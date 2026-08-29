@@ -33,6 +33,8 @@ import {
   H_BOOLEAN,
   H_NUMBER,
   H_STRING,
+  hasTypeParam,
+  hTypeAssignable,
   hTypeEquals,
   hTypeName,
   hUnknown,
@@ -219,11 +221,12 @@ function verifyStatement(
         break;
       }
 
-      // Check that the value type matches the target type. An Unknown target accepts anything --
-      // that is what the dynamic path IS, and it is the same exemption a call's callee gets
-      // (STA4041): a binding declared `string | number` is Unknown here, and every assignment to
-      // it is legal precisely because nothing was promised about it.
-      if (binding.type.kind !== 'unknown' && !hTypeEquals(assign.value.type, binding.type)) {
+      // Check that the value is ASSIGNABLE to the target -- not equal to it, since a `Dog` is a
+      // legal value for an `Animal` binding and its prefix layout is what makes that sound.
+      // `hTypeAssignable` also lets Unknown through in both directions, which is the dynamic path:
+      // a binding declared `string | number` promises nothing, and a value the HIR cannot describe
+      // is a boxed value like every other.
+      if (!hTypeAssignable(assign.value.type, binding.type)) {
         problems.push({
           kind: 'assignment',
           span: assign.span,
@@ -397,6 +400,18 @@ function verifyStatement(
     // (the gate rejects using one), so what is left to verify is the member functions -- each of
     // which must actually receive the instance it will read fields out of.
     case 'class-declaration': {
+      // Statics are ordinary bindings in the ENCLOSING scope, declared where the class declaration
+      // sits. Registering them here rather than at a `declaration` statement is the only thing the
+      // class node does that an ordinary declaration would not -- everything downstream then reads
+      // and writes them as identifiers.
+      // Registered in one pass and verified in another, for the reason function declarations are
+      // hoisted: one static method may call another written below it.
+      for (const decl of stmt.statics) {
+        bindings.set(decl.name, { kind: decl.declKind, type: decl.type });
+      }
+      for (const decl of stmt.statics) {
+        verifyExpression(decl.value, problems, bindings);
+      }
       const members = [...(stmt.ctor === undefined ? [] : [stmt.ctor]), ...stmt.methods];
       for (const member of members) {
         const receiver = member.fn.params[0]?.type;
@@ -426,6 +441,70 @@ function verifyStatement(
       }
       if (stmt.value !== undefined) {
         verifyExpression(stmt.value, problems, bindings);
+      }
+      break;
+    }
+
+    case 'super-call': {
+      verifyExpression(stmt.receiver, problems, bindings);
+      for (const arg of stmt.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      // The receiver must be an instance of a class that actually descends from the class being
+      // called, or the base constructor writes slots this object does not have. Reading the chain
+      // rather than the name alone is what makes `super` safe once the chain is more than one deep.
+      const self = stmt.receiver.type;
+      if (self.kind !== 'object' || !self.bases.includes(stmt.className)) {
+        problems.push({
+          kind: 'super-call',
+          span: stmt.span,
+          code: 'STA4051',
+          message: `super call to '${stmt.className}' from a receiver of type '${hTypeName(self)}'`,
+        });
+      }
+      break;
+    }
+
+    case 'throw-statement': {
+      // Any value may be thrown -- strings and numbers as much as objects -- so there is no type
+      // rule here, only the ordinary check that the expression itself is well-formed.
+      verifyExpression(stmt.value, problems, bindings);
+      break;
+    }
+
+    case 'try-statement': {
+      // `try {}` with neither handler nor cleanup is a JavaScript syntax error, so an HIR carrying
+      // one was built by a bug, not lowered from source.
+      if (stmt.catchBlock === undefined && stmt.finallyBlock === undefined) {
+        problems.push({
+          kind: 'try-statement',
+          span: stmt.span,
+          code: 'STA4057',
+          message: 'try statement with neither catch nor finally',
+        });
+      }
+      // A binding with no block to be visible in is equally unbuildable from source.
+      if (stmt.catchBinding !== undefined && stmt.catchBlock === undefined) {
+        problems.push({
+          kind: 'try-statement',
+          span: stmt.span,
+          code: 'STA4057',
+          message: 'catch binding without a catch block',
+        });
+      }
+      verifyBlock(stmt.tryBlock, problems, bindings, enclosing);
+      if (stmt.catchBlock !== undefined) {
+        // The caught value is Unknown by construction: anything can be thrown. The binding is
+        // const-like -- assigning to a catch variable is legal JavaScript, but the lowering
+        // declares it `let` inside the block scope, so an assignment verifies normally.
+        const scope = new Map(bindings);
+        if (stmt.catchBinding !== undefined) {
+          scope.set(stmt.catchBinding, { kind: 'let', type: hUnknown(false) });
+        }
+        verifyBlock(stmt.catchBlock, problems, scope, enclosing);
+      }
+      if (stmt.finallyBlock !== undefined) {
+        verifyBlock(stmt.finallyBlock, problems, bindings, enclosing);
       }
       break;
     }
@@ -493,6 +572,19 @@ function verifyExpression(
       message: `${expr.kind} expression missing HType`,
     });
     return; // can't continue without a type
+  }
+  // Monomorphization is what removes type parameters, and it removes them by never building one:
+  // `typeAt` substitutes where a `ts.Type` becomes an HType. So one surviving here is not a missing
+  // pass but a call that was never specialized -- and there is no C to emit for "whatever the
+  // caller had", so this must stop the build rather than reach the emitter.
+  if (hasTypeParam(expr.type)) {
+    problems.push({
+      kind: expr.kind,
+      span: expr.span,
+      code: 'STA4054',
+      message: `${expr.kind} has the unsubstituted type '${hTypeName(expr.type)}'`,
+    });
+    return;
   }
 
   switch (expr.kind) {
@@ -704,6 +796,47 @@ function verifyExpression(
       break;
     }
 
+    case 'typeof': {
+      verifyExpression(expr.operand, problems, bindings);
+      // No operand constraint, unlike every other prefix operator: `typeof` is total on values.
+      // The result, however, is a string and can be nothing else -- an emitter that believed
+      // otherwise would compare a boxed string against a number and always take the false branch.
+      if (!hTypeEquals(expr.type, H_STRING)) {
+        problems.push({
+          kind: 'typeof',
+          span: expr.span,
+          code: 'STA4055',
+          message: `typeof result must be string, got '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    case 'boundary-check': {
+      verifyExpression(expr.value, problems, bindings);
+      // A check exists to turn an Unknown into something concrete. Both halves of that are checked
+      // here, because both are ways the lowering could have inserted a check that does nothing: a
+      // check on an already-concrete value is a runtime cost with no soundness gain, and a check
+      // whose RESULT is Unknown has not narrowed anything and leaves the consumer no better off.
+      if (expr.value.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'boundary-check',
+          span: expr.span,
+          code: 'STA4056',
+          message: `boundary check on a value of type '${hTypeName(expr.value.type)}', which is already concrete`,
+        });
+      }
+      if (expr.type.kind === 'unknown') {
+        problems.push({
+          kind: 'boundary-check',
+          span: expr.span,
+          code: 'STA4056',
+          message: 'boundary check narrows to unknown, which checks nothing',
+        });
+      }
+      break;
+    }
+
     case 'template-literal': {
       for (const part of expr.expressions) {
         verifyExpression(part, problems, bindings);
@@ -838,9 +971,14 @@ function verifyExpression(
         verifyExpression(arg, problems, bindings);
       }
       // The class is named on the node so the emitter can call the method directly. That name is
-      // only trustworthy if it still matches the receiver's type, and the method still exists on
-      // it -- otherwise the emitted call reads a body belonging to another class.
-      if (expr.target.type.kind !== 'object' || expr.target.type.name !== expr.className) {
+      // the class DECLARING the method, which for an inherited method is an ancestor rather than
+      // the receiver's own class -- so the test is ancestry, not equality. It must still be an
+      // ancestry the receiver has, or the emitted call reads a body belonging to another class.
+      if (
+        expr.target.type.kind !== 'object' ||
+        (expr.target.type.name !== expr.className &&
+          !expr.target.type.bases.includes(expr.className))
+      ) {
         problems.push({
           kind: 'method-call',
           span: expr.span,
@@ -853,6 +991,20 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4047',
           message: `${expr.className} has no method '${expr.method}'`,
+        });
+      } else if (
+        expr.dispatch === 'virtual' &&
+        expr.target.type.methods.findIndex((m) => m.name === expr.method) !== expr.slot
+      ) {
+        // The slot is what a virtual call INDEXES, and it is resolved against the receiver's
+        // static type. Checking it against that type's own method list is the same check a field
+        // slot gets, for the same reason: an index that does not match the layout it claims to
+        // index is a wrong call, not a wrong type.
+        problems.push({
+          kind: 'method-call',
+          span: expr.span,
+          code: 'STA4047',
+          message: `method '${expr.method}' is at slot ${String(expr.target.type.methods.findIndex((m) => m.name === expr.method))}, not ${String(expr.slot)}`,
         });
       }
       break;
@@ -873,9 +1025,109 @@ function verifyExpression(
       break;
     }
 
+    case 'instanceof': {
+      verifyExpression(expr.target, problems, bindings);
+      // The target is deliberately unconstrained -- `1 instanceof C` is false, not an error -- so
+      // the only thing to check is the one the emitter depends on: the answer is a boolean.
+      if (!hTypeEquals(expr.type, H_BOOLEAN)) {
+        problems.push({
+          kind: 'instanceof',
+          span: expr.span,
+          code: 'STA4050',
+          message: `instanceof ${expr.className} has type '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    // Every entry is a slot in the literal's own shape, in the order it was written. The check is
+    // the one a field access gets, run once per entry at construction: an entry whose position is
+    // not the slot its name occupies would build an object every later read misindexes.
+    case 'object-literal': {
+      for (const entry of expr.entries) {
+        verifyExpression(entry.value, problems, bindings);
+      }
+      const shape = expr.type;
+      if (shape.kind !== 'object') {
+        problems.push({
+          kind: 'object-literal',
+          span: expr.span,
+          code: 'STA4052',
+          message: `object literal has type '${hTypeName(expr.type)}', not a shape`,
+        });
+        break;
+      }
+      for (const [index, entry] of expr.entries.entries()) {
+        if (shape.fields[index]?.name !== entry.name) {
+          problems.push({
+            kind: 'object-literal',
+            span: expr.span,
+            code: 'STA4052',
+            message: `entry '${entry.name}' is at position ${String(index)}, which the shape gives to '${shape.fields[index]?.name ?? '<none>'}'`,
+          });
+        }
+      }
+      break;
+    }
+
+    case 'collection-new': {
+      if (expr.type.kind !== expr.collection) {
+        problems.push({
+          kind: 'collection-new',
+          span: expr.span,
+          code: 'STA4053',
+          message: `new ${expr.collection} has type '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    // The emitter turns each operation into ONE runtime function with a fixed C signature, so both
+    // halves below are load-bearing rather than tidiness: an `add` on a Map would call an allocator
+    // that reads a value argument that is not there, and a wrong argument count is a call with a
+    // missing parameter -- neither of which the C compiler can catch, because every argument has
+    // the same type.
+    case 'collection-op': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const arity = COLLECTION_ARITY[expr.collection][expr.op];
+      if (expr.target.type.kind !== expr.collection) {
+        problems.push({
+          kind: 'collection-op',
+          span: expr.span,
+          code: 'STA4053',
+          message: `${expr.op} on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+      } else if (arity === undefined) {
+        problems.push({
+          kind: 'collection-op',
+          span: expr.span,
+          code: 'STA4053',
+          message: `'${expr.op}' is not an operation of a ${expr.collection}`,
+        });
+      } else if (expr.args.length !== arity) {
+        problems.push({
+          kind: 'collection-op',
+          span: expr.span,
+          code: 'STA4053',
+          message: `${expr.op} takes ${String(arity)} arguments, not ${String(expr.args.length)}`,
+        });
+      }
+      break;
+    }
+
     default: {
       const _exhaustive: never = expr;
       throw new Error(`Exhaustiveness check failed: ${_exhaustive}`);
     }
   }
 }
+
+/** Which operations each collection answers, and with how many arguments. The emitter's C
+ * signatures are the reason this is checked at all -- see the `collection-op` case. */
+const COLLECTION_ARITY: Readonly<Record<'map' | 'set', Readonly<Record<string, number>>>> = {
+  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0, size: 0 },
+  set: { add: 1, has: 1, delete: 1, clear: 0, size: 0 },
+};

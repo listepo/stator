@@ -198,3 +198,24 @@ class Feet {
 }
 console.log(new Metres(1));
 console.log(new Feet(1));
+
+// `instanceof` against a class NAME. There is one class descriptor per class in the whole program,
+// so the test is descriptor identity -- and while `extends` is deferred, identity is the entire
+// prototype chain. Two classes with the same shape are still two classes, which is the same
+// nominal fact the printed form shows.
+const metres = new Metres(1);
+console.log(metres instanceof Metres);
+console.log(metres instanceof Feet);
+console.log(new Feet(1) instanceof Feet);
+console.log(new Point(1, 2) instanceof Point);
+
+// An array is an object with no class descriptor at all, so it matches nothing.
+console.log([1, 2] instanceof Point);
+console.log(bag.items instanceof Bag);
+
+// The result is a boolean like any other: it narrows a condition, negates, and prints.
+if (metres instanceof Metres) {
+  console.log('narrowed to Metres');
+}
+console.log(!(metres instanceof Feet));
+console.log(`${metres instanceof Metres}`);

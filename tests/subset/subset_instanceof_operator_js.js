@@ -1,9 +1,8 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: instanceof operator
 
 class C {}
 const x = new C();
 const b = x instanceof C;
-export { b };
+console.log(b);

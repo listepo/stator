@@ -10,44 +10,44 @@
  * would be a grid); and past the depth cap an object prints as `[ClassName]`, not `[Object]`.
  */
 
-#include "jsrt_value.h"
+#include "corpus.h"
 
 #include <stdio.h>
-#include <string.h>
-
-static jsrt_value num(double d) {
-  return jsrt_number(d);
-}
-
-static jsrt_value str(const char *s) {
-  return jsrt_string_from_utf8(s, strlen(s));
-}
 
 /* The class descriptors a compiled program would emit: one `static const` per class, shared by
  * every instance of it. */
 static const char *const empty_fields[] = {""};
-static const JSRTClass EMPTY = {"Empty", 0, empty_fields};
+static const JSRTClass EMPTY = {"Empty", 0, empty_fields, NULL, 0, NULL};
 
 static const char *const p_fields[] = {"x", "y"};
-static const JSRTClass P = {"P", 2, p_fields};
+static const JSRTClass P = {"P", 2, p_fields, NULL, 0, NULL};
 
 static const char *const one_field[] = {"v"};
-static const JSRTClass DEEP = {"Deep", 1, one_field};
+static const JSRTClass DEEP = {"Deep", 1, one_field, NULL, 0, NULL};
 
 /* Same shape as Deep, different name: the pair is what shows the name is inside the line budget
  * and not merely printed in front of it. */
-static const JSRTClass SHORT = {"S", 1, one_field};
-static const JSRTClass LONG = {"AVeryLongClassNameIndeed", 1, one_field};
+static const JSRTClass SHORT = {"S", 1, one_field, NULL, 0, NULL};
+static const JSRTClass LONG = {"AVeryLongClassNameIndeed", 1, one_field, NULL, 0, NULL};
 
 static const char *const wide_fields[] = {"field0", "field1", "field2", "field3",
                                           "field4", "field5", "field6", "field7"};
-static const JSRTClass WIDE = {"Wide", 8, wide_fields};
+static const JSRTClass WIDE = {"Wide", 8, wide_fields, NULL, 0, NULL};
 
 static const char *const two_long[] = {"averyveryverylongfieldname", "another"};
-static const JSRTClass LONGFIELDS = {"Long", 2, two_long};
+static const JSRTClass LONGFIELDS = {"Long", 2, two_long, NULL, 0, NULL};
 
 static const char *const mixed_fields[] = {"arr", "o"};
-static const JSRTClass N = {"N", 2, mixed_fields};
+static const JSRTClass N = {"N", 2, mixed_fields, NULL, 0, NULL};
+
+/* A `#private` field HAS a slot -- the layout is the same as any other field's -- and is not
+ * printed. The leading '#' in the name is the whole signal, so these descriptors are what a
+ * compiled program emits for `class Priv { #hidden; shown; }` with nothing special added. */
+static const char *const priv_fields[] = {"#hidden", "shown"};
+static const JSRTClass PRIV = {"Priv", 2, priv_fields, NULL, 0, NULL};
+
+static const char *const all_priv_fields[] = {"#a", "#b"};
+static const JSRTClass ALLPRIV = {"AllPriv", 2, all_priv_fields, NULL, 0, NULL};
 
 static jsrt_value object(const JSRTClass *cls) {
   return jsrt_object_new(cls);
@@ -122,6 +122,11 @@ int main(void) {
 
   /* An unassigned slot reads as `undefined`, which is what a declared-but-unset field is. */
   jsrt_print(object(&P));
+
+  /* A `#private` field occupies a slot and never prints. An object whose fields are ALL private
+   * prints as `{}` -- the same as a class with no fields, which is what Node does. */
+  jsrt_print(with2(&PRIV, num(1), num(2)));
+  jsrt_print(with2(&ALLPRIV, num(1), num(2)));
 
   /* ToString of an object is not its inspect form. */
   {

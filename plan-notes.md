@@ -1154,6 +1154,163 @@ than crashing on them.
 
 ---
 
+## 62. `getPropertiesOfType` is own-first, which is the opposite of a prefix layout
+
+**Where:** `src/frontend/types.ts` `classTypeToHType`.
+
+**Evidence.** For `class B extends A { b1 } ` over `class A { a1 }`, the checker's property list is
+`[b1, a1]` — own properties first, inherited after. A subclass's layout has to be the reverse: its
+slots must START with its base's, in the base's own slot order, or a base-typed read of a subclass
+instance lands on the wrong slot. That prefix property is the only thing making `hTypeAssignable`
+sound — a `Dog` is a legal value for an `Animal` binding because the first N slots of a `Dog` *are*
+an `Animal`.
+
+**First attempt, and why it was wrong.** Ranking each property by its declaring class and
+stable-sorting root-first fixes the ts-mode case and silently breaks js mode. A `.js` field is
+declared by `this.x = …` in a constructor, so its "declaring class" is not a member node's parent,
+and a field assigned in **both** the base and the subclass has a declaration in each. `js/
+inheritance.js` caught it: `Counter` assigns `this.count, this.name`; `Stepped` assigns
+`this.name, this.step`. Ranking gave `Stepped` the layout `name, count, step` while `Counter`'s own
+layout is `count, name` — so the base's `report()` read `this.count` out of `name`'s slot and
+printed `2: stepped` instead of `stepped: 1`.
+
+**What landed.** The list is rebuilt from the chain root-first, asking **each ancestor** for its own
+property list and skipping names an ancestor already claimed. Each class's list is
+own-first-then-inherited, and by the time it is reached every inherited name is claimed, so what
+survives is exactly that class's own properties in its own declaration order. First-claim-wins is
+also what gives a doubly-assigned `.js` field one slot, at the base's index. No sort is involved;
+sorting a merged list cannot express "the base's order" at all.
+
+**plan.md edited:** yes — rung 6b now records inheritance as done.
+
+---
+
+## 63. Method overriding is deferred *separately* from inheritance, and that is the whole design
+
+**The line.** Static dispatch is sound **exactly** while no method is overridden: one name resolves
+to one function for every receiver whose type has that class in its ancestry. So inheritance splits
+the same way rung 6 did:
+
+- **Landed:** `extends`, `super(...)`, prefix layout, assignability, `instanceof` up the chain,
+  synthesized derived constructors. `MethodCall.className` became the class that **declares** the
+  method rather than the receiver's own — `d.describe()` on a `Dog` names `Animal` — which is a
+  direct call to the one function that exists.
+- **Deferred with the vtable:** redeclaring an inherited member, and `super.method()`. Both are
+  refused at the gate with a message naming the reason, in both modes. `super.method()` is a call
+  that deliberately skips a lookup, which means nothing until there is something to skip.
+
+**Why not just ship vtables now.** The same reason 6a shipped before 6b: a vtable changes what a
+`JSRTClass` *is* (a method table, an index per method, a per-class dispatch array) and what a call
+site emits, while everything above is a layout question that the existing descriptor answers with
+one added pointer. Landing them together would have made one change whose two halves fail for
+unrelated reasons.
+
+**Three invariant violations found on the way**, each the load-bearing invariant in the direction
+that raises an internal error for legal source:
+
+1. `d.describe()` on an inherited method reached the emitter as `class Dog has no method describe`,
+   because the node named the receiver's class.
+2. `super.m()` reached the lowering as `STA4031 unexpected expression kind: SuperKeyword`. The gate
+   accepted it because `super`'s type IS the base class, so every member-access test passed. The
+   refusal now sits in `gateMemberAccess`, where the receiver is examined.
+3. A `case ts.SyntaxKind.SuperKeyword:` added to the middle of `visitNode`'s fall-through group made
+   `HeritageClause` and `ExpressionWithTypeArguments` fall into it, so every `extends` clause was
+   rejected as "super as a value". Caught by the golden fixtures, not by typecheck — a fall-through
+   group is a place where adding a `return` is a semantic change to the cases above it.
+
+**Also fixed here:** field initializers were prepended at index 0 of a constructor body, which is
+wrong once there is a `super(...)` at index 0 — an initializer may read a field the base wrote
+(`doubled = this.sides * 2`). They now go after the super call, which is where JavaScript runs them.
+
+**plan.md edited:** yes.
+
+---
+
+## 64. `this` and `super` were gated by dead code: a token short-circuit swallowed both cases
+
+**Where:** `src/frontend/gate.ts` `gateConstruct`.
+
+**Evidence.** The walker opens with
+
+```ts
+if (kind <= ts.SyntaxKind.LastToken && kind !== ts.SyntaxKind.Identifier) {
+  return { kind: 'accept' };
+}
+```
+
+which is right for punctuation and operator keywords. But `ThisKeyword` and `SuperKeyword` are
+**tokens**, so `case ts.SyntaxKind.ThisKeyword: return gateThis(node)` had never run — not once,
+since it was written. `console.log(this)` at module scope reached the lowering and answered
+`STA4061 this outside a class member`, an internal error raised by six characters of legal
+JavaScript. The same hole is why the `SuperKeyword` case added for inheritance did nothing, and why
+the fix that actually worked for `super.m()` was the one in `gateMemberAccess`.
+
+**What landed.** The exemption list is now `Identifier`, `ThisKeyword`, `SuperKeyword` — the three
+tokens that are *expressions reading something* rather than punctuation. Both cases are live, and
+`tests/unit/gate.test.ts` pins `this` at module scope as a `not-yet`.
+
+**One case the live check then got wrong, and the fix.** `gateThis` walked up looking for a
+constructor or method, so a `this` in a FIELD INITIALIZER (`b = this.a + 1`) — lexically inside no
+function — was rejected. `tests/golden/ts/inheritance.ts` caught it immediately. A property
+declaration is a `this` position: the lowering moves the initializer into the constructor, where the
+receiver is a parameter. Statics are the exception in the other direction — `this` in a static member
+is the class object, which this model does not build.
+
+**Lesson worth keeping:** a `switch` on `ts.SyntaxKind` with an early-out over a kind RANGE has no
+compiler check that a later case is reachable. Both dead cases typechecked, linted and read
+correctly. This is the third invariant leak of the same family this phase (plan-notes 63) and the
+only one no test could have caught by construction — nothing was wrong, something was missing.
+
+**plan.md edited:** yes.
+
+---
+
+## 65. Statics are bindings, not slots — and `Unknown` had to become assignable in both directions
+
+**The model.** A static belongs to the class object; there is no class object in this subset. So a
+static is ONE binding for the whole program, named `C.count` — a dot is unspellable in an
+identifier, the same trick `RECEIVER` plays with a leading space. Everything follows: a read is an
+`Identifier`, a write is an `Assignment`, `C.m()` is a `CallExpr`, and `C.count += 1` reuses the
+identifier compound-assignment path unchanged, because a plain binding has no place to evaluate
+exactly once. Statics needed **no HIR node, no verifier case and no emitter case** — only a
+`statics: readonly Declaration[]` list on `ClassDeclaration` that the enclosing scope walks.
+
+Two details are load-bearing. The name carries the **declaring** class, because statics are
+inherited: `Sub.count` and `Base.count` are one static, and mangling by the receiver's spelling
+would make a write through one invisible through the other. And names are registered in one pass
+before any value is lowered (and again in the verifier), for the reason function declarations hoist
+— one static method may call another written below it.
+
+**A pre-existing bug this surfaced.** `hTypeAssignable` demanded exact equality unless the TARGET
+was Unknown, so an Unknown VALUE flowing into a typed binding was `STA4004`. That is ordinary
+js-mode source:
+
+```js
+function add(a, b) { return a + b; }
+let total = 0;
+total = add(total, 3);   // STA4004: target type number does not match value type unknown
+```
+
+Six lines, no classes, internal error. Unknown is now assignable in **both** directions, which is
+what the dynamic path means: an Unknown target promises nothing, and an Unknown value is a boxed
+`jsrt_value` like every other, stored by a total operation. It is the same exemption arithmetic
+operands already got (plan-notes 60's second defect) — the pattern is that a verifier rule written
+for ts mode becomes an internal error in js mode wherever it demands a static fact the checker
+cannot supply.
+
+**`isClassInstance` had to stop believing the checker.** The type of the expression `C` is the
+class's STATIC side, whose symbol is still the class declaration — so `tsTypeToHType` answered
+`object` for a class NAME, naming the very layout `new C()` produces, and `C.m()` lowered as an
+instance method call on `C`. Only the spelling separates the two, so the test now asks the AST.
+
+**Deferred, with reasons:** a `static {}` initialization block and `this` in a static member (both
+need the class object), overriding an inherited static (`D.count` and `C.count` must be one
+binding), and `C.name`/`C.prototype` (the class object again).
+
+**plan.md edited:** yes — rung 6b now records statics as done.
+
+---
+
 ## Open items carried forward
 
 - **Phase 0 is not approved.** `NICHE.md` does not exist and no `phase-0-approved` tag has been
@@ -1163,3 +1320,405 @@ than crashing on them.
   "fresh clone" wording and the `phase-0-approved` tag are both unverifiable until the initial
   commit lands.
 - ~~**`stator explain --json` schema**~~ — resolved, see entry 12 above.
+
+## 66. `#private` is a printing rule, and a corpus that lagged a struct change proved it
+
+**The implementation is nearly empty, and that is the finding.** A `#private` member is an ordinary
+member all the way down: `#count` takes a slot in declaration order, `#step()` is a member function,
+`static #next` is a static binding named `C.#next`. Nothing below the gate enforces privacy, because
+the checker already has: `o.#x` from outside the class body is a TypeScript error before the gate
+runs, and js mode gets the same check for free since `#private` is real syntax rather than a type
+annotation. There is no name collision to guard against either — no public property may be spelled
+with a leading `#`, so `#x` and `x` are two names in the one namespace the layout keys by.
+
+The one place the `#` is still observable is `util.inspect`, which omits `#private` fields. So the
+whole feature, below the frontend, is a two-character test in the runtime printer: skip a descriptor
+field whose name starts with `#`. The names must STAY in the descriptor — slot *i* of the class is
+slot *i* of the descriptor — so the printer counts visible fields first and then walks all slots
+skipping hidden ones. A class whose fields are all private prints `C {}`, the same as a class with
+no fields, which is right: both have nothing visible to show.
+
+**Two deferrals, both forced by the layout rather than by privacy.** A subclass re-declaring an
+ancestor's `#private` name is two distinct slots that share a spelling — the prefix rebuild is
+first-claim-wins by NAME, so it would silently merge them and let the base's method write the
+subclass's field. And `#brand in o` asks whether an object carries the slot at all, which is not a
+question a layout where every instance of a class has every slot can answer; it becomes meaningful
+with shapes. Both are `STA1214` with the reason named.
+
+**The corpus lagged the struct, and the Makefile hid it.** `runtime/tests/print_objects.c`
+hand-writes ten `JSRTClass` literals, and rung 6b's inheritance work added a fourth member
+(`parent`) to that struct. Under `-Wextra -Werror` every one of them is a
+`-Wmissing-field-initializers` error — but `pnpm run ci` passed anyway, because the Makefile listed
+no header prerequisites anywhere. Editing `runtime/include/jsrt_value.h` rebuilt *nothing*: the
+objects were stale, the archive was stale, and the corpus binaries were never relinked. The header
+is the codegen↔runtime contract; a build that ignores it can only ever test the runtime the
+contract used to describe. Fixed at the root with generated depfiles (`-MMD -MP` plus
+`-include $(DEPS)`), which is why a change to a header cannot be silently absent again. Each
+`JSRTClass` literal now names `NULL` explicitly.
+
+## 67. Overriding is one bit per method, and the bit is a whole-file question
+
+**The dispatch decision does not belong to the call site.** `a.m()` where `a: Animal` must reach
+`Dog`'s `m` if `a` holds a `Dog`, so whether the call can be direct is not a fact about the receiver
+expression, nor about `Animal`, nor about the pair — it is a fact about the FAMILY: does any chain
+containing `Animal` declare `m` twice? The lowering asks exactly that, of the whole file, once per
+call (`isOverridden`). A `no` keeps rung 6a's direct call unchanged, which is why a program that
+overrides nothing pays nothing for the feature existing.
+
+**The table is the field layout again.** A class descriptor gained `method_count` and a `methods`
+array of file-scope `JSRTClosure` pointers, in the same prefix order the fields have: a subclass's
+table begins with its base's, in the base's order. So the slot comes from the receiver's STATIC type
+and the entry comes from its DYNAMIC one, and both are right for the same reason a field slot is.
+`methodDeclaringClass` already walked leaf-first, which is precisely what a table entry needs: the
+most derived declaration this class responds to.
+
+**`super.m()` is the one call that must NOT be virtual.** It is a call on the same receiver with the
+override skipped — dispatching it virtually would find the override again and recur forever. So it
+lowers to a `MethodCall` whose target is the receiver PARAMETER (not an evaluation of `super`, which
+denotes no value) and whose dispatch is `direct` regardless of what the rest of the family does.
+`super.x` on a field is refused: a field has one slot per name, so `super.x` and `this.x` are the
+same slot and the spelling would promise a distinction the layout cannot make.
+
+**What the table's constness forces.** Entries are file-scope constants, so no method in an
+overriding family may capture. A class at module scope has nothing to capture; a class inside a
+function may, and there is no per-instantiation table to hold it. The gate refuses overriding there
+by asking whether the class declaration's parent is the source file — a syntactic test for a
+codegen property, justified because the property is exactly "this class's methods are constants".
+Re-declaring a FIELD stays refused for an unrelated reason: a field is a slot, and two declarations
+of one slot have two initializers racing for it in an order the layout does not express.
+
+**A mode-policy bug fell out.** `noImplicitOverride` was on in both modes, so js mode demanded a
+JSDoc `@override` tag on every overriding method — rejecting ordinary JavaScript for having no
+annotation, which is precisely what js mode promises not to do. It is now `mode === 'ts'`, the same
+shape `noImplicitAny` already has (notes #48). ts mode keeps it: there the modifier is real syntax,
+and an accidental override is exactly the mistake a method table makes silent.
+
+## 68. js mode still rejects legal JavaScript when an override narrows a return type
+
+Found while writing the overriding fixtures, and NOT fixed here:
+
+```js
+class A { m() { return 'x'; } }
+class B extends A { m() { return 1; } }   // STA0012: Type '() => number' is not assignable to '() => string'
+```
+
+Both bodies are untyped. The checker infers `() => string` and `() => number`, finds the override
+incompatible with the base, and reports it — and unlike `noImplicitAny` and `noImplicitOverride`
+there is no flag to turn off, because base-class compatibility is not a strictness option. js mode's
+contract (docs/MODES.md) is that untyped code is never rejected, so this is a contradiction, not a
+missing feature.
+
+Recorded rather than fixed because the fix is a policy decision with a wider blast radius: js mode
+would have to DOWNGRADE a class of checker errors that arise from inference over unannotated code,
+and the set has to be named precisely — an error about an annotation the user wrote must still be an
+error. `tests/subset/subset_override_widening_js.js` pins it as an `@expected-fail` decision test so
+the day it is fixed is the day that marker comes off.
+
+## 69. Accessors do NOT force the dynamic path — the plan said they did, and it was wrong
+
+`docs/SUBSET.md` promised `dynamic (property access lowers to function call)` for a class with a
+getter or setter, and the gate refused such a class outright with the reason "a getter or setter
+turns a field READ into a call". Both halves of that were an over-reading of one true fact.
+
+The true fact: `o.x` on an accessor is a call. What does not follow: that the CLASS becomes dynamic.
+An accessor is a pair of member functions under a name no source can spell — `get x` and `set x`,
+where the space does what the dot does for a static — and the property occupies no slot at all. So:
+
+- the class's real fields keep their fixed slots, and a subclass keeps its prefix layout;
+- `o.x` lowers to a `MethodCall` with no arguments, `o.x = v` to one with a single argument;
+- dispatch, the method table, arity padding and the receiver parameter all apply unchanged;
+- `util.inspect` never prints the property, because the printer prints SLOTS and there is none —
+  which is what Node does, and it falls out rather than being arranged.
+
+Nothing else moved. No HIR node, no verifier case, no emitter case, no runtime change: the entire
+feature is a mangled name, a branch in `classTypeToHType` that pushes methods instead of a field,
+and two branches in the lowering. The `dynamic` verdict in the decision tests became `static`.
+
+**What stayed deferred, each for its own reason.** A compound assignment (`o.x += 1`) is a get and a
+set of ONE property, and the machinery that evaluates a receiver exactly once across a
+read-modify-write hoists a slot, which an accessor is not. A static accessor belongs to the class
+object, which a plain binding is not. A `#private` or computed accessor name has no mangled form
+yet. And overriding an inherited accessor is refused because the lowering decides virtual dispatch
+by looking for a method DECLARED twice, which is a question about method declarations — accessors
+are dispatched directly, and an override would silently reach the base's half.
+
+**A set-only property is the case that catches a lazy implementation.** `set take(v) {}` with no
+getter has no read at all, so building the read half of the place unconditionally reports a missing
+`get take` on a class that is correct. The read is built only when the getter exists — and the only
+forms that would consume it are the compound ones, which the gate already refused.
+
+
+## 70. An object literal is a class whose declaration is a TYPE (rung 6b)
+
+**Evidence.** `plan.md` rung 6b listed object literals as "the one remaining item that breaks a
+property 6a's fixed-slot layout depends on (a literal has no class declaration to be a layout OF)".
+That is true of the DECLARATION and false of the layout. The checker already computes an anonymous
+object type for `{ x: 1, y: 'two' }`, with a property list in written order — which is precisely
+what `classTypeToHType` consumes for a class. The missing piece was never a layout; it was a name.
+
+**What it reduced to.** `shapeTypeToHType` turns a type with nothing but data properties into the
+same `hObject` a class produces, named STRUCTURALLY: `{x: number, y: string}`. The leading brace is
+what makes the name unspellable, the third instance of the trick the receiver parameter (leading
+space), statics (a dot) and accessors (a space) already use. A structural name means two literals
+with the same fields are the same HType, so:
+
+- they are assignable to each other, which is what a shape TYPE means in TypeScript;
+- the emitter's descriptor cache keys on the name, so one `JSRTClass` is emitted and shared;
+- a different key ORDER is a different name, which is correct — order is layout.
+
+The descriptor's C name is the empty string, and `jsrt_print` treats an empty name as "no
+constructor name". That is the only runtime change the whole feature needed, and it is what makes
+`{ x: 1 }` print bare where `Point { x: 1 }` prints with its class. The HIR gained one node,
+`ObjectLiteral` — entries in written order, no descriptor, no keys — and the emitter one sequence
+expression: allocate, `jsrt_object_set` per entry, yield the object.
+
+**Why the verifier gained a case (STA4052).** The entries ARE the slots. Nothing downstream carries
+a key, so an entry list that disagrees with its shape's field order would emit a silently wrong
+object rather than fail. The check is one comparison of two name lists, and it is the only thing
+standing between a reordering bug and a golden test that still passes on a symmetric fixture.
+
+**What stayed deferred.** A shorthand, spread, method or accessor member and a non-identifier key
+are Phase 3 work: each is statically knowable and simply has nothing to lower to yet. A literal
+whose type is not a layout — an optional property, an index signature — is Phase 4 work, because
+there is no fixed slot list to build at all; that is the shape table in Task 4.1, and the gate's
+message says so rather than pointing at the same phase for both kinds of refusal.
+
+## 71. The duplication budget is measured in LINES, and a type file breaks it (rung 6b)
+
+**Evidence.** Adding `ObjectLiteral` and `ObjectEntry` to `src/hir/nodes.ts` took `pnpm run dupes`
+from `25 clones · 0.8%` to `26 clones · 3.0%`, over the 1% threshold. The new clone was reported as
+`src/hir/nodes.ts 18-641 ~ 33-668` — 623 duplicated lines in a 672-line file. Measured on that file
+alone: `1 clones · 92.7% duplication`, with the same run's own token column reading
+`Duplicated tokens: 50 (3.80%)`. Deleting the nine added lines returns it to `0 clones · 0.0%`.
+
+**What that means.** The match is 50 tokens — exactly `minTokens` — and jscpd bills it by the LINE
+span between the first and last matching token. In a file that is 60% doc comments, 50 sparse tokens
+stretch across 623 lines. The two interfaces did not duplicate anything; they extended a structural
+pattern past the detector's floor.
+
+**Why the pattern cannot be factored out.** `nodes.ts` is the HIR's discriminated union and holds no
+function, no constant and no logic at all — it is types. A union member is
+`interface X extends Node { readonly kind: '…'; … }` by construction, and the `kind` field is the
+discriminant every exhaustive switch in the compiler depends on. Deleting the repetition means
+deleting the type safety it buys.
+
+**The fix, and why not the other two.** A `jscpd:ignore-start`/`ignore-end` pair wraps the
+declarations in `nodes.ts`. It is attached to the code it describes, it says why in the file, and it
+leaves any future function in that file checked — the markers open after the import and close at
+EOF, so code that is not a declaration would have to be added outside them. Raising `minTokens`
+would have hidden real 50-token copies everywhere in the compiler, and adding the file to the config
+`ignore` list would have exempted it invisibly, from a file that never mentions why. The threshold
+itself stays at 1% and the config is unchanged: `25 clones · 0.8%`.
+
+---
+
+## 72. Map and Set are one implementation, and the plan asked for two (rung 7)
+
+**What the plan said.** `docs/SUBSET.md` split the collections four ways and described the split as
+two data structures: a "specialized hash table for primitives, unboxed key/value" that is *static*,
+and an "identity-hash table" for object keys that is *dynamic*. Read literally, that is two probe
+tables, two comparison functions and two sets of runtime entry points.
+
+**Evidence that one suffices.** The comparison a Map performs is SameValueZero, and it is the only
+comparison either collection needs. On a NaN-boxed value:
+
+- a primitive key **is already unboxed** — the box IS the bits, so there is nothing a specialized
+  table would strip;
+- an object key **is already its pointer** — the box IS the identity, so there is nothing an
+  identity table would compute.
+
+The two cases differ only in the hash function, and that difference is four lines inside one
+`hash_key`: a number normalizes (`-0` → `+0`, every NaN → canonical) and hashes as a double, a
+string hashes FNV-1a over its UTF-16 units, and everything else hashes its box. `runtime/src/jsrt_map.c`
+is 270 lines total and serves all four SUBSET rows, plus Set, which is the same struct with the
+value half unused and a second `JSRTClass` descriptor to tell it apart.
+
+**What was actually built.** One `JSRTMap`; two descriptors (`jsrt_class_map`, `jsrt_class_set`);
+one `same_value_zero`; one `hash_key`. The `Object` tag carries both, because the 3-bit tag field is
+fully allocated (`docs/VALUE.md` §1.1) and a builtin cannot have a tag of its own — the descriptor
+pointer in the shared object prefix is what distinguishes them, the same trick object literals use.
+
+**The plan and SUBSET.md are edited to match**, and the two "dynamic" rows keep their verdict for a
+different and true reason: `Map<object, V>` is dynamic because `object` describes no layout and the
+KEY TYPE is Unknown, not because the table underneath is a different one.
+
+**Two facts the rows now state that the plan did not predict.** The type arguments must be on the
+CONSTRUCTION — `const m: Map<string, number> = new Map()` types the call itself `Map<any, any>`, so
+that spelling is dynamic while `new Map<string, number>()` is static. And every `.get` is dynamic:
+the lib types it `V | undefined`, and the HType model has no union. `.has` and `.size` are the typed
+reads today, which is the same relation `for-of` has to an array index read (plan-notes 53).
+
+**One gate rule changed to make this reachable.** `isGlobalReference` now answers false for the
+callee of a `new`. `new Map()` is one HIR node naming a constructor, never a read of the `Map`
+binding, and `gateNew` already refuses every constructor it does not implement — so answering
+"global" there only added a second diagnostic to the same span. The builtin is told from a user
+`class Map {}` by asking whether every declaration of the symbol lives in a `.d.ts`: the builtin is
+declared and never defined, a user class has a body, and a body only exists in a source file.
+(`hasNoDefaultLib` looks like that test and is not — it is false for `lib.es2015.collection.d.ts`
+and every other split lib file. Only `lib.es5.d.ts` carries the directive.)
+
+**Two duplication fixes the rung forced, both real rather than jscpd artifacts.** Adding the
+collection cases took `pnpm run dupes` to `34 clones · 1.1%`, over the 1% threshold. Unlike
+plan-notes 71 this was not a line-span illusion: the collection call was the SIXTH copy of "lower
+every argument left to right, abandon the call on the first failure" in `src/lower/index.ts`, and
+`jsrt_map_clear` was the second copy of the six-field empty state in `runtime/src/jsrt_map.c`. Both
+are now one definition — `lowerArguments()` and `map_reset()` — and the argument one is load-bearing
+rather than tidy: argument order IS evaluation order, and a drifted copy would reorder a user's side
+effects. A third, `num`/`str` written identically in three print corpora, moved to
+`runtime/tests/corpus.h`; a corpus is only ground truth while its C and `.mjs` halves build the same
+values, so those constructors having one definition is the point rather than a side effect.
+`29 clones · 0.9%`, threshold and config untouched.
+
+## 73. Monomorphization is not a pass, and the plan implied it was one (Task 3.4)
+
+**Contradiction.** `plan.md` lists monomorphization under `src/passes/` alongside const-fold, DCE and
+inline — i.e. as an HIR→HIR transform. Written that way it needs a clone walker that rebuilds every
+HIR node with a substituted type: ~40 node kinds, each of which must be re-derived when a new node
+kind lands, and each of which is a place a type parameter can survive by omission.
+
+**Evidence.** The lowering already threads `bindings: Map<string, HType>` through every one of its
+33 type-computing sites, and every one of them goes through `checker.getTypeAtLocation`. Lowering
+the generic's AST a second time with the substitution installed in that map produces the specialized
+HIR directly — one new function (`lowerSpecialization`), no walker, and the substitution applied at
+the ONE place a `ts.Type` becomes an HType (`typeAt`). The clone-walker version would have had to
+re-implement the same substitution at 40 sites to get the same result.
+
+The stronger argument is the invariant. As a pass, "no type parameter survives" is an obligation on
+the walker: it holds until someone adds a node kind and forgets a case, and the failure is silent —
+a `T` compares unequal to everything, so it surfaces as an unrelated type mismatch several rules
+away. At the lowering it is a property of construction: no code path builds an `HTypeParam` into a
+node, because `typeAt` substitutes before the node exists. `STA4054` in the verifier is then a
+check on the compiler, not a load-bearing step of the algorithm.
+
+**Two things this cost, both worth it.** The substitution rides in `bindings` under keys no
+identifier can spell (`<T>`, the same trick as `RECEIVER = ' this'` and the static's dot) rather
+than as a 34th parameter or module-level state — the emitter's leaked-closure-state bug is the
+standing argument against the latter. And the specialization is BOUND under `box<number>` while its
+`fn.name` stays `box`, so `console.log` prints `[Function: box]`; the emitter takes the name from
+`stmt.fn.name ?? stmt.name` for exactly this.
+
+**Recovering the substitution without internals.** TypeScript computes the type arguments during
+inference and exposes only the resolved signature, its mapper being private. Unifying the DECLARED
+signature's HTypes against the RESOLVED signature's recovers it through the public API, and is exact
+rather than heuristic because one signature IS the other instantiated. Unifying on HType rather than
+`ts.Type` is what makes instantiation sharing fall out for free: the checker infers `T = 42` for
+`box(42)` and `T = 7` for `box(7)` — two distinct literal types — and both map to `number`, so the
+two calls share one specialization instead of emitting identical C twice.
+
+**Plan edited** in the same change: Task 3.4 now says where specialization happens and lists what is
+deferred (`STA1214`: a generic as a value, generic arrows, constraints, defaults, explicit type
+arguments, generic classes). The boxed-`Unknown` fallback instantiation the plan offers for cold
+generics is NOT built — §13's bloat budget has not been tripped, and a second code path with no
+measurement behind it is the thing §15.4 exists to prevent.
+
+## 74. Union types cost nothing, and a narrowing that cannot be checked must not be refused (Task 3.5)
+
+Three decisions inside boundary-check insertion, all of which the plan left to judgment.
+
+**Unions came free, because the model has none.** `plan.md` lists "discriminated unions" as one of
+the narrowings Task 3.5 must handle, and separately lists `union<T1 | T2>` as an HType kind still to
+build. The second turned out not to be a prerequisite for the first: `string | number` maps to
+`Unknown` today, and a `typeof` guard over it narrows to `string` — which is exactly the shape the
+`unknown` case already needed. So `tests/subset/subset_union_types_*` flipped off `@expected-fail`
+with no union node written. What is still deferred is the narrowing that reads a DISCRIMINANT field
+rather than asking `typeof`; that one does need the model to see the constituents.
+
+The one union rule that had to be added is widening: a union whose constituents all map to a single
+HType is that type. `"a" | "b"` is a `string`. Without it `typeof` is unusable, because TypeScript
+types `typeof x` as a union of eight string literals — so `const t = typeof x` would have been
+`Unknown`, and asking an unknown value what it is would have produced another unknown. This is
+widening, not guessing: every constituent gives the same answer, so nothing is invented.
+
+**A narrowing that cannot be checked is dropped, not refused.** The first implementation refused at
+the gate any narrowing to a type a tag cannot settle — an object, an array, a signature — on the
+reading that the accept set must equal the HIR's vocabulary. It broke ten golden fixtures
+immediately: `m.get(k) ?? d` narrows an `Unknown` to `Map<K, V>`, and `x ?? y` narrows one to
+`null`, and both had been compiling correctly for rungs. The refusal was buying nothing. Leaving the
+value `Unknown` is already sound — nothing downstream trusts a type the HIR does not claim — so the
+cast or narrowing lowers to its operand alone and the value stays on the dynamic path it would have
+taken anyway. The invariant is intact either way: an `Identifier` typed `Unknown` is a node the HIR
+has, so the gate accepted nothing the lowering cannot build.
+
+**The check is per USE, not per binding.** `if (typeof x === "number") { return x + x + x; }` emits
+three checks, not one. Hoisting to one would mean asserting that the value did not change between
+the reads, which is the kind of unproven reasoning golden rule 4 exists to forbid — and coalescing
+them is a job for an optimization pass that can see the assignments, which §13's tripwire already
+names as the response if checks dominate a profile.
+
+**Also here:** `jsrt_panic` gained `_Noreturn`. A failed check has no value to return, and without
+the declaration every caller needs an unreachable `return` that reads as a path the code can take.
+
+---
+
+## 75. Passes run before the verifier, and inlining is defined by four refusals (Tasks 3.6–3.9)
+
+**Evidence:** `src/passes/{rewrite,constfold,dce,inline,index}.ts`, `tests/unit/passes.test.ts`
+(25 tests), `tests/golden/{ts/optimization.ts,js/optimization.js}`, `src/cli/build.ts:118`.
+
+**`optimize` runs BEFORE `verifyHir`, not after the lowering.** The obvious placement is the other
+way round — verify the lowering's output, then optimize — and it is wrong for the reason the
+verifier exists. The verifier is the only thing between a bug and silently wrong generated C, and
+what reaches the emitter is the OPTIMIZED module. Checking the lowering's output instead would
+verify a tree nothing emits and leave the one that does unchecked, so a pass that produced ill-typed
+HIR would be a clang error against generated code rather than an `STA4xxx`. `build.ts` therefore
+lowers, optimizes, verifies, emits, in that order.
+
+**The rewriter needed a list-level hook.** `Rewriter.statement` returns a list, which says "replace"
+and "delete" — but not the most ordinary statement-level fact there is: a `return` makes its
+FOLLOWING SIBLINGS unreachable. A statement hook can only ever speak for itself. `Rewriter.statements`
+sees a whole sequence, and DCE's unreachable-code elimination is written against it. One exception,
+which is a language fact rather than a convenience: a `function` declaration after a `return`
+SURVIVES, because it is hoisted and holds its binding for the code above.
+
+**Inlining is four refusals, not an analysis.** The HIR has no block-expression, so a general
+inliner needs temporaries, a result binding, and every `return` rewritten to an assignment plus a
+jump. That machinery wants a measurement and §13's tripwire has not fired. What is built is the case
+needing none of it — a body that is exactly one `return <expr>` — bounded by four conditions, each
+closing one way substitution changes meaning: (1) one statement; (2) the body names nothing but its
+own parameters; (3) every argument is a literal or identifier; (4) types agree exactly, argument to
+parameter and result to call.
+
+Condition 2 does the most work and is worth stating separately, because it closes a hazard that has
+nothing to do with closures. A body reading a module-level `g`, moved into a caller that has its own
+local `g`, silently starts reading the caller's — and the HIR resolves identifiers by NAME, so there
+is no scope information available here that could tell the two apart. Declining to move any free
+name at all also makes recursion impossible by construction: a recursive body must name itself.
+Nothing in `inline.ts` tests for recursion. The same name-only resolution is why a candidate whose
+name is bound more than once anywhere in the module is dropped outright: a local `f` shadowing the
+module-level `function f` would otherwise be inlined at a call site that never meant it.
+
+Condition 4 is `Unknown` preservation, and it is what makes js mode the interesting half of the
+golden pair. `double(21)` in `tests/golden/js/optimization.js` has a `number` argument and an
+`Unknown` parameter, so it does NOT inline — substituting would replace an unknown-typed subtree
+with a typed one and cancel exactly the boundary check unknown-ness exists to require. Both fixtures
+print identically, because Node inlines nothing anywhere.
+
+**The pipeline runs once, not to a fixpoint.** Order is a chain: inlining exposes constants
+(`double(2)` becomes `2 * 2`), folding decides branches (`if (1 < 2)` is not a literal condition
+until `1 < 2` is `true`), and eliminating branches is what finally makes a function unreachable —
+which is why the shake runs last. A second round would find a little more. Iterating until nothing
+changes costs compile time and risks a pass pair that oscillates, and that trade wants a measurement
+there is none of yet.
+
+**What DCE deliberately does not recognize.** An `if` whose branches both `return` also terminates,
+and is not treated as a terminator. That is the first step onto a lattice — then `switch` with a
+`default`, then a loop with no `break` — and each step buys a rarer program while widening what a
+bug here could delete. Unreachable code in a real source file sits immediately after a jump. For the
+same reason the shake covers functions but not classes: `new C()` names its class by string rather
+than by an identifier the reference walk would see, and a shake that cannot see a reference is a
+shake that deletes live code.
+
+---
+
+## 76. Exception nodes stay gated until their emitter lands (2026-08-30)
+
+**Evidence:** `src/hir/nodes.ts` adds `ThrowStatement` and `TryStatement`, and `src/lower/index.ts`
+can build them, but `src/codegen/index.ts` has no landing-pad implementation. Before this review,
+`src/frontend/gate.ts` accepted both constructs; a valid `try { throw 'boom' } catch {}` therefore
+escaped the frontend and crashed the emitter with `Unknown statement kind: try-statement`, while
+`pnpm run typecheck` failed its exhaustive switches at `src/codegen/index.ts:626` and `:1034`.
+
+Until Task 3.10 is implemented, the gate reports the existing generic boundary code `STA1214` for
+`throw`, `try`, and `catch`, and the emitter has explicit internal guards for hand-built HIR. This
+keeps user-facing failures diagnostic-only and restores the gate/HIR/emitter invariant without
+claiming exception unwinding is complete.

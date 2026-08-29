@@ -7,7 +7,22 @@
  */
 
 import * as ts from 'typescript';
-import { tsTypeToHType } from '../frontend/types.ts';
+import {
+  genericCallInstantiation,
+  specializationName,
+  substituteHType,
+} from '../frontend/generics.ts';
+import { assertedBy, isCheckable, narrowedTo, sourceLocation } from '../frontend/narrowing.ts';
+import {
+  accessorDeclaringClass,
+  ancestry,
+  baseClassOf,
+  classDeclarationOf,
+  isStaticMember,
+  methodDeclaringClass,
+  staticMemberOf,
+  tsTypeToHType,
+} from '../frontend/types.ts';
 import type {
   ArrayLength,
   ArrayLiteral,
@@ -17,6 +32,9 @@ import type {
   CallExpr,
   ClassDeclaration,
   ClassMethod,
+  CollectionNew,
+  CollectionOp,
+  CollectionOperation,
   ConsoleLogCall,
   Declaration,
   Expression,
@@ -26,21 +44,36 @@ import type {
   Identifier,
   IfStatement,
   IndexAccess,
+  InstanceOf,
   LogicalOp,
   MethodCall,
   Module,
   NewExpr,
+  ObjectEntry,
+  ObjectLiteral,
   Parameter,
   ReturnStatement,
   Span,
   Statement,
   StringLength,
+  SuperCall,
   SwitchClause,
   TemplateLiteral,
   UnaryOp,
 } from '../hir/nodes.ts';
 import type { HObject, HType } from '../hir/types.ts';
-import { fieldSlot, H_NUMBER, H_UNDEFINED, hFunction, hTypeName } from '../hir/types.ts';
+import {
+  accessorName,
+  fieldSlot,
+  H_BOOLEAN,
+  H_NUMBER,
+  H_STRING,
+  H_UNDEFINED,
+  hasTypeParam,
+  hFunction,
+  hTypeName,
+  hUnknown,
+} from '../hir/types.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
@@ -92,9 +125,38 @@ export function lowerSourceFile(
   const bindings = new Map<string, HType>();
 
   try {
+    // Monomorphization runs before anything is lowered, because a specialization is a FUNCTION the
+    // module contains and the module's own statements may call it. Nothing is cloned: a
+    // specialization is the generic's own AST lowered a second time with a substitution in scope.
+    const specializations = collectSpecializations(sourceFile, checker, diagnostics);
+    if (specializations === null) {
+      return { module: null, diagnostics };
+    }
     hoistFunctionDeclarations(sourceFile.statements, checker, bindings);
+    for (const specialization of specializations) {
+      bindings.set(specialization.name, specializationType(specialization, checker));
+    }
+
     const statements: Statement[] = [];
+    for (const specialization of specializations) {
+      const declaration = lowerSpecialization(
+        specialization,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      if (declaration === null) {
+        return { module: null, diagnostics };
+      }
+      statements.push(declaration);
+    }
     for (const node of sourceFile.statements) {
+      // A generic declaration lowers to nothing: its specializations are already above, and the
+      // name itself binds no value (the gate refuses reading one).
+      if (ts.isFunctionDeclaration(node) && isGenericDeclaration(node)) {
+        continue;
+      }
       const stmt = lowerStatement(node, sourceFile, checker, bindings, diagnostics);
       if (stmt === null) {
         return { module: null, diagnostics };
@@ -151,6 +213,17 @@ function lowerStatement(
   }
 
   // Expression statement (including assignments and console.log)
+  // `super(...)`. The base class comes from the RECEIVER's own type rather than from threaded
+  // context: `bases[0]` is the immediate base, and the receiver is in scope for exactly the
+  // constructor bodies where a super call is legal. The gate proved the position.
+  if (
+    ts.isExpressionStatement(node) &&
+    ts.isCallExpression(node.expression) &&
+    node.expression.expression.kind === ts.SyntaxKind.SuperKeyword
+  ) {
+    return lowerSuperCall(node.expression, node, sourceFile, checker, bindings, diagnostics);
+  }
+
   if (ts.isExpressionStatement(node)) {
     return lowerExpressionAsStatement(
       node.expression,
@@ -231,6 +304,62 @@ function lowerStatement(
 
   if (ts.isClassDeclaration(node)) {
     return lowerClass(node, sourceFile, checker, bindings, diagnostics);
+  }
+
+  if (ts.isThrowStatement(node)) {
+    const value = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (!value) {
+      return null;
+    }
+    return {
+      kind: 'throw-statement',
+      type: H_UNDEFINED,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      value,
+    };
+  }
+
+  if (ts.isTryStatement(node)) {
+    const tryBlock = lowerBlock(node.tryBlock, sourceFile, checker, bindings, diagnostics);
+    if (!tryBlock) {
+      return null;
+    }
+    let catchBinding: string | undefined;
+    let catchBlock: Block | undefined;
+    if (node.catchClause !== undefined) {
+      // The caught value is Unknown by decree, not by inference: anything can be thrown, so the
+      // binding enters scope as an unchecked value and a narrowing of it goes through the same
+      // BoundaryCheck machinery as any other unknown (Task 3.5). The scope copy is what confines
+      // it to the catch block.
+      const scope = new Map(bindings);
+      const declared = node.catchClause.variableDeclaration?.name;
+      if (declared !== undefined && ts.isIdentifier(declared)) {
+        catchBinding = declared.text;
+        scope.set(catchBinding, hUnknown(false));
+      }
+      const lowered = lowerBlock(node.catchClause.block, sourceFile, checker, scope, diagnostics);
+      if (!lowered) {
+        return null;
+      }
+      catchBlock = lowered;
+    }
+    let finallyBlock: Block | undefined;
+    if (node.finallyBlock !== undefined) {
+      const lowered = lowerBlock(node.finallyBlock, sourceFile, checker, bindings, diagnostics);
+      if (!lowered) {
+        return null;
+      }
+      finallyBlock = lowered;
+    }
+    return {
+      kind: 'try-statement',
+      type: H_UNDEFINED,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      tryBlock,
+      ...(catchBinding !== undefined && { catchBinding }),
+      ...(catchBlock !== undefined && { catchBlock }),
+      ...(finallyBlock !== undefined && { finallyBlock }),
+    };
   }
 
   if (ts.isBreakStatement(node) || ts.isContinueStatement(node)) {
@@ -381,7 +510,7 @@ function lowerDeclarationList(
   // what it was initialized with -- `let x: string | number = 1` binds a union, and taking the
   // initializer's `number` would make the perfectly legal `x = 'a'` an internal error, and would
   // let a later pass unbox a slot that can hold a string.
-  const type = tsTypeToHType(checker.getTypeAtLocation(decl.name), checker);
+  const type = typeAt(decl.name, checker, bindings);
   bindings.set(name, type);
 
   const stmt: Declaration = {
@@ -436,7 +565,7 @@ function lowerForOf(
   // In scope for the body, and only for the body: a fresh binding each iteration is exactly what
   // `let`/`const` in a for-of header means.
   const inner = new Map(bindings);
-  inner.set(binding, tsTypeToHType(checker.getTypeAtLocation(declaration.name), checker));
+  inner.set(binding, typeAt(declaration.name, checker, bindings));
 
   const body = lowerBody(node.statement, sourceFile, checker, inner, diagnostics);
   if (!body) {
@@ -633,10 +762,42 @@ function lowerExpressionAsStatement(
   return { kind: 'expression-statement', type: exp.type, span, expression: exp };
 }
 
+/** The binding an assignment TARGET names, or `undefined` if it names no binding at all.
+ *
+ * Two spellings reach one binding: a plain identifier, and `C.count` on a static. Resolving both
+ * here is what lets `C.count += 1` and `C.count++` reuse the identifier machinery unchanged --
+ * a static is a plain binding, so there is no place to evaluate once and nothing to hoist. */
+function placeName(
+  node: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+): string | undefined {
+  if (ts.isIdentifier(node)) {
+    return node.getText(sourceFile);
+  }
+  if (!ts.isPropertyAccessExpression(node)) {
+    return undefined;
+  }
+  const found = staticMemberOf(node, checker, false);
+  return found === undefined || found.owner.name === undefined
+    ? undefined
+    : staticName(found.owner.name.text, node.name.text);
+}
+
 /** The parameter a method's `this` reads from. The leading space makes it unspellable in source,
  * so it can never collide with a user binding, and it is the SAME key the emitter maps to a frame
  * slot -- `this` is an ordinary identifier from here down (see ClassMethod in src/hir/nodes.ts). */
 const RECEIVER = ' this';
+
+/** The binding name a static member gets: `C.count`.
+ *
+ * A dot is what makes it unspellable, the same trick `RECEIVER` uses with a leading space -- no
+ * source identifier can contain one, so a static can never collide with a user binding. The
+ * DECLARING class is the half that matters: statics are inherited, so `D.count` on a subclass and
+ * `C.count` on its base must produce the same name or one static would become two bindings. */
+function staticName(className: string, member: string): string {
+  return `${className}.${member}`;
+}
 
 /** The slot `field` occupies in `target`'s class, or `null` after reporting an internal error.
  *
@@ -688,7 +849,8 @@ function assignmentParts(
     targetNode: ts.Expression,
     make: (current: Identifier) => Expression | null,
   ): { target: string; value: Expression } | null => {
-    if (!ts.isIdentifier(targetNode)) {
+    const target = placeName(targetNode, sourceFile, checker);
+    if (target === undefined) {
       diagnostics.push(
         diagnosticFromNode(
           targetNode,
@@ -701,7 +863,6 @@ function assignmentParts(
       );
       return null;
     }
-    const target = targetNode.getText(sourceFile);
     const binding = bindings.get(target);
     if (!binding) {
       diagnostics.push(
@@ -744,7 +905,7 @@ function assignmentParts(
         // compound operators — the verifier rejected the hardcoded number, correctly.
         return {
           kind: 'binary-op',
-          type: tsTypeToHType(checker.getTypeAtLocation(expr), checker),
+          type: typeAt(expr, checker, bindings),
           span: current.span,
           operator,
           left: current,
@@ -828,6 +989,14 @@ function memberAssignment(
   if (!plain && compound === undefined && update === undefined) {
     return undefined; // a binary operator that is not an assignment at all
   }
+  // `C.count = …` looks like a member write and is not one: a static is a plain binding, so it
+  // belongs to the identifier path, which `assignmentParts` reaches once this declines it.
+  if (
+    ts.isPropertyAccessExpression(targetNode) &&
+    staticMemberOf(targetNode, checker, false) !== undefined
+  ) {
+    return undefined;
+  }
 
   // A compound form reads the place and writes it back, so every part of the PLACE must be
   // evaluated exactly once: `a[i()] += 1` calls `i` a single time, and the value it returned is
@@ -864,7 +1033,7 @@ function memberAssignment(
   // The read is only used by the compound and update folds; a plain `=` discards it.
   let current: Expression;
   let write: (value: Expression) => Statement;
-  const placeType = tsTypeToHType(checker.getTypeAtLocation(targetNode), checker);
+  const placeType = typeAt(targetNode, checker, bindings);
   if (ts.isElementAccessExpression(targetNode)) {
     const index = hoisted(targetNode.argumentExpression, 1);
     if (index === null) {
@@ -872,6 +1041,49 @@ function memberAssignment(
     }
     current = { kind: 'index-access', type: placeType, span, target, index };
     write = (value) => ({ kind: 'index-assignment', type: value.type, span, target, index, value });
+  } else if (accessorOwner(targetNode.expression, targetNode.name.text, checker) !== undefined) {
+    // `o.x = v` RUNS the setter. The gate refused the compound forms, so `current` is never read
+    // here -- it is built anyway so the two halves of a place stay one shape.
+    const field = targetNode.name.text;
+    const owner = accessorOwner(targetNode.expression, field, checker) ?? '';
+    // A set-only property has no read at all, which is legal and is why this is conditional: the
+    // only forms that would read it are the compound ones, and the gate refused those.
+    const read = hasAccessorHalf(targetNode.expression, field, 'get', checker)
+      ? accessorCall(
+          'get',
+          owner,
+          target,
+          field,
+          [],
+          placeType,
+          span,
+          targetNode,
+          sourceFile,
+          diagnostics,
+        )
+      : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
+    if (read === null) {
+      return null;
+    }
+    current = read;
+    write = (value) => {
+      const call = accessorCall(
+        'set',
+        owner,
+        target,
+        field,
+        [value],
+        H_UNDEFINED,
+        span,
+        targetNode,
+        sourceFile,
+        diagnostics,
+      );
+      // `accessorCall` already reported; a null here would be the same miss the read survived.
+      return call === null
+        ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
+        : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
+    };
   } else {
     const field = targetNode.name.text;
     const slot = slotOf(target, field, targetNode, sourceFile, diagnostics);
@@ -911,7 +1123,7 @@ function memberAssignment(
         ? null
         : {
             kind: 'binary-op',
-            type: tsTypeToHType(checker.getTypeAtLocation(expr), checker),
+            type: typeAt(expr, checker, bindings),
             span,
             operator: compound,
             left: current,
@@ -960,7 +1172,7 @@ function lowerIndexAccess(
   }
   return {
     kind: 'index-access',
-    type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+    type: typeAt(node, checker, bindings),
     span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
     target,
     index,
@@ -1063,7 +1275,7 @@ function lowerExpression(
   ) {
     return {
       kind: 'number-literal',
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       value: -Number(node.operand.text),
     };
@@ -1072,7 +1284,7 @@ function lowerExpression(
   // Number literal
   if (ts.isNumericLiteral(node)) {
     const value = parseFloat(node.text);
-    const type = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+    const type = typeAt(node, checker, bindings);
     return {
       kind: 'number-literal',
       type,
@@ -1084,7 +1296,7 @@ function lowerExpression(
   // String literal
   if (ts.isStringLiteral(node)) {
     const value = node.text;
-    const type = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+    const type = typeAt(node, checker, bindings);
     return {
       kind: 'string-literal',
       type,
@@ -1098,7 +1310,7 @@ function lowerExpression(
   if (ts.isNoSubstitutionTemplateLiteral(node)) {
     return {
       kind: 'string-literal',
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       value: node.text,
     };
@@ -1118,7 +1330,7 @@ function lowerExpression(
     }
     const template: TemplateLiteral = {
       kind: 'template-literal',
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       quasis,
       expressions,
@@ -1126,28 +1338,95 @@ function lowerExpression(
     return template;
   }
 
+  // `C.count` on a class NAME. Tested before the instance case because the receiver's type answers
+  // the same for both -- the type of the expression `C` is the class's static side, whose symbol is
+  // still the class declaration. A static is one binding, so this is an ordinary identifier read.
+  if (ts.isPropertyAccessExpression(node)) {
+    const found = staticMemberOf(node, checker, undefined);
+    if (found !== undefined && found.owner.name !== undefined) {
+      const name = staticName(found.owner.name.text, node.name.text);
+      const type = bindings.get(name);
+      if (type === undefined) {
+        diagnostics.push(
+          diagnosticFromNode(
+            node,
+            sourceFile,
+            'STA4066',
+            'internal',
+            'ts',
+            `static '${name}' read before its class declaration was lowered`,
+          ),
+        );
+        return null;
+      }
+      return {
+        kind: 'identifier',
+        type,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        name,
+      };
+    }
+  }
+
   // `o.x` on a class instance. This is tested BEFORE `.length` because a class may declare a field
   // called `length`, and that field is a slot -- the array and string intrinsics of the same name
   // belong to those types, not to every object that borrows the word.
-  if (ts.isPropertyAccessExpression(node) && isClassInstance(node.expression, checker)) {
+  if (ts.isPropertyAccessExpression(node) && isClassInstance(node.expression, checker, bindings)) {
     const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (target === null) {
       return null;
     }
     const field = node.name.text;
+    // An accessor is not a slot: reading `o.x` RUNS the getter, which is what the property means.
+    const owner = accessorOwner(node.expression, field, checker);
+    if (owner !== undefined) {
+      return accessorCall(
+        'get',
+        owner,
+        target,
+        field,
+        [],
+        typeAt(node, checker, bindings),
+        makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        node,
+        sourceFile,
+        diagnostics,
+      );
+    }
     const slot = slotOf(target, field, node, sourceFile, diagnostics);
     if (slot === null) {
       return null;
     }
     const access: FieldAccess = {
       kind: 'field-access',
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       target,
       field,
       slot,
     };
     return access;
+  }
+
+  // `m.size` -- a count the structure keeps, so a read rather than a walk, and the reason it is a
+  // `CollectionOp` with no arguments instead of a node of its own.
+  if (ts.isPropertyAccessExpression(node) && node.name.text === 'size') {
+    const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (target === null) {
+      return null;
+    }
+    if (target.type.kind === 'map' || target.type.kind === 'set') {
+      const size: CollectionOp = {
+        kind: 'collection-op',
+        type: H_NUMBER,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        collection: target.type.kind,
+        op: 'size',
+        target,
+        args: [],
+      };
+      return size;
+    }
   }
 
   // `s.length` and `a.length`. The gate already confirmed the object is a string or an array; a
@@ -1182,7 +1461,7 @@ function lowerExpression(
       // From the checker, not from the elements: `[1, 2]` in `const a: number[] = [1, 2]` is
       // `number[]`, but the same literal assigned to `unknown[]` is not, and only the checker
       // knows which context this literal sits in.
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       elements,
     };
@@ -1196,7 +1475,7 @@ function lowerExpression(
   // Boolean literal (true/false)
   if (node.kind === ts.SyntaxKind.TrueKeyword || node.kind === ts.SyntaxKind.FalseKeyword) {
     const value = node.kind === ts.SyntaxKind.TrueKeyword;
-    const type = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+    const type = typeAt(node, checker, bindings);
     return {
       kind: 'boolean-literal',
       type,
@@ -1209,33 +1488,74 @@ function lowerExpression(
   // class member, and every class member's parameter list starts with that parameter. There is no
   // `this` node in the HIR because there is nothing left for one to mean.
   if (node.kind === ts.SyntaxKind.ThisKeyword) {
-    const binding = bindings.get(RECEIVER);
-    if (binding === undefined) {
+    return receiverIdentifier(node, sourceFile, bindings, diagnostics);
+  }
+
+  // `{ x: 1 }`. The gate proved every key is an identifier and that the type is a shape, so the
+  // entries are the slots -- in the order written, which is the order the shape lists them and the
+  // order `console.log` prints them.
+  if (ts.isObjectLiteralExpression(node)) {
+    const type = typeAt(node, checker, bindings);
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    if (type.kind !== 'object') {
       diagnostics.push(
         diagnosticFromNode(
           node,
           sourceFile,
-          'STA4061',
+          'STA4068',
           'internal',
           'ts',
-          'this outside a class member',
+          'object literal has no shape',
         ),
       );
       return null;
     }
-    const receiver: Identifier = {
-      kind: 'identifier',
-      type: binding,
-      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-      name: RECEIVER,
-    };
-    return receiver;
+    const entries: ObjectEntry[] = [];
+    for (const property of node.properties) {
+      if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) {
+        diagnostics.push(
+          diagnosticFromNode(
+            property,
+            sourceFile,
+            'STA4068',
+            'internal',
+            'ts',
+            'object literal member is not a name/value pair',
+          ),
+        );
+        return null;
+      }
+      const value = lowerExpression(
+        property.initializer,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      if (value === null) {
+        return null;
+      }
+      entries.push({ name: property.name.text, value });
+    }
+    const literal: ObjectLiteral = { kind: 'object-literal', type, span, entries };
+    return literal;
   }
 
   // `new C(...)`. The class is named, not evaluated: the gate accepted only an identifier callee,
   // and what the emitter needs is the descriptor that identifier resolves to.
   if (ts.isNewExpression(node)) {
-    const type = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+    const type = typeAt(node, checker, bindings);
+    // A Map and a Set are allocated, not constructed: there is no descriptor to name and no
+    // constructor to run, so the node carries which of the two it is and nothing else.
+    if (type.kind === 'map' || type.kind === 'set') {
+      const created: CollectionNew = {
+        kind: 'collection-new',
+        type,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        collection: type.kind,
+      };
+      return created;
+    }
     if (type.kind !== 'object') {
       diagnostics.push(
         diagnosticFromNode(
@@ -1249,13 +1569,9 @@ function lowerExpression(
       );
       return null;
     }
-    const args: Expression[] = [];
-    for (const arg of node.arguments ?? []) {
-      const lowered = lowerExpression(arg, sourceFile, checker, bindings, diagnostics);
-      if (lowered === null) {
-        return null;
-      }
-      args.push(lowered);
+    const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+    if (args === null) {
+      return null;
     }
     const created: NewExpr = {
       kind: 'new',
@@ -1271,7 +1587,7 @@ function lowerExpression(
   if (node.kind === ts.SyntaxKind.NullKeyword) {
     return {
       kind: 'null-literal',
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
     };
   }
@@ -1310,10 +1626,101 @@ function lowerExpression(
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       name,
     };
+    // A narrowed read of an `unknown` is a boundary: the checker's claim about this use is settled
+    // here, once, and every operation downstream may then trust the type completely. The gate has
+    // already refused any narrowing this cannot check (`isCheckable`), so an unhandled one reaching
+    // the emitter would be the accept-set invariant breaking, not a missing feature.
+    const narrowing = narrowedTo(node, checker);
+    if (narrowing !== null && isCheckable(narrowing.narrowed) && binding.kind === 'unknown') {
+      return {
+        kind: 'boundary-check',
+        type: narrowing.narrowed,
+        span: ident.span,
+        value: ident,
+        where: sourceLocation(node, sourceFile),
+      };
+    }
     return ident;
   }
 
+  // `typeof x`. The operand is lowered as an ordinary expression and constrains nothing: this is
+  // the one operator that is total on every value the runtime has.
+  if (ts.isTypeOfExpression(node)) {
+    const operand = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (!operand) {
+      return null;
+    }
+    return {
+      kind: 'typeof',
+      type: H_STRING,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      operand,
+    };
+  }
+
+  // `x as T`. A widening or identity cast asserts nothing and lowers to its operand alone; anything
+  // else is the program overruling the checker, and the check is what makes that safe.
+  if (ts.isAsExpression(node)) {
+    const operand = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (!operand) {
+      return null;
+    }
+    const assertion = assertedBy(node, checker);
+    if (assertion === null || !isCheckable(assertion.asserted)) {
+      return operand;
+    }
+    // A cast off a value the compiler already types concretely needs no check -- the checker
+    // rejects `1 as string` outright, so what remains is a widening the operand already satisfies.
+    if (operand.type.kind !== 'unknown') {
+      return operand;
+    }
+    return {
+      kind: 'boundary-check',
+      type: assertion.asserted,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      value: operand,
+      where: sourceLocation(node, sourceFile),
+    };
+  }
+
   // Binary and short-circuiting expressions
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) {
+    // The right operand is a class NAME, and the name is taken from the DECLARATION rather than
+    // from the reference: `import { C as D }` would spell the reference `D`, and the emitter's
+    // descriptor is keyed by what the class calls itself.
+    const declaration = checker.getSymbolAtLocation(node.right)?.valueDeclaration;
+    if (
+      declaration === undefined ||
+      !ts.isClassDeclaration(declaration) ||
+      declaration.name === undefined
+    ) {
+      diagnostics.push(
+        diagnosticFromNode(
+          node.right,
+          sourceFile,
+          'STA4063',
+          'internal',
+          'ts',
+          'instanceof right operand is not a class the gate accepted',
+        ),
+      );
+      return null;
+    }
+    const target = lowerExpression(node.left, sourceFile, checker, bindings, diagnostics);
+    if (target === null) {
+      return null;
+    }
+    const test: InstanceOf = {
+      kind: 'instanceof',
+      // Always boolean, whatever the checker narrowed the expression to at this position.
+      type: H_BOOLEAN,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      target,
+      className: declaration.name.text,
+    };
+    return test;
+  }
+
   if (ts.isBinaryExpression(node)) {
     const opKind = node.operatorToken.kind;
     const operator = BINARY_OPERATORS.get(opKind);
@@ -1342,7 +1749,7 @@ function lowerExpression(
       return null;
     }
 
-    const type = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+    const type = typeAt(node, checker, bindings);
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
 
     if (logical !== undefined) {
@@ -1388,7 +1795,7 @@ function lowerExpression(
 
     const unaryOp: UnaryOp = {
       kind: 'unary-op',
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       operator,
       operand,
@@ -1416,17 +1823,12 @@ function lowerExpression(
         obj.text === 'console' &&
         (propName === 'log' || propName === 'warn' || propName === 'error')
       ) {
-        // Lower all arguments
-        const args: Expression[] = [];
-        for (const arg of node.arguments) {
-          const argExpr = lowerExpression(arg, sourceFile, checker, bindings, diagnostics);
-          if (!argExpr) {
-            return null;
-          }
-          args.push(argExpr);
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
         }
 
-        const type = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+        const type = typeAt(node, checker, bindings);
         const call: ConsoleLogCall = {
           kind: 'console-log',
           type,
@@ -1436,11 +1838,61 @@ function lowerExpression(
         return call;
       }
 
+      // `m.get(k)`, `s.add(v)` and the rest. Decided before the class case because a Map has no
+      // class declaration at all: the receiver's TYPE is the whole test, and each operation is one
+      // runtime function shared by every collection in the program.
+      const receiver = typeAt(obj, checker, bindings);
+      if (receiver.kind === 'map' || receiver.kind === 'set') {
+        // Asked of the TYPE before anything is lowered: `super.m()` reaches this same branch, and
+        // `super` names no value, so lowering the receiver to find out what it is would report an
+        // error on a call that is perfectly fine.
+        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+        if (target === null) {
+          return null;
+        }
+        {
+          const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+          if (args === null) {
+            return null;
+          }
+          const op = collectionOperation(propName);
+          if (op === undefined) {
+            diagnostics.push(
+              diagnosticFromNode(
+                expr,
+                sourceFile,
+                'STA4069',
+                'internal',
+                'ts',
+                `'${propName}' is not an operation of a ${hTypeName(receiver)}`,
+              ),
+            );
+            return null;
+          }
+          const call: CollectionOp = {
+            kind: 'collection-op',
+            type: typeAt(node, checker, bindings),
+            span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+            collection: receiver.kind,
+            op,
+            target,
+            args,
+          };
+          return call;
+        }
+      }
+
       // `o.m(a)`. The receiver is lowered; the method is NOT -- one function is shared by every
       // instance, so naming its class here is what lets the emitter make a direct call instead of
       // loading a per-instance closure out of a slot.
-      if (isClassInstance(obj, checker)) {
-        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+      if (isClassInstance(obj, checker, bindings)) {
+        // `super.m()` is a call on THIS receiver that skips the override -- the object is the same
+        // one, only the function differs. So the target is the receiver parameter, not an
+        // evaluation of `super`, which names no value at all.
+        const viaSuper = obj.kind === ts.SyntaxKind.SuperKeyword;
+        const target = viaSuper
+          ? receiverIdentifier(obj, sourceFile, bindings, diagnostics)
+          : lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
         if (target === null) {
           return null;
         }
@@ -1457,25 +1909,85 @@ function lowerExpression(
           );
           return null;
         }
-        const args: Expression[] = [];
-        for (const arg of node.arguments) {
-          const lowered = lowerExpression(arg, sourceFile, checker, bindings, diagnostics);
-          if (lowered === null) {
-            return null;
-          }
-          args.push(lowered);
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
+        }
+        // The DECLARING class, not the receiver's -- `d.describe()` on a `Dog` names `Animal` when
+        // `Animal` is where `describe` is written. Naming the receiver's class here would make the
+        // emitter look for a method that class does not own.
+        const owner = declaringClassName(obj, propName, checker);
+        if (owner === null) {
+          diagnostics.push(
+            diagnosticFromNode(
+              expr,
+              sourceFile,
+              'STA4065',
+              'internal',
+              'ts',
+              `no class in the receiver's ancestry declares method '${propName}'`,
+            ),
+          );
+          return null;
+        }
+        // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
+        // which is sound for the same reason a field slot is: a subclass's method table begins
+        // with its base's, in the base's order.
+        const slot = target.type.methods.findIndex((m) => m.name === propName);
+        if (slot < 0) {
+          diagnostics.push(
+            diagnosticFromNode(
+              expr,
+              sourceFile,
+              'STA4067',
+              'internal',
+              'ts',
+              `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
+            ),
+          );
+          return null;
         }
         const call: MethodCall = {
           kind: 'method-call',
-          type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+          type: typeAt(node, checker, bindings),
           span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
           target,
-          className: target.type.name,
+          className: owner,
           method: propName,
+          slot,
+          // Skipping the override is what `super` MEANS, so this one call stays direct even where
+          // every other call to the same method is virtual.
+          dispatch:
+            !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
+              ? 'virtual'
+              : 'direct',
           args,
         };
         return call;
       }
+    }
+
+    // A call to a generic names a SPECIALIZATION, not the generic: `box(1)` is a call to
+    // `box<number>`, which `collectSpecializations` has already put in `bindings` under that
+    // mangled name. The callee is not lowered as an expression, because the name it would lower to
+    // binds nothing -- a generic function has no value (the gate says so, in the same words).
+    const specialized = specializedCallee(node, sourceFile, checker, bindings, diagnostics);
+    if (specialized !== undefined) {
+      if (specialized === null) {
+        return null;
+      }
+      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+      if (args === null) {
+        return null;
+      }
+      const call: CallExpr = {
+        kind: 'call',
+        type: typeAt(node, checker, bindings),
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        callee: specialized,
+        args,
+      };
+      return call;
     }
 
     // An ordinary call. The callee is evaluated as a value like any other expression -- the gate
@@ -1484,17 +1996,13 @@ function lowerExpression(
     if (callee === null) {
       return null;
     }
-    const args: Expression[] = [];
-    for (const arg of node.arguments) {
-      const lowered = lowerExpression(arg, sourceFile, checker, bindings, diagnostics);
-      if (lowered === null) {
-        return null;
-      }
-      args.push(lowered);
+    const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+    if (args === null) {
+      return null;
     }
     const call: CallExpr = {
       kind: 'call',
-      type: tsTypeToHType(checker.getTypeAtLocation(node), checker),
+      type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       callee,
       args,
@@ -1527,10 +2035,7 @@ function hoistFunctionDeclarations(
 ): void {
   for (const statement of statements) {
     if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
-      bindings.set(
-        statement.name.text,
-        tsTypeToHType(checker.getTypeAtLocation(statement), checker),
-      );
+      bindings.set(statement.name.text, typeAt(statement, checker, bindings));
     }
   }
 }
@@ -1567,7 +2072,7 @@ function lowerFunction(
       );
       return null;
     }
-    const type = tsTypeToHType(checker.getTypeAtLocation(param), checker);
+    const type = typeAt(param, checker, bindings);
     params.push({
       name: param.name.text,
       type,
@@ -1586,7 +2091,7 @@ function lowerFunction(
   // Without a receiver the checker's own type is the answer. With one, the emitted function has a
   // parameter the source did not write, so the type has to describe what is actually called --
   // and for a constructor the checker has no function type to offer at all.
-  const declared = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+  const declared = typeAt(node, checker, bindings);
   const type =
     receiver === undefined
       ? declared
@@ -1618,8 +2123,208 @@ function lowerFunction(
  * Asked of the checker's type rather than of a lowered node, because it decides WHICH lowering to
  * run -- and it must give the same answer `tsTypeToHType` will, since that is what produces the
  * HObject the slot is resolved against. */
-function isClassInstance(node: ts.Expression, checker: ts.TypeChecker): boolean {
-  return tsTypeToHType(checker.getTypeAtLocation(node), checker).kind === 'object';
+function declaringClassName(
+  receiver: ts.Expression,
+  method: string,
+  checker: ts.TypeChecker,
+): string | null {
+  const declaration = classDeclarationOf(checker.getTypeAtLocation(receiver));
+  const owner =
+    declaration === undefined ? undefined : methodDeclaringClass(declaration, method, checker);
+  return owner?.name?.text ?? null;
+}
+
+/* Overriding, and the two questions it raises.
+ *
+ * A method call is direct -- a named C function, no table, no load -- exactly while the method has
+ * ONE implementation for every receiver that can reach the call site. That stops being true the
+ * moment two classes in one chain declare the same name, and it stops being true for the whole
+ * FAMILY, not just for the pair: a call through a base-typed reference may land on any descendant.
+ * So the question is asked of the file, not of the call: does any chain that contains this class
+ * declare this method twice? A `yes` makes every call to that name on that family virtual, which
+ * is why a class that is never overridden keeps rung 6a's zero-cost direct call unchanged.
+ *
+ * Scanning per call site is quadratic in a file's classes and linear in its chains. It is also
+ * exact, needs no plumbing through the lowering, and a program with enough classes for that to
+ * matter has a much larger emitter cost -- memoize when a measurement says to. */
+function classesIn(sourceFile: ts.SourceFile): ts.ClassDeclaration[] {
+  const found: ts.ClassDeclaration[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isClassDeclaration(node)) {
+      found.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+  return found;
+}
+
+function declaresMethod(declaration: ts.ClassDeclaration, name: string): boolean {
+  return declaration.members.some(
+    (m) =>
+      ts.isMethodDeclaration(m) &&
+      !isStaticMember(m) &&
+      (ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) &&
+      m.name.text === name,
+  );
+}
+
+function className(declaration: ts.ClassDeclaration): string {
+  return declaration.name?.text ?? '';
+}
+
+/** Is `method` declared twice in some chain that contains the class `name`? */
+function isOverridden(
+  name: string,
+  method: string,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+): boolean {
+  for (const declaration of classesIn(sourceFile)) {
+    const chain = ancestry(declaration, checker);
+    if (!chain.some((c) => className(c) === name)) {
+      continue;
+    }
+    if (chain.filter((c) => declaresMethod(c, method)).length > 1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** `o.x` and `o.x = v` on an accessor: a call to the member function the mangled name holds.
+ *
+ * Dispatch is direct because an accessor cannot be overridden here -- the gate refuses a subclass
+ * that re-declares an inherited accessor -- so the name resolves to one function. The slot is
+ * resolved anyway, so that the node is a well-formed method call and the verifier's check on it
+ * means the same thing it means everywhere else. */
+function accessorCall(
+  kind: 'get' | 'set',
+  owner: string,
+  target: Expression,
+  property: string,
+  args: readonly Expression[],
+  type: HType,
+  span: Span,
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  diagnostics: Diagnostic[],
+): MethodCall | null {
+  const method = accessorName(kind, property);
+  const slot =
+    target.type.kind === 'object' ? target.type.methods.findIndex((m) => m.name === method) : -1;
+  if (slot < 0) {
+    diagnostics.push(
+      diagnosticFromNode(
+        at,
+        sourceFile,
+        'STA4067',
+        'internal',
+        'ts',
+        `method '${method}' has no slot in the layout of ${hTypeName(target.type)}`,
+      ),
+    );
+    return null;
+  }
+  return {
+    kind: 'method-call',
+    type,
+    span,
+    target,
+    className: owner,
+    method,
+    slot,
+    dispatch: 'direct',
+    args,
+  };
+}
+
+/** The class that declares `property` as an accessor for this receiver, or `undefined`. */
+function accessorOwner(
+  receiver: ts.Expression,
+  property: string,
+  checker: ts.TypeChecker,
+): string | undefined {
+  const declaration = classDeclarationOf(checker.getTypeAtLocation(receiver));
+  const found =
+    declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
+  return found?.owner.name?.text;
+}
+
+/** Does this receiver's accessor for `property` have the given half? A property may be read-only
+ * or write-only, and each half is a separate member function. */
+function hasAccessorHalf(
+  receiver: ts.Expression,
+  property: string,
+  half: 'get' | 'set',
+  checker: ts.TypeChecker,
+): boolean {
+  const declaration = classDeclarationOf(checker.getTypeAtLocation(receiver));
+  const found =
+    declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
+  return found?.[half] === true;
+}
+
+/** The name a member function goes under: its own for a method, the mangled one for an accessor. */
+function memberFunctionName(
+  member: ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
+  sourceFile: ts.SourceFile,
+): string {
+  const spelled = member.name.getText(sourceFile);
+  if (ts.isGetAccessorDeclaration(member)) {
+    return accessorName('get', spelled);
+  }
+  return ts.isSetAccessorDeclaration(member) ? accessorName('set', spelled) : spelled;
+}
+
+/** A read of the receiver parameter, which is what both `this` and the object of `super.m()` are.
+ *
+ * The gate admits either only inside a class member, and every class member's parameter list
+ * starts with that parameter, so there is nothing left for a `this` node in the HIR to mean. */
+function receiverIdentifier(
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Identifier | null {
+  const binding = bindings.get(RECEIVER);
+  if (binding === undefined) {
+    diagnostics.push(
+      diagnosticFromNode(
+        node,
+        sourceFile,
+        'STA4061',
+        'internal',
+        'ts',
+        'this outside a class member',
+      ),
+    );
+    return null;
+  }
+  return {
+    kind: 'identifier',
+    type: binding,
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    name: RECEIVER,
+  };
+}
+
+function isClassInstance(
+  node: ts.Expression,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+): boolean {
+  // A class NAME is not an instance of itself, and the checker's type cannot say so: the type of
+  // the expression `C` is the class's STATIC side, whose symbol is still the class declaration, so
+  // `tsTypeToHType` answers with the very layout `new C()` produces. Only the spelling separates
+  // them, which is why this asks the AST and not the type.
+  if (
+    ts.isIdentifier(node) &&
+    ts.isClassDeclaration(checker.getSymbolAtLocation(node)?.valueDeclaration ?? node)
+  ) {
+    return false;
+  }
+  return typeAt(node, checker, bindings).kind === 'object';
 }
 
 /** `class C { … }`.
@@ -1670,17 +2375,83 @@ function lowerClass(
   });
   const initializers: ts.PropertyDeclaration[] = [];
   let ctorNode: ts.ConstructorDeclaration | undefined;
-  const methodNodes: ts.MethodDeclaration[] = [];
+  // An accessor is a member function under a mangled name, so it joins the method list rather
+  // than getting a list of its own -- which is what makes the table, dispatch and the receiver
+  // parameter apply to it unchanged.
+  const methodNodes: (
+    | ts.MethodDeclaration
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration
+  )[] = [];
+  const staticNodes: (ts.PropertyDeclaration | ts.MethodDeclaration)[] = [];
   for (const member of node.members) {
-    if (ts.isPropertyDeclaration(member)) {
+    // A static belongs to the class object, not to the layout: it is neither a slot nor a member
+    // function, so it leaves both lists before either is built.
+    if (
+      isStaticMember(member) &&
+      (ts.isPropertyDeclaration(member) || ts.isMethodDeclaration(member))
+    ) {
+      staticNodes.push(member);
+    } else if (ts.isPropertyDeclaration(member)) {
       if (member.initializer !== undefined) {
         initializers.push(member);
       }
     } else if (ts.isConstructorDeclaration(member)) {
       ctorNode = member;
-    } else if (ts.isMethodDeclaration(member)) {
+    } else if (
+      ts.isMethodDeclaration(member) ||
+      ts.isGetAccessorDeclaration(member) ||
+      ts.isSetAccessorDeclaration(member)
+    ) {
       methodNodes.push(member);
     }
+  }
+
+  // Statics are lowered BEFORE the members, and their bindings are registered in the enclosing
+  // scope: a static method's body may read another static (`C.count`), and so may an instance
+  // method's, so the names have to exist by the time any body is lowered.
+  //
+  // Every name is registered BEFORE any value is lowered, for the reason function declarations are
+  // hoisted: one static method may call another written below it, and a forward reference is legal
+  // source that must not reach an internal error.
+  const statics: Declaration[] = [];
+  for (const member of staticNodes) {
+    bindings.set(
+      staticName(node.name.text, member.name.getText(sourceFile)),
+      typeAt(member, checker, bindings),
+    );
+  }
+  for (const member of staticNodes) {
+    const name = staticName(node.name.text, member.name.getText(sourceFile));
+    const at = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
+    let value: Expression | null;
+    if (ts.isMethodDeclaration(member)) {
+      // No receiver: a static method is an ordinary function that happens to be written inside a
+      // class. `this` inside one is refused at the gate, which is what makes that true.
+      value = lowerFunction(member, sourceFile, checker, bindings, diagnostics);
+    } else if (member.initializer === undefined) {
+      // A declared-but-uninitialized static reads `undefined`, exactly as a field slot does.
+      value = { kind: 'undefined-literal', type: H_UNDEFINED, span: at };
+    } else {
+      value = lowerExpression(member.initializer, sourceFile, checker, bindings, diagnostics);
+    }
+    if (value === null) {
+      return null;
+    }
+    const declared = ts.isMethodDeclaration(member)
+      ? value.type
+      : typeAt(member, checker, bindings);
+    statics.push({
+      kind: 'declaration',
+      type: declared,
+      span: at,
+      name,
+      // `const`: a static method is a function that cannot be reassigned. A static FIELD can be
+      // (`C.count++`), which is what makes the two differ here and nowhere else.
+      declKind: ts.isMethodDeclaration(member) ? 'const' : 'let',
+      value,
+    });
+    bindings.set(name, declared);
   }
 
   const methods: ClassMethod[] = [];
@@ -1689,14 +2460,18 @@ function lowerClass(
     if (fn === null) {
       return null;
     }
-    methods.push({ name: method.name.getText(sourceFile), fn });
+    methods.push({ name: memberFunctionName(method, sourceFile), fn });
   }
 
+  // A derived class always needs a constructor even with nothing of its own to do, because the
+  // BASE's has to run. That is JavaScript's implicit `constructor(...args) { super(...args) }`,
+  // and it is why `base !== undefined` joins the two reasons a constructor was needed before.
+  const base = baseClassOf(node, checker)?.name?.text;
   let ctor: ClassMethod | undefined;
-  if (ctorNode !== undefined || initializers.length > 0) {
+  if (ctorNode !== undefined || initializers.length > 0 || base !== undefined) {
     const fn =
       ctorNode === undefined
-        ? emptyConstructor(node, sourceFile, type)
+        ? synthesizedConstructor(node, sourceFile, checker, type, base)
         : lowerFunction(ctorNode, sourceFile, checker, bindings, diagnostics, type);
     if (fn === null) {
       return null;
@@ -1712,24 +2487,97 @@ function lowerClass(
     if (prologue === null) {
       return null;
     }
+    // Field initializers run AFTER `super(...)`, never before it: an initializer may read a field
+    // the base constructor wrote (`doubled = this.sides * 2`), and in JavaScript `this` does not
+    // even exist until super returns. The gate proved super is the first statement when there is
+    // one, so "after it" is index 1.
+    const statements = fn.body.statements;
+    const afterSuper = statements[0]?.kind === 'super-call' ? 1 : 0;
     ctor = {
       name: 'constructor',
       fn: {
         ...fn,
-        body: { ...fn.body, statements: [...prologue, ...fn.body.statements] },
+        body: {
+          ...fn.body,
+          statements: [
+            ...statements.slice(0, afterSuper),
+            ...prologue,
+            ...statements.slice(afterSuper),
+          ],
+        },
       },
     };
   }
+
+  // A table only where something is overridden. Its entries are file-scope constants, so a class
+  // whose methods capture could not have one -- which is why the gate refuses overriding for a
+  // class that is not at module scope, and why the empty table here is a real answer rather than
+  // a missing one.
+  const vtable = type.methods.some((m) => isOverridden(type.name, m.name, sourceFile, checker))
+    ? type.methods.map((m) => ({
+        name: m.name,
+        // The MOST DERIVED declaration this class responds to: same name and same slot as the
+        // base's, different implementation. That difference is the whole of overriding.
+        className: methodDeclaringClass(node, m.name, checker)?.name?.text ?? type.name,
+      }))
+    : [];
 
   return {
     kind: 'class-declaration',
     type: H_UNDEFINED,
     span,
     name: node.name.text,
+    ...(base !== undefined && { base }),
     fields,
     ...(ctor !== undefined && { ctor }),
     methods,
+    statics,
+    vtable,
   };
+}
+
+/** `super(a, b)` -> the base constructor run against this constructor's receiver.
+ *
+ * Everything this needs is already in scope: the receiver is a parameter, and its HObject carries
+ * the ancestor names. Nothing is threaded down from `lowerClass`, so the rule "a super call is the
+ * base constructor applied to my own receiver" is stated once, here. */
+function lowerSuperCall(
+  call: ts.CallExpression,
+  statement: ts.ExpressionStatement,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Statement | null {
+  const span = makeSpan(statement.getStart(sourceFile), statement.getWidth(sourceFile), sourceFile);
+  const self = bindings.get(RECEIVER);
+  const base = self !== undefined && self.kind === 'object' ? self.bases[0] : undefined;
+  if (self === undefined || self.kind !== 'object' || base === undefined) {
+    diagnostics.push(
+      diagnosticFromNode(
+        statement,
+        sourceFile,
+        'STA4064',
+        'internal',
+        'ts',
+        'super call outside a derived constructor',
+      ),
+    );
+    return null;
+  }
+  const args = lowerArguments(call.arguments, sourceFile, checker, bindings, diagnostics);
+  if (args === null) {
+    return null;
+  }
+  const superCall: SuperCall = {
+    kind: 'super-call',
+    type: H_UNDEFINED,
+    span,
+    className: base,
+    receiver: { kind: 'identifier', type: self, span, name: RECEIVER },
+    args,
+  };
+  return superCall;
 }
 
 /** `this.x = <init>` for each initialized field, in declaration order.
@@ -1784,24 +2632,74 @@ function lowerFieldInitializers(
   return statements;
 }
 
-/** The constructor a class with initializers but no `constructor` gets: receiver in, nothing done.
- * Built rather than lowered because there is no declaration to lower. */
-function emptyConstructor(
+/** The constructor a class that writes none gets. Built rather than lowered because there is no
+ * declaration to lower.
+ *
+ * At the root of a chain it is `constructor() {}` -- the receiver in, nothing done, the field
+ * initializers the caller prepends being the whole point. In a derived class it is JavaScript's
+ * implicit `constructor(...args) { super(...args) }`, so it takes the parameters it forwards. It
+ * takes the NEAREST DECLARED ancestor constructor's, since an ancestor that writes none forwards
+ * in exactly the same way; that keeps the synthesized arity equal to the arity every caller and
+ * the checker already agree on. */
+function synthesizedConstructor(
   node: ts.ClassDeclaration,
   sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
   self: HObject,
+  base: string | undefined,
 ): FunctionExpr {
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const forwarded =
+    base === undefined
+      ? []
+      : (nearestConstructor(node, checker)?.parameters ?? []).map((p, index) => ({
+          name: ts.isIdentifier(p.name) ? p.name.text : `_arg${index}`,
+          type: tsTypeToHType(checker.getTypeAtLocation(p), checker),
+          span,
+        }));
+  const receiver: Identifier = { kind: 'identifier', type: self, span, name: RECEIVER };
+  const statements: Statement[] =
+    base === undefined
+      ? []
+      : [
+          {
+            kind: 'super-call',
+            type: H_UNDEFINED,
+            span,
+            className: base,
+            receiver,
+            args: forwarded.map((p) => ({
+              kind: 'identifier' as const,
+              type: p.type,
+              span,
+              name: p.name,
+            })),
+          },
+        ];
   return {
     kind: 'function',
-    type: hFunction([self], H_UNDEFINED),
+    type: hFunction([self, ...forwarded.map((p) => p.type)], H_UNDEFINED),
     span,
-    params: [{ name: RECEIVER, type: self, span }],
-    body: { kind: 'block', type: H_UNDEFINED, span, statements: [] },
+    params: [{ name: RECEIVER, type: self, span }, ...forwarded],
+    body: { kind: 'block', type: H_UNDEFINED, span, statements },
     envVars: [],
     captures: [],
     needsEnv: false,
   };
+}
+
+/** The nearest constructor actually written in a class's ancestry, or `undefined` if none is. */
+function nearestConstructor(
+  declaration: ts.ClassDeclaration,
+  checker: ts.TypeChecker,
+): ts.ConstructorDeclaration | undefined {
+  for (const current of ancestry(declaration, checker).toReversed()) {
+    const ctor = current.members.find(ts.isConstructorDeclaration);
+    if (ctor !== undefined) {
+      return ctor;
+    }
+  }
+  return undefined;
 }
 
 /* Capture analysis is a whole-file question, so it runs once per source file rather than once per
@@ -1854,4 +2752,299 @@ function makeSpan(start: number, width: number, sourceFile: ts.SourceFile): Span
     length: width,
     line,
   };
+}
+
+/** One function to emit: a generic declaration plus the tuple it is being built for.
+ *
+ * The tuple is CONCRETE by construction — `collectSpecializations` refuses to enqueue one that is
+ * not — which is what makes the mangled name a complete identity: two calls agree on a
+ * specialization exactly when they agree on the tuple, so `box(1)` and `box(2)` share one function
+ * and `box('a')` gets its own. */
+interface Specialization {
+  readonly name: string;
+  readonly declaration: ts.FunctionDeclaration;
+  readonly substitution: ReadonlyMap<string, HType>;
+}
+
+/** How deep a chain of instantiations may go before the compiler stops rather than hangs.
+ *
+ * `function deeper<T>(x: T): void { deeper([x]); }` instantiates `deeper<T[]>`, then
+ * `deeper<T[][]>`, forever: each instantiation is a new tuple, so nothing ever repeats and no
+ * dedupe can end it. This is the halting problem in miniature and the answer is a cap, not
+ * cleverness — 16 is far past any real generic and small enough that the refusal is instant. */
+const MAX_INSTANTIATION_DEPTH = 16;
+
+function isGenericDeclaration(node: ts.FunctionDeclaration): boolean {
+  return node.typeParameters !== undefined && node.typeParameters.length > 0;
+}
+
+/** Every specialization the file needs, in an order where a caller follows what it calls.
+ *
+ * The walk is a worklist over TUPLES, not over declarations: the seeds are the generic calls in
+ * ordinary code, where every tuple is concrete already, and processing one specialization looks
+ * inside the body it is about to emit for further generic calls — whose tuples may mention the type
+ * parameters this specialization is substituting, and are made concrete by doing exactly that.
+ *
+ * `null` means a diagnostic was pushed and the file cannot be lowered. */
+function collectSpecializations(
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  diagnostics: Diagnostic[],
+): Specialization[] | null {
+  const emitted = new Map<string, Specialization>();
+  const queue: { readonly specialization: Specialization; readonly depth: number }[] = [];
+  let failed = false;
+
+  /** Records one call's instantiation, with `substitution` — the enclosing specialization's, empty
+   * at the top level — applied to the tuple the checker inferred. */
+  const request = (
+    call: ts.CallExpression,
+    substitution: ReadonlyMap<string, HType>,
+    depth: number,
+  ): void => {
+    const instantiation = genericCallInstantiation(call, checker);
+    if (instantiation.kind !== 'generic') {
+      return;
+    }
+    const typeArguments = instantiation.typeArguments.map((t) =>
+      substituteHType(t, (name) => substitution.get(name)),
+    );
+    if (typeArguments.some(hasTypeParam)) {
+      // Unreachable for a well-formed program: the enclosing specialization substitutes every type
+      // parameter in scope, so a leftover means the two walks disagree about which are in scope.
+      diagnostics.push(
+        diagnosticFromNode(
+          call,
+          sourceFile,
+          'STA4070',
+          'internal',
+          'ts',
+          `generic call still mentions a type parameter after substitution: ${typeArguments.map(hTypeName).join(', ')}`,
+        ),
+      );
+      failed = true;
+      return;
+    }
+    const name = specializationName(instantiation.declaration.name?.text ?? '', typeArguments);
+    if (emitted.has(name)) {
+      return;
+    }
+    if (depth > MAX_INSTANTIATION_DEPTH) {
+      diagnostics.push(
+        diagnosticFromNode(
+          call,
+          sourceFile,
+          'STA2003',
+          'error',
+          'ts',
+          `generic instantiation is more than ${String(MAX_INSTANTIATION_DEPTH)} deep at '${name}'; it does not terminate`,
+        ),
+      );
+      failed = true;
+      return;
+    }
+    const parameters = instantiation.declaration.typeParameters ?? [];
+    const substitutionFor = new Map<string, HType>();
+    parameters.forEach((parameter, index) => {
+      const argument = typeArguments[index];
+      if (argument !== undefined) {
+        substitutionFor.set(parameter.name.text, argument);
+      }
+    });
+    const specialization: Specialization = {
+      name,
+      declaration: instantiation.declaration,
+      substitution: substitutionFor,
+    };
+    emitted.set(name, specialization);
+    queue.push({ specialization, depth });
+  };
+
+  /** Every call in `root`, skipping the bodies of generic declarations — those are reached through
+   * the worklist instead, once there is a tuple to read them under. */
+  const walkCalls = (
+    root: ts.Node,
+    substitution: ReadonlyMap<string, HType>,
+    depth: number,
+  ): void => {
+    const visit = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && isGenericDeclaration(node) && node !== root) {
+        return;
+      }
+      if (ts.isCallExpression(node)) {
+        request(node, substitution, depth);
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(root, visit);
+  };
+
+  for (const statement of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(statement) && isGenericDeclaration(statement)) {
+      continue;
+    }
+    walkCalls(statement, new Map(), 1);
+  }
+  // A plain index rather than `shift()`: the queue only grows, and the order it grows in is the
+  // order the specializations are emitted in, which keeps the output stable across runs.
+  for (let i = 0; i < queue.length && !failed; i++) {
+    const item = queue[i];
+    if (item === undefined) {
+      continue;
+    }
+    walkCalls(item.specialization.declaration, item.specialization.substitution, item.depth + 1);
+  }
+  return failed ? null : [...emitted.values()];
+}
+
+/** The identifier naming the specialization this call resolves to.
+ *
+ * `undefined` means the call is not to a generic and the ordinary path applies; `null` means it is
+ * and something went wrong, with a diagnostic already pushed. The mangled name is recomputed here
+ * from the same inputs `collectSpecializations` used — the call and the enclosing substitution — so
+ * the two cannot name different functions without disagreeing about the call itself. */
+function specializedCallee(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Identifier | null | undefined {
+  const instantiation = genericCallInstantiation(node, checker);
+  if (instantiation.kind !== 'generic') {
+    return undefined;
+  }
+  const typeArguments = instantiation.typeArguments.map((t) =>
+    substituteHType(t, (name) => bindings.get(typeParameterKey(name))),
+  );
+  const name = specializationName(instantiation.declaration.name?.text ?? '', typeArguments);
+  const type = bindings.get(name);
+  if (type === undefined) {
+    diagnostics.push(
+      diagnosticFromNode(
+        node,
+        sourceFile,
+        'STA4070',
+        'internal',
+        'ts',
+        `no specialization '${name}' was collected for this call`,
+      ),
+    );
+    return null;
+  }
+  return {
+    kind: 'identifier',
+    type,
+    span: makeSpan(
+      node.expression.getStart(sourceFile),
+      node.expression.getWidth(sourceFile),
+      sourceFile,
+    ),
+    name,
+  };
+}
+
+/** The specialization's own function type: the generic's signature with the substitution applied. */
+function specializationType(specialization: Specialization, checker: ts.TypeChecker): HType {
+  const declared = tsTypeToHType(checker.getTypeAtLocation(specialization.declaration), checker);
+  return substituteHType(declared, (name) => specialization.substitution.get(name));
+}
+
+/** Lowers the generic's body a second time, with its type parameters bound.
+ *
+ * This is the whole of monomorphization: no HIR is cloned and no type is rewritten after the fact,
+ * because `typeAt` reads the substitution out of the binding map at the one point a `ts.Type`
+ * becomes an HType. The emitted function keeps the SOURCE's name for printing (`[Function: box]`,
+ * as Node prints it) — only the binding it is reached through is mangled. */
+function lowerSpecialization(
+  specialization: Specialization,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): FunctionDeclaration | null {
+  const inner = new Map(bindings);
+  for (const [parameter, type] of specialization.substitution) {
+    inner.set(typeParameterKey(parameter), type);
+  }
+  const fn = lowerFunction(specialization.declaration, sourceFile, checker, inner, diagnostics);
+  if (fn === null) {
+    return null;
+  }
+  const node = specialization.declaration;
+  return {
+    kind: 'function-declaration',
+    type: H_UNDEFINED,
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    name: specialization.name,
+    fn,
+  };
+}
+
+/** A type parameter's binding key inside `bindings`: `<T>`.
+ *
+ * The same unspellable-name trick the receiver parameter plays with a leading space and a static
+ * with a dot. No identifier may contain an angle bracket, so a substitution can share the binding
+ * map with the program's own names without either being able to reach the other — and the map is
+ * already threaded through every function in this file, which is why the substitution needs no
+ * parameter of its own and no mutable state to leak between specializations. */
+function typeParameterKey(name: string): string {
+  return `<${name}>`;
+}
+
+/** The HType of a node, with the enclosing specialization's substitution applied.
+ *
+ * EVERY type read in the lowering goes through here rather than calling `tsTypeToHType` directly,
+ * and that is what keeps a type parameter out of the HIR: substitution happens at the one point a
+ * `ts.Type` becomes an HType, so no node is ever built carrying a `T` that a later pass would have
+ * to find and rewrite. Outside a specialization the lookup finds nothing and this is `tsTypeToHType`
+ * exactly. */
+function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Map<string, HType>): HType {
+  return substituteHType(tsTypeToHType(checker.getTypeAtLocation(node), checker), (name) =>
+    bindings.get(typeParameterKey(name)),
+  );
+}
+
+/** Every argument of a call, lowered left to right, or `null` if any of them failed.
+ *
+ * Six call shapes lower arguments — `new`, `console.log`, a collection operation, a method call, an
+ * ordinary call and `super(...)` — and every one of them lowers left to right and abandons the whole
+ * call on the first failure. That is not a coincidence to be factored for tidiness: argument order
+ * IS evaluation order, and a copy of this loop that drifted would reorder a user's side effects. */
+function lowerArguments(
+  nodes: readonly ts.Expression[] | undefined,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Expression[] | null {
+  const args: Expression[] = [];
+  for (const node of nodes ?? []) {
+    const lowered = lowerExpression(node, sourceFile, checker, bindings, diagnostics);
+    if (lowered === null) {
+      return null;
+    }
+    args.push(lowered);
+  }
+  return args;
+}
+
+/** The operation a Map or Set method name denotes, or undefined for a name that is not one.
+ *
+ * The gate has already refused every other name, so `undefined` here is an internal error rather
+ * than a user-facing refusal -- which is exactly why this returns rather than throwing: the caller
+ * reports it with a span, and the compiler does not stack-trace at the CLI. */
+function collectionOperation(name: string): CollectionOperation | undefined {
+  switch (name) {
+    case 'get':
+    case 'set':
+    case 'has':
+    case 'delete':
+    case 'clear':
+    case 'add':
+    case 'size':
+      return name;
+    default:
+      return undefined;
+  }
 }

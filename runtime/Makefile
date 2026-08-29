@@ -29,8 +29,13 @@ else
   GC_STATUS := plain malloc (no collection)
 endif
 
-CFLAGS_REL    := $(CFLAGS_COMMON) -O2
-CFLAGS_ASAN   := $(CFLAGS_COMMON) -O1 -g -fsanitize=address,undefined
+# Header dependencies are generated, never listed: jsrt_value.h is the codegen<->runtime contract,
+# and a build that does not rebuild when it changes will happily link a corpus against a struct that
+# no longer exists (plan-notes 66).
+DEPFLAGS      := -MMD -MP
+
+CFLAGS_REL    := $(CFLAGS_COMMON) $(DEPFLAGS) -O2
+CFLAGS_ASAN   := $(CFLAGS_COMMON) $(DEPFLAGS) -O1 -g -fsanitize=address,undefined
 
 SRC       := $(wildcard src/*.c)
 OBJ_REL   := $(patsubst src/%.c,build/%.o,$(SRC))
@@ -49,7 +54,11 @@ asan: build-asan/libjsrt.a
 # prints the same values through Node, and the two are diffed. Ground truth is Node, byte-for-byte
 # -- never a table of expectations written next to the implementation, which would only assert
 # that the code agrees with itself.
-CORPORA := print_numbers print_arrays print_objects
+CORPORA := print_numbers print_arrays print_objects print_maps print_typeof
+
+DEPS      := $(OBJ_REL:.o=.d) $(OBJ_ASAN:.o=.d) \
+             $(addprefix build/,$(addsuffix .d,$(CORPORA))) \
+             $(addprefix build-asan/,$(addsuffix .d,$(CORPORA)))
 
 test: $(addprefix build/,$(CORPORA))
 	@for corpus in $(CORPORA); do \
@@ -90,3 +99,5 @@ build build-asan:
 
 clean:
 	rm -rf build build-asan
+
+-include $(DEPS)

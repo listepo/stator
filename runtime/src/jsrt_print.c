@@ -569,18 +569,36 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTObject *o = jsrt_as_object(v);
   const JSRTClass *cls = o->cls;
 
+  /* An object LITERAL has no constructor name, and Node prints none: `{ x: 1 }`, not `Object
+   * { x: 1 }`. Its descriptor carries the empty name, which is unambiguous -- no class may be
+   * called "" -- and every place the name would print becomes a place it does not. */
+  const bool named = cls->name[0] != '\0';
+
   if (recurse > INSPECT_MAX_DEPTH) {
-    /* `[Deep]`, not `[Object]`: past the cap Node still names the constructor it stopped at. */
+    /* `[Deep]`, not `[Object]`: past the cap Node still names the constructor it stopped at --
+     * and for a literal, which has no constructor, that name IS `Object`. */
     buf_putc(out, '[');
-    buf_puts(out, cls->name);
+    buf_puts(out, named ? cls->name : "Object");
     buf_putc(out, ']');
     return;
   }
 
-  const size_t count = cls->field_count;
+  /* A `#private` field HAS a slot -- it is on the instance like any other field -- but
+   * `util.inspect` does not show it, so neither does this. A leading '#' is the whole test, and it
+   * is unambiguous: a class field's name is an identifier by construction, and no identifier can
+   * start with one. Printing therefore walks the visible slots, not every slot. */
+  size_t count = 0;
+  for (uint32_t i = 0; i < cls->field_count; i++) {
+    if (cls->fields[i][0] != '#') {
+      count++;
+    }
+  }
   if (count == 0) {
-    buf_puts(out, cls->name);
-    buf_puts(out, " {}");
+    if (named) {
+      buf_puts(out, cls->name);
+      buf_putc(out, ' ');
+    }
+    buf_puts(out, "{}");
     return;
   }
 
@@ -588,17 +606,113 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
   if (entries == NULL) {
     jsrt_panic("out of memory: print buffer");
   }
-  for (size_t i = 0; i < count; i++) {
-    buf_init(&entries[i]);
-    buf_puts(&entries[i], cls->fields[i]);
-    buf_puts(&entries[i], ": ");
-    inspect_value(&entries[i], o->fields[i], recurse + 1, indent + 2);
+  size_t next = 0;
+  for (uint32_t slot = 0; slot < cls->field_count; slot++) {
+    if (cls->fields[slot][0] == '#') {
+      continue;
+    }
+    Buf *entry = &entries[next++];
+    buf_init(entry);
+    buf_puts(entry, cls->fields[slot]);
+    buf_puts(entry, ": ");
+    inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
   }
 
-  /* The name and the space after it are part of the prefix Node measures, along with the `{`. */
-  const size_t prefix = strlen(cls->name) + 1 /* the space */ + 1 /* "{" */;
-  buf_puts(out, cls->name);
+  /* The name and the space after it are part of the prefix Node measures, along with the `{`. A
+   * literal contributes neither, so its budget is one character wider. */
+  const size_t prefix = named ? strlen(cls->name) + 1 /* the space */ + 1 : 1 /* "{" */;
+  if (named) {
+    buf_puts(out, cls->name);
+    buf_putc(out, ' ');
+  }
+  if (fits_one_line(entries, count, indent, prefix)) {
+    buf_puts(out, "{ ");
+    for (size_t i = 0; i < count; i++) {
+      if (i > 0) {
+        buf_puts(out, ", ");
+      }
+      buf_append(out, entries[i].data, entries[i].len);
+    }
+    buf_puts(out, " }");
+  } else {
+    buf_puts(out, "{\n");
+    for (size_t i = 0; i < count; i++) {
+      if (i > 0) {
+        buf_puts(out, ",\n");
+      }
+      buf_repeat(out, ' ', indent + 2);
+      buf_append(out, entries[i].data, entries[i].len);
+    }
+    buf_putc(out, '\n');
+    buf_repeat(out, ' ', indent);
+    buf_putc(out, '}');
+  }
+
+  for (size_t i = 0; i < count; i++) {
+    buf_free(&entries[i]);
+  }
+  free(entries);
+}
+
+/* `Map(2) { 'a' => 1, 'b' => 2 }` and `Set(2) { 1, 2 }`.
+ *
+ * Laid out like an object, not like an array: the size goes in front and counts toward the line
+ * budget the way a class name does, and there is NO grouping, because Node reaches
+ * groupArrayElements only for array-like output. A Set of eight numbers therefore prints as eight
+ * lines where an ARRAY of eight numbers prints as a grid — the one place the two look different for
+ * the same contents.
+ *
+ * Entries print in insertion order because that is what the structure stores; the dead ones a
+ * deletion left behind are skipped here exactly as they are skipped by a lookup. */
+static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
+  const JSRTMap *m = jsrt_as_map(v);
+  const bool is_map = m->cls == &jsrt_class_map;
+
+  if (recurse > INSPECT_MAX_DEPTH) {
+    buf_puts(out, is_map ? "[Map]" : "[Set]");
+    return;
+  }
+
+  char base[32];
+  snprintf(base, sizeof base, "%s(%u)", m->cls->name, m->size);
+  buf_puts(out, base);
   buf_putc(out, ' ');
+
+  const size_t shown = m->size > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : m->size;
+  const bool truncated = m->size > shown;
+  const size_t count = shown + (truncated ? 1 : 0);
+  if (count == 0) {
+    buf_puts(out, "{}");
+    return;
+  }
+
+  Buf *entries = (Buf *)calloc(count, sizeof(Buf));
+  if (entries == NULL) {
+    jsrt_panic("out of memory: print buffer");
+  }
+  size_t next = 0;
+  for (uint32_t i = 0; i < m->used && next < shown; i++) {
+    if (!m->entries[i].live) {
+      continue;
+    }
+    Buf *entry = &entries[next++];
+    buf_init(entry);
+    inspect_value(entry, m->entries[i].key, recurse + 1, indent + 2);
+    if (is_map) {
+      buf_puts(entry, " => ");
+      inspect_value(entry, m->entries[i].value, recurse + 1, indent + 2);
+    }
+  }
+  if (truncated) {
+    char more[64];
+    const uint32_t remaining = m->size - (uint32_t)shown;
+    snprintf(more, sizeof more, "... %u more item%s", remaining, remaining == 1 ? "" : "s");
+    buf_init(&entries[shown]);
+    buf_puts(&entries[shown], more);
+  }
+
+  /* The `Map(2)` and the space in front of it are Node's `base`, measured with the brace. */
+  const size_t prefix = strlen(base) + 1 + 1;
   if (fits_one_line(entries, count, indent, prefix)) {
     buf_puts(out, "{ ");
     for (size_t i = 0; i < count; i++) {
@@ -629,7 +743,9 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
 }
 
 static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent) {
-  if (jsrt_is(v, JSRT_TAG_OBJECT)) {
+  if (jsrt_is_map_or_set(v)) {
+    inspect_map(out, v, recurse, indent);
+  } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
     inspect_object(out, v, recurse, indent);
   } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
     inspect_array(out, v, recurse, indent);
@@ -648,7 +764,9 @@ void jsrt_print(jsrt_value v) {
 
   /* The top level is not inside an array, so a string prints bare -- `console.log("a")` is `a`,
    * while `console.log(["a"])` is `[ 'a' ]`. */
-  if (jsrt_is(v, JSRT_TAG_OBJECT)) {
+  if (jsrt_is_map_or_set(v)) {
+    inspect_map(&out, v, 0, 0);
+  } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
     inspect_object(&out, v, 0, 0);
   } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
     inspect_array(&out, v, 0, 0);
@@ -659,6 +777,21 @@ void jsrt_print(jsrt_value v) {
   buf_putc(&out, '\n');
   fwrite(out.data, 1, out.len, stdout);
   buf_free(&out);
+}
+
+_Noreturn void jsrt_uncaught(void) {
+  /* Same inspect form console.log uses, so `throw {x: 1}` reads as `{ x: 1 }` -- but on STDERR,
+   * because stdout is the program's output and an uncaught exception is not part of it. The text
+   * intentionally does not chase Node's (which prints source excerpts and stack frames this
+   * runtime does not have); the OBSERVABLE contract is stderr + exit 1. */
+  Buf out;
+  buf_init(&out);
+  buf_puts(&out, "Uncaught ");
+  inspect_value(&out, jsrt_take_exception(), 0, 0);
+  buf_putc(&out, '\n');
+  fwrite(out.data, 1, out.len, stderr);
+  buf_free(&out);
+  exit(1);
 }
 
 jsrt_value jsrt_to_string(jsrt_value v) {

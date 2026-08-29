@@ -109,7 +109,7 @@ tests/   unit/  subset/  golden/ts/  golden/js/  differential/  bench/
 
 ## 3. Phase 0 — Go/no-go gate (human decision)
 
-> **Status: ⏳ STILL OPEN.** `NICHE.md` does not exist; there is no `phase-0-approved` tag (and no commits at all yet — the whole tree is staged, uncommitted). Phase 1 was executed first on explicit owner instruction (`plan-notes.md`, Open items); that exception does not extend further — this gate needs the human decision, and the initial commit, before Phase 2 work starts.
+> **Status: ⏳ STILL OPEN.** `NICHE.md` does not exist and there is no `phase-0-approved` tag. The initial repository snapshot is committed (`fa13a50`), but the human decision and tag are still required before Phase 2 work starts; Phase 1 was executed first on explicit owner instruction (`plan-notes.md`, Open items), and that exception does not extend further.
 
 **Task 0.1 — Build-vs-join check.**
 
@@ -126,7 +126,7 @@ Steps:
 
 ## 4. Phase 1 — Bootstrap and specifications ✅ COMPLETE (2026-08-29)
 
-All four tasks are done and every Check passed (evidence on the Check lines below). Deviations from the written steps are logged in `plan-notes.md` (2026-08-29, entries 1–19); the executed step lists are removed here — what remains is the normative residue. **Two open follow-ups:** (a) nothing is committed yet — the initial commit awaits the owner, alongside the Phase-0 gate; (b) the Node pin is **26.7.0**, which satisfies "≥ 24" but may be Current rather than LTS — owner to confirm or drop to 24.x (notes #9); it is the differential ground truth, so settle it before Phase 2's golden tests exist.
+All four tasks are done and every Check passed (evidence on the Check lines below). Deviations from the written steps are logged in `plan-notes.md` (2026-08-29, entries 1–19); the executed step lists are removed here — what remains is the normative residue. **Two open follow-ups:** (a) the Phase-0 gate still needs the human approval/tag; (b) the Node pin is **26.7.0**, which satisfies "≥ 24" but may be Current rather than LTS — owner to confirm or drop to 24.x (notes #9); it is the differential ground truth, so settle it before Phase 2's golden tests exist.
 
 ~~**Task 1.0 — Bootstrap the TypeScript workspace.**~~ ✅ Done. Highlights: npm name `stator` is taken → package **`statorc`**, binary stays **`stator`**, both pinned by a unit test (notes #1); `typescript` pinned **6.0.3** — npm `latest` is already 7.0.2/tsgo, which §0.3 bans; re-evaluate 2026-11-29 (notes #2); lint/format is **Biome** (one dev dep replacing ESLint's ~130; the four load-bearing rules at `error`; `noUnnecessaryConditions` off for a documented inference gap; notes #19); runtime archives build to separate `build/` and `build-asan/` trees so a sanitized object can never reach a release link (notes #7); the package manager is **pnpm 11.20.0** (`packageManager` pin) and `cpd` 5.0.16 gates duplication at 1% inside `pnpm run ci` (notes #20). The **locked `tsconfig.json`** below remains normative (§15.7 — changes require a plan edit):
    ```json
@@ -311,15 +311,15 @@ Ten defects were found and fixed while making this Check pass; the ones with a l
    - **Sparse arrays are `STA2002`, raised at runtime.** A write more than one past the end refuses
      rather than filling the gap; in-range writes and `a[a.length] = v` are unaffected. Lifts with
      the object model (plan-notes 55).
-   - **Elision of the bounds check, and the typed read of `a[i]`, belong to Task 3.5, not here.**
-     `noUncheckedIndexedAccess` (Task 1.0) types an indexed read as `T | undefined`, which lands in
-     the HIR as `Unknown` — and 3.5 is the pass that materializes a runtime check where `Unknown`
-     narrows to a concrete HType.
-     That is also what gives "elide bounds checks when provably in range" something to elide. This
-     rung delivers the representation; `sum += a[i]` and `a[i] += 1` compile once 3.5 lands — the
-     gate accepts them and the lowering implements plan-notes 43's read-once rule already, pinned by
-     `tests/unit/arrays.test.ts`. The flag stays on: an index is a boundary, and golden rule 4
-     applies to it (plan-notes 53).
+   - **The typed read of `a[i]` landed with Task 3.5.** `noUncheckedIndexedAccess` (Task 1.0) types
+     an indexed read as `T | undefined`, which lands in the HIR as `Unknown`; narrowing one now
+     inserts a check, so `const v = a[i]; if (v !== undefined) { sum = sum + v; }` compiles and the
+     addition is on a value proved to be a number. The bare `sum += a[i]` still does not, and that
+     is the CHECKER refusing it, not the gate — `T | undefined` is not addable, and no check the
+     compiler inserts changes what TypeScript will accept.
+     Elision of the bounds check remains open and belongs to the optimization passes: 3.5 gives it
+     something to elide, it is not itself the eliding. The flag stays on: an index is a boundary,
+     and golden rule 4 applies to it (plan-notes 53).
 6. Classes → fixed slot offsets; getter/setter classes take the dynamic path per `SUBSET.md`.
    Split into **6a** (a class whose layout is fixed at its declaration) and **6b** (everything that
    changes what a layout is), on the line drawn in plan-notes 59.
@@ -338,7 +338,7 @@ Ten defects were found and fixed while making this Check pass; the ones with a l
      one unit-test file (`tests/unit/classes.test.ts`); the `class_fixed_shape` decision tests flip
      to passing in **both** modes. Defects found and fixed: plan-notes 57. Design decisions
      recorded: plan-notes 58 (`this` is a parameter, not a node kind) and 59 (the 6a/6b line).
-   - **6b — ToPrimitive ✅ done (2026-08-29); the rest not started.** ToPrimitive was listed here
+   - **6b — ToPrimitive ✅ done (2026-08-29).** ToPrimitive was listed here
      as a feature and was not one: `jsrt_loose_equals`, `jsrt_to_number`, `jsrt_op_add`, and
      `jsrt_compare` had all shipped object-blind in rung 5, so `a == a` answered **false** for every
      array and class instance while `a === a` answered true. One `jsrt_to_primitive`, run first in
@@ -349,17 +349,189 @@ Ten defects were found and fixed while making this Check pass; the ones with a l
      the compiler sees them. Second defect fixed in passing: `STA4011`/`STA4012` rejected an
      `unknown` arithmetic operand, so `id(a) - 1` in js mode — source the gate accepts — reached an
      internal error.
-     Still to do: inheritance and `super`, `instanceof`, static members, `#private` fields,
-     getters/setters via the dynamic path, and object literals. Each is a `not-yet` today with a
-     message naming the construct, and each breaks a property 6a's fixed-slot layout depends on —
-     the table in plan-notes 59 says which.
-7. `Map`/`Set`: specialized primitive-key path; identity-hash runtime path otherwise.
+   - **6b — inheritance and `super(...)` ✅ done (2026-08-29).** `extends`, `super(...)`, prefix
+     layout, assignability, `instanceof` up the chain, and synthesized derived constructors. A
+     subclass's slots START with its base's, in the base's own slot order, which is the only thing
+     making `hTypeAssignable` sound: the first N slots of a `Dog` *are* an `Animal`, so every
+     existing node — `FieldAccess`, `MethodCall`, `console.log`'s printer — works unchanged on a
+     base-typed reference. The slot list is rebuilt root-first from the chain, because the checker
+     lists a subclass's OWN properties first (plan-notes 62, which also records the js-mode bug a
+     sort-based fix caused and a golden fixture caught). `JSRTClass` grew one `parent` pointer and
+     `jsrt_instanceof` grew the walk; no generated C at a call site changed. `MethodCall.className`
+     became the class that DECLARES the method, so an inherited method is a direct call to the one
+     function that exists. Field initializers now run AFTER `super(...)`, since one may read a field
+     the base wrote. A derived class that writes no constructor gets JavaScript's implicit
+     `constructor(...args) { super(...args) }`.
+     **Method overriding and `super.method()` are deferred with the vtable, deliberately**: static
+     dispatch is sound exactly while no method is overridden, so redeclaring an inherited member is
+     refused at the gate with that reason in both modes rather than silently dispatching to the
+     base's body (plan-notes 63, which also records three load-bearing-invariant violations found on
+     the way). `pnpm run ci` green: 158 unit tests, `golden: 22 fixtures — 22 passed` under both the
+     release and the ASan/UBSan runtime, `subset: 164 fixtures — 60 passed, 104 expected-fail, 0
+     failed`, `runtime: print corpus matches Node` in both builds, `22 clones · 0.8% duplication`.
+     Two golden fixtures added (`ts/inheritance`, `js/inheritance`); `class_inheritance` flips to
+     passing in both modes and a new `method_override` pair pins the deferral.
+   - **6b — static members ✅ done (2026-08-29).** A static belongs to the class object and there
+     is no class object here, so a static is ONE binding for the whole program under a name no
+     source can spell (`C.count`; the dot does what the receiver parameter's leading space does).
+     That reduction is the design: a read is an `Identifier`, a write is an `Assignment`, `C.m()` is
+     a `CallExpr`, and `C.count += 1` reuses the identifier compound path unchanged — statics needed
+     **no HIR node, no verifier case and no emitter case**, only a `statics` list on
+     `ClassDeclaration` that the enclosing scope walks. The name carries the DECLARING class,
+     because statics are inherited and `Sub.count` must be the same binding as `Base.count`; names
+     hoist before values are lowered, so one static method may call another written below it
+     (plan-notes 65).
+     Two pre-existing defects surfaced and were fixed. `hTypeAssignable` refused an Unknown VALUE
+     into a typed binding, making six lines of ordinary js-mode source (`let total = 0; total =
+     add(total, 3)` with an untyped `add`) an internal error; Unknown is now assignable in both
+     directions, the same exemption arithmetic operands already got. And `this`/`super` were gated
+     by **dead code** — both are `ts.SyntaxKind` TOKENS, so the walker's token short-circuit
+     swallowed their cases, and `console.log(this)` reached `STA4061` instead of a `not-yet`
+     (plan-notes 64). `pnpm run ci` green: 164 unit tests, `golden: 24 fixtures — 24 passed` under
+     both the release and the ASan/UBSan runtime, `subset: 166 fixtures — 64 passed, 102
+     expected-fail, 0 failed`, `runtime: print corpus matches Node` in both builds, `22 clones ·
+     0.7% duplication`. Two golden fixtures added (`ts/statics`, `js/statics`);
+     `static_class_members` flips to passing in both modes and a new `static_block` pair pins the
+     deferral.
+     `#private` members then landed with **no compiler surface of their own**: `#count` is a slot,
+     `#step()` a member function, `static #next` a static binding, and the name simply keeps its
+     `#`. Privacy is a checker fact — every access from outside the class body is already an error
+     before the gate runs — so the whole feature below the frontend is one rule in the runtime
+     printer: `util.inspect` omits `#private` fields, so a descriptor field name starting with `#`
+     is skipped, and a class whose fields are all private prints `C {}`. Two deferrals are forced by
+     the layout, not by privacy: a subclass re-declaring an ancestor's `#private` name is two slots
+     sharing a spelling that a name-keyed list would merge, and `#brand in o` asks whether a slot
+     exists rather than reading it. A third defect surfaced: the runtime Makefile listed no header
+     prerequisites, so editing `jsrt_value.h` rebuilt nothing and `make -C runtime test` had been
+     linking corpus binaries against a struct that no longer existed; fixed with generated depfiles
+     (plan-notes 66). `pnpm run ci` green: 168 unit tests, `golden: 26 fixtures — 26 passed` under
+     both the release and the ASan/UBSan runtime, `subset: 168 fixtures — 68 passed, 100
+     expected-fail, 0 failed`, `runtime: print corpus matches Node` in both builds, `23 clones ·
+     0.8% duplication`. Two golden fixtures added (`ts/private`, `js/private`); `private_fields`
+     flips to passing in both modes and a new `private_shadowed` pair pins the deferral.
+     Method overriding then landed with a **method table in the class descriptor**: `method_count`
+     entries of file-scope `JSRTClosure` pointers, in the same prefix order the fields have, so the
+     slot comes from the receiver's static type and the entry from its dynamic one. Dispatch is
+     decided per METHOD, not per call site — the lowering asks the whole file whether any chain
+     containing the receiver's class declares that name twice — so a method nothing overrides keeps
+     rung 6a's direct call and a program that overrides nothing pays nothing. `super.m()` is a call
+     on the same receiver with the override skipped, and is direct even where the same method is
+     virtual everywhere else; a virtual call there would find the override again and recur. Two
+     deferrals follow from the table being a constant: overriding inside a function (a method there
+     may capture) and re-declaring a FIELD (one slot, two initializers). A mode-policy bug fell out
+     and was fixed: `noImplicitOverride` demanded a JSDoc `@override` tag in js mode, rejecting
+     ordinary JavaScript, and is now `mode === 'ts'` like `noImplicitAny` (plan-notes 67). One
+     contradiction is recorded and NOT fixed: js mode still rejects an override that narrows an
+     inferred return type, pinned as an `@expected-fail` decision test (plan-notes 68).
+     `pnpm run ci` green: 175 unit tests, `golden: 28 fixtures — 28 passed` under both the release
+     and the ASan/UBSan runtime, `subset: 173 fixtures — 72 passed, 101 expected-fail, 0 failed`,
+     `runtime: print corpus matches Node` in both builds, `23 clones · 0.8% duplication`. Two golden
+     fixtures added (`ts/override`, `js/override`); `method_override` flips to passing in both
+     modes and new `override_nested` and `field_redeclared` pairs pin the deferrals.
+     Getters and setters then landed — and NOT via the dynamic path the plan predicted. An accessor
+     is a pair of member functions under a name no source can spell (`get x`, `set x`, where the
+     space does what the dot does for a static), so `o.x` is a call and `o.x = v` is a call, the
+     property occupies no slot, and the class keeps the fixed-slot layout of its actual fields. The
+     whole feature is a mangled name, one branch in `classTypeToHType` and two in the lowering: no
+     HIR node, no verifier case, no emitter case, no runtime change, and `util.inspect` omits the
+     property for free because the printer prints slots. The `dynamic` verdict this plan promised
+     for such a class is now `static`, and `docs/SUBSET.md` is corrected (plan-notes 69). Deferred
+     with reasons: a compound assignment to an accessor, a static accessor, a `#private` or computed
+     accessor name, and overriding an inherited accessor. `pnpm run ci` green: 179 unit tests,
+     `golden: 30 fixtures — 30 passed` under both the release and the ASan/UBSan runtime,
+     `subset: 177 fixtures — 78 passed, 99 expected-fail, 0 failed`, `runtime: print corpus matches
+     Node` in both builds, `25 clones · 0.8% duplication`. Two golden fixtures added
+     (`ts/accessors`, `js/accessors`); `class_with_getters_setters` flips to passing in both modes
+     and new `accessor_compound` and `static_accessor` pairs pin the deferrals.
+     Object literals closed the rung, and the premise this plan gave for deferring them — "a
+     literal has no class declaration to be a layout OF" — was true of the DECLARATION and false of
+     the layout. The checker already computes the anonymous object type, with its properties in
+     written order, which is exactly what the class path consumes; the missing piece was a NAME. A
+     shape is named structurally (`{x: number, y: string}`, whose leading brace is unspellable the
+     way the receiver's leading space and a static's dot are), so two literals with the same fields
+     are one HType, share one emitted descriptor, and are assignable to each other — while a
+     different key ORDER is a different shape, because order is layout. The descriptor's name is
+     empty and the printer reads an empty name as "no constructor name", which is the single
+     runtime change the feature needed and the reason `{ x: 1 }` prints bare where `Point { x: 1 }`
+     does not. One HIR node (`ObjectLiteral`: entries in written order, no keys below the gate), one
+     verifier case (STA4052 — the entries ARE the slots, so an order that disagrees with the shape
+     would emit a silently wrong object), one emitter sequence expression (plan-notes 70). Deferred
+     with reasons: a shorthand, spread, method or accessor member and a non-identifier key (Phase 3
+     — statically knowable, nothing to lower to yet); a literal whose type is not a layout, meaning
+     an optional property or an index signature (Phase 4 — that is the shape table in Task 4.1, and
+     the gate's message says so rather than naming one phase for both kinds of refusal).
+     `pnpm run ci` green: 187 unit tests, `golden: 32 fixtures — 32 passed` under both the release
+     and the ASan/UBSan runtime, `subset: 181 fixtures — 84 passed, 97 expected-fail, 0 failed`,
+     `runtime: print corpus matches Node` in both builds, `25 clones · 0.8% duplication`. Two golden
+     fixtures added (`ts/objects`, `js/objects`); `object_literal_static_keys` flips to passing in
+     both modes and new `object_literal_method` and `object_literal_spread` pairs pin the deferrals.
+     One side finding, recorded because it changes a shared file: the two added interfaces pushed
+     `nodes.ts` past jscpd's 50-token floor, and jscpd bills a match by the LINE span between its
+     first and last token, so 50 tokens in a comment-heavy declaration file were charged as 623
+     duplicated lines. `nodes.ts` holds types and nothing else, and a discriminated union's `kind`
+     field cannot be factored out without deleting what makes the IR safe, so the declarations are
+     wrapped in `jscpd:ignore` markers that say why in the file. The threshold stays 1% and the
+     config is untouched (plan-notes 71).
+   - **6b ✅ COMPLETE (2026-08-29).** Everything plan-notes 59 assigned to the rung has landed:
+     ToPrimitive, inheritance and `super(...)`, statics, `#private`, method overriding and
+     `super.m()`, accessors, and object literals with static keys. Two claims this plan made about
+     the rung turned out to be wrong and are corrected above rather than left standing: a class with
+     accessors does NOT take the dynamic path (an accessor is a method under an unspellable name,
+     plan-notes 69), and a literal's lack of a class declaration does not deny it a layout (the
+     shape comes from the type, plan-notes 70). Deferrals are individually justified where they
+     appear, and each is pinned by an `@expected-fail` decision test in both modes; the only one
+     that is a plan contradiction rather than a schedule is plan-notes 68 (js mode rejects an
+     override narrowing an inferred return type).
+7. `Map`/`Set`: **one** open-addressed hash table keyed by SameValueZero, not the two paths this
+   line used to ask for. A NaN-boxed primitive key already IS its unboxed bits and an object key
+   already IS its pointer, so the "specialized primitive" and "identity-hash" tables would have been
+   the same code twice; the only difference is four lines inside one `hash_key` (plan-notes 72).
+   - **7 ✅ COMPLETE (2026-08-29).** `new Map<K, V>()` / `new Set<T>()`, `get`, `set`, `has`,
+     `delete`, `clear`, `add`, `size`, and `console.log` of either matching Node byte-for-byte in
+     both the release and ASan/UBSan builds. Entries are dense and in insertion order, so print
+     order survives deletion and the growth compaction. A Set is the same struct with the value half
+     unused, told apart by a second `JSRTClass` descriptor — the tag field is full (`docs/VALUE.md`
+     §1.1), so a builtin is an `Object`-tagged pointer distinguished by its descriptor, exactly as
+     an object literal is. Two frontend facts this plan did not predict are recorded in SUBSET.md:
+     the type arguments must be on the CONSTRUCTION (`const m: Map<string, number> = new Map()`
+     types the call `Map<any, any>`), and `.get` is dynamic everywhere because the lib types it
+     `V | undefined` and the HType model has no union. Deferred: constructing from an iterable,
+     iteration of any kind (`for-of`, `keys`, `values`, `entries`, `forEach`), and `WeakMap`/
+     `WeakSet`, which need the collector to know what weakness is.
 
-**Task 3.4 — Monomorphization.** Instantiate generics per concrete type tuple; cap instantiation depth (report, don't hang); share instantiations by type identity; a boxed `Unknown`-based single instantiation serves cold generics if bloat trips §13.
+**Task 3.4 — Monomorphization.** ✅ **Done.** Generic function DECLARATIONS are instantiated per concrete type tuple, shared by HType identity, and capped at depth 16 (`STA2003`, a user error — the program genuinely has no fixed point).
 
-**Task 3.5 — Boundary-check insertion.** The pass that materializes runtime checks where `Unknown` narrows to a concrete HType (`typeof` guards, `instanceof`, discriminated unions, `.ts`↔boundary imports). Checks are calls into `jsrt_check_*`; failure = runtime type error with source location.
+  Specialization happens at the LOWERING, not in a pass: the generic's AST is lowered once per tuple with the substitution in scope (carried in the binding map already threaded everywhere, under the unspellable key `<T>`), so a type parameter is never built into the HIR at all — `hasTypeParam` in the verifier (`STA4054`) checks an invariant of construction rather than the output of a walk. See plan-notes.md entry 73 for why this beats an HIR clone pass.
 
-**Task 3.6–3.9 — Optimization passes v0.** Const-fold; DCE/tree-shake; inline (small, non-recursive); all verifier-clean, all `Unknown`-preserving.
+  The substitution is recovered through the public API by unifying the DECLARED signature's HTypes (which mention `T`) against the RESOLVED one's (which do not) — exact, not heuristic, because one is the other instantiated. Unifying on HType rather than `ts.Type` is what makes `box(1)` and `box(2)` share one specialization: their literal types collapse to `number`.
+
+  Deferred (`STA1214`): a generic used as a VALUE, generic arrows/function expressions, constrained or defaulted type parameters, explicit type arguments, and generic classes. The boxed-`Unknown` fallback instantiation for cold generics is not built — §13's bloat budget has not been tripped, and building it before it is would be a second code path with no measurement behind it.
+
+  `pnpm run ci` green: `Checked 45 files … No fixes applied`, `28 clones · 0.9% duplication`, 209 unit tests (14 of them `tests/unit/generics.test.ts`), `runtime: print corpus matches Node`, `subset: 181 fixtures — 94 passed, 87 expected-fail, 0 failed`, `golden: 36 fixtures — 36 passed, 0 failed` under both the release and the ASan/UBSan runtime.
+
+**Task 3.5 — Boundary-check insertion.** ✅ **Done.** A narrowed read of an `Unknown` and an `as` cast off one both lower to a `BoundaryCheck`, which emits `jsrt_check_number/string/boolean` — the value back on success, `STA2001` with a `file:line:col` on failure. `typeof` landed with it, as its own HIR node.
+
+  Not a pass, for the same reason Task 3.4 is not: the insertion point is where a `ts.Type` becomes an HType, which only the lowering has. A pass would have to rediscover the narrowing from an HIR that had already thrown it away.
+
+  Three deliberate scopings, all recorded in plan-notes.md entry 74. The check is per USE, not per binding — nothing proves the value did not change between two reads. A narrowing to a type no TAG settles in constant time (an object, an array, a signature) leaves the value `Unknown` on the dynamic path rather than being refused: refusing buys no soundness, since nothing downstream was going to trust the type, and would break `m.get(k) ?? d` and every other narrowing that compiles today. And **union types came free**: the HType model has no union node, so `string | number` IS `Unknown`, and narrowing one is the machinery `unknown` already needed. A union whose constituents all map to one HType is widened to it (`"a" | "b"` → `string`), which is what makes `typeof` usable at all — TypeScript types it as a union of eight string literals.
+
+  Deferred: `JSON.parse` and FFI returns, which need the builtin (§7 Task 4.2) and Phase 6 rather than new check machinery; `.ts`↔`.js` graph boundaries, which need Phase 5's module graph; and discriminated unions keyed on a TAG, which need a union the model can see the constituents of.
+
+  `pnpm run ci` green: `Checked 47 files … No fixes applied`, `28 clones · 0.9% duplication`, 220 unit tests (11 of them `tests/unit/narrowing.test.ts`), `runtime: print corpus matches Node` (now including `print_typeof`), `subset: 181 fixtures — 100 passed, 81 expected-fail, 0 failed` (`typeof`, `unknown` and union fixtures flipped off `@expected-fail` in both modes), `golden: 38 fixtures — 38 passed, 0 failed` under both the release and the ASan/UBSan runtime.
+
+**Task 3.6–3.9 — Optimization passes v0.** ✅ **Done.** Const-fold, DCE/tree-shake and inlining run as `optimize()` from `src/passes/index.ts`, over a shared bottom-up, identity-preserving rewriter (`src/passes/rewrite.ts`) with exhaustive switches over every HIR node kind.
+
+  They run BEFORE the verifier, not after the lowering: what reaches the emitter is the optimized module, so that is what has to be checked. Verifying the lowering's output instead would check a tree nothing emits (plan-notes.md entry 75).
+
+  `Unknown` preservation is a property of each pass's admission rule rather than a check bolted on. Const-fold folds only when every operand is a LITERAL NODE — which is simultaneously why no fold can elide a boundary check (a literal is never `Unknown`) and why no fold can delete a side effect (a literal has none). DCE reasons only about control flow, never about values. Inlining requires the argument's HType to equal the parameter's, which is what stops a `js`-mode call from having its `Unknown` parameter replaced by a typed subtree.
+
+  The evaluator for folding is JavaScript's own — the compiler runs on the pinned Node the golden tests diff against, so a folded `${1 / 3}` and an unfolded one produce the same bytes, and `-0`, NaN and `1 << 31` need no special case.
+
+  Inlining covers a body that is exactly one `return <expr>`, bounded by four refusals (one statement; the body names nothing but its parameters; every argument is a literal or identifier; types agree exactly). Condition two closes the shadowing hazard the HIR's name-only identifier resolution creates, and makes recursion impossible by construction — nothing tests for it. The pipeline runs once rather than to a fixpoint; both scopings and the ordering argument are in plan-notes.md entry 75.
+
+  Deferred: a general inliner (needs a block-expression or the statement machinery for multi-return bodies), iterating to a fixpoint, treating an `if` whose branches both return as a terminator, and shaking classes — `new C()` names its class by string, so the reference walk cannot see it. Builtin tree-shaking is Task 3.12.
+
+  `pnpm run ci` green: `Checked 52 files … No fixes applied`, `28 clones · 0.8% duplication`, 245 unit tests (25 of them `tests/unit/passes.test.ts`), `runtime: print corpus matches Node`, `subset: 181 fixtures — 100 passed, 81 expected-fail, 0 failed`, `golden: 40 fixtures — 40 passed, 0 failed` under both the release and the ASan/UBSan runtime.
 
 **Task 3.10 — Exception unwinding.** `try/catch/finally` lowering emits per-scope cleanup blocks; every `goto landing_pad_N` routes through the scope's cleanup (shadow-frame pops, `finally` bodies); decision tests exercise throw-inside-loop-inside-try with ASan on.
 

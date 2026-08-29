@@ -1,13 +1,18 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Classes with getters/setters
 
 class Value {
+  constructor(start) {
+    this.val = start;
+  }
   get value() {
-    return 0;
+    return this.val;
   }
   set value(v) {
+    this.val = v;
   }
 }
-export const x = new Value();
+const v = new Value(0);
+v.value = 2;
+export const x = v.value;

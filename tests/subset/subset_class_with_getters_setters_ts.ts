@@ -1,6 +1,5 @@
 // @mode: ts
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: Classes with getters/setters
 
 class Value {
@@ -12,4 +11,6 @@ class Value {
     this.val = v;
   }
 }
-export const x = new Value();
+const v = new Value();
+v.value = 2;
+export const x = v.value;

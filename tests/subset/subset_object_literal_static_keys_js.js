@@ -1,6 +1,7 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Object literals with static keys
 
-export const obj = { x: 1, y: 2 };
+export function point(a, b) {
+  return { x: a, y: b };
+}

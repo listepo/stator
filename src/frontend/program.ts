@@ -25,7 +25,11 @@ export function createProgram(
     noImplicitAny: mode === 'ts',
     noUncheckedIndexedAccess: true,
     exactOptionalPropertyTypes: true,
-    noImplicitOverride: true,
+    // Same contract, one rung further along: in js mode `noImplicitOverride` would demand a JSDoc
+    // `@override` tag on every overriding method, which rejects ordinary JavaScript for having no
+    // annotation. ts mode keeps it -- there the modifier is real syntax, and an accidental override
+    // is exactly the mistake a vtable makes silent.
+    noImplicitOverride: mode === 'ts',
     noFallthroughCasesInSwitch: true,
     // Deliberately NOT noUnusedLocals/noUnusedParameters. Those are style checks: they change
     // nothing about what a type means, so nothing downstream depends on them, and switching them

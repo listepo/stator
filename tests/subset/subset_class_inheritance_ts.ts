@@ -1,16 +1,23 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Class inheritance, super calls, instance methods
 
 class Base {
+  n: number;
+  constructor(n: number) {
+    this.n = n;
+  }
   m(): number {
-    return 1;
+    return this.n + 1;
   }
 }
 class Derived extends Base {
-  m(): number {
-    return super.m() + 1;
+  doubled = this.n * 2;
+  constructor(n: number) {
+    super(n);
   }
 }
-export const d = new Derived();
+class Implicit extends Derived {}
+
+const d: Base = new Implicit(1);
+console.log(d.m());

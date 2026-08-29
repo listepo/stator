@@ -11,6 +11,7 @@ Per plan.md §6 Task 3.1, this document is read before implementing any phase be
 3. [Unknown is first-class](#3-unknown-is-first-class)
 4. [TypeScript types map to HType](#4-typescript-types-map-to-htype)
 5. [The HIR verifier](#5-the-hir-verifier)
+6. [The optimization passes](#6-the-optimization-passes)
 
 ---
 
@@ -49,6 +50,8 @@ Expressions produce values; statements do not. An expression-statement wraps an 
 - `Identifier` — reference to a binding
 - `BinaryOp` — the nineteen operators whose operands are **both** evaluated, exactly once, left to right: `+ - * / %`, `< > <= >=`, `=== !== == !=`, `& | ^ << >> >>>`
 - `UnaryOp` — prefix `-`, `+`, `!`, `~`
+- `TypeOf` — `typeof x`. Not a `UnaryOp`: it runs no conversion (it is total on every value, where the other four run ToNumber or ToBoolean) and its type is `string`, where `UnaryOp`'s is fixed to `number` or `boolean` by the verifier's own rule (`STA4055`)
+- `BoundaryCheck` — the one node where an `Unknown` becomes concrete, carrying the checked type and a `file:line:col`. Its presence in the HIR IS the statement that a boundary was crossed; see §3.2.1 for where the lowering builds one (`STA4056`)
 - `LogicalOp` — `&&`, `||`, `??`
 - `TemplateLiteral` — `` `a${x}b` ``, as `quasis` and `expressions` with the invariant `quasis.length === expressions.length + 1`
 - `StringLength` — `.length` on a string, in **UTF-16 code units** (an astral character counts twice)
@@ -104,7 +107,60 @@ Rung 6a added classes: `ClassDeclaration` (a statement, in source order — a cl
 - **`FieldAccess` and `FieldAssignment` store a `slot`, resolved once during lowering.** The point is not speed — the emitter could recompute it — but *checkability*: a recomputed index is correct by construction and therefore unfalsifiable, while a stored one is verified against the layout it claims to index (`STA4046`).
 - **A method has no slot and is not in `HObject.fields`.** One function is shared by every instance, so `MethodCall` names the class and the emitter makes a direct call, rather than every object carrying one closure per method.
 
-Future phases add: `for-in`, `try`/`catch`/`finally`, object literals, general property access, inheritance and `super`, and the rest.
+Rung 6b added `InstanceOf`. It carries a class **name** and an ordinary target expression, for the same reason `NewExpr` does: the emitter reaches one file-scope descriptor, and `x instanceof (cond ? A : B)` has none to reach. The target is deliberately unconstrained — `1 instanceof C` is `false`, not an error — so the node's only invariant is that its type is `boolean` (`STA4050`). Inheritance did not change this node: the parent-link walk went inside the runtime helper, which is what "the emitter names the class, never the offset" buys.
+
+Rung 6b then added inheritance: `HObject` grew a `bases` list (nearest ancestor first), `ClassDeclaration` grew an optional `base` name, and `SuperCall` joined the statements. Four decisions there are load-bearing:
+
+- **`HObject.fields` is the WHOLE layout, base fields first.** A subclass's field list is not "its own fields, plus a pointer to its base's" — it is one flat list that starts with its base's, in the base's own slot order. Every existing node keeps working unchanged: `FieldAccess` resolves a slot against the flat list, and a base-typed read of a subclass instance resolves the same index it would on a base instance. That prefix property, and nothing else, is what makes `hTypeAssignable` sound — a `Dog` is a legal value for an `Animal` binding because the first N slots of a `Dog` *are* an `Animal`.
+- **`MethodCall.className` is the DECLARING class, not the receiver's.** `d.describe()` on a `Dog` names `Animal` when `Animal` is where `describe` is written, because that is the function a direct call reaches. The verifier checks ancestry rather than equality (`STA4047`).
+- **`MethodCall.dispatch` is a fact about the program, not about the call site.** A method is `virtual` exactly when some chain containing the receiver's class declares it twice — which the lowering asks of the whole file, because a call through a base-typed reference may land on any descendant. Everything else stays `direct` and costs exactly what rung 6a's call cost. `super.m()` is `direct` even where the same method is virtual everywhere else: skipping the override is what `super` means, and a virtual call there would find the override again and recur.
+- **`ClassDeclaration.vtable` is empty for a class that participates in no overriding.** That is a real answer rather than a missing one: a table's entries are file-scope constants, so a class whose methods capture could not have one, which is why the gate refuses overriding for a class declared inside a function.
+- **`SuperCall` is a statement, not an expression.** It names the BASE, carries the receiver explicitly, and evaluates to nothing: it is the base constructor run against the receiver this constructor was handed, not an allocation. Making it a statement is what lets the field-initializer prologue be *inserted after it* — initializers must run once the base has written its fields, since one may read them.
+- **A derived class always has a constructor in the HIR, even when the source writes none.** The lowering synthesizes JavaScript's implicit `constructor(...args) { super(...args) }`, taking the parameters of the nearest ancestor that actually declares one. Without it a `new Blob(…)` would allocate the slots and run nothing.
+
+Rung 6b then added statics, as `ClassDeclaration.statics` — a list of ordinary `Declaration`
+statements, not a node kind. A static belongs to the class OBJECT rather than to any instance, so it
+is not a slot: it is one binding for the whole program, under a name no source can spell (`C.count`,
+where the dot does what the receiver parameter's leading space does). That reduction is the whole
+design — a static read is an `Identifier`, a write is an `Assignment`, and `C.m()` is a `CallExpr` —
+and it is why statics needed no verifier case and no emitter case of their own. Two details are
+load-bearing: the name carries the **declaring** class, because statics are inherited and `Sub.count`
+must be the same binding as `Base.count`; and the declarations ride on the class node rather than
+being spliced into the enclosing statement list, so a class stays one statement in source order and
+its statics initialize exactly where it sits.
+
+`#private` members added no HIR surface at all. A `#count` is a field like any other, `#step()` is a
+member function like any other, and `static #next` is a static binding like any other — the name
+simply keeps its `#`. Privacy is a *checker* fact: every access from outside the class body is
+already an error before the gate runs, so no node below it has anything left to enforce. The one
+place the `#` still matters is printing, and it matters in the runtime rather than here: the printer
+skips a descriptor field whose name starts with `#`. The layout is what forced the two deferrals — a
+subclass re-declaring an ancestor's `#private` name is two slots sharing a spelling, which a list
+keyed by name cannot hold apart, and `#brand in o` asks whether a slot exists rather than reading it.
+
+Accessors added no HIR surface either, for the reason `#private` did not: a getter is a method under
+the name `get x` and a setter one under `set x`, where the space is unspellable exactly as the
+static's dot is. `o.x` lowers to a `MethodCall` with no arguments and `o.x = v` to one with a single
+argument, wrapped in an `ExpressionStatement` — the property occupies no slot, so nothing in the
+layout, the printer or the verifier had to learn what an accessor is.
+
+`ObjectLiteral` is the one node the object work did add, and it is deliberately thin: a list of
+`{name, value}` entries whose `type` is the shape they build. There is no descriptor in the node and
+no key in the emitted code — the entries ARE the slots, in written order, and the verifier's job is
+only to check that that order matches the shape's field list. Everything else a literal needs is the
+class machinery it borrows: the same allocation, the same `FieldAccess` for a read, and a descriptor
+whose name is empty so the printer omits the prefix a class instance gets.
+
+`CollectionNew` and `CollectionOp` are the two nodes rung 7 added for `Map` and `Set`. Each names a
+`collection` (`'map'` or `'set'`) and, for the operation, one of a closed set of `op`s —
+`get`, `set`, `has`, `delete`, `clear`, `add`, `size` — with a target and an argument list. The
+closed set is the point: an operation is not a general method call that happens to land on a builtin,
+it is one HIR node the emitter turns into one runtime function with a fixed C signature. `.size` is
+an `op` with no arguments rather than a `FieldAccess`, so nothing below reads the struct field. The
+verifier checks the receiver's type kind and the argument count for both, because every `jsrt_value`
+argument has the same C type and the C compiler cannot catch either mistake.
+
+Future phases add: `for-in`, `try`/`catch`/`finally`, general property access, and the rest.
 
 A loop or switch carries its own optional `label`; there is no LabeledStatement wrapper. A label exists only to be named by `break`/`continue`, so it belongs to the thing being jumped out of, and a wrapper would sit between the jump and its target for no gain.
 
@@ -156,14 +212,15 @@ Each is a singleton (except `unknown`, which carries a flag—see §3).
 
 ### 2.2 Phase 3+ types — planned
 
-`fn(params, ret)` landed with rung 4, `array<T>` with rung 5, and `object` — a class instance: a name, fields in slot order, and method signatures — with rung 6a. `object` is compared **nominally**, unlike every other kind: two classes that declare the same fields are still two classes, which matches what the emitter allocated (one descriptor per declaration) and is also the only comparison that terminates, since `class C { self: C }` is a cyclic type.
+`fn(params, ret)` landed with rung 4, `array<T>` with rung 5, and `object` — a class instance: a name, fields in slot order, and method signatures — with rung 6a. `object` is compared **nominally**, unlike every other kind: two classes that declare the same fields are still two classes, which matches what the emitter allocated (one descriptor per declaration) and is also the only comparison that terminates, since `class C { self: C }` is a cyclic type. Rung 7 added `map<K, V>` and `set<T>`.
+
+Task 3.4 added one more, `type-param`, which is the single HType kind that must NEVER reach the HIR: it lives only inside `src/frontend/`, as the thing unification binds and substitution replaces. Monomorphization happens at the lowering, so a node carrying a `type-param` means a specialization was built outside its own substitution — the verifier refuses it as `STA4054`.
 
 The following kinds **do not yet exist** in the code and are mentioned here only to state the plan explicitly. Do not implement them early and do not describe them as if they work:
 
 - **`i32`** — refinement of `number` to 32-bit integers (Phase 3 optimization; all arithmetic promotes overflows back to `number`)
 - **`union<T1 | T2 | ...>`** — union of concrete types (replaces implicit unions via widening)
-- **`generic-instance<G, [A1, A2, ...]>`** — a generic type applied to concrete arguments
-- **`map/set` specializations** — typed `Map<K, V>` and `Set<T>` when keys/values are concrete
+- **`generic-instance<G, [A1, A2, ...]>`** — a generic type applied to concrete arguments. Not needed by Task 3.4 and possibly never: monomorphization erases the generic rather than representing it, so `box<number>` is a FunctionDeclaration named `box<number>` whose type is the ordinary `(number) => number`. A `generic-instance` kind becomes necessary only if a generic ever has to survive to runtime — a generic class stored in an `Unknown`, say
 
 ---
 
@@ -183,7 +240,7 @@ interface HUnknown {
 - Source `any` annotation (in `js` mode; in `ts` mode the gate rejects it first with `STA1001`)
 - `unknown` type annotation
 - Untyped code in `js` mode (inferred as `unknown`, not rejected)
-- Union types that don't narrow (plans for Phase 3)
+- Union types whose constituents map to more than one HType. `string | number` is `Unknown`; `"a" | "b"` is NOT, because every constituent gives the same answer and widening to `string` invents nothing (Task 3.5). That widening is what makes `typeof` usable: TypeScript types it as a union of eight string literals
 - `JSON.parse()` return value (always `unknown`)
 - FFI boundary (`declare function` imports)
 - `.js`→`.ts` imports (the imported value is runtime-typed, not statically typed)
@@ -201,12 +258,38 @@ interface HUnknown {
 
 **Invariant (enforced by the verifier):** Every value of type `Unknown` in the HIR must remain `Unknown` through lowering, optimization, and codegen. Codegen emits it as a tagged `jsrt_value` with a runtime check at every narrowing site.
 
+### 3.2.1 What a narrowing site is (Task 3.5)
+
+An `Unknown` becomes concrete in exactly one node, `BoundaryCheck`, and the lowering is the only thing that builds one — a later pass could not, because by then the HIR has already forgotten which type the checker narrowed to. Two spellings produce it: a read of an `Unknown` binding at a point where the checker has narrowed it (a `typeof` guard, an `instanceof`, an `!== undefined`), and an `as` cast off an `Unknown`. The emitted C is `jsrt_check_number/string/boolean(v, "file:line:col")`, which returns `v` or raises `STA2001`.
+
+Three rules follow from the preservation rule above rather than from convenience:
+
+- **Per use, not per binding.** Three reads inside one guard emit three checks. Hoisting to one would assert that the value did not change between them, which is a type assumption propagated across an `Unknown` boundary — the third bullet in the list above.
+- **A narrowing to a type no TAG settles is dropped, not refused.** An object's shape, an array's element type and a function's signature cannot be checked in constant time, so those narrowings leave the value `Unknown` and it stays on the dynamic path. That IS the preservation rule; refusing instead would reject programs that already compile, in exchange for no soundness (see plan-notes 74).
+- **An unnarrowed `Unknown` gets no check.** `console.log(x)` asks nothing of `x`. A check is inserted where a claim is made, not where a value is used.
+
+### 3.2.2 How each pass satisfies the rule (Tasks 3.6–3.9)
+
+The rule above is stated as a prohibition, which invites a pass to satisfy it with a check that a
+reviewer has to trust. None of the three passes does that. Each satisfies it through the condition
+that admits a rewrite at all, so violating it is not something the code could be edited into doing
+without changing what the pass is:
+
+- **Const-fold** folds only when every operand is a **literal node**. A literal is never `Unknown`,
+  so the fourth bullet above is unreachable — and a literal has no side effect, so folding never
+  deletes one either. One restriction, two properties.
+- **DCE** reasons only about **control flow**: what follows a jump, which branch a literal condition
+  takes, what can reach a function. It never asks what a value is, so it has no way to elide a check.
+- **Inlining** requires the argument's HType to **equal** the parameter's. A `js`-mode call passing a
+  `number` to an `Unknown` parameter therefore does not inline: substituting would replace an
+  unknown-typed subtree with a typed one and cancel the check that unknown-ness requires.
+
 ### 3.3 Example
 
 ```typescript
 // ts mode
 const x: unknown = JSON.parse('1');  // type is unknown
-const y = x + 1;                     // STA2001 boundary check at runtime: does x coerce to number?
+const y = (x as number) + 1;         // jsrt_check_number: STA2001 at runtime if x is not a number
 
 // js mode
 const x = JSON.parse('1');           // type is unknown (inferred)
@@ -472,10 +555,13 @@ Example:
 
 ### 5.3 Verifier discipline
 
-**When:** The verifier runs after:
-- The initial lowering from TypeScript AST to HIR
-- Every optimization pass (const-fold, DCE, inline) in debug builds
-- For now, in all builds—Phase 3 optimization may add a flag to disable it in release builds if measurements show it is a bottleneck
+**When:** Once per build, on the OPTIMIZED module — `build.ts` lowers, optimizes, verifies, emits.
+
+That ordering is the point rather than an implementation detail. What reaches the emitter is the
+optimized module, so that is what has to be checked; verifying the lowering's output instead would
+check a tree nothing emits and leave the one that does unchecked, turning a pass bug into a clang
+error against generated C rather than an `STA4xxx`. In all builds, for now — §6 may add a flag to
+skip it in release builds if measurements ever show it is a bottleneck.
 
 **What counts as a verifier failure:** Always a compiler bug (`STA4xxx`), never a user error. The gate has already accepted the source and the lowering has already produced the HIR. A verifier failure means one of them violated an invariant—either the gate let through a construct it shouldn't have, or the pass produced invalid HIR. The verifier's job is to **catch bugs early**, before they cascade into wrong code.
 
@@ -487,12 +573,72 @@ If the gate accepts a construct but the HIR has no node type for it, lowering fa
 
 ---
 
+## 6. The optimization passes
+
+`src/passes/` holds the transformations that operate on a complete HIR. Two of the passes this plan
+originally listed are **not** here — monomorphization (Task 3.4) and boundary-check insertion
+(Task 3.5) both happen at the lowering, because each needs a fact that lives in the `ts.Type` world
+and is gone by the time an HIR exists. A pass would have to reconstruct from the output what the
+input already knew. See plan-notes.md entries 73 and 74.
+
+### 6.1 The shared rewriter
+
+`rewrite.ts` is a bottom-up, identity-preserving walk over every node kind, with exhaustive
+switches. Exhaustive rather than reflective on purpose: a reflective walker handles a node kind
+added later *silently*, which is the opposite of what is wanted for nodes with special evaluation
+rules — `LogicalOp`'s right operand is conditional, and a walker that treated it as an ordinary
+child would license hoisting work into a branch that may never run.
+
+A `Rewriter` supplies up to three hooks, all called with children already rewritten:
+
+| Hook | Signature | Why it exists |
+|---|---|---|
+| `expression` | `Expression => Expression` | The common case. |
+| `statement` | `Statement => Statement[]` | A list says both useful answers: replace (`[s]`) and delete (`[]`). |
+| `statements` | `Statement[] => Statement[]` | A statement can only speak for itself, so a pass reasoning about a **run** of them needs the run — `return` making its following siblings unreachable is the case. |
+
+Returning a node by identity (`===`) is how a pass says "nothing happened", and the walk propagates
+that upward, so an unoptimizable module comes back as the same object.
+
+### 6.2 The three passes, and their order
+
+`optimize()` applies them once, in an order that is a chain rather than a preference:
+
+1. **`inlineCalls`** — replaces a call to a one-`return` function with the expression it returns.
+   Exposes constants: `double(2)` becomes `2 * 2`.
+2. **`constFold`** — evaluates operations over literal operands, using JavaScript's own operators.
+   Decides branches: `if (1 < 2)` is not a literal condition until `1 < 2` is `true`.
+3. **`eliminateDeadCode`** — drops statements after a jump, selects a literal-conditioned branch,
+   removes `while (false)`, and shakes module-level functions nothing can reach. Runs last because
+   eliminating a branch is what finally makes a function unreachable.
+
+Once, not to a fixpoint: iterating would find a little more, at the cost of compile time and the
+risk of an oscillating pass pair — a trade that wants a measurement (plan §13).
+
+### 6.3 Where the passes decline
+
+Every pass is defined as much by what it refuses, and each refusal names the thing that would
+otherwise break:
+
+- A `function` declaration after a `return` **survives** — it is hoisted, so it holds its binding
+  for the code above it. Nothing else in the subset is: `let`, `const` and `class` all have a
+  temporal dead zone starting where they are written.
+- A selected branch stays a **`Block`**, not statements spliced into the parent list. A branch is
+  its own scope, and splicing would promote its `let` bindings into the enclosing one.
+- The shake covers functions, **not classes**: `new C()` names its class by string rather than by an
+  identifier the reference walk would see.
+- Inlining declines a body that names anything but its own parameters. The HIR resolves identifiers
+  by **name**, so a body reading a module-level `g` moved into a caller with its own `g` would
+  silently read the wrong one — and the same condition makes recursion impossible by construction.
+
+---
+
 ## Notes
 
 - **HIR stability:** The Phase 2 skeleton HIR (expressions, statements, control flow) is stable. Phases 3+ add new node kinds (arrays, objects, etc.) and new HType kinds (fn, array, object-shape, etc.). All existing nodes remain valid; new passes only have to handle new cases in their switch statements.
 
-- **Scope and binding:** Phase 2 is expression-level and block-scoped only. Function scopes, function parameters, and closure capture arrive in Phase 3 Task 3.4.
+- **Scope and binding:** Phase 2 is expression-level and block-scoped only. Function scopes, function parameters and closure capture arrived with Phase 3 rung 4; Task 3.4 is monomorphization.
 
-- **Type narrowing:** Discriminated unions, type guards (`typeof`, `instanceof`), and pattern matching arrive in Phase 3 Task 3.5 (boundary-check insertion). Until then, `unknown` and unions stay wide.
+- **Type narrowing:** `typeof` guards and `as` casts became `BoundaryCheck` nodes in Task 3.5 (§3.2.1). Discriminated unions keyed on a tag still wait for a union the HType model can see the constituents of; until then `unknown` and unions stay wide.
 
-- **Unknown is forever:** `Unknown` does not narrow during optimization. A type inference pass that "learns" a better type must emit a runtime check (boundary-check insertion) to validate it; without a check, `Unknown` stays.
+- **Unknown is forever:** `Unknown` does not narrow during optimization — §3.2.2 records how each of the three passes makes that a property of its admission rule rather than a check. A type inference pass that "learns" a better type must emit a runtime check to validate it; without a check, `Unknown` stays.

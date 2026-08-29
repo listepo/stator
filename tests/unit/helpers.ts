@@ -1,6 +1,8 @@
+import { strict as assert } from 'node:assert';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
+import { gateProgram } from '../../src/frontend/gate.ts';
 import type {
   Assignment,
   BinaryOp,
@@ -109,6 +111,58 @@ export function lowerSource(code: string): {
   }
 
   return { module: result.module, diagnostics: result.diagnostics };
+}
+
+/** The diagnostic codes the gate reports for `source`. `mode` picks the file extension too: a `.js`
+ * name is what makes the gate treat the file as JavaScript, so the two travel together. */
+export function gateCodes(source: string, mode: 'ts' | 'js' = 'ts'): string[] {
+  const { program } = createProgram(source, mode === 'js' ? '/test.js' : '/test.ts');
+  return gateProgram(program, mode).map((d) => d.code);
+}
+
+/** The statements `code` lowers to, asserting the lowering itself was clean — a diagnostic here is
+ * a compiler bug, and letting it through would test the shape of a half-built module. */
+export function loweredStatements(code: string): readonly Statement[] {
+  const { module, diagnostics } = lowerSource(code);
+  assert.deepEqual(
+    diagnostics.map((d) => d.code),
+    [],
+    'lowering should be clean',
+  );
+  return module.statements;
+}
+
+/** Every node below `root`, flattened, so a test can ask what a program CONTAINS rather than
+ * navigating to the one expression it means. The walk is structural and shallow-typed on purpose:
+ * it recurses into every object-valued property, so a node kind added later is covered without this
+ * helper being edited — which is what makes "no such node anywhere" a claim worth asserting.
+ *
+ * `type` and `span` are skipped: an HType is a tree of objects too, and walking it would report
+ * types as if they were nodes. */
+export function hirNodes(root: unknown): { kind: string }[] {
+  const found: { kind: string }[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+    if (typeof value !== 'object' || value === null) {
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record['kind'] === 'string') {
+      found.push(record as { kind: string });
+    }
+    for (const key of Object.keys(record)) {
+      if (key !== 'type' && key !== 'span') {
+        visit(record[key]);
+      }
+    }
+  };
+  visit(root);
+  return found;
 }
 
 /** Create a source span with the given line number. */

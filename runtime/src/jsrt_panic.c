@@ -1,11 +1,13 @@
 /* jsrt_panic.c — fatal error handler with stack trace. */
 
+#include "jsrt.h"
+
 #include "jsrt_value.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 
-void jsrt_panic(const char *msg) {
+_Noreturn void jsrt_panic(const char *msg) {
   /* Print the error message. */
   fprintf(stderr, "PANIC: %s\n", msg);
 

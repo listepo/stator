@@ -82,6 +82,13 @@ void test('switch, case, default and do/while are all accepted syntax', () => {
   assert.deepEqual(codesFor('let x: number = 0;\ndo { x++; } while (x < 1);'), []);
 });
 
+void test('try/catch/finally and throw are deferred until exception unwinding lands', () => {
+  assert.deepEqual(codesFor("try { throw 'boom'; } catch { console.log('handled'); }"), [
+    'STA1214',
+  ]);
+  assert.deepEqual(codesFor("throw 'boom';"), ['STA1214']);
+});
+
 // `var` is banned in ts mode BY DESIGN (STA1104, a 'never' code, no phase) — hoisting with a TDZ
 // is the dynamic-scoping behaviour strict mode exists to exclude. In js mode it is merely not
 // implemented yet, which is a different class of diagnostic entirely (docs/DIAGNOSTICS.md).
@@ -156,5 +163,188 @@ void test('a user binding that shadows a global name is a user binding', () => {
       'function f(): number {\n  const String: number = 1;\n  return String;\n}\nconsole.log(f());',
     ),
     [],
+  );
+});
+
+void test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is not', () => {
+  const chain = `class A {\n  n = 1;\n  m(): number {\n    return this.n;\n  }\n}\n`;
+  assert.deepEqual(
+    codesFor(`${chain}class B extends A {\n  k = 2;\n}\nconsole.log(new B().m());`),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      `${chain}class B extends A {\n  override m(): number {\n    return 2;\n  }\n}\nconsole.log(new B().m());`,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      `${chain}class B extends A {\n  override m(): number {\n    return super.m() + 1;\n  }\n}\nconsole.log(new B().m());`,
+    ),
+    [],
+  );
+  // A field is a SLOT, and a subclass re-declaring one would be two declarations of that slot with
+  // two initializers racing for it. Overriding solves the method problem, not this one.
+  assert.deepEqual(
+    codesFor(`${chain}class B extends A {\n  n = 2;\n}\nconsole.log(new B().m());`),
+    ['STA1214'],
+  );
+});
+
+void test('a method table is a file-scope constant, so an override inside a function is not', () => {
+  // A class declared in a function may have methods that CAPTURE, and a captured environment is
+  // per evaluation of the declaration -- there is no one table for the class to point at.
+  const nested = `function f(): number {\n  class A {\n    m(): number {\n      return 1;\n    }\n  }\n  class B extends A {\n    override m(): number {\n      return 2;\n    }\n  }\n  return new B().m();\n}\nconsole.log(f());`;
+  assert.deepEqual(codesFor(nested), ['STA1214']);
+});
+
+void test('super is a marker on two forms, not a value', () => {
+  const chain = `class A {\n  n = 1;\n  m(): number {\n    return this.n;\n  }\n}\n`;
+  // `super.n` is the same SLOT as `this.n` -- the spelling would promise a distinction the layout
+  // cannot make -- and `super.m` as a value would need a bound method object nothing builds.
+  assert.deepEqual(
+    codesFor(
+      `${chain}class B extends A {\n  k(): number {\n    return super.n;\n  }\n}\nconsole.log(new B().k());`,
+    ),
+    ['STA1214'],
+  );
+});
+
+void test('a derived constructor must open with super(...)', () => {
+  // Not style: field initializers are inserted after the super call, and every field the base
+  // declares is unwritten until it runs. A constructor that does anything first can read them.
+  const base = 'class A {\n  n: number;\n  constructor(n: number) {\n    this.n = n;\n  }\n}\n';
+  assert.deepEqual(
+    codesFor(
+      `${base}class B extends A {\n  constructor() {\n    super(1);\n  }\n}\nconsole.log(new B().n);`,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      `${base}class B extends A {\n  constructor() {\n    console.log(0);\n    super(1);\n  }\n}\nconsole.log(new B().n);`,
+    ),
+    ['STA1214'],
+  );
+});
+
+void test('statics are accepted; what has no class object to read is not', () => {
+  const cls = 'class C {\n  static n = 1;\n  static m(): number {\n    return C.n;\n  }\n}\n';
+  assert.deepEqual(codesFor(`${cls}console.log(C.m());`), []);
+  // A static initialization block runs statements against the class OBJECT, and `this` inside a
+  // static is that object. There is no class object here -- a static is a plain binding.
+  assert.deepEqual(
+    codesFor('class C {\n  static n = 1;\n  static {\n    C.n = 2;\n  }\n}\nconsole.log(C.n);'),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    codesFor(
+      'class C {\n  static n = 1;\n  static m(): number {\n    return this.n;\n  }\n}\nconsole.log(C.m());',
+    ),
+    ['STA1214'],
+  );
+  // The rest of the class object -- `C.name`, `C.prototype` -- is a member no static declares.
+  assert.deepEqual(codesFor('class C {\n  static n = 1;\n}\nconsole.log(C.name);'), ['STA1214']);
+});
+
+void test('this is gated, not left to the lowering', () => {
+  // `this` is a TOKEN, and the gate short-circuits tokens. It is exempted by name, without which
+  // its case is dead code and `this` outside a class reaches an internal error instead.
+  assert.deepEqual(codesFor('console.log(this);'), ['STA1214']);
+  // A field initializer is a `this` position though it is inside no function: the lowering moves
+  // it into the constructor, where the receiver is a parameter.
+  assert.deepEqual(
+    codesFor('class C {\n  a = 1;\n  b = this.a + 1;\n}\nconsole.log(new C().b);'),
+    [],
+  );
+});
+
+void test('#private members are accepted; sharing a name down the chain is not', () => {
+  assert.deepEqual(
+    codesFor(`class C {
+  #n: number = 0;
+  static #m: number = 0;
+  #read(): number { return this.#n; }
+  get(): number { return this.#read() + C.#m; }
+}
+console.log(new C().get());
+`),
+    [],
+    'a #private field, method and static are ordinary members with an unspellable name',
+  );
+  // One name, one slot: two #private `#n`s in one chain are two distinct slots that a layout
+  // keyed by name cannot hold apart, so the gate refuses rather than merging them.
+  assert.deepEqual(
+    codesFor(`class B { #n: number = 0; b(): number { return this.#n; } }
+class D extends B { #n: number = 1; d(): number { return this.#n; } }
+console.log(new D().d() + new D().b());
+`),
+    ['STA1214'],
+  );
+});
+
+void test('the #brand-in-object test is a not-yet, not an accepted member access', () => {
+  // `#n in o` is not a property read: it asks whether o carries the slot at all, which needs a
+  // shape test the layout has no room for while every instance of a class has every slot.
+  assert.deepEqual(
+    codesFor(`class C {
+  #n: number = 0;
+  static has(o: C): boolean { return #n in o; }
+}
+console.log(C.has(new C()));
+`),
+    ['STA1214'],
+  );
+});
+
+void test('accessors are accepted; what has no place to live is not', () => {
+  const body = `  raw: number = 0;\n  get value(): number {\n    return this.raw;\n  }\n  set value(v: number) {\n    this.raw = v;\n  }\n`;
+  assert.deepEqual(
+    codesFor(`class C {\n${body}}\nconst c = new C();\nc.value = 1;\nconsole.log(c.value);`),
+    [],
+  );
+  // A read-modify-write is a get AND a set of one property, and what evaluates the receiver once
+  // across the pair hoists a slot -- which an accessor is not.
+  assert.deepEqual(
+    codesFor(`class C {\n${body}}\nconst c = new C();\nc.value += 1;\nconsole.log(c.value);`),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    codesFor(`class C {\n${body}}\nconst c = new C();\nc.value++;\nconsole.log(c.value);`),
+    ['STA1214'],
+  );
+  // A static accessor belongs to the class OBJECT, and a static here is one plain binding.
+  assert.deepEqual(
+    codesFor(
+      'class C {\n  static raw: number = 0;\n  static get value(): number {\n    return C.raw;\n  }\n}\nconsole.log(C.value);',
+    ),
+    ['STA1214'],
+  );
+});
+
+void test('an object literal is accepted exactly where its shape is a fixed slot list', () => {
+  assert.deepEqual(codesFor("const p = { x: 1, y: 'two' };\nconsole.log(p.x);"), []);
+  assert.deepEqual(codesFor('const e = {};\nconsole.log(e);'), []);
+  assert.deepEqual(codesFor('const t = { c: { d: 1 } };\nconsole.log(t.c.d);'), []);
+});
+
+void test('every literal form that is not a fixed slot list is a not-yet', () => {
+  // A method needs a member function table the shape has no declaration to build; a spread needs
+  // the key set at RUNTIME; a computed key needs it at runtime too; and shorthand is the one that
+  // looks accepted-adjacent -- it is a distinct AST node the gate must reach on purpose.
+  assert.deepEqual(codesFor('const o = { m(): number { return 1; } };\nconsole.log(o);'), [
+    'STA1214',
+  ]);
+  assert.deepEqual(codesFor('const a = { x: 1 };\nconst b = { ...a };\nconsole.log(b.x);'), [
+    'STA1214',
+  ]);
+  assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), [
+    'STA1214',
+  ]);
+  assert.deepEqual(codesFor('const x = 1;\nconst o = { x };\nconsole.log(o.x);'), ['STA1214']);
+  assert.deepEqual(
+    codesFor('const o = {\n  get x(): number {\n    return 1;\n  },\n};\nconsole.log(o);'),
+    ['STA1214'],
   );
 });

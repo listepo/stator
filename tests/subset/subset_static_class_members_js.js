@@ -1,9 +1,12 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Static methods and static class members
 
 class C {
   static value;
+  static set(v) {
+    C.value = v;
+  }
 }
-export const v = C.value;
+C.set(3);
+console.log(C.value);

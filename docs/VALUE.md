@@ -414,14 +414,40 @@ and nothing in this subset adds a property, so the buffer never grows and the he
 never has to move.
 
 The descriptor is `static const` and file-scope, one per class declaration, shared by every
-instance: the class name, the slot count, and the field names in slot order. An instance therefore
-costs a pointer plus its fields, a field read is an offset load, and `instanceof` — when rung 6b
-needs it — is a comparison of descriptor pointers.
+instance: the class name, the slot count, the field names in slot order, and the base class's
+descriptor (`NULL` at the root of a chain). An instance therefore costs a pointer plus its fields,
+a field read is an offset load, and `instanceof` walks the parent links comparing descriptor
+pointers (`jsrt_instanceof`, rung 6b): one class, one descriptor, so class identity and pointer
+identity are the same fact at every link. Anything that is not an object with a descriptor — a
+primitive, an array, a closure — answers `false` at the tag test, before any dereference.
 
-A method is not in the object. One function is shared by every instance and the call site resolves
-at compile time to that class's method, with the receiver passed as argument zero under the
-ordinary closure ABI. Putting methods in slots would cost one closure per method per object and
-turn a direct call into an indirect one.
+A static member is not in the descriptor either, and not in any instance: it is one ordinary
+binding for the whole program, named after the class that declares it. Nothing about a class is
+per-instance except its slots.
+
+The parent link is the prototype chain as far as this subset can observe it, and `instanceof` is
+the only thing that asks. Field access never walks it: a subclass's slots BEGIN with its base's, in
+the base's own slot order, so a base-typed read of a subclass instance is the same offset load it
+would be on a base instance. Inheritance costs a pointer in the descriptor and nothing per
+instance.
+
+A method is not in the object. One function is shared by every instance, with the receiver passed
+as argument zero under the ordinary closure ABI. Putting methods in slots would cost one closure
+per method per object and turn every call into an indirect one.
+
+Where a method is overridden the descriptor carries a METHOD TABLE: `method_count` entries, each a
+pointer to a file-scope `JSRTClosure`, in the same prefix order the fields have — a subclass's table
+begins with its base's, so a slot resolved against a receiver's static type indexes the right method
+on every descendant, and an override is a different entry at the same index (`jsrt_method`). The
+table is per class, not per instance, so overriding costs a pointer and a count in the descriptor
+and nothing per object. A class nothing overrides has no table at all (`method_count` 0, `methods`
+NULL) and keeps the compile-time-resolved direct call: the frontend decides which of the two a call
+site is, and only ever emits the load where it proved the table exists.
+
+An accessor is not in the object either, and not in the descriptor's field list: `get x`/`set x` are
+member functions like any other, so a class with accessors keeps the fixed-slot layout of its actual
+fields. That is also why an accessor does not print — `util.inspect` shows slots, and there is no
+slot.
 
 An unassigned slot reads as `undefined` because that is what it HOLDS. That is a value, not an
 absence — so the key still prints, which is the observable difference from a property that was
@@ -429,7 +455,7 @@ never declared.
 
 ### What inspect does differently for an object
 
-`runtime/tests/print_objects.{c,mjs}` is the paired corpus, and it pins three behaviours that the
+`runtime/tests/print_objects.{c,mjs}` is the paired corpus, and it pins four behaviours that the
 array constants in §4.4 do not predict:
 
 - **The class name is inside the 80-column budget**, not merely printed in front of it. The same
@@ -438,9 +464,95 @@ array constants in §4.4 do not predict:
   where eight array elements would be a grid.
 - **Past the depth cap an object prints as `[ClassName]`**, not `[Object]`.
 
-A class with no fields prints as `Name {}`. `ToString` of an object is still `[object Object]`,
+- **`#private` fields do not print.** A field name in the descriptor that begins with `#` is
+  skipped, which is the whole implementation of privacy below the gate: the checker has already
+  rejected every access from outside the class body, so the printer is the only place the
+  distinction is still observable. The names stay in the descriptor because slot *i* of the class
+  must be slot *i* of the descriptor.
+
+A class with no fields — and a class whose fields are ALL `#private` — prints as `Name {}`. `ToString` of an object is still `[object Object]`,
 which is a different operation from what `console.log` does — a distinction the golden fixture
 `tests/golden/ts/classes.ts` checks in both directions.
+
+---
+
+## 4.6 Map and Set — one table, two descriptors
+
+The tag field is fully allocated (§1.1), so a Map cannot have a tag of its own. It does not need
+one: a Map is an `Object`-tagged pointer whose first word is a `const JSRTClass *`, exactly like a
+class instance, and the descriptor pointer is what says which builtin it is. Two file-scope
+descriptors exist for the whole program — `jsrt_class_map` and `jsrt_class_set` — so the test is a
+pointer comparison, the same one `instanceof` makes.
+
+```c
+typedef struct JSRTMapEntry { jsrt_value key; jsrt_value value; bool live; } JSRTMapEntry;
+typedef struct JSRTMap {
+  const JSRTClass *cls;   /* &jsrt_class_map or &jsrt_class_set — the prefix every object shares */
+  uint32_t size;          /* LIVE entries: what `.size` answers */
+  uint32_t used;          /* entries appended, dead ones included: where the next one goes */
+  uint32_t capacity;
+  JSRTMapEntry *entries;  /* dense, in insertion order — this is why iteration order is insertion order */
+  uint32_t *index;        /* open-addressed probe table of (entry index + 1), 0 meaning empty */
+  uint32_t index_mask;
+} JSRTMap;
+```
+
+A Set is the same struct with the value half unused, which is the whole reason there is one
+implementation rather than two: the only comparison either needs is SameValueZero.
+
+**SameValueZero** is `===` except that `NaN` finds itself, and `Object.is` except that `-0` finds
+`+0`. Both differences are reachable from ordinary arithmetic (`0/0`, `-0`), so the hash has to
+agree with the comparison on both: a number key is normalized to a double with `-0` folded to `+0`
+and every NaN folded to the canonical one (§1.2), a string is hashed FNV-1a over its UTF-16 units,
+and anything else hashes by box identity — which is exactly what identity comparison means for an
+object key, with no object model involved.
+
+`index` is kept at least twice `capacity`, so the load factor stays ≤ ½ and linear probing does not
+degrade. Growth compacts: dead entries are dropped, the survivors keep their relative order, and the
+probe table is rebuilt. A delete blanks the entry's key and value and clears `live` rather than
+moving anything, so **insertion order survives a delete-and-reinsert** — the reinsert appends at the
+end, it does not reclaim the hole.
+
+`console.log` of either prints through the same `util.inspect` rules objects use, with two
+differences pinned by `runtime/tests/print_maps.{c,mjs}`:
+
+- The prefix `Map(n) ` / `Set(n) ` counts toward the 80-column budget, the way a class name does.
+- Map and Set entries **never group**. `groupArrayElements` is array-only, so eight entries are
+  eight lines where eight array elements would be a grid.
+
+---
+
+## 4.7 `typeof`, and the two places the tag is not the answer
+
+`jsrt_type_name` is a switch on the tag, and it has to be one rather than a derivation, because
+ECMA-262 disagrees with this layout twice:
+
+- **`typeof null` is `"object"`.** The 1995 bug that shipped and then became normative. No
+  structural route to the `Null` tag gives that answer, so it is asserted.
+- **A closure is `"function"`.** Everywhere else in this header a closure IS an object —
+  `jsrt_is_object` says so, and so does every operation that takes one. `typeof` is the single
+  place the language separates callable from not.
+
+The numeric case is a property of the boxing rather than of the language: a value is a number if it
+is an unboxed double OR carries the `Int32` tag, and a real NaN reaches the switch as a double
+(the quiet-NaN space holds the tagged values, not NaN itself), so it answers `"number"` correctly
+without a special case. `runtime/tests/print_typeof.c` pins every one of these against Node.
+
+## 4.8 Boundary checks — `jsrt_check_*` and STA2001
+
+The check family is `jsrt_check_number`, `jsrt_check_string` and `jsrt_check_boolean`: each returns
+its argument on success, so a check composes as an expression and the emitter wraps a value in
+place, and each calls `jsrt_panic` on failure with `STA2001` and the `file:line:col` the emitter
+baked in as a string literal.
+
+Deliberately three. A tag settles these in constant time; an object's shape, an array's element
+type and a function's signature do not, and a "check" that walked an array would turn an O(1)
+narrowing into an O(n) one silently. Narrowings to those types are left on the dynamic path instead
+(docs/HIR.md §3.2.1).
+
+Failure ABORTS rather than returning an error value. That is the whole contract: everything the
+compiler emits downstream of a check is entitled to trust the type completely, and a check that
+could be ignored would make that entitlement false.
 
 ---
 
@@ -452,13 +564,14 @@ reads as scheduling, not omission:
 | Specified here | Phase 2 | Later |
 |---|---|---|
 | Double, `Bool`, `Undefined`, `Null`, `String` | yes | — |
-| `Int32` tag | layout only, never emitted | Phase 3 (`NUMERIC.md`) |
+| `Int32` tag | layout only, never emitted (but `jsrt_type_name` handles it, §4.7) | Phase 3 (`NUMERIC.md`) |
 | `Array` tag + `JSRTArray` | yes, from rung 5 (§4.4) | — |
-| `Object` tag + `JSRTClass`/`JSRTObject` | yes, from rung 6a (§4.5) | inheritance, statics, `instanceof`: rung 6b |
+| `Object` tag + `JSRTClass`/`JSRTObject` | yes, from rung 6a (§4.5); `instanceof`, inheritance, statics, `#private`, method tables, accessors and object-literal shapes from rung 6b; `JSRTMap` from rung 7 (§4.6) | dynamic-key objects: Task 4.1 (shape table) |
 | `Closure` tag + `JSRTClosure` | yes, from rung 4a | — |
 | `JSRTEnv` + `JSRT_FRAME_ENV` | yes, from rung 4b | — |
 | `jsrt_string_length` / `_char` | yes | — |
 | Ryū + `Number::toString` format | yes | — |
 | `JSRT_FRAME` / `JSRT_LOCAL` | yes, from the first emitted function | — |
+| `jsrt_typeof` / `jsrt_check_*` | yes, from Task 3.5 (§4.7, §4.8) | `jsrt_check_*` for shapes: needs Task 4.1 |
 | Landing-pad frame discipline | no `try`/`catch` in the subset yet | Phase 3 Task 3.10 |
 | Boehm GC | yes | precise generational, §12 |

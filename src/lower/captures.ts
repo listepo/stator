@@ -17,16 +17,18 @@
 
 import * as ts from 'typescript';
 
-/** Every node that opens a new `var`/parameter scope in this subset. A method and a constructor
- * are on the list because they ARE functions -- the lowering gives each an explicit receiver
- * parameter and emits it like any other function, so a local declared in a method and read by an
- * arrow inside it is an ordinary capture, owned by the method. */
+/** Every node that opens a new `var`/parameter scope in this subset. A method, a constructor and
+ * an accessor are on the list because they ARE functions -- the lowering gives each an explicit
+ * receiver parameter and emits it like any other function, so a local declared in one and read by
+ * an arrow inside it is an ordinary capture, owned by that member. */
 export type FunctionLike =
   | ts.FunctionDeclaration
   | ts.FunctionExpression
   | ts.ArrowFunction
   | ts.MethodDeclaration
-  | ts.ConstructorDeclaration;
+  | ts.ConstructorDeclaration
+  | ts.GetAccessorDeclaration
+  | ts.SetAccessorDeclaration;
 
 /** One free variable, resolved against the environment chain the referencing function receives.
  * `levels` counts from that incoming environment: 0 is the nearest enclosing env-bearing scope. */
@@ -52,7 +54,9 @@ export function isFunctionLike(node: ts.Node): node is FunctionLike {
     ts.isFunctionExpression(node) ||
     ts.isArrowFunction(node) ||
     ts.isMethodDeclaration(node) ||
-    ts.isConstructorDeclaration(node)
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node)
   );
 }
 

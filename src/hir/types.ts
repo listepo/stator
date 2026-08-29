@@ -5,10 +5,11 @@
  * anything the checker cannot resolve becomes `Unknown` — never a guess.
  *
  * The model grows one kind at a time, with the lowering ladder that constructs it. `fn` landed
- * with rung 4 (functions) and `array` with rung 5. The remaining kinds from plan.md §2 —
- * object-shape, map/set, union, generic-instance, and the i32 refinement — are still absent rather
- * than stubbed: an unconstructed variant is a switch case every pass has to carry without ever
- * being able to test it.
+ * with rung 4 (functions), `array` with rung 5, `object` with rung 6 (a class instance, and an
+ * object literal's shape under a structural name), and `map`/`set` with rung 7. The remaining kinds
+ * from plan.md §2 — union, generic-instance, and the i32 refinement — are still absent rather than
+ * stubbed: an unconstructed variant is a switch case every pass has to carry without ever being
+ * able to test it.
  */
 
 /** Every number is an f64 in Phase 2 — spec-correct JS semantics. The i32 refinement is a
@@ -69,6 +70,30 @@ export interface HArray {
   readonly element: HType;
 }
 
+/** A `Map<K, V>`, and below it a hash table keyed by SameValueZero.
+ *
+ * The key type is carried for the same reason the element type of an array is: it types `.get`,
+ * `.set` and `.has`, and it is what a later pass would need to specialize the table. It does NOT
+ * change the representation today — a primitive key and an object key take the same path, because
+ * a NaN-boxed key already IS the unboxed value for a primitive and IS the pointer for an object,
+ * and SameValueZero on the box is value equality for one and identity for the other (plan-notes 72).
+ *
+ * `.get` yields `V | undefined`, never `V`: an absent key really does read as `undefined`, so the
+ * type of the READ is not the type of what the map HOLDS — exactly the relation an array's index
+ * read has to its element type. */
+export interface HMap {
+  readonly kind: 'map';
+  readonly key: HType;
+  readonly value: HType;
+}
+
+/** A `Set<T>`. The same table as HMap with the value half unused, which is also how the runtime
+ * stores it — writing the structure twice would mean two chances to get SameValueZero wrong. */
+export interface HSet {
+  readonly kind: 'set';
+  readonly element: HType;
+}
+
 /** One field of a class instance. The ORDER of the field list is the slot order the emitter
  * allocates, so it is part of the type, not an incidental detail of how it was built. */
 export interface HField {
@@ -93,6 +118,30 @@ export interface HObject {
   readonly name: string;
   readonly fields: readonly HField[];
   readonly methods: readonly HField[];
+  /** Ancestor class names, nearest first: `class C extends B extends A` gives `['B', 'A']`.
+   *
+   * A name list rather than a link to the ancestor's HObject, deliberately. The chain is the whole
+   * of what subtyping needs to answer (`hTypeAssignable`), and a cyclic type -- `class C { self: C }`
+   * -- would make a structural link a graph the comparison has to walk. `fields` already CONTAINS
+   * the inherited fields, in the ancestors' slot order, so nothing downstream has to follow this to
+   * lay an object out. */
+  readonly bases: readonly string[];
+}
+
+/** The `T` of `function box<T>(item: T): T` — a type the program does not have yet.
+ *
+ * It is NOT Unknown, and the difference is the whole of Task 3.4. Unknown means "no static
+ * description exists, box it"; a type parameter means "the description arrives at the call site".
+ * Monomorphization (`src/passes/monomorphize.ts`) substitutes one concrete HType for every
+ * occurrence and emits a specialization, so this kind exists only between the lowering and that
+ * pass. The verifier refuses it: reaching the emitter with a type parameter still in the tree means
+ * a call was never specialized, and there is no C type to emit for "whatever the caller had".
+ *
+ * `name` is the parameter's own spelling, which is unique per function and shadowed the way scopes
+ * shadow — two functions may each have a `T`, and a specialization substitutes only its own. */
+export interface HTypeParam {
+  readonly kind: 'type-param';
+  readonly name: string;
 }
 
 export type HType =
@@ -104,7 +153,10 @@ export type HType =
   | HUnknown
   | HFunction
   | HArray
-  | HObject;
+  | HMap
+  | HSet
+  | HObject
+  | HTypeParam;
 
 export const H_NUMBER: HNumber = { kind: 'number' };
 export const H_STRING: HString = { kind: 'string' };
@@ -120,12 +172,37 @@ export function hArray(element: HType): HArray {
   return { kind: 'array', element };
 }
 
+export function hMap(key: HType, value: HType): HMap {
+  return { kind: 'map', key, value };
+}
+
+export function hSet(element: HType): HSet {
+  return { kind: 'set', element };
+}
+
+export function hTypeParam(name: string): HTypeParam {
+  return { kind: 'type-param', name };
+}
+
 export function hObject(
   name: string,
   fields: readonly HField[],
   methods: readonly HField[],
+  bases: readonly string[] = [],
 ): HObject {
-  return { kind: 'object', name, fields, methods };
+  return { kind: 'object', name, fields, methods, bases };
+}
+
+/** A getter or setter is a METHOD, under a name no source can spell: `get x`, `set x`. The space
+ * does what the dot does for a static -- no identifier may contain one, so the mangled name can
+ * never collide with a real member.
+ *
+ * The reduction is what makes accessors nearly free. An accessor is not a slot, so it never
+ * disturbs a layout; it IS a method, so it inherits dispatch, the method table, arity padding and
+ * the receiver parameter unchanged. `o.x` on an accessor is a call to `get x`, and `o.x = v` is a
+ * call to `set x` -- which is precisely what the property means. */
+export function accessorName(kind: 'get' | 'set', property: string): string {
+  return `${kind} ${property}`;
 }
 
 /** The slot a field name occupies, or `undefined` if the class has no such field. The emitter and
@@ -161,10 +238,21 @@ export function hTypeEquals(a: HType, b: HType): boolean {
   if (a.kind === 'array' && b.kind === 'array') {
     return hTypeEquals(a.element, b.element);
   }
+  if (a.kind === 'map' && b.kind === 'map') {
+    return hTypeEquals(a.key, b.key) && hTypeEquals(a.value, b.value);
+  }
+  if (a.kind === 'set' && b.kind === 'set') {
+    return hTypeEquals(a.element, b.element);
+  }
   // Nominal, not structural, and not recursive. Two classes are the same type when they are the
   // same class -- which is also the only comparison that terminates: `class C { self: C }` is a
   // cyclic type, and comparing it field by field would not stop.
   if (a.kind === 'object' && b.kind === 'object') {
+    return a.name === b.name;
+  }
+  // By name, for the same reason a class is: two `T`s are the same type only inside one function's
+  // body, and the substitution that replaces them is per specialization.
+  if (a.kind === 'type-param' && b.kind === 'type-param') {
     return a.name === b.name;
   }
   if (a.kind === 'fn' && b.kind === 'fn') {
@@ -180,6 +268,35 @@ export function hTypeEquals(a: HType, b: HType): boolean {
   return true;
 }
 
+/** Can a value of type `value` be used where a `target` is expected?
+ *
+ * This is the subtyping question `hTypeEquals` refuses to answer, and it exists because inheritance
+ * made the two differ: a `Dog` IS a usable `Animal`, and identity says otherwise. Every other kind
+ * is invariant here -- the subset has no variance anywhere else, and inventing some would be a
+ * silent widening of what the verifier accepts.
+ *
+ * The class case reads the ancestor NAMES rather than comparing layouts, which is sound for exactly
+ * the reason the layout is a prefix: a subclass's fields begin with its base's, in the base's slot
+ * order, so a base-typed read of a subclass instance finds what it expects at the offset it
+ * expects. If that prefix rule is ever broken, this function silently becomes wrong -- which is why
+ * the ordering is built in one place (`classTypeToHType`) and checked by the verifier's slot rule
+ * rather than trusted. */
+export function hTypeAssignable(value: HType, target: HType): boolean {
+  // Unknown on EITHER side is assignable, and the two directions are the same fact seen twice.
+  // An Unknown target promises nothing, so nothing can violate it. An Unknown VALUE is a value the
+  // HIR has no static description of -- which at runtime is a boxed `jsrt_value` like every other,
+  // stored into a slot by a total operation. Refusing it would make ordinary js-mode source an
+  // internal error: `let total = 0; total = add(total, 3)` with an untyped `add` has a `number`
+  // binding and an Unknown value, and the checker is right about both.
+  if (value.kind === 'unknown' || target.kind === 'unknown') {
+    return true;
+  }
+  if (value.kind === 'object' && target.kind === 'object') {
+    return value.name === target.name || value.bases.includes(target.name);
+  }
+  return hTypeEquals(value, target);
+}
+
 /** Does Unknown appear ANYWHERE in this type, however deep?
  *
  * The verdict walk asks this, and the shallow question (`t.kind === 'unknown'`) is the wrong one:
@@ -191,8 +308,11 @@ export function hTypeHasUnknown(t: HType): boolean {
   if (t.kind === 'unknown') {
     return true;
   }
-  if (t.kind === 'array') {
+  if (t.kind === 'array' || t.kind === 'set') {
     return hTypeHasUnknown(t.element);
+  }
+  if (t.kind === 'map') {
+    return hTypeHasUnknown(t.key) || hTypeHasUnknown(t.value);
   }
   if (t.kind === 'fn') {
     return t.params.some(hTypeHasUnknown) || hTypeHasUnknown(t.ret);
@@ -203,16 +323,46 @@ export function hTypeHasUnknown(t: HType): boolean {
   return false;
 }
 
+/** Does this type still mention a type parameter, however deep?
+ *
+ * Two callers, asking the same question for opposite reasons. The lowering asks before it accepts a
+ * tuple — a specialization whose own type arguments are not concrete is not a specialization. The
+ * verifier asks of every node, where a `true` is a bug: monomorphization removes type parameters by
+ * never building one, so a survivor means a call was not specialized. */
+export function hasTypeParam(t: HType): boolean {
+  switch (t.kind) {
+    case 'type-param':
+      return true;
+    case 'array':
+    case 'set':
+      return hasTypeParam(t.element);
+    case 'map':
+      return hasTypeParam(t.key) || hasTypeParam(t.value);
+    case 'fn':
+      return t.params.some(hasTypeParam) || hasTypeParam(t.ret);
+    default:
+      // An object stops the walk for the reason equality does: the type can be cyclic. A generic
+      // CLASS is a separate feature the gate refuses, so no field can hold a type parameter today.
+      return false;
+  }
+}
+
 /** Diagnostic text. Matches the names users see in TypeScript so a Stator message and a tsc
  * message describing the same value agree. */
 export function hTypeName(t: HType): string {
-  if (t.kind === 'object') {
+  if (t.kind === 'object' || t.kind === 'type-param') {
     return t.name;
   }
   if (t.kind === 'array') {
     // Parenthesised for a function element, because `(() => number)[]` and `() => number[]` are
     // different types and the unparenthesised spelling reads as the second.
     return t.element.kind === 'fn' ? `(${hTypeName(t.element)})[]` : `${hTypeName(t.element)}[]`;
+  }
+  if (t.kind === 'map') {
+    return `Map<${hTypeName(t.key)}, ${hTypeName(t.value)}>`;
+  }
+  if (t.kind === 'set') {
+    return `Set<${hTypeName(t.element)}>`;
   }
   if (t.kind === 'fn') {
     return `(${t.params.map((p, i) => `a${String(i)}: ${hTypeName(p)}`).join(', ')}) => ${hTypeName(t.ret)}`;

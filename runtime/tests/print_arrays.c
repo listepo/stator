@@ -9,18 +9,9 @@
  * entries, the depth cap, and the 100-element truncation each have a boundary here.
  */
 
-#include "jsrt_value.h"
+#include "corpus.h"
 
 #include <stdio.h>
-#include <string.h>
-
-static jsrt_value num(double d) {
-  return jsrt_number(d);
-}
-
-static jsrt_value str(const char *s) {
-  return jsrt_string_from_utf8(s, strlen(s));
-}
 
 /* Builds an array of `n` copies of `fill`, used for the grouping and truncation boundaries. */
 static jsrt_value repeated(uint32_t n, jsrt_value fill) {

@@ -1,6 +1,5 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Static methods and static class members
 
 class C {
@@ -9,4 +8,8 @@ class C {
     C.count++;
   }
 }
-export const n = C.count;
+class D extends C {}
+
+C.increment();
+console.log(C.count);
+console.log(D.count);

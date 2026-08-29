@@ -1,12 +1,15 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Private fields
 
 class C {
   #field: number = 0;
-  get(): number {
+  #bump(): number {
+    this.#field += 1;
     return this.#field;
   }
+  get(): number {
+    return this.#bump();
+  }
 }
-export const c = new C();
+export const c = new C().get();

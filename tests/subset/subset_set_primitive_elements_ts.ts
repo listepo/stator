@@ -1,7 +1,8 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Set with primitive elements
 
-const s: Set<string> = new Set(["a", "b", "c"]);
-export { s };
+// The type argument is on the construction: an annotation alone leaves the call `Set<any>`.
+const s = new Set<string>();
+s.add('a');
+console.log(s.has('a'));

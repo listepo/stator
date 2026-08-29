@@ -174,6 +174,20 @@ function statementHasUnknown(stmt: Statement): boolean {
         (stmt.ctor !== undefined && expressionHasUnknown(stmt.ctor.fn)) ||
         stmt.methods.some((m) => expressionHasUnknown(m.fn))
       );
+    // A super call is a call: its receiver and arguments are where dynamic values can appear.
+    case 'super-call':
+      return expressionHasUnknown(stmt.receiver) || stmt.args.some(expressionHasUnknown);
+    case 'throw-statement':
+      return expressionHasUnknown(stmt.value);
+    // The catch binding is ALWAYS Unknown — anything can be thrown — but that alone must not make
+    // the statement dynamic, or every try/catch in ts mode would be. Only the blocks' contents
+    // count, exactly as an unused `unknown` parameter does not taint its function.
+    case 'try-statement':
+      return (
+        stmt.tryBlock.statements.some(statementHasUnknown) ||
+        (stmt.catchBlock?.statements.some(statementHasUnknown) ?? false) ||
+        (stmt.finallyBlock?.statements.some(statementHasUnknown) ?? false)
+      );
     default: {
       const exhaustive: never = stmt;
       return exhaustive;
@@ -228,6 +242,29 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expressionHasUnknown(expr.target);
     case 'method-call':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    // The answer is a boolean whatever the target is, so only the target can be dynamic.
+    case 'instanceof':
+      return expressionHasUnknown(expr.target);
+    // A literal's own type stops the deep walk for the same reason a class's does, so what makes
+    // one dynamic is a value it was built from -- which is exactly what a read of it will find.
+    case 'object-literal':
+      return expr.entries.some((e) => expressionHasUnknown(e.value));
+    // A fresh collection is as static as its type argument, which the check at the top of this
+    // function already read: `new Map<string, number>()` is static, `new Map()` -- which the
+    // checker types `Map<any, any>` -- is not.
+    case 'collection-new':
+      return false;
+    case 'collection-op':
+      return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    // `typeof` is a string whatever it asked about, so an Unknown OPERAND does not make the result
+    // dynamic -- asking an unknown value what it is is exactly how a program stops being dynamic.
+    case 'typeof':
+      return false;
+    // Likewise a check: it is the point where an Unknown becomes concrete, so it reports the type
+    // it produced, not the one it consumed. Recursing into `value` would report every narrowing
+    // site as dynamic and make `explain` say the opposite of what the code does.
+    case 'boundary-check':
+      return false;
     default: {
       const exhaustive: never = expr;
       return exhaustive;

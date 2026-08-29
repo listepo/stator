@@ -233,14 +233,29 @@ bool jsrt_op_ge(jsrt_value a, jsrt_value b);
  * every field's index at compile time and reads it directly, with no property lookup and no hash.
  *
  * `JSRTClass` is emitted `static const` per class, one instance per class in the whole program, so
- * comparing two `cls` pointers is a class-identity test (that is what `instanceof` will be).
+ * comparing two `cls` pointers is a class-identity test -- that is what `instanceof` is.
  * `fields` is only needed to PRINT an object -- `console.log` shows `P { x: 1 }` -- so the names
  * live here once rather than in every instance. */
 typedef struct JSRTClass {
   const char *name;           /* the class's own name, as written; "" is not a valid class */
   uint32_t field_count;
   const char *const *fields;  /* field names, in slot order; length is field_count */
+  /* The base class's descriptor, or NULL at the root. This IS the prototype chain as far as this
+   * subset can observe it: the only question anything asks of it is `instanceof`. The chain is
+   * finite because `extends` is a declaration-order relation the frontend already proved acyclic,
+   * so the walk below needs no visited set. */
+  const struct JSRTClass *parent;
+  /* The method table, in slot order, or NULL for a class that participates in no overriding.
+   * A subclass's table BEGINS with its base's, in the base's own slot order -- the same prefix
+   * property the fields have -- so a slot resolved against the static type of a receiver indexes
+   * the same method on every descendant, and an override is a different entry at the same index.
+   * The entries are file-scope constants, which is exactly why the table is absent for a class
+   * whose methods capture: such a closure is not one constant per class. */
+  uint32_t method_count;
+  const struct JSRTClosure *const *methods;
 } JSRTClass;
+
+struct JSRTClosure;
 
 /* Unlike JSRTArray, the elements ARE a flexible member here, and that is safe for the reason it is
  * unsafe there: an object's slot count is fixed by its class at construction and the subset has no
@@ -271,6 +286,98 @@ static inline jsrt_value jsrt_object_get(jsrt_value obj, uint32_t slot) {
 static inline void jsrt_object_set(jsrt_value obj, uint32_t slot, jsrt_value v) {
   jsrt_as_object(obj)->fields[slot] = v;
 }
+
+/* `x instanceof C`. There is exactly one `JSRTClass` per class in the program, so class identity is
+ * descriptor identity and each link of the walk is a pointer comparison -- no string compare, no
+ * lookup. Walking `parent` is what makes a `Dog` an `Animal`.
+ *
+ * A non-object answers `false` rather than raising: `1 instanceof C` is false in JavaScript, and it
+ * is the RIGHT operand that has to be a constructor, which the frontend proved. Arrays and closures
+ * are objects with no `JSRTClass` at all, so the tag test excludes them before any dereference. */
+static inline bool jsrt_instanceof(jsrt_value v, const JSRTClass *cls) {
+  if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
+    return false;
+  }
+  for (const JSRTClass *c = jsrt_as_object(v)->cls; c != NULL; c = c->parent) {
+    if (c == cls) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------ Map and Set */
+
+/* A Map and a Set are ONE structure under two descriptors, because they differ in exactly two
+ * places: a Set ignores the value half of an entry, and the printer writes `1` where a Map writes
+ * `'a' => 1`. Everything that is actually hard -- SameValueZero on the keys, insertion order,
+ * deletion without disturbing it -- is identical, and writing it twice would mean two chances to
+ * get NaN or -0 wrong.
+ *
+ * `cls` is FIRST, exactly as in JSRTObject, and that prefix is what makes a Map an object: the tag
+ * is JSRT_TAG_OBJECT, `jsrt_as_object(m)->cls` is a valid read, and `instanceof` walks it like any
+ * other class. The printer tells the two apart by comparing that pointer against the two
+ * descriptors below -- there is one of each in the whole program, so it is a pointer compare, the
+ * same identity test `instanceof` is.
+ *
+ * Insertion order is a SPEC guarantee, not a convenience: `console.log` and every iteration form
+ * print entries in the order they were first inserted, and re-setting an existing key does not
+ * move it. That is why entries live in an append-only array and the hash table holds INDICES into
+ * it rather than the entries themselves. A deletion marks its entry dead and blanks both halves
+ * (stale bits in a GC-scanned allocation would keep a dead key alive); the dead entries are
+ * compacted away the next time the array is full. */
+typedef struct JSRTMapEntry {
+  jsrt_value key;
+  jsrt_value value; /* JSRT_UNDEFINED throughout a Set, which stores keys and nothing else */
+  bool live;
+} JSRTMapEntry;
+
+typedef struct JSRTMap {
+  const JSRTClass *cls; /* &jsrt_class_map or &jsrt_class_set -- prefix-shared with JSRTObject */
+  uint32_t size;        /* LIVE entries: what `.size` reports */
+  uint32_t used;        /* entries appended, live or dead: entries[0..used) have been written */
+  uint32_t capacity;
+  JSRTMapEntry *entries;
+  /* Open-addressed, linear-probed, holding `entry index + 1` so that 0 means empty. Sized to a
+   * power of two at twice `capacity`, which keeps the load factor at or below one half. */
+  uint32_t *index;
+  uint32_t index_mask;
+} JSRTMap;
+
+extern const JSRTClass jsrt_class_map;
+extern const JSRTClass jsrt_class_set;
+
+jsrt_value jsrt_map_new(void);
+jsrt_value jsrt_set_new(void);
+
+static inline JSRTMap *jsrt_as_map(jsrt_value v) { return (JSRTMap *)jsrt_ptr(v); }
+
+/* True for a Map or a Set -- the test the printer runs before treating an object as a class
+ * instance, since both carry the object tag. */
+static inline bool jsrt_is_map_or_set(jsrt_value v) {
+  if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
+    return false;
+  }
+  const JSRTClass *cls = jsrt_as_object(v)->cls;
+  return cls == &jsrt_class_map || cls == &jsrt_class_set;
+}
+
+/* `m.get(k)` -- `undefined` for an absent key, which is what JavaScript returns and why the static
+ * type of a `.get` is `V | undefined`. */
+jsrt_value jsrt_map_get(jsrt_value map, jsrt_value key);
+
+/* `m.set(k, v)` and `s.add(v)` both RETURN THE COLLECTION, which is what makes them chainable. */
+jsrt_value jsrt_map_set(jsrt_value map, jsrt_value key, jsrt_value value);
+jsrt_value jsrt_set_add(jsrt_value set, jsrt_value key);
+
+bool jsrt_map_has(jsrt_value map, jsrt_value key);
+/* `true` when the key was there, `false` when it was not -- the value JavaScript's delete returns. */
+bool jsrt_map_delete(jsrt_value map, jsrt_value key);
+/* Undefined, the value `clear()` evaluates to -- so a statement that calls it is an ordinary
+ * expression rather than one the emitter has to wrap in a comma to give a value to. */
+jsrt_value jsrt_map_clear(jsrt_value map);
+/* `.size` as a Number, so the emitter never reads the struct field itself. */
+jsrt_value jsrt_map_size(jsrt_value map);
 
 /* ---------------------------------------------------------------- arrays */
 
@@ -351,6 +458,13 @@ static inline jsrt_value jsrt_closure(const JSRTClosure *c) {
   return JSRT_BOX(JSRT_TAG_CLOSURE, (uintptr_t)c);
 }
 
+/* Virtual dispatch: the receiver's OWN class answers, which is the whole point -- the slot came
+ * from the static type, the entry comes from the dynamic one. The frontend emits this only where
+ * it proved the table exists, so a NULL table here is a codegen bug, not a runtime condition. */
+static inline jsrt_value jsrt_method(jsrt_value obj, uint32_t slot) {
+  return jsrt_closure(jsrt_as_object(obj)->cls->methods[slot]);
+}
+
 /* The heap-allocated form, for a function that captures. Returns an already-boxed value because
  * the closure is reachable only through it. */
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
@@ -371,10 +485,67 @@ static inline jsrt_value jsrt_arg(uint32_t argc, const jsrt_value *argv, uint32_
  * loud and located, rather than a jump through a garbage pointer. */
 jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
 
+/* ------------------------------------------------------------- typeof */
+
+/* The string ECMA-262's `typeof` produces, as a C literal with static storage.
+ *
+ * Seven answers, and two of them are famously not the ones a tag would give: `typeof null` is
+ * "object" (the original 1995 bug, now normative), and a callable is "function" even though a
+ * function IS an object everywhere else in this header -- which is why this is a switch on the tag
+ * and not a call to jsrt_is_object. */
+const char *jsrt_type_name(jsrt_value v);
+
+/* `typeof x`. The string, boxed. */
+jsrt_value jsrt_typeof(jsrt_value v);
+
+/* ---------------------------------------------------------- boundary checks */
+
+/* STA2001. A value crossing INTO typed code is checked against the type the program claimed for
+ * it, and a mismatch is a located runtime error rather than a value the compiled code then reads
+ * as if the claim were true (plan.md §0.2, golden rule 4).
+ *
+ * Each returns `v` unchanged when the check passes, so a check composes as an expression and the
+ * emitter can wrap a value in place. `where` is "file.ts:line:col", baked into the generated C as
+ * a string literal -- the check knows the source location because the emitter knew it, and nothing
+ * has to be reconstructed from a stack at the point of failure.
+ *
+ * The number check accepts either numeric tag: a double and an int32 are one type to the language,
+ * and which one a value happens to be boxed as is the runtime's business, not the program's. */
+jsrt_value jsrt_check_number(jsrt_value v, const char *where);
+jsrt_value jsrt_check_string(jsrt_value v, const char *where);
+jsrt_value jsrt_check_boolean(jsrt_value v, const char *where);
+
 /* --------------------------------------------------------------- output */
 
 void jsrt_print(jsrt_value v);      /* console.log semantics: prints -0 as "-0" */
 jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
+
+/* ----------------------------------------------------------- exceptions */
+
+/* One pending exception per thread -- return-value + landing-pad style, never setjmp/longjmp
+ * (plan.md §2: bad codegen interactions, GC-root problems). The contract with generated C:
+ *
+ *   - `throw e` compiles to `jsrt_throw(v); goto <pad>;`.
+ *   - After every call that can run user code, generated C checks `jsrt_pending()` and jumps to
+ *     the nearest landing pad: a catch, a finally, or the function's unwind pad, which pops the
+ *     shadow frame and returns. The return VALUE of an unwinding call is JSRT_UNDEFINED and
+ *     meaningless -- the pending flag is the channel, not the value.
+ *   - A pad that handles the exception calls `jsrt_take_exception()` exactly once, which clears
+ *     the flag and hands over the value. Not clearing it would make every later call in the
+ *     handler appear to throw.
+ *
+ * ROOTING INVARIANT: between jsrt_throw and jsrt_take_exception the stored value may be the only
+ * reference to a heap object, so the collector must trace the pending slot as a root alongside
+ * the frame chain. (Under the current plain-malloc runtime nothing collects, but generated C is
+ * written against this contract, not against the allocator of the day.) */
+void jsrt_throw(jsrt_value v);
+bool jsrt_pending(void);
+jsrt_value jsrt_take_exception(void);
+
+/* The pad of last resort: main's. Prints the value to STDERR and exits 1 -- stdout stays clean,
+ * which is what the golden runner compares, and the exit code is what Node observably does with
+ * an uncaught throw. */
+_Noreturn void jsrt_uncaught(void);
 
 /* ------------------------------------------------------- rooting protocol */
 

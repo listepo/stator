@@ -17,6 +17,7 @@ import { gateProgram } from '../frontend/gate.ts';
 import { createProgram } from '../frontend/program.ts';
 import { verifyHir } from '../hir/verify.ts';
 import { lowerSourceFile } from '../lower/index.ts';
+import { optimize } from '../passes/index.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { renderDiagnostic } from '../support/diagnostics.ts';
 
@@ -114,9 +115,14 @@ export function compileToC(entry: string, mode: Mode): string | null {
     return null;
   }
 
+  // Optimization runs BEFORE the verifier, so the verifier checks what the emitter will actually
+  // see. A pass that produced ill-typed HIR would otherwise pass through a verifier that had only
+  // inspected the lowering's output.
+  const optimized = optimize(module);
+
   // The verifier is not an optional debug pass: it is the only thing standing between a lowering
   // bug and silently wrong generated C, and it costs one tree walk.
-  const problems = verifyHir(module);
+  const problems = verifyHir(optimized);
   if (problems.length > 0) {
     for (const p of problems) {
       process.stderr.write(`stator: ${p.code} internal error in ${p.kind}: ${p.message}\n`);
@@ -125,7 +131,7 @@ export function compileToC(entry: string, mode: Mode): string | null {
     return null;
   }
 
-  return emitC(module);
+  return emitC(optimized);
 }
 
 /** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are

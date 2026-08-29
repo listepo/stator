@@ -6,6 +6,9 @@ import type {
   BinaryOp,
   CallExpr,
   ClassDeclaration,
+  ClassMethod,
+  CollectionOp,
+  CollectionOperation,
   EnvCapture,
   Expression,
   FieldAssignment,
@@ -17,11 +20,14 @@ import type {
   MethodCall,
   Module,
   NewExpr,
+  ObjectLiteral,
   Span,
   Statement,
+  SuperCall,
   SwitchStatement,
   TemplateLiteral,
   UnaryOp,
+  VtableEntry,
 } from '../hir/nodes.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
@@ -67,6 +73,18 @@ const BINARY_EMITTERS: Readonly<Record<BinaryOp['operator'], (l: string, r: stri
  *
  * `-` is a real negation, not a constant fold: `-x` where x is `+0` must yield `-0`, which is why
  * the emitter negates the double rather than subtracting from zero. */
+/** The runtime check for each HType kind a boundary may narrow TO.
+ *
+ * Deliberately partial. A kind absent here is one the runtime cannot test for in constant time from
+ * the value alone -- an object's shape, a function's signature, an array's element type -- and the
+ * gate refuses those narrowings rather than letting the emitter invent a check that only looks at
+ * the tag. A missing entry reaching here is therefore a gate/emitter disagreement, and throws. */
+const CHECK_FUNCTIONS: Readonly<Record<string, string | undefined>> = {
+  number: 'jsrt_check_number',
+  string: 'jsrt_check_string',
+  boolean: 'jsrt_check_boolean',
+};
+
 const UNARY_EMITTERS: Readonly<Record<UnaryOp['operator'], (operand: string) => string>> = {
   '-': (x) => `jsrt_number(-jsrt_to_number(${x}))`,
   '+': (x) => `jsrt_number(jsrt_to_number(${x}))`,
@@ -118,6 +136,21 @@ interface FunctionUnit {
   readonly name: string;
 }
 
+/** The descriptor name a class prints. A SHAPE prints none: `console.log({x: 1})` shows
+ * `{ x: 1 }`, with no constructor name in front, and the leading brace of the shape's structural
+ * name is what says so -- no class may be called that. */
+function descriptorName(name: string): string {
+  return name.startsWith('{') ? '' : name;
+}
+
+/** The structural name of a literal's shape, which is also its descriptor's identity. */
+function shapeNameOf(expr: ObjectLiteral): string {
+  if (expr.type.kind !== 'object') {
+    throw new Error('object literal has no shape');
+  }
+  return expr.type.name;
+}
+
 class Emitter {
   private lines: string[] = [];
   private indent: number = 0;
@@ -141,7 +174,10 @@ class Emitter {
   /* Frame slot holding a call's callee and its arguments: 1 + argc CONTIGUOUS slots, so `argv` can
    * point at the first argument and every already-evaluated operand stays rooted while the rest are
    * evaluated. Keyed by node identity, like the other temporaries. */
-  private callSlots: Map<CallExpr | MethodCall | NewExpr, number> = new Map();
+  private callSlots: Map<
+    CallExpr | CollectionOp | MethodCall | NewExpr | ObjectLiteral | SuperCall,
+    number
+  > = new Map();
 
   /* Every class declared anywhere in the file, in the order counting reached them. The index is
    * the descriptor's C identity (`_jsrt_class_N`), and the name is how NewExpr and MethodCall --
@@ -234,23 +270,6 @@ class Emitter {
     const mainLines = this.emitMain(module, globalSlots);
 
     const out: string[] = ['#include "jsrt_value.h"', '', `JSRT_GLOBALS(${globalSlots});`, ''];
-    // One descriptor per class, shared by every instance: the name printed by console.log, the
-    // slot count, and the field names in slot order. `const` and file-scope, so it costs nothing
-    // per object and `instanceof` will be a pointer comparison when rung 6b needs one.
-    for (const [id, cls] of this.classes.entries()) {
-      // A zero-length array is not valid C11, and a class with no fields is valid TypeScript. The
-      // count is what readers use, so the unread placeholder is harmless.
-      const names =
-        cls.fields.length === 0 ? '""' : cls.fields.map((f) => cNameLiteral(f.name)).join(', ');
-      out.push(`static const char *const _jsrt_fields_${id}[] = {${names}};`);
-      out.push(
-        `static const JSRTClass _jsrt_class_${id} = {${cNameLiteral(cls.name)}, ` +
-          `${cls.fields.length}, _jsrt_fields_${id}};`,
-      );
-    }
-    if (this.classes.length > 0) {
-      out.push('');
-    }
     // Forward declarations ahead of every definition, so a function can call itself, or one
     // declared further down the file.
     for (const unit of this.functions) {
@@ -263,6 +282,37 @@ class Emitter {
       );
     }
     if (this.functions.length > 0) {
+      out.push('');
+    }
+    // One descriptor per class, shared by every instance: the name printed by console.log, the
+    // slot count, the field names in slot order, the base's descriptor, and the method table.
+    // `const` and file-scope, so it costs nothing per object and `instanceof` is a pointer
+    // comparison. It follows the closure constants because a method table names them.
+    //
+    // A descriptor takes the ADDRESS of its base's, so the base's must already be declared. It
+    // always is, and not by luck: `this.classes` is in source order, and a base whose declaration
+    // followed its subclass would be a temporal-dead-zone error the frontend never accepts. The
+    // lookup below asserts that rather than assuming it.
+    for (const [id, cls] of this.classes.entries()) {
+      // A zero-length array is not valid C11, and a class with no fields is valid TypeScript. The
+      // count is what readers use, so the unread placeholder is harmless.
+      const names =
+        cls.fields.length === 0 ? '""' : cls.fields.map((f) => cNameLiteral(f.name)).join(', ');
+      out.push(`static const char *const _jsrt_fields_${id}[] = {${names}};`);
+      if (cls.vtable.length > 0) {
+        const entries = cls.vtable.map((entry) => `&_jsrt_closure_${this.methodId(entry)}`);
+        out.push(
+          `static const JSRTClosure *const _jsrt_methods_${id}[] = {${entries.join(', ')}};`,
+        );
+      }
+      const table =
+        cls.vtable.length === 0 ? '0, NULL' : `${cls.vtable.length}, _jsrt_methods_${id}`;
+      out.push(
+        `static const JSRTClass _jsrt_class_${id} = {${cNameLiteral(descriptorName(cls.name))}, ` +
+          `${cls.fields.length}, _jsrt_fields_${id}, ${this.baseDescriptor(cls, id)}, ${table}};`,
+      );
+    }
+    if (this.classes.length > 0) {
       out.push('');
     }
     out.push(...functionLines, ...mainLines);
@@ -502,7 +552,10 @@ class Emitter {
             this.slotMap.set(stmt.name, this.slotCount);
             this.slotCount++;
           }
-          this.registerFunction(stmt.fn, stmt.name);
+          // The FUNCTION's own name, falling back to the declaration's. They differ for exactly one
+          // thing: a monomorphized specialization is bound as `box<number>` but is still the `box`
+          // the user wrote, and `[Function: box]` is what Node prints for it.
+          this.registerFunction(stmt.fn, stmt.fn.name ?? stmt.name);
           break;
         case 'return-statement':
           if (stmt.value) {
@@ -537,6 +590,17 @@ class Emitter {
           this.countExpression(stmt.target);
           this.countExpression(stmt.value);
           break;
+        case 'super-call':
+          // The same contiguous, rooted argv every call uses: receiver in slot zero, then the
+          // base constructor's arguments. It is a CALL, so every operand must be reachable across
+          // the allocations the later ones may perform.
+          this.callSlots.set(stmt, this.slotCount);
+          this.slotCount += 1 + stmt.args.length;
+          this.countExpression(stmt.receiver);
+          for (const arg of stmt.args) {
+            this.countExpression(arg);
+          }
+          break;
         case 'class-declaration':
           // A class occupies no frame slot: it is not a value in this subset. What counting does
           // here is claim the descriptor's identity and register the member functions, which are
@@ -551,10 +615,20 @@ class Emitter {
           for (const method of stmt.methods) {
             this.registerFunction(method.fn, method.name);
           }
+          // A static is a binding in the ENCLOSING scope, so it takes a slot there exactly as a
+          // `let` would -- which is what makes `C.count` an ordinary slot read downstream.
+          this.countBindings(stmt.statics);
           break;
         case 'break-statement':
         case 'continue-statement':
           break;
+        case 'throw-statement':
+        case 'try-statement':
+          // These nodes are kept in the HIR for Task 3.10's in-progress implementation, but the
+          // frontend gate rejects them until landing-pad emission exists. Keep the exhaustive
+          // switch honest so hand-built invalid HIR fails as an internal error, not as a TS compile
+          // failure that prevents every other feature from building.
+          throw new Error(`${stmt.kind} is not yet supported by the emitter`);
         default: {
           const _exhaustive: never = stmt;
           throw new Error(
@@ -580,9 +654,15 @@ class Emitter {
         this.countExpression(expr.right);
         break;
       case 'unary-op':
+      case 'typeof':
       case 'string-length':
       case 'array-length':
         this.countExpression(expr.operand);
+        break;
+      // A check allocates nothing on the passing path and does not return on the failing one, so
+      // the value it guards needs no slot beyond whatever building it already claimed.
+      case 'boundary-check':
+        this.countExpression(expr.value);
         break;
       case 'array-literal':
         this.arraySlots.set(expr, this.slotCount);
@@ -647,11 +727,40 @@ class Emitter {
           this.countExpression(arg);
         }
         break;
+      // One rooted slot for the object itself, claimed BEFORE any entry is evaluated: an entry may
+      // allocate, and the half-built object has to survive that. The shape's descriptor is
+      // registered here for the same reason a class's is -- emission only ever looks one up.
+      case 'object-literal':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 1;
+        this.registerShape(expr);
+        for (const entry of expr.entries) {
+          this.countExpression(entry.value);
+        }
+        break;
+      // Target first, then each argument, each in its own rooted slot. The runtime functions take
+      // positional C arguments rather than an argv, so the run does not have to be contiguous --
+      // but the SEQUENCING does have to exist: C leaves argument evaluation order unspecified, and
+      // `m.set(f(), g())` must run f before g (plan-notes 55).
+      case 'collection-op':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 1 + expr.args.length;
+        this.countExpression(expr.target);
+        for (const arg of expr.args) {
+          this.countExpression(arg);
+        }
+        break;
       // No slot: the read is a dereference with nothing allocated between evaluating the target
       // and using it, so there is no window in which the object could go unrooted.
       case 'field-access':
+      // Same as a field read: the test is a pointer comparison against a static descriptor, with
+      // nothing allocated between evaluating the target and using it.
+      case 'instanceof':
         this.countExpression(expr.target);
         break;
+      // One allocator call with no operands: nothing is evaluated between the allocation and the
+      // use of its result, so there is no window to root against.
+      case 'collection-new':
       case 'number-literal':
       case 'string-literal':
       case 'boolean-literal':
@@ -895,10 +1004,44 @@ class Emitter {
         break;
       }
 
+      case 'super-call': {
+        const base = this.callSlots.get(stmt);
+        if (base === undefined) {
+          throw new Error('super call was not registered during counting');
+        }
+        const ctor = this.classAt(stmt.className).ctor;
+        // A base with nothing to run emits nothing. It can take no arguments either -- the checker
+        // rejects arguments to a constructor that does not exist -- so no side effect is skipped.
+        if (ctor === undefined) {
+          break;
+        }
+        const parts = [`${this.slotAt(base)} = ${this.emitExpression(stmt.receiver)}`];
+        stmt.args.forEach((arg, index) => {
+          parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
+        });
+        parts.push(
+          `jsrt_call(${this.closureValue(ctor.fn)}, ${1 + stmt.args.length}, &${this.slotAt(base)})`,
+        );
+        this.appendLine(`${parts.join(', ')};`, stmt.span);
+        break;
+      }
+
       // Nothing runs here. A class's descriptor and its member functions are file-scope, and the
       // name is not a binding -- so the declaration's whole effect happened at compile time.
       case 'class-declaration':
+        // The class itself emits nothing -- its descriptor is file-scope and its members are
+        // function units. Its statics DO emit, here, which is what puts their initializers in
+        // source order: a static is live from the class declaration onward, not before.
+        for (const decl of stmt.statics) {
+          this.emitStatement(decl);
+        }
         break;
+
+      case 'throw-statement':
+      case 'try-statement':
+        // See the counting switch above. A source program cannot reach this path because the gate
+        // reports STA1214 first; this guard is for malformed or hand-built HIR only.
+        throw new Error(`${stmt.kind} is not yet supported by the emitter`);
 
       default: {
         const _exhaustive: never = stmt;
@@ -1015,6 +1158,22 @@ class Emitter {
         return UNARY_EMITTERS[expr.operator](this.emitExpression(expr.operand));
       }
 
+      case 'typeof': {
+        return `jsrt_typeof(${this.emitExpression(expr.operand)})`;
+      }
+
+      // The location is a string literal in the emitted C rather than something reconstructed at
+      // failure time: the emitter is the only party that still knows where this value came from,
+      // and a check that could not say where it failed would be nearly useless in a compiled
+      // binary with no source map at runtime.
+      case 'boundary-check': {
+        const check = CHECK_FUNCTIONS[expr.type.kind];
+        if (check === undefined) {
+          throw new Error(`no boundary check for type kind: ${expr.type.kind}`);
+        }
+        return `${check}(${this.emitExpression(expr.value)}, "${this.escapeFilePath(expr.where)}")`;
+      }
+
       case 'logical-op': {
         return this.emitLogicalOp(expr);
       }
@@ -1121,20 +1280,71 @@ class Emitter {
         if (base === undefined) {
           throw new Error('method call was not registered during counting');
         }
-        const method = this.classAt(expr.className).methods.find((m) => m.name === expr.method);
-        if (method === undefined) {
-          throw new Error(`class ${expr.className} has no method ${expr.method}`);
-        }
         // Receiver first, then arguments left to right -- the same order and the same contiguous
         // argv as a plain call, with the receiver where the callee slot would be.
         const parts = [`${this.slotAt(base)} = ${this.emitExpression(expr.target)}`];
         expr.args.forEach((arg, index) => {
           parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
         });
-        parts.push(
-          `jsrt_call(${this.closureValue(method.fn)}, ${1 + expr.args.length}, &${this.slotAt(base)})`,
-        );
+        // A direct call names the function; a virtual one loads the entry the RECEIVER's own class
+        // holds at this slot. The receiver is already in its slot, so the load reads the value the
+        // call is about to pass, not a second evaluation of the target expression.
+        const callee =
+          expr.dispatch === 'virtual'
+            ? `jsrt_method(${this.slotAt(base)}, ${expr.slot})`
+            : this.closureValue(this.methodOf(expr).fn);
+        parts.push(`jsrt_call(${callee}, ${1 + expr.args.length}, &${this.slotAt(base)})`);
         return `(${parts.join(', ')})`;
+      }
+
+      // Allocate, then fill left to right. The object is in its own rooted slot first, so an entry
+      // that allocates cannot collect the object it is being stored into.
+      case 'object-literal': {
+        const slot = this.callSlots.get(expr);
+        if (slot === undefined) {
+          throw new Error('object literal was not registered during counting');
+        }
+        const id = String(this.classIds.get(shapeNameOf(expr)));
+        const parts = [`${this.slotAt(slot)} = jsrt_object_new(&_jsrt_class_${id})`];
+        expr.entries.forEach((entry, index) => {
+          parts.push(
+            `jsrt_object_set(${this.slotAt(slot)}, ${index}, ${this.emitExpression(entry.value)})`,
+          );
+        });
+        parts.push(this.slotAt(slot));
+        return `(${parts.join(', ')})`;
+      }
+
+      case 'collection-new':
+        return expr.collection === 'map' ? 'jsrt_map_new()' : 'jsrt_set_new()';
+
+      // One runtime function per operation, shared by every collection in the program: there is no
+      // descriptor to name and no table to index, which is what makes these calls direct in a way
+      // even a non-overridden method is not.
+      case 'collection-op': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('collection operation was not registered during counting');
+        }
+        const parts = [`${this.slotAt(base)} = ${this.emitExpression(expr.target)}`];
+        expr.args.forEach((arg, index) => {
+          parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
+        });
+        const operands = [
+          this.slotAt(base),
+          ...expr.args.map((_, index) => this.slotAt(base + 1 + index)),
+        ].join(', ');
+        parts.push(collectionCall(expr.op, operands));
+        return `(${parts.join(', ')})`;
+      }
+
+      // One descriptor exists per class in the whole program, so class identity IS descriptor
+      // identity and the test is a pointer comparison. `classAt` is called for its check alone:
+      // it throws if counting and emission disagree about which classes exist.
+      case 'instanceof': {
+        this.classAt(expr.className);
+        const id = String(this.classIds.get(expr.className));
+        return `jsrt_bool(jsrt_instanceof(${this.emitExpression(expr.target)}, &_jsrt_class_${id}))`;
       }
 
       default: {
@@ -1144,6 +1354,74 @@ class Emitter {
         );
       }
     }
+  }
+
+  /** A literal's shape becomes a class with no constructor, no methods and no table -- which is
+   * all a descriptor needs. Two literals of the same shape share the name, so they share the
+   * descriptor, which is what makes them one type rather than two. */
+  private registerShape(expr: ObjectLiteral): void {
+    const name = shapeNameOf(expr);
+    if (this.classIds.has(name)) {
+      return;
+    }
+    this.classIds.set(name, this.classes.length);
+    this.classes.push({
+      kind: 'class-declaration',
+      type: expr.type,
+      span: expr.span,
+      name,
+      fields: expr.entries.map((entry, index) => ({
+        name: entry.name,
+        type:
+          expr.type.kind === 'object'
+            ? (expr.type.fields[index]?.type ?? entry.value.type)
+            : entry.value.type,
+        span: expr.span,
+      })),
+      methods: [],
+      statics: [],
+      vtable: [],
+    });
+  }
+
+  /** The one function a direct call names: the class the lowering resolved, and that class's own
+   * body. `classAt` is what turns a disagreement between counting and emission into a throw. */
+  private methodOf(expr: MethodCall): ClassMethod {
+    const method = this.classAt(expr.className).methods.find((m) => m.name === expr.method);
+    if (method === undefined) {
+      throw new Error(`class ${expr.className} has no method ${expr.method}`);
+    }
+    return method;
+  }
+
+  /** The closure constant a method-table entry names: the implementing class's own function.
+   *
+   * A table entry must be a file-scope constant, so a method that captures cannot appear in one.
+   * The gate guarantees it by refusing to override in a class that is not at module scope, and a
+   * class at module scope has nothing to capture. This throws rather than emitting a wrong table
+   * if that guarantee is ever broken -- an internal error is the honest failure there. */
+  private methodId(entry: VtableEntry): number {
+    const method = this.classAt(entry.className).methods.find((m) => m.name === entry.name);
+    if (method === undefined) {
+      throw new Error(`class ${entry.className} has no method ${entry.name}`);
+    }
+    if (method.fn.needsEnv) {
+      throw new Error(`method ${entry.className}.${entry.name} captures and cannot be in a table`);
+    }
+    return this.functionId(method.fn);
+  }
+
+  /** `&_jsrt_class_N` for the base class, or `NULL` at the root of a chain. Throws when the base
+   * has no descriptor yet, which would mean classes were emitted out of declaration order. */
+  private baseDescriptor(cls: ClassDeclaration, id: number): string {
+    if (cls.base === undefined) {
+      return 'NULL';
+    }
+    const baseId = this.classIds.get(cls.base);
+    if (baseId === undefined || baseId >= id) {
+      throw new Error(`class ${cls.name} is emitted before its base ${cls.base}`);
+    }
+    return `&_jsrt_class_${baseId}`;
   }
 
   /* The declaration a class name refers to. A miss means counting and emission disagree about
@@ -1340,4 +1618,28 @@ class Emitter {
 export function emitC(module: Module): string {
   const emitter = new Emitter();
   return emitter.emit(module);
+}
+
+/** The C call one Map or Set operation becomes, given its already-sequenced operands.
+ *
+ * A Set shares the Map's functions rather than having its own: the structure IS the same one, and
+ * `add` differs from `set` only in passing no value. The two that return a C `bool` are boxed here,
+ * and `clear`, which returns nothing, yields `undefined` -- the value JavaScript gives it. */
+function collectionCall(op: CollectionOperation, operands: string): string {
+  switch (op) {
+    case 'get':
+      return `jsrt_map_get(${operands})`;
+    case 'set':
+      return `jsrt_map_set(${operands})`;
+    case 'add':
+      return `jsrt_set_add(${operands})`;
+    case 'has':
+      return `jsrt_bool(jsrt_map_has(${operands}))`;
+    case 'delete':
+      return `jsrt_bool(jsrt_map_delete(${operands}))`;
+    case 'clear':
+      return `jsrt_map_clear(${operands})`;
+    case 'size':
+      return `jsrt_map_size(${operands})`;
+  }
 }

@@ -78,7 +78,27 @@ const payload = '0123456789012345678901234567890123456789012345678901234567';
 console.log(new S(payload));
 console.log(new AVeryLongClassNameIndeed(payload));
 
+class Priv {
+  #hidden;
+  constructor(hidden, shown) {
+    this.#hidden = hidden;
+    this.shown = shown;
+  }
+}
+
+class AllPriv {
+  #a;
+  #b;
+  constructor(a, b) {
+    this.#a = a;
+    this.#b = b;
+  }
+}
+
 console.log(new P(undefined, undefined));
+
+console.log(new Priv(1, 2));
+console.log(new AllPriv(1, 2));
 
 console.log(String(new P(1, 2)));
 console.log(String([new P(1, 2), 3]));

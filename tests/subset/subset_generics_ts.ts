@@ -1,9 +1,9 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Generics
 
-export function box<T>(item: T): T {
+function box<T>(item: T): T {
   return item;
 }
-export const v = box(42);
+console.log(box(42));
+console.log(box("x"));

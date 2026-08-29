@@ -1,12 +1,15 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Private fields
 
 class C {
-  #field = 0;
-  get() {
+  #field;
+  #store(v) {
+    this.#field = v;
     return this.#field;
   }
+  get(v) {
+    return this.#store(v);
+  }
 }
-export const c = new C();
+export const c = new C().get(1);

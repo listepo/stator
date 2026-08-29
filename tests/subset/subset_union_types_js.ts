@@ -1,7 +1,13 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Union types
 
-type Status = "ok" | "error";
-export const s: Status = "ok";
+function describe(v: string | number): string {
+  if (typeof v === "string") {
+    return `string ${v}`;
+  }
+  return `number ${v + 0}`;
+}
+
+console.log(describe("hi"));
+console.log(describe(2));

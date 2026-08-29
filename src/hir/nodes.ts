@@ -9,6 +9,16 @@
 
 import type { HType } from './types.ts';
 
+/* jscpd:ignore-start
+ *
+ * Everything below is DECLARATION, not code: this file holds the HIR's discriminated union and
+ * nothing else -- no function, no constant, nothing a copy/paste detector can be right about. A
+ * union member is `interface X extends Node { readonly kind: '...'; ... }` by construction, and
+ * the `kind` is what makes the union discriminated, so the repetition cannot be factored out
+ * without deleting the thing that makes the IR type-safe. jscpd charges that similarity by LINE,
+ * so a 50-token structural match here was billed as 623 duplicated lines (plan-notes 71). The
+ * markers cover the declarations only; a function added to this file would still be checked. */
+
 /** Source span for diagnostics and #line maps.
  *
  * `start`/`length` are 0-indexed UTF-16 offsets, matching TypeScript's own coordinate system so
@@ -109,6 +119,43 @@ export interface UnaryOp extends Node {
   readonly kind: 'unary-op';
   readonly operator: '-' | '+' | '!' | '~';
   readonly operand: Expression;
+}
+
+/** `typeof x` — not a UnaryOp, for two reasons that both matter downstream.
+ *
+ * It does not coerce: every other prefix operator runs ToNumber or ToBoolean on its operand and so
+ * constrains what may reach it, while `typeof` is total on every value there is and constrains
+ * nothing. And its result is a `string`, where UnaryOp's is fixed to `number` or `boolean` by the
+ * verifier's own rule — folding this in would mean weakening that rule for all four.
+ *
+ * The `type` is always `string`. What the operand's type is has no bearing on it: `typeof` asks the
+ * VALUE, and a value whose static type is `number` can still be an unchecked `unknown` underneath,
+ * which is precisely why the guard `typeof x === 'string'` is worth compiling at all. */
+export interface TypeOf extends Node {
+  readonly kind: 'typeof';
+  readonly operand: Expression;
+}
+
+/** A runtime check that a value is what the program says it is — STA2001 if it is not.
+ *
+ * This is golden rule 4 made executable. TypeScript's types are unsound at exactly the places this
+ * node appears: an `unknown` narrowed by a guard, an `as` cast, a value arriving from untyped code.
+ * At each, the program ASSERTS a type it has not proven, and everything the compiler emits after
+ * that point is entitled to trust the assertion completely — so the assertion is settled here,
+ * once, rather than defended by every later operation.
+ *
+ * `type` is the checked type, which is what the node's consumers see; `value.type` is what it was
+ * before, which is `unknown`. A check whose two types already agree is not built at all: the
+ * lowering emits this node only where the narrowing is real, so its presence in the HIR IS the
+ * statement that a boundary was crossed.
+ *
+ * `where` is `file:line:col`, carried on the node rather than derived from `span` at emission. A
+ * column needs the source text to compute, the emitter does not have it, and adding one to `Span`
+ * would grow every node in the IR to serve the one that reports a location to a human. */
+export interface BoundaryCheck extends Node {
+  readonly kind: 'boundary-check';
+  readonly value: Expression;
+  readonly where: string;
 }
 
 /** `&&`, `||`, `??` — separate from BinaryOp because they differ in both ways that matter to a
@@ -238,9 +285,17 @@ export interface FieldAccess extends Node {
 
 /** `o.m(a)`.
  *
- * A method is not a field and has no slot: one function is shared by every instance, so the call
- * resolves at compile time to that class's method rather than loading a closure out of the object.
- * `className` records which class's method, because that is what the emitter names.
+ * A method is not a field: no instance holds a closure for it, and one function is shared by every
+ * instance of the class that declares it. `className` records which class -- for a `direct` call
+ * that is the function the emitter names, and for a `virtual` one it is the class the SLOT was
+ * resolved against.
+ *
+ * `dispatch` is the whole of overriding. A method nothing overrides has exactly one implementation
+ * for every receiver in the chain, so the call is `direct` and costs nothing; a method some
+ * descendant overrides is `virtual` and loads its entry from the receiver's own class at `slot`.
+ * The distinction is a fact about the whole program, not about the call site, which is why the
+ * lowering decides it once per method rather than the emitter guessing per call. `super.m()` is
+ * `direct` even when `m` is overridden -- skipping the override is what `super` MEANS.
  *
  * `target` is the receiver and is NOT in `args`; it becomes argument zero, which is where a method
  * body's `this` parameter reads it from. */
@@ -249,6 +304,60 @@ export interface MethodCall extends Node {
   readonly target: Expression;
   readonly className: string;
   readonly method: string;
+  /** Index into the class's method table. Meaningful only for a `virtual` call, and correct for
+   * every descendant because a subclass's table begins with its base's, in the base's order. */
+  readonly slot: number;
+  readonly dispatch: 'direct' | 'virtual';
+  readonly args: readonly Expression[];
+}
+
+/** `{ x: 1, y: f() }`.
+ *
+ * The same allocation a class instance is -- a descriptor pointer followed by slots -- with the
+ * descriptor derived from the TYPE rather than from a declaration. `type` is the shape, whose name
+ * is the shape itself, so two literals written with the same keys and types share one descriptor.
+ *
+ * `entries` is in slot order and is the same order the source wrote, which is what makes
+ * `console.log` print the keys in the order JavaScript prints them. Each value is evaluated in
+ * that order, left to right, exactly once. */
+export interface ObjectLiteral extends Node {
+  readonly kind: 'object-literal';
+  readonly entries: readonly ObjectEntry[];
+}
+
+export interface ObjectEntry {
+  readonly name: string;
+  readonly value: Expression;
+}
+
+/** `new Map()` and `new Set()`.
+ *
+ * Not a `NewExpr`: that names a class the emitter emitted a descriptor for, and these two are
+ * runtime structures with no declaration in the program. The `collection` field is the whole
+ * difference between them below this point -- one allocator call each. */
+export interface CollectionNew extends Node {
+  readonly kind: 'collection-new';
+  readonly collection: 'map' | 'set';
+}
+
+/** Every operation the subset performs on a Map or a Set.
+ *
+ * `size` is here despite being a property rather than a call, because it is the same question asked
+ * of the same structure and giving it a node of its own would buy nothing -- exactly the reasoning
+ * that keeps `ArrayLength` separate from a general property access, seen from the other side. */
+export type CollectionOperation = 'get' | 'set' | 'has' | 'delete' | 'clear' | 'add' | 'size';
+
+/** `m.get(k)`, `s.add(v)`, `m.size` — one node for the whole method surface of both collections.
+ *
+ * A `MethodCall` would be wrong twice over: there is no `JSRTClass` method table to index and no
+ * user function to name, and the operations are not virtual in any sense -- `get` on a Map is one
+ * runtime function for every Map in the program. The verifier is what pins each operation to the
+ * collection it belongs to, so `s.get(k)` cannot survive lowering by accident. */
+export interface CollectionOp extends Node {
+  readonly kind: 'collection-op';
+  readonly collection: 'map' | 'set';
+  readonly op: CollectionOperation;
+  readonly target: Expression;
   readonly args: readonly Expression[];
 }
 
@@ -327,6 +436,8 @@ export type Expression =
   | Identifier
   | BinaryOp
   | UnaryOp
+  | TypeOf
+  | BoundaryCheck
   | LogicalOp
   | TemplateLiteral
   | StringLength
@@ -337,12 +448,37 @@ export type Expression =
   | InstanceOf
   | FieldAccess
   | MethodCall
+  | ObjectLiteral
+  | CollectionNew
+  | CollectionOp
   | FunctionExpr
   | CallExpr
   | ConsoleLogCall;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Statements
+
+/** `super(a, b)` — the base constructor, run against THIS constructor's receiver.
+ *
+ * A statement, not an expression, because that is all it can ever be: the gate admits it only as
+ * the first statement of a derived constructor, and JavaScript gives it no value. Making it a
+ * statement is also what lets the lowering place the class's own field initializers, which run
+ * after the base constructor and before the rest of the body — a fixed position only because the
+ * call is in a fixed position.
+ *
+ * `receiver` is named rather than implied: one object is being constructed, the base constructor
+ * fills its lower slots and this one fills the rest, and an implicit receiver would be the one part
+ * of that story the HIR did not say out loud. `className` is the BASE, for the same reason
+ * `MethodCall` names a class — the emitter reaches a specific constructor.
+ *
+ * A base with no constructor to run emits nothing. It can have no parameters either (the checker
+ * would reject the arguments), so there is nothing whose side effects could be skipped. */
+export interface SuperCall extends Node {
+  readonly kind: 'super-call';
+  readonly className: string;
+  readonly receiver: Expression;
+  readonly args: readonly Expression[];
+}
 
 /** let or const binding. The initializer is required: an uninitialized `let` would need
  * definite-assignment tracking to know whether a read yields `undefined`, which is Phase 3 work.
@@ -410,9 +546,41 @@ export interface ClassMethod {
 export interface ClassDeclaration extends Node {
   readonly kind: 'class-declaration';
   readonly name: string;
+  /** The immediate base class's name, absent at the root of a chain. `fields` already includes the
+   * inherited ones (base-first, which is what makes a derived instance readable as a base one), so
+   * this is not needed for layout -- it is needed for `instanceof`, which asks about the chain. */
+  readonly base?: string;
   readonly fields: readonly Parameter[];
   readonly ctor?: ClassMethod;
   readonly methods: readonly ClassMethod[];
+  /** Static members, as ordinary bindings under a name no source can spell (`C.count`).
+   *
+   * A static belongs to the class OBJECT, not to any instance: it is not a slot in the layout, it
+   * is ONE binding for the whole program, and `C.count` reads it by name. A static method is the
+   * same thing with a function for a value and no receiver. Modelling them this way is why they
+   * needed no node, no verifier case and no emitter case of their own -- a static read is an
+   * `Identifier`, a static write is an `Assignment`, and a static call is a `CallExpr`.
+   *
+   * They ride on the class rather than being spliced into the enclosing statement list so that a
+   * class stays one statement in source order; the enclosing scope reaches them by walking here,
+   * which is also what fixes WHEN they are initialized -- where the class declaration sits. */
+  readonly statics: readonly Declaration[];
+  /** The method table, in slot order: one entry per method this class responds to, inherited ones
+   * first and in the base's own order. Each entry names the class whose body IMPLEMENTS the method
+   * for THIS class, which is where an override differs from its base -- same name, same slot,
+   * different implementor.
+   *
+   * Empty for a class that participates in no overriding: such a class needs no table, because
+   * every call to its methods is direct. That is not only an optimization -- a table is a
+   * file-scope constant, and a class declared inside a function may have methods that capture,
+   * which have no one constant form. Overriding is refused there for exactly that reason. */
+  readonly vtable: readonly VtableEntry[];
+}
+
+/** One method-table entry: the name at this slot, and the class whose body implements it. */
+export interface VtableEntry {
+  readonly name: string;
+  readonly className: string;
 }
 
 /** Expression statement (wraps an expression). */
@@ -519,6 +687,42 @@ export interface ContinueStatement extends Node, Labelled {
   readonly kind: 'continue-statement';
 }
 
+/** `throw e;`.
+ *
+ * The value is ANY value — JavaScript throws strings and numbers as happily as Error objects, and
+ * this subset has no Error yet (Task 4.2), so a fixture that throws throws a primitive. The
+ * statement never completes: control transfers to the nearest enclosing catch, running every
+ * `finally` on the way, or unwinds out of `main` as an uncaught exception (exit code 1, message on
+ * stderr — matching Node's observable behaviour, which is what the golden runner compares). */
+export interface ThrowStatement extends Node {
+  readonly kind: 'throw-statement';
+  readonly value: Expression;
+}
+
+/** `try { … } catch (e) { … } finally { … }`.
+ *
+ * INVARIANT: at least one of `catchBlock`/`finallyBlock` is present — `try {}` alone is a syntax
+ * error in JavaScript, and the verifier re-checks it because an emitter handed neither would emit
+ * a block that catches nothing and cleans up nothing while claiming to.
+ *
+ * `catchBinding` is the caught name, absent both for `catch {` (the binding-less form) and when
+ * there is no catch at all — `catchBlock` is what distinguishes those two. The binding is typed
+ * `Unknown` always: anything can be thrown, so `useUnknownInCatchVariables` is not a strictness
+ * flag here but the only sound answer, and a narrowing of the caught value goes through the same
+ * BoundaryCheck machinery as any other `unknown` (§3.2.1).
+ *
+ * `finally` runs on EVERY exit from the try/catch — normal completion, a thrown value, a `return`,
+ * a `break`/`continue` crossing the statement — and its own completion wins over the one it
+ * interrupted. The emitter implements that with a per-try completion code and a dispatch after the
+ * finally body; see the emitter, and docs/HIR.md §1.3. */
+export interface TryStatement extends Node {
+  readonly kind: 'try-statement';
+  readonly tryBlock: Block;
+  readonly catchBinding?: string;
+  readonly catchBlock?: Block;
+  readonly finallyBlock?: Block;
+}
+
 /** `function f(...) {...}` as a statement.
  *
  * Separate from Declaration, and not sugar for `const f = function f(){}`, because the binding is
@@ -557,6 +761,7 @@ export type Statement =
   | Assignment
   | IndexAssignment
   | FieldAssignment
+  | SuperCall
   | ClassDeclaration
   | ExpressionStatement
   | IfStatement
@@ -567,6 +772,8 @@ export type Statement =
   | SwitchStatement
   | BreakStatement
   | ContinueStatement
+  | ThrowStatement
+  | TryStatement
   | FunctionDeclaration
   | ReturnStatement
   | Block;
@@ -583,3 +790,5 @@ export interface Module extends Node {
   readonly fileName: string;
   readonly statements: readonly Statement[];
 }
+
+/* jscpd:ignore-end */

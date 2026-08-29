@@ -11,7 +11,11 @@
 
 int jsrt_abi_version(void);
 
-/* Fatal error handler: prints message and stack-frame count, then aborts. */
-void jsrt_panic(const char *msg);
+/* Fatal error handler: prints message and stack-frame count, then aborts.
+ *
+ * `_Noreturn` is part of the contract, not decoration: a caller that ends in a panic -- a failed
+ * boundary check, say -- has no value to return and must not be made to invent one. Without it,
+ * every such caller needs an unreachable `return`, which reads as a path the code can take. */
+_Noreturn void jsrt_panic(const char *msg);
 
 #endif /* JSRT_H */
