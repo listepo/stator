@@ -1,0 +1,464 @@
+# VALUE.md — the codegen↔runtime value contract
+
+This document is **normative**. `runtime/include/jsrt_value.h` mirrors it exactly; where the two
+disagree, this file is right and the header is a bug. Per plan.md §5 Task 2.1, no C may be
+emitted before this document merges — everything the emitter writes assumes the layout below.
+
+Four things are specified here, in the order plan.md §2 requires them:
+
+1. the exact bit layout, including how `-0.0` survives;
+2. the string struct and its only sanctioned accessors;
+3. number→string as shortest-round-trip, byte-identical to Node;
+4. the GC rooting protocol, needed by the *first* line of generated C.
+
+---
+
+## 1. Bit layout — NaN boxing
+
+`jsrt_value` is exactly 64 bits (`uint64_t`). It is a plain integer type, never a union and
+never a struct: it must pass in a single register and be memcpy-able without ceremony.
+
+```c
+typedef uint64_t jsrt_value;
+```
+
+A double is stored **as itself**. Everything else hides in the quiet-NaN space:
+
+```
+ 63   62 .. 52    51     50 .. 48   47 .. 0
+┌────┬──────────┬──────┬──────────┬──────────────┐
+│sign│ exponent │quiet │   tag    │   payload    │
+│ 1  │  0x7FF   │  1   │  3 bits  │   48 bits    │
+└────┴──────────┴──────┴──────────┴──────────────┘
+```
+
+A value is a **boxed (non-double)** value iff its top 13 bits are all set:
+
+```c
+#define JSRT_NANBOX_MASK  UINT64_C(0xFFF8000000000000)
+#define jsrt_is_double(v) (((v) & JSRT_NANBOX_MASK) != JSRT_NANBOX_MASK)
+```
+
+Note the **sign bit is part of the mask**. Only *negative* quiet NaNs are tags; the entire
+positive-NaN space stays available to real doubles. That is what makes rule §1.2 workable.
+
+### 1.1 Tags
+
+| Tag | Name | Payload |
+|---|---|---|
+| 0 | `Undefined` | zero |
+| 1 | `Null` | zero |
+| 2 | `Bool` | 0 or 1 |
+| 3 | `Int32` | two's-complement `int32_t` in the low 32 bits |
+| 4 | `Object` | pointer |
+| 5 | `String` | pointer to `JSString` |
+| 6 | `Array` | pointer |
+| 7 | `Closure` | pointer to `JSRTClosure` |
+
+The tag field is **three bits and completely allocated**. There is no spare tag, and adding one
+would take a bit from `JSRT_NANBOX_MASK`, whose width is what keeps the whole positive-NaN space
+available to doubles. Anything the runtime needs to make reachable but that is *not* a JavaScript
+value — a captured-variable environment, for instance — is rooted structurally instead (§4.3),
+never by inventing a tag.
+
+A callable is a `JSRTClosure`. `fn` takes the environment even when there is none, because
+`jsrt_call` dispatches through this pointer without knowing whether the closure captures:
+
+```c
+typedef struct JSRTClosure {
+  jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env);
+  uint32_t     arity;   /* declared parameters, i.e. Function.prototype.length */
+  const char  *name;    /* "" for an anonymous function */
+  JSRTEnv     *env;     /* NULL when the function captures nothing */
+} JSRTClosure;
+
+jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t, const jsrt_value *, JSRTEnv *),
+                            uint32_t arity, const char *name, JSRTEnv *env);
+```
+
+A function that captures nothing stays a **file-static constant** with `env = NULL` — no
+allocation, which is the path rung 4a established and 4b leaves intact. Only a capturing function
+is heap-allocated via `jsrt_closure_new`, once per evaluation of its function expression, which is
+what makes two evaluations close over different variables.
+
+`arity` is the *declared* parameter count. It never bounds what a call site may pass: JavaScript
+drops extra arguments and fills missing ones with `undefined`, so every callee reads parameters
+through `jsrt_arg` rather than indexing `argv` directly.
+
+```c
+#define JSRT_TAG_SHIFT  48
+#define JSRT_PAYLOAD_MASK  UINT64_C(0x0000FFFFFFFFFFFF)
+#define JSRT_BOX(tag, payload) \
+  (JSRT_NANBOX_MASK | ((uint64_t)(tag) << JSRT_TAG_SHIFT) | ((uint64_t)(payload) & JSRT_PAYLOAD_MASK))
+
+#define JSRT_UNDEFINED  JSRT_BOX(0, 0)
+#define JSRT_NULL       JSRT_BOX(1, 0)
+#define JSRT_TRUE       JSRT_BOX(2, 1)
+#define JSRT_FALSE      JSRT_BOX(2, 0)
+```
+
+Tags 4–7 all carry pointers. They are distinct tags rather than one `Ptr` tag plus a header
+read because the common operations — "is this a string?", "is this callable?" — must be a
+register compare, not a dependent load through a cold pointer.
+
+**Pointer assumption.** The 48-bit payload holds a full pointer only because every platform in
+scope (x86-64 and AArch64, user space) leaves the high 16 bits of a valid heap pointer clear.
+`jsrt_init()` asserts this against a real heap allocation at startup rather than trusting it
+silently. If Stator is ever ported somewhere with 5-level paging enabled for user space or with
+the AArch64 top-byte-ignore feature in play, this assumption breaks loudly at startup instead of
+corrupting values — that is the entire point of checking it.
+
+Pointer payloads are **not** shifted or sign-extended on the way out; unboxing is a mask:
+
+```c
+#define jsrt_ptr(v) ((void *)(uintptr_t)((v) & JSRT_PAYLOAD_MASK))
+```
+
+`Int32` is signed, so it *is* re-widened on the way out:
+
+```c
+#define jsrt_int32(v) ((int32_t)(uint32_t)((v) & UINT64_C(0xFFFFFFFF)))
+```
+
+### 1.2 NaN canonicalization — required, not optional
+
+The tag space is negative quiet NaNs, and on x86-64 the SSE default NaN produced by `0.0/0.0`
+is `0xFFF8000000000000` — bit-identical to `JSRT_UNDEFINED`. An arithmetic NaN flowing into a
+value slot unfiltered would silently *become* `undefined`.
+
+So every double entering a `jsrt_value` passes through one funnel, which replaces any NaN with
+the canonical positive quiet NaN:
+
+```c
+#define JSRT_CANONICAL_NAN  UINT64_C(0x7FF8000000000000)
+
+static inline jsrt_value jsrt_number(double d) {
+  jsrt_value v;
+  memcpy(&v, &d, sizeof v);
+  return jsrt_is_double(v) ? v : JSRT_CANONICAL_NAN;
+}
+```
+
+This is spec-legal: ECMAScript exposes exactly one NaN. No program can observe which bit pattern
+it had. **Generated C never bit-casts a double into a `jsrt_value` directly — it always calls
+`jsrt_number()`.** The emitter has no exception to this rule, including for literals it believes
+cannot be NaN, because the cost is one predictable branch and the failure mode is silent.
+
+`memcpy` is the type-pun, not a union or a pointer cast: it is the only form that is defined
+under C11 strict aliasing, and every compiler in scope lowers it to a register move at `-O1`+.
+
+### 1.3 How `-0.0` survives
+
+`-0.0` has the bit pattern `0x8000000000000000`. Masked with `JSRT_NANBOX_MASK` that yields
+`0x8000000000000000`, which is not `JSRT_NANBOX_MASK` — so `jsrt_is_double` says *double*, and
+it round-trips unchanged. It is never canonicalized (it is not a NaN) and it is never demoted to
+`Int32` (see below).
+
+This matters because `Object.is(-0, 0) === false` and `1/-0 === -Infinity` are observable. Both
+are decision tests, per plan.md §2.
+
+**The `Int32` demotion rule exists to protect this.** A double may be stored as `Int32` only if
+it is integral, within `int32_t` range, **and is not `-0.0`**:
+
+```c
+static inline bool jsrt_fits_int32(double d) {
+  return d >= -2147483648.0 && d <= 2147483647.0
+      && (double)(int32_t)d == d
+      && !(d == 0.0 && signbit(d));   /* -0.0 must stay a double */
+}
+```
+
+The `signbit` clause is the whole reason this helper exists rather than being inlined at each
+call site: `(double)(int32_t)(-0.0) == -0.0` is *true*, so the obvious integral test admits
+`-0.0` and would quietly turn it into `+0`.
+
+**Phase 2 does not emit `Int32` at all.** Per plan.md §5, the walking skeleton treats all numbers
+as `f64`, which is spec-correct; the `i32` fast path arrives in Phase 3 with `NUMERIC.md` as a
+pure optimization. The tag is specified now so that turning it on later is a codegen change with
+no layout change — and so that `jsrt_strict_equals` is written correctly from the start.
+
+### 1.4 Equality
+
+Because a number has two possible representations (`Int32` and double) once Phase 3 lands,
+`===` on two `jsrt_value`s is **not** `a == b`. Bit equality is a fast path, not the definition:
+
+```c
+bool jsrt_strict_equals(jsrt_value a, jsrt_value b);
+```
+
+The rules it implements: `NaN !== NaN` (so bit-equal canonical NaNs must compare *false*);
+`+0 === -0` (so bit-*unequal* values must compare *true*); a number is equal across
+representations; everything else is bit equality. Getting `===` from `==` on the raw integer
+gets both zero cases and the NaN case wrong, which is why the operator is a function from day 1
+even though Phase 2's subset could get away with less.
+
+---
+
+## 2. Strings
+
+```c
+typedef struct JSString {
+  uint32_t length;   /* in UTF-16 code units, not bytes and not code points */
+  uint16_t data[];   /* flexible array member; NOT NUL-terminated */
+} JSString;
+```
+
+UTF-16 is not negotiable for v0. `String.prototype.length`, `charCodeAt`, `codePointAt`, surrogate
+pair handling, and essentially all of Test262's string coverage are defined in UTF-16 code units.
+Choosing UTF-8 to save memory would make every one of those operations either wrong or O(n), and
+the conversion cost would reappear at every boundary. Revisit only with measurements, via
+`plan-notes.md`.
+
+`length` is `uint32_t`, not `size_t`: it caps strings at 4 Gi code units (JS's own limit is lower),
+keeps the header 4 bytes so `data` starts 8-byte-aligned after padding, and makes the struct the
+same size on both 32- and 64-bit targets.
+
+Generated C touches string contents **only** through these:
+
+```c
+uint32_t jsrt_string_length(jsrt_value v);
+uint16_t jsrt_string_char(jsrt_value v, uint32_t i);
+```
+
+No direct `->data[i]` in emitted code, ever. The indirection is what allows §12's rope or
+small-string optimizations to be a runtime-only change. A bounds-check policy lives behind these
+accessors too, so it can be compiled out in release builds in one place rather than at thousands
+of emitted call sites.
+
+---
+
+## 3. Number → string
+
+**Requirement: byte-identical to the pinned Node.** Golden tests compare stdout with no
+tolerance, so this is a correctness requirement, not a formatting preference. "Round to N
+decimals" is never an acceptable fix for a mismatch — a mismatch is a bug in this layer.
+
+This splits into two problems that are easy to conflate:
+
+**3.1 Shortest round-trip digits — vendored Ryū.** Given a double, produce the shortest decimal
+digit string that parses back to exactly that double. This is `runtime/vendor/ryu/` (plan.md §5
+Task 2.5). Do not write this; do not use `printf("%.17g")`, which is neither shortest nor
+correctly rounded for this purpose.
+
+**3.2 The surrounding format — ECMA-262 `Number::toString`.** Ryū gives digits and an exponent;
+the *shape* of the output is the spec's, and it is not what a C library would print:
+
+| Value | JS output | A naive `%g` would give |
+|---|---|---|
+| `1e21` | `1e+21` | `1e+21` |
+| `1e20` | `100000000000000000000` | `1e+20` |
+| `0.000001` | `0.000001` | `1e-06` |
+| `0.0000001` | `1e-7` | `1e-07` |
+
+Note both traps: the decimal/exponential threshold is at 1e21 (not the C library's much lower
+one), and negative exponents are written `e-7`, with **no zero padding**. These are exactly the
+cases where a plausible-looking implementation passes casual testing and fails golden tests.
+
+**3.3 `console.log(-0)` prints `-0` — but `String(-0)` is `"0"`.** These are different
+operations. `Number::toString(-0)` is specified to return `"0"`, while Node's `console.log` runs
+values through `util.inspect`, which prints `-0` to preserve the distinction for humans.
+
+Golden tests compare `console.log` output, so **`jsrt_print` must implement the inspect rule, not
+the `toString` rule** for this case. They are separate functions:
+
+```c
+void      jsrt_print(jsrt_value v);            /* console.log semantics */
+jsrt_value jsrt_to_string(jsrt_value v);       /* ECMA-262 ToString */
+```
+
+The distinction is documented here because it will otherwise be discovered as a one-character
+golden-test diff by whoever writes the first `-0` test, and misdiagnosed as a Ryū bug.
+
+---
+
+## 4. GC rooting protocol
+
+Every generated function opens a shadow-stack frame. Every local holding a `jsrt_value` lives in
+that frame. Frames pop on **every** exit path — normal return, early return, and landing pads.
+
+```c
+typedef struct JSRTFrame {
+  struct JSRTFrame *prev;
+  uint32_t          count;
+  jsrt_value       *slots;
+  struct JSRTEnv   *env;    /* this function's own captured-variable environment, or NULL */
+} JSRTFrame;
+
+extern _Thread_local JSRTFrame *jsrt_frame_top;
+
+#define JSRT_FRAME(n)                                                        \
+  jsrt_value _jsrt_slots[(n)];                                               \
+  JSRTFrame  _jsrt_frame = { jsrt_frame_top, (uint32_t)(n), _jsrt_slots, NULL }; \
+  jsrt_frame_init(&_jsrt_frame);                                             \
+  jsrt_frame_top = &_jsrt_frame
+
+#define JSRT_LOCAL(i)     (_jsrt_slots[(i)])
+#define JSRT_FRAME_POP()  (jsrt_frame_top = _jsrt_frame.prev)
+#define JSRT_FRAME_ENV(e) (_jsrt_frame.env = (e))
+```
+
+`jsrt_frame_init` fills every slot with `JSRT_UNDEFINED` before the frame becomes reachable. The
+frame is pushed *after* initialization, so a collection triggered mid-prologue can never scan an
+uninitialized slot.
+
+The `env` field is the root for a captured-variable environment (§4.3). A collector traces it
+alongside `slots`; it is `NULL` for every frame whose function captures nothing, which is almost
+all of them.
+
+### 4.3 Captured-variable environments
+
+A variable read by a nested function cannot live in its declaring function's frame: the frame dies
+when the call returns, and the closure may outlive it. Such variables move to a heap `JSRTEnv`,
+chained through `parent` so a reference resolves to (levels-up, index) — both compile-time
+constants the emitter gets from capture analysis. The chain runs over **env-bearing scopes only**,
+not over source nesting, so a function that captures nothing adds no level.
+
+```c
+typedef struct JSRTEnv {
+  struct JSRTEnv *parent;
+  uint32_t        count;
+  jsrt_value      slots[];   /* C11 flexible array member */
+} JSRTEnv;
+
+JSRTEnv *jsrt_env_new(JSRTEnv *parent, uint32_t count);
+```
+
+`jsrt_env_new` fills `slots` with `JSRT_UNDEFINED` before returning, for the same reason
+`jsrt_frame_init` does.
+
+Storing captured variables in the env — rather than copying them into each closure — is what makes
+a write the declaring function performs *after* building a closure visible through that closure,
+which is what the language requires.
+
+**Why the env is rooted by the frame and not by the closure.** Tracing `closure → env → slots`
+covers the env only once a closure exists and only while one is alive. Neither holds between
+`jsrt_env_new` and the first `jsrt_closure_new`, nor in a function still reading its own captured
+locals after every closure it built has died. So the declaring function roots its own env through
+`JSRT_FRAME_ENV`. It is *not* a `jsrt_value`: the tag field is three bits and all eight values are
+allocated (§2), and widening it would take a bit from `JSRT_NANBOX_MASK`, which exists to keep the
+entire positive-NaN space available to doubles. An environment is not a JavaScript value and does
+not need to become one. See plan-notes 50.
+
+### 4.1 Why this exists under Boehm, where it does almost nothing
+
+Phase 2 uses Boehm GC, which is conservative: it scans the machine stack and would find these
+values anyway. Under Boehm these macros are nearly free and nearly pointless.
+
+They are mandatory regardless, because §12's precise generational GC needs an exact root set. If
+codegen is written without the discipline and the discipline is retrofitted later, the retrofit
+*is* a codegen rewrite — which is precisely the history plan.md §0.7 cites from Boa. The cost of
+maintaining it now is a few macros; the cost of adding it later is the backend.
+
+Consequently: **a frame is opened even when the runtime would not need it.** Uniformity is what
+makes the codegen auditable, and plan.md §7 Task 4.5 requires a codegen test that diffs emitted
+frames against emitted locals — a test that only works if the rule has no exceptions.
+
+### 4.2 Landing pads
+
+`try`/`catch` lowering (plan.md §6 Task 3.10) uses return-value + landing-pad style, never
+`setjmp`/`longjmp`. Every `goto landing_pad_N` runs its scope's cleanup, popping frames in
+reverse scope order, before jumping.
+
+The invariant, stated so a reviewer can check it mechanically: **on every path leaving a
+function, the number of `JSRT_FRAME_POP()` executed equals the number of `JSRT_FRAME()`
+entered.** An unwind path that skips a pop leaves a dangling frame pointing at a dead stack
+region — which under a precise GC is a crash, and under Boehm is an invisible time bomb that only
+surfaces after §12 lands. This is ASan/UBSan-tested per plan.md §6 Task 3.10.
+
+---
+
+## 4.4 Arrays, and the `console.log` shape they print in
+
+A `JSRTArray` is a header — `length`, `capacity`, `elements` — boxed under the `Array` tag. The
+elements are a SEPARATE allocation rather than a flexible array member, because the buffer grows
+and a flexible member cannot move without invalidating every `jsrt_value` that boxes the header.
+The header's address is therefore stable for the array's whole life, which is what lets the emitter
+hold an array in a frame slot across a push.
+
+Two ceilings are deliberate and recorded rather than hidden:
+
+- **No holes.** `jsrt_array_set` refuses a write more than one past the end (`STA2002`, raised at
+  runtime). ECMA-262 leaves the skipped indices absent, and a dense buffer cannot be absent;
+  filling them with `undefined` would make `console.log` print a different program's output.
+- **A read out of range is `undefined`**, which is why `noUncheckedIndexedAccess` types `a[i]` as
+  `T | undefined` and the HIR types it `Unknown` until Task 3.5 narrows it (plan-notes 53).
+
+### The inspect constants
+
+`console.log` on an array is `util.inspect`, not `ToString`, and `jsrt_print` reproduces Node's
+formatting byte-for-byte. The constants are Node's defaults, verified empirically against the
+pinned Node rather than read out of documentation, and `runtime/tests/print_arrays.{c,mjs}` is the
+paired corpus that holds them:
+
+| Constant | Value | What it controls |
+|---|---|---|
+| `breakLength` | 80 | The column at which a single-line array becomes a multi-line one |
+| `depth` | 2 | Below this, a nested array prints as `[Array]` |
+| `maxArrayLength` | 100 | Entries printed before `... n more items` |
+| `compact` | 3 | Feeds `groupArrayElements`, which packs more than six entries into aligned columns |
+| separator space | 2 | The `, ` between entries, which counts toward every width test |
+
+One simplification is worth stating so it does not read as a missing check: Node guards grouping
+with `ctx.currentDepth - recurseTimes < ctx.compact`, and with a depth cap of 2 and `compact` of 3
+that comparison is **always** true, so it is omitted rather than translated.
+
+Column alignment follows the element types: a run of numbers is right-aligned (`padStart`), and
+anything else left-aligned (`padEnd`).
+
+## 4.5 Class instances, and why they print differently from arrays
+
+A `JSRTObject` is a pointer to a `JSRTClass` descriptor followed by its slots, boxed under the
+`Object` tag. Unlike `JSRTArray`, the slots ARE a flexible array member — one allocation, not two —
+and that is safe here for the reason it is unsafe there: the slot count is fixed at construction
+and nothing in this subset adds a property, so the buffer never grows and the header's address
+never has to move.
+
+The descriptor is `static const` and file-scope, one per class declaration, shared by every
+instance: the class name, the slot count, and the field names in slot order. An instance therefore
+costs a pointer plus its fields, a field read is an offset load, and `instanceof` — when rung 6b
+needs it — is a comparison of descriptor pointers.
+
+A method is not in the object. One function is shared by every instance and the call site resolves
+at compile time to that class's method, with the receiver passed as argument zero under the
+ordinary closure ABI. Putting methods in slots would cost one closure per method per object and
+turn a direct call into an indirect one.
+
+An unassigned slot reads as `undefined` because that is what it HOLDS. That is a value, not an
+absence — so the key still prints, which is the observable difference from a property that was
+never declared.
+
+### What inspect does differently for an object
+
+`runtime/tests/print_objects.{c,mjs}` is the paired corpus, and it pins three behaviours that the
+array constants in §4.4 do not predict:
+
+- **The class name is inside the 80-column budget**, not merely printed in front of it. The same
+  single field under `S` fits on one line and under `AVeryLongClassNameIndeed` does not.
+- **Objects never group.** `groupArrayElements` is array-only, so eight fields are eight lines
+  where eight array elements would be a grid.
+- **Past the depth cap an object prints as `[ClassName]`**, not `[Object]`.
+
+A class with no fields prints as `Name {}`. `ToString` of an object is still `[object Object]`,
+which is a different operation from what `console.log` does — a distinction the golden fixture
+`tests/golden/ts/classes.ts` checks in both directions.
+
+---
+
+## 5. What Phase 2 actually implements
+
+The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap
+reads as scheduling, not omission:
+
+| Specified here | Phase 2 | Later |
+|---|---|---|
+| Double, `Bool`, `Undefined`, `Null`, `String` | yes | — |
+| `Int32` tag | layout only, never emitted | Phase 3 (`NUMERIC.md`) |
+| `Array` tag + `JSRTArray` | yes, from rung 5 (§4.4) | — |
+| `Object` tag + `JSRTClass`/`JSRTObject` | yes, from rung 6a (§4.5) | inheritance, statics, `instanceof`: rung 6b |
+| `Closure` tag + `JSRTClosure` | yes, from rung 4a | — |
+| `JSRTEnv` + `JSRT_FRAME_ENV` | yes, from rung 4b | — |
+| `jsrt_string_length` / `_char` | yes | — |
+| Ryū + `Number::toString` format | yes | — |
+| `JSRT_FRAME` / `JSRT_LOCAL` | yes, from the first emitted function | — |
+| Landing-pad frame discipline | no `try`/`catch` in the subset yet | Phase 3 Task 3.10 |
+| Boehm GC | yes | precise generational, §12 |

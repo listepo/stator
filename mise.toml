@@ -1,0 +1,5 @@
+# Toolchain for statorc. `mise install` then `pnpm install`.
+# clang and make come from the system (Xcode CLT) — see ci.sh.
+[tools]
+node = "26"
+"npm:pnpm" = "11.20.0"

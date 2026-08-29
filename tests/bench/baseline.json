@@ -1,0 +1,43 @@
+{
+  "recordedAt": "2026-08-29T09:36:07.148Z",
+  "host": {
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M3 Max"
+  },
+  "toolchain": {
+    "node": "v26.7.0",
+    "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+    "generatedCFlags": "-std=c11 -O2"
+  },
+  "runsPerFixture": 5,
+  "note": "compileMsBest is the minimum of runsPerFixture wall-clock measurements of `stator build`, including Node startup and the clang invocation.",
+  "measurements": [
+    {
+      "fixture": "arithmetic.ts",
+      "compileMsBest": 301,
+      "binaryBytes": 51680
+    },
+    {
+      "fixture": "control-flow.ts",
+      "compileMsBest": 314,
+      "binaryBytes": 51680
+    },
+    {
+      "fixture": "fibonacci.ts",
+      "compileMsBest": 307,
+      "binaryBytes": 51680
+    },
+    {
+      "fixture": "numbers.ts",
+      "compileMsBest": 304,
+      "binaryBytes": 51680
+    },
+    {
+      "fixture": "strings.ts",
+      "compileMsBest": 313,
+      "binaryBytes": 51680
+    }
+  ]
+}

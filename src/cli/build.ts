@@ -1,0 +1,188 @@
+/** The build driver: source -> program -> gate -> HIR -> C -> clang -> executable (plan.md §5
+ * Task 2.4).
+ *
+ * Everything policy-shaped lives above this file. The driver's own job is only sequencing and
+ * process control, and it stops at the FIRST stage that produced diagnostics: continuing past a
+ * rejected gate would hand the lowering source it already refused, and every diagnostic after that
+ * would be a consequence of the first one rather than a fact about the program.
+ */
+
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { emitC } from '../codegen/index.ts';
+import { gateProgram } from '../frontend/gate.ts';
+import { createProgram } from '../frontend/program.ts';
+import { verifyHir } from '../hir/verify.ts';
+import { lowerSourceFile } from '../lower/index.ts';
+import type { Diagnostic } from '../support/diagnostics.ts';
+import { renderDiagnostic } from '../support/diagnostics.ts';
+
+type Mode = 'ts' | 'js';
+
+export interface BuildOptions {
+  readonly entry: string;
+  readonly out: string;
+  readonly mode: Mode;
+  /** Stop after writing C to `out` instead of invoking the C compiler. */
+  readonly emitCOnly: boolean;
+  /** Keep the intermediate .c next to the executable instead of deleting it. */
+  readonly keepC: boolean;
+}
+
+/** Raised for conditions the USER can act on: a missing file, a missing toolchain. Anything the
+ * user cannot act on is a Diagnostic with an STA4xxx code, not an exception. */
+export class BuildError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'BuildError';
+  }
+}
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const RUNTIME_INCLUDE = join(REPO_ROOT, 'runtime', 'include');
+
+/** `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so CI can run
+ * the SAME golden fixtures under ASan/UBSan (plan.md §5 Task 2.7). The sanitizer has to be on both
+ * the archive and the final link or the instrumentation is only half applied, which is why one
+ * variable controls both rather than exposing a flags knob. */
+const SANITIZED = process.env['STATOR_RUNTIME'] === 'asan';
+const RUNTIME_LIB_DIR = join(REPO_ROOT, 'runtime', SANITIZED ? 'build-asan' : 'build');
+const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
+const SANITIZER_FLAGS = ['-O1', '-g', '-fsanitize=address,undefined'];
+
+/** Returns the process exit code: 0 on success, 1 if the program was rejected. */
+export function build(options: BuildOptions): number {
+  const c = compileToC(options.entry, options.mode);
+  if (c === null) {
+    return 1;
+  }
+
+  if (options.emitCOnly) {
+    writeFileSync(options.out, c, 'utf8');
+    return 0;
+  }
+
+  // The .c goes beside the executable when it is being kept, so `--keep-c` produces a file the
+  // user can actually find; otherwise it lives in a temp dir that is removed on every exit path.
+  const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
+  const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
+
+  try {
+    writeFileSync(cPath, c, 'utf8');
+    linkExecutable(cPath, options.out);
+    return 0;
+  } finally {
+    if (scratch !== null) {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+}
+
+/** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
+ * the only path any generated C comes from. Returns null if the program was rejected. */
+export function compileToC(entry: string, mode: Mode): string | null {
+  if (!existsSync(entry)) {
+    throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
+  }
+
+  const { program, diagnostics: programDiagnostics } = createProgram(entry, mode);
+  if (report(programDiagnostics)) {
+    return null;
+  }
+
+  if (report(gateProgram(program, mode))) {
+    return null;
+  }
+
+  const sourceFile = program.getSourceFiles().find((f) => f.fileName === entry.replace(/\\/g, '/'));
+  const entryFile = sourceFile ?? program.getSourceFile(entry);
+  if (entryFile === undefined) {
+    throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
+  }
+
+  const { module, diagnostics: lowerDiagnostics } = lowerSourceFile(
+    entryFile,
+    program.getTypeChecker(),
+  );
+  if (report(lowerDiagnostics) || module === null) {
+    return null;
+  }
+
+  // The verifier is not an optional debug pass: it is the only thing standing between a lowering
+  // bug and silently wrong generated C, and it costs one tree walk.
+  const problems = verifyHir(module);
+  if (problems.length > 0) {
+    for (const p of problems) {
+      process.stderr.write(`stator: ${p.code} internal error in ${p.kind}: ${p.message}\n`);
+    }
+    process.stderr.write('stator: this is a compiler bug — please report it with the input\n');
+    return null;
+  }
+
+  return emitC(module);
+}
+
+/** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are
+ * both rejections — the difference is what the user should do about it, not whether it compiles. */
+function report(diagnostics: readonly Diagnostic[]): boolean {
+  for (const d of diagnostics) {
+    process.stderr.write(`${renderDiagnostic(d)}\n`);
+  }
+  return diagnostics.length > 0;
+}
+
+function linkExecutable(cPath: string, out: string): void {
+  if (!existsSync(RUNTIME_ARCHIVE)) {
+    throw new BuildError(
+      'STA0011',
+      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`make -C runtime${
+        SANITIZED ? ' asan' : ''
+      }\``,
+    );
+  }
+
+  const cc = process.env['CC'] ?? 'clang';
+  const result = spawnSync(
+    cc,
+    [
+      '-std=c11',
+      ...(SANITIZED ? SANITIZER_FLAGS : ['-O2']),
+      '-I',
+      RUNTIME_INCLUDE,
+      cPath,
+      '-L',
+      RUNTIME_LIB_DIR,
+      '-ljsrt',
+      '-lm',
+      '-o',
+      out,
+    ],
+    { stdio: ['ignore', 'inherit', 'inherit'] },
+  );
+
+  // ENOENT here means the toolchain is absent, which is the one build failure with an actionable
+  // fix -- so it gets its own code and a per-platform install hint rather than a generic failure.
+  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ENOENT') {
+    throw new BuildError(
+      'STA0008',
+      `C compiler "${cc}" not found — install clang ` +
+        '(macOS: `xcode-select --install`; Debian/Ubuntu: `apt install clang`) or set `CC`',
+    );
+  }
+  if (result.error !== undefined) {
+    throw new BuildError('STA0009', `C compiler failed to start: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new BuildError(
+      'STA0009',
+      `C compiler failed (exit ${result.status ?? 'signal'}) — this is a compiler bug; ` +
+        'keep the C with `--keep-c` and report it',
+    );
+  }
+}

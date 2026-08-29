@@ -1,0 +1,41 @@
+{
+  "name": "statorc",
+  "version": "0.0.0",
+  "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "stator": "dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "runtime"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
+    "build": "tsc",
+    "lint": "biome check --error-on-warnings .",
+    "format": "biome check --write .",
+    "test": "node --test \"tests/unit/*.test.ts\"",
+    "test:subset": "node tests/subset/run.ts",
+    "test:golden": "node tests/golden/run.ts",
+    "bench:record": "node tests/bench/record.ts",
+    "test:runtime": "make -C runtime test",
+    "test:asan": "make -C runtime asan && make -C runtime test-asan && STATOR_RUNTIME=asan node tests/golden/run.ts",
+    "runtime": "make -C runtime",
+    "dupes": "cpd .",
+    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run test && pnpm run runtime && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:asan"
+  },
+  "dependencies": {
+    "typescript": "6.0.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.11",
+    "@types/node": "26.4.0",
+    "cpd": "5.0.16"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+runtime/build/
+runtime/build-asan/
+*.o
+*.a
+.DS_Store

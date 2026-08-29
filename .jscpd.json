@@ -1,0 +1,19 @@
+{
+  "minTokens": 50,
+  "minLines": 5,
+  "mode": "strict",
+  "crossFormats": "js-ts",
+  "reporters": ["ai"],
+  "threshold": 1,
+  "ignore": [
+    "**/node_modules/**",
+    "dist/**",
+    "runtime/vendor/**",
+    "tests/subset/subset_*",
+    "tests/subset/helper_*",
+    "tests/subset/cycle_partner_*",
+    "tests/golden/ts/**",
+    "tests/golden/js/**",
+    "tests/differential/**"
+  ]
+}

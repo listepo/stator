@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!dist",
+      "!runtime",
+      "!tests/subset/subset_*",
+      "!tests/subset/helper_*",
+      "!tests/subset/cycle_partner_*",
+      "!tests/golden/ts",
+      "!tests/golden/js",
+      "!tests/differential",
+      "!pnpm-lock.yaml"
+    ]
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": { "quoteStyle": "single" }
+  },
+  "linter": {
+    "domains": { "types": "all", "project": "all", "test": "all" },
+    "rules": {
+      "preset": "recommended",
+      "complexity": { "useLiteralKeys": "off" },
+      "suspicious": { "noExplicitAny": "error", "noUnnecessaryConditions": "off" },
+      "style": {
+        "noNonNullAssertion": "error",
+        "useImportType": "error"
+      },
+      "nursery": { "useExhaustiveSwitchCases": "error" }
+    }
+  },
+  "assist": {
+    "actions": { "source": { "organizeImports": "on" } }
+  }
+}

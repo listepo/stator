@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // The repo root, not `tests/`: unit tests import the modules they test, so the program spans
+    // both trees. Nothing is emitted from this config, so rootDir only has to contain the inputs.
+    "rootDir": ".."
+  },
+  "include": ["**/*.ts"],
+  "exclude": [
+    "subset/subset_*",
+    "subset/helper_*",
+    "subset/cycle_partner_*",
+    "golden/ts",
+    "golden/js",
+    "differential"
+  ]
+}
