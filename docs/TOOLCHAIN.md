@@ -51,6 +51,12 @@ make -C runtime clean
 Release and sanitized runtime archives build into **separate** directories (`build/` and
 `build-asan/`) so a sanitized archive can never be linked into a release binary by accident.
 
+Release links dead-strip (Task 3.12): builtins live in `libjsrt.a` compiled with
+`-ffunction-sections -fdata-sections`, and the final link passes `-Wl,-dead_strip` (Mach-O) or
+`-Wl,--gc-sections` (ELF), so a builtin the program never references is not in the binary —
+function granularity, not the archive's .o granularity. Sanitized builds skip the stripping:
+ASan's global-registration sections are exactly what `--gc-sections` is documented to drop.
+
 ## Not yet required
 
 These arrive with the phase that needs them; do not add them to CI before that:

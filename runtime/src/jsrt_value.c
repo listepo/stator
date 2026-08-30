@@ -15,10 +15,6 @@
  * Boehm GC — optional conditional inclusion
  * ============================================================================ */
 
-#ifdef JSRT_HAVE_BOEHM
-#include <gc.h>
-#endif
-
 /* ============================================================================
  * Shadow stack frame management — rooting protocol for the GC
  * ============================================================================ */
@@ -87,10 +83,7 @@ void jsrt_init(void) {
 
   free(test_ptr);
 
-  /* Initialize the Boehm GC if available. */
-#ifdef JSRT_HAVE_BOEHM
-  GC_INIT();
-#endif
+  jsrt_gc_init();
 }
 
 /* ----------------------------------------------------------------- calls */
@@ -111,14 +104,7 @@ jsrt_value jsrt_object_new(const JSRTClass *cls) {
   /* One allocation, header and slots together: the flexible member is safe because an object's
    * slot count never changes (see the comment on JSRTObject). */
   const size_t bytes = sizeof(JSRTObject) + (size_t)cls->field_count * sizeof(jsrt_value);
-#ifdef JSRT_HAVE_BOEHM
-  JSRTObject *object = (JSRTObject *)GC_MALLOC(bytes);
-#else
-  JSRTObject *object = (JSRTObject *)malloc(bytes);
-#endif
-  if (object == NULL) {
-    jsrt_panic("out of memory: object");
-  }
+  JSRTObject *object = (JSRTObject *)jsrt_gc_alloc(bytes, "object");
   object->cls = cls;
   /* Every slot starts `undefined` -- both because that is what an unassigned field reads as, and
    * because a conservative collector scans these words before the constructor has written them. */
@@ -135,27 +121,12 @@ jsrt_value jsrt_object_new(const JSRTClass *cls) {
  * the collector traces the values inside. */
 static jsrt_value *alloc_elements(uint32_t capacity) {
   size_t bytes = (size_t)capacity * sizeof(jsrt_value);
-#ifdef JSRT_HAVE_BOEHM
-  jsrt_value *elements = (jsrt_value *)GC_MALLOC(bytes);
-#else
-  jsrt_value *elements = (jsrt_value *)malloc(bytes);
-#endif
-  if (elements == NULL && capacity > 0) {
-    jsrt_panic("out of memory: array elements");
-  }
+  jsrt_value *elements = (jsrt_value *)jsrt_gc_alloc(bytes, "array elements");
   return elements;
 }
 
 jsrt_value jsrt_array_new(uint32_t count, const jsrt_value *items) {
-#ifdef JSRT_HAVE_BOEHM
-  JSRTArray *array = (JSRTArray *)GC_MALLOC(sizeof(JSRTArray));
-#else
-  JSRTArray *array = (JSRTArray *)malloc(sizeof(JSRTArray));
-#endif
-  if (array == NULL) {
-    jsrt_panic("out of memory: array");
-  }
-
+  JSRTArray *array = (JSRTArray *)jsrt_gc_alloc(sizeof(JSRTArray), "array");
   /* An empty literal still gets a one-element buffer, so `elements` is never NULL and every path
    * below can index it without a null test. */
   uint32_t capacity = count > 0 ? count : 1;
@@ -183,7 +154,10 @@ jsrt_value jsrt_array_length(jsrt_value array) {
  * definition of "in range" shared between the read and the write path. */
 static bool index_of(jsrt_value index, uint32_t *out) {
   double d = jsrt_to_number(index);
-  if (!(d >= 0.0) || d != (double)(uint32_t)d) {
+  /* Check the upper bound BEFORE converting: a C floating-to-uint32 conversion outside the
+   * representable range is undefined, while JavaScript simply treats that value as a named
+   * (non-index) property. */
+  if (!(d >= 0.0) || d >= 4294967296.0 || d != trunc(d)) {
     return false;
   }
   *out = (uint32_t)d;
@@ -251,15 +225,7 @@ void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
 
 JSRTEnv *jsrt_env_new(JSRTEnv *parent, uint32_t count) {
   size_t alloc_size = sizeof(JSRTEnv) + (size_t)count * sizeof(jsrt_value);
-#ifdef JSRT_HAVE_BOEHM
-  JSRTEnv *env = (JSRTEnv *)GC_MALLOC(alloc_size);
-#else
-  JSRTEnv *env = (JSRTEnv *)malloc(alloc_size);
-#endif
-
-  if (env == NULL) {
-    jsrt_panic("out of memory: closure environment");
-  }
+  JSRTEnv *env = (JSRTEnv *)jsrt_gc_alloc(alloc_size, "closure environment");
 
   env->parent = parent;
   env->count = count;
@@ -273,15 +239,7 @@ JSRTEnv *jsrt_env_new(JSRTEnv *parent, uint32_t count) {
 
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
                             uint32_t arity, const char *name, JSRTEnv *env) {
-#ifdef JSRT_HAVE_BOEHM
-  JSRTClosure *c = (JSRTClosure *)GC_MALLOC(sizeof(JSRTClosure));
-#else
-  JSRTClosure *c = (JSRTClosure *)malloc(sizeof(JSRTClosure));
-#endif
-
-  if (c == NULL) {
-    jsrt_panic("out of memory: closure");
-  }
+  JSRTClosure *c = (JSRTClosure *)jsrt_gc_alloc(sizeof(JSRTClosure), "closure");
 
   c->fn = fn;
   c->arity = arity;

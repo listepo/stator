@@ -1,14 +1,11 @@
 /* jsrt_string.c — UTF-16 string operations and construction. */
 
+#include "jsrt.h"
 #include "jsrt_value.h"
 
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef JSRT_HAVE_BOEHM
-#include <gc.h>
-#endif
 
 /* ============================================================================
  * String accessors — bounds-checked, required by generated C
@@ -144,15 +141,7 @@ jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len) {
 
   /* Allocate the JSString structure. */
   size_t alloc_size = sizeof(JSString) + (size_t)utf16_len * sizeof(uint16_t);
-#ifdef JSRT_HAVE_BOEHM
-  JSString *str = (JSString *)GC_MALLOC(alloc_size);
-#else
-  JSString *str = (JSString *)malloc(alloc_size);
-#endif
-
-  if (str == NULL) {
-    return JSRT_NULL; /* Allocation failure. */
-  }
+  JSString *str = (JSString *)jsrt_gc_alloc(alloc_size, "string");
 
   str->length = utf16_len;
 
@@ -187,6 +176,19 @@ jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len) {
   }
 
   /* Box the string into a jsrt_value. */
+  return JSRT_BOX(JSRT_TAG_STRING, (uintptr_t)str);
+}
+
+/* Build a string directly from UTF-16 code units -- the constructor JSON.parse needs, since a
+ * parsed JSON string is already a unit sequence (escapes decoded, surrogate pairs left as the
+ * two units they are). No validation: lone surrogates are legal JS string contents. */
+jsrt_value jsrt_string_from_units(const uint16_t *units, uint32_t len) {
+  size_t alloc_size = sizeof(JSString) + (size_t)len * sizeof(uint16_t);
+  JSString *str = (JSString *)jsrt_gc_alloc(alloc_size, "string");
+  str->length = len;
+  if (len > 0) {
+    memcpy(str->data, units, (size_t)len * sizeof(uint16_t));
+  }
   return JSRT_BOX(JSRT_TAG_STRING, (uintptr_t)str);
 }
 
@@ -260,15 +262,7 @@ jsrt_value jsrt_string_concat(jsrt_value a, jsrt_value b) {
 
   /* Allocate the combined JSString. */
   size_t alloc_size = sizeof(JSString) + (size_t)new_len * sizeof(uint16_t);
-#ifdef JSRT_HAVE_BOEHM
-  JSString *result = (JSString *)GC_MALLOC(alloc_size);
-#else
-  JSString *result = (JSString *)malloc(alloc_size);
-#endif
-
-  if (result == NULL) {
-    return JSRT_NULL; /* Allocation failure. */
-  }
+  JSString *result = (JSString *)jsrt_gc_alloc(alloc_size, "string");
 
   result->length = new_len;
 

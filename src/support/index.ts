@@ -3,3 +3,5 @@
 
 export type { Diagnostic } from './diagnostics.ts';
 export { diagnosticFromFile, diagnosticFromNode, renderDiagnostic } from './diagnostics.ts';
+export type { RuntimeFlavor } from './features.ts';
+export { intlEnabled, runtimeFlavor } from './features.ts';

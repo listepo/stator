@@ -17,6 +17,27 @@ interface Console {
    * `util.inspect` for arrays, including grouping, the 80-column break and the depth cap, and
    * `runtime/tests/print_arrays.*` is the paired corpus that holds it to that byte-for-byte. */
   log(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  /** Same formatting as `log`, same stream: Node's `info` and `debug` are stdout aliases. */
+  info(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  debug(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  /** Same formatting as `log`, on STDERR — Node's split, mapped to `jsrt_eprint`. The golden
+   * runner compares both streams byte-for-byte, so the split is held to Node's, not asserted. */
+  error(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  warn(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  /** `log`'s formatting WITHOUT its one exception: a top-level string keeps its quotes, so
+   * `console.dir("a")` is `'a'` where `console.log("a")` is `a`. */
+  dir(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  /** Prints the label (when given) and indents every later console line by two spaces, until a
+   * matching `groupEnd`. The indent applies to EACH line of a multi-line inspect, as in Node. */
+  group(label?: number | string | boolean | null | readonly unknown[] | object): void;
+  /** Outdents one level. Unmatched, it is a no-op — Node's behaviour, not an error. */
+  groupEnd(): void;
+  /** Per-label tally, printed as `label: n`; the label-less form counts under `default`. */
+  count(label?: string): void;
+  /** Zeroes a tally and prints nothing. */
+  countReset(label?: string): void;
+  /** Nothing when the condition holds; `Assertion failed[: message]` on STDERR when it does not. */
+  assert(condition: boolean, message?: string): void;
 }
 
 declare const console: Console;

@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
 import { emitC } from '../../src/codegen/index.ts';
-import { H_BOOLEAN, H_NUMBER, H_STRING } from '../../src/hir/types.ts';
+import { H_BOOLEAN, H_NUMBER, H_STRING, hUnknown } from '../../src/hir/types.ts';
 import {
   assign,
   binary,
@@ -18,7 +18,10 @@ import {
   makeModule,
   num,
   ret,
+  span,
   str,
+  throwStmt,
+  tryStmt,
   whileStmt,
 } from './helpers.ts';
 
@@ -210,7 +213,7 @@ void test('a call evaluates arguments left to right, and dispatches only once al
 void test('console.log with more than one argument throws', () => {
   const module = makeModule([exprStmt(consoleLog([num(1), num(2)]), H_NUMBER)]);
 
-  assert.throws(() => emitC(module), /console.log requires exactly 1 argument/);
+  assert.throws(() => emitC(module), /console.log has no entry point for 2 arguments/);
 });
 
 void test('relational operators dispatch to the runtime and wrap in jsrt_bool', () => {
@@ -316,4 +319,201 @@ void test('binary operands are sequenced into rooted slots before the operation'
     'left operand, then right operand, then operator',
   );
   assert.doesNotMatch(c, /jsrt_op_add\(\(JSRT_(?:GLOBAL|LOCAL).*jsrt_call/);
+});
+
+/* --- Task 3.10: exception unwinding ------------------------------------------------------- */
+
+void test('an uncaught throw in main lands on an unwind pad that calls jsrt_uncaught', () => {
+  const c = emitC(makeModule([throwStmt(str('boom'))]));
+  assert.match(c, /jsrt_throw\(/);
+  assert.match(c, /goto _jsrt_unwind;/);
+  // The pad sits after main's normal return, so a program that does not throw never reaches it.
+  const ret0 = c.indexOf('return 0;');
+  const pad = c.indexOf('_jsrt_unwind: ;');
+  assert.ok(ret0 > -1 && pad > ret0, 'the unwind pad follows the normal return');
+  assert.match(c, /jsrt_uncaught\(\);/);
+});
+
+void test('a function unwind pad pops the frame before returning', () => {
+  const c = emitC(makeModule([fnDecl('f', [], block([throwStmt(num(1))]))]));
+  // The pad is inside the function unit and must pop -- the rooting discipline requires a pop on
+  // EVERY exit path, landing pads included.
+  const fnStart = c.indexOf('_jsrt_fn_0');
+  const pad = c.indexOf('_jsrt_unwind: ;', fnStart);
+  const mainStart = c.indexOf('int main');
+  assert.ok(pad > fnStart && pad < mainStart, 'the pad belongs to the function unit');
+  const afterPad = c.slice(pad, pad + 200);
+  assert.match(afterPad, /JSRT_FRAME_POP\(\);/);
+  // Main itself throws nothing, so main gets no pad.
+  assert.ok(!c.slice(mainStart).includes('_jsrt_unwind'), 'main has no unwind pad');
+});
+
+void test('every call is followed by a pending-exception check', () => {
+  const c = emitC(
+    makeModule([fnDecl('f', [], block([])), exprStmt(call(id('f', H_NUMBER)), H_NUMBER)]),
+  );
+  const dispatch = c.indexOf('jsrt_call');
+  const check = c.indexOf('if (jsrt_pending()) { goto _jsrt_unwind; }', dispatch);
+  assert.ok(dispatch > -1 && check > dispatch, 'the check follows the dispatch');
+});
+
+void test('try/catch takes the exception into the binding slot and skips the catch normally', () => {
+  const c = emitC(
+    makeModule([
+      fnDecl('f', [], block([throwStmt(num(1))])),
+      tryStmt(block([exprStmt(call(id('f', H_NUMBER)), H_NUMBER)]), {
+        catchBinding: 'e',
+        catchBlock: block([]),
+      }),
+    ]),
+  );
+  // The pending check inside the try targets the catch pad, not the unit unwind.
+  assert.match(c, /if \(jsrt_pending\(\)\) \{ goto _jsrt_cat_0; \}/);
+  // Normal completion jumps over the handler; the handler re-arms the cell by taking.
+  const skip = c.indexOf('goto _jsrt_try_end_0;');
+  const pad = c.indexOf('_jsrt_cat_0: ;');
+  const take = c.indexOf('= jsrt_take_exception();');
+  assert.ok(skip > -1 && pad > skip && take > pad, 'skip, pad, take -- in that order');
+});
+
+void test('a catch whose try body cannot throw is not emitted at all', () => {
+  const c = emitC(
+    makeModule([
+      tryStmt(block([decl('x', num(1), 'let')]), {
+        catchBinding: 'e',
+        catchBlock: block([assign('x', num(2))]),
+      }),
+    ]),
+  );
+  assert.ok(!c.includes('_jsrt_cat_0'), 'no landing pad for an unthrowing try');
+  assert.ok(!c.includes('jsrt_take_exception'), 'no handler body either');
+});
+
+void test('try/finally stashes the exception, runs the finally, then rethrows', () => {
+  const c = emitC(
+    makeModule([
+      fnDecl('f', [], block([throwStmt(num(1))])),
+      tryStmt(block([exprStmt(call(id('f', H_NUMBER)), H_NUMBER)]), {
+        finallyBlock: block([exprStmt(consoleLog([num(9)]), H_NUMBER)]),
+      }),
+    ]),
+  );
+  // Completion protocol: 0 normal, 1 throw. The take happens BEFORE the finally body -- its own
+  // throw must find the cell empty -- and the rethrow AFTER it.
+  assert.match(c, /int _jsrt_comp_0 = 0;/);
+  const stash = c.indexOf('= jsrt_take_exception();');
+  const body = c.indexOf('jsrt_print');
+  const rethrow = c.indexOf('if (_jsrt_comp_0 == 1) { jsrt_throw(');
+  assert.ok(stash > -1 && body > stash && rethrow > body, 'stash, finally body, rethrow');
+});
+
+void test('a return through a finally routes via the completion dispatch', () => {
+  const c = emitC(
+    makeModule([
+      fnDecl(
+        'f',
+        [],
+        block([
+          tryStmt(block([ret(num(1))]), {
+            finallyBlock: block([exprStmt(consoleLog([num(9)]), H_NUMBER)]),
+          }),
+        ]),
+      ),
+    ]),
+  );
+  // The return parks its value, records jump code 2, and enters the finally; the dispatch after
+  // the finally body performs the actual return, popping the frame.
+  assert.match(c, /_jsrt_comp_0 = 2;/);
+  assert.match(c, /goto _jsrt_fin_0;/);
+  const dispatch = c.indexOf('if (_jsrt_comp_0 == 2) {');
+  const realReturn = c.indexOf('return (JSRT_FRAME_POP(), JSRT_LOCAL(', dispatch);
+  assert.ok(dispatch > -1 && realReturn > dispatch, 'the dispatch re-performs the return');
+});
+
+void test('a break out of a try inside a loop routes through the finally first', () => {
+  const brk = {
+    kind: 'break-statement',
+    type: H_NUMBER,
+    span: span(1),
+  } as const;
+  const c = emitC(
+    makeModule([
+      whileStmt(
+        bool(true),
+        block([
+          tryStmt(block([brk]), {
+            finallyBlock: block([exprStmt(consoleLog([num(9)]), H_NUMBER)]),
+          }),
+        ]),
+      ),
+    ]),
+  );
+  // The break records a jump code instead of jumping; the dispatch performs the goto.
+  assert.match(c, /_jsrt_comp_0 = 2;/);
+  const dispatch = c.indexOf('if (_jsrt_comp_0 == 2) {');
+  const jump = c.indexOf('goto brk_0;', dispatch);
+  assert.ok(dispatch > -1 && jump > dispatch, 'the dispatch performs the break');
+});
+
+void test('a break inside try/finally that targets a loop inside the same try does not route', () => {
+  const brk = {
+    kind: 'break-statement',
+    type: H_NUMBER,
+    span: span(1),
+  } as const;
+  const c = emitC(
+    makeModule([
+      tryStmt(block([whileStmt(bool(true), block([brk]))]), {
+        finallyBlock: block([exprStmt(consoleLog([num(9)]), H_NUMBER)]),
+      }),
+    ]),
+  );
+  // The jump never leaves the protected code, so no completion code is allocated for it.
+  assert.ok(!c.includes('_jsrt_comp_0 = 2;'), 'no route for a jump that stays inside the try');
+  assert.match(c, /goto brk_0;/);
+});
+
+// Task 4.1: the dynamic residue. A dyn-object-literal allocates through jsrt_dynobj_new and fills
+// with NULL caches (construction transitions every time — the case the cache does not serve);
+// every ACCESS site gets its own static JSRTIC, zero-initialized at file scope.
+void test('dynamic objects emit shape-table calls with per-site inline caches', () => {
+  const unknown = hUnknown(false);
+  const s = span(1);
+  const module = makeModule([
+    decl(
+      'o',
+      {
+        kind: 'dyn-object-literal',
+        type: unknown,
+        span: s,
+        entries: [{ name: 'x', value: num(1) }],
+      },
+      'const',
+      unknown,
+    ),
+    {
+      kind: 'dyn-field-assignment',
+      type: H_NUMBER,
+      span: s,
+      target: id('o', unknown),
+      field: 'y',
+      value: num(2),
+    },
+    exprStmt(
+      consoleLog([
+        { kind: 'dyn-field-access', type: unknown, span: s, target: id('o', unknown), field: 'y' },
+      ]),
+      H_NUMBER,
+    ),
+  ]);
+  const c = emitC(module);
+
+  assert.match(c, /jsrt_dynobj_new\(\)/);
+  // The literal's own store carries no cache; the assignment and the read each claim their own.
+  assert.match(c, /jsrt_set_prop\([^\n]*"x"[^\n]*NULL\)/);
+  assert.match(c, /jsrt_set_prop\([^\n]*"y"[^\n]*&_jsrt_ic_0\)/);
+  assert.match(c, /jsrt_get_prop\([^\n]*"y"[^\n]*&_jsrt_ic_1\)/);
+  // File-scope, static, zero-initialized: a NULL shape IS the empty cache.
+  assert.match(c, /static JSRTIC _jsrt_ic_0;/);
+  assert.match(c, /static JSRTIC _jsrt_ic_1;/);
 });

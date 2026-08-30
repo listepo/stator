@@ -1,12 +1,22 @@
 import * as ts from 'typescript';
+import type { ConsoleMethod, RegExpOperation } from '../hir/nodes.ts';
+import {
+  ARRAY_OPS,
+  CONSOLE_METHODS,
+  isSetOperation,
+  REGEXP_OPS,
+  STRING_OPS,
+} from '../hir/nodes.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromFile, diagnosticFromNode } from '../support/diagnostics.ts';
+import { intlEnabled } from '../support/features.ts';
 import { genericCallInstantiation } from './generics.ts';
 import {
   accessorDeclaringClass,
   baseClassOf,
   classDeclarationOf,
   hasExplicitAny,
+  isDynamicShape,
   isImplicitAny,
   isStaticMember,
   methodDeclaringClass,
@@ -193,13 +203,57 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.ContinueStatement:
       return { kind: 'accept' };
 
-    // `throw e;` and `try/catch/finally` are reserved for Task 3.10. The HIR carries their shape
-    // while the unwinding emitter is being built, but accepting them here would let a valid source
-    // file reach an emitter that cannot yet route landing pads (and would surface a compiler stack
-    // trace instead of a user-facing not-yet diagnostic).
+    // Task 3.10: `throw e;` and `try/catch/finally` lower to landing pads in the emitter.
     case ts.SyntaxKind.ThrowStatement:
     case ts.SyntaxKind.TryStatement:
-      return notYet('try/catch/finally and throw are not yet supported', 3);
+      return { kind: 'accept' };
+
+    // Task 3.11: modules, whole-program v0. The merged program has ONE namespace and an import
+    // binds nothing -- the importer's identifier resolves to the exporting file's own top-level
+    // binding BY NAME (src/frontend/graph.ts). Everything accepted here must preserve that
+    // resolution, which is why every renaming shape (`x as y`) is refused: it would make a name
+    // resolve to a binding that does not carry it.
+    case ts.SyntaxKind.ImportDeclaration:
+      return gateImport(node as ts.ImportDeclaration);
+    case ts.SyntaxKind.ImportClause:
+    case ts.SyntaxKind.NamedImports:
+    case ts.SyntaxKind.NamedExports:
+      return { kind: 'accept' };
+    case ts.SyntaxKind.ImportSpecifier: {
+      const spec = node as ts.ImportSpecifier;
+      // A type-only alias is erased whole, so renaming one changes nothing at runtime.
+      return spec.propertyName === undefined || importIsTypeOnly(spec)
+        ? { kind: 'accept' }
+        : notYet("renaming an import ('x as y') is not yet supported", 4);
+    }
+    // `export { x }` (no specifier). The re-export form carries a specifier and is an ALIAS: the
+    // local file never binds the name, so name-resolution through the merge cannot find it.
+    case ts.SyntaxKind.ExportDeclaration: {
+      const decl = node as ts.ExportDeclaration;
+      return decl.moduleSpecifier === undefined
+        ? { kind: 'accept' }
+        : notYet("re-exports (export { x } from '...') are not yet supported", 4);
+    }
+    case ts.SyntaxKind.ExportSpecifier: {
+      const spec = node as ts.ExportSpecifier;
+      const parent = spec.parent.parent;
+      const typeOnly = spec.isTypeOnly || (ts.isExportDeclaration(parent) && parent.isTypeOnly);
+      return spec.propertyName === undefined || typeOnly
+        ? { kind: 'accept' }
+        : notYet("renaming an export ('x as y') is not yet supported", 4);
+    }
+    // `export default <literal>`. Nothing can import a default in v0 (default imports are
+    // refused below), so the only thing at stake is the expression's side effects -- which a
+    // literal has none of, letting the lowering skip the statement entirely.
+    case ts.SyntaxKind.ExportAssignment: {
+      const assignment = node as ts.ExportAssignment;
+      if (assignment.isExportEquals) {
+        return notYet('export = is not yet supported', 4);
+      }
+      return isLiteralValue(assignment.expression)
+        ? { kind: 'accept' }
+        : notYet('a default export with a computed value is not yet supported', 4);
+    }
 
     // `catch (e)` / `catch {`. The binding must be a plain name -- `catch ({ message })`
     // destructures, and the HIR has one name per binding, the same rule gateDeclaration applies.
@@ -210,7 +264,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       const clause = node as ts.CatchClause;
       const binding = clause.variableDeclaration;
       return binding === undefined || ts.isIdentifier(binding.name)
-        ? notYet('try/catch/finally and throw are not yet supported', 3)
+        ? { kind: 'accept' }
         : notYet('destructuring a caught value is not yet supported', 3);
     }
 
@@ -357,6 +411,12 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.Constructor:
       return { kind: 'accept' };
 
+    // `/ab+c/gi` -- pattern and flags travel to the runtime as TEXT, so nothing here parses them
+    // and nothing here can disagree with the vendored engine about what they mean. An invalid
+    // pattern is settled where it is compiled: at run time, loudly (STA2005 pattern).
+    case ts.SyntaxKind.RegularExpressionLiteral:
+      return { kind: 'accept' };
+
     case ts.SyntaxKind.NewExpression:
       return gateNew(node as ts.NewExpression, typeChecker);
 
@@ -373,18 +433,64 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     // Scheduled features that already own a code: the message must name the same phase the
     // diagnostics table does, or `stator explain` and docs/DIAGNOSTICS.md disagree.
     case ts.SyntaxKind.AwaitExpression:
+      return gateAwait(node);
     case ts.SyntaxKind.YieldExpression:
-      return {
-        kind: 'not-yet',
-        code: 'STA1201',
-        message:
-          'async/await and generators are not yet supported; planned for Phase 4 (runtime v1)',
-        phase: 4,
-      };
+      return generatorNotYet();
 
     default:
       return notYet(`${describeKind(kind)} is not yet supported`, 3);
   }
+}
+
+/** A named or side-effect-only import. `import './x'` contributes an edge to the module graph
+ * and nothing else; `import type` is erased whole. What is refused binds a NAME the exporting
+ * file does not own under that spelling: a default import (the export is anonymous) and a
+ * namespace import (`ns.x` would need an object no module is). */
+function gateImport(node: ts.ImportDeclaration): GateResult {
+  const spec = node.moduleSpecifier;
+  if (ts.isStringLiteral(spec) && node.importClause?.isTypeOnly !== true) {
+    // Bare specifier: a package. Compiling one means compiling someone else's whole module graph.
+    if (!spec.text.startsWith('./') && !spec.text.startsWith('../')) {
+      return notYet('importing a package is not yet supported', 7);
+    }
+    // Node ESM never resolves an extensionless relative specifier, and Node is the ground truth
+    // the golden tests hold this compiler to. The Bundler-style resolution the checker runs
+    // WOULD resolve it, which is exactly why the gate has to say no here.
+    if (!/\.[cm]?[tj]s$/.test(spec.text)) {
+      return {
+        kind: 'never',
+        code: 'STA1113',
+        message:
+          "a relative import must name the file's extension (./x.ts, ./x.js) — " +
+          'Node ESM does not resolve extensionless specifiers',
+      };
+    }
+  }
+  const clause = node.importClause;
+  if (clause === undefined || clause.isTypeOnly) {
+    return { kind: 'accept' };
+  }
+  if (clause.name !== undefined) {
+    return notYet('default imports are not yet supported', 4);
+  }
+  if (clause.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
+    return notYet('namespace imports (import * as ns) are not yet supported', 4);
+  }
+  return { kind: 'accept' };
+}
+
+function importIsTypeOnly(spec: ts.ImportSpecifier): boolean {
+  return spec.isTypeOnly || spec.parent.parent.isTypeOnly;
+}
+
+function isLiteralValue(expr: ts.Expression): boolean {
+  return (
+    ts.isStringLiteral(expr) ||
+    ts.isNumericLiteral(expr) ||
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    expr.kind === ts.SyntaxKind.FalseKeyword ||
+    expr.kind === ts.SyntaxKind.NullKeyword
+  );
 }
 
 /** One code for the whole Phase 2 boundary. These constructs are not deferred for six different
@@ -472,7 +578,15 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker): GateR
   // `undefined` is the one exception, and it is exempted by name here because the lowering
   // special-cases it by name too: it answers with an undefined-literal, and both sides have to
   // agree or the invariant above is broken again in the other direction.
-  if (symbol !== undefined && node.text !== 'undefined' && isGlobalReference(node)) {
+  // `NaN` and `Infinity` join `undefined` in the by-name exemption: the lowering answers each
+  // with a number literal, and cDoubleLiteral already spells both in C.
+  if (
+    symbol !== undefined &&
+    node.text !== 'undefined' &&
+    node.text !== 'NaN' &&
+    node.text !== 'Infinity' &&
+    isGlobalReference(node)
+  ) {
     // Declared in a declaration file (`lib.es5.d.ts`, `stator.globals.d.ts`) -- an ambient value
     // with no body to lower -- or declared nowhere at all, which is how the checker models
     // `globalThis`. `every` rather than `some`: a name that IS declared in user code is a
@@ -553,7 +667,19 @@ function isGlobalReference(node: ts.Identifier): boolean {
     return false;
   }
   if (ts.isPropertyAccessExpression(parent)) {
-    return !(parent.name === node || (parent.expression === node && isConsoleLog(parent)));
+    // `Math` on the LEFT of a member access is exempt the way `console` is in `console.log`:
+    // gateMemberAccess and gateCall judge the member itself, with a sharper message than a
+    // blanket "the global 'Math'" — and the declaration-file test in isGlobalMath keeps a user
+    // binding named Math on the ordinary identifier path.
+    return !(
+      parent.name === node ||
+      (parent.expression === node &&
+        (isConsoleLog(parent) ||
+          node.text === 'Math' ||
+          node.text === 'Object' ||
+          node.text === 'Promise' ||
+          node.text === 'JSON'))
+    );
   }
   return true;
 }
@@ -661,7 +787,12 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
       // A bare name is HIR Assignment, `a[i] = v` is IndexAssignment, `o.x = v` is FieldAssignment.
       // Neither member form is re-checked here for what it is a member OF: this node's child is
       // gated in its own right, and gateElementAccess and gateMemberAccess are where that lives.
-      return isAssignableTarget(bin.left, typeChecker)
+      // A dynamic-shape member is a fourth target, plain `=` only: the compound forms fold to a
+      // read of the place, and the read-once machinery hoists SLOTS, which a shape-table entry
+      // is not -- so they stay refused below, not admitted here.
+      return isAssignableTarget(bin.left, typeChecker) ||
+        (ts.isPropertyAccessExpression(bin.left) &&
+          isDynamicShape(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker))
         ? { kind: 'accept' }
         : notYet('assignment to anything but a variable is not yet supported', 3);
 
@@ -789,9 +920,300 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
   // interface-typed value -- needs the shape lookup the dynamic path will bring.
   if (ts.isPropertyAccessExpression(callee)) {
     if (isConsoleLog(callee)) {
-      return call.arguments.length === 1
+      const method = callee.name.text as ConsoleMethod;
+      const shape = CONSOLE_METHODS[method];
+      const given = call.arguments.length;
+      // A spread argument is refused here rather than counted: the lowering pads and the emitter
+      // picks an entry point by COUNT, and a spread's count is not its arity.
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet(`a spread argument to console.${method} is not yet supported`, 3);
+      }
+      return given <= shape.arity && given >= shape.arity - shape.optional
         ? { kind: 'accept' }
-        : notYet('console.log with other than one argument is not yet supported', 3);
+        : notYet(`console.${method} with ${String(given)} arguments is not yet supported`, 3);
+    }
+    // A Math method: one runtime function per operation, like a collection op. Spread arguments
+    // are refused here rather than lowered wrong -- `Math.min(...xs)` has no fixed arity to fold.
+    if (isGlobalMath(callee.expression, typeChecker)) {
+      if (!MATH_METHODS.has(callee.name.text)) {
+        return notYet(`Math.${callee.name.text} is not yet supported`, 4);
+      }
+      return call.arguments.some((a) => ts.isSpreadElement(a))
+        ? notYet('a spread argument to a Math method is not yet supported', 4)
+        : { kind: 'accept' };
+    }
+    // JSON.stringify and JSON.parse, single-argument forms. A replacer, an indent, or a reviver
+    // changes the whole shape of the operation and stays deferred.
+    if (isGlobalJson(callee.expression, typeChecker)) {
+      const method = callee.name.text;
+      if (method !== 'stringify' && method !== 'parse') {
+        return notYet(`JSON.${method} is not yet supported`, 4);
+      }
+      const [argument] = call.arguments;
+      if (call.arguments.length !== 1 || argument === undefined) {
+        return notYet(`JSON.${method} with other than one argument is not yet supported`, 4);
+      }
+      if (ts.isSpreadElement(argument)) {
+        return notYet(`a spread argument to JSON.${method} is not yet supported`, 4);
+      }
+      // parse reads TEXT. A value the checker types as something OTHER than a string is the
+      // program leaning on ToString, a conversion the runtime parser does not do, and the
+      // compiler can say so here rather than at run time. An untyped value is the js-mode norm
+      // and is accepted: the tag check the runtime performs is the honest place to settle it,
+      // and it aborts loudly rather than reading a non-string as text.
+      if (method === 'parse') {
+        const argumentType = typeChecker.getTypeAtLocation(argument);
+        const untyped = (argumentType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+        return untyped || isStringReceiver(argument, typeChecker)
+          ? { kind: 'accept' }
+          : notYet('JSON.parse of a value that is not a string is not yet supported', 4);
+      }
+      return admitsUnserializable(typeChecker.getTypeAtLocation(argument), typeChecker)
+        ? notYet(
+            'JSON.stringify of a value that may be undefined or a function is not yet supported',
+            4,
+          )
+        : { kind: 'accept' };
+    }
+    // The Object namespace calls. A walking method's argument must be something whose keys the
+    // runtime CAN walk — a fixed shape (its class descriptor lists the fields) or a dynamic shape
+    // (its shape chain does). An array, a Map, or a primitive at that position answers
+    // differently in Node than either walk would, so each stays deferred rather than
+    // approximated. `fromEntries` is the mirror: it iterates, so it wants the array.
+    if (isGlobalObject(callee.expression, typeChecker)) {
+      const method = callee.name.text;
+      if (!Object.hasOwn(OBJECT_STATICS, method)) {
+        return notYet(`Object.${method} is not yet supported`, 4);
+      }
+      const shape = OBJECT_STATICS[method as keyof typeof OBJECT_STATICS];
+      const [argument, second] = call.arguments;
+      if (call.arguments.length !== shape.arity || argument === undefined) {
+        return notYet(
+          `Object.${method} with other than ${String(shape.arity)} arguments is not yet supported`,
+          4,
+        );
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to an Object method is not yet supported', 4);
+      }
+      const argType = typeChecker.getTypeAtLocation(argument);
+      const accepted =
+        shape.receiver === 'pairs'
+          ? tsTypeToHType(argType, typeChecker).kind === 'array'
+          : tsTypeToHType(argType, typeChecker).kind === 'object' ||
+            isDynamicShape(argType, typeChecker);
+      if (!accepted) {
+        return notYet(`Object.${method} on this argument type is not yet supported`, 4);
+      }
+      // The key is a runtime string: a symbol or a number reads a property neither layout holds,
+      // and converting one is the ToPropertyKey the object model owns.
+      return !shape.key || (second !== undefined && isStringReceiver(second, typeChecker))
+        ? { kind: 'accept' }
+        : notYet(`Object.${method} with a key that is not a string is not yet supported`, 4);
+    }
+    // The Promise namespace calls. `all` wants an ARRAY specifically -- the runtime walks one,
+    // and every other iterable is the Symbol.iterator protocol -- while `resolve` and `reject`
+    // take any value at all, which is why neither checks the argument's type.
+    if (isGlobalPromise(callee.expression, typeChecker)) {
+      const method = callee.name.text;
+      if (!Object.hasOwn(PROMISE_STATICS, method)) {
+        return notYet(`Promise.${method} is not yet supported`, 4);
+      }
+      if (call.arguments.length !== 1) {
+        return notYet(`Promise.${method} with other than one argument is not yet supported`, 4);
+      }
+      const [argument] = call.arguments;
+      if (argument === undefined || ts.isSpreadElement(argument)) {
+        return notYet('a spread argument to a Promise method is not yet supported', 4);
+      }
+      if (
+        PROMISE_STATICS[method as keyof typeof PROMISE_STATICS].array &&
+        !isArrayOrTuple(typeChecker.getTypeAtLocation(argument), typeChecker)
+      ) {
+        return notYet('Promise.all over a non-array is not yet supported', 4);
+      }
+      return { kind: 'accept' };
+    }
+    // A method ON a promise -- `.then`, `.catch`, `.finally` -- runs a JS callback whose own throw
+    // must become a rejection of the derived promise. That is a runtime-level catch, and the
+    // pending-exception protocol gives one to generated code, not to a builtin. An async function
+    // needs none of them: its landing pad rejects its own promise in emitted C.
+    if (
+      tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind ===
+      'promise'
+    ) {
+      return {
+        kind: 'not-yet',
+        code: 'STA1216',
+        message:
+          `Promise.prototype.${callee.name.text} is not yet supported: use an async function, ` +
+          'whose await and return do the same work',
+        phase: 5,
+      };
+    }
+    // The landed String.prototype surface. The extra argument checks close the two union-typed
+    // holes the closed set cannot see: a RegExp pattern (Task 4.3) and a replacer FUNCTION are
+    // both legal TypeScript at these positions, and each needs machinery no string op has.
+    if (isStringReceiver(callee.expression, typeChecker)) {
+      const op = callee.name.text;
+      if (!Object.hasOwn(STRING_OPS, op)) {
+        return notYet(`String.prototype.${op} is not yet supported`, 4);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to a string method is not yet supported', 4);
+      }
+      if (op === 'concat' && call.arguments.length !== 1) {
+        // Variadic concat has no node to fold into (the array-concat rule), and the
+        // zero-argument copy is pointless on an immutable string.
+        return notYet('concat with other than one argument is not yet supported', 4);
+      }
+      if (op === 'split' && call.arguments.length > 1) {
+        return notYet('split with a limit is not yet supported', 4);
+      }
+      // The two argument shapes a closed op set cannot express, both of which are legal
+      // TypeScript at these positions. A PATTERN may be a string or a regexp -- the runtime
+      // dispatches on the tag, because a regexp pattern is a scan and a string one is a substring
+      // search. Everything else in an argument position must be a string: a replacer FUNCTION runs
+      // user code per match, which is machinery no string op has.
+      if (op === 'split' || op === 'replace' || op === 'replaceAll' || op === 'search') {
+        for (const [index, argument] of call.arguments.entries()) {
+          const kind = tsTypeToHType(typeChecker.getTypeAtLocation(argument), typeChecker).kind;
+          const patternPosition = index === 0;
+          if (kind === 'regexp' ? !patternPosition : kind !== 'string') {
+            return notYet(`${op} with this argument type is not yet supported`, 4);
+          }
+        }
+        // `search` has no string form at all: the spec builds a RegExp out of whatever it is
+        // given, and `new RegExp(...)` is a constructor this compiler does not have.
+        const pattern = call.arguments[0];
+        if (op === 'search' && (pattern === undefined || !isRegExpReceiver(pattern, typeChecker))) {
+          return notYet('search with anything but a regular expression is not yet supported', 4);
+        }
+      }
+      // The locale-sensitive trio is the one part of this surface that Unicode's own tables cannot
+      // answer: collation is a per-locale ORDER and tailored casing a per-locale EXCEPTION, both
+      // of them CLDR data. They land only in the ICU feature build (Task 4.4), and only with an
+      // EXPLICIT locale -- the spec's absent-locales form reads the HOST's default, which would
+      // make a compiled program's output depend on the machine that runs it rather than on its
+      // source, and every golden test in this repo rests on that not being true.
+      if (op === 'localeCompare' || op === 'toLocaleLowerCase' || op === 'toLocaleUpperCase') {
+        if (!intlEnabled()) {
+          return {
+            kind: 'not-yet',
+            code: 'STA1215',
+            message:
+              `String.prototype.${op} needs the ICU feature build: rebuild with ` +
+              '`make -C runtime intl` and compile with STATOR_RUNTIME=intl',
+            phase: 4,
+          };
+        }
+        if (call.arguments.length !== STRING_OPS[op].arity) {
+          // No padding here, unlike every other op in the table: an absent locale is not the same
+          // request with a default filled in, it is the host-dependent form refused above.
+          return notYet(`${op} without an explicit locale is not yet supported`, 4);
+        }
+        for (const argument of call.arguments) {
+          const kind = tsTypeToHType(typeChecker.getTypeAtLocation(argument), typeChecker).kind;
+          if (kind !== 'string') {
+            // `locales` is also legally a string[] and `options` an object; both are Intl
+            // negotiation this compiler does not model.
+            return notYet(`${op} with this argument type is not yet supported`, 4);
+          }
+        }
+      }
+      return { kind: 'accept' };
+    }
+    // The landed Array.prototype surface — the non-callback methods. The refusals close what the
+    // closed set cannot express: variadic `push`/`unshift` have no node to fold into,
+    // `lastIndexOf` gives an explicit position a DIFFERENT meaning than an absent one (so the
+    // padding that is sound everywhere else would change the answer), and `concat` lands as
+    // exactly one spread array argument.
+    if (isArrayReceiver(callee.expression, typeChecker)) {
+      const op = callee.name.text;
+      if (!Object.hasOwn(ARRAY_OPS, op)) {
+        return notYet(`Array.prototype.${op} is not yet supported`, 4);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to an array method is not yet supported', 4);
+      }
+      if ((op === 'push' || op === 'unshift') && call.arguments.length !== 1) {
+        return notYet(`${op} with other than one argument is not yet supported`, 4);
+      }
+      if (op === 'lastIndexOf' && call.arguments.length > 1) {
+        return notYet('lastIndexOf with a position is not yet supported', 4);
+      }
+      if ((op === 'splice' || op === 'toSpliced') && call.arguments.length !== 2) {
+        // splice(start) deletes to the END while an explicit undefined deleteCount deletes
+        // nothing (the lastIndexOf rule), and the insertion form is variadic.
+        return notYet(`${op} with other than two arguments is not yet supported`, 4);
+      }
+      if ((op === 'sort' || op === 'toSorted') && call.arguments.length === 0) {
+        return { kind: 'accept' }; // the ToString default; an explicit undefined means the same
+      }
+      if (op === 'reduce' || op === 'reduceRight') {
+        // The zero-initial form seeds from the first element and cannot share the padded
+        // signature: an explicit `undefined` initial IS an initial.
+        if (call.arguments.length !== 2) {
+          return notYet(`${op} without an initial value is not yet supported`, 4);
+        }
+      } else if (Object.hasOwn(CALLBACK_ARRAY_OPS, op) && call.arguments.length !== 1) {
+        return notYet(`${op} with a thisArg is not yet supported`, 4);
+      }
+      if (Object.hasOwn(CALLBACK_ARRAY_OPS, op)) {
+        const cb = call.arguments[0];
+        // A callback the checker cannot type as callable would reach jsrt_call as a non-closure
+        // and die there; in js mode an `any`-typed callback lands here too, and refusing it is
+        // the honest answer until the dynamic tier can carry it.
+        if (
+          cb === undefined ||
+          typeChecker.getSignaturesOfType(typeChecker.getTypeAtLocation(cb), ts.SignatureKind.Call)
+            .length === 0
+        ) {
+          return notYet(`${op} with a non-function callback is not yet supported`, 4);
+        }
+      }
+      if (op === 'concat') {
+        const arg = call.arguments[0];
+        if (
+          call.arguments.length !== 1 ||
+          arg === undefined ||
+          !typeChecker.isArrayType(typeChecker.getTypeAtLocation(arg))
+        ) {
+          return notYet('concat with anything but one array is not yet supported', 4);
+        }
+      }
+      return { kind: 'accept' };
+    }
+    // The landed `RegExp.prototype` surface, which is `test` alone. Everything else keeps STA1211:
+    // `exec` and the non-global `match` answer an ARRAY WITH PROPERTIES (`index`, `input`,
+    // `groups` hang off it), which a dense jsrt array cannot represent, and the rest wait on that.
+    if (isRegExpReceiver(callee.expression, typeChecker)) {
+      const op = callee.name.text;
+      if (!Object.hasOwn(REGEXP_OPS, op)) {
+        return {
+          kind: 'not-yet',
+          code: 'STA1211',
+          message: `RegExp.prototype.${op} is not yet supported; planned for Phase 4 (builtins)`,
+          phase: 4,
+        };
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to a RegExp method is not yet supported', 4);
+      }
+      const arity = REGEXP_OPS[op as RegExpOperation];
+      const subject = call.arguments[0];
+      if (call.arguments.length !== arity || subject === undefined) {
+        return notYet(`${op} with other than ${String(arity)} arguments is not yet supported`, 4);
+      }
+      // The JSON.parse rule: a value the checker types as something OTHER than a string is the
+      // program leaning on ToString, which the bridge does not perform, and the compiler can say
+      // so here. An untyped one is the js-mode norm and is accepted -- the runtime's tag check is
+      // the honest place to settle it, and it aborts loudly rather than reading a non-string.
+      const subjectType = typeChecker.getTypeAtLocation(subject);
+      const untyped = (subjectType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+      return untyped || isStringReceiver(subject, typeChecker)
+        ? { kind: 'accept' }
+        : notYet(`${op} of a value that is not a string is not yet supported`, 4);
     }
     // A Map or a Set: one runtime function per operation, and no user declaration anywhere, so
     // this is decided before anything that looks for a class.
@@ -843,10 +1265,7 @@ function gateFunction(
   // A generator's asterisk is checked here as well as at YieldExpression, because a generator
   // with no `yield` in it is still a generator and still returns an iterator.
   if (!ts.isArrowFunction(fn) && fn.asteriskToken !== undefined) {
-    return asyncNotYet();
-  }
-  if (fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true) {
-    return asyncNotYet();
+    return generatorNotYet();
   }
   // A generic is compiled by MONOMORPHIZATION: one specialization per concrete type tuple a call
   // asks for (Task 3.4). That needs a declaration to specialize -- a named, hoisted one the lowering
@@ -873,12 +1292,45 @@ function gateFunction(
   return { kind: 'accept' };
 }
 
-/** Shared with the AwaitExpression/YieldExpression case: same feature, same code, same phase. */
-function asyncNotYet(): GateResult {
+/** Shared by every generator spelling: the asterisk, `yield`, and `for await`. Async landed in
+ * Phase 4 and generators did not, so this code now names only what is still missing -- one code,
+ * one feature, which is what makes `stator explain` legible. */
+function generatorNotYet(): GateResult {
   return {
     kind: 'not-yet',
     code: 'STA1201',
-    message: 'async/await and generators are not yet supported; planned for Phase 4 (runtime v1)',
+    message: 'generators are not yet supported; planned for Phase 4 (runtime v1)',
+    phase: 4,
+  };
+}
+
+/** `await e`, admitted only inside an async function's body.
+ *
+ * An await compiles into the resume machinery of the function that contains it -- a state number,
+ * a suspension point, a label -- and a module body has none of that: it runs once, on the way to
+ * `main`'s return, with no promise to settle and nothing to re-enter. Top-level await is therefore
+ * a separate feature rather than the same one in another place, and it gets its own code. */
+function gateAwait(node: ts.Node): GateResult {
+  for (let n: ts.Node | undefined = node.parent; n !== undefined; n = n.parent) {
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isArrowFunction(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isConstructorDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n)
+    ) {
+      return n.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true
+        ? { kind: 'accept' }
+        : notYet('await outside an async function is not yet supported', 4);
+    }
+  }
+  return {
+    kind: 'not-yet',
+    code: 'STA1208',
+    message:
+      'top-level await is not yet supported: a module body has no resume point to suspend into',
     phase: 4,
   };
 }
@@ -956,6 +1408,25 @@ function isStringLength(access: ts.PropertyAccessExpression, checker: ts.TypeChe
   return (objectType.flags & ts.TypeFlags.StringLike) !== 0;
 }
 
+/** The checker says the receiver is a string — literal types and unions of literals included,
+ * exactly the test isStringLength uses. */
+export function isStringReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  return (checker.getTypeAtLocation(expression).flags & ts.TypeFlags.StringLike) !== 0;
+}
+
+/** The checker says the receiver is an array — the test isArrayLength uses, shared with the
+ * lowering so both decide "array method" identically. A tuple answers false, with everything
+ * else. */
+export function isArrayReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  return checker.isArrayType(checker.getTypeAtLocation(expression));
+}
+
+/** The checker says the receiver is a RegExp — the same shape as isArrayReceiver, decided through
+ * the HType mapping so the gate and the lowering agree on what a regexp receiver is. */
+export function isRegExpReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  return tsTypeToHType(checker.getTypeAtLocation(expression), checker).kind === 'regexp';
+}
+
 /** True for the `x` in `for (const x of a)`, which is the one declaration with no initializer that
  * is nonetheless definitely assigned. */
 function isForOfBinding(decl: ts.VariableDeclaration): boolean {
@@ -1018,11 +1489,20 @@ function gateObjectLiteral(
       return notYet('an object literal key that is not an identifier is not yet supported', 3);
     }
   }
+  // The CONTEXTUAL type decides the dynamic question, and the order matters: in
+  // `const o: { x?: number } = { x: 1 }` the literal's own type is `{ x: number }` -- a perfectly
+  // good layout -- but the binding's type is the annotation, and every later read of `o` sees THAT.
+  // Building a fixed object here would make each of those reads a runtime not-yet; honoring the
+  // annotation builds the dynamic object the reads expect (docs/VALUE.md §4.10).
+  const decisive = checker.getContextualType(literal) ?? checker.getTypeAtLocation(literal);
+  if (isDynamicShape(decisive, checker)) {
+    return { kind: 'accept' };
+  }
   return tsTypeToHType(checker.getTypeAtLocation(literal), checker).kind === 'object'
     ? { kind: 'accept' }
-    : // Not a scheduling accident like the two above: an optional property or an index signature
-      // has no fixed slot list at all, so it waits on the shape table Task 4.1 builds.
-      notYet('an object literal whose shape is not a layout is not yet supported', 4);
+    : // What remains is a shape neither path takes: an interface, or an anonymous shape with a
+      // method or accessor member. Both need calling through the shape table, which is Phase 5.
+      notYet('an object literal whose shape is not a layout is not yet supported', 5);
 }
 
 /** `class C { … }`, minus every member kind whose semantics the fixed-slot layout cannot express.
@@ -1165,7 +1645,13 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
         return notYet('a method overload signature is not yet supported', 3);
       }
       if (member.asteriskToken !== undefined) {
-        return notYet('a generator method is not yet supported', 4);
+        return generatorNotYet();
+      }
+      if (member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true) {
+        // The async lowering gives a function one heap environment holding every binding it has.
+        // A method also has a receiver, which arrives as a parameter and would have to join them;
+        // that is a second question, and it lands with the second slice rather than by accident.
+        return notYet('an async method is not yet supported', 4);
       }
       if (member.questionToken !== undefined) {
         return notYet('an optional method is not yet supported', 3);
@@ -1279,12 +1765,29 @@ function opensWithSuperCall(ctor: ts.ConstructorDeclaration): boolean {
 /** The Map and Set surface the subset compiles, with the argument count each operation takes.
  *
  * A closed list, not a lookup on the lib declarations: everything here is one runtime function, and
- * an operation that is NOT here (`forEach`, `keys`, `entries`, `union`) is either an iterator or a
- * callback over one, which is the Symbol.iterator protocol the subset has no node for. Reading the
- * list off the lib would turn each of those into an internal error instead of a `not-yet`. */
+ * an operation that is NOT here (`keys`, `entries`, `values`, `union`) hands back an ITERATOR,
+ * which is the Symbol.iterator protocol the subset has no node for. Reading the list off the lib
+ * would turn each of those into an internal error instead of a `not-yet`.
+ *
+ * `forEach` IS here, and was previously grouped with them by mistake: it takes a callback, not an
+ * iterator, and the runtime calls it through `jsrt_call` exactly as the `Array.prototype` callback
+ * methods already do — no protocol the subset lacks (plan-notes 97). */
 const COLLECTION_OPS: Readonly<Record<'map' | 'set', Readonly<Record<string, number>>>> = {
-  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0 },
-  set: { add: 1, has: 1, delete: 1, clear: 0 },
+  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0, forEach: 1 },
+  set: {
+    add: 1,
+    has: 1,
+    delete: 1,
+    clear: 0,
+    forEach: 1,
+    union: 1,
+    intersection: 1,
+    difference: 1,
+    symmetricDifference: 1,
+    isSubsetOf: 1,
+    isSupersetOf: 1,
+    isDisjointFrom: 1,
+  },
 };
 
 /** `'map'`, `'set'`, or undefined for anything that is not one — the receiver test every rule
@@ -1322,12 +1825,42 @@ function gateCollectionCall(
   if (arity === undefined) {
     return notYet(`${callee.name.text} on a ${collectionName(collection)} is not yet supported`, 4);
   }
-  return call.arguments.length === arity
-    ? { kind: 'accept' }
-    : notYet(
-        `${collectionName(collection)}.${callee.name.text} with ${String(call.arguments.length)} arguments is not yet supported`,
+  if (call.arguments.length !== arity) {
+    return notYet(
+      `${collectionName(collection)}.${callee.name.text} with ${String(call.arguments.length)} arguments is not yet supported`,
+      4,
+    );
+  }
+  if (isSetOperation(callee.name.text)) {
+    // The spec takes a SET-LIKE object here -- anything with a `size`, a `has` and a `keys` -- and
+    // reads it by calling `keys()`, which is the iterator protocol the subset has no node for. A
+    // real Set is read straight out of the table instead, so that is the whole of what is accepted:
+    // the runtime reads this argument as a JSRTMap, and a wrong one is not a wrong answer.
+    const other = call.arguments[0];
+    if (other === undefined || collectionOf(other, checker) !== 'set') {
+      return notYet(
+        `Set.${callee.name.text} with an argument that is not a Set is not yet supported`,
         4,
       );
+    }
+    return { kind: 'accept' };
+  }
+  if (callee.name.text === 'forEach') {
+    // The same rule the array callback ops follow: a callback the checker cannot type as callable
+    // would reach jsrt_call as a non-closure and die there, and an `any` callback in js mode lands
+    // here too. Refusing it is the honest answer until the dynamic tier can carry one.
+    const cb = call.arguments[0];
+    if (
+      cb === undefined ||
+      checker.getSignaturesOfType(checker.getTypeAtLocation(cb), ts.SignatureKind.Call).length === 0
+    ) {
+      return notYet(
+        `${collectionName(collection)}.forEach with a non-function callback is not yet supported`,
+        4,
+      );
+    }
+  }
+  return { kind: 'accept' };
 }
 
 function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
@@ -1344,6 +1877,16 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
           `constructing a ${collectionName(collection)} from an iterable is not yet supported`,
           4,
         );
+  }
+  if (isGlobalPromise(node.expression, checker)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1216',
+      message:
+        'new Promise(executor) is not yet supported: the executor is a JS callback whose throw ' +
+        'must become a rejection, which needs a runtime-level catch',
+      phase: 5,
+    };
   }
   if (node.typeArguments !== undefined) {
     return notYet('explicit type arguments on a constructor call are not yet supported', 3);
@@ -1410,6 +1953,116 @@ function gateMemberAccess(
       ? { kind: 'accept' }
       : notYet('super on anything but an inherited method is not yet supported', 3);
   }
+  // `Math.floor` and `Math.PI` -- decided before anything that looks for a class, because Math
+  // resolves to no declaration this compiler models. A constant is a plain read the lowering
+  // folds to a literal; a method exists only as a callee (there is no function VALUE to bind);
+  // anything else on Math is a real member of the real global that has not landed.
+  if (isGlobalMath(access.expression, checker)) {
+    const member = access.name.text;
+    if (MATH_CONSTANTS.has(member)) {
+      return { kind: 'accept' };
+    }
+    if (MATH_METHODS.has(member)) {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' }
+        : notYet('using a Math method as a value is not yet supported', 4);
+    }
+    return notYet(`Math.${member} is not yet supported`, 4);
+  }
+
+  // Object namespace members follow Math's rules: a method exists only as a callee, and a member
+  // outside the landed set is deferred by name.
+  if (isGlobalObject(access.expression, checker)) {
+    const member = access.name.text;
+    if (Object.hasOwn(OBJECT_STATICS, member)) {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' }
+        : notYet('using an Object method as a value is not yet supported', 4);
+    }
+    return notYet(`Object.${member} is not yet supported`, 4);
+  }
+
+  // The Promise namespace, same rules again. `.then`/`.catch`/`.finally` are NOT here: they are
+  // members of a promise VALUE, not of the namespace, and are refused where a method call on a
+  // promise receiver is decided.
+  if (isGlobalPromise(access.expression, checker)) {
+    const member = access.name.text;
+    if (Object.hasOwn(PROMISE_STATICS, member)) {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' }
+        : notYet('using a Promise method as a value is not yet supported', 4);
+    }
+    return notYet(`Promise.${member} is not yet supported`, 4);
+  }
+
+  // JSON follows the same rules: stringify and parse exist only as callees; the rest are
+  // deferred by name.
+  if (isGlobalJson(access.expression, checker)) {
+    const member = access.name.text;
+    if (member === 'stringify' || member === 'parse') {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' }
+        : notYet(`using JSON.${member} as a value is not yet supported`, 4);
+    }
+    return notYet(`JSON.${member} is not yet supported`, 4);
+  }
+
+  // A String.prototype method exists only as a callee -- there is no function value to bind, the
+  // same rule a collection method follows. `.length` is handled by its own node and never gets
+  // here; any other string member is a real property of the real String.prototype that has not
+  // landed.
+  if (
+    isStringReceiver(access.expression, checker) &&
+    access.name.text !== 'length' &&
+    !ts.isCallExpression(access.parent)
+  ) {
+    return Object.hasOwn(STRING_OPS, access.name.text)
+      ? notYet('using a string method as a value is not yet supported', 4)
+      : notYet(`String.prototype.${access.name.text} is not yet supported`, 4);
+  }
+  if (
+    isStringReceiver(access.expression, checker) &&
+    ts.isCallExpression(access.parent) &&
+    access.parent.expression === access
+  ) {
+    return { kind: 'accept' }; // gateCall vets the operation itself
+  }
+
+  // Array.prototype members follow the same two rules as String's: a method exists only as a
+  // callee, and a member outside the landed set is deferred by name. `.length` has its own node
+  // and never gets here.
+  if (
+    isArrayReceiver(access.expression, checker) &&
+    access.name.text !== 'length' &&
+    !(ts.isCallExpression(access.parent) && access.parent.expression === access)
+  ) {
+    return Object.hasOwn(ARRAY_OPS, access.name.text)
+      ? notYet('using an array method as a value is not yet supported', 4)
+      : notYet(`Array.prototype.${access.name.text} is not yet supported`, 4);
+  }
+  if (
+    isArrayReceiver(access.expression, checker) &&
+    ts.isCallExpression(access.parent) &&
+    access.parent.expression === access
+  ) {
+    return { kind: 'accept' }; // gateCall vets the operation itself
+  }
+
+  // RegExp.prototype follows String's and Array's rule: a method is a CALLEE and nothing else.
+  // The data properties (`source`, `flags`, `lastIndex`, `global`, ...) are reads the object model
+  // has no node for yet, so they are deferred by name under the family's own code.
+  if (isRegExpReceiver(access.expression, checker)) {
+    if (ts.isCallExpression(access.parent) && access.parent.expression === access) {
+      return { kind: 'accept' }; // gateCall vets the operation itself
+    }
+    return {
+      kind: 'not-yet',
+      code: 'STA1211',
+      message: `RegExp.prototype.${access.name.text} is not yet supported; planned for Phase 4 (builtins)`,
+      phase: 4,
+    };
+  }
+
   // `C.count` -- the receiver is a class NAME, so this reads a static, not an instance field.
   // `classDeclarationOf` cannot tell the two apart: the type of the expression `C` is the class's
   // STATIC side, whose symbol is still the class declaration, so a value read and a static read
@@ -1446,6 +2099,20 @@ function gateMemberAccess(
       return shape.fields.some((f) => f.name === access.name.text)
         ? { kind: 'accept' }
         : notYet('a property that is not a field of the shape is not yet supported', 3);
+    }
+    // `p.x` on a DYNAMIC shape -- one with an optional property or an index signature -- resolves
+    // through the shape table at run time (docs/VALUE.md §4.10). Reads and writes only: a name the
+    // type does not admit is a checker error before it is a gate question, and a CALL through the
+    // table needs a bound method object nothing here builds yet.
+    const receiver = checker.getTypeAtLocation(access.expression);
+    if (isDynamicShape(receiver, checker)) {
+      if (ts.isCallExpression(access.parent) && access.parent.expression === access) {
+        return notYet('calling a method through a dynamic shape is not yet supported', 5);
+      }
+      return checker.getPropertyOfType(receiver, access.name.text) !== undefined ||
+        checker.getIndexInfosOfType(receiver).length > 0
+        ? { kind: 'accept' }
+        : notYet('a property the dynamic shape does not declare is not yet supported', 4);
     }
     return notYet('property access is not yet supported', 3);
   }
@@ -1512,7 +2179,9 @@ function gateElementAccess(
  * assigns to an existing binding, and destructuring needs a pattern the subset cannot lower. */
 function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateResult {
   if (statement.awaitModifier !== undefined) {
-    return asyncNotYet();
+    // `for await` drives the ASYNC iterator protocol, which is the generator machinery under
+    // another name -- not the await that landed with async functions.
+    return generatorNotYet();
   }
   if (!checker.isArrayType(checker.getTypeAtLocation(statement.expression))) {
     return notYet('for-of over a non-array is not yet supported', 5);
@@ -1528,10 +2197,153 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
   return { kind: 'accept' };
 }
 
+/** The Math surface Task 4.2 has landed: the EXACTLY-specified operations only. The approximated
+ * transcendentals (sin, log, exp, …) are deliberately absent — Node's answers come from V8's
+ * fdlibm and the host libm may differ in the last ulp, so they wait on vendoring fdlibm rather
+ * than shipping golden tests that depend on whichever libm built the runtime. */
+export const MATH_METHODS: ReadonlySet<string> = new Set([
+  'abs',
+  'ceil',
+  'clz32',
+  'floor',
+  'fround',
+  'imul',
+  'max',
+  'min',
+  'pow',
+  'round',
+  'sign',
+  'sqrt',
+  'trunc',
+]);
+
+/** Folded to number literals by the lowering — the compiler runs on the pinned Node, so these are
+ * bit-for-bit the doubles the golden tests diff against. */
+export const MATH_CONSTANTS: ReadonlySet<string> = new Set([
+  'E',
+  'LN10',
+  'LN2',
+  'LOG10E',
+  'LOG2E',
+  'PI',
+  'SQRT1_2',
+  'SQRT2',
+]);
+
+/** `Math` the GLOBAL, not a user binding that borrowed the name: every declaration behind the
+ * symbol is ambient. A local `const Math = …` shadows the global at runtime and must win here
+ * too, which is what the declaration-file test buys over matching the text alone. */
+export function isGlobalMath(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'Math');
+}
+
+/** The `Object` namespace, by the same test. */
+export function isGlobalObject(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'Object');
+}
+
+function isGlobalNamed(node: ts.Expression, checker: ts.TypeChecker, name: string): boolean {
+  if (!ts.isIdentifier(node) || node.text !== name) {
+    return false;
+  }
+  const declarations = checker.getSymbolAtLocation(node)?.declarations ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/** The Object namespace calls that lower, and what each takes.
+ *
+ * `arity` is exact — none of these is variadic in the landed form. `receiver` says what the FIRST
+ * argument must be: `shaped` is an object whose keys a walk can enumerate (a fixed shape, whose
+ * class descriptor lists its fields, or a dynamic shape, whose chain does), and `pairs` is an
+ * array, which is the only `fromEntries` input the runtime iterates. `key` marks the methods that
+ * additionally take a string key.
+ *
+ * Everything else on `Object` stays deferred, and each for a reason rather than a backlog:
+ * `freeze`/`isFrozen` need a frozen bit every write site would have to consult; `create`,
+ * `defineProperty`, `getPrototypeOf` and `setPrototypeOf` are prototype machinery, which ts mode
+ * bans by design and js mode leaves to the object model; `assign` mutates a target, which a
+ * FIXED shape cannot accept at all. */
+export const OBJECT_STATICS = {
+  entries: { arity: 1, receiver: 'shaped', key: false },
+  fromEntries: { arity: 1, receiver: 'pairs', key: false },
+  getOwnPropertyNames: { arity: 1, receiver: 'shaped', key: false },
+  hasOwn: { arity: 2, receiver: 'shaped', key: true },
+  keys: { arity: 1, receiver: 'shaped', key: false },
+  values: { arity: 1, receiver: 'shaped', key: false },
+} as const satisfies Record<
+  string,
+  { readonly arity: number; readonly receiver: 'pairs' | 'shaped'; readonly key: boolean }
+>;
+
+/** The `Promise` namespace calls that lower. Each takes exactly one argument -- the combinators
+ * that take two or more are the ones that need `.then`, and the executor form needs a callback
+ * whose throw has to become a rejection, which only generated code can do (see PromiseStaticCall
+ * in src/hir/nodes.ts). `all` additionally requires an ARRAY: the runtime walks one, and any other
+ * iterable is the Symbol.iterator protocol. */
+export const PROMISE_STATICS = {
+  all: { array: true },
+  reject: { array: false },
+  resolve: { array: false },
+} as const satisfies Record<string, { readonly array: boolean }>;
+
+/** An array literal written straight into `Promise.all([...])` types as a TUPLE, not an array --
+ * the contextual parameter is an iterable, and the checker keeps the more precise answer. Both
+ * are one contiguous run of elements at run time, which is the only property this asks about. */
+function isArrayOrTuple(type: ts.Type, checker: ts.TypeChecker): boolean {
+  return checker.isArrayType(type) || checker.isTupleType(type);
+}
+
+/** `Promise` the GLOBAL, by the same declaration-file test `Math` and `Object` use. */
+export function isGlobalPromise(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'Promise');
+}
+
+/** The `ARRAY_OPS` entries whose FIRST argument is a callback: the gate holds that argument to a
+ * function type, refuses the thisArg form of the single-callback methods, and requires
+ * `reduce`/`reduceRight`'s explicit initial value. */
+export const CALLBACK_ARRAY_OPS = {
+  every: true,
+  sort: true,
+  reduce: true,
+  reduceRight: true,
+  filter: true,
+  flatMap: true,
+  find: true,
+  findIndex: true,
+  findLast: true,
+  findLastIndex: true,
+  toSorted: true,
+  forEach: true,
+  map: true,
+  some: true,
+} as const;
+
+/** The `JSON` namespace, by the same test. */
+export function isGlobalJson(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'JSON');
+}
+
+/** True when `type` (or any union arm of it) admits `undefined` or a function — the values
+ * JSON.stringify answers `undefined` FOR at the top level, where the call's type promises a
+ * string. Checked at the gate so the runtime's loud abort is a compiler bug, not a user path. */
+function admitsUnserializable(type: ts.Type, checker: ts.TypeChecker): boolean {
+  const arms = type.isUnion() ? type.types : [type];
+  return arms.some(
+    (arm) =>
+      (arm.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 ||
+      checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0,
+  );
+}
+
+/** A console call the HIR can spell. The method table lives with the node it configures
+ * (`CONSOLE_METHODS` in `src/hir/nodes.ts`); what stays deferred is deferred for a reason rather
+ * than a backlog: `time`/`timeEnd` print an ELAPSED DURATION and `trace` a stack, neither of
+ * which a golden test can hold to Node byte-for-byte, and `table` is a column-layout algorithm
+ * of its own. */
 function isConsoleLog(access: ts.PropertyAccessExpression): boolean {
   return (
     ts.isIdentifier(access.expression) &&
     access.expression.text === 'console' &&
-    access.name.text === 'log'
+    Object.hasOwn(CONSOLE_METHODS, access.name.text)
   );
 }

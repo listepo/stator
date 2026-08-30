@@ -5,12 +5,14 @@ import {
   H_BOOLEAN,
   H_NULL,
   H_NUMBER,
+  H_REGEXP,
   H_STRING,
   H_UNDEFINED,
   hArray,
   hFunction,
   hMap,
   hObject,
+  hPromise,
   hSet,
   hTypeEquals,
   hTypeName,
@@ -88,6 +90,10 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
   const collection = collectionTypeToHType(type, checker, depth);
   if (collection !== null) {
     return collection;
+  }
+
+  if (isLibInterface(type, 'RegExp')) {
+    return H_REGEXP;
   }
 
   const object = classTypeToHType(type, checker, depth);
@@ -278,6 +284,41 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
     });
   }
   return hObject(shapeName(fields), fields, [], []);
+}
+
+/** Whether `type` is an anonymous object shape that goes to the DYNAMIC representation -- a shape
+ * table plus inline caches (docs/VALUE.md §4.10) -- rather than a fixed layout.
+ *
+ * The line between the two paths is drawn here and nowhere else. A shape qualifies when it is
+ * anonymous (interfaces stay refused: a value typed by one may be an instance of any class, and
+ * Phase 5 owns that), callable in no way, has no methods or accessors (calling through the shape
+ * table is also Phase 5), and -- the actual trigger -- carries an OPTIONAL property or an index
+ * signature: exactly what a fixed slot list cannot hold. An all-required anonymous shape stays on
+ * the fixed path; making it dynamic too would silently deoptimize every literal in the program. */
+export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean {
+  const symbol = type.getSymbol();
+  const anonymous =
+    symbol !== undefined &&
+    (symbol.flags & (ts.SymbolFlags.ObjectLiteral | ts.SymbolFlags.TypeLiteral)) !== 0;
+  if (
+    !anonymous ||
+    checker.getSignaturesOfType(type, ts.SignatureKind.Call).length > 0 ||
+    checker.getSignaturesOfType(type, ts.SignatureKind.Construct).length > 0
+  ) {
+    return false;
+  }
+  let optional = false;
+  for (const property of checker.getPropertiesOfType(type)) {
+    if (
+      (property.flags &
+        (ts.SymbolFlags.Method | ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !==
+      0
+    ) {
+      return false;
+    }
+    optional = optional || (property.flags & ts.SymbolFlags.Optional) !== 0;
+  }
+  return optional || checker.getIndexInfosOfType(type).length > 0;
 }
 
 /** The structural name of a shape: what makes two identical literals one layout. */
@@ -496,6 +537,22 @@ function arrayTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
  * A missing type argument is `null` rather than a guess: `Map` written bare is `Map<any, any>` to
  * the checker, and that reaches here as Unknown through the ordinary argument mapping — it is not
  * this function's business to decide what an unresolved key type means. */
+/** Is this the lib's `X`, rather than a user's class or interface of the same name?
+ *
+ * The name alone is not the test: `class Map { … }` in user code is an ordinary class, and typing
+ * it as the builtin would hand the emitter a `jsrt_map_*` call against an object with no table. The
+ * builtin is DECLARED and never defined — every one of its declarations lives in a `.d.ts` — while
+ * a user's class has a body, and a body only exists in a source file. (`hasNoDefaultLib` looks like
+ * the test for this and is not: it is false for every split lib file.) */
+function isLibInterface(type: ts.Type, name: string): boolean {
+  const symbol = type.getSymbol();
+  if (symbol?.getName() !== name) {
+    return false;
+  }
+  const declarations = symbol.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
 function collectionTypeToHType(
   type: ts.Type,
   checker: ts.TypeChecker,
@@ -504,19 +561,20 @@ function collectionTypeToHType(
   if (depth >= MAX_SIGNATURE_DEPTH) {
     return null;
   }
-  const symbol = type.getSymbol();
-  const name = symbol?.getName();
-  if (name !== 'Map' && name !== 'Set') {
+  const name = type.getSymbol()?.getName();
+  if (name !== 'Map' && name !== 'Set' && name !== 'Promise') {
     return null;
   }
-  const declarations = symbol?.getDeclarations() ?? [];
-  if (
-    declarations.length === 0 ||
-    !declarations.every((d) => d.getSourceFile().isDeclarationFile)
-  ) {
+  if (!isLibInterface(type, name)) {
     return null;
   }
   const args = checker.getTypeArguments(type as ts.TypeReference);
+  if (name === 'Promise') {
+    // `Promise<void>` is the return type of every async function that returns nothing, and `void`
+    // is not a kind: it is `undefined` everywhere else the model meets it.
+    const [value] = args;
+    return value === undefined ? null : hPromise(tsTypeToHType(value, checker, depth + 1));
+  }
   if (name === 'Set') {
     const [element] = args;
     return element === undefined ? null : hSet(tsTypeToHType(element, checker, depth + 1));

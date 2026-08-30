@@ -8,18 +8,20 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emitC } from '../codegen/index.ts';
 import { gateProgram } from '../frontend/gate.ts';
+import { moduleOrder } from '../frontend/graph.ts';
 import { createProgram } from '../frontend/program.ts';
 import { verifyHir } from '../hir/verify.ts';
-import { lowerSourceFile } from '../lower/index.ts';
+import { lowerProgram } from '../lower/index.ts';
 import { optimize } from '../passes/index.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { renderDiagnostic } from '../support/diagnostics.ts';
+import { runtimeFlavor } from '../support/features.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -52,10 +54,29 @@ const RUNTIME_INCLUDE = join(REPO_ROOT, 'runtime', 'include');
  * the SAME golden fixtures under ASan/UBSan (plan.md §5 Task 2.7). The sanitizer has to be on both
  * the archive and the final link or the instrumentation is only half applied, which is why one
  * variable controls both rather than exposing a flags knob. */
-const SANITIZED = process.env['STATOR_RUNTIME'] === 'asan';
-const RUNTIME_LIB_DIR = join(REPO_ROOT, 'runtime', SANITIZED ? 'build-asan' : 'build');
+const FLAVOR = runtimeFlavor();
+const SANITIZED = FLAVOR === 'asan';
+const RUNTIME_DIR_OF = { default: 'build', asan: 'build-asan', intl: 'build-intl' } as const;
+const RUNTIME_MAKE_TARGET = { default: '', asan: ' asan', intl: ' intl' } as const;
+const RUNTIME_LIB_DIR = join(REPO_ROOT, 'runtime', RUNTIME_DIR_OF[FLAVOR]);
 const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
 const SANITIZER_FLAGS = ['-O1', '-g', '-fsanitize=address,undefined'];
+
+/** The libraries a program linking this archive needs — Boehm's `-lgc` when the runtime was built
+ * against it, ICU's when the archive is the feature build — written next to the archive by the
+ * make rule that produced it. Reading them back is the only way this link cannot disagree with the
+ * objects it links: rediscovering them here would ask `pkg-config` a second time, in a different
+ * environment, and an archive compiled WITH Boehm linked WITHOUT `-lgc` is an undefined-symbol
+ * error at the end of every compile (plan-notes 106). Absent means an archive built before the
+ * make rule wrote one; the link then fails the way it always did, which is the honest outcome. */
+function extraLinkFlags(): string[] {
+  const recorded = join(RUNTIME_LIB_DIR, 'link-flags.txt');
+  if (!existsSync(recorded)) {
+    return [];
+  }
+  const flags = readFileSync(recorded, 'utf8').trim();
+  return flags === '' ? [] : flags.split(/\s+/);
+}
 
 /** Returns the process exit code: 0 on success, 1 if the program was rejected. */
 export function build(options: BuildOptions): number {
@@ -101,16 +122,21 @@ export function compileToC(entry: string, mode: Mode): string | null {
     return null;
   }
 
-  const sourceFile = program.getSourceFiles().find((f) => f.fileName === entry.replace(/\\/g, '/'));
-  const entryFile = sourceFile ?? program.getSourceFile(entry);
+  // Mirrors createProgram's normalization: the program stores the entry under its ABSOLUTE
+  // forward-slash name, whatever spelling the command line used.
+  const entryFile = program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
   if (entryFile === undefined) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
 
-  const { module, diagnostics: lowerDiagnostics } = lowerSourceFile(
-    entryFile,
-    program.getTypeChecker(),
-  );
+  // The module graph: every reachable file, dependencies first, cycles refused (STA3001). The
+  // whole-program merge happens in the LOWERING -- the graph only decides membership and order.
+  const { order, diagnostics: graphDiagnostics } = moduleOrder(program, entryFile, mode);
+  if (report(graphDiagnostics)) {
+    return null;
+  }
+
+  const { module, diagnostics: lowerDiagnostics } = lowerProgram(order, program.getTypeChecker());
   if (report(lowerDiagnostics) || module === null) {
     return null;
   }
@@ -147,24 +173,36 @@ function linkExecutable(cPath: string, out: string): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
       'STA0011',
-      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`make -C runtime${
-        SANITIZED ? ' asan' : ''
-      }\``,
+      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`make -C runtime${RUNTIME_MAKE_TARGET[FLAVOR]}\``,
     );
   }
 
   const cc = process.env['CC'] ?? 'clang';
+  // Tree-shaking builtins (plan.md Task 3.12): builtins live in libjsrt.a, and the archive links
+  // at .o granularity -- one referenced symbol drags in every builtin its object file holds. The
+  // linker's dead-stripping restores function granularity: a builtin the program never references
+  // is not in the binary. Mach-O strips per-symbol out of the box; ELF needs the sections split at
+  // compile time (the runtime Makefile does the same for the archive's own objects). Sanitized
+  // builds skip it -- ASan's global registration arrays are exactly the kind of unreferenced
+  // section --gc-sections is documented to break.
+  const shakeFlags = SANITIZED
+    ? []
+    : process.platform === 'darwin'
+      ? ['-Wl,-dead_strip']
+      : ['-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections'];
   const result = spawnSync(
     cc,
     [
       '-std=c11',
       ...(SANITIZED ? SANITIZER_FLAGS : ['-O2']),
+      ...shakeFlags,
       '-I',
       RUNTIME_INCLUDE,
       cPath,
       '-L',
       RUNTIME_LIB_DIR,
       '-ljsrt',
+      ...extraLinkFlags(),
       '-lm',
       '-o',
       out,

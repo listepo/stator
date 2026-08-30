@@ -1,6 +1,5 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: if statements
 
 function test(x: number): number {

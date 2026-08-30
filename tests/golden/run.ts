@@ -7,7 +7,7 @@
  * comparison to make it pass.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,11 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
 const CLI = join(REPO, 'src', 'cli', 'main.ts');
+
+/* Fixtures named `intl_*` exercise the ICU feature build (Task 4.4), which is off by default and
+ * may be absent on a machine entirely. They are SKIPPED unless this run links that archive, so
+ * `pnpm run ci` stays green without ICU and `pnpm run test:intl` is what turns them on. */
+const INTL = process.env['STATOR_RUNTIME'] === 'intl';
 
 function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: string }[] {
   const dir = join(HERE, mode);
@@ -24,13 +29,32 @@ function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: s
   } catch {
     return [];
   }
+  // A DIRECTORY is a multi-file fixture: its entry point is `main.<mode>` and the other
+  // files in it are modules the entry imports. Stator compiles the whole graph from the
+  // entry; Node likewise runs just the entry — both resolve the imports themselves.
   return names
-    .filter((name) => name.endsWith(`.${mode}`))
+    .filter(
+      (name) =>
+        (INTL || !name.startsWith('intl_')) &&
+        (name.endsWith(`.${mode}`) ||
+          statSync(join(dir, name), { throwIfNoEntry: false })?.isDirectory()),
+    )
     .sort()
-    .map((name) => ({ mode, name, path: join(dir, name) }));
+    .map((name) => ({
+      mode,
+      name,
+      path: name.endsWith(`.${mode}`) ? join(dir, name) : join(dir, name, `main.${mode}`),
+    }));
 }
 
-function runCompiled(path: string, mode: 'ts' | 'js'): string {
+/* Both streams, because console.error/warn write to STDERR in Node and the runtime mirrors
+ * that — comparing stdout alone would let a wrong-stream bug pass. */
+interface Streams {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+function runCompiled(path: string, mode: 'ts' | 'js'): Streams {
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
@@ -44,18 +68,18 @@ function runCompiled(path: string, mode: 'ts' | 'js'): string {
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
     }
-    return exec.stdout;
+    return { stdout: exec.stdout, stderr: exec.stderr };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
 }
 
-function runNode(path: string): string {
+function runNode(path: string): Streams {
   const result = spawnSync(process.execPath, [path], { encoding: 'utf8' });
   if (result.status !== 0) {
     throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);
   }
-  return result.stdout;
+  return { stdout: result.stdout, stderr: result.stderr };
 }
 
 function main(): void {
@@ -67,11 +91,12 @@ function main(): void {
     try {
       const actual = runCompiled(fixture.path, fixture.mode);
       const expected = runNode(fixture.path);
-      if (actual === expected) {
+      if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
         passed += 1;
       } else {
+        const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
         failures.push(
-          `${fixture.mode}/${fixture.name}: stdout differs\n  stator: ${JSON.stringify(actual)}\n  node:   ${JSON.stringify(expected)}`,
+          `${fixture.mode}/${fixture.name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`,
         );
       }
     } catch (error) {

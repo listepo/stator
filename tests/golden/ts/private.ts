@@ -62,6 +62,11 @@ console.log(c.bump());
 console.log(c.jump());
 console.log(c.read());
 console.log(c);
+// Reflection exposes ordinary own properties only; #private slots are not property keys.
+console.log(Object.keys(c));
+console.log(Object.getOwnPropertyNames(c));
+console.log(Object.hasOwn(c, '#count'));
+console.log(Object.hasOwn(c, 'label'));
 
 const o = new Opaque(7, 'x');
 console.log(o.describe());

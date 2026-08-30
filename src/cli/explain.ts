@@ -14,11 +14,13 @@
  */
 
 import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { gateProgram } from '../frontend/gate.ts';
+import { moduleOrder } from '../frontend/graph.ts';
 import { createProgram } from '../frontend/program.ts';
 import type { Expression, Module, Statement } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
-import { lowerSourceFile } from '../lower/index.ts';
+import { lowerProgram } from '../lower/index.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { renderDiagnostic } from '../support/diagnostics.ts';
 import { BuildError } from './build.ts';
@@ -60,12 +62,24 @@ export function explainFile(entry: string, mode: Mode): Explanation {
     return verdictFromDiagnostics;
   }
 
-  const entryFile = program.getSourceFile(entry);
+  // Mirrors createProgram's normalization: the program stores the entry under its ABSOLUTE
+  // forward-slash name, whatever spelling the command line used.
+  const entryFile = program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
   if (entryFile === undefined) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
 
-  const { module, diagnostics } = lowerSourceFile(entryFile, program.getTypeChecker());
+  // The verdict covers the whole module graph, exactly as the build does: a cycle or a
+  // cross-file collision decides the entry's verdict, and a dependency's Unknown makes the
+  // program dynamic -- per-file verdicts would claim `static` for an entry whose import graph
+  // cannot compile.
+  const { order, diagnostics: graphDiagnostics } = moduleOrder(program, entryFile, mode);
+  const graphVerdict = classify(graphDiagnostics);
+  if (graphVerdict !== null) {
+    return graphVerdict;
+  }
+
+  const { module, diagnostics } = lowerProgram(order, program.getTypeChecker());
   const verdictFromLowering = classify(diagnostics);
   if (verdictFromLowering !== null) {
     return verdictFromLowering;
@@ -166,6 +180,10 @@ function statementHasUnknown(stmt: Statement): boolean {
       return expressionHasUnknown(stmt.iterable) || statementHasUnknown(stmt.body);
     case 'field-assignment':
       return expressionHasUnknown(stmt.target) || expressionHasUnknown(stmt.value);
+    // Dynamic BY DEFINITION: the node exists because the receiver's type has no layout, so the
+    // walk of its operands is for completeness, not for the verdict.
+    case 'dyn-field-assignment':
+      return true;
     // A field's type is not reached by recursion -- fields are Parameters, not Expressions -- so a
     // class holding an `any` field is dynamic at its DECLARATION, not only where it is read.
     case 'class-declaration':
@@ -249,6 +267,14 @@ function expressionHasUnknown(expr: Expression): boolean {
     // one dynamic is a value it was built from -- which is exactly what a read of it will find.
     case 'object-literal':
       return expr.entries.some((e) => expressionHasUnknown(e.value));
+    // Dynamic by definition -- their type is Unknown, which the check at the top of this function
+    // has already answered; these arms only complete the switch.
+    case 'dyn-object-literal':
+    case 'dyn-field-access':
+    // JSON.parse answers data the checker cannot see into: the result is Unknown whatever the
+    // argument was, so the call site is where the program becomes dynamic.
+    case 'json-parse':
+      return true;
     // A fresh collection is as static as its type argument, which the check at the top of this
     // function already read: `new Map<string, number>()` is static, `new Map()` -- which the
     // checker types `Map<any, any>` -- is not.
@@ -256,6 +282,33 @@ function expressionHasUnknown(expr: Expression): boolean {
       return false;
     case 'collection-op':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    // A pattern is TEXT with a type of its own, and `test` answers a boolean whatever it was asked
+    // about -- so neither is a place a program becomes dynamic. The SUBJECT can be Unknown, and
+    // that is what the argument walk below reports.
+    case 'regexp-literal':
+      return false;
+    case 'regexp-op':
+      return expr.args.some(expressionHasUnknown);
+    // Number in, number out, checked by the verifier -- only an argument can carry an Unknown.
+    case 'math-call':
+      return expr.args.some(expressionHasUnknown);
+    case 'array-op':
+    case 'string-op':
+      return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    case 'json-stringify':
+      return expressionHasUnknown(expr.arg);
+    // A namespace walk answers what its argument holds, so an Unknown ARGUMENT carries through --
+    // except for `fromEntries`, whose result is a dynamic shape and therefore Unknown outright,
+    // which the check at the top of this function has already answered.
+    case 'object-static':
+      return expr.args.some(expressionHasUnknown);
+    // A promise's own value type is what makes the awaited result dynamic or not, and that type
+    // is on the node -- the check at the top of this function has already read it. What remains
+    // is the operand: `await someUnknown` is a dynamic site, as is `Promise.all(dynamic)`.
+    case 'await':
+      return expressionHasUnknown(expr.value);
+    case 'promise-static':
+      return expressionHasUnknown(expr.arg);
     // `typeof` is a string whatever it asked about, so an Unknown OPERAND does not make the result
     // dynamic -- asking an unknown value what it is is exactly how a program stops being dynamic.
     case 'typeof':

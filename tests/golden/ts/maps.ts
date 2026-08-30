@@ -129,3 +129,138 @@ console.log(many.size);
 console.log(many.get(39));
 console.log(many.get(38));
 console.log(many);
+
+// forEach is the one iteration form that needs no iterator: it takes a callback, and the runtime
+// calls it through jsrt_call exactly as the Array.prototype callback methods do. The spec's triple
+// is (value, key, collection) for a Map and (value, value, set) for a Set -- a Set entry is its
+// own key, which is how it is stored.
+const walk = new Map<string, number>();
+walk.set('a', 1);
+walk.set('b', 2);
+walk.set('c', 3);
+walk.forEach((v: number, k: string): void => {
+  console.log(`${k}=${v}`);
+});
+
+// The third argument is the collection itself, and a callback may declare fewer parameters.
+walk.forEach((v: number, k: string, self: Map<string, number>): void => {
+  console.log(`${k}:${v}:${self.size}`);
+});
+walk.forEach((v: number): void => {
+  console.log(v);
+});
+
+const letters = new Set<string>();
+letters.add('x');
+letters.add('y');
+letters.forEach((v: string, k: string): void => {
+  console.log(`${v}/${k}`);
+});
+
+// Insertion order survives a delete-and-reinsert: the re-added key goes to the END.
+const reordered = new Map<string, number>();
+reordered.set('one', 1);
+reordered.set('two', 2);
+reordered.set('three', 3);
+reordered.delete('one');
+reordered.set('one', 10);
+reordered.forEach((v: number, k: string): void => {
+  console.log(`${k}->${v}`);
+});
+
+// An entry ADDED during the walk is visited; one DELETED before it is reached is not. That pair is
+// why the table suppresses compaction while a walk holds an index into it: a compaction triggered
+// by the insert would renumber the entries under the cursor and the walk would skip past them.
+const mutating = new Map<number, number>();
+mutating.set(1, 1);
+mutating.set(2, 2);
+mutating.forEach((v: number, k: number): void => {
+  console.log(`saw ${k}`);
+  if (k === 1) {
+    mutating.set(99, 99);
+    mutating.delete(2);
+  }
+});
+console.log(mutating.size);
+
+// Enough inserts during a walk to force the array to grow more than once, so the preserved-index
+// path runs rather than being a case the fixture merely describes.
+const growing = new Map<number, number>();
+growing.set(0, 0);
+let added = 0;
+growing.forEach((v: number, k: number): void => {
+  if (added < 12) {
+    added = added + 1;
+    growing.set(added, added);
+  }
+});
+console.log(growing.size);
+console.log(added);
+
+// Clearing from inside the walk ends it: there is nothing left to reach.
+const cleared = new Map<number, number>();
+cleared.set(1, 1);
+cleared.set(2, 2);
+cleared.set(3, 3);
+cleared.forEach((v: number, k: number): void => {
+  console.log(k);
+  cleared.clear();
+});
+console.log(cleared.size);
+
+// Nested walks over the same collection, which is why the suppression counts rather than flags.
+const outer = new Map<string, number>();
+outer.set('p', 1);
+outer.set('q', 2);
+outer.forEach((v: number, k: string): void => {
+  outer.forEach((v2: number, k2: string): void => {
+    console.log(`${k}${k2}`);
+  });
+});
+
+// A throwing callback stops the walk and reaches the catch, the same protocol the array callbacks
+// follow -- the runtime's guard tests jsrt_pending() and the emitter checks it after the call.
+const throwing = new Map<number, number>();
+throwing.set(1, 1);
+throwing.set(2, 2);
+throwing.set(3, 3);
+try {
+  throwing.forEach((v: number, k: number): void => {
+    console.log(k);
+    if (k === 2) {
+      throw 'enough';
+    }
+  });
+} catch (e) {
+  console.log(typeof e);
+}
+console.log('after map forEach');
+
+// Nothing to walk is not a special case.
+const emptyMap = new Map<string, number>();
+emptyMap.forEach((): void => {
+  console.log('never');
+});
+const emptySet = new Set<number>();
+emptySet.forEach((): void => {
+  console.log('never either');
+});
+console.log('empty walks done');
+
+// -0 as the FIRST insert of a key: the spec stores it as +0, so the key prints as `0` and `1 / k`
+// answers Infinity. A stored -0 would show in both, and SameValueZero would hide it from `has`.
+const negzero = new Map<number, string>();
+negzero.set(-0, 'first');
+console.log(negzero);
+negzero.forEach((v: string, k: number): void => {
+  console.log(k);
+  console.log(1 / k);
+  console.log(v);
+});
+console.log(negzero.has(0));
+const negset = new Set<number>();
+negset.add(-0);
+console.log(negset);
+negset.forEach((v: number): void => {
+  console.log(1 / v);
+});

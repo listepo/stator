@@ -8,6 +8,19 @@
 
 import * as ts from 'typescript';
 import {
+  isArrayReceiver,
+  isGlobalJson,
+  isGlobalMath,
+  isGlobalObject,
+  isGlobalPromise,
+  isRegExpReceiver,
+  isStringReceiver,
+  MATH_CONSTANTS,
+  MATH_METHODS,
+  OBJECT_STATICS,
+  PROMISE_STATICS,
+} from '../frontend/gate.ts';
+import {
   genericCallInstantiation,
   specializationName,
   substituteHType,
@@ -18,6 +31,7 @@ import {
   ancestry,
   baseClassOf,
   classDeclarationOf,
+  isDynamicShape,
   isStaticMember,
   methodDeclaringClass,
   staticMemberOf,
@@ -26,6 +40,7 @@ import {
 import type {
   ArrayLength,
   ArrayLiteral,
+  ArrayOpName,
   BinaryOp,
   BinaryOperator,
   Block,
@@ -36,6 +51,7 @@ import type {
   CollectionOp,
   CollectionOperation,
   ConsoleLogCall,
+  ConsoleMethod,
   Declaration,
   Expression,
   FieldAccess,
@@ -46,20 +62,32 @@ import type {
   IndexAccess,
   InstanceOf,
   LogicalOp,
+  MathMethod,
   MethodCall,
   Module,
   NewExpr,
   ObjectEntry,
   ObjectLiteral,
+  ObjectStaticMethod,
   Parameter,
+  PromiseStaticMethod,
+  RegExpOperation,
   ReturnStatement,
   Span,
   Statement,
   StringLength,
+  StringOpName,
   SuperCall,
   SwitchClause,
   TemplateLiteral,
   UnaryOp,
+} from '../hir/nodes.ts';
+import {
+  ARRAY_OPS,
+  CONSOLE_METHODS,
+  isSetOperation,
+  REGEXP_OPS,
+  STRING_OPS,
 } from '../hir/nodes.ts';
 import type { HObject, HType } from '../hir/types.ts';
 import {
@@ -71,6 +99,7 @@ import {
   H_UNDEFINED,
   hasTypeParam,
   hFunction,
+  hPromise,
   hTypeName,
   hUnknown,
 } from '../hir/types.ts';
@@ -121,54 +150,89 @@ export function lowerSourceFile(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
+  return lowerProgram([sourceFile], checker);
+}
+
+/* Lowers a whole program -- the module-graph files in topological order, entry LAST -- into ONE
+ * merged Module (plan.md §5 Task 3.11). The merge is the binding map: it is shared across files,
+ * so a dependency's top-level names are already registered when its importers lower, and an
+ * imported identifier resolves to the exporting file's own binding by name. The graph walk has
+ * already refused what would make that unsound: cycles (STA3001) and cross-file name collisions. */
+export function lowerProgram(
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
   const bindings = new Map<string, HType>();
+  const statements: Statement[] = [];
+  const entry = files.at(-1);
+  if (entry === undefined) {
+    throw new Error('lowerProgram requires at least one file');
+  }
+  let current = entry;
 
   try {
-    // Monomorphization runs before anything is lowered, because a specialization is a FUNCTION the
-    // module contains and the module's own statements may call it. Nothing is cloned: a
-    // specialization is the generic's own AST lowered a second time with a substitution in scope.
-    const specializations = collectSpecializations(sourceFile, checker, diagnostics);
-    if (specializations === null) {
-      return { module: null, diagnostics };
-    }
-    hoistFunctionDeclarations(sourceFile.statements, checker, bindings);
-    for (const specialization of specializations) {
-      bindings.set(specialization.name, specializationType(specialization, checker));
-    }
+    for (const sourceFile of files) {
+      current = sourceFile;
+      // Monomorphization runs before anything is lowered, because a specialization is a FUNCTION
+      // the module contains and the module's own statements may call it. Nothing is cloned: a
+      // specialization is the generic's own AST lowered a second time with a substitution in
+      // scope. Two files instantiating one generic at the same tuple produce one specialization:
+      // the name (`box<number>`) is unspellable from source, so a binding under it can only be an
+      // earlier file's copy of the same function.
+      const collected = collectSpecializations(sourceFile, checker, diagnostics);
+      if (collected === null) {
+        return { module: null, diagnostics };
+      }
+      const specializations = collected.filter((spec) => !bindings.has(spec.name));
+      hoistFunctionDeclarations(sourceFile.statements, checker, bindings);
+      for (const specialization of specializations) {
+        bindings.set(specialization.name, specializationType(specialization, checker));
+      }
 
-    const statements: Statement[] = [];
-    for (const specialization of specializations) {
-      const declaration = lowerSpecialization(
-        specialization,
-        sourceFile,
-        checker,
-        bindings,
-        diagnostics,
-      );
-      if (declaration === null) {
-        return { module: null, diagnostics };
+      for (const specialization of specializations) {
+        const declaration = lowerSpecialization(
+          specialization,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+        );
+        if (declaration === null) {
+          return { module: null, diagnostics };
+        }
+        statements.push(declaration);
       }
-      statements.push(declaration);
-    }
-    for (const node of sourceFile.statements) {
-      // A generic declaration lowers to nothing: its specializations are already above, and the
-      // name itself binds no value (the gate refuses reading one).
-      if (ts.isFunctionDeclaration(node) && isGenericDeclaration(node)) {
-        continue;
+      for (const node of sourceFile.statements) {
+        // A generic declaration lowers to nothing: its specializations are already above, and the
+        // name itself binds no value (the gate refuses reading one).
+        if (ts.isFunctionDeclaration(node) && isGenericDeclaration(node)) {
+          continue;
+        }
+        // Module syntax lowers to nothing either: an import binds nothing in the merged namespace
+        // (the name resolves to the exporting file's own binding), `export { x }` is metadata
+        // about a binding that already exists, and a default export is gate-restricted to a
+        // literal, which has no effect to keep.
+        if (
+          ts.isImportDeclaration(node) ||
+          ts.isExportDeclaration(node) ||
+          ts.isExportAssignment(node)
+        ) {
+          continue;
+        }
+        const stmt = lowerStatement(node, sourceFile, checker, bindings, diagnostics);
+        if (stmt === null) {
+          return { module: null, diagnostics };
+        }
+        statements.push(stmt);
       }
-      const stmt = lowerStatement(node, sourceFile, checker, bindings, diagnostics);
-      if (stmt === null) {
-        return { module: null, diagnostics };
-      }
-      statements.push(stmt);
     }
 
     const module: Module = {
       kind: 'module',
       type: H_UNDEFINED,
-      span: makeSpan(0, sourceFile.getEnd(), sourceFile),
-      fileName: sourceFile.fileName,
+      span: makeSpan(0, entry.getEnd(), entry),
+      fileName: entry.fileName,
       statements,
     };
 
@@ -177,8 +241,8 @@ export function lowerSourceFile(
     // Ensure no exception escapes — all errors must be diagnostics
     diagnostics.push(
       diagnosticFromNode(
-        sourceFile,
-        sourceFile,
+        current,
+        current,
         'STA4030',
         'internal',
         'ts',
@@ -1084,6 +1148,20 @@ function memberAssignment(
         ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
         : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
     };
+  } else if (isDynamicShape(checker.getTypeAtLocation(targetNode.expression), checker)) {
+    // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). Only plain `=`
+    // reaches here -- the gate refused the compound and update forms -- so `current` is never
+    // read; it is built anyway so the two halves of a place stay one shape.
+    const field = targetNode.name.text;
+    current = { kind: 'dyn-field-access', type: hUnknown(false), span, target, field };
+    write = (value) => ({
+      kind: 'dyn-field-assignment',
+      type: value.type,
+      span,
+      target,
+      field,
+      value,
+    });
   } else {
     const field = targetNode.name.text;
     const slot = slotOf(target, field, targetNode, sourceFile, diagnostics);
@@ -1305,6 +1383,22 @@ function lowerExpression(
     };
   }
 
+  // `/ab+c/gi`. The AST hands the whole literal back as ONE token, so the split is here: the last
+  // `/` ends the pattern (an inner one is escaped or inside a class, and neither can be the last
+  // character -- the grammar requires the closing delimiter after it). Neither half is parsed; the
+  // vendored engine is the only thing that reads them, which is what keeps them from disagreeing.
+  if (ts.isRegularExpressionLiteral(node)) {
+    const text = node.text;
+    const end = text.lastIndexOf('/');
+    return {
+      kind: 'regexp-literal',
+      type: typeAt(node, checker, bindings),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      source: text.slice(1, end),
+      flags: text.slice(end + 1),
+    };
+  }
+
   // `` `no holes` `` carries no substitutions, so it IS a string literal -- distinguishing it
   // from one below the frontend would be preserving syntax, not meaning.
   if (ts.isNoSubstitutionTemplateLiteral(node)) {
@@ -1366,6 +1460,52 @@ function lowerExpression(
         name,
       };
     }
+  }
+
+  // `Math.PI` and the other Math constants fold to number literals HERE: the compiler runs on
+  // the pinned Node, so the double it holds is bit-for-bit the one the golden tests diff against,
+  // and no runtime representation of Math has to exist.
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    isGlobalMath(node.expression, checker) &&
+    MATH_CONSTANTS.has(node.name.text)
+  ) {
+    const constants: Record<string, number> = {
+      E: Math.E,
+      LN10: Math.LN10,
+      LN2: Math.LN2,
+      LOG10E: Math.LOG10E,
+      LOG2E: Math.LOG2E,
+      PI: Math.PI,
+      SQRT1_2: Math.SQRT1_2,
+      SQRT2: Math.SQRT2,
+    };
+    return {
+      kind: 'number-literal',
+      type: H_NUMBER,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      value: constants[node.name.text] ?? Number.NaN,
+    };
+  }
+
+  // `o.x` on a DYNAMIC shape: no slot exists, so the read resolves the NAME through the shape
+  // table with a per-site cache (docs/VALUE.md §4.10). The result is Unknown -- an absent optional
+  // property reads as `undefined`, and narrowing it back is the caller's job, like a Map get.
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    isDynamicShape(checker.getTypeAtLocation(node.expression), checker)
+  ) {
+    const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (target === null) {
+      return null;
+    }
+    return {
+      kind: 'dyn-field-access',
+      type: hUnknown(false),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      target,
+      field: node.name.text,
+    };
   }
 
   // `o.x` on a class instance. This is tested BEFORE `.length` because a class may declare a field
@@ -1495,21 +1635,7 @@ function lowerExpression(
   // entries are the slots -- in the order written, which is the order the shape lists them and the
   // order `console.log` prints them.
   if (ts.isObjectLiteralExpression(node)) {
-    const type = typeAt(node, checker, bindings);
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-    if (type.kind !== 'object') {
-      diagnostics.push(
-        diagnosticFromNode(
-          node,
-          sourceFile,
-          'STA4068',
-          'internal',
-          'ts',
-          'object literal has no shape',
-        ),
-      );
-      return null;
-    }
     const entries: ObjectEntry[] = [];
     for (const property of node.properties) {
       if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) {
@@ -1536,6 +1662,28 @@ function lowerExpression(
         return null;
       }
       entries.push({ name: property.name.text, value });
+    }
+    // The CONTEXTUAL type decides fixed-versus-dynamic, and it must be asked FIRST: in
+    // `const o: { x?: number } = { x: 1 }` the literal's own type is a layout, but every later
+    // read of `o` goes through the annotation -- so the object must be the dynamic one those
+    // reads resolve against (same reasoning, same order, as gateObjectLiteral).
+    const decisive = checker.getContextualType(node) ?? checker.getTypeAtLocation(node);
+    if (isDynamicShape(decisive, checker)) {
+      return { kind: 'dyn-object-literal', type: hUnknown(false), span, entries };
+    }
+    const type = typeAt(node, checker, bindings);
+    if (type.kind !== 'object') {
+      diagnostics.push(
+        diagnosticFromNode(
+          node,
+          sourceFile,
+          'STA4068',
+          'internal',
+          'ts',
+          'object literal has no shape',
+        ),
+      );
+      return null;
     }
     const literal: ObjectLiteral = { kind: 'object-literal', type, span, entries };
     return literal;
@@ -1606,6 +1754,16 @@ function lowerExpression(
         span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       };
     }
+    // `NaN` and `Infinity` are globals too, exempted by name at the gate exactly like
+    // `undefined` -- and like it, a user binding of the same name wins first, above.
+    if (binding === undefined && (name === 'NaN' || name === 'Infinity')) {
+      return {
+        kind: 'number-literal',
+        type: H_NUMBER,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        value: name === 'NaN' ? Number.NaN : Number.POSITIVE_INFINITY,
+      };
+    }
     if (!binding) {
       diagnostics.push(
         diagnosticFromNode(
@@ -1655,6 +1813,22 @@ function lowerExpression(
       type: H_STRING,
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       operand,
+    };
+  }
+
+  // `await e`. The result type is the promise's value type, taken from the checker's own answer
+  // for the await expression rather than by peeling the operand -- `await 1` is legal and its
+  // operand is not a promise at all, which is exactly the case peeling would get wrong.
+  if (ts.isAwaitExpression(node)) {
+    const value = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (!value) {
+      return null;
+    }
+    return {
+      kind: 'await',
+      type: typeAt(node, checker, bindings),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      value,
     };
   }
 
@@ -1817,25 +1991,252 @@ function lowerExpression(
       const obj = expr.expression;
       const propName = expr.name.text;
 
-      // Check if it's console.log
+      // A console call. The gate allowed the method to omit its optional trailing argument. Where
+      // the spec's own absent case IS undefined (`count()` counts under "default") the list is
+      // padded here and one C entry point serves both forms; where it is not (`group`, `assert`,
+      // whose explicit-undefined output differs from their omitted output) the list stays short
+      // and `consoleEntryPoint` picks the runtime function that means absence.
       if (
         ts.isIdentifier(obj) &&
         obj.text === 'console' &&
-        (propName === 'log' || propName === 'warn' || propName === 'error')
+        Object.hasOwn(CONSOLE_METHODS, propName)
       ) {
+        const given = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (given === null) {
+          return null;
+        }
+        const method = propName as ConsoleMethod;
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const shape = CONSOLE_METHODS[method];
+        const args = [...given];
+        if (!('bare' in shape)) {
+          while (args.length < shape.arity) {
+            args.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+          }
+        }
+        const call: ConsoleLogCall = {
+          kind: 'console-log',
+          type: typeAt(node, checker, bindings),
+          span,
+          method,
+          args,
+        };
+        return call;
+      }
+
+      // The Object namespace calls. `keys`/`getOwnPropertyNames` are `string[]` by construction
+      // and `hasOwn` a boolean; for `values`/`entries` the checker's answer is kept when it maps
+      // to an array, and the element degrades to Unknown when it does not (a mixed shape makes
+      // the element genuinely a union this type model does not carry). `fromEntries` builds a
+      // DYNAMIC shape, so it is Unknown outright — the same honest answer `JSON.parse` gives,
+      // and every read of it is a boundary.
+      if (isGlobalObject(obj, checker) && Object.hasOwn(OBJECT_STATICS, propName)) {
         const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
         if (args === null) {
           return null;
         }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const method = propName as ObjectStaticMethod;
+        const checkerType = typeAt(node, checker, bindings);
+        let type: HType;
+        if (method === 'keys' || method === 'getOwnPropertyNames') {
+          type = { kind: 'array', element: H_STRING };
+        } else if (method === 'hasOwn') {
+          type = H_BOOLEAN;
+        } else if (method === 'fromEntries') {
+          type = hUnknown(false);
+        } else {
+          type =
+            checkerType.kind === 'array'
+              ? checkerType
+              : { kind: 'array', element: hUnknown(false) };
+        }
+        return { kind: 'object-static', type, span, method, args };
+      }
 
-        const type = typeAt(node, checker, bindings);
-        const call: ConsoleLogCall = {
-          kind: 'console-log',
+      // The two JSON calls, both single-argument. `stringify` is always a string: the gate
+      // already refused arguments whose type admits `undefined` or a function at the top level,
+      // the two cases where the spec's answer is `undefined` rather than a string. `parse` is
+      // Unknown by construction -- the checker types it `any` because the text is data, and the
+      // honest HIR type for data nobody has checked yet is the one every use must narrow.
+      if (isGlobalJson(obj, checker)) {
+        const arg = lowerOnlyArgument(node, sourceFile, checker, bindings, diagnostics);
+        if (arg === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        return propName === 'parse'
+          ? { kind: 'json-parse', type: hUnknown(false), span, arg }
+          : { kind: 'json-stringify', type: H_STRING, span, arg };
+      }
+
+      // The three Promise statics the subset carries. `resolve`/`reject` take one value of any
+      // type and `all` an array; the result is always a promise, and its value type comes from
+      // the checker -- which knows `Promise.resolve(1)` is `Promise<number>` and, for `all`, the
+      // tuple-or-array element the awaited result carries. Where the checker's answer does not
+      // map to a promise (an untyped argument in js mode) the value degrades to Unknown, which
+      // is what every read of the awaited result must narrow anyway.
+      if (isGlobalPromise(obj, checker) && Object.hasOwn(PROMISE_STATICS, propName)) {
+        const arg = lowerOnlyArgument(node, sourceFile, checker, bindings, diagnostics);
+        if (arg === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const checkerType = typeAt(node, checker, bindings);
+        const type = checkerType.kind === 'promise' ? checkerType : hPromise(hUnknown(false));
+        return {
+          kind: 'promise-static',
           type,
-          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+          span,
+          method: propName as PromiseStaticMethod,
+          arg,
+        };
+      }
+
+      // `Math.floor(x)` and the rest of the Math surface. Variadic min/max are folded to nested
+      // BINARY nodes here -- left fold, so `Math.min(a, b, c)` compares a to b first, which is
+      // the order the spec's own loop uses and the order side effects already ran in. The
+      // zero-argument forms are their identity literals, and one argument passes through: every
+      // argument is typed number, and min/max of one number is that number (NaN included).
+      if (isGlobalMath(obj, checker) && MATH_METHODS.has(propName)) {
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        if (propName === 'min' || propName === 'max') {
+          if (args.length === 0) {
+            return {
+              kind: 'number-literal',
+              type: H_NUMBER,
+              span,
+              value: propName === 'min' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY,
+            };
+          }
+          let folded = args[0];
+          if (folded === undefined) {
+            return null;
+          }
+          for (const next of args.slice(1)) {
+            folded = {
+              kind: 'math-call',
+              type: H_NUMBER,
+              span,
+              method: propName,
+              args: [folded, next],
+            };
+          }
+          return folded;
+        }
+        return {
+          kind: 'math-call',
+          type: H_NUMBER,
+          span,
+          method: propName as MathMethod,
           args,
         };
-        return call;
+      }
+
+      // The landed RegExp.prototype surface, which is `test` alone. The result is taken from the
+      // node rather than the table because there is nothing else it can be -- the verifier pins it
+      // to boolean, and this keeps a checker that says otherwise visible instead of overwritten.
+      if (isRegExpReceiver(obj, checker) && Object.hasOwn(REGEXP_OPS, propName)) {
+        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+        if (target === null) {
+          return null;
+        }
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
+        }
+        return {
+          kind: 'regexp-op',
+          type: typeAt(node, checker, bindings),
+          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+          op: propName as RegExpOperation,
+          target,
+          args,
+        };
+      }
+
+      // The landed String.prototype surface. Missing optional arguments are PADDED with
+      // undefined-literals up to the table's arity -- for every op in the set the spec gives an
+      // explicitly-passed undefined the same meaning as an absent argument, which is what makes
+      // the padding observably identical to the source. The node's type comes from the table,
+      // the same table the verifier holds it to.
+      if (isStringReceiver(obj, checker) && Object.hasOwn(STRING_OPS, propName)) {
+        const op = propName as StringOpName;
+        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+        if (target === null) {
+          return null;
+        }
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const shape = STRING_OPS[op];
+        const padded: Expression[] = [...args];
+        while (padded.length < shape.arity) {
+          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+        }
+        const type: HType =
+          shape.result === 'element'
+            ? hUnknown(false)
+            : shape.result === 'string-array'
+              ? { kind: 'array', element: H_STRING }
+              : shape.result === 'number'
+                ? H_NUMBER
+                : shape.result === 'boolean'
+                  ? H_BOOLEAN
+                  : H_STRING;
+        return { kind: 'string-op', type, span, op, target, args: padded };
+      }
+
+      // The landed Array.prototype surface, on the same table discipline: pad optional positions
+      // with `undefined` (sound for every op the table holds — `lastIndexOf` lands without its
+      // position for exactly the case where it would not be), and take the result type from the
+      // table, where `self` is the RECEIVER's own array type and `element` is Unknown by the
+      // IndexAccess rule (`pop` on an empty array really answers `undefined`).
+      if (isArrayReceiver(obj, checker) && Object.hasOwn(ARRAY_OPS, propName)) {
+        const op = propName as ArrayOpName;
+        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+        if (target === null) {
+          return null;
+        }
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const shape = ARRAY_OPS[op];
+        const padded: Expression[] = [...args];
+        while (padded.length < shape.arity) {
+          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+        }
+        // `mapped` keeps the checker's answer -- map's element is the callback's to choose and a
+        // type-guard filter legitimately narrows below the receiver -- degrading to Unknown when
+        // the answer is not an array this model can spell.
+        const checkerType = typeAt(node, checker, bindings);
+        const type: HType =
+          shape.result === 'self'
+            ? target.type
+            : shape.result === 'checker'
+              ? checkerType
+              : shape.result === 'mapped'
+                ? checkerType.kind === 'array'
+                  ? checkerType
+                  : { kind: 'array', element: hUnknown(false) }
+                : shape.result === 'undefined'
+                  ? H_UNDEFINED
+                  : shape.result === 'number'
+                    ? H_NUMBER
+                    : shape.result === 'boolean'
+                      ? H_BOOLEAN
+                      : shape.result === 'string'
+                        ? H_STRING
+                        : hUnknown(false);
+        return { kind: 'array-op', type, span, op, target, args: padded };
       }
 
       // `m.get(k)`, `s.add(v)` and the rest. Decided before the class case because a Map has no
@@ -1972,27 +2373,13 @@ function lowerExpression(
     // mangled name. The callee is not lowered as an expression, because the name it would lower to
     // binds nothing -- a generic function has no value (the gate says so, in the same words).
     const specialized = specializedCallee(node, sourceFile, checker, bindings, diagnostics);
-    if (specialized !== undefined) {
-      if (specialized === null) {
-        return null;
-      }
-      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-      if (args === null) {
-        return null;
-      }
-      const call: CallExpr = {
-        kind: 'call',
-        type: typeAt(node, checker, bindings),
-        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-        callee: specialized,
-        args,
-      };
-      return call;
+    if (specialized === null) {
+      return null;
     }
 
-    // An ordinary call. The callee is evaluated as a value like any other expression -- the gate
-    // has already restricted it to shapes whose value the emitter can produce.
-    const callee = lowerExpression(expr, sourceFile, checker, bindings, diagnostics);
+    // An ordinary call's callee is evaluated as a value like any other expression -- the gate has
+    // already restricted it to shapes whose value the emitter can produce.
+    const callee = specialized ?? lowerExpression(expr, sourceFile, checker, bindings, diagnostics);
     if (callee === null) {
       return null;
     }
@@ -2111,6 +2498,7 @@ function lowerFunction(
     ...(name !== undefined && { name }),
     params,
     body,
+    isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
     envVars: info?.envVars ?? [],
     captures: info?.captures ?? [],
     needsEnv: info?.needsEnv ?? false,
@@ -2682,6 +3070,7 @@ function synthesizedConstructor(
     span,
     params: [{ name: RECEIVER, type: self, span }, ...forwarded],
     body: { kind: 'block', type: H_UNDEFINED, span, statements },
+    isAsync: false,
     envVars: [],
     captures: [],
     needsEnv: false,
@@ -2751,6 +3140,9 @@ function makeSpan(start: number, width: number, sourceFile: ts.SourceFile): Span
     start,
     length: width,
     line,
+    // The file, per span rather than per module: a merged program's statements come from many
+    // files, and a #line directive naming the wrong one would point every debugger at it.
+    file: sourceFile.fileName,
   };
 }
 
@@ -3011,6 +3403,19 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Map<string, HT
  * ordinary call and `super(...)` — and every one of them lowers left to right and abandons the whole
  * call on the first failure. That is not a coincidence to be factored for tidiness: argument order
  * IS evaluation order, and a copy of this loop that drifted would reorder a user's side effects. */
+/** The sole argument of a one-argument namespace call, lowered -- `null` when lowering failed.
+ * The gate already pinned the arity, so a missing argument here is unreachable, not a diagnostic. */
+function lowerOnlyArgument(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  return args?.[0] ?? null;
+}
+
 function lowerArguments(
   nodes: readonly ts.Expression[] | undefined,
   sourceFile: ts.SourceFile,
@@ -3043,8 +3448,11 @@ function collectionOperation(name: string): CollectionOperation | undefined {
     case 'clear':
     case 'add':
     case 'size':
+    case 'forEach':
       return name;
     default:
-      return undefined;
+      // The ES2025 set operations, which are a table rather than seven more cases -- the gate and
+      // the verifier read the same one.
+      return isSetOperation(name) ? name : undefined;
   }
 }

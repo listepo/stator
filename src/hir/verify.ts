@@ -24,8 +24,18 @@ import type {
   Identifier,
   IfStatement,
   Module,
+  ObjectStaticMethod,
   Span,
   Statement,
+} from './nodes.ts';
+import {
+  ARRAY_OPS,
+  CONSOLE_METHODS,
+  consoleEntryPoint,
+  isSetOperation,
+  REGEXP_OPS,
+  SET_OPS,
+  STRING_OPS,
 } from './nodes.ts';
 import type { HType } from './types.ts';
 import {
@@ -33,6 +43,7 @@ import {
   H_BOOLEAN,
   H_NUMBER,
   H_STRING,
+  H_UNDEFINED,
   hasTypeParam,
   hTypeAssignable,
   hTypeEquals,
@@ -509,6 +520,24 @@ function verifyStatement(
       break;
     }
 
+    // The dynamic half of Task 4.1: no slot to cross-check -- the offset is the shape table's
+    // answer at runtime. What CAN be checked is the reason the node exists: a dynamic site whose
+    // target the frontend actually typed would mean the lowering picked the slow path for a
+    // receiver the fast path owns, which is a lowering bug, not a program property.
+    case 'dyn-field-assignment': {
+      verifyExpression(stmt.target, problems, bindings);
+      verifyExpression(stmt.value, problems, bindings);
+      if (stmt.target.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'dyn-field-assignment',
+          span: stmt.span,
+          code: 'STA4059',
+          message: `dynamic assignment to '${stmt.field}' on a target typed '${hTypeName(stmt.target.type)}'`,
+        });
+      }
+      break;
+    }
+
     default: {
       const _exhaustive: never = stmt;
       throw new Error(`Exhaustiveness check failed: ${_exhaustive}`);
@@ -943,17 +972,27 @@ function verifyExpression(
 
     case 'console-log': {
       const call = expr as ConsoleLogCall;
-      // Verify all arguments
       for (const arg of call.args) {
         verifyExpression(arg, problems, bindings);
       }
-      // console.log should have type undefined (no return value in Phase 2)
-      if (expr.type.kind !== 'undefined') {
+      // Every console node is a width the runtime has an entry point for: full arity, or the short
+      // form of the two methods whose omitted tail is its own C function. The verifier restates
+      // this rather than trusting the lowering's padding.
+      if (consoleEntryPoint(call.method, call.args.length) === null) {
+        const arity = CONSOLE_METHODS[call.method].arity;
         problems.push({
           kind: 'console-log',
           span: expr.span,
           code: 'STA4019',
-          message: `console.log must have type 'undefined', got '${hTypeName(expr.type)}'`,
+          message: `console.${call.method} takes ${String(arity)} arguments, not ${String(call.args.length)}`,
+        });
+      } else if (expr.type.kind !== 'undefined') {
+        // Every console method is void: it is called for its output, never for a value.
+        problems.push({
+          kind: 'console-log',
+          span: expr.span,
+          code: 'STA4019',
+          message: `console.${call.method} must have type 'undefined', got '${hTypeName(expr.type)}'`,
         });
       }
       break;
@@ -1070,6 +1109,35 @@ function verifyExpression(
       break;
     }
 
+    // See the dyn-field-assignment case for what these check and why there is no slot to verify.
+    case 'dyn-object-literal': {
+      for (const entry of expr.entries) {
+        verifyExpression(entry.value, problems, bindings);
+      }
+      if (expr.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'dyn-object-literal',
+          span: expr.span,
+          code: 'STA4059',
+          message: `dynamic object literal has type '${hTypeName(expr.type)}', not Unknown`,
+        });
+      }
+      break;
+    }
+
+    case 'dyn-field-access': {
+      verifyExpression(expr.target, problems, bindings);
+      if (expr.target.type.kind !== 'unknown' || expr.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'dyn-field-access',
+          span: expr.span,
+          code: 'STA4059',
+          message: `dynamic read of '${expr.field}' with target '${hTypeName(expr.target.type)}' and result '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
     case 'collection-new': {
       if (expr.type.kind !== expr.collection) {
         problems.push({
@@ -1114,6 +1182,316 @@ function verifyExpression(
           code: 'STA4053',
           message: `${expr.op} takes ${String(arity)} arguments, not ${String(expr.args.length)}`,
         });
+      } else if (isSetOperation(expr.op)) {
+        // The one collection operation family whose ARGUMENT has a kind: the runtime reads it as a
+        // JSRTMap, so anything else here is memory corruption rather than a wrong answer, and no
+        // arity count would catch it. The result is pinned for the same reason it is worth pinning
+        // anywhere -- a predicate that typed as a Set would flow into a `.has` the C never checks.
+        const argument = expr.args[0];
+        const answers = SET_OPS[expr.op];
+        if (argument === undefined || argument.type.kind !== 'set') {
+          problems.push({
+            kind: 'collection-op',
+            span: expr.span,
+            code: 'STA4053',
+            message: `${expr.op} takes a Set, not '${argument === undefined ? 'nothing' : hTypeName(argument.type)}'`,
+          });
+        } else if (expr.type.kind !== answers) {
+          problems.push({
+            kind: 'collection-op',
+            span: expr.span,
+            code: 'STA4053',
+            message: `${expr.op} answers a ${answers}, not '${hTypeName(expr.type)}'`,
+          });
+        }
+      }
+      break;
+    }
+
+    // Number in, number out, exact arity — the three claims the C signatures rest on, and none of
+    // which the C compiler can check across `jsrt_value`. First code of the verifier's third band.
+    case 'math-call': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const arity = MATH_ARITY[expr.method];
+      if (arity === undefined || expr.args.length !== arity) {
+        problems.push({
+          kind: 'math-call',
+          span: expr.span,
+          code: 'STA4080',
+          message: `Math.${expr.method} takes ${String(arity ?? NaN)} arguments, not ${String(expr.args.length)}`,
+        });
+      } else if (
+        expr.type.kind !== 'number' ||
+        expr.args.some((arg) => arg.type.kind !== 'number')
+      ) {
+        problems.push({
+          kind: 'math-call',
+          span: expr.span,
+          code: 'STA4080',
+          message: `Math.${expr.method} must be number -> number, got (${expr.args.map((a) => hTypeName(a.type)).join(', ')}) -> ${hTypeName(expr.type)}`,
+        });
+      }
+      break;
+    }
+
+    // The receiver is a string, the arity is the table's (the lowering PADDED optional arguments,
+    // so a short count is a lowering bug), and the result type is the op's. Argument types are
+    // deliberately unchecked: a padded slot is undefined where the source position was a number
+    // or a string, and the checker already vetted what the source wrote.
+    case 'string-op': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const shape = STRING_OPS[expr.op];
+      // `element` is unchecked, the array-op rule: the honest answer is Unknown.
+      const want: HType | undefined =
+        shape.result === 'element'
+          ? undefined
+          : shape.result === 'string-array'
+            ? { kind: 'array', element: H_STRING }
+            : shape.result === 'number'
+              ? H_NUMBER
+              : shape.result === 'boolean'
+                ? H_BOOLEAN
+                : H_STRING;
+      if (expr.target.type.kind !== 'string') {
+        problems.push({
+          kind: 'string-op',
+          span: expr.span,
+          code: 'STA4081',
+          message: `${expr.op} on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+      } else if (expr.args.length !== shape.arity) {
+        problems.push({
+          kind: 'string-op',
+          span: expr.span,
+          code: 'STA4081',
+          message: `${expr.op} takes ${String(shape.arity)} arguments after padding, not ${String(expr.args.length)}`,
+        });
+      } else if (want !== undefined && !hTypeEquals(expr.type, want)) {
+        problems.push({
+          kind: 'string-op',
+          span: expr.span,
+          code: 'STA4081',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not '${hTypeName(want)}'`,
+        });
+      }
+      break;
+    }
+
+    // The array counterpart of the case above (STA4082): array receiver, the table's exact
+    // post-padding arity, and the table's result type — where `self` is the RECEIVER's own array
+    // type (slice/concat/fill/reverse) and `element` is Unknown by the IndexAccess rule, so only
+    // the three concrete kinds are pinned. Argument types stay unchecked for the same reason.
+    case 'array-op': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const shape = ARRAY_OPS[expr.op];
+      if (expr.target.type.kind !== 'array') {
+        problems.push({
+          kind: 'array-op',
+          span: expr.span,
+          code: 'STA4082',
+          message: `${expr.op} on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+        break;
+      }
+      const want: HType | undefined =
+        shape.result === 'self'
+          ? expr.target.type
+          : shape.result === 'undefined'
+            ? H_UNDEFINED
+            : shape.result === 'number'
+              ? H_NUMBER
+              : shape.result === 'boolean'
+                ? H_BOOLEAN
+                : shape.result === 'string'
+                  ? H_STRING
+                  : undefined;
+      if (expr.args.length !== shape.arity) {
+        problems.push({
+          kind: 'array-op',
+          span: expr.span,
+          code: 'STA4082',
+          message: `${expr.op} takes ${String(shape.arity)} arguments after padding, not ${String(expr.args.length)}`,
+        });
+      } else if (want !== undefined && !hTypeEquals(expr.type, want)) {
+        problems.push({
+          kind: 'array-op',
+          span: expr.span,
+          code: 'STA4082',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not '${hTypeName(want)}'`,
+        });
+      } else if (shape.result === 'mapped' && expr.type.kind !== 'array') {
+        // Only the KIND is pinned: the element is the checker's answer (map) or a possibly
+        // narrowed one (filter), the same latitude Object.values gets under STA4083.
+        problems.push({
+          kind: 'array-op',
+          span: expr.span,
+          code: 'STA4082',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not an array`,
+        });
+      }
+      break;
+    }
+
+    // One argument, and a result that is an ARRAY: `keys` exactly `string[]`, `values`/`entries`
+    // any array (their element follows the checker's answer, which may be Unknown for a mixed
+    // shape). The argument's own type is deliberately unchecked — the gate restricted it to the
+    // object layouts, and a fixed shape, a dynamic shape, and an Unknown-typed dynamic read all
+    // spell differently here.
+    case 'object-static': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const shape = OBJECT_STATIC_SHAPES[expr.method];
+      const want = objectStaticWant(shape.result);
+      if (expr.args.length !== shape.arity) {
+        problems.push({
+          kind: 'object-static',
+          span: expr.span,
+          code: 'STA4083',
+          message: `Object.${expr.method} takes ${String(shape.arity)} arguments, not ${String(expr.args.length)}`,
+        });
+      } else if (want !== undefined && !hTypeEquals(expr.type, want)) {
+        problems.push({
+          kind: 'object-static',
+          span: expr.span,
+          code: 'STA4083',
+          message: `Object.${expr.method} results in '${hTypeName(expr.type)}', not '${hTypeName(want)}'`,
+        });
+      } else if (shape.result === 'array' && expr.type.kind !== 'array') {
+        problems.push({
+          kind: 'object-static',
+          span: expr.span,
+          code: 'STA4083',
+          message: `Object.${expr.method} results in '${hTypeName(expr.type)}', not an array`,
+        });
+      }
+      break;
+    }
+
+    // JSON.parse answers data: nothing about the result is pinned (the lowering types it
+    // Unknown, and a pass that narrowed it to something real must be allowed to say so), and the
+    // argument is a string the gate already checked.
+    case 'json-parse': {
+      verifyExpression(expr.arg, problems, bindings);
+      break;
+    }
+
+    // JSON.stringify is pinned `string` by the lowering; anything else is a lowering bug. The
+    // argument itself is unchecked -- any serializable value is legal, and the two values that
+    // are not (undefined, a function) were refused by the gate at the top level and abort loudly
+    // at run time when an Unknown smuggles one in deeper.
+    case 'json-stringify': {
+      verifyExpression(expr.arg, problems, bindings);
+      if (!hTypeEquals(expr.type, H_STRING)) {
+        problems.push({
+          kind: 'json-stringify',
+          span: expr.span,
+          code: 'STA4085',
+          message: `JSON.stringify results in '${hTypeName(expr.type)}', not a string`,
+        });
+      }
+      break;
+    }
+
+    // A leaf whose only claim is its own kind: the pattern text is never read above the C
+    // boundary (see RegExpLiteral), so there is nothing else here that could be wrong.
+    case 'regexp-literal': {
+      if (expr.type.kind !== 'regexp') {
+        problems.push({
+          kind: 'regexp-literal',
+          span: expr.span,
+          code: 'STA4086',
+          message: `a regular-expression literal has type '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    // `re.test(s)` is one runtime function with a fixed C signature, and its RECEIVER is a
+    // JSRTRegExp the bridge dereferences without asking -- so a wrong kind here is memory
+    // corruption rather than a wrong answer, which is why it is pinned where a string op's
+    // receiver is. The ARGUMENT is deliberately unchecked, for STA4081's reason: an untyped value
+    // is the js-mode norm, and the runtime's tag check is the honest place to settle it.
+    case 'regexp-op': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (expr.target.type.kind !== 'regexp') {
+        problems.push({
+          kind: 'regexp-op',
+          span: expr.span,
+          code: 'STA4086',
+          message: `${expr.op} on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+      } else if (expr.args.length !== REGEXP_OPS[expr.op]) {
+        problems.push({
+          kind: 'regexp-op',
+          span: expr.span,
+          code: 'STA4086',
+          message: `${expr.op} takes ${String(REGEXP_OPS[expr.op])} arguments, not ${String(expr.args.length)}`,
+        });
+      } else if (!hTypeEquals(expr.type, H_BOOLEAN)) {
+        problems.push({
+          kind: 'regexp-op',
+          span: expr.span,
+          code: 'STA4086',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not a boolean`,
+        });
+      }
+      break;
+    }
+
+    // `await e`. The one claim that holds for every operand: awaiting a PROMISE produces its
+    // value type. Awaiting anything else is legal (`await 1` is a spec-sanctioned no-op that
+    // still yields to the microtask queue), and its result type is the operand's own, so
+    // nothing is pinned there -- peeling would get exactly that case wrong.
+    case 'await': {
+      verifyExpression(expr.value, problems, bindings);
+      if (expr.value.type.kind === 'promise' && !hTypeEquals(expr.type, expr.value.type.value)) {
+        problems.push({
+          kind: 'await',
+          span: expr.span,
+          code: 'STA4087',
+          message: `await of '${hTypeName(expr.value.type)}' results in '${hTypeName(expr.type)}', not '${hTypeName(expr.value.type.value)}'`,
+        });
+      }
+      break;
+    }
+
+    // The Promise statics. All three answer a promise -- `jsrt_promise_resolve` and its siblings
+    // return one unconditionally -- and `Promise.all` reads its argument as an array without
+    // asking, which is a wrong dereference rather than a wrong answer if the type is not one.
+    // An Unknown argument is admitted: js mode's untyped array is the norm, and the runtime's
+    // own tag check is the honest place to settle it.
+    case 'promise-static': {
+      verifyExpression(expr.arg, problems, bindings);
+      if (expr.type.kind !== 'promise') {
+        problems.push({
+          kind: 'promise-static',
+          span: expr.span,
+          code: 'STA4088',
+          message: `Promise.${expr.method} results in '${hTypeName(expr.type)}', not a promise`,
+        });
+      } else if (
+        expr.method === 'all' &&
+        expr.arg.type.kind !== 'array' &&
+        expr.arg.type.kind !== 'unknown'
+      ) {
+        problems.push({
+          kind: 'promise-static',
+          span: expr.span,
+          code: 'STA4088',
+          message: `Promise.${expr.method} takes an array, not '${hTypeName(expr.arg.type)}'`,
+        });
       }
       break;
     }
@@ -1128,6 +1506,63 @@ function verifyExpression(
 /** Which operations each collection answers, and with how many arguments. The emitter's C
  * signatures are the reason this is checked at all -- see the `collection-op` case. */
 const COLLECTION_ARITY: Readonly<Record<'map' | 'set', Readonly<Record<string, number>>>> = {
-  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0, size: 0 },
-  set: { add: 1, has: 1, delete: 1, clear: 0, size: 0 },
+  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0, size: 0, forEach: 1 },
+  set: {
+    add: 1,
+    has: 1,
+    delete: 1,
+    clear: 0,
+    size: 0,
+    forEach: 1,
+    union: 1,
+    intersection: 1,
+    difference: 1,
+    symmetricDifference: 1,
+    isSubsetOf: 1,
+    isSupersetOf: 1,
+    isDisjointFrom: 1,
+  },
+};
+
+/** Post-lowering arity is EXACT: the lowering folded variadic min/max into nested binary nodes,
+ * so a wrong count here is a lowering bug, never a source property. */
+/** What each `Object` namespace call takes and answers. `arity` is the count the gate already
+ * enforced, restated here because the verifier trusts no earlier stage. The result kinds mirror
+ * the collection tables': `strings` pins `string[]`, `boolean` pins a boolean, `array` pins only
+ * "some array" (the element follows the checker, which may be Unknown for a mixed shape), and
+ * `unknown` pins nothing -- `fromEntries` builds a dynamic shape, which every read must check. */
+const OBJECT_STATIC_SHAPES = {
+  entries: { arity: 1, result: 'array' },
+  fromEntries: { arity: 1, result: 'unknown' },
+  getOwnPropertyNames: { arity: 1, result: 'strings' },
+  hasOwn: { arity: 2, result: 'boolean' },
+  keys: { arity: 1, result: 'strings' },
+  values: { arity: 1, result: 'array' },
+} as const satisfies Record<
+  ObjectStaticMethod,
+  { readonly arity: number; readonly result: 'array' | 'boolean' | 'strings' | 'unknown' }
+>;
+
+/** The type a result kind pins, or `undefined` where it pins nothing checkable here. */
+function objectStaticWant(result: 'array' | 'boolean' | 'strings' | 'unknown'): HType | undefined {
+  if (result === 'strings') {
+    return { kind: 'array', element: H_STRING };
+  }
+  return result === 'boolean' ? H_BOOLEAN : undefined;
+}
+
+const MATH_ARITY: Readonly<Record<string, number>> = {
+  abs: 1,
+  clz32: 1,
+  fround: 1,
+  ceil: 1,
+  floor: 1,
+  round: 1,
+  sign: 1,
+  sqrt: 1,
+  trunc: 1,
+  pow: 2,
+  imul: 2,
+  min: 2,
+  max: 2,
 };

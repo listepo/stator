@@ -94,6 +94,29 @@ export interface HSet {
   readonly element: HType;
 }
 
+/** A `RegExp`: a compiled pattern.
+ *
+ * A leaf, like `string`: a pattern describes text rather than containing values, so there is no
+ * element type to carry. It is nonetheless the one builtin value in the subset with MUTABLE state
+ * the language exposes — `lastIndex` moves under a `/g` or `/y` pattern — which is why a regexp
+ * literal builds a new object every time it is EVALUATED rather than being hoisted to a constant. */
+export interface HRegExp {
+  readonly kind: 'regexp';
+}
+
+/** A `Promise<T>`: the value a call to an async function evaluates to, and the only thing `await`
+ * accepts without first wrapping it.
+ *
+ * `value` is what it settles WITH, and the reason this is a kind rather than an opaque leaf: the
+ * type of `await p` is `p`'s value type, and the type of an async function's body is one level
+ * inside the type its declaration writes. A promise that settles with a promise cannot be spelled
+ * in TypeScript -- `Promise<Promise<T>>` collapses -- and the runtime adopts rather than nests, so
+ * the two agree without anything here enforcing it. */
+export interface HPromise {
+  readonly kind: 'promise';
+  readonly value: HType;
+}
+
 /** One field of a class instance. The ORDER of the field list is the slot order the emitter
  * allocates, so it is part of the type, not an incidental detail of how it was built. */
 export interface HField {
@@ -155,6 +178,8 @@ export type HType =
   | HArray
   | HMap
   | HSet
+  | HRegExp
+  | HPromise
   | HObject
   | HTypeParam;
 
@@ -163,6 +188,7 @@ export const H_STRING: HString = { kind: 'string' };
 export const H_BOOLEAN: HBoolean = { kind: 'boolean' };
 export const H_UNDEFINED: HUndefined = { kind: 'undefined' };
 export const H_NULL: HNull = { kind: 'null' };
+export const H_REGEXP: HRegExp = { kind: 'regexp' };
 
 export function hFunction(params: readonly HType[], ret: HType): HFunction {
   return { kind: 'fn', params, ret };
@@ -178,6 +204,10 @@ export function hMap(key: HType, value: HType): HMap {
 
 export function hSet(element: HType): HSet {
   return { kind: 'set', element };
+}
+
+export function hPromise(value: HType): HPromise {
+  return { kind: 'promise', value };
 }
 
 export function hTypeParam(name: string): HTypeParam {
@@ -243,6 +273,9 @@ export function hTypeEquals(a: HType, b: HType): boolean {
   }
   if (a.kind === 'set' && b.kind === 'set') {
     return hTypeEquals(a.element, b.element);
+  }
+  if (a.kind === 'promise' && b.kind === 'promise') {
+    return hTypeEquals(a.value, b.value);
   }
   // Nominal, not structural, and not recursive. Two classes are the same type when they are the
   // same class -- which is also the only comparison that terminates: `class C { self: C }` is a
@@ -364,8 +397,13 @@ export function hTypeName(t: HType): string {
   if (t.kind === 'set') {
     return `Set<${hTypeName(t.element)}>`;
   }
+  if (t.kind === 'promise') {
+    return `Promise<${hTypeName(t.value)}>`;
+  }
   if (t.kind === 'fn') {
     return `(${t.params.map((p, i) => `a${String(i)}: ${hTypeName(p)}`).join(', ')}) => ${hTypeName(t.ret)}`;
   }
-  return t.kind;
+  // The one leaf whose spelling is not its kind: TypeScript calls it `RegExp`, and a message that
+  // said `regexp` would not match what the user reads in their own editor.
+  return t.kind === 'regexp' ? 'RegExp' : t.kind;
 }

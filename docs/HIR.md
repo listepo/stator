@@ -55,7 +55,7 @@ Expressions produce values; statements do not. An expression-statement wraps an 
 - `LogicalOp` — `&&`, `||`, `??`
 - `TemplateLiteral` — `` `a${x}b` ``, as `quasis` and `expressions` with the invariant `quasis.length === expressions.length + 1`
 - `StringLength` — `.length` on a string, in **UTF-16 code units** (an astral character counts twice)
-- `ConsoleLogCall` — builtin call to `console.log`
+- `ConsoleLogCall` — builtin console call. `method` names one of the eleven members of `CONSOLE_METHODS` (`src/hir/nodes.ts`), the single table the gate, the lowering, the verifier and the emitter all read: it gives each member its arity, how many trailing arguments are optional, and the C entry point the emitter calls. `args` is therefore either exactly `arity` long or, for the two members whose omitted tail is its own C entry point (`group`, `assert`), that minus its optional tail: the lowering pads an omitted optional with an `undefined` literal only where explicit `undefined` means what absence means. `consoleEntryPoint(method, width)` maps a width to the C call, and `STA4019` holds every node to a width it answers
 - `FunctionExpr` — a function expression or arrow function; `params`, a `body` Block, and an
   optional `name` (a declaration's name, or the binding a function expression is assigned to, so
   `[Function: name]` survives to the runtime)
@@ -151,16 +151,105 @@ only to check that that order matches the shape's field list. Everything else a 
 class machinery it borrows: the same allocation, the same `FieldAccess` for a read, and a descriptor
 whose name is empty so the printer omits the prefix a class instance gets.
 
+Task 4.1 added the dynamic residue's three nodes — `DynObjectLiteral`, `DynFieldAccess`,
+`DynFieldAssignment` — for a literal whose contextual type has an optional property or an index
+signature, and therefore no fixed slot list. They mirror their fixed-path twins minus the `slot`:
+the property is a NAME resolved through the shape table at run time, with a per-site inline cache
+(docs/VALUE.md §4.10). Two invariants carry the design:
+
+- **Everything dynamic types `Unknown`, and the verifier enforces it (`STA4059`).** A
+  `DynFieldAccess` result and its target are Unknown by definition — an absent optional property
+  reads as `undefined`, so any concrete type on the node is a narrowing nothing proved. The
+  consumer narrows the value back the way it narrows a `Map.get`.
+- **No pending check follows a dynamic access.** `jsrt_get_prop` allocates nothing and runs no
+  user code; `jsrt_set_prop` can grow slot storage — which is why its operands sit in rooted
+  frame slots — but cannot throw. The nodes are cheap to sequence precisely because the runtime
+  entry points are total over dynamic receivers, and loudly not-yet (`STA2004`) over aliased
+  fixed-shape ones.
+
 `CollectionNew` and `CollectionOp` are the two nodes rung 7 added for `Map` and `Set`. Each names a
 `collection` (`'map'` or `'set'`) and, for the operation, one of a closed set of `op`s —
-`get`, `set`, `has`, `delete`, `clear`, `add`, `size` — with a target and an argument list. The
+`get`, `set`, `has`, `delete`, `clear`, `add`, `size`, `forEach` — with a target and an argument
+list. The
 closed set is the point: an operation is not a general method call that happens to land on a builtin,
 it is one HIR node the emitter turns into one runtime function with a fixed C signature. `.size` is
 an `op` with no arguments rather than a `FieldAccess`, so nothing below reads the struct field. The
 verifier checks the receiver's type kind and the argument count for both, because every `jsrt_value`
 argument has the same C type and the C compiler cannot catch either mistake.
 
-Future phases add: `for-in`, `try`/`catch`/`finally`, general property access, and the rest.
+The seven ES2025 set operations are `op`s too, and they are the only ones whose ARGUMENT is a
+collection: the emitter passes it to a runtime function that reads it as a `JSRTMap`, so the
+verifier checks the argument's type kind (`STA4053`) rather than trusting the arity count, and pins
+the result — a Set for the four combining forms, a boolean for the three predicates. The `SET_OPS`
+table in `src/hir/nodes.ts` is the one place that membership and those answers are written down;
+the gate, the verifier and the emitter all read it.
+
+`forEach` is the one collection op that runs USER CODE: the runtime calls the callback through
+`jsrt_call`, exactly as the `Array.prototype` callback ops do, so the emitter gives it the same
+treatment those get — the call is emitted as its own STATEMENT and a pending check follows it, so a
+`throw` from the callback reaches its landing pad instead of being read as a result. The iterator
+forms (`keys`, `values`, `entries`) stay out for a different reason entirely: they hand back an
+ITERATOR, and the subset has no node for one.
+
+Task 4.2 added `MathCall` on the CollectionOp precedent: a closed method set, exact arity, one
+runtime function per operation, no function value anywhere. Post-lowering arity is FIXED at one or
+two — the lowering folds variadic `min`/`max` into nested binary nodes and the zero-argument forms
+into their identity literals — and the verifier pins arity plus the number-in/number-out contract
+(`STA4080`), because every `jsrt_value` argument looks alike to the C compiler. `Math.PI` and the
+other constants need no node: they fold to number literals during lowering, bit-for-bit the doubles
+the pinned Node holds.
+
+The String slice added `StringOp` the same way, with one structural difference: the closed set lives in a TABLE (`STRING_OPS` in `nodes.ts`, op → {arity, result}) rather than in per-op code, and the gate, the lowering, the verifier, and the emitter all read it — the emitter derives each C name mechanically (`camelCase` → `jsrt_string_snake_case`), so adding an op is one table row plus one C function. The lowering pads omitted optional arguments with `undefined` literals, which is sound because ECMA-262 treats explicit `undefined` as absent for every op in the set; the verifier (`STA4081`) then pins the string receiver, the exact post-padding arity, and the table's result type, while leaving argument types unchecked — the runtime coerces per spec, and `indexOf(1)` is legal JavaScript the gate already admitted.
+
+The Array slice added `ArrayOp` on the identical pattern (`ARRAY_OPS`, verifier `STA4082`, C names `jsrt_array_*`), with two result kinds `STRING_OPS` never needed: `self` — the RECEIVER's own array type, for the ops that slice, copy, or mutate-and-return it — and `element`, which is Unknown by the IndexAccess rule, because `pop` on an empty array really answers `undefined` and a narrower type would be the compiler asserting what the runtime cannot honour. The callback methods (`forEach map filter some every find findIndex`) joined the same table: their single argument is a closure the runtime calls through `jsrt_call` — the compiled world's own ABI — and two result kinds came with them: `mapped` (the CHECKER's answer, for `map`'s free element choice and `filter`'s type-guard narrowing; pinned only to "some array") and `undefined` (`forEach`). `reduce`/`reduceRight` (with-initial form) brought a third: `checker` — the checker's answer with nothing pinned, because the accumulator's type is whatever the callback and the initial value agreed on.
+
+The Object slice added `ObjectStaticCall` — `Object.keys/values/entries`, a NAMESPACE call like `MathCall` rather than a method on a receiver, one argument in one rooted slot. `keys` is pinned to `string[]` (`STA4083`); `values`/`entries` are pinned only to "some array", because their element follows the checker's answer and `entries` produces `[string, T]` pairs the HType model has no tuple for — that element is honestly Unknown, and an `entries` call is what makes an otherwise fully-typed file report `dynamic`. The node carries an argument LIST rather than a single argument, because the namespace is not uniformly unary: `hasOwn` takes an object and a key. Arity is fixed per method by the gate's `OBJECT_STATICS` table and restated in the verifier's `OBJECT_STATIC_SHAPES`, whose result kinds pin what each method can be pinned to — `string[]` for `keys`/`getOwnPropertyNames`, a boolean for `hasOwn`, “some array” for `values`/`entries`, and nothing at all for `fromEntries`, which builds a dynamic shape and is therefore Unknown outright.
+
+The JSON slice added `JsonStringify` — `JSON.stringify(v)` in its single-argument form, the same one-argument-one-slot namespace shape as `ObjectStaticCall`, pinned to `string` (`STA4085`). The pin is why the gate refuses argument types that admit `undefined` or a function at the TOP level: there the spec answers `undefined`, not a string. Inside a structure both serialize per spec (skipped as object values, `null` as array elements), and a cycle aborts loudly at run time on the STA2005 pattern.
+
+`JsonParse` is its mirror and the same single-slot shape, but the opposite of pinned: nothing about its result is checked. The lowering types it `Unknown` — the argument is text, and a type annotation on data nobody has read yet is a claim, not a fact — so `explain` reports the call as the point where the program becomes dynamic, and the boundary machinery from Task 3.5 (`typeof` narrowing, an `as` cast) is what settles each use. The verifier leaves the type alone rather than pinning it, so a later pass that proves something concrete about a parsed value is free to say so.
+
+Task 4.3 added `RegExpLiteral` and `RegExpOp`. The literal carries the pattern and the flags as two
+STRINGS, split at the last `/` of the token, and neither is parsed anywhere above the C boundary —
+the vendored engine (quickjs-ng's libregexp) is the only thing that reads them, which is what keeps
+this compiler from disagreeing with it about what a pattern means. It is a literal but NOT a
+constant: §22.2.4.1 makes every evaluation a fresh object, and it has to be, because `lastIndex` is
+mutable state ON that object, so the emitter compiles the pattern at each evaluation rather than
+hoisting it. The verifier's only claim about the node is its own kind (`STA4086`).
+
+`RegExpOp` is `StringOp`'s shape over the `REGEXP_OPS` table, with one difference in what the
+verifier pins: the receiver kind is load-bearing in a way a string op's is not, because
+`jsrt_regexp_test` dereferences it as a `JSRTRegExp` without asking — a wrong kind there is memory
+corruption, not a wrong answer. The argument is deliberately unchecked for `STA4081`'s reason: an
+untyped subject is the js-mode norm, and the bridge's own tag check is the honest place to settle
+it. `test` is the whole table for now; `exec` is absent because it answers an ARRAY WITH PROPERTIES
+(`index`, `input`, `groups` hang off the match array) and a jsrt array is dense with no property
+table, so landing it would mean either a wrong answer or a representation change.
+
+Task 3.10 added exceptions, as two statements:
+
+- **`ThrowStatement`** carries the thrown expression. Its type is `undefined`, but nothing consumes
+  it: a throw completes abruptly. The emitter turns it into `jsrt_throw(v); goto <pad>;` where the
+  pad is the innermost enclosing try's landing pad, or the unit's own unwind pad (docs/VALUE.md
+  §4.9).
+- **`TryStatement`** has a `tryBlock` plus at least one of `catchBlock` and `finallyBlock` — a try
+  with neither is unbuildable from source and the verifier rejects it (`STA4057`), as it does a
+  `catchBinding` without a `catchBlock`. The binding, when present, is typed **`Unknown`
+  always**: anything can be thrown, so the catch variable is a narrowing point like any other
+  boundary (§3.2.1), which is why `explain` does not count the binding itself as dynamic — only
+  reads of it in the blocks.
+
+Two decisions there are load-bearing:
+
+- **The blocks are `Block` nodes, not statement lists**, because a catch binding is scoped to its
+  block and DCE's scope-preservation argument (§6.3) applies to them unchanged.
+- **There is no landing-pad node.** Which pad a throw reaches, the order finally bodies run in,
+  and how a `return`/`break`/`continue` routes THROUGH a finally are all decided by the emitter,
+  which lowers a try-with-finally to an `int` completion code (0 normal, 1 rethrow, 2+ one per
+  distinct jump) dispatched after the finally body. Encoding that routing in the HIR would force
+  every pass to preserve a control structure none of them can improve.
+
+Future phases add: `for-in`, general property access, and the rest.
 
 A loop or switch carries its own optional `label`; there is no LabeledStatement wrapper. A label exists only to be named by `break`/`continue`, so it belongs to the thing being jumped out of, and a wrapper would sit between the jump and its target for no gain.
 
@@ -529,7 +618,11 @@ Each check is a compiler invariant. If it fails, the compiler has contradicted i
 - Arithmetic operators (`+`, `-`, `*`, `/`, `%`) must have both operands of type `number` and result type `number` → `STA4011`, `STA4012`, `STA4013`
 - Comparison operators (`<`, `>`, `<=`, `>=`) must have operands of matching type (number or string, not mixed) and result type `boolean` → `STA4014`, `STA4015`, `STA4016`
 - Strict equality (`===`, `!==`) must have operands of matching type and result type `boolean` → `STA4017`, `STA4018`
-- `console.log` call must have type `undefined` → `STA4019`
+- An `ArrayOp` whose `ARRAY_OPS` entry carries `calls` is emitted as its own statement followed by
+  `if (jsrt_pending()) goto pad;` — it runs compiled code and can therefore throw, and the check has
+  to sit between the op and whatever consumes its result. Every other array op is a walk over the
+  backing store that cannot unwind, and nests directly.
+- A console call must have type `undefined`, and exactly as many arguments as `CONSOLE_METHODS` gives its method → `STA4019`
 
 **Control flow:** `IfStatement` and `WhileStatement` conditions must have type `boolean` → `STA4005`, `STA4006`.
 

@@ -462,6 +462,39 @@ static bool fits_one_line(const Buf *entries, size_t count, size_t indent, size_
   return true;
 }
 
+/* The brace layout objects and Map/Set share: entries joined one-line inside `{ }` when the line
+ * budget holds, one entry per line at indent+2 otherwise. Consumes (frees) the entry buffers. */
+static void emit_braced(Buf *out, Buf *entries, size_t count, size_t indent, size_t prefix) {
+  if (fits_one_line(entries, count, indent, prefix)) {
+    buf_puts(out, "{ ");
+    for (size_t i = 0; i < count; i++) {
+      if (i > 0) {
+        buf_puts(out, ", ");
+      }
+      buf_append(out, entries[i].data, entries[i].len);
+    }
+    buf_puts(out, " }");
+  } else {
+    buf_puts(out, "{\n");
+    for (size_t i = 0; i < count; i++) {
+      if (i > 0) {
+        buf_puts(out, ",\n");
+      }
+      buf_repeat(out, ' ', indent + 2);
+      buf_append(out, entries[i].data, entries[i].len);
+    }
+    buf_putc(out, '\n');
+    buf_repeat(out, ' ', indent);
+    buf_putc(out, '}');
+  }
+
+  for (size_t i = 0; i < count; i++) {
+    buf_free(&entries[i]);
+  }
+  free(entries);
+}
+
+
 static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   if (recurse > INSPECT_MAX_DEPTH) {
     buf_puts(out, "[Array]");
@@ -565,13 +598,64 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
  * Field names are emitted bare. Node quotes a key that is not a valid identifier (`{ 'a-b': 1 }`),
  * but a class field's name is an identifier by construction, so the case cannot arise here; it
  * arrives with object literals, which can spell any key. */
+/* A dynamic object's key prints bare only when it is a valid identifier; Node quotes the rest
+ * (`{ 'a-b': 1 }`), choosing the quote by the same rule strings use. Class fields never take this
+ * path -- their names are identifiers by construction. */
+static bool key_is_identifier(const char *key) {
+  if (key[0] == '\0') {
+    return false;
+  }
+  for (size_t i = 0; key[i] != '\0'; i++) {
+    const char c = key[i];
+    const bool alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$';
+    if (!alpha && (i == 0 || c < '0' || c > '9')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void append_key(Buf *out, const char *key) {
+  if (key_is_identifier(key)) {
+    buf_puts(out, key);
+    return;
+  }
+  bool has_single = false;
+  bool has_double = false;
+  bool has_backtick = false;
+  for (size_t i = 0; key[i] != '\0'; i++) {
+    has_single = has_single || key[i] == '\'';
+    has_double = has_double || key[i] == '"';
+    has_backtick = has_backtick || key[i] == '`';
+  }
+  char quote = '\'';
+  if (has_single) {
+    quote = !has_double ? '"' : (!has_backtick ? '`' : '\'');
+  }
+  buf_putc(out, quote);
+  for (size_t i = 0; key[i] != '\0'; i++) {
+    if (key[i] == quote || key[i] == '\\') {
+      buf_putc(out, '\\');
+    }
+    buf_putc(out, key[i]);
+  }
+  buf_putc(out, quote);
+}
+
 static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTObject *o = jsrt_as_object(v);
   const JSRTClass *cls = o->cls;
 
+  /* A DYNAMIC object's layout lives in its shape, not its class: keys come from the shape chain,
+   * values from the out-of-line slots, and insertion order is the chain reversed. Everything
+   * below the collection step -- entries, budget, line breaking -- is shared with fixed-shape
+   * objects, which is the point: the two print identically because Node cannot tell them apart. */
+  const JSRTDynObject *dyn = cls == &jsrt_class_dynamic ? (const JSRTDynObject *)o : NULL;
+
   /* An object LITERAL has no constructor name, and Node prints none: `{ x: 1 }`, not `Object
    * { x: 1 }`. Its descriptor carries the empty name, which is unambiguous -- no class may be
-   * called "" -- and every place the name would print becomes a place it does not. */
+   * called "" -- and every place the name would print becomes a place it does not. A dynamic
+   * object is a plain object and prints namelessly for the same reason. */
   const bool named = cls->name[0] != '\0';
 
   if (recurse > INSPECT_MAX_DEPTH) {
@@ -588,9 +672,13 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
    * is unambiguous: a class field's name is an identifier by construction, and no identifier can
    * start with one. Printing therefore walks the visible slots, not every slot. */
   size_t count = 0;
-  for (uint32_t i = 0; i < cls->field_count; i++) {
-    if (cls->fields[i][0] != '#') {
-      count++;
+  if (dyn != NULL) {
+    count = jsrt_dyn_property_count(dyn);
+  } else {
+    for (uint32_t i = 0; i < cls->field_count; i++) {
+      if (cls->fields[i][0] != '#') {
+        count++;
+      }
     }
   }
   if (count == 0) {
@@ -607,15 +695,28 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
     jsrt_panic("out of memory: print buffer");
   }
   size_t next = 0;
-  for (uint32_t slot = 0; slot < cls->field_count; slot++) {
-    if (cls->fields[slot][0] == '#') {
-      continue;
+  if (dyn != NULL) {
+    /* Dynamic keys follow OrdinaryOwnPropertyKeys: integer indices first, then insertion order. */
+    const JSRTShape **links = jsrt_dyn_property_order(dyn, (uint32_t)count);
+    for (size_t i = 0; i < count; i++) {
+      Buf *entry = &entries[next++];
+      buf_init(entry);
+      append_key(entry, links[i]->key);
+      buf_puts(entry, ": ");
+      inspect_value(entry, dyn->slots[links[i]->offset], recurse + 1, indent + 2);
     }
-    Buf *entry = &entries[next++];
-    buf_init(entry);
-    buf_puts(entry, cls->fields[slot]);
-    buf_puts(entry, ": ");
-    inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
+    free(links);
+  } else {
+    for (uint32_t slot = 0; slot < cls->field_count; slot++) {
+      if (cls->fields[slot][0] == '#') {
+        continue;
+      }
+      Buf *entry = &entries[next++];
+      buf_init(entry);
+      buf_puts(entry, cls->fields[slot]);
+      buf_puts(entry, ": ");
+      inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
+    }
   }
 
   /* The name and the space after it are part of the prefix Node measures, along with the `{`. A
@@ -625,33 +726,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
     buf_puts(out, cls->name);
     buf_putc(out, ' ');
   }
-  if (fits_one_line(entries, count, indent, prefix)) {
-    buf_puts(out, "{ ");
-    for (size_t i = 0; i < count; i++) {
-      if (i > 0) {
-        buf_puts(out, ", ");
-      }
-      buf_append(out, entries[i].data, entries[i].len);
-    }
-    buf_puts(out, " }");
-  } else {
-    buf_puts(out, "{\n");
-    for (size_t i = 0; i < count; i++) {
-      if (i > 0) {
-        buf_puts(out, ",\n");
-      }
-      buf_repeat(out, ' ', indent + 2);
-      buf_append(out, entries[i].data, entries[i].len);
-    }
-    buf_putc(out, '\n');
-    buf_repeat(out, ' ', indent);
-    buf_putc(out, '}');
-  }
-
-  for (size_t i = 0; i < count; i++) {
-    buf_free(&entries[i]);
-  }
-  free(entries);
+  emit_braced(out, entries, count, indent, prefix);
 }
 
 /* `Map(2) { 'a' => 1, 'b' => 2 }` and `Set(2) { 1, 2 }`.
@@ -713,37 +788,46 @@ static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
 
   /* The `Map(2)` and the space in front of it are Node's `base`, measured with the brace. */
   const size_t prefix = strlen(base) + 1 + 1;
-  if (fits_one_line(entries, count, indent, prefix)) {
-    buf_puts(out, "{ ");
-    for (size_t i = 0; i < count; i++) {
-      if (i > 0) {
-        buf_puts(out, ", ");
-      }
-      buf_append(out, entries[i].data, entries[i].len);
-    }
-    buf_puts(out, " }");
-  } else {
-    buf_puts(out, "{\n");
-    for (size_t i = 0; i < count; i++) {
-      if (i > 0) {
-        buf_puts(out, ",\n");
-      }
-      buf_repeat(out, ' ', indent + 2);
-      buf_append(out, entries[i].data, entries[i].len);
-    }
-    buf_putc(out, '\n');
-    buf_repeat(out, ' ', indent);
-    buf_putc(out, '}');
-  }
+  emit_braced(out, entries, count, indent, prefix);
+}
 
-  for (size_t i = 0; i < count; i++) {
-    buf_free(&entries[i]);
+/* `/source/flags` -- the literal a program would have written, which is what Node prints both at
+ * the top level and inside a structure, and without quotes in either place. The source is already
+ * in its escaped form: `jsrt_regexp_new` stores what it was given, and the one value that has no
+ * spelling as a literal -- the empty pattern -- is normalized to `(?:)` there. */
+static void inspect_regexp(Buf *out, jsrt_value v) {
+  const JSRTRegExp *re = jsrt_as_regexp(v);
+  buf_putc(out, '/');
+  append_string(out, (const JSString *)jsrt_ptr(re->source));
+  buf_putc(out, '/');
+  append_string(out, (const JSString *)jsrt_ptr(re->flags));
+}
+
+static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent);
+
+/* `Promise { 42 }`, `Promise { <pending> }`, `Promise { <rejected> 'boom' }`. The settled value
+ * is inspected, not printed bare -- a fulfilled string shows its quotes, exactly as it does inside
+ * an array -- and the two angle-bracket forms are Node's own markers, not values. */
+static void inspect_promise(Buf *out, jsrt_value v, int recurse, size_t indent) {
+  const JSRTPromise *p = jsrt_as_promise(v);
+  buf_puts(out, "Promise { ");
+  if (p->state == JSRT_PROMISE_PENDING) {
+    buf_puts(out, "<pending>");
+  } else {
+    if (p->state == JSRT_PROMISE_REJECTED) {
+      buf_puts(out, "<rejected> ");
+    }
+    inspect_value(out, p->value, recurse + 1, indent);
   }
-  free(entries);
+  buf_puts(out, " }");
 }
 
 static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent) {
-  if (jsrt_is_map_or_set(v)) {
+  if (jsrt_is_regexp(v)) {
+    inspect_regexp(out, v);
+  } else if (jsrt_is_promise(v)) {
+    inspect_promise(out, v, recurse, indent);
+  } else if (jsrt_is_map_or_set(v)) {
     inspect_map(out, v, recurse, indent);
   } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
     inspect_object(out, v, recurse, indent);
@@ -758,25 +842,193 @@ static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent) {
  * Public
  * ============================================================================ */
 
-void jsrt_print(jsrt_value v) {
+/* console.group's indentation, in GROUPS -- Node writes two spaces per level in front of every
+ * line of every console write, including each line of a multi-line inspect. One counter for the
+ * whole program: console has one output state, and the subset has no second console. */
+static size_t group_depth = 0;
+
+/* Write `text` with the group indent in front of every line. The text always ends in the newline
+ * its writer appended, and Node does NOT indent past that final newline -- a blank line stays
+ * blank -- so the prefix goes before each line that has content. */
+static void write_grouped(const char *text, size_t len, FILE *stream) {
+  if (group_depth == 0) {
+    fwrite(text, 1, len, stream);
+    return;
+  }
+  size_t line = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (text[i] != '\n') {
+      continue;
+    }
+    for (size_t g = 0; g < group_depth; g++) {
+      fwrite("  ", 1, 2, stream);
+    }
+    fwrite(text + line, 1, i + 1 - line, stream);
+    line = i + 1;
+  }
+  if (line < len) {
+    for (size_t g = 0; g < group_depth; g++) {
+      fwrite("  ", 1, 2, stream);
+    }
+    fwrite(text + line, 1, len - line, stream);
+  }
+}
+
+/* `bare` is console.log's one exception to inspect form: a top-level string prints WITHOUT
+ * quotes, so `console.log("a")` is `a` while `console.log(["a"])` is `[ 'a' ]`. console.dir has
+ * no such exception -- it inspects whatever it is given, which is the whole difference between
+ * the two entry points. */
+static void print_to(jsrt_value v, FILE *stream, bool bare) {
   Buf out;
   buf_init(&out);
 
-  /* The top level is not inside an array, so a string prints bare -- `console.log("a")` is `a`,
-   * while `console.log(["a"])` is `[ 'a' ]`. */
-  if (jsrt_is_map_or_set(v)) {
+  if (jsrt_is_regexp(v)) {
+    inspect_regexp(&out, v);
+  } else if (jsrt_is_promise(v)) {
+    inspect_promise(&out, v, 0, 0);
+  } else if (jsrt_is_map_or_set(v)) {
     inspect_map(&out, v, 0, 0);
   } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
     inspect_object(&out, v, 0, 0);
   } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
     inspect_array(&out, v, 0, 0);
   } else {
-    inspect_scalar(&out, v, false);
+    inspect_scalar(&out, v, !bare);
   }
 
   buf_putc(&out, '\n');
-  fwrite(out.data, 1, out.len, stdout);
+  write_grouped(out.data, out.len, stream);
   buf_free(&out);
+}
+
+void jsrt_print(jsrt_value v) { print_to(v, stdout, true); }
+
+/* console.error / console.warn: the same inspect form, on stderr -- Node's own split, which is
+ * why the golden runner compares BOTH streams byte-for-byte. */
+void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
+
+/* console.dir: inspect form with no bare-string exception. */
+void jsrt_console_dir(jsrt_value v) { print_to(v, stdout, false); }
+
+/* console.group(label) prints the label at the CURRENT indent and then indents; the label-less
+ * form prints nothing and only indents. console.groupEnd() outdents, and bottoms out at zero --
+ * an unmatched groupEnd is a no-op in Node, not an error. */
+void jsrt_console_group(jsrt_value label) {
+  /* The label is PRINTED, undefined included: `console.group(undefined)` writes "undefined" where
+   * `console.group()` writes nothing, so the two forms are two entry points rather than one with
+   * a sentinel. */
+  jsrt_print(label);
+  group_depth++;
+}
+
+void jsrt_console_group_bare(void) { group_depth++; }
+
+void jsrt_console_group_end(void) {
+  if (group_depth > 0) {
+    group_depth--;
+  }
+}
+
+/* console.count's per-label tallies. A linked list rather than a hash: the labels a program
+ * counts are a handful of literals, and a list keeps the keys immortal for free -- the same
+ * lifetime rule shape keys follow, and for the same reason (the table only grows). */
+typedef struct CountEntry {
+  const char *label;
+  uint32_t count;
+  struct CountEntry *next;
+} CountEntry;
+
+static CountEntry *counts = NULL;
+
+/* The label as a C string. `console.count()` with no argument counts under "default", which is
+ * the literal Node prints, not a placeholder. */
+static const char *count_label(jsrt_value label) {
+  return label == JSRT_UNDEFINED ? "default" : jsrt_shape_key(label);
+}
+
+static CountEntry *count_entry(const char *label) {
+  for (CountEntry *e = counts; e != NULL; e = e->next) {
+    if (e->label == label || strcmp(e->label, label) == 0) {
+      return e;
+    }
+  }
+  CountEntry *fresh = (CountEntry *)malloc(sizeof(CountEntry));
+  if (fresh == NULL) {
+    jsrt_panic("out of memory: console.count");
+  }
+  fresh->label = label;
+  fresh->count = 0;
+  fresh->next = counts;
+  counts = fresh;
+  return fresh;
+}
+
+/* Both entry points answer `undefined` -- console methods are void, and the emitter needs a
+ * value-shaped result for the expression position a call sits in. */
+static void count_print(const char *label, uint32_t count) {
+  Buf out;
+  buf_init(&out);
+  buf_puts(&out, label);
+  buf_puts(&out, ": ");
+  char digits[16];
+  snprintf(digits, sizeof digits, "%u", count);
+  buf_puts(&out, digits);
+  buf_putc(&out, '\n');
+  write_grouped(out.data, out.len, stdout);
+  buf_free(&out);
+}
+
+jsrt_value jsrt_console_count(jsrt_value label) {
+  const char *name = count_label(label);
+  CountEntry *entry = count_entry(name);
+  entry->count++;
+  count_print(name, entry->count);
+  return JSRT_UNDEFINED;
+}
+
+/* countReset zeroes the tally and prints nothing, which is Node's behaviour for a label that
+ * exists; a label that does not exist warns in Node, and warning is a diagnostic this runtime
+ * has no channel for -- so an unknown label simply starts at zero, which is what the next
+ * `count` on it would have done anyway. */
+jsrt_value jsrt_console_count_reset(jsrt_value label) {
+  count_entry(count_label(label))->count = 0;
+  return JSRT_UNDEFINED;
+}
+
+/* console.assert: nothing at all when the condition holds, `Assertion failed` on STDERR when it
+ * does not -- with `: message` appended only when a message was passed. */
+/* Node's two separators: a STRING message joins with ": ", anything else with a space and its
+ * inspect form -- `Assertion failed: why` against `Assertion failed 42`. An explicitly passed
+ * `undefined` is "anything else", which is why the message-less form is its own entry point
+ * instead of a JSRT_UNDEFINED sentinel here. */
+static void assert_failed(jsrt_value message, bool has_message) {
+  Buf out;
+  buf_init(&out);
+  buf_puts(&out, "Assertion failed");
+  if (has_message) {
+    if (jsrt_is(message, JSRT_TAG_STRING)) {
+      buf_puts(&out, ": ");
+      append_string(&out, (const JSString *)jsrt_ptr(message));
+    } else {
+      buf_putc(&out, ' ');
+      inspect_scalar(&out, message, true);
+    }
+  }
+  buf_putc(&out, '\n');
+  write_grouped(out.data, out.len, stderr);
+  buf_free(&out);
+}
+
+void jsrt_console_assert(jsrt_value condition, jsrt_value message) {
+  if (!jsrt_truthy(condition)) {
+    assert_failed(message, true);
+  }
+}
+
+void jsrt_console_assert_bare(jsrt_value condition) {
+  if (!jsrt_truthy(condition)) {
+    assert_failed(JSRT_UNDEFINED, false);
+  }
 }
 
 _Noreturn void jsrt_uncaught(void) {
@@ -794,6 +1046,201 @@ _Noreturn void jsrt_uncaught(void) {
   exit(1);
 }
 
+/* Array.prototype.join (§23.1.3.16), which is also Array#toString: `undefined` separator means
+ * ",", and `null`/`undefined` ELEMENTS join as empty text, not as their names. Lives here rather
+ * than with the other array builtins because joining IS stringification — it needs Buf and the
+ * recursive ToString below. */
+jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
+  const JSRTArray *a = jsrt_as_array(array);
+  Buf joined;
+  buf_init(&joined);
+  for (uint32_t i = 0; i < a->length; i++) {
+    if (i > 0) {
+      if (jsrt_is(separator, JSRT_TAG_UNDEFINED)) {
+        buf_putc(&joined, ',');
+      } else {
+        append_string(&joined, (const JSString *)jsrt_ptr(separator));
+      }
+    }
+    const jsrt_value element = a->elements[i];
+    if (jsrt_is(element, JSRT_TAG_NULL) || jsrt_is(element, JSRT_TAG_UNDEFINED)) {
+      continue;
+    }
+    const jsrt_value text = jsrt_to_string(element);
+    append_string(&joined, (const JSString *)jsrt_ptr(text));
+  }
+  const jsrt_value result = jsrt_string_from_utf8(joined.data == NULL ? "" : joined.data,
+                                                  joined.len);
+  buf_free(&joined);
+  return result;
+}
+
+/* ============================================================================
+ * JSON.stringify (§25.5.2) — SerializeJSONProperty over the value graph
+ * ============================================================================
+ *
+ * Lives here for jsrt_array_join's reason: serialization IS stringification, and it needs Buf,
+ * format_double and the UTF-16 walk. Two departures from the inspect code above are the whole
+ * point: numbers hide the minus of `-0` ("0", where inspect shows "-0"), and strings are QUOTED
+ * per §25.5.2.2 — `"` and `\\` escaped, controls as their short escapes or \u00XX, and a LONE
+ * surrogate as \udXXX (well-formed JSON.stringify, ES2019), where the inspect walk substitutes
+ * U+FFFD.
+ *
+ * Two spec behaviours cannot be produced yet and abort loudly instead (the STA2005 pattern):
+ * a CYCLE (the spec throws TypeError, and builtins cannot throw), and `undefined` at the TOP
+ * level (the spec returns undefined where this node's type promises a string; the gate refuses
+ * argument types that admit it, so reaching it means an Unknown leaked). Inside a structure,
+ * `undefined` and closures follow the spec: skipped in objects, `null` in arrays. */
+
+typedef struct JSONAncestor {
+  const void *ptr;
+  const struct JSONAncestor *parent;
+} JSONAncestor;
+
+static bool json_unserializable(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_UNDEFINED) || jsrt_is(v, JSRT_TAG_CLOSURE);
+}
+
+static void json_quote(Buf *out, const JSString *str) {
+  buf_putc(out, '"');
+  for (uint32_t i = 0; i < str->length; i++) {
+    uint32_t cp = str->data[i];
+    if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < str->length && str->data[i + 1] >= 0xDC00u &&
+        str->data[i + 1] <= 0xDFFFu) {
+      /* A paired surrogate passes through as its code point, encoded UTF-8 below. */
+      cp = 0x10000u + ((cp - 0xD800u) << 10) + (str->data[i + 1] - 0xDC00u);
+      i++;
+    }
+    if (cp == '"' || cp == '\\') {
+      buf_putc(out, '\\');
+      buf_putc(out, (char)cp);
+    } else if (cp == '\b') {
+      buf_puts(out, "\\b");
+    } else if (cp == '\f') {
+      buf_puts(out, "\\f");
+    } else if (cp == '\n') {
+      buf_puts(out, "\\n");
+    } else if (cp == '\r') {
+      buf_puts(out, "\\r");
+    } else if (cp == '\t') {
+      buf_puts(out, "\\t");
+    } else if (cp < 0x20u || (cp >= 0xD800u && cp <= 0xDFFFu)) {
+      /* Controls without a short escape, and LONE surrogates (well-formed JSON.stringify). */
+      char esc[8];
+      snprintf(esc, sizeof esc, "\\u%04x", cp);
+      buf_puts(out, esc);
+    } else if (cp < 0x80u) {
+      buf_putc(out, (char)cp);
+    } else if (cp < 0x800u) {
+      buf_putc(out, (char)(0xC0u | (cp >> 6)));
+      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+    } else if (cp < 0x10000u) {
+      buf_putc(out, (char)(0xE0u | (cp >> 12)));
+      buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
+      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+    } else {
+      buf_putc(out, (char)(0xF0u | (cp >> 18)));
+      buf_putc(out, (char)(0x80u | ((cp >> 12) & 0x3Fu)));
+      buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
+      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+    }
+  }
+  buf_putc(out, '"');
+}
+
+static void json_check_cycle(const void *ptr, const JSONAncestor *chain) {
+  for (; chain != NULL; chain = chain->parent) {
+    if (chain->ptr == ptr) {
+      jsrt_panic("STA2005: JSON.stringify of a cyclic structure is not yet supported; the spec "
+                 "throws TypeError, which builtins cannot raise yet");
+    }
+  }
+}
+
+static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
+  if (jsrt_is(v, JSRT_TAG_NULL)) {
+    buf_puts(out, "null");
+    return;
+  }
+  if (jsrt_is(v, JSRT_TAG_BOOL)) {
+    buf_puts(out, v == JSRT_TRUE ? "true" : "false");
+    return;
+  }
+  if (jsrt_is_double(v)) {
+    double d = jsrt_to_double(v);
+    if (isnan(d) || isinf(d)) {
+      buf_puts(out, "null"); /* §25.5.2.2: non-finite serializes as null */
+      return;
+    }
+    char num[64];
+    format_double(d, num, sizeof num, false); /* false: JSON spells -0 as "0" */
+    buf_puts(out, num);
+    return;
+  }
+  if (jsrt_is(v, JSRT_TAG_STRING)) {
+    json_quote(out, (const JSString *)jsrt_ptr(v));
+    return;
+  }
+  if (jsrt_is(v, JSRT_TAG_ARRAY)) {
+    const JSRTArray *a = jsrt_as_array(v);
+    json_check_cycle(a, chain);
+    const JSONAncestor here = {a, chain};
+    buf_putc(out, '[');
+    for (uint32_t i = 0; i < a->length; i++) {
+      if (i > 0) {
+        buf_putc(out, ',');
+      }
+      /* An unserializable ELEMENT is null, not skipped -- indices must keep their meaning. */
+      if (json_unserializable(a->elements[i])) {
+        buf_puts(out, "null");
+      } else {
+        json_value(out, a->elements[i], &here);
+      }
+    }
+    buf_putc(out, ']');
+    return;
+  }
+  if (jsrt_is(v, JSRT_TAG_OBJECT)) {
+    if (jsrt_is_map_or_set(v) || jsrt_is_regexp(v) || jsrt_is_promise(v)) {
+      buf_puts(out, "{}"); /* no enumerable own properties, Node's own answer */
+      return;
+    }
+    json_check_cycle(jsrt_ptr(v), chain);
+    const JSONAncestor here = {jsrt_ptr(v), chain};
+    /* The one enumeration walk the runtime has; the pairs array is transient and stack-reachable
+     * while this frame lives, which is what the collector scans. */
+    const JSRTArray *entries = jsrt_as_array(jsrt_object_entries(v));
+    buf_putc(out, '{');
+    bool first = true;
+    for (uint32_t i = 0; i < entries->length; i++) {
+      const JSRTArray *pair = jsrt_as_array(entries->elements[i]);
+      if (json_unserializable(pair->elements[1])) {
+        continue; /* an unserializable VALUE drops its key */
+      }
+      if (!first) {
+        buf_putc(out, ',');
+      }
+      first = false;
+      json_quote(out, (const JSString *)jsrt_ptr(pair->elements[0]));
+      buf_putc(out, ':');
+      json_value(out, pair->elements[1], &here);
+    }
+    buf_putc(out, '}');
+    return;
+  }
+  jsrt_panic("STA2005: JSON.stringify of undefined at the top level is not yet supported; the "
+             "spec returns undefined where this call's type promises a string");
+}
+
+jsrt_value jsrt_json_stringify(jsrt_value v) {
+  Buf out;
+  buf_init(&out);
+  json_value(&out, v, NULL);
+  const jsrt_value result = jsrt_string_from_utf8(out.data == NULL ? "" : out.data, out.len);
+  buf_free(&out);
+  return result;
+}
+
 jsrt_value jsrt_to_string(jsrt_value v) {
   char buf[64];
 
@@ -808,24 +1255,7 @@ jsrt_value jsrt_to_string(jsrt_value v) {
    * until js mode's dynamic arrays land -- and the guard belongs there, with the seen-set that
    * inspect will need at the same time. (inspect_array is already safe: its depth cap stops it.) */
   if (jsrt_is(v, JSRT_TAG_ARRAY)) {
-    const JSRTArray *a = jsrt_as_array(v);
-    Buf joined;
-    buf_init(&joined);
-    for (uint32_t i = 0; i < a->length; i++) {
-      if (i > 0) {
-        buf_putc(&joined, ',');
-      }
-      const jsrt_value element = a->elements[i];
-      if (jsrt_is(element, JSRT_TAG_NULL) || jsrt_is(element, JSRT_TAG_UNDEFINED)) {
-        continue;
-      }
-      const jsrt_value text = jsrt_to_string(element);
-      append_string(&joined, (const JSString *)jsrt_ptr(text));
-    }
-    const jsrt_value result = jsrt_string_from_utf8(joined.data == NULL ? "" : joined.data,
-                                                    joined.len);
-    buf_free(&joined);
-    return result;
+    return jsrt_array_join(v, JSRT_UNDEFINED);
   }
 
   if (jsrt_is_double(v)) {
@@ -845,6 +1275,8 @@ jsrt_value jsrt_to_string(jsrt_value v) {
      * original span carried into the binary. Until then this is deliberately shaped like a
      * function rather than "[object Object]", and differs from Node. */
     snprintf(buf, sizeof buf, "function %s() { [native code] }", jsrt_as_closure(v)->name);
+  } else if (jsrt_is_promise(v)) {
+    snprintf(buf, sizeof buf, "[object Promise]");
   } else {
     snprintf(buf, sizeof buf, "[object Object]");
   }

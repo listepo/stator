@@ -1,7 +1,7 @@
 {
   "name": "statorc",
   "version": "0.0.0",
-  "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries",
+  "description": "Stator \u2014 an ahead-of-time compiler from TypeScript/JavaScript to native binaries",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.20.0",
@@ -25,10 +25,13 @@
     "test:golden": "node tests/golden/run.ts",
     "bench:record": "node tests/bench/record.ts",
     "test:runtime": "make -C runtime test",
+    "test:leak": "node tests/leak/run.ts",
     "test:asan": "make -C runtime asan && make -C runtime test-asan && STATOR_RUNTIME=asan node tests/golden/run.ts",
+    "test:intl": "make -C runtime intl && STATOR_RUNTIME=intl node tests/golden/run.ts",
     "runtime": "make -C runtime",
     "dupes": "cpd .",
-    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run test && pnpm run runtime && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:asan"
+    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run test && pnpm run runtime && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
+    "test:builtins": "node tests/golden/builtins.ts"
   },
   "dependencies": {
     "typescript": "6.0.3"

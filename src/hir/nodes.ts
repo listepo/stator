@@ -29,6 +29,9 @@ export interface Span {
   readonly start: number;
   readonly length: number;
   readonly line: number;
+  /** The file this span points into. Absent only in hand-built HIR (tests); the lowering always
+   * sets it, and the emitter falls back to the module's fileName when it is missing. */
+  readonly file?: string;
 }
 
 /** Base interface for all HIR nodes. */
@@ -283,6 +286,18 @@ export interface FieldAccess extends Node {
   readonly slot: number;
 }
 
+/** `o.x` where `o`'s type has no layout to resolve a slot against — the dynamic half of Task 4.1.
+ *
+ * No `slot`: the offset is the shape table's answer at runtime, cached per SITE in a static
+ * `JSRTIC` the emitter allocates. The node's `type` is always Unknown — an optional property
+ * reads `undefined` when absent, and that possibility is the whole reason this node exists.
+ * `jsrt_get_prop` runs no user code and cannot throw, so no pending check follows it. */
+export interface DynFieldAccess extends Node {
+  readonly kind: 'dyn-field-access';
+  readonly target: Expression;
+  readonly field: string;
+}
+
 /** `o.m(a)`.
  *
  * A method is not a field: no instance holds a closure for it, and one function is shared by every
@@ -330,6 +345,20 @@ export interface ObjectEntry {
   readonly value: Expression;
 }
 
+/** An object literal whose type is NOT a layout — an optional property or an index signature
+ * (docs/VALUE.md §4.10, Task 4.1). There is no descriptor and no slot order: the object is a
+ * `JSRTDynObject`, each entry is a `jsrt_set_prop`, and WHICH slot a key landed in is the shape
+ * table's business at runtime, not this node's.
+ *
+ * The literal's fate is decided by its CONTEXTUAL type when one exists: `const o: {x?: n} =
+ * {x: 1}` must build a dynamic object even though the initializer's own type has no optional
+ * property, or every later `o.x` — typed by the binding — would aim a dynamic site at a
+ * fixed-shape object. `entries` is written order, evaluated left to right, exactly once. */
+export interface DynObjectLiteral extends Node {
+  readonly kind: 'dyn-object-literal';
+  readonly entries: readonly ObjectEntry[];
+}
+
 /** `new Map()` and `new Set()`.
  *
  * Not a `NewExpr`: that names a class the emitter emitted a descriptor for, and these two are
@@ -344,8 +373,54 @@ export interface CollectionNew extends Node {
  *
  * `size` is here despite being a property rather than a call, because it is the same question asked
  * of the same structure and giving it a node of its own would buy nothing -- exactly the reasoning
- * that keeps `ArrayLength` separate from a general property access, seen from the other side. */
-export type CollectionOperation = 'get' | 'set' | 'has' | 'delete' | 'clear' | 'add' | 'size';
+ * that keeps `ArrayLength` separate from a general property access, seen from the other side.
+ *
+ * `forEach` is the one operation here that runs USER CODE, so it carries the same consequences an
+ * `ARRAY_OPS` entry with `calls` does: the emitter follows it with a pending check, and the
+ * runtime's walk stops the moment an exception is pending (plan-notes 96). The other iteration
+ * forms -- `keys`/`values`/`entries` -- are not here, because they hand back an ITERATOR, which is
+ * the Symbol.iterator protocol the subset still has no node for.
+ *
+ * The last seven are the ES2025 set operations, which are `SET_OPS` below: they take another SET
+ * rather than an element, which is a contract neither the arity check nor the receiver check would
+ * catch on its own. */
+export type CollectionOperation =
+  | 'get'
+  | 'set'
+  | 'has'
+  | 'delete'
+  | 'clear'
+  | 'add'
+  | 'size'
+  | 'forEach'
+  | SetOperation;
+
+/** The ES2025 set operations, mapped to what each ANSWERS.
+ *
+ * They differ from every other collection operation in their argument: it is a Set, not an element,
+ * and the runtime reads it as a `JSRTMap` -- so passing anything else is memory corruption rather
+ * than a wrong answer. That is why this table exists at all, and why both the gate and the verifier
+ * consult it rather than trusting an arity count.
+ *
+ * The spec accepts any SET-LIKE object (a `size`, a `has` and a `keys`), which the gate refuses:
+ * reading one means calling its `keys()` iterator, the protocol the forms above wait on. */
+export const SET_OPS = {
+  union: 'set',
+  intersection: 'set',
+  difference: 'set',
+  symmetricDifference: 'set',
+  isSubsetOf: 'boolean',
+  isSupersetOf: 'boolean',
+  isDisjointFrom: 'boolean',
+} as const satisfies Record<string, 'set' | 'boolean'>;
+
+export type SetOperation = keyof typeof SET_OPS;
+
+/** Whether an operation is one of the seven — the membership test every stage shares. `Object.hasOwn`
+ * rather than `in`, so a name like `toString` cannot answer true off the prototype (plan-notes 91). */
+export function isSetOperation(op: string): op is SetOperation {
+  return Object.hasOwn(SET_OPS, op);
+}
 
 /** `m.get(k)`, `s.add(v)`, `m.size` — one node for the whole method surface of both collections.
  *
@@ -358,6 +433,255 @@ export interface CollectionOp extends Node {
   readonly collection: 'map' | 'set';
   readonly op: CollectionOperation;
   readonly target: Expression;
+  readonly args: readonly Expression[];
+}
+
+/** The String.prototype surface Task 4.2 has landed, with each operation's post-lowering arity
+ * (optional arguments are PADDED with undefined-literals by the lowering — for every method here
+ * the spec gives an explicit undefined the same meaning as an absent argument) and its result
+ * kind, which the verifier holds the node's type to (`STA4081`); `element` is Unknown, the
+ * IndexAccess rule — `at`/`codePointAt` really answer `undefined` out of range, where `charAt`
+ * answers "" and `charCodeAt` NaN. `concat` is the receiver-plus-one-argument form of `+`, and
+ * its C name IS the concatenation primitive. Absent deliberately: `normalize` and
+ * `localeCompare` (Unicode tables), and everything regex-shaped (Task 4.3). */
+export const STRING_OPS = {
+  at: { arity: 1, result: 'element' },
+  charAt: { arity: 1, result: 'string' },
+  charCodeAt: { arity: 1, result: 'number' },
+  codePointAt: { arity: 1, result: 'element' },
+  concat: { arity: 1, result: 'string' },
+  endsWith: { arity: 2, result: 'boolean' },
+  includes: { arity: 2, result: 'boolean' },
+  indexOf: { arity: 2, result: 'number' },
+  lastIndexOf: { arity: 2, result: 'number' },
+  localeCompare: { arity: 2, result: 'number' },
+  normalize: { arity: 1, result: 'string' },
+  padEnd: { arity: 2, result: 'string' },
+  padStart: { arity: 2, result: 'string' },
+  repeat: { arity: 1, result: 'string' },
+  search: { arity: 1, result: 'number' },
+  replace: { arity: 2, result: 'string' },
+  replaceAll: { arity: 2, result: 'string' },
+  slice: { arity: 2, result: 'string' },
+  split: { arity: 1, result: 'string-array' },
+  startsWith: { arity: 2, result: 'boolean' },
+  substring: { arity: 2, result: 'string' },
+  toLocaleLowerCase: { arity: 1, result: 'string' },
+  toLocaleUpperCase: { arity: 1, result: 'string' },
+  toLowerCase: { arity: 0, result: 'string' },
+  toString: { arity: 0, result: 'string' },
+  toUpperCase: { arity: 0, result: 'string' },
+  trim: { arity: 0, result: 'string' },
+  trimEnd: { arity: 0, result: 'string' },
+  trimStart: { arity: 0, result: 'string' },
+  valueOf: { arity: 0, result: 'string' },
+} as const satisfies Record<
+  string,
+  { arity: number; result: 'boolean' | 'element' | 'number' | 'string' | 'string-array' }
+>;
+
+export type StringOpName = keyof typeof STRING_OPS;
+
+/** `s.indexOf(t)` and the rest of the landed String.prototype surface — the CollectionOp shape
+ * exactly: a closed op set, one runtime function per operation, no method value anywhere. The
+ * receiver is typed `string`, and the result type comes from the table above. */
+export interface StringOp extends Node {
+  readonly kind: 'string-op';
+  readonly op: StringOpName;
+  readonly target: Expression;
+  readonly args: readonly Expression[];
+}
+
+/** The `Array.prototype` methods the HIR can spell, with their POST-LOWERING arity and result
+ * kind — the same single-vocabulary contract as `STRING_OPS`, read by the gate, the lowering, the
+ * verifier, and the emitter (C names derive mechanically: `jsrt_array_` + snake_case).
+ *
+ * The set is the non-callback surface: `map`/`filter`/`forEach` and the rest that take a function
+ * wait on a protocol for the runtime to call back into compiled code. Omitted optional arguments
+ * are padded with `undefined` literals where ECMA-262 makes explicit `undefined` and absent
+ * indistinguishable — which is every op here EXCEPT `lastIndexOf`, whose absent `fromIndex` means
+ * `length - 1` while an explicit `undefined` means `0`; it therefore lands with arity 1 and an
+ * explicit position stays deferred. `push`/`unshift` land single-argument (the variadic forms have
+ * no node to fold into); `concat` takes exactly one array and spreads it, per spec.
+ *
+ * Result kinds: `self` is the RECEIVER's array type (`slice`/`concat`/`fill`/`reverse` — the last
+ * two mutate in place and return the receiver); `element` is `T | undefined` and therefore
+ * Unknown, the IndexAccess precedent (`pop` on an empty array really answers `undefined`);
+ * `mapped` keeps the CHECKER's answer when it is an array (degrading its element to Unknown
+ * otherwise) — for `map` because the element is the callback's to choose, and for `filter`
+ * because a type-guard predicate legitimately narrows it below the receiver's; `undefined` is
+ * `forEach`'s only answer; `checker` is the checker's answer with NOTHING pinned — `reduce`'s
+ * accumulator type is whatever the callback and initial value agreed on.
+ *
+ * The callback-taking ops carry `calls: true`, which is the fact that they can THROW: the runtime's
+ * walks stop as soon as `jsrt_pending()` is set, and the emitter follows the op with the same
+ * pending check an ordinary call gets (plan-notes 96). They hold their single argument to a
+ * function TYPE at the gate; the runtime
+ * calls it through jsrt_call, the same closure ABI compiled callers use, with the spec's
+ * (element, index, array) triple — `reduce`/`reduceRight` prepend the accumulator and land in
+ * their WITH-initial form only, because an explicit `undefined` initial is an initial and so the
+ * two forms cannot share an undefined-padded signature. `sort` is a stable merge (stability is
+ * normative), and an ABSENT comparator equals an explicit `undefined` one in the spec, so the
+ * padding rule holds and both spell the ToString default -- [10, 9] stays [10, 9]. */
+export const ARRAY_OPS = {
+  at: { arity: 1, result: 'element' },
+  concat: { arity: 1, result: 'self' },
+  copyWithin: { arity: 3, result: 'self' },
+  every: { arity: 1, result: 'boolean', calls: true },
+  fill: { arity: 3, result: 'self' },
+  filter: { arity: 1, result: 'mapped', calls: true },
+  find: { arity: 1, result: 'element', calls: true },
+  findIndex: { arity: 1, result: 'number', calls: true },
+  findLast: { arity: 1, result: 'element', calls: true },
+  findLastIndex: { arity: 1, result: 'number', calls: true },
+  flat: { arity: 1, result: 'mapped' },
+  flatMap: { arity: 1, result: 'mapped', calls: true },
+  forEach: { arity: 1, result: 'undefined', calls: true },
+  includes: { arity: 2, result: 'boolean' },
+  indexOf: { arity: 2, result: 'number' },
+  join: { arity: 1, result: 'string' },
+  lastIndexOf: { arity: 1, result: 'number' },
+  map: { arity: 1, result: 'mapped', calls: true },
+  pop: { arity: 0, result: 'element' },
+  push: { arity: 1, result: 'number' },
+  reduce: { arity: 2, result: 'checker', calls: true },
+  reduceRight: { arity: 2, result: 'checker', calls: true },
+  reverse: { arity: 0, result: 'self' },
+  shift: { arity: 0, result: 'element' },
+  slice: { arity: 2, result: 'self' },
+  sort: { arity: 1, result: 'self', calls: true },
+  some: { arity: 1, result: 'boolean', calls: true },
+  splice: { arity: 2, result: 'self' },
+  toReversed: { arity: 0, result: 'self' },
+  toSorted: { arity: 1, result: 'self' },
+  toSpliced: { arity: 2, result: 'self' },
+  toString: { arity: 0, result: 'string' },
+  unshift: { arity: 1, result: 'number' },
+  with: { arity: 2, result: 'self' },
+} as const satisfies Record<
+  string,
+  {
+    arity: number;
+    result:
+      | 'boolean'
+      | 'checker'
+      | 'element'
+      | 'mapped'
+      | 'number'
+      | 'self'
+      | 'string'
+      | 'undefined';
+    /* Present exactly on the ops that call back into compiled code, which is what makes them able
+     * to THROW. The emitter reads it to decide whether the call needs its own statement and a
+     * pending check after it; the runtime's walks read the same fact as `!jsrt_pending()` in their
+     * loop guards. */
+    calls?: true;
+  }
+>;
+
+export type ArrayOpName = keyof typeof ARRAY_OPS;
+
+/** Whether this op calls back into compiled code — and therefore whether it can THROW. The emitter
+ * gives such an op its own statement and a pending check after it; every other array op is a walk
+ * over the backing store that cannot unwind. */
+export function arrayOpCallsBack(op: ArrayOpName): boolean {
+  return 'calls' in ARRAY_OPS[op];
+}
+
+/** `xs.push(v)`, `xs.slice(1, -1)` — an `ARRAY_OPS` operation on an array-typed receiver. */
+export interface ArrayOp extends Node {
+  readonly kind: 'array-op';
+  readonly op: ArrayOpName;
+  readonly target: Expression;
+  readonly args: readonly Expression[];
+}
+
+/** The `Object` namespace calls the HIR can spell — `Object.keys(o)` and its two siblings, each
+ * one runtime function over a fixed-shape or dynamic object (the gate restricts the argument to
+ * those). `keys` is `string[]`; `values`/`entries` carry the checker's answer, with an Unknown
+ * element where the shape makes the element genuinely mixed. Enumeration order is field
+ * declaration order (fixed shapes) or insertion order (dynamic shapes), which IS the spec's
+ * string-key order because every key here is an identifier — integer-like keys cannot be spelled
+ * through the property syntax these objects are built from. */
+export type ObjectStaticMethod =
+  | 'entries'
+  | 'fromEntries'
+  | 'getOwnPropertyNames'
+  | 'hasOwn'
+  | 'keys'
+  | 'values';
+
+/** A call on the `Object` namespace. Arity is fixed per method by the gate's own table, so the
+ * arguments are a plain list and the verifier checks the count against that same table. */
+export interface ObjectStaticCall extends Node {
+  readonly kind: 'object-static';
+  readonly method: ObjectStaticMethod;
+  readonly args: readonly Expression[];
+}
+
+/** The `Promise` namespace calls the subset can spell. `all` takes an ARRAY -- the only iterable
+ * the runtime walks -- and settles with an array of the same length in INPUT order; `resolve` and
+ * `reject` are the two one-argument constructors that need no executor.
+ *
+ * `new Promise(executor)`, `.then`, `.catch` and `.finally` are deliberately absent, and not as a
+ * backlog: each runs a JS callback whose own throw has to become a rejection, which is a
+ * runtime-level catch the pending-exception protocol gives to GENERATED code and not to a builtin.
+ * An async function needs none of them -- its landing pad rejects its own promise in emitted C --
+ * which is why async lands first and the combinators follow the object model's exceptions. */
+export type PromiseStaticMethod = 'all' | 'reject' | 'resolve';
+
+export interface PromiseStaticCall extends Node {
+  readonly kind: 'promise-static';
+  readonly method: PromiseStaticMethod;
+  readonly arg: Expression;
+  /** What the resulting promise settles with — `T` for `resolve`/`reject`, `T[]` for `all`. */
+  readonly type: HType;
+}
+
+/** `JSON.stringify(v)`, single-argument form — always a `string`. The gate refuses argument
+ * types that admit `undefined` or a function at the TOP level, because there the spec returns
+ * `undefined` where this type promises a string; inside a structure both serialize per spec
+ * (skipped in objects, `null` in arrays), and a cycle aborts loudly at run time. */
+export interface JsonStringify extends Node {
+  readonly kind: 'json-stringify';
+  readonly arg: Expression;
+}
+
+/** `JSON.parse(text)`, single-argument form. The result is genuinely untyped — the text is data,
+ * not something the checker can see into — so it lowers typed Unknown, exactly like a dynamic
+ * property read, and every use below it is a boundary the program must check. The reviver form
+ * is gate-refused; malformed text aborts loudly at run time (the spec throws SyntaxError). */
+export interface JsonParse extends Node {
+  readonly kind: 'json-parse';
+  readonly arg: Expression;
+}
+
+/** The Math methods the HIR can spell. After lowering, arity is FIXED: `abs`..`trunc` take one
+ * argument, `pow`/`min`/`max` exactly two — the variadic `Math.min(a, b, c)` was folded into
+ * nested binary nodes by the lowering, and the zero-argument forms into their identity literals
+ * (`Infinity` / `-Infinity`), so no node below the gate is variadic. */
+export type MathMethod =
+  | 'abs'
+  | 'ceil'
+  | 'floor'
+  | 'max'
+  | 'min'
+  | 'pow'
+  | 'round'
+  | 'sign'
+  | 'sqrt'
+  | 'trunc';
+
+/** `Math.floor(x)` and friends — one node for the Math surface, on the CollectionOp precedent.
+ *
+ * Not a `CallExpr`: there is no function value anywhere — `Math` is not an object the program
+ * built, and each method is one runtime function for the whole program. Not per-method nodes: the
+ * ten differ only in which C function the emitter names, and the verifier pins arity and the
+ * number-in/number-out contract once for all of them (`STA4080`). Constants (`Math.PI`) need no
+ * node at all — the lowering folds them to number literals, the same doubles Node holds. */
+export interface MathCall extends Node {
+  readonly kind: 'math-call';
+  readonly method: MathMethod;
   readonly args: readonly Expression[];
 }
 
@@ -387,6 +711,26 @@ export interface FunctionExpr extends Node {
    * the incoming one and its closure is heap-allocated. False leaves rung 4a's file-static
    * constant with `env = NULL`, which is why a non-capturing function still costs no allocation. */
   readonly needsEnv: boolean;
+  /** An `async` function. It returns a promise rather than its body's value, and every one of its
+   * bindings — including the emitter's own temporaries — lives in the heap environment, because a
+   * suspended body's C frame is gone by the time it resumes. */
+  readonly isAsync: boolean;
+}
+
+/** `await e`.
+ *
+ * `type` is what the awaited promise settles WITH, which is one level inside the awaited
+ * expression's type — and is the type of this expression, since awaiting is the only thing that
+ * takes a value back out of a promise. Awaiting a non-promise is legal and still suspends for a
+ * tick, so the operand is NOT required to be one; the runtime wraps whatever it gets.
+ *
+ * An await may only appear inside an async function's body. Nothing below the gate re-checks that,
+ * because the emitter's resume machinery is what an await compiles into and there is none anywhere
+ * else — an await outside one is not a wrong answer, it is a node the emitter cannot spell. */
+export interface AwaitExpr extends Node {
+  readonly kind: 'await';
+  readonly value: Expression;
+  readonly type: HType;
 }
 
 /** One captured variable. `levels` counts from the environment the referencing function receives:
@@ -421,9 +765,95 @@ export interface CallExpr extends Node {
   readonly args: readonly Expression[];
 }
 
-/** console.log call — restricted to this single builtin for Phase 2. */
+/** What each console method takes, and the runtime function that serves it. The five printing
+ * methods differ only in stream and in whether a top-level string prints bare, so they share
+ * `jsrt_print`/`jsrt_eprint`; the rest each have their own entry point because each carries its
+ * own state (the group indent, the per-label tallies) or its own output rule.
+ *
+ * `optional` marks a trailing argument the method may omit, and `bare` is how the omission
+ * reaches the runtime. Where `bare` is ABSENT the lowering pads the argument with `undefined`,
+ * which is sound only because the spec's own absent case IS undefined there: `count()` and
+ * `count(undefined)` both tally under "default". Where `bare` is present the two forms are
+ * genuinely different output — Node prints `console.group(undefined)` as "undefined" and
+ * `console.assert(c, undefined)` as "Assertion failed undefined", where the omitted forms print
+ * nothing — so the short form gets its own C entry point rather than a sentinel the runtime
+ * would have to mistake for absence. This is the `lastIndexOf` rule (plan-notes 83) with a second
+ * answer available: refuse the form, or give it its own call. */
+export const CONSOLE_METHODS = {
+  assert: { arity: 2, optional: 1, fn: 'jsrt_console_assert', bare: 'jsrt_console_assert_bare' },
+  count: { arity: 1, optional: 1, fn: 'jsrt_console_count' },
+  countReset: { arity: 1, optional: 1, fn: 'jsrt_console_count_reset' },
+  debug: { arity: 1, optional: 0, fn: 'jsrt_print' },
+  dir: { arity: 1, optional: 0, fn: 'jsrt_console_dir' },
+  error: { arity: 1, optional: 0, fn: 'jsrt_eprint' },
+  group: { arity: 1, optional: 1, fn: 'jsrt_console_group', bare: 'jsrt_console_group_bare' },
+  groupEnd: { arity: 0, optional: 0, fn: 'jsrt_console_group_end' },
+  info: { arity: 1, optional: 0, fn: 'jsrt_print' },
+  log: { arity: 1, optional: 0, fn: 'jsrt_print' },
+  warn: { arity: 1, optional: 0, fn: 'jsrt_eprint' },
+} as const satisfies Record<
+  string,
+  { readonly arity: number; readonly optional: number; readonly fn: string; readonly bare?: string }
+>;
+
+export type ConsoleMethod = keyof typeof CONSOLE_METHODS;
+
+/** The C entry point for a call of this width, or `null` if the method has no such form. A method
+ * without `bare` is always called at full arity because the lowering padded it there. */
+export function consoleEntryPoint(method: ConsoleMethod, given: number): string | null {
+  const shape = CONSOLE_METHODS[method];
+  if (given === shape.arity) {
+    return shape.fn;
+  }
+  return 'bare' in shape && given === shape.arity - shape.optional ? shape.bare : null;
+}
+
+/** A console call. The method survives lowering because the runtime entry points are no longer
+ * one function and a stream flag: `dir` suppresses the bare-string exception, `group`/`groupEnd`
+ * move an indent every other console write then honours, and `count` keeps per-label tallies.
+ * `args` is either the method's full arity or, for the two methods whose omitted tail is its own
+ * C entry point, the arity minus its optional tail — `consoleEntryPoint` maps the width to the
+ * call, and nothing downstream branches on the method itself. */
 export interface ConsoleLogCall extends Node {
   readonly kind: 'console-log';
+  readonly method: ConsoleMethod;
+  readonly args: readonly Expression[];
+}
+
+/** `/ab+c/gi` — a regular-expression literal, carried as the two strings the runtime compiles it
+ * from: the pattern without its delimiting slashes, and the flag letters as written.
+ *
+ * A literal, but NOT a constant, and the difference is normative: §22.2.4.1 makes every evaluation
+ * of a regexp literal a new object, and it has to, because `lastIndex` is mutable state ON that
+ * object — hoisting one out of a loop would let one iteration's match position leak into the next.
+ * So the emitter compiles the pattern at each evaluation rather than once at startup.
+ *
+ * The engine is vendored (quickjs-ng's libregexp, plan.md golden rule 5), which is why the pattern
+ * travels as TEXT all the way to the runtime: nothing above the C boundary parses it, so nothing
+ * above the C boundary can disagree with the engine about what it means. */
+export interface RegExpLiteral extends Node {
+  readonly kind: 'regexp-literal';
+  readonly source: string;
+  readonly flags: string;
+}
+
+/** The `RegExp.prototype` surface, on the `COLLECTION_OPS` discipline: a closed set of methods,
+ * each one runtime function with a fixed C signature, never a function value.
+ *
+ * `test` is the whole of it for now. `exec` is deliberately absent: it answers an ARRAY WITH
+ * PROPERTIES (`index`, `input`, `groups` hang off the match array), and a jsrt array is dense with
+ * no property table — so landing it would mean either a wrong answer or a representation change,
+ * and neither belongs in this slice. */
+export const REGEXP_OPS = {
+  test: 1,
+} as const satisfies Record<string, number>;
+
+export type RegExpOperation = keyof typeof REGEXP_OPS;
+
+export interface RegExpOp extends Node {
+  readonly kind: 'regexp-op';
+  readonly op: RegExpOperation;
+  readonly target: Expression;
   readonly args: readonly Expression[];
 }
 
@@ -443,16 +873,28 @@ export type Expression =
   | StringLength
   | ArrayLength
   | ArrayLiteral
+  | ArrayOp
+  | JsonStringify
+  | JsonParse
+  | ObjectStaticCall
   | IndexAccess
   | NewExpr
   | InstanceOf
   | FieldAccess
   | MethodCall
   | ObjectLiteral
+  | DynObjectLiteral
+  | DynFieldAccess
   | CollectionNew
   | CollectionOp
+  | MathCall
+  | StringOp
+  | RegExpLiteral
+  | RegExpOp
   | FunctionExpr
   | CallExpr
+  | AwaitExpr
+  | PromiseStaticCall
   | ConsoleLogCall;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -519,6 +961,16 @@ export interface FieldAssignment extends Node {
   readonly target: Expression;
   readonly field: string;
   readonly slot: number;
+  readonly value: Expression;
+}
+
+/** `o.x = v` against a dynamic object: overwrite in place when the key exists, shape transition
+ * when it does not. Same evaluation order as FieldAssignment (target, then value), and both land
+ * in rooted slots first — `jsrt_set_prop` may grow the slot array, which allocates. */
+export interface DynFieldAssignment extends Node {
+  readonly kind: 'dyn-field-assignment';
+  readonly target: Expression;
+  readonly field: string;
   readonly value: Expression;
 }
 
@@ -761,6 +1213,7 @@ export type Statement =
   | Assignment
   | IndexAssignment
   | FieldAssignment
+  | DynFieldAssignment
   | SuperCall
   | ClassDeclaration
   | ExpressionStatement

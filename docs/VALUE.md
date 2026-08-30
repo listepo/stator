@@ -556,6 +556,88 @@ could be ignored would make that entitlement false.
 
 ---
 
+## 4.9 Exceptions — the pending cell and the landing-pad protocol (Task 3.10)
+
+Exceptions are return-value + landing-pad style, never `setjmp`/`longjmp` (plan.md §2: bad codegen
+interactions, GC-root problems). The runtime's entire contribution is a mailbox — one value and one
+flag, thread-local, in `runtime/src/jsrt_throw.c`:
+
+- `jsrt_throw(v)` stores the value and raises the flag. Overwriting an already-pending exception is
+  legal and REQUIRED: a throw inside a `finally` replaces the completion that got the finally
+  running, and the generated code relies on the newest throw winning.
+- `jsrt_pending()` reads the flag. Generated C checks it after every operation that can run user
+  code — `jsrt_call` in all its spellings — and jumps to the nearest landing pad. The return VALUE
+  of an unwinding call is `JSRT_UNDEFINED` and meaningless; the flag is the channel.
+- `jsrt_take_exception()` clears both and hands over the value. A pad that handles the exception
+  takes exactly once; not taking would make every later call in the handler appear to throw.
+- `jsrt_uncaught()` is main's pad of last resort: prints `Uncaught <value>` to STDERR (stdout stays
+  clean for the golden comparison) and exits 1, which is what Node observably does.
+
+Everything else about exceptions — which catch receives one, the order finally blocks run in, how
+frames pop on the way out — is a property of the GENERATED C, decided by the emitter where the
+scope structure is known (docs/HIR.md §1.3 `TryStatement`). Two invariants tie it to this section:
+
+- **Frames pop on every exit path, landing pads included.** A function with no enclosing try gets
+  one `_jsrt_unwind` pad that does `JSRT_FRAME_POP(); return JSRT_UNDEFINED;` — emitted only when
+  something in the unit can actually throw.
+- **The pending slot is a GC root.** Between throw and take the cell may hold the only reference
+  to a heap object, so a precise collector must trace it alongside the frame chain (§4). Under
+  conservative Boehm today the invariant is latent, the same way it is for §12's plans.
+
+---
+
+## 4.10 Dynamic objects — the shape table and inline caches (Task 4.1)
+
+The representation for an object whose property set is **not a compile-time layout**: optional
+properties, index signatures, and — from Phase 5 — untyped receivers. Boa's lesson, taken as
+design: ICs matter exactly where types are unknown, so the compiled path never touches any of
+this — a typed field access is a struct offset load into `JSRTObject`, no cache, no shape.
+
+**The shape chain.** A `JSRTShape` is one link of a property history: `parent` is the shape
+before `key` was added, `offset` is the slot the addition claimed. The root (no properties, NULL
+key) is a static singleton; everything else is allocated on first use and lives forever — shapes
+are program-lifetime metadata, never freed, never moved, so a cached shape pointer can never
+dangle. Transitions ("from this shape, adding this key leads to that shape") hang off the parent
+as a linked list of children, and **reuse-before-allocate is the invariant that makes sharing
+real**: two objects that gain the same keys in the same order land on the *same* shape.
+
+**The object.** `JSRTDynObject` is prefix-shared with `JSRTObject` (`cls` first, pointing at the
+marker descriptor `jsrt_class_dynamic`), so the Object tag covers it and the printer, `typeof`,
+truthiness and `instanceof` all see an ordinary object. Its name is `""` — a dynamic object IS a
+plain object, and prints like a literal (`{ a: 1 }`), because Node cannot tell them apart. Slots
+are **out of line**, unlike a fixed-shape object's, because property addition grows them
+(doubling from 4) and the header's address must stay stable — every boxed reference is that
+address. Under Boehm the slots are a collected, scanned allocation; the shapes hold no values and
+use plain malloc either way.
+
+**The inline cache.** One `JSRTIC { shape, offset }` per property-access *site*, emitted `static`
+in generated C. The whole protocol is two rules:
+
+- A cache is filled **only from a hit** against the object's current shape, so
+  `ic->shape == o->shape` alone proves `ic->offset` is the site's key's slot — the key is fixed
+  at compile time, and same shape means same layout. A hit is one pointer compare and one load.
+- A get **miss is never cached**: the object can gain the key later under a different shape, and
+  a cached "absent" would keep answering `undefined` after the property exists.
+
+Reading a property the object lacks *is* `undefined` — that is the semantics of an optional
+property, not an error. A set of an existing key overwrites in place (shape unchanged); a set of
+a new key takes or builds a transition and moves the object's shape. Transitions are not
+IC-cached: each object performs a given addition once, so a transition cache pays only across
+objects — worth building when Phase 5 measures construction-heavy dynamic code, not before.
+
+The subset has no `delete`, so shapes need no removal edges; when deletion lands it gets a
+dictionary-mode escape, not shape surgery. Keys are `const char *` with program lifetime
+(generated C passes string literals; the shape table stores the pointer and compares by pointer
+first, `strcmp` as the backstop for one key spelled at two sites). Dynamic property access on
+anything that is not a dynamic object panics `STA4058` — loudly unimplemented until Phase 5 gives
+fixed-shape objects, primitives and nullish receivers their deliberate dynamic paths, never
+silently wrong.
+
+Pinned by `runtime/tests/print_shapes.{c,mjs}`: insertion-order printing through the chain,
+overwrite-in-place, undefined-on-miss, shared-IC reads across shape-sharing objects, the
+stale-cache miss after a transition, divergent histories landing on different shapes, and
+non-identifier keys printing quoted (`{ 'a-b': 1 }`).
+
 ## 5. What Phase 2 actually implements
 
 The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap
@@ -566,12 +648,12 @@ reads as scheduling, not omission:
 | Double, `Bool`, `Undefined`, `Null`, `String` | yes | — |
 | `Int32` tag | layout only, never emitted (but `jsrt_type_name` handles it, §4.7) | Phase 3 (`NUMERIC.md`) |
 | `Array` tag + `JSRTArray` | yes, from rung 5 (§4.4) | — |
-| `Object` tag + `JSRTClass`/`JSRTObject` | yes, from rung 6a (§4.5); `instanceof`, inheritance, statics, `#private`, method tables, accessors and object-literal shapes from rung 6b; `JSRTMap` from rung 7 (§4.6) | dynamic-key objects: Task 4.1 (shape table) |
+| `Object` tag + `JSRTClass`/`JSRTObject` | yes, from rung 6a (§4.5); `instanceof`, inheritance, statics, `#private`, method tables, accessors and object-literal shapes from rung 6b; `JSRTMap` from rung 7 (§4.6); `JSRTDynObject` shape table + ICs from Task 4.1 (§4.10) | frontend consumers of the dynamic path: Phase 5 |
 | `Closure` tag + `JSRTClosure` | yes, from rung 4a | — |
 | `JSRTEnv` + `JSRT_FRAME_ENV` | yes, from rung 4b | — |
 | `jsrt_string_length` / `_char` | yes | — |
 | Ryū + `Number::toString` format | yes | — |
 | `JSRT_FRAME` / `JSRT_LOCAL` | yes, from the first emitted function | — |
 | `jsrt_typeof` / `jsrt_check_*` | yes, from Task 3.5 (§4.7, §4.8) | `jsrt_check_*` for shapes: needs Task 4.1 |
-| Landing-pad frame discipline | no `try`/`catch` in the subset yet | Phase 3 Task 3.10 |
+| Landing-pad frame discipline | yes, from Task 3.10 (§4.9): pads take the pending exception, unwind pads pop | — |
 | Boehm GC | yes | precise generational, §12 |

@@ -1,0 +1,16 @@
+const s: string = 'héllo 𝄞 world';
+console.log(s.at(0));
+console.log(s.at(-1));
+console.log(s.at(6));
+console.log(s.at(99));
+console.log(s.at(-99));
+console.log(s.codePointAt(0));
+console.log(s.codePointAt(6));
+console.log(s.codePointAt(7));
+console.log(s.codePointAt(99));
+console.log(s.concat('!'));
+console.log('a'.concat('b'));
+console.log(s.toString());
+console.log(s.valueOf());
+console.log(''.at(0));
+console.log(''.codePointAt(0));

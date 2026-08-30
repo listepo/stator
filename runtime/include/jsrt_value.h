@@ -113,8 +113,15 @@ uint16_t jsrt_string_char(jsrt_value v, uint32_t i);
 /* String construction from UTF-8 bytes. */
 jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len);
 
+/* String construction from UTF-16 code units, copied verbatim (lone surrogates included). */
+jsrt_value jsrt_string_from_units(const uint16_t *units, uint32_t len);
+
 /* String operations: concatenation, equality, and lexicographic comparison. */
 jsrt_value jsrt_string_concat(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_string_at(jsrt_value s, jsrt_value i);
+jsrt_value jsrt_string_code_point_at(jsrt_value s, jsrt_value i);
+jsrt_value jsrt_string_to_string(jsrt_value s);
+jsrt_value jsrt_string_value_of(jsrt_value s);
 bool jsrt_string_equals(jsrt_value a, jsrt_value b);
 /* Compare two strings lexicographically by UTF-16 code unit.
  * Returns: <0 if a < b, 0 if a == b, >0 if a > b */
@@ -271,6 +278,217 @@ typedef struct JSRTObject {
  * JavaScript. The constructor body then assigns the ones it assigns. */
 jsrt_value jsrt_object_new(const JSRTClass *cls);
 
+/* ============================================================================
+ * Dynamic objects -- the shape table (hidden classes), docs/VALUE.md §4.10
+ * ============================================================================
+ *
+ * A dynamic object is the representation for an object whose property SET is not a compile-time
+ * layout: optional properties, index signatures, and (from Phase 5) untyped receivers. Its
+ * properties live in an out-of-line slots array, and WHICH property is at which slot is recorded
+ * once per distinct property history in a shared JSRTShape chain -- two objects that gained the
+ * same keys in the same order point at the same shape, which is what makes a per-site inline
+ * cache work: "same shape" implies "same offset", so a hit is one pointer compare and one load.
+ *
+ * A shape is one link of that history: `parent` is the object's shape before `key` was added, and
+ * `offset` is the slot the addition claimed, so a shape's slot count is `offset + 1` and the root
+ * (no properties yet) is the one shape with a NULL key. Transitions -- "from this shape, adding
+ * this key leads to that shape" -- hang off the parent as a linked list of children. Shapes are
+ * program-lifetime metadata: allocated on first use, never freed, never moved.
+ *
+ * The subset has no `delete`, so shapes never need a removal edge; when deletion lands it gets a
+ * dictionary-mode escape, not shape surgery. */
+typedef struct JSRTShape {
+  struct JSRTShape *parent; /* the shape before `key` was added; NULL only at the root */
+  const char *key;          /* the property this link added; NULL only at the root */
+  uint32_t offset;          /* slot index `key` occupies; slot count of this shape is offset+1 */
+  struct JSRTShape *transitions; /* first child: a shape reached by adding one more key */
+  struct JSRTShape *sibling;     /* next child in the parent's transition list */
+} JSRTShape;
+
+/* Prefix-shared with JSRTObject exactly as JSRTMap is: `cls` first, so the Object tag covers it
+ * and `jsrt_class_dynamic` (by pointer) is what distinguishes it. Slots are OUT of line, unlike a
+ * fixed-shape object's, because property addition grows them and the header's address must stay
+ * stable -- every boxed reference is the header's address. */
+typedef struct JSRTDynObject {
+  const JSRTClass *cls; /* &jsrt_class_dynamic -- prefix-shared with JSRTObject */
+  JSRTShape *shape;
+  uint32_t capacity;    /* slots allocated; the shape says how many are live */
+  jsrt_value *slots;
+} JSRTDynObject;
+
+/* One per property-access SITE, emitted `static` in generated C so it persists across executions
+ * of the site. `shape == NULL` is the empty cache. The invariant a hit relies on: an IC is filled
+ * only from a hit against a specific shape, so `ic->shape == o->shape` implies `ic->offset` is
+ * `key`'s slot in that shape -- the site's key is fixed at compile time. */
+typedef struct JSRTIC {
+  const JSRTShape *shape;
+  uint32_t offset;
+} JSRTIC;
+
+/* The marker descriptor every dynamic object shares. Its name is "" (prints like a literal) and
+ * its field list is empty -- the SHAPE owns the layout, not the class. */
+extern const JSRTClass jsrt_class_dynamic;
+
+jsrt_value jsrt_dynobj_new(void);
+
+/* Own-property order for a dynamic object: canonical array-index keys first in numeric order,
+ * followed by the remaining string keys in insertion order (ECMA-262 OrdinaryOwnPropertyKeys).
+ * The returned shape-pointer array is malloc-owned by the caller; it contains metadata pointers,
+ * not GC values, and is therefore safe to hold outside a JSRT_FRAME. */
+uint32_t jsrt_dyn_property_count(const JSRTDynObject *dyn);
+const JSRTShape **jsrt_dyn_property_order(const JSRTDynObject *dyn, uint32_t count);
+
+/* A shape key from a JS string: an immortal NUL-terminated UTF-8 copy, the lifetime the shape
+ * table already gives every key. A key containing U+0000 aborts -- a C string cannot hold one. */
+const char *jsrt_shape_key(jsrt_value name);
+/* Reading a property the object does not have is `undefined` -- that IS the semantics of an
+ * optional property. A miss is never cached: the same object can gain the key later. */
+jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic);
+/* Overwrites in place when the key exists; transitions the shape (growing slots) when it does
+ * not. Transitions are not IC-cached -- each object performs a given addition once. `key` must
+ * outlive the program (generated C passes string literals); the shape table stores the pointer. */
+void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic);
+bool jsrt_has_prop(jsrt_value obj, const char *key);
+
+/* Math builtins (jsrt_math.c) — number -> number, ECMA-262 §21.3.2 exactly; only the
+ * exactly-specified operations exist (the approximated transcendentals wait on vendored fdlibm).
+ * min/max are BINARY: the frontend folds the variadic forms into nested calls. */
+jsrt_value jsrt_math_abs(jsrt_value x);
+jsrt_value jsrt_math_clz32(jsrt_value x);
+jsrt_value jsrt_math_fround(jsrt_value x);
+jsrt_value jsrt_math_imul(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_math_ceil(jsrt_value x);
+jsrt_value jsrt_math_floor(jsrt_value x);
+jsrt_value jsrt_math_round(jsrt_value x);
+jsrt_value jsrt_math_sign(jsrt_value x);
+jsrt_value jsrt_math_sqrt(jsrt_value x);
+jsrt_value jsrt_math_trunc(jsrt_value x);
+jsrt_value jsrt_math_pow(jsrt_value base, jsrt_value exponent);
+jsrt_value jsrt_math_min(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_math_max(jsrt_value a, jsrt_value b);
+
+/* String.prototype builtins (jsrt_string_ops.c) — UTF-16 code-unit semantics, ECMA-262 §22.1.3
+ * exactly. Optional arguments arrive as JSRT_UNDEFINED (the lowering pads them; for every method
+ * here an explicit undefined means the same as absent). Case mapping outside ASCII and repeat's
+ * RangeError are loud runtime not-yets (STA2005), never approximations. */
+jsrt_value jsrt_string_char_at(jsrt_value s, jsrt_value i);
+jsrt_value jsrt_string_char_code_at(jsrt_value s, jsrt_value i);
+jsrt_value jsrt_string_index_of(jsrt_value s, jsrt_value search, jsrt_value from);
+jsrt_value jsrt_string_last_index_of(jsrt_value s, jsrt_value search, jsrt_value from);
+jsrt_value jsrt_string_includes(jsrt_value s, jsrt_value search, jsrt_value from);
+jsrt_value jsrt_string_starts_with(jsrt_value s, jsrt_value search, jsrt_value from);
+jsrt_value jsrt_string_ends_with(jsrt_value s, jsrt_value search, jsrt_value end);
+jsrt_value jsrt_string_slice(jsrt_value s, jsrt_value a, jsrt_value b);
+jsrt_value jsrt_string_substring(jsrt_value s, jsrt_value a, jsrt_value b);
+jsrt_value jsrt_string_trim(jsrt_value s);
+jsrt_value jsrt_string_trim_start(jsrt_value s);
+jsrt_value jsrt_string_trim_end(jsrt_value s);
+jsrt_value jsrt_string_repeat(jsrt_value s, jsrt_value n);
+jsrt_value jsrt_string_pad_start(jsrt_value s, jsrt_value target, jsrt_value pad);
+jsrt_value jsrt_string_pad_end(jsrt_value s, jsrt_value target, jsrt_value pad);
+/* The libunicode-backed String.prototype methods (runtime/src/jsrt_unicode.c). Case mapping is
+ * defined on CODE POINTS and one of them can map to three, so neither of these is a per-unit walk;
+ * `normalize` takes the form string or `undefined`, which means NFC. */
+jsrt_value jsrt_unicode_case(jsrt_value s, bool upper);
+jsrt_value jsrt_unicode_normalize(jsrt_value s, jsrt_value form);
+
+/* `s.search(re)` -- the one String.prototype method the subset admits ONLY with a regexp: the spec
+ * converts a non-regexp with `new RegExp(...)`, a constructor the compiler does not have. */
+jsrt_value jsrt_string_search(jsrt_value s, jsrt_value re);
+jsrt_value jsrt_string_normalize(jsrt_value s, jsrt_value form);
+jsrt_value jsrt_string_split(jsrt_value s, jsrt_value sep);
+jsrt_value jsrt_string_replace(jsrt_value s, jsrt_value pattern, jsrt_value replacement);
+jsrt_value jsrt_string_replace_all(jsrt_value s, jsrt_value pattern, jsrt_value replacement);
+jsrt_value jsrt_string_to_upper_case(jsrt_value s);
+
+/* The locale-sensitive trio (runtime/src/jsrt_intl.c). Collation and TAILORED casing are CLDR
+ * data, not Unicode tables, so these are the one part of the string surface that needs ICU: they
+ * are implemented in the `make -C runtime intl` build and abort with an STA2005 naming that flag
+ * in the default one. `locales` is a single BCP 47 tag, never absent -- an implicit default locale
+ * would make the answer depend on the machine that RUNS the binary. */
+jsrt_value jsrt_string_locale_compare(jsrt_value s, jsrt_value that, jsrt_value locales);
+jsrt_value jsrt_string_to_locale_upper_case(jsrt_value s, jsrt_value locales);
+jsrt_value jsrt_string_to_locale_lower_case(jsrt_value s, jsrt_value locales);
+
+/* Array.prototype builtins (§23.1.3) — the non-callback surface, runtime/src/jsrt_array_ops.c
+ * (join lives in jsrt_print.c with the ToString machinery it needs). Optional positions arrive as
+ * JSRT_UNDEFINED per the lowering's padding; `lastIndexOf` has no position argument because the
+ * spec gives its explicit `undefined` a DIFFERENT meaning than absence. `reverse` and `fill`
+ * mutate in place and return the receiver. */
+jsrt_value jsrt_array_push(jsrt_value array, jsrt_value element);
+jsrt_value jsrt_array_pop(jsrt_value array);
+jsrt_value jsrt_array_shift(jsrt_value array);
+jsrt_value jsrt_array_unshift(jsrt_value array, jsrt_value element);
+jsrt_value jsrt_array_at(jsrt_value array, jsrt_value index);
+jsrt_value jsrt_array_index_of(jsrt_value array, jsrt_value search, jsrt_value from);
+jsrt_value jsrt_array_last_index_of(jsrt_value array, jsrt_value search);
+jsrt_value jsrt_array_includes(jsrt_value array, jsrt_value search, jsrt_value from);
+jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator);
+jsrt_value jsrt_array_slice(jsrt_value array, jsrt_value start, jsrt_value end);
+jsrt_value jsrt_array_concat(jsrt_value array, jsrt_value other);
+jsrt_value jsrt_array_reverse(jsrt_value array);
+jsrt_value jsrt_array_fill(jsrt_value array, jsrt_value value, jsrt_value start, jsrt_value end);
+
+/* The callback-taking methods. Each calls back into compiled code through jsrt_call with the
+ * spec's (element, index, array) triple, caching `length` at entry; predicates coerce the
+ * callback's answer through jsrt_truthy, exactly ToBoolean. */
+jsrt_value jsrt_array_for_each(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_map(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_filter(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_some(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_every(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_find(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_find_index(jsrt_value array, jsrt_value cb);
+/* With-initial forms only; the callback gets (accumulator, element, index, array). */
+jsrt_value jsrt_array_reduce(jsrt_value array, jsrt_value cb, jsrt_value initial);
+jsrt_value jsrt_array_reduce_right(jsrt_value array, jsrt_value cb, jsrt_value initial);
+/* Stable in-place sort returning the receiver; an undefined comparator means the spec's
+ * ToString default. */
+jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp);
+jsrt_value jsrt_array_copy_within(jsrt_value array, jsrt_value target, jsrt_value start,
+                                  jsrt_value end);
+/* Two-argument form only; returns the removed run. */
+jsrt_value jsrt_array_splice(jsrt_value array, jsrt_value start, jsrt_value delete_count);
+jsrt_value jsrt_array_flat(jsrt_value array, jsrt_value depth);
+jsrt_value jsrt_array_flat_map(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_find_last(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_find_last_index(jsrt_value array, jsrt_value cb);
+jsrt_value jsrt_array_to_reversed(jsrt_value array);
+jsrt_value jsrt_array_to_sorted(jsrt_value array, jsrt_value cmp);
+jsrt_value jsrt_array_to_spliced(jsrt_value array, jsrt_value start, jsrt_value skip_count);
+jsrt_value jsrt_array_to_string(jsrt_value array);
+/* Out-of-range index aborts (spec: RangeError; STA2005 pattern). */
+jsrt_value jsrt_array_with(jsrt_value array, jsrt_value index, jsrt_value value);
+
+/* Object.keys/values/entries (§20.1.2) over the two object layouts — runtime/src/jsrt_object_ops.c.
+ * Fixed shapes enumerate declaration-order public identifiers (private #name slots are omitted);
+ * dynamic shapes apply the full OrdinaryOwnPropertyKeys order because Object.fromEntries/JSON.parse
+ * can create integer keys. */
+jsrt_value jsrt_object_keys(jsrt_value v);
+jsrt_value jsrt_object_values(jsrt_value v);
+jsrt_value jsrt_object_entries(jsrt_value v);
+jsrt_value jsrt_object_get_own_property_names(jsrt_value v);
+jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key);
+jsrt_value jsrt_object_from_entries(jsrt_value pairs);
+
+/* JSON.stringify (§25.5.2), single-argument form — runtime/src/jsrt_print.c, with the rest of
+ * stringification. Non-finite numbers and -0 serialize per spec ("null", "0"); a cycle or a
+ * top-level undefined aborts loudly (STA2005 pattern) because the spec's answers — TypeError and
+ * an undefined result — are not expressible yet. */
+jsrt_value jsrt_json_stringify(jsrt_value v);
+
+/* JSON.parse, single-argument form: text in, runtime value out -- JSON objects become dynamic-
+ * shape objects, JSON arrays become arrays. Malformed text aborts loudly (the spec throws
+ * SyntaxError, which builtins cannot raise yet). */
+jsrt_value jsrt_json_parse(jsrt_value text);
+jsrt_value jsrt_string_to_lower_case(jsrt_value s);
+
+static inline bool jsrt_is_dynobj(jsrt_value v) {
+  /* JSRT_TAG_OBJECT specifically: jsrt_is_object also answers true for arrays and closures,
+   * which carry no JSRTClass and must not be dereferenced as one. */
+  return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_dynamic;
+}
+
 static inline JSRTObject *jsrt_as_object(jsrt_value v) {
   return (JSRTObject *)jsrt_ptr(v);
 }
@@ -342,6 +560,10 @@ typedef struct JSRTMap {
    * power of two at twice `capacity`, which keeps the load factor at or below one half. */
   uint32_t *index;
   uint32_t index_mask;
+  /* Depth of forEach walks in progress. A walk holds an INDEX into `entries`, and compaction is
+   * the one thing that renumbers them (see grow()), so while this is non-zero the array only ever
+   * grows and dead entries keep their slots. Nested walks are why it counts rather than flags. */
+  uint32_t iterating;
 } JSRTMap;
 
 extern const JSRTClass jsrt_class_map;
@@ -366,6 +588,13 @@ static inline bool jsrt_is_map_or_set(jsrt_value v) {
  * type of a `.get` is `V | undefined`. */
 jsrt_value jsrt_map_get(jsrt_value map, jsrt_value key);
 
+/* `m.forEach(cb)` and `s.forEach(cb)`: the spec's callback triple is (value, key, collection) for a
+ * Map and (value, value, set) for a Set -- a Set entry is its own key, which is exactly how it is
+ * stored. Insertion order, entries added DURING the walk are visited, and an entry deleted before
+ * it is reached is not. Both return undefined. */
+jsrt_value jsrt_map_for_each(jsrt_value map, jsrt_value cb);
+jsrt_value jsrt_set_for_each(jsrt_value set, jsrt_value cb);
+
 /* `m.set(k, v)` and `s.add(v)` both RETURN THE COLLECTION, which is what makes them chainable. */
 jsrt_value jsrt_map_set(jsrt_value map, jsrt_value key, jsrt_value value);
 jsrt_value jsrt_set_add(jsrt_value set, jsrt_value key);
@@ -378,6 +607,67 @@ bool jsrt_map_delete(jsrt_value map, jsrt_value key);
 jsrt_value jsrt_map_clear(jsrt_value map);
 /* `.size` as a Number, so the emitter never reads the struct field itself. */
 jsrt_value jsrt_map_size(jsrt_value map);
+
+/* The ES2025 set operations (§24.2.4). Both operands are real Sets -- the spec's set-like object
+ * is refused at the gate, because reading one means calling its `keys()` iterator. Neither operand
+ * is mutated: the four combining forms build a new Set.
+ *
+ * Order is normative and is NOT always the receiver's: `intersection` walks the smaller collection
+ * and answers in that one's order (the spec's own branch, which the pinned Node observes). The
+ * others answer in the receiver's order, followed by the argument's. */
+jsrt_value jsrt_set_union(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_set_intersection(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_set_difference(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_set_symmetric_difference(jsrt_value a, jsrt_value b);
+bool jsrt_set_is_subset_of(jsrt_value a, jsrt_value b);
+bool jsrt_set_is_superset_of(jsrt_value a, jsrt_value b);
+bool jsrt_set_is_disjoint_from(jsrt_value a, jsrt_value b);
+
+/* --------------------------------------------------------------- regexps */
+
+/* A compiled regular expression: the engine's bytecode plus the two strings a program can read back
+ * off it. The engine is quickjs-ng's libregexp, vendored under `runtime/vendor/` (plan.md golden
+ * rule 5 -- do not write a regex engine); this struct is the whole of what Stator adds to it.
+ *
+ * `bytecode` is `lre_compile`'s output: plain bytes with no `jsrt_value` inside, so a collector
+ * never scans it. It is allocated through `lre_realloc`, which is one of the three functions the
+ * engine asks its embedder for (`runtime/src/jsrt_regexp.c`).
+ *
+ * `last_index` is the `lastIndex` property, and it is state ON THE PATTERN rather than on the
+ * match: `/g` and `/y` read it to decide where to start and write it back after a match, which is
+ * why two loops sharing one regexp literal are not independent in JavaScript. */
+typedef struct JSRTRegExp {
+  const JSRTClass *cls; /* &jsrt_class_regexp -- prefix-shared with JSRTObject */
+  jsrt_value source;    /* the pattern as written, without the delimiting slashes */
+  jsrt_value flags;     /* the flags as a string, in the spec's canonical order */
+  int lre_flags;        /* the same flags as the LRE_FLAG_* set the bytecode was compiled with */
+  uint32_t last_index;
+  int bytecode_len;
+  uint8_t *bytecode;
+} JSRTRegExp;
+
+extern const JSRTClass jsrt_class_regexp;
+
+static inline JSRTRegExp *jsrt_as_regexp(jsrt_value v) { return (JSRTRegExp *)jsrt_ptr(v); }
+
+static inline bool jsrt_is_regexp(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) && jsrt_as_object(v)->cls == &jsrt_class_regexp;
+}
+
+/* `/source/flags`. Both arguments are strings; a pattern the engine refuses is a compile-time
+ * error in every spelling the subset accepts, so this aborts with the STA2005 pattern rather than
+ * answering with something that is not a regexp. */
+jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags);
+
+/* `re.test(s)` -- and the one operation that also WRITES `lastIndex`, for a /g or /y pattern. */
+bool jsrt_regexp_test(jsrt_value re, jsrt_value str);
+
+/* The regexp-taking String.prototype methods (§22.2.5). They live here rather than in
+ * jsrt_string_ops.c because they are the ENGINE's algorithms: everything they do is a scan, and
+ * the scan is the vendored executor. jsrt_string_ops.c dispatches to them on the pattern's tag. */
+jsrt_value jsrt_regexp_search(jsrt_value re, jsrt_value str);
+jsrt_value jsrt_regexp_split(jsrt_value re, jsrt_value str);
+jsrt_value jsrt_regexp_replace(jsrt_value re, jsrt_value str, jsrt_value replacement, bool all);
 
 /* ---------------------------------------------------------------- arrays */
 
@@ -485,6 +775,105 @@ static inline jsrt_value jsrt_arg(uint32_t argc, const jsrt_value *argv, uint32_
  * loud and located, rather than a jump through a garbage pointer. */
 jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
 
+/* ------------------------------------------------------------ promises */
+
+/* A promise is an OBJECT with its own class descriptor, the way a Map is: `cls` first, compared
+ * against the one `jsrt_class_promise` in the program. That is what lets `typeof`, `instanceof`
+ * and the printer treat it as an object without knowing anything else about it.
+ *
+ * A reaction is a NATIVE continuation -- a C function plus GC-allocated state -- not a JS callback.
+ * That is the whole shape of Phase 4's async: an async function's resume point and `Promise.all`'s
+ * per-element handler are both reactions, so `.then` is not the mechanism, it is a future CLIENT
+ * of the mechanism. Reactions run from the microtask queue and never inline, which is what makes
+ * `await` observably asynchronous even when the awaited value has already settled. */
+
+typedef void (*JSRTSettle)(void *state, jsrt_value value, bool rejected);
+
+typedef struct JSRTReaction {
+  JSRTSettle on_settle;
+  void *state;
+  struct JSRTReaction *next;
+} JSRTReaction;
+
+#define JSRT_PROMISE_PENDING 0u
+#define JSRT_PROMISE_FULFILLED 1u
+#define JSRT_PROMISE_REJECTED 2u
+
+typedef struct JSRTPromise {
+  const JSRTClass *cls; /* &jsrt_class_promise -- prefix-shared with JSRTObject */
+  uint32_t state;
+  jsrt_value value; /* the fulfilment value or the rejection reason; undefined while pending */
+  /* Registration order is observable: reactions on one promise run in the order they subscribed,
+   * so the list is appended to at `last` and drained from `first`. */
+  JSRTReaction *first;
+  JSRTReaction *last;
+  /* Rejected with no reaction registered. The drain reports one rather than swallowing it, and a
+   * later subscribe clears it -- which is exactly what "something is awaiting this" means. */
+  bool unhandled;
+} JSRTPromise;
+
+extern const JSRTClass jsrt_class_promise;
+
+static inline JSRTPromise *jsrt_as_promise(jsrt_value v) { return (JSRTPromise *)jsrt_ptr(v); }
+
+static inline bool jsrt_is_promise(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_promise;
+}
+
+jsrt_value jsrt_promise_new(void);
+
+/* Settles a pending promise and queues its reactions. Settling an already-settled promise is a
+ * no-op, not an error: the spec's resolving functions are idempotent, and both `Promise.all` and
+ * an async body's landing pad can reach a settle twice on the same value.
+ *
+ * Fulfilling WITH a promise adopts it instead of nesting: the outer promise settles when the inner
+ * one does. That is §27.2.1.3.2's thenable step, restricted to the only thenables that exist here,
+ * and it is what makes `return somePromise` inside an async function mean what it means. */
+void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected);
+
+/* Registers a reaction. If the promise has already settled, the reaction is queued immediately --
+ * queued, never called, so the ordering rule holds for a settled promise too. */
+void jsrt_promise_subscribe(jsrt_value promise, JSRTSettle on_settle, void *state);
+
+jsrt_value jsrt_promise_resolve(jsrt_value v);      /* Promise.resolve: passes a promise through */
+jsrt_value jsrt_promise_reject(jsrt_value reason);  /* Promise.reject */
+jsrt_value jsrt_promise_all(jsrt_value array);      /* Promise.all over an ARRAY, the only iterable
+                                                     * the subset can hand it */
+
+/* The event loop, such as it is: drain the microtask queue until it is empty. Generated `main`
+ * calls it once, after the module body, and that is the whole loop until timers or I/O exist to
+ * need more (plan.md Task 4.6). */
+void jsrt_run_microtasks(void);
+
+/* ---------------------------------------------------------- async bodies */
+
+/* An async function compiles to two C functions: a CONSTRUCTOR that builds the environment holding
+ * every local and calls jsrt_async_start, and a RESUME body that is re-entered once per await with
+ * the awaited value. `state` is the resume label; generated C writes it before suspending and
+ * switches on it on the way back in. The environment is where the locals live -- which is why
+ * an async body's bindings are forced into the env rather than onto the C stack, whose frame does
+ * not survive a suspension. */
+typedef struct JSRTAsync JSRTAsync;
+typedef void (*JSRTResume)(JSRTAsync *self, jsrt_value value, bool rejected);
+
+struct JSRTAsync {
+  JSRTEnv *env;
+  JSRTResume resume;
+  jsrt_value promise; /* what the call returned, settled by jsrt_async_return/throw */
+  uint32_t state;
+};
+
+/* Runs the body synchronously up to its first await or its completion -- an async function's
+ * prefix is NOT deferred -- and returns the promise the call evaluates to. */
+jsrt_value jsrt_async_start(JSRTEnv *env, JSRTResume resume);
+
+/* Suspends: subscribe this body's resume to `awaited`, wrapping a non-promise in a settled one so
+ * that `await 1` still yields to the microtask queue, as the spec requires. */
+void jsrt_await(JSRTAsync *self, jsrt_value awaited);
+
+void jsrt_async_return(JSRTAsync *self, jsrt_value value);
+void jsrt_async_throw(JSRTAsync *self, jsrt_value reason);
+
 /* ------------------------------------------------------------- typeof */
 
 /* The string ECMA-262's `typeof` produces, as a C literal with static storage.
@@ -517,7 +906,21 @@ jsrt_value jsrt_check_boolean(jsrt_value v, const char *where);
 
 /* --------------------------------------------------------------- output */
 
-void jsrt_print(jsrt_value v);      /* console.log semantics: prints -0 as "-0" */
+void jsrt_print(jsrt_value v); /* console.log semantics: prints -0 as "-0" */
+void jsrt_eprint(jsrt_value v);      /* console.error/warn: same form, stderr */
+void jsrt_console_dir(jsrt_value v); /* console.dir: inspect form, no bare-string exception */
+/* console.group/assert take their optional argument by ENTRY POINT, not by a JSRT_UNDEFINED
+ * sentinel: Node prints an explicitly passed undefined ("undefined"; "Assertion failed undefined")
+ * where the omitted form prints nothing, so the two forms are genuinely two calls. The lowering
+ * therefore pads neither -- contrast count/countReset below, where the spec's own absent case IS
+ * undefined and one entry point serves both. */
+void jsrt_console_group(jsrt_value label);
+void jsrt_console_group_bare(void);
+void jsrt_console_group_end(void);
+void jsrt_console_assert(jsrt_value condition, jsrt_value message);
+void jsrt_console_assert_bare(jsrt_value condition);
+jsrt_value jsrt_console_count(jsrt_value label);       /* label may be JSRT_UNDEFINED: "default" */
+jsrt_value jsrt_console_count_reset(jsrt_value label); /* same, and prints nothing */
 jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
 
 /* ----------------------------------------------------------- exceptions */
@@ -535,12 +938,15 @@ jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
  *     handler appear to throw.
  *
  * ROOTING INVARIANT: between jsrt_throw and jsrt_take_exception the stored value may be the only
- * reference to a heap object, so the collector must trace the pending slot as a root alongside
- * the frame chain. (Under the current plain-malloc runtime nothing collects, but generated C is
- * written against this contract, not against the allocator of the day.) */
+ * reference to a heap object, so the collector traces the pending slot as a root alongside the
+ * frame chain. That is not hypothetical: a `finally` on the way out runs arbitrary code, and the
+ * cell is static storage, which a conservative collector cannot read a boxed value out of any
+ * more than it can read one out of the heap (plan-notes 108). `jsrt_pending_slot` is how the
+ * collector reaches it; nothing else may call it. */
 void jsrt_throw(jsrt_value v);
 bool jsrt_pending(void);
 jsrt_value jsrt_take_exception(void);
+jsrt_value *jsrt_pending_slot(void);
 
 /* The pad of last resort: main's. Prints the value to STDERR and exits 1 -- stdout stays clean,
  * which is what the golden runner compares, and the exit code is what Node observably does with

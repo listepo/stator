@@ -16,10 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef JSRT_HAVE_BOEHM
-#include <gc.h>
-#endif
-
 /* One descriptor each, file-scope and const: the printer's test and `instanceof` are both pointer
  * comparisons against these. No fields, because a Map's entries are not slots — nothing in the
  * subset can reach them by name. */
@@ -93,14 +89,7 @@ static bool same_value_zero(jsrt_value a, jsrt_value b) {
  * ============================================================================ */
 
 static void *map_alloc(size_t bytes) {
-#ifdef JSRT_HAVE_BOEHM
-  void *p = GC_MALLOC(bytes);
-#else
-  void *p = malloc(bytes);
-#endif
-  if (p == NULL) {
-    jsrt_panic("out of memory: map");
-  }
+  void *p = jsrt_gc_alloc(bytes, "map");
   return p;
 }
 
@@ -119,6 +108,9 @@ static void map_reset(JSRTMap *m) {
 static jsrt_value map_new(const JSRTClass *cls) {
   JSRTMap *m = (JSRTMap *)map_alloc(sizeof(JSRTMap));
   m->cls = cls;
+  /* Set here and NOT in map_reset: `clear()` resets through that path, and a clear called from
+   * inside a forEach must not re-enable compaction while the walk still holds an index. */
+  m->iterating = 0;
   map_reset(m);
   return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)m);
 }
@@ -157,17 +149,23 @@ static JSRTMapEntry *probe(const JSRTMap *m, jsrt_value key, uint32_t *slot) {
  * Compaction is what keeps `set`/`delete` in a loop from growing without bound, and it is also the
  * only thing that renumbers entries — which is why the index is rebuilt here rather than patched. */
 static void grow(JSRTMap *m) {
+  /* A forEach in progress holds an index into `entries`, and compaction is the only thing that
+   * renumbers them -- so while one is walking, dead entries keep their slots and the array grows
+   * unconditionally. Without this a callback that inserts could trigger a compaction that shifts
+   * every later entry down, and the walk would SKIP the ones it stepped over. */
+  const bool compacting = m->iterating == 0;
   uint32_t capacity = m->capacity;
-  if (m->size + 1 > capacity / 2) {
+  if (!compacting || m->size + 1 > capacity / 2) {
     capacity = capacity == 0 ? 8 : capacity * 2;
   }
 
   JSRTMapEntry *entries = (JSRTMapEntry *)map_alloc(capacity * sizeof(JSRTMapEntry));
   uint32_t used = 0;
   for (uint32_t i = 0; i < m->used; i++) {
-    if (m->entries[i].live) {
-      entries[used++] = m->entries[i];
+    if (compacting && !m->entries[i].live) {
+      continue;
     }
+    entries[used++] = m->entries[i];
   }
   /* Past `used` the array is scanned conservatively, so it must not hold bits that look like a
    * pointer to something already unreachable. */
@@ -191,6 +189,9 @@ static void grow(JSRTMap *m) {
   m->index_mask = slots - 1;
 
   for (uint32_t i = 0; i < used; i++) {
+    if (!entries[i].live) {
+      continue; /* a preserved dead entry holds its slot but is not findable */
+    }
     uint32_t slot;
     (void)probe(m, entries[i].key, &slot);
     m->index[slot] = i + 1;
@@ -212,7 +213,15 @@ bool jsrt_map_has(jsrt_value map, jsrt_value key) {
   return probe(jsrt_as_map(map), key, &slot) != NULL;
 }
 
-static jsrt_value map_put(jsrt_value map, jsrt_value key, jsrt_value value) {
+/* §24.1.3.9 step 6 and §24.2.3.1 step 4: a key of -0 is STORED as +0. SameValueZero already finds
+ * one through the other, so this changes no lookup -- it changes what the entry prints as and what
+ * a forEach callback is handed, both of which are observable (`1 / k`). */
+static jsrt_value normalized_key(jsrt_value key) {
+  return jsrt_is_number(key) && jsrt_number_value(key) == 0.0 ? jsrt_number(0.0) : key;
+}
+
+static jsrt_value map_put(jsrt_value map, jsrt_value raw_key, jsrt_value value) {
+  const jsrt_value key = normalized_key(raw_key);
   JSRTMap *m = jsrt_as_map(map);
   uint32_t slot;
   JSRTMapEntry *entry = probe(m, key, &slot);
@@ -243,6 +252,32 @@ jsrt_value jsrt_set_add(jsrt_value set, jsrt_value key) {
   return map_put(set, key, JSRT_UNDEFINED);
 }
 
+/* The walk both collections share. `used` is re-read each step because a callback may append --
+ * the spec visits entries added during the walk -- and the entry is re-read through the map
+ * because an append can reallocate `entries`. Indices stay meaningful across that reallocation
+ * only because `iterating` suppresses compaction; the counter is what makes the cursor valid.
+ *
+ * `pass_key` is the Map/Set difference in full: a Set hands the element to the callback twice,
+ * because a Set entry is its own key. */
+static jsrt_value for_each(jsrt_value collection, jsrt_value cb, bool pass_key) {
+  JSRTMap *m = jsrt_as_map(collection);
+  m->iterating++;
+  for (uint32_t i = 0; i < m->used && !jsrt_pending(); i++) {
+    if (!m->entries[i].live) {
+      continue; /* deleted before it was reached: the spec does not visit it */
+    }
+    const jsrt_value key = m->entries[i].key;
+    jsrt_value args[3] = {pass_key ? m->entries[i].value : key, key, collection};
+    jsrt_call(cb, 3, args);
+  }
+  m->iterating--;
+  return JSRT_UNDEFINED;
+}
+
+jsrt_value jsrt_map_for_each(jsrt_value map, jsrt_value cb) { return for_each(map, cb, true); }
+
+jsrt_value jsrt_set_for_each(jsrt_value set, jsrt_value cb) { return for_each(set, cb, false); }
+
 bool jsrt_map_delete(jsrt_value map, jsrt_value key) {
   JSRTMap *m = jsrt_as_map(map);
   uint32_t slot;
@@ -267,4 +302,147 @@ jsrt_value jsrt_map_clear(jsrt_value map) {
 
 jsrt_value jsrt_map_size(jsrt_value map) {
   return jsrt_number((double)jsrt_as_map(map)->size);
+}
+
+/* ============================================================================
+ * The ES2025 set operations (§24.2.4)
+ * ============================================================================
+ *
+ * The spec takes a SET-LIKE argument -- any object with a numeric `size`, a callable `has` and a
+ * callable `keys` -- and reads it through GetSetRecord, iterating it with `keys()`. The gate
+ * accepts only a real Set, so these read the second table directly: a set-like OBJECT would need
+ * the iteration protocol the subset does not have, and refusing it is the honest answer.
+ *
+ * Order is normative here, and it is not always the receiver's. `intersection` walks whichever
+ * collection is SMALLER and appends in that one's order, which the spec spells out step by step
+ * and the pinned Node observes -- so it is a semantics rule, not an optimization. Everything else
+ * appends the receiver's elements first and the argument's after.
+ *
+ * None of these mutates either operand: each builds a new Set. */
+
+static uint32_t set_count(jsrt_value s) { return jsrt_as_map(s)->size; }
+
+/* Append every live key of `from` to `into`, in insertion order. `map_put` leaves an existing key
+ * where it already sits, so this is also how a union keeps the receiver's positions. */
+static void copy_keys(jsrt_value into, jsrt_value from) {
+  const JSRTMap *m = jsrt_as_map(from);
+  for (uint32_t i = 0; i < m->used; i++) {
+    if (m->entries[i].live) {
+      jsrt_set_add(into, m->entries[i].key);
+    }
+  }
+}
+
+/* The live keys of a set, in insertion order: `*at` walks ENTRY indices (not element numbers), and
+ * each call advances it past the dead ones. False ends the walk. None of the operations below runs
+ * user code or writes to the collection it is walking, so the cursor needs none of the compaction
+ * suppression `forEach` does. */
+static bool next_key(jsrt_value s, uint32_t *at, jsrt_value *key) {
+  const JSRTMap *m = jsrt_as_map(s);
+  for (; *at < m->used; (*at)++) {
+    if (m->entries[*at].live) {
+      *key = m->entries[(*at)++].key;
+      return true;
+    }
+  }
+  return false;
+}
+
+jsrt_value jsrt_set_union(jsrt_value a, jsrt_value b) {
+  jsrt_value out = jsrt_set_new();
+  copy_keys(out, a);
+  copy_keys(out, b);
+  return out;
+}
+
+jsrt_value jsrt_set_intersection(jsrt_value a, jsrt_value b) {
+  /* §24.2.4.9: the walk runs over the receiver only while the receiver is no larger than the
+   * argument; otherwise it runs over the argument, and the RESULT ORDER follows it. */
+  const bool walk_a = set_count(a) <= set_count(b);
+  const jsrt_value walk = walk_a ? a : b;
+  const jsrt_value test = walk_a ? b : a;
+  jsrt_value out = jsrt_set_new();
+  uint32_t at = 0;
+  jsrt_value key;
+  while (next_key(walk, &at, &key)) {
+    if (jsrt_map_has(test, key)) {
+      jsrt_set_add(out, key);
+    }
+  }
+  return out;
+}
+
+jsrt_value jsrt_set_difference(jsrt_value a, jsrt_value b) {
+  jsrt_value out = jsrt_set_new();
+  uint32_t at = 0;
+  jsrt_value key;
+  while (next_key(a, &at, &key)) {
+    if (!jsrt_map_has(b, key)) {
+      jsrt_set_add(out, key);
+    }
+  }
+  return out;
+}
+
+jsrt_value jsrt_set_symmetric_difference(jsrt_value a, jsrt_value b) {
+  jsrt_value out = jsrt_set_new();
+  copy_keys(out, a);
+  /* Membership is tested against A, not against the result: the result is losing keys as this
+   * runs, and the spec asks whether the RECEIVER had the key. */
+  uint32_t at = 0;
+  jsrt_value key;
+  while (next_key(b, &at, &key)) {
+    if (jsrt_map_has(a, key)) {
+      (void)jsrt_map_delete(out, key);
+    } else {
+      jsrt_set_add(out, key);
+    }
+  }
+  return out;
+}
+
+bool jsrt_set_is_subset_of(jsrt_value a, jsrt_value b) {
+  /* The size test is not a shortcut -- it is the spec's first step, and it is what makes the walk
+   * below sufficient: a set cannot be contained in a smaller one. */
+  if (set_count(a) > set_count(b)) {
+    return false;
+  }
+  uint32_t at = 0;
+  jsrt_value key;
+  while (next_key(a, &at, &key)) {
+    if (!jsrt_map_has(b, key)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool jsrt_set_is_superset_of(jsrt_value a, jsrt_value b) {
+  if (set_count(a) < set_count(b)) {
+    return false;
+  }
+  uint32_t at = 0;
+  jsrt_value key;
+  while (next_key(b, &at, &key)) {
+    if (!jsrt_map_has(a, key)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool jsrt_set_is_disjoint_from(jsrt_value a, jsrt_value b) {
+  /* Either side answers the same question, so the smaller walk is a true optimization here --
+   * unlike `intersection`, a boolean has no order to observe. */
+  const bool walk_a = set_count(a) <= set_count(b);
+  const jsrt_value walk = walk_a ? a : b;
+  const jsrt_value test = walk_a ? b : a;
+  uint32_t at = 0;
+  jsrt_value key;
+  while (next_key(walk, &at, &key)) {
+    if (jsrt_map_has(test, key)) {
+      return false;
+    }
+  }
+  return true;
 }

@@ -8,6 +8,7 @@
   "ignore": [
     "**/node_modules/**",
     "dist/**",
+    "runtime/build*/**",
     "runtime/vendor/**",
     "tests/subset/subset_*",
     "tests/subset/helper_*",

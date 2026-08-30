@@ -1,0 +1,55 @@
+// Array.prototype (Task 4.2): the non-callback surface over the dense representation --
+// mutation returning the receiver, relative and out-of-range indices, the indexOf/includes
+// NaN asymmetry (SameValueZero finds it, strict equality cannot), and join's separator rules.
+
+const xs: number[] = [3, 1, 4, 1, 5];
+console.log(xs.push(9));
+console.log(xs);
+console.log(xs.pop());
+console.log(xs.pop());
+console.log(xs);
+console.log(xs.unshift(0));
+console.log(xs);
+console.log(xs.shift());
+console.log(xs);
+console.log(xs.at(0));
+console.log(xs.at(-1));
+console.log(xs.at(99));
+console.log(xs.indexOf(1));
+console.log(xs.indexOf(1, 2));
+console.log(xs.indexOf(7));
+console.log(xs.lastIndexOf(1));
+console.log(xs.includes(4));
+console.log(xs.includes(7));
+const nans: number[] = [1, NaN, 3];
+console.log(nans.includes(NaN));
+console.log(nans.indexOf(NaN));
+console.log(xs.join("-"));
+console.log(xs.join(""));
+console.log(xs.join());
+const sl = xs.slice(1, 3);
+console.log(sl);
+console.log(xs.slice(-2));
+console.log(xs.slice());
+console.log(xs.slice(2, 1));
+const cc = xs.concat([7, 8]);
+console.log(cc);
+console.log(xs);
+const rv = [1, 2, 3].reverse();
+console.log(rv);
+const fl = [0, 0, 0, 0, 0].fill(7, 1, 3);
+console.log(fl);
+console.log([0, 0].fill(5));
+const empty: number[] = [];
+console.log(empty.pop());
+console.log(empty.shift());
+console.log(empty.join("-"));
+console.log(empty.slice(0, 5));
+const strs: string[] = ["b", "a", "c"];
+console.log(strs.join("|"));
+console.log(strs.includes("a"));
+console.log(strs.indexOf("c"));
+console.log(strs.reverse());
+const zeros: number[] = [0, -0];
+console.log(zeros.indexOf(-0));
+console.log(zeros.includes(-0));

@@ -122,7 +122,8 @@ function rebuildStatement(stmt: Statement, rewriter: Rewriter): Statement {
         ? stmt
         : { ...stmt, target, index, value };
     }
-    case 'field-assignment': {
+    case 'field-assignment':
+    case 'dyn-field-assignment': {
       const target = expr(stmt.target);
       const value = expr(stmt.value);
       return target === stmt.target && value === stmt.value ? stmt : { ...stmt, target, value };
@@ -274,6 +275,8 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
 
   switch (expr.kind) {
     // Leaves: a literal has no children, and an identifier's only content is its name.
+    // A regexp literal carries TEXT, not expressions: there is nothing inside it to rewrite.
+    case 'regexp-literal':
     case 'number-literal':
     case 'string-literal':
     case 'boolean-literal':
@@ -321,17 +324,37 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       return args === expr.args ? expr : { ...expr, args };
     }
     case 'instanceof':
-    case 'field-access': {
+    case 'field-access':
+    case 'dyn-field-access': {
       const target = sub(expr.target);
       return target === expr.target ? expr : { ...expr, target };
     }
+    case 'array-op':
     case 'method-call':
-    case 'collection-op': {
+    case 'collection-op':
+    case 'regexp-op':
+    case 'string-op': {
       const target = sub(expr.target);
       const args = rewriteEach(expr.args, sub);
       return target === expr.target && args === expr.args ? expr : { ...expr, target, args };
     }
-    case 'object-literal': {
+    case 'math-call':
+    case 'object-static': {
+      const args = rewriteEach(expr.args, sub);
+      return args === expr.args ? expr : { ...expr, args };
+    }
+    case 'json-parse':
+    case 'json-stringify':
+    case 'promise-static': {
+      const arg = sub(expr.arg);
+      return arg === expr.arg ? expr : { ...expr, arg };
+    }
+    case 'await': {
+      const value = sub(expr.value);
+      return value === expr.value ? expr : { ...expr, value };
+    }
+    case 'object-literal':
+    case 'dyn-object-literal': {
       const entries = rewriteEach(expr.entries, (entry): ObjectEntry => {
         const value = sub(entry.value);
         return value === entry.value ? entry : { ...entry, value };

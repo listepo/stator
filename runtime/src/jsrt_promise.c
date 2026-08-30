@@ -1,0 +1,257 @@
+/* jsrt_promise.c — promises, the microtask queue, and the async-body driver (plan.md Task 4.6).
+ *
+ * The design decision that shapes this file: a reaction is a NATIVE continuation, a C function
+ * plus GC-allocated state, not a JS callback. An async function's resume point and `Promise.all`'s
+ * per-element handler are the same kind of thing, so both are served by one mechanism and neither
+ * needs `.then` to exist. When `.then` lands it becomes a client of this — a reaction whose state
+ * is the JS handler and the derived promise — rather than the thing everything else is built on.
+ *
+ * Ordering is the part that is easy to get wrong and observable when you do. Two rules carry it:
+ * a reaction is always QUEUED and never called inline, even when the promise it subscribes to has
+ * already settled; and reactions run in registration order. Together they make `await` yield to
+ * the queue exactly once per await regardless of whether the awaited value was ready, which is
+ * what makes an interleaving match Node's rather than merely finishing with the same answer.
+ *
+ * The event loop is a drain and nothing more: `main` calls jsrt_run_microtasks() once after the
+ * module body. There are no timers and no I/O, so there is no macrotask phase to run — plan.md is
+ * explicit that libuv waits until something actually needs it.
+ */
+
+#include "jsrt.h"
+#include "jsrt_value.h"
+
+#include <stdio.h>
+
+const JSRTClass jsrt_class_promise = {"Promise", 0, NULL, NULL, 0, NULL};
+
+/* ------------------------------------------------------------ microtasks */
+
+/* A queued reaction, with the value it will be handed. The value is captured at QUEUE time, not
+ * read at run time: a promise cannot change once settled, but `Promise.all` settles a combined
+ * promise from inside a reaction, and reading later would be one more thing to reason about. */
+typedef struct Microtask {
+  JSRTSettle on_settle;
+  void *state;
+  jsrt_value value;
+  bool rejected;
+  struct Microtask *next;
+} Microtask;
+
+/* Raw pointers in static storage, which the collector scans conservatively and correctly — unlike
+ * a jsrt_value, which it cannot read at all (plan-notes 108). Everything reachable from the queue
+ * is a collected allocation, so the whole pending graph stays alive through the head pointer. */
+static Microtask *queue_first;
+static Microtask *queue_last;
+
+static void enqueue(JSRTSettle on_settle, void *state, jsrt_value value, bool rejected) {
+  Microtask *task = (Microtask *)jsrt_gc_alloc(sizeof(Microtask), "microtask");
+  task->on_settle = on_settle;
+  task->state = state;
+  task->value = value;
+  task->rejected = rejected;
+  task->next = NULL;
+  if (queue_last == NULL) {
+    queue_first = task;
+  } else {
+    queue_last->next = task;
+  }
+  queue_last = task;
+}
+
+/* Rejections nobody is listening to. Node reports one and exits nonzero; matching its report
+ * byte-for-byte means an Error object with a stack, which this runtime does not build yet -- so
+ * the drain aborts loudly with the STA2005 pattern instead of swallowing it, which is the one
+ * outcome that would be silently wrong. Counted rather than listed: a rejection acquires a
+ * handler by being subscribed to, and that is the only event that can clear one. */
+static uint32_t unhandled_rejections;
+
+void jsrt_run_microtasks(void) {
+  while (queue_first != NULL) {
+    Microtask *task = queue_first;
+    queue_first = task->next;
+    if (queue_first == NULL) {
+      queue_last = NULL;
+    }
+    /* Dropped from the queue BEFORE running, so a reaction that queues more work appends behind
+     * the tasks already waiting rather than ahead of them. */
+    task->on_settle(task->state, task->value, task->rejected);
+    if (jsrt_pending()) {
+      /* A throw that escaped a reaction has no enclosing scope left to catch it: the stack that
+       * created this work is long gone. Node reports it and exits, and so does this. */
+      jsrt_uncaught();
+    }
+  }
+  /* Checked after the drain, not at the rejection: a promise rejected now is routinely awaited by
+   * a continuation still sitting in the queue, and only an empty queue settles the question. */
+  if (unhandled_rejections > 0) {
+    jsrt_panic("STA2005: a promise was rejected with nothing awaiting it; the unhandled-rejection "
+               "report is not yet supported");
+  }
+}
+
+/* -------------------------------------------------------------- promises */
+
+jsrt_value jsrt_promise_new(void) {
+  JSRTPromise *p = (JSRTPromise *)jsrt_gc_alloc(sizeof(JSRTPromise), "promise");
+  p->cls = &jsrt_class_promise;
+  p->state = JSRT_PROMISE_PENDING;
+  p->value = JSRT_UNDEFINED;
+  p->first = NULL;
+  p->last = NULL;
+  p->unhandled = false;
+  return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)p);
+}
+
+void jsrt_promise_subscribe(jsrt_value promise, JSRTSettle on_settle, void *state) {
+  JSRTPromise *p = jsrt_as_promise(promise);
+  if (p->state != JSRT_PROMISE_PENDING) {
+    if (p->unhandled) {
+      p->unhandled = false;
+      unhandled_rejections--;
+    }
+    enqueue(on_settle, state, p->value, p->state == JSRT_PROMISE_REJECTED);
+    return;
+  }
+  JSRTReaction *r = (JSRTReaction *)jsrt_gc_alloc(sizeof(JSRTReaction), "promise reaction");
+  r->on_settle = on_settle;
+  r->state = state;
+  r->next = NULL;
+  if (p->last == NULL) {
+    p->first = r;
+  } else {
+    p->last->next = r;
+  }
+  p->last = r;
+}
+
+/* Adoption: an outer promise fulfilled WITH a promise settles when the inner one does. Registered
+ * as an ordinary reaction, so it costs the same extra microtask tick the spec's job does. */
+static void adopt(void *state, jsrt_value value, bool rejected) {
+  jsrt_promise_settle((jsrt_value)(uintptr_t)state, value, rejected);
+}
+
+void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected) {
+  JSRTPromise *p = jsrt_as_promise(promise);
+  if (p->state != JSRT_PROMISE_PENDING) {
+    return; /* already settled: the resolving functions are idempotent */
+  }
+  if (!rejected && jsrt_is_promise(value)) {
+    jsrt_promise_subscribe(value, adopt, (void *)(uintptr_t)promise);
+    return;
+  }
+  p->state = rejected ? JSRT_PROMISE_REJECTED : JSRT_PROMISE_FULFILLED;
+  p->value = value;
+  if (rejected && p->first == NULL) {
+    p->unhandled = true;
+    unhandled_rejections++;
+  }
+  for (JSRTReaction *r = p->first; r != NULL; r = r->next) {
+    enqueue(r->on_settle, r->state, value, rejected);
+  }
+  p->first = NULL;
+  p->last = NULL;
+}
+
+jsrt_value jsrt_promise_resolve(jsrt_value v) {
+  if (jsrt_is_promise(v)) {
+    return v; /* §27.2.4.6: an already-promise passes through, same identity */
+  }
+  jsrt_value p = jsrt_promise_new();
+  jsrt_promise_settle(p, v, false);
+  return p;
+}
+
+jsrt_value jsrt_promise_reject(jsrt_value reason) {
+  jsrt_value p = jsrt_promise_new();
+  jsrt_promise_settle(p, reason, true);
+  return p;
+}
+
+/* ------------------------------------------------------------ Promise.all */
+
+typedef struct {
+  jsrt_value results; /* the array handed to the combined promise, filled BY INDEX */
+  jsrt_value promise;
+  uint32_t remaining;
+} AllState;
+
+typedef struct {
+  AllState *all;
+  uint32_t index;
+} AllElement;
+
+static void all_element(void *state, jsrt_value value, bool rejected) {
+  AllElement *e = (AllElement *)state;
+  AllState *all = e->all;
+  if (rejected) {
+    /* First rejection wins and the rest are ignored — settle is idempotent, so the later ones
+     * arrive and do nothing rather than needing a flag here. */
+    jsrt_promise_settle(all->promise, value, true);
+    return;
+  }
+  /* By index, never by arrival: `Promise.all` preserves the input order however the elements
+   * happen to settle. The array was pre-filled to the right length for exactly this. */
+  jsrt_array_set(all->results, jsrt_number((double)e->index), value);
+  all->remaining--;
+  if (all->remaining == 0) {
+    jsrt_promise_settle(all->promise, all->results, false);
+  }
+}
+
+jsrt_value jsrt_promise_all(jsrt_value array) {
+  if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
+    jsrt_panic("STA2005: Promise.all over a non-array is not yet supported");
+  }
+  const uint32_t n = jsrt_as_array(array)->length;
+  AllState *all = (AllState *)jsrt_gc_alloc(sizeof(AllState), "Promise.all");
+  all->promise = jsrt_promise_new();
+  all->remaining = n;
+  all->results = jsrt_array_new(0, NULL);
+  for (uint32_t i = 0; i < n; i++) {
+    jsrt_array_set(all->results, jsrt_number((double)i), JSRT_UNDEFINED);
+  }
+  if (n == 0) {
+    /* An empty list is already done, and settles on this tick rather than never. */
+    jsrt_promise_settle(all->promise, all->results, false);
+    return all->promise;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    AllElement *e = (AllElement *)jsrt_gc_alloc(sizeof(AllElement), "Promise.all element");
+    e->all = all;
+    e->index = i;
+    jsrt_promise_subscribe(jsrt_promise_resolve(jsrt_as_array(array)->elements[i]), all_element, e);
+  }
+  return all->promise;
+}
+
+/* ---------------------------------------------------------- async bodies */
+
+static void async_resume(void *state, jsrt_value value, bool rejected) {
+  JSRTAsync *self = (JSRTAsync *)state;
+  self->resume(self, value, rejected);
+}
+
+jsrt_value jsrt_async_start(JSRTEnv *env, JSRTResume resume) {
+  JSRTAsync *self = (JSRTAsync *)jsrt_gc_alloc(sizeof(JSRTAsync), "async frame");
+  self->env = env;
+  self->resume = resume;
+  self->promise = jsrt_promise_new();
+  self->state = 0;
+  /* The prefix runs NOW, on the caller's stack: an async function's body up to its first await is
+   * synchronous, which is observable and is the difference between an async function and a
+   * callback. */
+  resume(self, JSRT_UNDEFINED, false);
+  return self->promise;
+}
+
+void jsrt_await(JSRTAsync *self, jsrt_value awaited) {
+  jsrt_promise_subscribe(jsrt_promise_resolve(awaited), async_resume, self);
+}
+
+void jsrt_async_return(JSRTAsync *self, jsrt_value value) {
+  jsrt_promise_settle(self->promise, value, false);
+}
+
+void jsrt_async_throw(JSRTAsync *self, jsrt_value reason) {
+  jsrt_promise_settle(self->promise, reason, true);
+}

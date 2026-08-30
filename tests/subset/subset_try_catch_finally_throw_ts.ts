@@ -1,18 +1,17 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: try/catch/finally/throw
 
-function test(shouldThrow: boolean): number {
-  try {
-    if (shouldThrow) {
-      throw new Error("test error");
-    }
-    return 42;
-  } catch (e: unknown) {
-    return -1;
-  } finally {
-    // cleanup
-  }
+// No function here on purpose: this fixture names `try`, so it must not also depend on functions
+// (plan-notes 42). The thrown value is a plain string -- `Error` is a Phase-4 global -- and the
+// catch is binding-less, because the binding is typed `unknown` and reading it would make the
+// fixture depend on narrowing rather than on the construct it names.
+let out: string = "";
+try {
+  throw "boom";
+} catch {
+  out = `${out}caught`;
+} finally {
+  out = `${out}!`;
 }
-export { test };
+console.log(out);

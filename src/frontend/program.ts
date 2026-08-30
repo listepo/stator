@@ -1,4 +1,4 @@
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
@@ -42,14 +42,26 @@ export function createProgram(
     allowImportingTsExtensions: true,
     rewriteRelativeImportExtensions: true,
 
-    // Module system (ESM only)
-    module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    // Module system (ESM only, plan §1). NOT NodeNext: NodeNext classifies a file by the nearest
+    // package.json's "type" field and calls it CommonJS by default, so a bare directory of .ts
+    // files could not use `import` at all. Stator compiles ESM regardless of packaging metadata --
+    // Force makes every file a module, Bundler resolves relative specifiers without consulting
+    // package.json, and the gate holds Node's own rule that a relative specifier names its file
+    // extension (STA1113), which Bundler alone would not enforce.
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    moduleDetection: ts.ModuleDetectionKind.Force,
 
-    // Target and libs. `lib` takes FILE names, not the tsconfig shorthand: "es2023" resolves to
+    // Target and libs. `lib` takes FILE names, not the tsconfig shorthand: "es2025" resolves to
     // nothing and silently leaves the program without Array, Object, or any other global type.
-    target: ts.ScriptTarget.ES2023,
-    lib: ['lib.es2023.d.ts'],
+    //
+    // The lib describes the JAVASCRIPT the differential ground truth implements -- the pinned Node
+    // in `.node-version` -- and NOT the subset Stator has landed. Those are different jobs: the
+    // gate is what states the subset, and its answer for a member the compiler does not do yet is
+    // `STA1214`, which names the delivering phase. Under too low a lib the same program gets a type
+    // error telling the user to change a `lib` option they do not own (plan-notes 99).
+    target: ts.ScriptTarget.ES2025,
+    lib: ['lib.es2025.d.ts'],
 
     // No emit — we generate our own C
     noEmit: true,
@@ -66,7 +78,15 @@ export function createProgram(
   // Stator's globals are a root file, not a `lib`: they describe what `libjsrt.a` provides, and a
   // compiled program has neither Node's globals nor the DOM's.
   const globals = join(dirname(fileURLToPath(import.meta.url)), 'lib', 'stator.globals.d.ts');
-  const program = ts.createProgram([globals, entryFile], compilerOptions);
+  // The entry is made absolute BEFORE the program sees it: with a relative root, the file's
+  // `fileName` stays relative while `ts.resolveModuleName` answers with absolute paths, so every
+  // import edge silently fails the `getSourceFile` lookup and the module graph loses its
+  // dependencies -- legal multi-file source then dies as STA4035 in the lowering. Forward slashes
+  // because that is the separator TypeScript normalizes every fileName to.
+  const program = ts.createProgram(
+    [globals, resolve(entryFile).replace(/\\/g, '/')],
+    compilerOptions,
+  );
   const diagnostics: Diagnostic[] = [];
 
   // Surface TypeScript's own diagnostics as Stator diagnostics

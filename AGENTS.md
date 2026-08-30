@@ -48,6 +48,7 @@ tests/unit/        node:test unit tests (*.test.ts)
 tests/subset/      decision tests (feature × mode matrix)
 tests/golden/ts|js machine-checked vs Node, byte-for-byte
 tests/differential/ fuzzer corpus    tests/bench/ baselines + results
+tests/leak/        GC hygiene: a 10M-object loop whose RSS must plateau
 ```
 
 ## Commands
@@ -65,9 +66,12 @@ pnpm run test:subset            # decision tests → verdict matrix
 pnpm run test:golden            # compile + run vs Node, byte-for-byte
 pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-for-byte
 pnpm run test:asan              # golden fixtures with runtime + generated C under ASan/UBSan
+pnpm run test:leak              # 10M-object loop; RSS must plateau (skips without Boehm)
 pnpm run bench:record           # refresh tests/bench/baseline.json (valid for this machine only)
 make -C runtime                 # build libjsrt.a (clang, -Wall -Wextra -Werror)
 make -C runtime asan            # ASan/UBSan runtime build (golden tests must also pass on this)
+make -C runtime intl            # ICU feature build (off by default; needs pkg-config icu-uc icu-i18n)
+pnpm run test:intl              # the intl_* golden fixtures against that build (not part of `ci`)
 pnpm run ci                     # all of the above, in order — run before claiming any task done
 node src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]
 node src/cli/main.ts explain file.ts --json     # per-construct verdicts (decision tests use this)
@@ -84,7 +88,7 @@ node src/cli/main.ts explain file.ts --json     # per-construct verdicts (decisi
 
 ## Implementation standards — C runtime (`runtime/`)
 
-- C11, `clang -Wall -Wextra -Werror`; ASan/UBSan job in CI is mandatory and blocking.
+- C11, `clang -Wall -Wextra -Werror`; ASan/UBSan job in CI is mandatory and blocking. The full flag set is the rule for code we WRITE (`runtime/src/`); `runtime/vendor/` compiles with `-Wall` alone, because upstream source is not ours to fix and a warning flag is not a correctness flag (plan-notes 101). ASan/UBSan cover both.
 - All value access goes through `jsrt_value.h` accessors; no hand-rolled bit twiddling outside it.
 - GC rooting discipline: every generated function opens `JSRT_FRAME(n)`; locals via `JSRT_LOCAL`; frames pop on **every** exit path including landing pads. The runtime may assume it; codegen must guarantee it.
 - Generated C is never hand-edited — fix the emitter and re-emit.

@@ -3,12 +3,17 @@
 
 import type {
   ArrayLiteral,
+  ArrayOp,
+  AwaitExpr,
   BinaryOp,
+  Block,
   CallExpr,
   ClassDeclaration,
   ClassMethod,
   CollectionOp,
   CollectionOperation,
+  DynFieldAssignment,
+  DynObjectLiteral,
   EnvCapture,
   Expression,
   FieldAssignment,
@@ -16,19 +21,29 @@ import type {
   FunctionExpr,
   IndexAccess,
   IndexAssignment,
+  JsonParse,
+  JsonStringify,
   LogicalOp,
+  MathCall,
   MethodCall,
   Module,
   NewExpr,
   ObjectLiteral,
+  ObjectStaticCall,
+  PromiseStaticCall,
+  RegExpLiteral,
+  RegExpOp,
   Span,
   Statement,
+  StringOp,
   SuperCall,
   SwitchStatement,
   TemplateLiteral,
+  TryStatement,
   UnaryOp,
   VtableEntry,
 } from '../hir/nodes.ts';
+import { arrayOpCallsBack, consoleEntryPoint, SET_OPS } from '../hir/nodes.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
  *
@@ -136,9 +151,31 @@ interface FunctionUnit {
   readonly name: string;
 }
 
+/* One open try-with-finally during emission. A jump (return/break/continue) out of the protected
+ * code cannot simply `goto` its target -- the finally body must run first -- so it records WHICH
+ * jump in the completion variable and gotos the finally instead; `routes` maps each distinct jump
+ * (keyed by its goto label, or 'return') to the completion code that selects it in the dispatch
+ * and the emitter action that re-performs it there. The action runs with this scope already
+ * popped, so a jump crossing two finallys routes through both, innermost first. */
+interface TryFinallyScope {
+  readonly compVar: string;
+  readonly finLabel: string;
+  /** `this.enclosing.length` when the try opened: a break/continue leaves the try exactly when
+   * its target construct's index in `enclosing` is below this depth. */
+  readonly enclosingDepth: number;
+  readonly routes: Map<string, { readonly code: number; readonly action: () => void }>;
+}
+
 /** The descriptor name a class prints. A SHAPE prints none: `console.log({x: 1})` shows
  * `{ x: 1 }`, with no constructor name in front, and the leading brace of the shape's structural
  * name is what says so -- no class may be called that. */
+/** The runtime's C naming rule for a JS member: camelCase becomes snake_case, so `charCodeAt`
+ * is `char_code_at` and `getOwnPropertyNames` is `get_own_property_names`. Mechanical on purpose
+ * -- a runtime function's name is derivable from the member it serves, with no table to drift. */
+function snakeCase(member: string): string {
+  return member.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+}
+
 function descriptorName(name: string): string {
   return name.startsWith('{') ? '' : name;
 }
@@ -158,7 +195,7 @@ class Emitter {
   /** Frame slot holding each short-circuit operator's left operand. Keyed by node identity, since
    * two `&&`s in one expression must not share a slot: the outer one's value stays live while the
    * inner one is being evaluated. */
-  private tempSlots: Map<LogicalOp, number> = new Map();
+  private tempSlots: Map<AwaitExpr | LogicalOp, number> = new Map();
   /* C does not specify which operand of an operator or function call it evaluates first. Every
    * BinaryOp therefore gets two rooted slots: emitting `left` into the first before `right` into
    * the second makes the JavaScript left-to-right rule explicit, and preserves the left value if
@@ -175,13 +212,32 @@ class Emitter {
    * point at the first argument and every already-evaluated operand stays rooted while the rest are
    * evaluated. Keyed by node identity, like the other temporaries. */
   private callSlots: Map<
-    CallExpr | CollectionOp | MethodCall | NewExpr | ObjectLiteral | SuperCall,
+    | ArrayOp
+    | CallExpr
+    | JsonParse
+    | JsonStringify
+    | CollectionOp
+    | DynObjectLiteral
+    | MathCall
+    | MethodCall
+    | NewExpr
+    | ObjectLiteral
+    | ObjectStaticCall
+    | PromiseStaticCall
+    | RegExpLiteral
+    | RegExpOp
+    | StringOp
+    | SuperCall,
     number
   > = new Map();
 
   /* Every class declared anywhere in the file, in the order counting reached them. The index is
    * the descriptor's C identity (`_jsrt_class_N`), and the name is how NewExpr and MethodCall --
    * which carry a class NAME, not a pointer -- find their way back to it. */
+  /** Inline-cache sites allocated so far -- one static JSRTIC per dynamic property SITE
+   * (docs/VALUE.md §4.10), declared at file scope with the class descriptors. Reset per emit. */
+  private icCount = 0;
+
   private classes: ClassDeclaration[] = [];
   private classIds: Map<string, number> = new Map();
   /* An array literal's elements occupy a contiguous run, for the same reason a call's arguments do:
@@ -192,7 +248,10 @@ class Emitter {
   /* Two slots for a read (`target`, `index`), three for a write (`target`, `index`, `value`).
    * Same unspecified-order argument as binarySlots: `jsrt_array_get(a(), i())` would let C run
    * `i()` first, and a collection during `i()` could free the array `a()` just produced. */
-  private indexSlots: Map<IndexAccess | IndexAssignment | FieldAssignment, number> = new Map();
+  private indexSlots: Map<
+    DynFieldAssignment | FieldAssignment | IndexAccess | IndexAssignment,
+    number
+  > = new Map();
   /* The for-of iterable's slot. Evaluated ONCE -- `for (const x of f())` calls `f` once -- and the
    * array has to stay rooted for the whole loop, since the body can allocate on every iteration. */
   private forOfSlots: Map<ForOfStatement, number> = new Map();
@@ -216,6 +275,18 @@ class Emitter {
    * frame is still live, and only then is the frame popped. One slot per function is enough --
    * returns do not nest. */
   private returnSlot: number = 0;
+  /* Set while counting, read once counting is done: whether this unit has a `return <expr>` at
+   * all, and therefore whether `returnSlot` is a slot or a number nothing reads. */
+  private returnsValue: boolean = false;
+  /* Async state for the unit being emitted. `inAsync` switches `slotAt` over to the heap
+   * environment: an async function's locals must survive a suspension, and a suspension pops the
+   * C frame. `awaitStates` numbers each suspension point, assigned while COUNTING because the
+   * resume function's dispatch switch is emitted before the body whose labels it jumps to. */
+  private inAsync: boolean = false;
+  private awaitStates: Map<AwaitExpr, number> = new Map();
+  /* Whether anything in the module suspended or promised. `main` drains the microtask queue only
+   * then -- a program that never promises should not link the driver in at all. */
+  private usedAsync: boolean = false;
   /* Every function reachable from the module, in emission order. It GROWS while it is walked: a
    * nested function is only discovered when its parent's body is counted. */
   private functions: FunctionUnit[] = [];
@@ -232,6 +303,20 @@ class Emitter {
    * `while` into a build failure. Every jump is emitted before its target line, so consulting this
    * at emission time is enough -- no second pass over the output. */
   private usedLabels: Set<string> = new Set();
+
+  /* Where a pending exception unwinds to, innermost try's landing pad last. Empty means the
+   * unit's own `_jsrt_unwind` tail: pop the frame and return (functions) or report the exception
+   * as uncaught and exit (main). */
+  private padStack: string[] = [];
+  private unwindUsed = false;
+  /* Open try/finally constructs, innermost last -- see TryFinallyScope. */
+  private tryFinallyStack: TryFinallyScope[] = [];
+  private tryCount = 0;
+  /* The rooted slot a try-with-finally stashes a caught exception in: the pending cell empties
+   * before the finally body runs (the body may itself throw, and its exception must overwrite,
+   * not collide), so the taken value needs a frame slot the GC can see until the dispatch
+   * rethrows it. */
+  private trySlots: Map<TryStatement, number> = new Map();
 
   emit(module: Module): string {
     this.fileName = module.fileName;
@@ -255,6 +340,11 @@ class Emitter {
     this.enclosing = [];
     this.loopCount = 0;
     this.usedLabels.clear();
+    this.padStack = [];
+    this.unwindUsed = false;
+    this.tryFinallyStack = [];
+    this.tryCount = 0;
+    this.trySlots.clear();
     this.lines = [];
     this.indent = 0;
 
@@ -315,6 +405,14 @@ class Emitter {
     if (this.classes.length > 0) {
       out.push('');
     }
+    // One static cache per dynamic property site, zero-initialized: a NULL shape is the empty
+    // cache, so no runtime setup is needed and the first access at each site fills it.
+    for (let i = 0; i < this.icCount; i++) {
+      out.push(`static JSRTIC _jsrt_ic_${String(i)};`);
+    }
+    if (this.icCount > 0) {
+      out.push('');
+    }
     out.push(...functionLines, ...mainLines);
 
     return `${out.join('\n')}\n`;
@@ -327,6 +425,10 @@ class Emitter {
     this.inFunction = false;
     this.slotMap = this.globalMap;
     this.slotCount = this.globalCount;
+    this.padStack = [];
+    this.unwindUsed = false;
+    this.tryFinallyStack = [];
+    this.tryCount = 0;
 
     this.appendLine('int main(void) {');
     this.indent++;
@@ -336,8 +438,19 @@ class Emitter {
     for (const stmt of module.statements) {
       this.emitStatement(stmt);
     }
+    // Everything a promise queued runs before the program exits -- that is the whole of the job
+    // queue's observable behaviour for a program with no other event source. Emitted only when
+    // the module actually promised, so a program that never did does not link the driver in.
+    if (this.usedAsync) {
+      this.appendLine('jsrt_run_microtasks();', module.span);
+    }
     // No pop: the globals frame is pushed once and lives as long as the program does.
     this.appendLine('return 0;', module.span);
+    if (this.unwindUsed) {
+      // An exception no try caught: report on stderr and exit(1), which is what Node does.
+      this.appendLine('_jsrt_unwind: ;', module.span);
+      this.appendLine('jsrt_uncaught();', module.span);
+    }
     this.indent--;
     this.appendLine('}');
 
@@ -367,73 +480,64 @@ class Emitter {
     const savedEnclosing = this.enclosing;
     const savedLabels = this.usedLabels;
     const savedReturnSlot = this.returnSlot;
+    const savedReturnsValue = this.returnsValue;
     const savedEnvMap = this.envMap;
     const savedCaptureMap = this.captureMap;
+    const savedPadStack = this.padStack;
+    const savedUnwindUsed = this.unwindUsed;
+    const savedTryFinallyStack = this.tryFinallyStack;
+    const savedTryCount = this.tryCount;
+    const savedInAsync = this.inAsync;
+    const savedAwaitStates = this.awaitStates;
 
     const produced: string[] = [];
     this.lines = produced;
     this.indent = 0;
     this.slotMap = new Map();
-    this.slotCount = 0;
     this.inFunction = true;
     this.enclosing = [];
     this.usedLabels = new Set();
+    this.padStack = [];
+    this.unwindUsed = false;
+    this.tryFinallyStack = [];
+    this.tryCount = 0;
 
     const { fn } = unit;
     this.envMap = new Map(fn.envVars.map((name, index) => [name, index]));
     this.captureMap = new Map(fn.captures.map((c) => [c.name, c]));
+    this.inAsync = fn.isAsync;
+    this.awaitStates = new Map();
+    // An async unit's locals live in the SAME environment array as its captured bindings, which
+    // already own indices 0..envVars.length-1 -- so numbering starts past them. One array, one
+    // allocation, and `slotRef`'s existing precedence keeps a captured name out of the local run.
+    this.slotCount = fn.isAsync ? fn.envVars.length : 0;
 
     for (const param of fn.params) {
-      // A captured parameter lives in the environment, not the frame: one variable, one home.
-      if (this.envMap.has(param.name)) {
-        continue;
-      }
       // `function f(a, a)` is legal in sloppy JavaScript and the later parameter wins; reusing the
-      // slot rather than allocating a second one is exactly that rule.
-      if (!this.slotMap.has(param.name)) {
-        this.slotMap.set(param.name, this.slotCount);
-        this.slotCount++;
-      }
+      // slot rather than allocating a second one is exactly that rule, and `bindSlot` is where it
+      // lives along with the captured-binding rule.
+      this.bindSlot(param.name);
     }
-    this.returnSlot = this.slotCount;
-    this.slotCount++;
+    // The return slot is claimed AFTER counting, and only if the body actually returns a value:
+    // it holds the result across JSRT_FRAME_POP(), and a function that never produces one would
+    // otherwise root a slot nothing ever writes.
+    this.returnsValue = false;
     this.countBindings(fn.body.statements);
+    // An async unit always parks its result: every exit settles the promise, and the value has to
+    // be in a rooted slot while `jsrt_async_return` allocates the microtask that delivers it.
+    if (fn.isAsync) {
+      this.returnsValue = true;
+    }
+    if (this.returnsValue) {
+      this.returnSlot = this.slotCount;
+      this.slotCount++;
+    }
 
-    this.appendLine(
-      `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
-    );
-    this.indent++;
-    this.appendLine(`JSRT_FRAME(${this.slotCount});`, fn.span);
-    if (fn.envVars.length > 0) {
-      // Rooted through the frame, not through a closure: nothing points at this environment until
-      // a closure is built from it, and the function reads its own captured locals before then
-      // and after every such closure has died (docs/VALUE.md §4.3).
-      this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(env, ${fn.envVars.length});`, fn.span);
-      this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', fn.span);
-    } else if (fn.captures.length === 0) {
-      // Nothing reads the incoming environment here. The ABI passes one regardless so `jsrt_call`
-      // need not know which kind of closure it holds, so silence it for -Werror.
-      this.appendLine('(void)env;', fn.span);
+    if (fn.isAsync) {
+      this.emitAsyncUnit(unit);
+    } else {
+      this.emitSyncUnit(unit);
     }
-    if (fn.params.length === 0) {
-      this.appendLine('(void)argc;');
-      this.appendLine('(void)argv;');
-    }
-    fn.params.forEach((param, index) => {
-      // A call site may pass fewer or more arguments than the function declares. `jsrt_arg` makes
-      // both a value -- `undefined` and "dropped" -- rather than a read past the end of `argv`.
-      this.appendLine(`${this.slotRef(param.name)} = jsrt_arg(argc, argv, ${index});`, param.span);
-    });
-    this.emitHoistedFunctions(fn.body.statements);
-    for (const stmt of fn.body.statements) {
-      this.emitStatement(stmt);
-    }
-    // Falling off the end of a JavaScript function returns `undefined` -- and still has to pop.
-    this.appendLine('JSRT_FRAME_POP();', fn.span);
-    this.appendLine('return JSRT_UNDEFINED;', fn.span);
-    this.indent--;
-    this.appendLine('}');
-    this.appendLine('');
 
     this.lines = savedLines;
     this.indent = savedIndent;
@@ -443,8 +547,15 @@ class Emitter {
     this.enclosing = savedEnclosing;
     this.usedLabels = savedLabels;
     this.returnSlot = savedReturnSlot;
+    this.returnsValue = savedReturnsValue;
     this.envMap = savedEnvMap;
     this.captureMap = savedCaptureMap;
+    this.padStack = savedPadStack;
+    this.unwindUsed = savedUnwindUsed;
+    this.inAsync = savedInAsync;
+    this.awaitStates = savedAwaitStates;
+    this.tryFinallyStack = savedTryFinallyStack;
+    this.tryCount = savedTryCount;
 
     return produced;
   }
@@ -481,6 +592,18 @@ class Emitter {
     return id;
   }
 
+  /* Storage for one named binding, at most once. A binding this function CAPTURES already has a
+   * home -- its heap environment -- and `slotRef` reads that one, so a frame slot of the same name
+   * would be a slot the frame roots and nothing ever reads. One variable, one home; the frame-vs-
+   * locals audit in tests/unit/frames.test.ts is what holds this to exactly that. */
+  private bindSlot(name: string): void {
+    if (this.envMap.has(name) || this.slotMap.has(name)) {
+      return;
+    }
+    this.slotMap.set(name, this.slotCount);
+    this.slotCount++;
+  }
+
   /* Assigns every frame slot before a single line of body is emitted, because JSRT_FRAME(n) is
    * written once at the top and n has to be final by then. Named bindings and short-circuit
    * temporaries share one counter and one frame: both hold jsrt_values the GC must see. */
@@ -488,10 +611,7 @@ class Emitter {
     for (const stmt of statements) {
       switch (stmt.kind) {
         case 'declaration':
-          if (!this.slotMap.has(stmt.name)) {
-            this.slotMap.set(stmt.name, this.slotCount);
-            this.slotCount++;
-          }
+          this.bindSlot(stmt.name);
           if (stmt.value.kind === 'function') {
             // Node names a function after the binding it is assigned to: `const mul = () => {}`
             // prints as `[Function: mul]`, not `[Function (anonymous)]`.
@@ -548,10 +668,7 @@ class Emitter {
           break;
         }
         case 'function-declaration':
-          if (!this.slotMap.has(stmt.name)) {
-            this.slotMap.set(stmt.name, this.slotCount);
-            this.slotCount++;
-          }
+          this.bindSlot(stmt.name);
           // The FUNCTION's own name, falling back to the declaration's. They differ for exactly one
           // thing: a monomorphized specialization is bound as `box<number>` but is still the `box`
           // the user wrote, and `[Function: box]` is what Node prints for it.
@@ -559,6 +676,7 @@ class Emitter {
           break;
         case 'return-statement':
           if (stmt.value) {
+            this.returnsValue = true;
             this.countExpression(stmt.value);
           }
           break;
@@ -573,15 +691,14 @@ class Emitter {
           this.forOfSlots.set(stmt, this.slotCount);
           this.slotCount++;
           this.countExpression(stmt.iterable);
-          // The loop binding is an ordinary frame slot: the body may capture it, and countBindings
-          // is what gives a name storage.
-          if (!this.slotMap.has(stmt.binding)) {
-            this.slotMap.set(stmt.binding, this.slotCount);
-            this.slotCount++;
-          }
+          this.bindSlot(stmt.binding);
           this.countBindings(stmt.body.statements);
           break;
         case 'field-assignment':
+        // The dynamic variant needs the same two slots for a stronger reason: jsrt_set_prop can
+        // GROW the object's slot storage, which allocates, so both operands must be rooted
+        // across the call itself, not only across each other's evaluation.
+        case 'dyn-field-assignment':
           // Target and value each get a rooted slot: C does not fix the order in which it
           // evaluates the arguments to jsrt_object_set, and the target has to stay reachable
           // while the value -- which may allocate -- is computed.
@@ -623,12 +740,26 @@ class Emitter {
         case 'continue-statement':
           break;
         case 'throw-statement':
+          this.countExpression(stmt.value);
+          break;
         case 'try-statement':
-          // These nodes are kept in the HIR for Task 3.10's in-progress implementation, but the
-          // frontend gate rejects them until landing-pad emission exists. Keep the exhaustive
-          // switch honest so hand-built invalid HIR fails as an internal error, not as a TS compile
-          // failure that prevents every other feature from building.
-          throw new Error(`${stmt.kind} is not yet supported by the emitter`);
+          // A try with a finally claims a slot of its own: where the dispatch stashes a caught
+          // exception while the finally body (which may allocate) runs.
+          if (stmt.catchBinding !== undefined) {
+            this.bindSlot(stmt.catchBinding);
+          }
+          if (stmt.finallyBlock !== undefined) {
+            this.trySlots.set(stmt, this.slotCount);
+            this.slotCount++;
+          }
+          this.countBindings(stmt.tryBlock.statements);
+          if (stmt.catchBlock !== undefined) {
+            this.countBindings(stmt.catchBlock.statements);
+          }
+          if (stmt.finallyBlock !== undefined) {
+            this.countBindings(stmt.finallyBlock.statements);
+          }
+          break;
         default: {
           const _exhaustive: never = stmt;
           throw new Error(
@@ -738,11 +869,63 @@ class Emitter {
           this.countExpression(entry.value);
         }
         break;
+      // The object slot plus ONE value scratch slot, reused entry by entry: jsrt_set_prop may
+      // grow the slot storage, which allocates, so the value being stored must be rooted across
+      // the call -- unlike jsrt_object_set, which only writes. `{}` has no entry to store and
+      // therefore no scratch: a slot the emitter never writes is one the frame roots for nothing.
+      case 'dyn-object-literal':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += expr.entries.length === 0 ? 1 : 2;
+        for (const entry of expr.entries) {
+          this.countExpression(entry.value);
+        }
+        break;
       // Target first, then each argument, each in its own rooted slot. The runtime functions take
       // positional C arguments rather than an argv, so the run does not have to be contiguous --
       // but the SEQUENCING does have to exist: C leaves argument evaluation order unspecified, and
       // `m.set(f(), g())` must run f before g (plan-notes 55).
+      // One rooted slot for the argument: the runtime walk allocates its result while the
+      // argument must stay reachable, and a slot is the frame discipline's way to promise that.
+      case 'json-parse':
+      case 'json-stringify':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 1;
+        this.countExpression(expr.arg);
+        break;
+      // One rooted slot for the awaited value: it has to survive the subscribe allocation on the
+      // way out, and it holds the resumed result on the way back in. The state number is assigned
+      // here too, because the dispatch switch is emitted ahead of the labels it jumps to.
+      case 'await':
+        this.tempSlots.set(expr, this.slotCount);
+        this.slotCount += 1;
+        this.awaitStates.set(expr, this.awaitStates.size + 1);
+        this.countExpression(expr.value);
+        break;
+      // The same one-slot promise json-parse makes: jsrt_promise_* allocates its result while the
+      // argument must stay reachable.
+      case 'promise-static':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 1;
+        this.countExpression(expr.arg);
+        break;
+      // The same reachability promise, one slot per argument: an Object walk allocates its
+      // result, and `Object.hasOwn(o, k)` must hold BOTH operands across the call.
+      case 'object-static':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += expr.args.length;
+        for (const arg of expr.args) {
+          this.countExpression(arg);
+        }
+        break;
+      // Same discipline for a string or array op: the receiver and every argument stay rooted
+      // while the rest are evaluated, and evaluation order is pinned against C's unspecified
+      // argument order.
+      // A regexp op is the same shape: `re.test(s)` holds the compiled pattern rooted while the
+      // subject is evaluated, and the subject rooted while the engine allocates.
+      case 'array-op':
       case 'collection-op':
+      case 'regexp-op':
+      case 'string-op':
         this.callSlots.set(expr, this.slotCount);
         this.slotCount += 1 + expr.args.length;
         this.countExpression(expr.target);
@@ -750,9 +933,24 @@ class Emitter {
           this.countExpression(arg);
         }
         break;
+      // Numbers are immediates -- nothing to root -- so the slots exist for SEQUENCING alone:
+      // `Math.pow(f(), g())` must run f before g, and C leaves argument order unspecified. A
+      // single argument has no order to fix and takes no slot at all.
+      case 'math-call':
+        if (expr.args.length > 1) {
+          this.callSlots.set(expr, this.slotCount);
+          this.slotCount += expr.args.length;
+        }
+        for (const arg of expr.args) {
+          this.countExpression(arg);
+        }
+        break;
       // No slot: the read is a dereference with nothing allocated between evaluating the target
       // and using it, so there is no window in which the object could go unrooted.
       case 'field-access':
+      // jsrt_get_prop allocates nothing and runs no user code -- a chain walk and a load -- so
+      // the dynamic read is as slot-free as the static one.
+      case 'dyn-field-access':
       // Same as a field read: the test is a pointer comparison against a static descriptor, with
       // nothing allocated between evaluating the target and using it.
       case 'instanceof':
@@ -760,6 +958,12 @@ class Emitter {
         break;
       // One allocator call with no operands: nothing is evaluated between the allocation and the
       // use of its result, so there is no window to root against.
+      // One rooted slot for the pattern text, claimed before the FLAG string is allocated: the
+      // two are two allocations, and the first has to survive the second.
+      case 'regexp-literal':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 1;
+        break;
       case 'collection-new':
       case 'number-literal':
       case 'string-literal':
@@ -793,7 +997,12 @@ class Emitter {
 
       case 'expression-statement': {
         const expr = this.emitExpression(stmt.expression);
-        this.appendLine(`${expr};`, stmt.span);
+        // A call already ran as its own statements; what came back is only the slot its result
+        // sits in, and a bare `JSRT_LOCAL(3);` line would be a no-op -- one clang warns about.
+        // An async unit spells its slots as environment reads, so both forms are matched.
+        if (!/^(?:JSRT_(?:LOCAL|GLOBAL)\(\d+\)|_jsrt_env->slots\[\d+\])$/.test(expr)) {
+          this.appendLine(`${expr};`, stmt.span);
+        }
         break;
       }
 
@@ -821,9 +1030,22 @@ class Emitter {
 
       case 'while-statement': {
         const id = this.enterLoop(stmt.label);
-        const cond = this.emitExpression(stmt.condition);
-        this.appendLine(`while (jsrt_truthy(${cond})) {`, stmt.span);
+        // The condition is captured, not emitted in place: it re-runs every iteration, so any
+        // statements it needs (a call and its pending check) must land INSIDE the loop, and a
+        // statement cannot sit inside `while (...)`. With none, the compact form survives.
         this.indent++;
+        const cond = this.capture(() => this.emitExpression(stmt.condition));
+        this.indent--;
+        if (cond.lines.length === 0) {
+          this.appendLine(`while (jsrt_truthy(${cond.value})) {`, stmt.span);
+          this.indent++;
+        } else {
+          this.appendLine('while (1) {', stmt.span);
+          this.indent++;
+          this.lines.push(...cond.lines);
+          this.usedLabels.add(`brk_${id}`);
+          this.appendLine(`if (!jsrt_truthy(${cond.value})) { goto brk_${id}; }`, stmt.span);
+        }
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
         }
@@ -845,9 +1067,19 @@ class Emitter {
         // `continue` in a do/while jumps to the TEST, not past it -- the loop still gets to decide
         // whether to run again. Placing the target at the end of the body is what achieves that.
         this.emitJumpTarget(`cont_${id}`, stmt.span);
-        this.indent--;
-        const cond = this.emitExpression(stmt.condition);
-        this.appendLine(`} while (jsrt_truthy(${cond}));`, stmt.span);
+        const cond = this.capture(() => this.emitExpression(stmt.condition));
+        if (cond.lines.length === 0) {
+          this.indent--;
+          this.appendLine(`} while (jsrt_truthy(${cond.value}));`, stmt.span);
+        } else {
+          // The condition needed statements of its own, and `} while (...)` cannot hold them:
+          // the test moves into the body's tail, still after the continue target.
+          this.lines.push(...cond.lines);
+          this.usedLabels.add(`brk_${id}`);
+          this.appendLine(`if (!jsrt_truthy(${cond.value})) { goto brk_${id}; }`, stmt.span);
+          this.indent--;
+          this.appendLine('} while (1);', stmt.span);
+        }
         this.emitJumpTarget(`brk_${id}`, stmt.span);
         this.enclosing.pop();
         break;
@@ -859,13 +1091,26 @@ class Emitter {
           this.emitStatement(stmt.init);
         }
         // An absent condition is an infinite loop, not a false one. `while (1)` rather than
-        // synthesising a `true` literal, so nothing downstream has to evaluate a fake node.
-        const cond =
-          stmt.condition === undefined
-            ? '1'
-            : `jsrt_truthy(${this.emitExpression(stmt.condition)})`;
-        this.appendLine(`while (${cond}) {`, stmt.span);
+        // synthesising a `true` literal, so nothing downstream has to evaluate a fake node. A
+        // present one is captured like while's: its statements must re-run every iteration.
         this.indent++;
+        const condition = stmt.condition;
+        const cond =
+          condition === undefined ? undefined : this.capture(() => this.emitExpression(condition));
+        this.indent--;
+        if (cond === undefined || cond.lines.length === 0) {
+          this.appendLine(
+            `while (${cond === undefined ? '1' : `jsrt_truthy(${cond.value})`}) {`,
+            stmt.span,
+          );
+          this.indent++;
+        } else {
+          this.appendLine('while (1) {', stmt.span);
+          this.indent++;
+          this.lines.push(...cond.lines);
+          this.usedLabels.add(`brk_${id}`);
+          this.appendLine(`if (!jsrt_truthy(${cond.value})) { goto brk_${id}; }`, stmt.span);
+        }
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
         }
@@ -904,8 +1149,7 @@ class Emitter {
           throw new Error(`${stmt.kind} has no enclosing target; verifier should have caught it`);
         }
         const name = `${wantsLoop ? 'cont' : 'brk'}_${target.id}`;
-        this.usedLabels.add(name);
-        this.appendLine(`goto ${name};`, stmt.span);
+        this.emitLoopJump(name, this.enclosing.indexOf(target), stmt.span);
         break;
       }
 
@@ -974,16 +1218,37 @@ class Emitter {
         if (!this.inFunction) {
           throw new Error('return outside a function; verifier should have caught it');
         }
+        const slot = this.slotAt(this.returnSlot);
         if (stmt.value === undefined) {
-          this.appendLine('JSRT_FRAME_POP();', stmt.span);
-          this.appendLine('return JSRT_UNDEFINED;', stmt.span);
+          if (this.tryFinallyStack.length === 0) {
+            if (this.inAsync) {
+              this.emitAsyncSettle('jsrt_async_return', 'JSRT_UNDEFINED', stmt.span);
+              break;
+            }
+            this.appendLine('JSRT_FRAME_POP();', stmt.span);
+            this.appendLine('return JSRT_UNDEFINED;', stmt.span);
+            break;
+          }
+          // An enclosing finally must run first: park the value, route only the jump.
+          this.appendLine(`${slot} = JSRT_UNDEFINED;`, stmt.span);
+          this.emitReturnJump(stmt.span);
           break;
         }
         const value = this.emitExpression(stmt.value);
-        const slot = `JSRT_LOCAL(${this.returnSlot})`;
+        if (this.tryFinallyStack.length !== 0) {
+          this.appendLine(`${slot} = ${value};`, stmt.span);
+          this.emitReturnJump(stmt.span);
+          break;
+        }
         // Evaluate into a rooted slot FIRST, pop SECOND, read THIRD. Popping before evaluating
         // would run the expression -- and any allocation in it -- with this frame's locals
-        // invisible to the collector.
+        // invisible to the collector. An async return settles instead of returning, and settling
+        // allocates, so it sits inside the same window.
+        if (this.inAsync) {
+          this.appendLine(`${slot} = ${value};`, stmt.span);
+          this.emitAsyncSettle('jsrt_async_return', slot, stmt.span);
+          break;
+        }
         this.appendLine(`return (${slot} = ${value}, JSRT_FRAME_POP(), ${slot});`, stmt.span);
         break;
       }
@@ -995,12 +1260,31 @@ class Emitter {
         }
         const target = this.slotAt(base);
         const value = this.slotAt(base + 1);
-        this.appendLine(
-          `${target} = ${this.emitExpression(stmt.target)}, ` +
-            `${value} = ${this.emitExpression(stmt.value)}, ` +
-            `jsrt_object_set(${target}, ${stmt.slot}, ${value});`,
-          stmt.span,
+        const parts: string[] = [];
+        this.sequencePart(parts, stmt.target, stmt.span, (v) => `${target} = ${v}`);
+        this.sequencePart(parts, stmt.value, stmt.span, (v) => `${value} = ${v}`);
+        parts.push(`jsrt_object_set(${target}, ${stmt.slot}, ${value})`);
+        this.flushParts(parts, stmt.span);
+        break;
+      }
+
+      // Same shape as field-assignment; the differences are the slow-path entry point, the KEY
+      // (a string, not a slot -- the shape table resolves it), and the per-site cache. No pending
+      // check follows: jsrt_set_prop runs no user code and cannot throw.
+      case 'dyn-field-assignment': {
+        const base = this.indexSlots.get(stmt);
+        if (base === undefined) {
+          throw new Error('dynamic field assignment was not registered during counting');
+        }
+        const target = this.slotAt(base);
+        const value = this.slotAt(base + 1);
+        const parts: string[] = [];
+        this.sequencePart(parts, stmt.target, stmt.span, (v) => `${target} = ${v}`);
+        this.sequencePart(parts, stmt.value, stmt.span, (v) => `${value} = ${v}`);
+        parts.push(
+          `jsrt_set_prop(${target}, ${cNameLiteral(stmt.field)}, ${value}, &${this.icSite()})`,
         );
+        this.flushParts(parts, stmt.span);
         break;
       }
 
@@ -1015,14 +1299,21 @@ class Emitter {
         if (ctor === undefined) {
           break;
         }
-        const parts = [`${this.slotAt(base)} = ${this.emitExpression(stmt.receiver)}`];
+        const parts: string[] = [];
+        this.sequencePart(parts, stmt.receiver, stmt.span, (v) => `${this.slotAt(base)} = ${v}`);
         stmt.args.forEach((arg, index) => {
-          parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
+          this.sequencePart(
+            parts,
+            arg,
+            stmt.span,
+            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
+          );
         });
         parts.push(
           `jsrt_call(${this.closureValue(ctor.fn)}, ${1 + stmt.args.length}, &${this.slotAt(base)})`,
         );
-        this.appendLine(`${parts.join(', ')};`, stmt.span);
+        this.flushParts(parts, stmt.span);
+        this.emitPendingCheck(stmt.span);
         break;
       }
 
@@ -1037,11 +1328,19 @@ class Emitter {
         }
         break;
 
-      case 'throw-statement':
-      case 'try-statement':
-        // See the counting switch above. A source program cannot reach this path because the gate
-        // reports STA1214 first; this guard is for malformed or hand-built HIR only.
-        throw new Error(`${stmt.kind} is not yet supported by the emitter`);
+      case 'throw-statement': {
+        const value = this.emitExpression(stmt.value);
+        // Overwrite-on-throw is the pending cell's contract (runtime/src/jsrt_throw.c): a throw
+        // inside a finally REPLACES whatever completion was pending, which is the language rule.
+        this.appendLine(`jsrt_throw(${value});`, stmt.span);
+        this.appendLine(`goto ${this.currentPad()};`, stmt.span);
+        break;
+      }
+
+      case 'try-statement': {
+        this.emitTry(stmt);
+        break;
+      }
 
       default: {
         const _exhaustive: never = stmt;
@@ -1063,6 +1362,223 @@ class Emitter {
   private emitJumpTarget(name: string, span: Span): void {
     if (this.usedLabels.has(name)) {
       this.appendLine(`${name}: ;`, span);
+    }
+  }
+
+  /* Where control goes when an exception is pending: the innermost try's landing pad, or the
+   * unit's own unwind tail when no try is open. Asking marks the pad used, which is what decides
+   * whether the tail -- or a catch that nothing in its try body can reach -- is emitted at all. */
+  private currentPad(): string {
+    const pad = this.padStack.at(-1);
+    if (pad === undefined) {
+      this.unwindUsed = true;
+      return '_jsrt_unwind';
+    }
+    this.usedLabels.add(pad);
+    return pad;
+  }
+
+  /* The check after every operation that can throw. Throwing operations are emitted as their own
+   * STATEMENTS -- never inside a consumer's expression -- precisely so this line can sit between
+   * the operation and whatever consumes its result: a callee that threw left `undefined` behind,
+   * and nothing may observe it. */
+  private emitPendingCheck(span: Span): void {
+    this.appendLine(`if (jsrt_pending()) { goto ${this.currentPad()}; }`, span);
+  }
+
+  /* Runs `f` against a private buffer and hands back what it appended plus its value. Loop
+   * conditions and short-circuit right operands need this: they are re-evaluated somewhere other
+   * than where the emitter is currently appending, so any statements the operand needs (a call
+   * and its pending check) must be captured and replayed at the evaluation point. */
+  private capture(f: () => string): { readonly lines: string[]; readonly value: string } {
+    const saved = this.lines;
+    const buffer: string[] = [];
+    this.lines = buffer;
+    const value = f();
+    this.lines = saved;
+    return { lines: buffer, value };
+  }
+
+  /* Evaluates one operand of a comma sequence under construction. A call-free operand joins the
+   * sequence via `use` and keeps the compact single-line shape. One that produced statements of
+   * its own (a call and its pending check) forces the sequence so far out as a statement FIRST:
+   * the language already evaluated those operands, so their values must be sitting in their
+   * rooted slots before this operand's calls run -- and then lands its own `use` line after its
+   * statements. Returns whether it flushed, which tells the caller the compact shape is gone. */
+  private sequencePart(
+    parts: string[],
+    operand: Expression,
+    span: Span,
+    use: (value: string) => string,
+  ): boolean {
+    const captured = this.capture(() => this.emitExpression(operand));
+    if (captured.lines.length === 0) {
+      parts.push(use(captured.value));
+      return false;
+    }
+    this.flushParts(parts, span);
+    this.lines.push(...captured.lines);
+    this.appendLine(`${use(captured.value)};`, span);
+    return true;
+  }
+
+  private flushParts(parts: string[], span: Span): void {
+    if (parts.length > 0) {
+      this.appendLine(`${parts.join(', ')};`, span);
+      parts.length = 0;
+    }
+  }
+
+  /* `goto` to a loop/switch label, routed through any finally standing between here and the
+   * target. The innermost try decides: if the target construct opened BEFORE the try did, the
+   * jump leaves the protected code and the finally must run first. The dispatch re-invokes this
+   * with that scope popped, which chains the jump through the next finally outward in turn. */
+  private emitLoopJump(name: string, targetIndex: number, span: Span): void {
+    const scope = this.tryFinallyStack.at(-1);
+    if (scope !== undefined && scope.enclosingDepth > targetIndex) {
+      this.routeJump(scope, name, span, () => this.emitLoopJump(name, targetIndex, span));
+      return;
+    }
+    this.usedLabels.add(name);
+    this.appendLine(`goto ${name};`, span);
+  }
+
+  /* A `return` whose enclosing finally bodies must run first. The value already sits in the
+   * (rooted) return slot; only the JUMP routes, and the same chaining as emitLoopJump applies. */
+  private emitReturnJump(span: Span): void {
+    const scope = this.tryFinallyStack.at(-1);
+    if (scope === undefined) {
+      const slot = this.slotAt(this.returnSlot);
+      if (this.inAsync) {
+        this.emitAsyncSettle('jsrt_async_return', slot, span);
+        return;
+      }
+      this.appendLine(`return (JSRT_FRAME_POP(), ${slot});`, span);
+      return;
+    }
+    this.routeJump(scope, 'return', span, () => this.emitReturnJump(span));
+  }
+
+  /* Records the jump in the completion variable and enters the finally. One code per DISTINCT
+   * jump, allocated on first use: two `break`s to the same loop share a code and a dispatch arm,
+   * a `break` and a `return` do not. Codes 0 (normal) and 1 (throw) are reserved. */
+  private routeJump(scope: TryFinallyScope, key: string, span: Span, action: () => void): void {
+    let route = scope.routes.get(key);
+    if (route === undefined) {
+      route = { code: 2 + scope.routes.size, action };
+      scope.routes.set(key, route);
+    }
+    this.appendLine(`${scope.compVar} = ${route.code};`, span);
+    this.appendLine(`goto ${scope.finLabel};`, span);
+  }
+
+  /* Landing-pad lowering, the shape plan.md Task 3.10 and docs/VALUE.md §6 prescribe: no setjmp,
+   * no unwinder -- a throwing call is followed by `if (jsrt_pending()) goto pad;`, and this emits
+   * the pads those checks target. */
+  private emitTry(stmt: TryStatement): void {
+    const id = this.tryCount++;
+    if (stmt.finallyBlock === undefined) {
+      this.emitTryCatch(stmt, id);
+    } else {
+      this.emitTryFinally(stmt, stmt.finallyBlock, id);
+    }
+  }
+
+  private emitTryCatch(stmt: TryStatement, id: number): void {
+    const catchPad = `_jsrt_cat_${id}`;
+    this.padStack.push(catchPad);
+    this.emitStatement(stmt.tryBlock);
+    this.padStack.pop();
+    if (!this.usedLabels.has(catchPad)) {
+      // Nothing in the try body can throw, so the catch is unreachable: emitting it would put
+      // dead C behind an unconditional goto. The body already ran under the outer pads.
+      return;
+    }
+    const end = `_jsrt_try_end_${id}`;
+    this.usedLabels.add(end);
+    this.appendLine(`goto ${end};`, stmt.span);
+    this.appendLine(`${catchPad}: ;`, stmt.span);
+    this.emitCatchEntry(stmt);
+    if (stmt.catchBlock !== undefined) {
+      this.emitStatement(stmt.catchBlock);
+    }
+    this.appendLine(`${end}: ;`, stmt.span);
+  }
+
+  /* The completion-code protocol: 0 falls through the dispatch (normal completion), 1 rethrows
+   * the stashed exception, 2+ re-perform a recorded jump. The dispatch sits AFTER the finally
+   * body, so a finally that itself throws or jumps never reaches it -- which is the language
+   * rule: the finally's own completion replaces the one on the way through. */
+  private emitTryFinally(stmt: TryStatement, finallyBlock: Block, id: number): void {
+    const comp = `_jsrt_comp_${id}`;
+    const finThr = `_jsrt_finthr_${id}`;
+    const fin = `_jsrt_fin_${id}`;
+    const excIndex = this.trySlots.get(stmt);
+    if (excIndex === undefined) {
+      throw new Error('try/finally has no exception slot; countBindings missed a node');
+    }
+    const exc = this.slotAt(excIndex);
+    this.appendLine('{', stmt.span);
+    this.indent++;
+    this.appendLine(`int ${comp} = 0;`, stmt.span);
+    const scope: TryFinallyScope = {
+      compVar: comp,
+      finLabel: fin,
+      enclosingDepth: this.enclosing.length,
+      routes: new Map(),
+    };
+    this.tryFinallyStack.push(scope);
+    const catchPad = stmt.catchBlock === undefined ? finThr : `_jsrt_cat_${id}`;
+    this.padStack.push(catchPad);
+    this.emitStatement(stmt.tryBlock);
+    this.padStack.pop();
+    this.usedLabels.add(fin);
+    this.appendLine(`goto ${fin};`, stmt.span);
+    if (stmt.catchBlock !== undefined && this.usedLabels.has(catchPad)) {
+      this.appendLine(`${catchPad}: ;`, stmt.span);
+      this.emitCatchEntry(stmt);
+      this.padStack.push(finThr);
+      this.emitStatement(stmt.catchBlock);
+      this.padStack.pop();
+      this.appendLine(`goto ${fin};`, stmt.span);
+    }
+    // The scope pops HERE: a return/break/throw inside the finally body itself does not route
+    // through this finally again -- it replaces the pending completion, which is exactly what
+    // leaving comp undispatched does.
+    this.tryFinallyStack.pop();
+    if (this.usedLabels.has(finThr)) {
+      this.appendLine(`${finThr}: ;`, stmt.span);
+      this.appendLine(`${comp} = 1;`, stmt.span);
+      // Take BEFORE the finally body runs: the body may itself throw, and its exception must
+      // find the cell empty to overwrite, while this one waits in a rooted slot.
+      this.appendLine(`${exc} = jsrt_take_exception();`, stmt.span);
+    }
+    this.appendLine(`${fin}: ;`, stmt.span);
+    this.emitStatement(finallyBlock);
+    if (this.usedLabels.has(finThr)) {
+      this.appendLine(
+        `if (${comp} == 1) { jsrt_throw(${exc}); goto ${this.currentPad()}; }`,
+        stmt.span,
+      );
+    }
+    for (const route of scope.routes.values()) {
+      this.appendLine(`if (${comp} == ${route.code}) {`, stmt.span);
+      this.indent++;
+      route.action();
+      this.indent--;
+      this.appendLine('}', stmt.span);
+    }
+    this.indent--;
+    this.appendLine('}', stmt.span);
+  }
+
+  /* Taking the exception is what re-arms the cell for the next throw; a binding-less catch still
+   * takes, it just has nowhere to put the value. */
+  private emitCatchEntry(stmt: TryStatement): void {
+    if (stmt.catchBinding !== undefined) {
+      this.appendLine(`${this.slotRef(stmt.catchBinding)} = jsrt_take_exception();`, stmt.span);
+    } else {
+      this.appendLine('(void)jsrt_take_exception();', stmt.span);
     }
   }
 
@@ -1186,14 +1702,19 @@ class Emitter {
         return `jsrt_number((double)jsrt_string_length(${this.emitExpression(expr.operand)}))`;
       }
 
+      // The operand list is positional; the WIDTH picks the entry point, which is the only thing
+      // the two short forms need from it. No rooted slots: every one of these runtime functions is
+      // a formatter that allocates only its own scratch buffer, and the arguments it reads are
+      // already evaluated when it starts.
       case 'console-log': {
-        const consoleLog = expr as Extract<Expression, { kind: 'console-log' }>;
-        const [arg] = consoleLog.args;
-        if (consoleLog.args.length !== 1 || arg === undefined) {
-          throw new Error(`console.log requires exactly 1 argument, got ${consoleLog.args.length}`);
+        const fn = consoleEntryPoint(expr.method, expr.args.length);
+        if (fn === null) {
+          throw new Error(
+            `console.${expr.method} has no entry point for ${String(expr.args.length)} arguments`,
+          );
         }
-        const argC = this.emitExpression(arg);
-        return `jsrt_print(${argC})`;
+        const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
+        return `${fn}(${operands})`;
       }
 
       case 'function': {
@@ -1211,11 +1732,24 @@ class Emitter {
         if (expr.elements.length === 0) {
           return 'jsrt_array_new(0, NULL)';
         }
-        const parts = expr.elements.map(
-          (element, i) => `${this.slotAt(base + i)} = ${this.emitExpression(element)}`,
-        );
-        parts.push(`jsrt_array_new(${expr.elements.length}, &${this.slotAt(base)})`);
-        return `(${parts.join(', ')})`;
+        const parts: string[] = [];
+        let flushed = false;
+        expr.elements.forEach((element, i) => {
+          flushed =
+            this.sequencePart(
+              parts,
+              element,
+              expr.span,
+              (v) => `${this.slotAt(base + i)} = ${v}`,
+            ) || flushed;
+        });
+        const alloc = `jsrt_array_new(${expr.elements.length}, &${this.slotAt(base)})`;
+        if (!flushed) {
+          parts.push(alloc);
+          return `(${parts.join(', ')})`;
+        }
+        this.flushParts(parts, expr.span);
+        return alloc;
       }
 
       case 'index-access': {
@@ -1225,7 +1759,15 @@ class Emitter {
         }
         const target = this.slotAt(base);
         const index = this.slotAt(base + 1);
-        return `(${target} = ${this.emitExpression(expr.target)}, ${index} = ${this.emitExpression(expr.index)}, jsrt_array_get(${target}, ${index}))`;
+        const parts: string[] = [];
+        this.sequencePart(parts, expr.target, expr.span, (v) => `${target} = ${v}`);
+        this.sequencePart(parts, expr.index, expr.span, (v) => `${index} = ${v}`);
+        const read = `jsrt_array_get(${target}, ${index})`;
+        if (parts.length === 2) {
+          return `(${parts.join(', ')}, ${read})`;
+        }
+        this.flushParts(parts, expr.span);
+        return read;
       }
 
       case 'call': {
@@ -1234,18 +1776,37 @@ class Emitter {
           throw new Error('call was not registered during counting');
         }
         // Callee first, then arguments left to right -- the evaluation order the language
-        // specifies, made explicit by a comma expression so C cannot choose another.
-        const parts = [`${this.slotAt(base)} = ${this.emitExpression(expr.callee)}`];
+        // specifies, each landing in its rooted slot before the next runs. The call itself lands
+        // as a STATEMENT, never inside the consumer's expression, so the pending-check can sit
+        // between it and whatever consumes the result -- which waits in the callee's slot.
+        const parts: string[] = [];
+        this.sequencePart(parts, expr.callee, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
         expr.args.forEach((arg, index) => {
-          parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
+          this.sequencePart(
+            parts,
+            arg,
+            expr.span,
+            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
+          );
         });
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
-        parts.push(`jsrt_call(${this.slotAt(base)}, ${expr.args.length}, ${argv})`);
-        return `(${parts.join(', ')})`;
+        parts.push(
+          `${this.slotAt(base)} = jsrt_call(${this.slotAt(base)}, ${expr.args.length}, ${argv})`,
+        );
+        this.flushParts(parts, expr.span);
+        this.emitPendingCheck(expr.span);
+        return this.slotAt(base);
       }
 
       case 'field-access': {
         return `jsrt_object_get(${this.emitExpression(expr.target)}, ${expr.slot})`;
+      }
+
+      // The site's cache is a static JSRTIC: a hit is one pointer compare and one load, a miss
+      // walks the shape chain and refills it (docs/VALUE.md §4.10). Runs no user code, so no
+      // pending check -- and a missing property is `undefined`, not an error.
+      case 'dyn-field-access': {
+        return `jsrt_get_prop(${this.emitExpression(expr.target)}, ${cNameLiteral(expr.field)}, &${this.icSite()})`;
       }
 
       case 'new': {
@@ -1264,15 +1825,23 @@ class Emitter {
           `${object} = jsrt_object_new(&_jsrt_class_${String(this.classIds.get(expr.className))})`,
         ];
         expr.args.forEach((arg, index) => {
-          parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
-        });
-        if (cls.ctor !== undefined) {
-          parts.push(
-            `jsrt_call(${this.closureValue(cls.ctor.fn)}, ${1 + expr.args.length}, &${object})`,
+          this.sequencePart(
+            parts,
+            arg,
+            expr.span,
+            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
           );
+        });
+        if (cls.ctor === undefined) {
+          this.flushParts(parts, expr.span);
+          return object;
         }
-        parts.push(object);
-        return `(${parts.join(', ')})`;
+        parts.push(
+          `jsrt_call(${this.closureValue(cls.ctor.fn)}, ${1 + expr.args.length}, &${object})`,
+        );
+        this.flushParts(parts, expr.span);
+        this.emitPendingCheck(expr.span);
+        return object;
       }
 
       case 'method-call': {
@@ -1282,9 +1851,15 @@ class Emitter {
         }
         // Receiver first, then arguments left to right -- the same order and the same contiguous
         // argv as a plain call, with the receiver where the callee slot would be.
-        const parts = [`${this.slotAt(base)} = ${this.emitExpression(expr.target)}`];
+        const parts: string[] = [];
+        this.sequencePart(parts, expr.target, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
         expr.args.forEach((arg, index) => {
-          parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
+          this.sequencePart(
+            parts,
+            arg,
+            expr.span,
+            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
+          );
         });
         // A direct call names the function; a virtual one loads the entry the RECEIVER's own class
         // holds at this slot. The receiver is already in its slot, so the load reads the value the
@@ -1293,8 +1868,12 @@ class Emitter {
           expr.dispatch === 'virtual'
             ? `jsrt_method(${this.slotAt(base)}, ${expr.slot})`
             : this.closureValue(this.methodOf(expr).fn);
-        parts.push(`jsrt_call(${callee}, ${1 + expr.args.length}, &${this.slotAt(base)})`);
-        return `(${parts.join(', ')})`;
+        parts.push(
+          `${this.slotAt(base)} = jsrt_call(${callee}, ${1 + expr.args.length}, &${this.slotAt(base)})`,
+        );
+        this.flushParts(parts, expr.span);
+        this.emitPendingCheck(expr.span);
+        return this.slotAt(base);
       }
 
       // Allocate, then fill left to right. The object is in its own rooted slot first, so an entry
@@ -1306,36 +1885,228 @@ class Emitter {
         }
         const id = String(this.classIds.get(shapeNameOf(expr)));
         const parts = [`${this.slotAt(slot)} = jsrt_object_new(&_jsrt_class_${id})`];
+        let flushed = false;
         expr.entries.forEach((entry, index) => {
-          parts.push(
-            `jsrt_object_set(${this.slotAt(slot)}, ${index}, ${this.emitExpression(entry.value)})`,
-          );
+          flushed =
+            this.sequencePart(
+              parts,
+              entry.value,
+              expr.span,
+              (v) => `jsrt_object_set(${this.slotAt(slot)}, ${index}, ${v})`,
+            ) || flushed;
         });
-        parts.push(this.slotAt(slot));
-        return `(${parts.join(', ')})`;
+        if (!flushed) {
+          parts.push(this.slotAt(slot));
+          return `(${parts.join(', ')})`;
+        }
+        this.flushParts(parts, expr.span);
+        return this.slotAt(slot);
+      }
+
+      // Allocate, then fill left to right through the rooted scratch slot. No inline cache on
+      // construction: each entry is a fresh key on a fresh object, so every store transitions --
+      // exactly the case the cache deliberately does not serve (docs/VALUE.md §4.10).
+      case 'dyn-object-literal': {
+        const slot = this.callSlots.get(expr);
+        if (slot === undefined) {
+          throw new Error('dynamic object literal was not registered during counting');
+        }
+        const scratch = this.slotAt(slot + 1);
+        const parts = [`${this.slotAt(slot)} = jsrt_dynobj_new()`];
+        let flushed = false;
+        for (const entry of expr.entries) {
+          flushed =
+            this.sequencePart(parts, entry.value, expr.span, (v) => `${scratch} = ${v}`) || flushed;
+          parts.push(
+            `jsrt_set_prop(${this.slotAt(slot)}, ${cNameLiteral(entry.name)}, ${scratch}, NULL)`,
+          );
+        }
+        if (!flushed) {
+          parts.push(this.slotAt(slot));
+          return `(${parts.join(', ')})`;
+        }
+        this.flushParts(parts, expr.span);
+        return this.slotAt(slot);
       }
 
       case 'collection-new':
         return expr.collection === 'map' ? 'jsrt_map_new()' : 'jsrt_set_new()';
 
-      // One runtime function per operation, shared by every collection in the program: there is no
-      // descriptor to name and no table to index, which is what makes these calls direct in a way
-      // even a non-overridden method is not.
-      case 'collection-op': {
+      // Compiled at EVERY evaluation, never hoisted: §22.2.4.1 makes each evaluation a fresh
+      // object, and it has to be, because `lastIndex` is mutable state on it. The pattern rides in
+      // its slot so it survives the flag string's allocation.
+      case 'regexp-literal': {
         const base = this.callSlots.get(expr);
         if (base === undefined) {
-          throw new Error('collection operation was not registered during counting');
+          throw new Error('regexp literal was not registered during counting');
         }
-        const parts = [`${this.slotAt(base)} = ${this.emitExpression(expr.target)}`];
+        const source = `${this.slotAt(base)} = ${this.emitStringLiteral(expr.source)}`;
+        return `(${source}, jsrt_regexp_new(${this.slotAt(base)}, ${this.emitStringLiteral(expr.flags)}))`;
+      }
+
+      // A single-operand runtime walk: the argument rides in its rooted slot across the call.
+      case 'json-parse':
+      case 'json-stringify':
+      case 'promise-static': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error(`${expr.kind} call was not registered during counting`);
+        }
+        const parts: string[] = [];
+        const flushed = this.sequencePart(
+          parts,
+          expr.arg,
+          expr.span,
+          (v) => `${this.slotAt(base)} = ${v}`,
+        );
+        if (expr.kind === 'promise-static') {
+          this.usedAsync = true;
+        }
+        const runtimeCall =
+          expr.kind === 'promise-static'
+            ? `jsrt_promise_${expr.method}`
+            : `jsrt_json_${expr.kind === 'json-parse' ? 'parse' : 'stringify'}`;
+        const opCall = `${runtimeCall}(${this.slotAt(base)})`;
+        if (!flushed) {
+          parts.push(opCall);
+          return `(${parts.join(', ')})`;
+        }
+        this.flushParts(parts, expr.span);
+        return opCall;
+      }
+
+      // One runtime function per operation, receiver and arguments riding in rooted slots. The
+      // collection ops name their C function through a table (there is no descriptor to index --
+      // these calls are direct in a way even a non-overridden method is not); string and array
+      // ops derive it mechanically, camelCase op to snake_case suffix (charCodeAt ->
+      // jsrt_string_char_code_at, indexOf -> jsrt_array_index_of).
+      case 'collection-op':
+      case 'array-op':
+      case 'regexp-op':
+      case 'string-op': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error(`${expr.kind} was not registered during counting`);
+        }
+        const parts: string[] = [];
+        let flushed = this.sequencePart(
+          parts,
+          expr.target,
+          expr.span,
+          (v) => `${this.slotAt(base)} = ${v}`,
+        );
         expr.args.forEach((arg, index) => {
-          parts.push(`${this.slotAt(base + 1 + index)} = ${this.emitExpression(arg)}`);
+          flushed =
+            this.sequencePart(
+              parts,
+              arg,
+              expr.span,
+              (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
+            ) || flushed;
         });
         const operands = [
           this.slotAt(base),
           ...expr.args.map((_, index) => this.slotAt(base + 1 + index)),
         ].join(', ');
-        parts.push(collectionCall(expr.op, operands));
-        return `(${parts.join(', ')})`;
+        const opCall =
+          expr.kind === 'collection-op'
+            ? collectionCall(expr.op, expr.collection, operands)
+            : expr.kind === 'regexp-op'
+              ? // The one op family that answers a C bool rather than a jsrt_value: the engine has
+                // no notion of our values, so the boxing is the bridge's job (see jsrt_regexp.c).
+                `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
+              : `jsrt_${expr.kind === 'array-op' ? 'array' : 'string'}_${snakeCase(expr.op)}(${operands})`;
+        // An op that calls back into compiled code can throw, so it gets its own STATEMENT and a
+        // pending check -- the same discipline `call` follows, and for the same reason: the check
+        // has to sit between the op and whatever consumes its result, which a comma expression
+        // gives it nowhere to stand. The receiver's slot takes the answer; it is dead by then.
+        const callsBack =
+          expr.kind === 'array-op'
+            ? arrayOpCallsBack(expr.op)
+            : expr.kind === 'collection-op' && expr.op === 'forEach';
+        if (callsBack) {
+          parts.push(`${this.slotAt(base)} = ${opCall}`);
+          this.flushParts(parts, expr.span);
+          this.emitPendingCheck(expr.span);
+          return this.slotAt(base);
+        }
+        if (!flushed) {
+          parts.push(opCall);
+          return `(${parts.join(', ')})`;
+        }
+        this.flushParts(parts, expr.span);
+        return opCall;
+      }
+
+      // One runtime function per method, number -> number. The single-argument form nests
+      // directly; the binary form sequences its arguments through slots because C would otherwise
+      // pick the order (`Math.pow(f(), g())` must run f first).
+      case 'math-call':
+      case 'object-static': {
+        const name =
+          expr.kind === 'math-call'
+            ? `jsrt_math_${expr.method}`
+            : `jsrt_object_${snakeCase(expr.method)}`;
+        // Math takes immediates, so a lone argument has neither an order to fix nor anything to
+        // keep rooted and nests directly. An Object walk always uses its slots (see counting).
+        if (expr.kind === 'math-call' && expr.args.length <= 1) {
+          const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
+          return `${name}(${operands})`;
+        }
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error(`${expr.kind} was not registered during counting`);
+        }
+        const parts: string[] = [];
+        let flushed = false;
+        expr.args.forEach((arg, index) => {
+          flushed =
+            this.sequencePart(
+              parts,
+              arg,
+              expr.span,
+              (v) => `${this.slotAt(base + index)} = ${v}`,
+            ) || flushed;
+        });
+        const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
+        const opCall = `${name}(${operands})`;
+        if (!flushed) {
+          parts.push(opCall);
+          return `(${parts.join(', ')})`;
+        }
+        this.flushParts(parts, expr.span);
+        return opCall;
+      }
+
+      // A suspension point, emitted where the expression sits: park the resume state, subscribe,
+      // pop the frame and leave. The `goto` that comes back lands in the middle of whatever loop
+      // or try block this sits inside, which is legal C here specifically because no state lives
+      // in the C frame -- every local is in the environment the reaction holds.
+      case 'await': {
+        if (!this.inAsync) {
+          throw new Error('await outside an async function; the gate should have caught it');
+        }
+        const slot = this.tempSlots.get(expr);
+        const state = this.awaitStates.get(expr);
+        if (slot === undefined || state === undefined) {
+          throw new Error('await was not registered during counting');
+        }
+        const at = this.slotAt(slot);
+        const value = this.emitExpression(expr.value);
+        this.appendLine(`${at} = ${value};`, expr.span);
+        this.appendLine(`_jsrt_self->state = ${state};`, expr.span);
+        this.appendLine(`jsrt_await(_jsrt_self, ${at});`, expr.span);
+        this.appendLine('JSRT_FRAME_POP();', expr.span);
+        this.appendLine('return;', expr.span);
+        this.appendLine(`_jsrt_res_${state}: ;`, expr.span);
+        // A rejected awaited promise resumes with its reason: put it back in the pending cell so
+        // an enclosing try -- or this unit's own pad -- treats it exactly like a `throw`.
+        this.appendLine(
+          `if (_jsrt_err) { jsrt_throw(_jsrt_v); goto ${this.currentPad()}; }`,
+          expr.span,
+        );
+        this.appendLine(`${at} = _jsrt_v;`, expr.span);
+        return at;
       }
 
       // One descriptor exists per class in the whole program, so class identity IS descriptor
@@ -1356,9 +2127,161 @@ class Emitter {
     }
   }
 
+  /* The ordinary function unit: one C function, one stack frame, one exit protocol. */
+  private emitSyncUnit(unit: FunctionUnit): void {
+    const { fn } = unit;
+    this.appendLine(
+      `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
+    );
+    this.indent++;
+    // A zero-length array is not valid C11 and a function that roots nothing is valid TypeScript,
+    // so the frame has a floor of one slot -- the same rule JSRT_GLOBALS(n) follows.
+    this.appendLine(`JSRT_FRAME(${Math.max(1, this.slotCount)});`, fn.span);
+    if (fn.envVars.length > 0) {
+      // Rooted through the frame, not through a closure: nothing points at this environment until
+      // a closure is built from it, and the function reads its own captured locals before then
+      // and after every such closure has died (docs/VALUE.md §4.3).
+      this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(env, ${fn.envVars.length});`, fn.span);
+      this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', fn.span);
+    } else if (fn.captures.length === 0) {
+      // Nothing reads the incoming environment here. The ABI passes one regardless so `jsrt_call`
+      // need not know which kind of closure it holds, so silence it for -Werror.
+      this.appendLine('(void)env;', fn.span);
+    }
+    this.emitParameterPrologue(fn);
+    this.emitHoistedFunctions(fn.body.statements);
+    for (const stmt of fn.body.statements) {
+      this.emitStatement(stmt);
+    }
+    // Falling off the end of a JavaScript function returns `undefined` -- and still has to pop.
+    this.appendLine('JSRT_FRAME_POP();', fn.span);
+    this.appendLine('return JSRT_UNDEFINED;', fn.span);
+    if (this.unwindUsed) {
+      // The landing pad when no try encloses a throw point: the frame still pops -- the rooting
+      // discipline demands it on EVERY exit path -- and the exception stays pending for the
+      // caller's own check after jsrt_call to observe.
+      this.appendLine('_jsrt_unwind: ;', fn.span);
+      this.appendLine('JSRT_FRAME_POP();', fn.span);
+      this.appendLine('return JSRT_UNDEFINED;', fn.span);
+    }
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* An async unit is TWO C functions. The entry point keeps the closure ABI: it builds the heap
+   * environment that will outlive every suspension, stores the arguments there, and hands both to
+   * `jsrt_async_start`, which runs the body's prefix synchronously (as the spec requires) and
+   * answers the promise. The resume function holds the body itself, so each `await` can pop the
+   * frame and return, and each resumption re-enters from the top -- rebuilding the frame, then
+   * jumping to the suspension point. Nothing lives in the C frame across a suspension, which is
+   * exactly what makes a `goto` into the middle of a loop or a try block correct here. */
+  private emitAsyncUnit(unit: FunctionUnit): void {
+    const { fn } = unit;
+    const resume = `_jsrt_async_${unit.id}`;
+    this.usedAsync = true;
+    this.appendLine(
+      `static void ${resume}(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err);`,
+    );
+    this.appendLine('');
+    this.appendLine(
+      `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
+    );
+    this.indent++;
+    // One frame slot, used for nothing but carrying the environment: JSRT_FRAME_ENV is what roots
+    // it while `jsrt_async_start` allocates the promise and the frame that holds it.
+    this.appendLine('JSRT_FRAME(1);', fn.span);
+    this.appendLine(
+      `JSRTEnv *_jsrt_env = jsrt_env_new(env, ${Math.max(1, this.slotCount)});`,
+      fn.span,
+    );
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', fn.span);
+    this.emitParameterPrologue(fn);
+    this.appendLine(`jsrt_value _jsrt_p = jsrt_async_start(_jsrt_env, ${resume});`, fn.span);
+    this.appendLine('JSRT_FRAME_POP();', fn.span);
+    this.appendLine('return _jsrt_p;', fn.span);
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+
+    this.appendLine(
+      `static void ${resume}(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err) {`,
+    );
+    this.indent++;
+    this.appendLine('JSRT_FRAME(1);', fn.span);
+    this.appendLine('JSRTEnv *_jsrt_env = _jsrt_self->env;', fn.span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', fn.span);
+    // Enclosing environments are reached through the parent link rather than a parameter: the
+    // scheduler calls this function, and it has no environment to pass. `(void)` unconditionally
+    // -- a body that captures nothing still declares it, and -Werror would object.
+    this.appendLine('JSRTEnv *env = _jsrt_env->parent;', fn.span);
+    this.appendLine('(void)env;', fn.span);
+    // The dispatch sits AFTER the prologue so it never jumps over a declaration, and before the
+    // body so every `_jsrt_res_N:` it names is defined further down. State 0 is the first entry,
+    // which falls through into the body's prefix.
+    if (this.awaitStates.size > 0) {
+      this.appendLine('switch (_jsrt_self->state) {', fn.span);
+      this.indent++;
+      for (const state of this.awaitStates.values()) {
+        this.appendLine(`case ${state}: goto _jsrt_res_${state};`, fn.span);
+      }
+      this.appendLine('default: break;');
+      this.indent--;
+      this.appendLine('}', fn.span);
+    } else {
+      // An async function with no `await` still answers a promise; it just never suspends.
+      this.appendLine('(void)_jsrt_v;', fn.span);
+      this.appendLine('(void)_jsrt_err;', fn.span);
+    }
+    this.emitHoistedFunctions(fn.body.statements);
+    for (const stmt of fn.body.statements) {
+      this.emitStatement(stmt);
+    }
+    this.emitAsyncSettle('jsrt_async_return', 'JSRT_UNDEFINED', fn.span);
+    if (this.unwindUsed) {
+      // An exception that reached the top of an async body REJECTS the promise rather than
+      // staying pending: the caller observes it through `.then`/`await`, not through the mailbox.
+      this.appendLine('_jsrt_unwind: ;', fn.span);
+      this.appendLine(`${this.slotAt(this.returnSlot)} = jsrt_take_exception();`, fn.span);
+      this.emitAsyncSettle('jsrt_async_throw', this.slotAt(this.returnSlot), fn.span);
+    }
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* Settle THEN pop: settling enqueues a microtask, which allocates, and the value being settled
+   * with must still be rooted while it does. */
+  private emitAsyncSettle(fn: string, value: string, span: Span): void {
+    this.appendLine(`${fn}(_jsrt_self, ${value});`, span);
+    this.appendLine('JSRT_FRAME_POP();', span);
+    this.appendLine('return;', span);
+  }
+
+  private emitParameterPrologue(fn: FunctionExpr): void {
+    if (fn.params.length === 0) {
+      this.appendLine('(void)argc;');
+      this.appendLine('(void)argv;');
+    }
+    fn.params.forEach((param, index) => {
+      // A call site may pass fewer or more arguments than the function declares. `jsrt_arg` makes
+      // both a value -- `undefined` and "dropped" -- rather than a read past the end of `argv`.
+      this.appendLine(`${this.slotRef(param.name)} = jsrt_arg(argc, argv, ${index});`, param.span);
+    });
+  }
+
   /** A literal's shape becomes a class with no constructor, no methods and no table -- which is
    * all a descriptor needs. Two literals of the same shape share the name, so they share the
    * descriptor, which is what makes them one type rather than two. */
+  /** Claims the next inline-cache site and returns its C name. Every dynamic property site gets
+   * its own -- sharing one between two sites would make them evict each other on every
+   * alternation, which is the pathology caches exist to avoid. */
+  private icSite(): string {
+    const name = `_jsrt_ic_${String(this.icCount)}`;
+    this.icCount += 1;
+    return name;
+  }
+
   private registerShape(expr: ObjectLiteral): void {
     const name = shapeNameOf(expr);
     if (this.classIds.has(name)) {
@@ -1455,29 +2378,41 @@ class Emitter {
       throw new Error('template literal has no frame slots; countExpression missed a node');
     }
 
-    const parts: string[] = [];
+    const sequence: string[] = [];
+    let flushed = false;
+    let partIndex = 0;
     expr.quasis.forEach((quasi, i) => {
       if (quasi !== '') {
-        parts.push(this.emitStringLiteral(quasi));
+        sequence.push(`${this.slotAt(slots.base + partIndex)} = ${this.emitStringLiteral(quasi)}`);
+        partIndex++;
       }
       const hole = expr.expressions[i];
       if (hole !== undefined) {
-        parts.push(`jsrt_to_string(${this.emitExpression(hole)})`);
+        const holeSlot = this.slotAt(slots.base + partIndex);
+        flushed =
+          this.sequencePart(
+            sequence,
+            hole,
+            expr.span,
+            (v) => `${holeSlot} = jsrt_to_string(${v})`,
+          ) || flushed;
+        partIndex++;
       }
     });
 
-    if (parts.length !== slots.count) {
+    if (partIndex !== slots.count) {
       throw new Error('template literal part count disagrees with its frame-slot count');
     }
     const first = this.slotAt(slots.base);
-    const sequence: string[] = parts.map(
-      (part, index) => `${this.slotAt(slots.base + index)} = ${part}`,
-    );
-    for (let index = 1; index < parts.length; index++) {
+    for (let index = 1; index < partIndex; index++) {
       sequence.push(`${first} = jsrt_string_concat(${first}, ${this.slotAt(slots.base + index)})`);
     }
-    sequence.push(first);
-    return `(${sequence.join(', ')})`;
+    if (!flushed) {
+      sequence.push(first);
+      return `(${sequence.join(', ')})`;
+    }
+    this.flushParts(sequence, expr.span);
+    return first;
   }
 
   private emitBinaryOp(expr: BinaryOp): string {
@@ -1487,11 +2422,20 @@ class Emitter {
     }
     const left = this.slotAt(base);
     const right = this.slotAt(base + 1);
-    const result = BINARY_EMITTERS[expr.operator](left, right);
     // The comma operator sequences the assignments. Calling jsrt_op_* directly with the emitted
     // child expressions would revive C's unspecified argument order and could collect a temporary
     // from the left while evaluating the right.
-    return `(${left} = ${this.emitExpression(expr.left)}, ${right} = ${this.emitExpression(expr.right)}, ${result})`;
+    const parts: string[] = [];
+    this.sequencePart(parts, expr.left, expr.span, (v) => `${left} = ${v}`);
+    this.sequencePart(parts, expr.right, expr.span, (v) => `${right} = ${v}`);
+    const result = BINARY_EMITTERS[expr.operator](left, right);
+    if (parts.length === 2) {
+      return `(${parts.join(', ')}, ${result})`;
+    }
+    // An operand carried statements of its own (a call and its pending check): everything is
+    // already sequenced into the slots, so only the operation remains for the consumer.
+    this.flushParts(parts, expr.span);
+    return result;
   }
 
   private emitStringLiteral(value: string): string {
@@ -1505,16 +2449,38 @@ class Emitter {
     }
     const temp = this.slotAt(slot);
     const left = this.emitExpression(expr.left);
-    const right = this.emitExpression(expr.right);
+    this.indent++;
+    const captured = this.capture(() => this.emitExpression(expr.right));
+    this.indent--;
 
-    // `??` tests nullish, NOT falsy: `0 ?? 1` is 0 while `0 || 1` is 1.
-    // `||` is the odd one out: it is the only operator here whose test passing means "keep the
-    // left operand". `&&` and `??` both mean "the left operand was unsatisfying, take the right".
-    const test = expr.operator === '??' ? `jsrt_is_nullish(${temp})` : `jsrt_truthy(${temp})`;
-    const whenTrue = expr.operator === '||' ? temp : right;
-    const whenFalse = expr.operator === '||' ? right : temp;
+    if (captured.lines.length === 0) {
+      const right = captured.value;
+      // `??` tests nullish, NOT falsy: `0 ?? 1` is 0 while `0 || 1` is 1.
+      // `||` is the odd one out: it is the only operator here whose test passing means "keep the
+      // left operand". `&&` and `??` both mean "the left operand was unsatisfying, take the right".
+      const test = expr.operator === '??' ? `jsrt_is_nullish(${temp})` : `jsrt_truthy(${temp})`;
+      const whenTrue = expr.operator === '||' ? temp : right;
+      const whenFalse = expr.operator === '||' ? right : temp;
+      return `(${temp} = ${left}, ${test} ? (${whenTrue}) : (${whenFalse}))`;
+    }
 
-    return `(${temp} = ${left}, ${test} ? (${whenTrue}) : (${whenFalse}))`;
+    // The right operand needed statements of its own (a call and its pending check), and it only
+    // runs when the operator says so -- so its statements sit inside a branch, and the node's
+    // value is whatever `temp` holds afterwards.
+    this.appendLine(`${temp} = ${left};`, expr.span);
+    const enter =
+      expr.operator === '&&'
+        ? `jsrt_truthy(${temp})`
+        : expr.operator === '||'
+          ? `!jsrt_truthy(${temp})`
+          : `jsrt_is_nullish(${temp})`;
+    this.appendLine(`if (${enter}) {`, expr.span);
+    this.indent++;
+    this.lines.push(...captured.lines);
+    this.appendLine(`${temp} = ${captured.value};`, expr.span);
+    this.indent--;
+    this.appendLine('}', expr.span);
+    return temp;
   }
 
   private escapeString(s: string): string {
@@ -1549,6 +2515,12 @@ class Emitter {
   /* The C lvalue for a slot of the unit being emitted. Same slot number, different array: a
    * function's slots are its stack frame, the module's are the file-static globals. */
   private slotAt(slot: number): string {
+    // An async unit keeps every local in its heap environment instead: the frame it would
+    // otherwise sit in is popped at each suspension and rebuilt on each resume, so a C frame slot
+    // would not survive a single `await`.
+    if (this.inAsync) {
+      return `_jsrt_env->slots[${slot}]`;
+    }
     return this.inFunction ? `JSRT_LOCAL(${slot})` : `JSRT_GLOBAL(${slot})`;
   }
 
@@ -1603,7 +2575,7 @@ class Emitter {
 
     // Add #line directive before statements (but not for braces/empty lines)
     if (span && line && !line.startsWith('}')) {
-      const escapedFile = this.escapeFilePath(this.fileName);
+      const escapedFile = this.escapeFilePath(span.file ?? this.fileName);
       fullLine = `#line ${span.line} "${escapedFile}"\n${fullLine}`;
     }
 
@@ -1625,7 +2597,11 @@ export function emitC(module: Module): string {
  * A Set shares the Map's functions rather than having its own: the structure IS the same one, and
  * `add` differs from `set` only in passing no value. The two that return a C `bool` are boxed here,
  * and `clear`, which returns nothing, yields `undefined` -- the value JavaScript gives it. */
-function collectionCall(op: CollectionOperation, operands: string): string {
+function collectionCall(
+  op: CollectionOperation,
+  collection: 'map' | 'set',
+  operands: string,
+): string {
   switch (op) {
     case 'get':
       return `jsrt_map_get(${operands})`;
@@ -1641,5 +2617,17 @@ function collectionCall(op: CollectionOperation, operands: string): string {
       return `jsrt_map_clear(${operands})`;
     case 'size':
       return `jsrt_map_size(${operands})`;
+    case 'forEach':
+      // The one collection op that runs user code, hence the only one the emitter follows with a
+      // pending check. A Set hands the element to the callback twice, which is the whole of the
+      // Map/Set difference and lives in the runtime, not here.
+      return `jsrt_${collection}_for_each(${operands})`;
+    default: {
+      // The ES2025 set operations, whose C names are their method names in snake_case. The four
+      // combining forms answer a new Set; the three predicates answer a C bool, boxed here exactly
+      // as `has` and `delete` are.
+      const call = `jsrt_set_${snakeCase(op)}(${operands})`;
+      return SET_OPS[op] === 'boolean' ? `jsrt_bool(${call})` : call;
+    }
   }
 }

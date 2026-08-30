@@ -103,3 +103,90 @@ for (let i = 0; i < 40; i += 2) {
 }
 console.log(many.size);
 console.log(many);
+
+// forEach on the dynamic path: the callback triple is a runtime fact, not a typed one, so an
+// untyped file sees the same (value, key, collection) for a Map and (value, value, set) for a Set.
+const walk = new Map();
+walk.set('a', 1);
+walk.set(2, 'two');
+walk.set(true, null);
+walk.forEach((v, k, self) => {
+  console.log(`${typeof k}:${k}`);
+  console.log(v);
+  console.log(self.size);
+});
+
+const letters = new Set();
+letters.add('x');
+letters.add(7);
+letters.forEach((v, k) => {
+  console.log(v === k);
+  console.log(v);
+});
+
+// Delete-and-reinsert moves the key to the end; the walk sees the new order.
+const reordered = new Map();
+reordered.set('one', 1);
+reordered.set('two', 2);
+reordered.delete('one');
+reordered.set('one', 10);
+reordered.forEach((v, k) => {
+  console.log(`${k}->${v}`);
+});
+
+// Mutating during the walk: an added entry is visited, one deleted before being reached is not.
+const mutating = new Map();
+mutating.set(1, 1);
+mutating.set(2, 2);
+mutating.forEach((v, k) => {
+  console.log(`saw ${k}`);
+  if (k === 1) {
+    mutating.set(99, 99);
+    mutating.delete(2);
+  }
+});
+console.log(mutating);
+
+// Growth during a walk, so the preserved-index path runs on the dynamic side too.
+const growing = new Map();
+growing.set(0, 0);
+let added = 0;
+growing.forEach(() => {
+  if (added < 12) {
+    added = added + 1;
+    growing.set(added, added);
+  }
+});
+console.log(growing.size);
+
+// A throwing callback stops the walk and propagates.
+const throwing = new Set();
+throwing.add('a');
+throwing.add('b');
+try {
+  throwing.forEach((v) => {
+    console.log(v);
+    throw v;
+  });
+} catch (e) {
+  console.log(typeof e);
+}
+console.log('after set forEach');
+
+// -0 as the FIRST insert of a key: the spec normalizes it to +0 on the way in, so the key prints
+// as `0` and `1 / k` answers Infinity -- a stored -0 would be visible in both.
+const negzero = new Map();
+negzero.set(-0, 'first');
+console.log(negzero);
+negzero.forEach((v, k) => {
+  console.log(k);
+  console.log(1 / k);
+  console.log(v);
+});
+const negset = new Set();
+negset.add(-0);
+console.log(negset);
+negset.forEach((v) => {
+  console.log(v);
+  console.log(1 / v);
+});

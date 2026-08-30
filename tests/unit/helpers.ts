@@ -24,10 +24,12 @@ import type {
   Span,
   Statement,
   StringLiteral,
+  ThrowStatement,
+  TryStatement,
   WhileStatement,
 } from '../../src/hir/nodes.ts';
 import type { HType } from '../../src/hir/types.ts';
-import { H_BOOLEAN, H_NUMBER, H_STRING } from '../../src/hir/types.ts';
+import { H_BOOLEAN, H_NUMBER, H_STRING, H_UNDEFINED } from '../../src/hir/types.ts';
 import { lowerSourceFile } from '../../src/lower/index.ts';
 import type { Diagnostic } from '../../src/support/diagnostics.ts';
 
@@ -55,7 +57,7 @@ export function createProgram(
     // `lib` takes FILE names, not the tsconfig shorthand -- `'es2024'` resolves to nothing and
     // silently builds a program with NO standard library, in which `number[]` is an error type and
     // `checker.isArrayType` answers false for every array. Mirrors src/frontend/program.ts.
-    lib: ['lib.es2023.d.ts'],
+    lib: ['lib.es2025.d.ts'],
     // Mirrors src/frontend/program.ts: without these, ts.createProgram silently drops a `.js`
     // root file instead of building it, and every js-mode test here would be exercising nothing.
     allowJs: isJs,
@@ -249,6 +251,7 @@ export function consoleLog(
     kind: 'console-log',
     type,
     span: span(line),
+    method: 'log',
     args,
   };
 }
@@ -369,7 +372,7 @@ export function fn(
   const parameters: Parameter[] = params.map((p) => ({ name: p, type, span: span(line) }));
   // Captures default to none: a hand-built function in a unit test is the non-capturing case
   // unless a test says otherwise, which keeps rung 4a's static-closure path the default here too.
-  const capture = { envVars: [], captures: [], needsEnv: false } as const;
+  const capture = { envVars: [], captures: [], needsEnv: false, isAsync: false } as const;
   return name === undefined
     ? { kind: 'function', type, span: span(line), params: parameters, body, ...capture }
     : { kind: 'function', type, span: span(line), name, params: parameters, body, ...capture };
@@ -397,6 +400,29 @@ export function ret(value?: Expression, type: HType = H_NUMBER, line = 1): Retur
   return value === undefined
     ? { kind: 'return-statement', type, span: span(line) }
     : { kind: 'return-statement', type, span: span(line), value };
+}
+
+/** Create a throw statement. */
+export function throwStmt(value: Expression, line = 1): ThrowStatement {
+  return { kind: 'throw-statement', type: H_UNDEFINED, span: span(line), value };
+}
+
+/** Create a try statement. At least one of catchBlock/finallyBlock must be given, mirroring the
+ * HIR invariant the verifier enforces (STA4057). */
+export function tryStmt(
+  tryBlock: Block,
+  parts: { catchBinding?: string; catchBlock?: Block; finallyBlock?: Block },
+  line = 1,
+): TryStatement {
+  return {
+    kind: 'try-statement',
+    type: H_UNDEFINED,
+    span: span(line),
+    tryBlock,
+    ...(parts.catchBinding !== undefined && { catchBinding: parts.catchBinding }),
+    ...(parts.catchBlock !== undefined && { catchBlock: parts.catchBlock }),
+    ...(parts.finallyBlock !== undefined && { finallyBlock: parts.finallyBlock }),
+  };
 }
 
 /** Create a call expression. */

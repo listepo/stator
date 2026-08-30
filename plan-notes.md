@@ -1722,3 +1722,792 @@ Until Task 3.10 is implemented, the gate reports the existing generic boundary c
 `throw`, `try`, and `catch`, and the emitter has explicit internal guards for hand-built HIR. This
 keeps user-facing failures diagnostic-only and restores the gate/HIR/emitter invariant without
 claiming exception unwinding is complete.
+
+## 77. Exceptions: statements-with-pending-checks forced the comma builders to learn to flush (Task 3.10)
+
+**Evidence.** Task 3.10 as written ("lowering emits per-scope cleanup blocks") reads as if try/catch were the only construct touched. Implementing it touched every call site the emitter produces, for a reason worth recording: a pending-check must sit BETWEEN a call and whatever consumes its result, and the emitter expressed calls as comma expressions *inside* their consumer (`x = (s0 = f, s1 = a, jsrt_call(...))`). There is no place in a comma expression to put `if (jsrt_pending()) goto pad;`.
+
+**Decision.** Calls (plain, method, `new`-with-ctor, `super`) are now emitted as their own statements, result parked in the (rooted) callee/receiver slot, check appended, slot name returned to the consumer. That in turn exposed an evaluation-order hazard in every multi-operand comma builder: with a call in operand N, operands 0..N-1 must already be IN their slots when the call's statements run, or `x + f()` reads `x` after `f` mutates it. The shared `sequencePart` helper does exactly that — call-free operands keep the compact single-line comma shape (golden-C stability, and most expressions), an operand with a prelude flushes the sequence so far as a statement first. Conditional contexts can't even flush: a loop condition re-runs per iteration and a `&&`/`||`/`??` right operand runs only sometimes, so those capture the prelude into a buffer and replay it at the evaluation point (loops restructure to `while (1) { <prelude>; if (!truthy) goto brk; … }` only when the prelude is nonempty).
+
+Also settled here: the finally protocol is a per-try `int` completion code dispatched AFTER the finally body (0 normal, 1 rethrow, 2+ per distinct routed jump), with the dispatch re-invoking the routing logic in the popped context so nested finallys chain; the pending cell overwrites on throw BY CONTRACT (a finally's throw replaces the completion — jsrt_throw.c documents it as required, not tolerated); and a catch whose try body cannot throw is not emitted at all, because its landing pad would be a label nothing jumps to guarding dead code. `STA4057` allocated (verifier: try with neither catch nor finally / binding without catch block); docs/DIAGNOSTICS.md band bookkeeping updated (STA4040–STA4057 taken).
+
+**Plan edit.** Task 3.10 marked ✅ Done with CI figures in the same change.
+
+## 78. Modules: whole-program merge resolves imports by name, so the gate refuses every rename (Task 3.11, 2026-08-30)
+
+**Evidence.** Task 3.11 asks for ESM whole-program v0: import graph from the `ts.Program`, cycles = STA3001 with locations, module-init in topological order. The minimal artifact honoring that is ONE merged Module HIR — each file's statements in topological order (dependencies first, entry last), sharing one binding namespace threaded through `lowerProgram`. In that shape an import binds nothing: `import { x } from './b.ts'` makes the importer's `x` resolve to b's own top-level binding *by name*. Three consequences, each enforced rather than hoped:
+
+1. **Every aliasing shape is refused** (not-yet STA1214, Phase 4): renamed import/export specifiers (`x as y`), default imports, namespace imports, re-exports, non-literal default exports. Name-based resolution cannot honor a rename; accepting one would silently bind the wrong value. `import type` renames stay accepted — erased, nothing to resolve. `export default <literal>` is accepted and lowers to nothing: without default imports, nothing can observe it.
+2. **Cross-file top-level name collisions are refused** (not-yet STA1214): two files declaring the same top-level name — exported or not; scopes TypeScript keeps apart — collide in the merge, and the later initializer would silently overwrite the earlier binding. `src/frontend/graph.ts` names both files in the diagnostic.
+3. **Cycles are STA3001** with the path spelled (`a.ts → b.ts → a.ts`), found as DFS back edges. ESM gives cycles well-defined semantics only via live bindings + TDZ checks, neither expressible in a merged namespace.
+
+**compilerOptions change** (`src/frontend/program.ts`): `module: NodeNext, moduleResolution: NodeNext` → `module: ESNext, moduleResolution: Bundler, moduleDetection: Force`. NodeNext classifies files by the nearest package.json `type` field and calls a bare directory of `.ts` files CommonJS, which rejects `import` outright under `verbatimModuleSyntax` (observed as STA0012 on the first multi-file smoke). Stator compiles ESM regardless of packaging metadata (plan §1), so Force makes every file a module and Bundler resolves relative specifiers without consulting package.json. Bundler is laxer than Node in one way that matters: it resolves extensionless relative specifiers. The gate re-imposes Node's own permanent ESM rule as **STA1113 (never)**: a relative specifier names its file extension. Bare (package) specifiers are not-yet STA1214 (Phase 7). `Span` gained an optional `file` so `#line` directives name the right file inside the merged program.
+
+## 79. Tree-shaking builtins is the linker's job today, because no builtin is an HIR module yet (Task 3.12, 2026-08-30)
+
+**Evidence.** Task 3.12 says "Builtins are HIR-level library modules; only referenced ones are emitted/linked." The first clause describes a representation that does not exist: every builtin (`console.log`, string/array/Map operations, the numeric protocol) is a C function in `libjsrt.a`, dispatched by the emitter as a `jsrt_*` call — nothing is authored at HIR level, so there is nothing HIR-level to shake, and the emitter already emits only the user's own code. What DID need fixing was the link: a static archive resolves at .o granularity, so hello-world linked 53 `jsrt_*` functions (all of `jsrt_map.o`, dragged in transitively) for the 5 it references.
+
+**Change.** Function-granularity dead-stripping: `runtime/Makefile` adds `-ffunction-sections -fdata-sections` to `CFLAGS_COMMON` (required for ELF `--gc-sections` to have anything to drop; free on Mach-O, where per-symbol subsections are the default), and `linkExecutable` passes `-Wl,-dead_strip` on darwin / `-ffunction-sections -fdata-sections -Wl,--gc-sections` elsewhere. Sanitized builds skip it: ASan registers globals through arrays the linker sees as unreferenced, the documented `--gc-sections` failure mode. Measured: hello-world 72 KB → 51.8 KB, 53 → 5 `jsrt_*` symbols; the < 500 KB size target is met with ~10× headroom, so competitor-release measurement stays deferred until "once stable" arrives and a comparison would mean something. `tests/bench/baseline.json` refreshed with post-strip `binaryBytes`.
+
+**Plan edit.** Task 3.12 marked done with the note that HIR-level builtin modules return when a builtin is actually authored at HIR level (Phase 4+ library work); the shaking mechanism is in place either way and the check (unit test asserting `jsrt_map_new` absent from a hello-world binary, `jsrt_print` present) holds it.
+
+## 80. Dynamic objects: the contextual type decides, and the aliasing hazard is a runtime not-yet (Task 4.1, 2026-08-30)
+
+The plan says "shape table + per-site inline caches only for the dynamic residue" but not which
+literals ARE the residue. Evidence forced two decisions:
+
+- **The decisive type is `checker.getContextualType(literal) ?? getTypeAtLocation(literal)`.** In
+  `const o: { x?: number } = { x: 1 }` the literal's own type is `{ x: number }` — a perfectly good
+  layout — but the binding's type is the annotation, and every later read of `o` types against
+  THAT. Building the fixed object would make each such read a dynamic site aimed at a fixed
+  receiver, i.e. a guaranteed runtime abort in a program that is plainly meant to work. The
+  annotation wins, so gate and lowering both ask the contextual type FIRST and in the same order —
+  the two must never disagree, or the gate accepts a literal the lowering cannot build.
+- **Structural aliasing is a loud runtime not-yet, `STA2004`, never a silent answer.** The checker
+  blesses `const a = { x: 1 }; const b: { x?: number } = a`, so a FIXED-shape `JSRTObject` can
+  arrive at a shape-table site. No compile-time rule can catch this without refusing assignability
+  the language guarantees; answering the read would mean guessing a slot; so `as_dynobj` splits
+  receivers three ways — dynamic (proceed), fixed object (`STA2004`, lifts in Phase 5 when the
+  entry points learn to read through a `JSRTClass` descriptor), anything else (`STA4058`, a
+  compiler bug, since no emitted site can produce it). Precedent: STA2002 sparse arrays.
+
+Also settled here: the IC protocol (fill on hit only; get-misses never cached — caching absence
+would serve `undefined` after a later write with the same stale shape; construction stores carry
+`NULL` ICs because a fresh key on a fresh object transitions every time), and `STA4059` verifier
+discipline — the three dyn nodes type Unknown by definition, so a concrete type on one is a
+narrowing nothing proved. In js mode the shape can come from JSDoc `@type`, which the checker
+honors in `.js` files with no new machinery.
+
+## 81. Math builtins: only the exactly-specified operations can land before fdlibm (Task 4.2, 2026-08-30)
+
+The plan's Task 4.2 says "`Math` … a builtin counts as implemented when ≥1 golden test exercises
+it and matches Node." For most of Math those two sentences CONFLICT: golden tests diff against
+Node byte-for-byte, Node's `sin`/`log`/`exp`/`cbrt`/`hypot` come from V8's vendored fdlibm, and
+ECMA-262 §21.3.2 explicitly permits implementation-approximated answers — so the host libm is
+allowed to differ from Node in the last ulp, and a golden test for `Math.sin` would be green on
+one machine and red on another. Decision: land the EXACTLY-specified surface now (`abs` `ceil`
+`floor` `round` `sign` `sqrt` `trunc` `pow` `min` `max` — IEEE-defined or spec-exact, plus all
+constants and the `NaN`/`Infinity` globals), defer every approximated operation with the gate's
+not-yet until fdlibm itself is vendored (`runtime/vendor/`, like Ryū — golden rule 5's "don't
+write a float printer" logic applies to transcendentals too). `Math.random` is deferred with them
+for the adjacent reason: no byte-for-byte golden test can exercise it.
+
+The wrappers in `runtime/src/jsrt_math.c` exist for named ECMA/libm disagreements, each cited in
+the file: C `round` ties away from zero (ECMA: toward +∞) and `floor(x + 0.5)` breaks at
+0.49999999999999994; `fmin`/`fmax` skip a NaN operand (ECMA propagates) and treat the zeros as
+equal (ECMA orders -0 below +0); C `pow(±1, ±Inf)` and `pow(1, NaN)` answer 1 (ECMA: NaN).
+
+Two shapes settled here follow existing precedent rather than adding machinery: `MathCall` is a
+CollectionOp-style closed-set node (exact arity after the lowering folds variadic `min`/`max`
+left into binary nodes — the spec's own comparison order — and zero-argument forms into identity
+literals), and `Math.PI`-style constants plus `NaN`/`Infinity` fold to number literals, which
+`cDoubleLiteral` already spells (the compiler runs on the pinned Node, so the doubles are
+bit-for-bit the ones golden tests expect). `STA4080` opens the verifier's third band; the second
+filled at STA4059.
+
+## 82. String builtins: one op table, undefined-padding, and two loud runtime not-yets (Task 4.2, 2026-08-30)
+
+**Decision.** The String slice lands as one `StringOp` HIR node whose vocabulary is a TABLE —
+`STRING_OPS` in `src/hir/nodes.ts`, op → {arity, result} — read by the gate (accept set), the
+lowering (padding + result type), the verifier (`STA4081`), and the emitter (C names derived
+mechanically, camelCase → `jsrt_string_snake_case`). Adding an op is one table row plus one C
+function; no consumer can drift from another because there is nothing to keep in sync.
+
+**Padding.** The lowering pads omitted optional arguments with `undefined` literals up to the
+table's arity, so every `jsrt_string_*` function has one fixed C signature. Sound because ECMA-262
+specifies "if _arg_ is undefined" — explicit `undefined` and absent are indistinguishable — for
+every op in the landed set. (Not true of e.g. `Array.prototype.fill`'s end argument semantics
+elsewhere; the claim was checked per-op, not assumed.)
+
+**GetSubstitution is implemented, not refused.** Node honors `$$` `$&` `` $` `` `$'` in
+plain-string `replace`/`replaceAll` patterns, so refusing them would fail byte-for-byte goldens on
+ordinary code; `$n`/`$<name>` stay literal without a RegExp match, exactly per spec.
+
+**Two runtime not-yets under `STA2005`** (fourth runtime-emitted diagnostic, precedent STA2002):
+`repeat` with a negative/infinite count — the spec throws RangeError, and builtins cannot join the
+throw protocol until exceptions carry across the C boundary — and case mapping above ASCII, which
+waits on `libunicode` (vendored with Task 4.3's libregexp). Both abort loudly rather than answer
+wrongly, per prime directive 4.
+
+**Dashboard fix.** The coverage renderer's mention-check looked for `String.prototype.trim`
+literally, which no source ever spells; prototype namespaces now match call syntax (`.trim(` — the
+paren keeps it from matching inside `.trimStart(`). The renderer caught its own gap by flagging 8
+correct claims as stale, which is the failure mode it exists to surface.
+
+## 83. Array builtins: the non-callback surface, and lastIndexOf breaks the padding rule (Task 4.2, 2026-08-30)
+
+**Decision.** The Array slice reuses the String slice's whole shape — `ARRAY_OPS` table in
+`src/hir/nodes.ts` read by gate/lowering/verifier (`STA4082`)/emitter — and lands only the
+methods that take no function argument. The callback-taking majority (`map`, `filter`,
+`forEach`, `reduce`, `sort`, …) needs the runtime to call back into compiled code, a protocol
+that does not exist; deferring them by name at the gate is honest, and lowering them to inline
+loops instead was rejected because an expression-position loop needs block-expression machinery
+the HIR does not have.
+
+**lastIndexOf is the padding rule's counterexample.** For every other landed op ECMA-262 gives an
+explicitly-passed `undefined` the meaning of an absent argument, which is what makes the
+lowering's undefined-padding sound. Array `lastIndexOf` is different: absent `fromIndex` means
+`length - 1`, explicit `undefined` means `ToIntegerOrInfinity(undefined)` = `0` — Node answers
+`[1,2,1].lastIndexOf(1)` = 2 but `[1,2,1].lastIndexOf(1, undefined)` = 0. It therefore lands
+with arity 1 and an explicit position stays deferred, rather than padding a wrong answer in.
+
+**Result-kind additions.** `self` types the result as the RECEIVER's array type
+(`slice`/`concat`/`fill`/`reverse` — the last two mutate in place and return the receiver, per
+spec) and `element` is Unknown by the IndexAccess precedent: `pop` on an empty array really
+answers `undefined`.
+
+**Two spec asymmetries golden-tested.** `includes` uses SameValueZero, so `[NaN].includes(NaN)`
+is `true` while `[NaN].indexOf(NaN)` is `-1`; and `-0` matches `0` under both. `join` is also
+`Array#toString` — `jsrt_to_string`'s array branch now delegates to `jsrt_array_join`, and
+`null`/`undefined` elements join as empty text.
+
+**Shared helpers moved, not duplicated.** `int_or_inf`/`clamp_index`/`relative_index` left
+`jsrt_string_ops.c` for `runtime/src/jsrt_index_util.h` (internal header, static inline) so the
+two builtin families share one definition of the spec's index steps — and the 1% duplication
+gate stays honest.
+
+## 84. console beyond log: a stream flag, not new nodes — and the golden runner grows a stream (Task 4.2, 2026-08-30)
+
+**Decision.** `console.info/debug/warn/error` lower to the SAME `ConsoleLogCall` node as `log`,
+plus one field: `stderr: boolean`. Node's five inspect-style methods differ only in destination
+(`warn`/`error` → stderr; `info`/`debug` are stdout aliases), formatting is identical, and
+nothing downstream ever needs the method name — so the name dies at lowering and the emitter
+picks `jsrt_print` or `jsrt_eprint` (the same `print_to` body, parameterized by stream).
+
+**The latent bug this fixed.** The lowering had accepted `warn`/`error` since Phase 2 and mapped
+them to stdout — unreachable only because the gate refused them. Landing the gate acceptance
+without the stream split would have turned that into a silent wrong answer against Node.
+
+**The golden runner now compares BOTH streams byte-for-byte.** Comparing stdout alone would let
+a wrong-stream bug pass invisibly; the stderr comparison is a strengthening of the golden
+contract, never a loosening. The compiler's ambient `Console` interface (stator.globals.d.ts)
+grew the four methods with the same parameter type `log` promises, which is what `jsrt_print`'s
+inspect corpus already holds.
+
+## 85. Object enumeration: one walk, two layouts, and entries is honestly dynamic (Task 4.2, 2026-08-30)
+
+**Decision.** `Object.keys/values/entries` land as a namespace-call node (`ObjectStaticCall`,
+MathCall's shape, one rooted slot) over ONE runtime walk (`collect` in `jsrt_object_ops.c`)
+parameterized by what each index becomes. A fixed shape enumerates its class descriptor's
+`fields` (declaration order); a dynamic shape enumerates its shape chain, filled into offset
+order in one pass (insertion order). Both are the ECMA-262 enumeration order for these objects,
+because every key either layout can hold is an identifier — the integer-like-keys-first reorder
+cannot trigger. The comment in the C file states this as the invariant it is.
+
+**Arguments outside the two layouts are deferred, not approximated.** `Object.keys([1, 2])` is
+`['0', '1']` in Node and `Object.keys("ab")` is `['0', '1']` too — neither is an object walk,
+and each would need its own arm. The gate refuses them by type (fixed `object` HType or
+`isDynamicShape`), with `Object.assign`/`freeze`/`create`/… deferred by name.
+
+**entries makes the verdict dynamic, and that is correct.** `entries` produces `[string, T]`
+pairs; the HType model has no tuple, so the element is `hUnknown` and the per-file Unknown walk
+reports `dynamic` for a file that uses it. The subset fixtures split accordingly
+(`subset_object_static_*` static for keys/values, `subset_object_entries_*` dynamic) — the
+verdict is the model telling the truth about what it can type, not a bug to paper over.
+
+**STA4084 follows STA4058's precedent**: raised by the runtime, numbered in the verifier's band,
+because it polices the same argument contract from the other side.
+
+## 86. JSON.stringify: the type pin decides the gate, and parse waits for an untyped-result story (Task 4.2, 2026-08-30)
+
+**Observation.** `JSON.stringify` has one honest type only in its single-argument form over serializable values: `string`. The spec's exceptions are exactly the values for which it answers `undefined` instead — a top-level `undefined` or function. And `JSON.parse` is typed `any` by TypeScript's own lib, which ts mode rejects (STA1003) before any gate rule can speak.
+
+**Decision.** Land `stringify` arity-1 as a `JsonStringify` node pinned `string` (verifier `STA4085`), with the pin driving the gate: argument types that admit `undefined` or a function at the TOP level are refused (`STA1214`), because there the runtime would have to answer `undefined` where the node's type promises a string. Inside structures no refusal is needed — the spec itself serializes them (skip as object value, `null` as array element) and the walk implements that. Cycles and an Unknown-smuggled top-level `undefined` abort on the STA2005 pattern: the spec throws `TypeError`, which builtins cannot raise until exceptions reach the runtime boundary. Output details held to Node byte-for-byte: `-0` is `"0"` (JSON, unlike console.log), NaN/Infinity are `null`, lone surrogates escape as `\udXXX` (well-formed JSON.stringify), Map/Set serialize as `{}`.
+
+**Deferred with evidence.** The replacer/space forms change the entire output shape (indentation, filtering) — deferred by arity. `parse` is deferred by name: its result is genuinely untyped, and the honest lowering (dyn values typed Unknown, verdict `dynamic`) is the same story dyn-field reads use — worth landing as its own slice, not as a rider. The ts-mode fixture pins today's truth: `parse` dies as STA1003 (`any` in ts mode) before the gate's not-yet, and will flip to not-yet and then dynamic as the typing story lands.
+
+## 87. The callback protocol already existed: jsrt_call is the whole story (Task 4.2, 2026-08-30)
+
+**Observation.** The Array slice deferred every callback-taking method "pending a runtime→compiled-code call protocol". Examining the closure ABI showed the protocol already shipped with rung 4b: every compiled function is a `JSRTClosure` whose `fn` takes `(argc, argv, env)`, and `jsrt_call` dispatches through it without knowing what kind of caller it has. A runtime builtin calling a callback is indistinguishable from compiled code calling a function value.
+
+**Decision.** `forEach map filter some every find findIndex` land as ordinary `ARRAY_OPS` entries — same table, same STA4082 verifier case, same mechanical C-name derivation (`findIndex` → `jsrt_array_find_index`). Each runtime loop passes the spec's `(element, index, array)` triple (a callee declared with fewer parameters reads the rest as `undefined` through `jsrt_arg`), caches `length` at entry (the spec's ToLength step) while re-checking existence per visit (shrink-then-regrow is visited exactly as Node visits it), and coerces predicate answers with `jsrt_truthy` — ToBoolean, so a predicate returning a number works. Two new result kinds: `mapped` keeps the CHECKER's result type — `map` because its element is the callback's to choose, `filter` because a type-guard predicate legitimately narrows below the receiver's element, and pinning either to the receiver would make the verifier reject well-typed programs; `undefined` is `forEach`. The gate requires the single argument to have ≥1 call signature (an `any`-typed callback in js mode is deferred, not passed to `jsrt_call` to die as a non-closure) and defers the thisArg form of all seven.
+
+**Deferred with evidence.** `reduce`: the absent-vs-present initial value changes both the argument protocol (first call gets `(acc, x, i, arr)` vs `(x0, x1, 1, arr)`) and the result typing — its own slice. `sort`: the DEFAULT comparator sorts by ToString (`[10, 9]` → `[10, 9]`), so landing comparator-only would invite exactly the silent divergence golden tests exist to catch; it lands with a stable-sort implementation decision. Smoke test (closures capturing locals, named function callbacks, the `(w, i, all)` triple, empty arrays, nested arrays): BYTE-IDENTICAL vs Node on first run, including Node's array-grid inspect formatting.
+
+## 88. reduce lands with-initial only, and its result kind pins nothing (Task 4.2, 2026-08-30)
+
+**Observation.** `reduce`'s two forms differ in more than arity: without an initial value the FIRST element becomes the seed and iteration starts at 1, and `xs.reduce(cb, undefined)` seeds with `undefined` rather than the first element — so the undefined-padding rule that folds every other optional argument would silently change the answer, the same trap `lastIndexOf` documented (plan-notes 83).
+
+**Decision.** `reduce`/`reduceRight` land as exact-arity-2 `ARRAY_OPS` entries; the gate defers the 1-argument form by count ("without an initial value is not yet supported"). Their result kind is new: `checker` — the checker's answer, with NOTHING pinned by the verifier, because the accumulator type is whatever the callback and initial value agreed on (number, string, an array being built — the smoke test does all three) and any pin would be the compiler asserting a shape the spec does not have. The runtime loops prepend the accumulator to the callback triple: `(acc, element, index, array)`; `reduceRight` walks down from the ENTRY length with a per-visit existence check, the spec's HasProperty step over a dense representation. Smoke: BYTE-IDENTICAL vs Node first run.
+
+## 89. sort: stability forces the algorithm, and the scratch must be GC-visible (Task 4.2, 2026-08-30)
+
+**Observation.** ECMA-262 §23.1.3.30 makes sort stability normative (since ES2019), which rules out `qsort`. And unlike `reduce`, sort's two forms CAN share a padded signature: SortCompare treats an explicit `undefined` comparator exactly as an absent one, so the standard undefined-padding rule is sound here.
+
+**Decision.** `jsrt_array_sort` is a top-down stable merge over the receiver's own storage. Two details are load-bearing: the merge takes the LEFT run on ties (`<= 0`), which is the entire stability argument; and the scratch buffer is a real jsrt array (`jsrt_array_new` copy), not raw malloc — during a merge an element's only reference is its scratch copy, and the future collector must be able to see it there (the plain-malloc-scratch rule from the Object slice, applied in the other direction). SortCompare's undefined-element rule runs BEFORE the comparator (undefined sinks to the end, comparator never sees one), the comparator's answer is coerced by ToNumber with NaN meaning 0, and the default comparator is ToString + code-unit comparison — `[10, 9, 2, 100, 1].sort()` answers `[1, 10, 100, 2, 9]`, golden-tested. Smoke (default order, stability over equal keys, -0, NaN comparator): BYTE-IDENTICAL vs Node first run.
+
+## 90. The structural quartet: three pad safely, splice does not (Task 4.2, 2026-08-30)
+
+**Observation.** Checking each optional argument against the padding rule (does explicit `undefined` mean what absence means?): `flat`'s depth — yes (`undefined` → default 1, §23.1.3.13); `copyWithin`'s `start` (→ 0) and `end` (→ length) — yes; `splice`'s `deleteCount` — NO: `splice(start)` deletes to the END, `splice(start, undefined)` deletes nothing. The lastIndexOf trap, third occurrence.
+
+**Decision.** `flat` (arity 1, result `mapped` — the checker computes the flattened element type, and a non-literal depth degrades honestly to Unknown), `flatMap` (callback set, result `mapped`, spreads an array answer exactly one level and appends anything else — implemented as depth-0 `flatten_into` of each answer, no intermediate array), `copyWithin` (arity 3, `self`, one memmove over the clamped overlap) land as ordinary padded table entries. `splice` lands at exact arity 2 with a gate count check; the removed run comes back as a fresh array of the receiver's element type (`self`), vacated tail slots cleared to `undefined` for the conservative-scan rule. Insertion `splice` is variadic and waits with variadic `push`. Smoke (negative indices, over-long deleteCount, overlapping copyWithin ranges, filtering flatMap): BYTE-IDENTICAL vs Node first run.
+
+## 91. `'toString' in ARRAY_OPS` was true before toString landed: hasOwn everywhere (Task 4.2, 2026-08-30)
+
+**Observation.** Landing `toString` surfaced a latent gate bug: every table-membership test spelled `op in TABLE`, and JavaScript's `in` walks the prototype chain — so `'toString'`, `'valueOf'`, `'constructor'`, `'hasOwnProperty'` all tested true against EVERY op table since the String slice. `s.valueOf()` would have been accepted, looked up `STRING_OPS.valueOf` (Object.prototype's function, no `arity`), padded against `undefined`, and emitted a call to a C symbol that does not exist — a link error instead of a diagnostic.
+
+**Decision.** Every membership test against an object table (`STRING_OPS`, `ARRAY_OPS`, `CALLBACK_ARRAY_OPS`) is now `Object.hasOwn`; the `Set`-based tables (`MATH_METHODS`, `OBJECT_STATIC_METHODS`, `CONSOLE_METHODS`) were never exposed. A regression test pins `s.valueOf()` to STA1214. The slice itself: `findLast`/`findLastIndex` (downward mirrors, same entry-length + existence discipline), `toReversed`/`toSorted`/`toSpliced` (fresh copy + the mutating op's machinery, `toSpliced` inheriting splice's exact-arity rule), `toString` (= `join` undefined-separator, §23.1.3.36), `with` (copy + replace; out-of-range aborts loudly — spec throws RangeError, builtins cannot). `Array.prototype`: 34/37; the residue is `keys`/`values`/`entries`, which are iterator-protocol work, not builtin work.
+
+
+## 92. JSON.parse: the annotation is the whole ts-mode story (Task 4.2, 2026-08-30)
+
+**Observation.** `plan-notes` 86 deferred `parse` by name because its result is genuinely untyped, and the deferral note assumed ts mode would have to reject it outright: the lib types the result `any`, and any-in-ts-mode is STA1003 by design. Reading `isImplicitAny` (`src/frontend/types.ts`) showed the assumption was wrong. STA1003 fires only at an ANNOTATION SITE — `annotationSiteOf` returns the node's type annotation for a VariableDeclaration, Parameter, PropertyDeclaration, FunctionDeclaration, ArrowFunction, FunctionExpression, and `null` for every other node — that lacks an annotation AND whose checker type carries `ts.TypeFlags.Any`. So `const v = JSON.parse(t)` is an error and `const v: unknown = JSON.parse(t)` is not, and the difference is exactly the difference the language already draws: writing `unknown` is the program admitting it has data, not a type.
+
+A second question the slice had to answer: what the gate does with an argument it cannot prove is a string. Refusing everything but a `string`-typed argument would make js-mode `parse` nearly useless — the js-mode norm is an untyped `text` parameter, and `any` is not `StringLike`. Accepting everything would read a non-string as text, which is silently wrong for exactly the values that matter. The evidence that settles it: TypeScript's own lib signature (`parse(text: string, ...)`) already rejects a KNOWN non-string in both modes at the STA0012 stage, so a compile-time refusal there buys nothing a type error was not already buying. What is left is the untyped case, which is a tag question, not a type question.
+
+**Decision.** `JsonParse` lowers typed `hUnknown(false)` and the verifier pins nothing (contrast `JsonStringify`, pinned `string` under STA4085): the checker has no claim to check, and a later pass that proves something concrete about a parsed value must be free to say so. The gate accepts a string-ish OR an untyped argument and defers a known non-string (a rule `explain` reports even where a build reports the lib's type error first); the runtime performs the tag check and aborts on the STA2005 pattern. In ts mode the annotated spelling is THE spelling, and `subset_json_parse_ts.ts` stays an STA1003 error to record that the unannotated one still dies at the declaration — the two fixtures together are the documentation. No new diagnostic code: every loud abort reuses the STA2005 pattern, and no compile-time condition here is new.
+
+
+## 93. The Object namespace is not uniformly unary (Task 4.2, 2026-08-30)
+
+**Observation.** `ObjectStaticCall` was built for `keys`/`values`/`entries`, three methods that take one object, and it carried a single `arg`. `Object.hasOwn(o, k)` does not fit that shape, and `Object.fromEntries(pairs)` fits it only by coincidence — its argument is an ARRAY, the opposite of what the other four accept. Two ways to absorb them: add an optional second field to the node, or give it an argument list with arity fixed per method. The codebase already answers this: `MathCall` carries `args` with a per-method arity table (`MATH_ARITY`), and the collection ops carry a table of shapes with result kinds. An optional field would be a third idiom for a question two already answer.
+
+A second observation fell out of writing the emit: with an argument LIST, `object-static` and `math-call` became the same emit — N arguments into N slots, one C call, no receiver — differing only in the function's name and in math's shortcut for a lone argument, which nests directly because a number is an immediate with nothing to keep rooted. An object argument has to stay rooted, so `object-static` always uses its slots.
+
+A third: both `JSON.parse` and `Object.fromEntries` need a JS string to become a shape key, and `jsrt_json.c` had written that conversion inline — an immortal UTF-8 copy, because the shape table keeps key pointers forever and a collected allocation would be wrong for exactly that reason.
+
+**Decision.** `ObjectStaticCall.args` is a list; the gate's `OBJECT_STATICS` table fixes arity, the receiver kind (`shaped` for a walk, `pairs` for `fromEntries`) and whether a string key follows, and the verifier restates arity and result kinds in `OBJECT_STATIC_SHAPES` — the verifier trusts no earlier stage. The `object-static` emit merged into `math-call`'s case, and the mechanical camelCase-to-snake_case naming became one module-level `snakeCase` used by both it and the array/string ops. `jsrt_shape_key` moved to `jsrt_shape.c`, next to the table whose lifetime rule it implements, and `JSON.parse`'s key path collapsed to a call to it. The deferred residue of the namespace is now documented BY REASON in the gate table's own comment rather than as a backlog: `assign` mutates a target a fixed shape cannot accept, `freeze`/`isFrozen` need a frozen bit every write site would consult, and the prototype four are machinery ts mode bans by design.
+
+
+## 94. console is a namespace of arities, not of receivers (Task 4.2, 2026-08-30)
+
+**Observation.** `ConsoleLogCall` carried a `stderr` boolean, which was exactly right while the five accepted members differed in nothing else: `log`/`info`/`debug` onto stdout, `warn`/`error` onto stderr, one argument each, one formatting rule. The six members this slice adds break that symmetry in the one dimension the node did not model. `groupEnd()` takes nothing. `count(label?)` and `countReset(label?)` take an optional string. `group(label?)` takes an optional value of the print type. `assert(condition, message?)` takes two with an optional tail. `dir(value)` takes one but is NOT `log` — it keeps a top-level string's quotes. A boolean cannot carry any of that, and neither can a second boolean.
+
+The codebase had already answered the general form of this question twice. `STRING_OPS` and `ARRAY_OPS` are tables of `{arity, optional, result}` that the gate, the lowering, the verifier and the emitter all read, so that an arity is stated once and cannot drift between the stage that admits a call and the stage that emits it. The difference here is only that console's members vary by ARITY where the collection ops vary by RECEIVER; the table shape is the same, and the emitter's needs are smaller — no receiver, no result type, just a C entry point.
+
+The padding rule needed its own check rather than an appeal to precedent, and the check is what saved the slice. Padding an omitted trailing argument with an `undefined` literal is sound only where explicit `undefined` means what absence means — the rule `lastIndexOf` violates (plan-notes 83) and `repeat` and friends satisfy (plan-notes 82). The first cut of this slice padded all four optionals and had the C side read `JSRT_UNDEFINED` as absence. Running the four spellings against the pinned Node before believing it:
+
+```
+console.group(undefined)      -> "undefined"                  console.group()      -> (nothing)
+console.assert(false, undefined) -> "Assertion failed undefined"  console.assert(false) -> "Assertion failed"
+console.count(undefined)      -> "default: 1"                 console.count()      -> "default: 1"
+console.countReset(undefined) -> zeroes "default"             console.countReset() -> zeroes "default"
+```
+
+So the rule splits the set: `count`/`countReset` pad, and `group`/`assert` cannot — treating `JSRT_UNDEFINED` as absence there prints nothing where Node prints something, for source a program can legally write (`assert(c, msg)` with `msg: string | undefined` is ordinary TypeScript). The same run also caught the separator: Node joins a STRING message with `": "` and anything else with a space and its inspect form, where the first cut always used `": "`.
+
+**Decision.** `CONSOLE_METHODS` in `src/hir/nodes.ts` is the single table — `{arity, optional, fn, bare?}` per member — and `ConsoleLogCall.stderr` became `ConsoleLogCall.method`. `bare` is how a method whose omitted tail is NOT `undefined` reaches the runtime: a second C entry point (`jsrt_console_group_bare`, `jsrt_console_assert_bare`) rather than a sentinel the runtime would have to mistake for absence. That is the third answer to the `lastIndexOf` question — the first two being "pad it" and "refuse the form" — and it is available here only because the runtime function is ours to split. `consoleEntryPoint(method, width)` maps an argument count to the C call or to `null`, and it is the one place the mapping lives: the lowering pads only where `bare` is absent, the verifier asks it rather than trusting the lowering (`STA4019`, which already owned the node's void-ness), and the emitter reads it instead of counting. The gate is unchanged in shape: it admits `arity - optional <= given <= arity`. The stream split is no longer a flag anywhere — it is which C function the table names, and the golden runner's byte-for-byte comparison of BOTH streams (plan-notes 84) is what holds it to Node's, with all four explicit-`undefined` spellings now in both fixtures so the collapse cannot come back.
+
+The four members left out are left out permanently as far as this test suite is concerned, and the reason is the suite itself rather than the difficulty: `time`/`timeEnd` print an elapsed DURATION and `trace` prints a stack, so no golden fixture can pin their output to Node byte-for-byte; `table` is a column-layout algorithm of its own, which is work, not a blocker. Recording that distinction in `SUBSET.md` and in the gate's table matters more than the four members do — a reader should not spend an afternoon discovering that `console.time` cannot be golden-tested.
+
+
+## 95. The dashboard was 70% of the wrong denominator (Task 4.2, 2026-08-30)
+
+**Observation.** Task 4.2 lists the builtins it covers: `Math`, `JSON`, `String.prototype`, `Array.prototype`, `Object`, `Map`, `Set`, `console`. The coverage table had namespaces for six of those eight. `Map` and `Set` landed at rung 7 — one hash table under two names, with `tests/golden/ts/maps.ts` and `tests/golden/js/maps.js` exercising `get`/`set`/`has`/`delete`/`clear`/`size`/`add` against Node — and were simply never added to the dashboard. Every reported percentage since has been a fraction of a surface that omitted a namespace the plan names, which is the failure mode the dashboard exists to prevent: it counts what has NOT landed rather than hiding it, and a missing namespace hides more than a missing member.
+
+Adding them surfaced a second thing. The renderer verifies each non-empty claim by looking for the member in the fixture's source, and for a `.prototype` namespace the needle was `.member(` — call syntax, with the trailing paren there to stop `.trim` matching inside `.trimStart`. `Map.prototype.size` is a property. No fixture will ever contain `.size(`, so the member could not have been claimed at all; the paren was load-bearing for the wrong reason.
+
+**Decision.** `Map.prototype` (10 members) and `Set.prototype` (16) are namespaces in `builtins_coverage.json`, and the total moved from 102/145 (70%) to 113/171 (66%). Nothing regressed — the denominator got honest, and a dashboard whose number can only go up is not measuring anything. The surface lists are the members a program reaches for on the PINNED Node, which is now written down in the table's own comment: Symbol-keyed members are out, `Map.prototype.getOrInsert`/`getOrInsertComputed` are out as stage-3 additions, and the ES2025 `Set` operations are in because the pinned Node has them and a program can call them.
+
+The needle became access syntax that must not be followed by an identifier character — `/\.member(?![A-Za-z0-9_$])/` — which checks a property and a method alike and still refuses `.trimStart` for `.trim`. It is strictly more general than the paren rule it replaces, and it is what makes `size` claimable.
+
+Both gaps this exposes are one gap: `entries`/`forEach`/`keys`/`values` are missing from `Map`, from `Set`, and (minus `forEach`) from `Array.prototype`, all waiting on the same iteration protocol. That is worth knowing as one blocker rather than three coincidences.
+
+
+## 96. A `throw` inside an array callback did neither of the two things it must (Task 4.2, 2026-08-30)
+
+**Observation.** Setting out to add `Map.prototype.forEach`, the first question was how `Array.prototype.forEach` handles a callback that throws — the answer being the template to copy. It does not handle it at all. This program:
+
+```ts
+const xs: number[] = [1, 2, 3];
+try {
+  xs.forEach((x: number): void => { console.log(x); if (x === 2) { throw 'stop'; } });
+} catch (e) { console.log(typeof e); }
+console.log('after');
+```
+
+prints `1 2 string after` on the pinned Node and printed `1 2 3 after` compiled. Two distinct failures in one line of output: the walk CONTINUED past the throw (the `3`), and the exception was SWALLOWED (no `string` — the catch never ran). Either alone is a semantics bug; together they mean a compiled program silently runs past a `throw`, which is the worst failure mode in the list.
+
+The cause is that the exception protocol has two halves and the callback slice wired neither. `runtime/include/jsrt_value.h` states the contract: an exception is a per-thread pending flag, and "after every call that can run user code, generated C checks `jsrt_pending()` and jumps to a landing pad". `emitPendingCheck` in the emitter says the same from the other side — a throwing operation is emitted as its own STATEMENT, never inside a consumer's expression, precisely so the check can stand between the operation and its consumer. Both statements were true of `call`, `new` and `method-call`. An `array-op` was neither: the runtime's loop guard asked only `i < len && i < arr(array)->length`, and the emitter returned the op as an expression for a consumer to embed, leaving nowhere for a check to stand.
+
+This is the ordinary shape of the bug this codebase keeps finding: a fact stated in one place ("operations that run user code need a pending check") and a new node kind added without the table that would have forced the question.
+
+**Decision.** The fact becomes a table entry. `ARRAY_OPS` gains `calls: true` on the thirteen ops that call back into compiled code, read through `arrayOpCallsBack` — the `consoleEntryPoint` idiom, because an optional property on an `as const` table is not readable off the union without it. The emitter gives such an op its own statement into the receiver's slot (dead by then) and follows it with `emitPendingCheck`, the same three lines `call` already had. The runtime's ten upward walks now share one guard, `walking(array, i, len)`, whose third conjunct is `!jsrt_pending()`; the three downward walks test it in their loop condition; and `sort` bails out of both `sort_range` and `sort_merge`, the latter skipping its write-back because a half-finished merge would DUPLICATE elements if copied over the receiver. Extracting the shared guard also removed ten copies of a condition, which the duplication budget notices in the right direction.
+
+Two things checked rather than assumed. Getters run user code too — they lower to a `method-call`, which always had the check, so they were never affected (verified on the emitted C). And the partial answers these ops now return (a half-built `map` result, a partly sorted receiver) are exactly what the pending-check contract already says nothing may observe: the consumer jumps to its landing pad instead of reading the slot.
+
+The regression is pinned where it cannot come back quietly: both `array_callbacks` golden fixtures now throw from a callback, a predicate, a comparator and a reducer, and are held to Node byte-for-byte on both streams.
+
+## 97. `forEach` was never an iterator question (Task 4.2, 2026-08-30)
+
+**Context.** Rung 7 landed `Map` and `Set` and deferred, in one breath, "iteration of any kind (`for-of`, `keys`, `values`, `entries`, `forEach`)". Four of those five are the same question — they hand back an ITERATOR, and the subset has no node for one, no `Symbol.iterator` protocol, and no way to spell the object an iterator is. `forEach` is not that question at all. It takes a CALLBACK, and calling a compiled callback is something the runtime has done since the `Array.prototype` callback slice: `jsrt_call`, the same closure ABI every compiled call site dispatches through. It was grouped with the iterator forms because they share a sentence in the spec's table of contents, not because they share a blocker.
+
+**Decision.** `forEach` joins `COLLECTION_OPS` for both collections, under exactly the rules the array callback ops already follow: the gate holds the callback to a function type (an `any` callback in js mode defers rather than reaching `jsrt_call` unvetted), the thisArg form defers (a compiled callback has no `this` to bind), the verifier pins the arity, and the emitter gives the op its own STATEMENT followed by `emitPendingCheck` — plan-notes 96's rule, applied at the point the node was created rather than discovered later by a fixture. The runtime shares one `for_each` over both descriptors, since a Set is the same table with the value half unused: the callback's first argument is the value for a Map and the key for a Set, and the rest of the triple is identical.
+
+**What the slice actually cost.** Not the call — the MUTATION rules. The spec has `forEach` visit entries appended during the walk, skip entries deleted before they are reached, and end when the collection is cleared. The table is append-only with `live` flags, so all three fall out of walking the entry array by index and re-reading `used` each step. Except for one thing: `grow()` is the only operation that RENUMBERS entries, because it compacts dead ones away as it rehashes — and a walk holding an index cannot survive that. A `delete` followed by enough `set`s to trigger a growth would silently skip or repeat entries, and no existing test could have caught it, because nothing before this walked the array from outside the table's own code.
+
+`JSRTMap` therefore gained `uint32_t iterating` — a DEPTH, not a flag, because `forEach` inside `forEach` is legal and the inner walk's exit must not re-enable compaction under the outer one. While it is non-zero, `grow()` preserves dead entries in place (they keep their slots and stay unfindable, since only live entries are re-indexed) and takes a capacity bump whenever the live count alone would not have needed one. Two smaller consequences, both verified rather than assumed:
+
+- `iterating` is initialised in `map_new` and NOT in `map_reset`, even though `map_reset` initialises everything else. `clear()` resets through `map_reset`, and a `clear()` called from inside a `forEach` must leave the counter alone — zeroing it there would re-enable compaction under the very walk that is running.
+- Suppressed compaction is not a leak: the walk decrements on exit, and the next growth after that compacts as usual.
+
+**Evidence.** Both `maps` golden fixtures cover the triple, callbacks that take fewer parameters than they are given, delete-and-reinsert ORDER (the reinsert appends at the end), mutation during the walk, growth during the walk (the preserved-index path), `clear()` during the walk, nested walks, a throwing callback, and empty collections — matching the pinned Node byte-for-byte on both streams. Dashboard: 113/171 → 115/171 (67%), `Map.prototype` 7/10, `Set.prototype` 6/16; the residue of the old five-member group is exactly the iterator quartet, which still waits on the protocol.
+
+## 98. A -0 key was stored as -0, and `forEach` made it visible (Task 4.2, 2026-08-30)
+
+**Found by.** The `forEach` slice, immediately. SameValueZero has always been right here — `hash_key` folds -0 into the +0 bucket and `same_value_zero` relies on C's `==`, so `has(-0)` finds a zero written as `0` and vice versa. What was wrong was the STORE: `map_put` kept the key exactly as it was handed, so a Map whose zero key was inserted as `-0` held a -0. Nothing could see it before, because every read path went back through SameValueZero. `forEach` hands the key to user code, and `1 / k` then answers -Infinity where Node answers Infinity; `console.log(m)` prints `Map(1) { -0 => 'first' }` against Node's `Map(1) { 0 => 'first' }`.
+
+**The spec says so explicitly.** §24.1.3.9 step 6 (`Map.prototype.set`) and §24.2.3.1 step 4 (`Set.prototype.add`): "If key is -0𝔽, set key to +0𝔽". It is a normalization at INSERT, not a comparison rule — which is exactly why a table that only ever compared could not have had it.
+
+**Fix.** One guard at the top of `map_put`, shared by `set` and `add` because both already route through it. A number key equal to zero is stored as `+0`; everything else is stored as it came. No lookup changes, because no lookup could tell the difference to begin with.
+
+**Evidence.** Both `maps` golden fixtures now insert `-0` as the first write of its key and read it back three ways — the collection's own printing, the `forEach` key, and `1 / k` — matching the pinned Node byte-for-byte. Note the pre-existing numeric section could not have caught this: it writes `0` before `-0`, so the +0 was already in the table and the second write found it.
+
+## 99. The lib describes Node, not the subset (Task 4.2, 2026-08-30)
+
+**Found by.** The first line of the ES2025 set-operation fixture. `a.union(b)` did not reach the gate at all: `src/frontend/program.ts` handed user source `lib: ['lib.es2023.d.ts']`, so the checker answered *"Property 'union' does not exist on type 'Set<any>'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2025' or later."* — surfaced as `STA0012`.
+
+**Why that message is wrong twice.** The program is valid JavaScript, and the pinned Node in `.node-version` runs it. And the advice cannot be followed: the `lib` in question is not the user's, it is the one the compiler chooses for them; a user tsconfig does not set it (plan-notes 47).
+
+**Decision.** The lib describes the JAVASCRIPT the differential ground truth implements, not the subset Stator has landed. Those are two different jobs and two different layers: the gate is what states the subset, and its answer for a member the compiler does not do yet is `STA1214`, which names the delivering phase and is actionable. `lib`/`target` for user source therefore move to es2025 (`tests/unit/helpers.ts` follows, so the unit tests see what a build sees). The compiler's OWN tsconfig — plan §4 Task 1.0, locked — is untouched: that one is about the code in `src/`, and es2023 is what it is pinned to.
+
+**Consequence, and it is the intended one.** Raising the lib admits every other ES2024/ES2025 member to the checker: `Object.groupBy`, `Promise.withResolvers`, the `Iterator` helpers, `Array.fromAsync`. All of them are refused by the gate as `not-yet`, which is exactly the diagnostic they deserve — a member Stator has not landed, named with the phase that will. The full suite was re-run for this: no fixture's verdict changed except the ones this slice added.
+
+## 100. The set operations are the first op whose argument is a collection (Task 4.2, 2026-08-30)
+
+**What landed.** The seven ES2025 set operations. Four build a new Set (`union`, `intersection`, `difference`, `symmetricDifference`) and three answer a boolean (`isSubsetOf`, `isSupersetOf`, `isDisjointFrom`). None mutates either operand.
+
+**The new shape.** Every collection operation before these took an ELEMENT — a key, a value, a callback. These take another SET, and the runtime reads it as a `JSRTMap` through `jsrt_as_map`. A wrong argument is therefore not a wrong answer, it is a pointer read as a structure it is not; and neither of the checks the verifier already ran would catch it, because the arity is right and the RECEIVER is a Set. So the seven are a table — `SET_OPS` in `src/hir/nodes.ts`, mapping each to what it answers — that the gate, the verifier and the emitter all read: the gate refuses an argument that is not a Set, the verifier re-checks the argument's type kind and pins the result (a set for four, a boolean for three, `STA4053`), and the emitter reads the same table to decide whether to box the answer with `jsrt_bool`. This is the `ARRAY_OPS`/`CONSOLE_METHODS` discipline applied at the moment a new op family is added rather than after a bug (plan-notes 96 is what that costs otherwise).
+
+**What the spec actually asks for, and what is refused.** The argument is a SET-LIKE record: any object with a numeric `size`, a callable `has` and a callable `keys`, read through GetSetRecord and iterated by calling `keys()`. That is the iterator protocol the subset still has no node for, so a set-like object is `not-yet(STA1214)` and a real Set is read straight out of the table. The subset fixture that spells one out is refused twice, which is the tidiest possible evidence: once for the argument, and once because writing a set-like value at all requires a `keys()`.
+
+**Order is normative, and it is not always the receiver's.** `intersection` walks whichever collection is SMALLER and appends in that one's order — the spec's own branch, not an optimization. Verified on the pinned Node: `{9,8,7,6,5}.intersection({5,6})` is `Set(2) { 5, 6 }`, where the receiver's order would have been `6, 5`. Equal sizes walk the receiver. `union` appends the receiver's elements then the argument's new ones; `symmetricDifference` copies the receiver, then removes or appends per element of the argument, testing membership against the RECEIVER rather than the result being built (the result is losing keys while it runs). `isDisjointFrom` may walk either side, and does walk the smaller one — a boolean has no order to observe, so there the smaller walk really is just an optimization. Both `set_ops` golden fixtures pin every one of these against Node byte-for-byte, including the empty operand, a set against itself, SameValueZero over `NaN`/`-0`, and object elements (identity, so two structurally identical objects are two elements).
+
+
+## 101. Vendored code is compiled with our warnings, not our warning FLAGS (Task 4.3, 2026-08-30)
+
+**Contradiction.** `AGENTS.md` says the C runtime is built `clang -Wall -Wextra -Werror`, and the
+Makefile applied that to everything under `runtime/`. Golden rule 5 says to vendor QuickJS-NG's
+libregexp rather than write a regex engine. The two collide on the first build: `cutils.h` has an
+unused parameter in an inline helper and `libregexp.c` compares a signed count against an unsigned
+one, so `-Wextra -Werror` refuses to compile code we are required to vendor.
+
+**Evidence.** `make -C runtime` on the unmodified vendor tree, before any flag change:
+
+```
+vendor/quickjs-ng/cutils.h:283:47: error: unused parameter 'size' [-Werror,-Wunused-parameter]
+vendor/quickjs-ng/libregexp.c:2624:24: error: comparison of integers of different signs
+    ('int' and 'uint32_t') [-Werror,-Wsign-compare]
+```
+
+**Decision.** `runtime/Makefile` gained `CFLAGS_VENDOR` — `-std=c11 -Wall` and the include paths,
+without `-Wextra -Werror` — used by the `build/vendor_%.o` and `build-asan/vendor_%.o` rules alone.
+Everything in `runtime/src/` keeps the full set. The reasoning is that a warning flag is a policy
+about code we WRITE: `-Werror` exists so that a warning in our own source stops the build before it
+reaches review, and there is no review here — upstream's source is not ours to fix, and patching it
+to silence a warning would break the no-hand-editing rule for a cosmetic reason. What is NOT relaxed
+is anything that could hide a real defect in the vendored code: `-Wall` still runs, and the ASan and
+UBSan builds cover `vendor/` exactly as they cover `src/`, which is where a genuine memory or
+undefined-behaviour bug in the engine would surface. `AGENTS.md`'s sentence now reads as the rule for
+`runtime/src/`, which is what it always meant.
+
+## 102. A regexp literal is a literal but not a constant (Task 4.3, 2026-08-30)
+
+**Finding.** The obvious optimization for `/a/g.test(s)` inside a loop is to compile the pattern once
+and hoist the object out — a literal with no substitutions looks exactly like the string and number
+literals the const-folder already hoists. It is wrong, and observably so.
+
+**Evidence.** ECMA-262 §22.2.4.1 evaluates a RegularExpressionLiteral by *creating* a RegExp object
+each time, because `lastIndex` is mutable state ON that object. On the pinned Node:
+
+```js
+for (let i = 0; i < 3; i++) console.log(/a/g.test('banana'));  // true true true
+const g = /a/g;
+console.log(g.test('banana'), g.test('banana'), g.test('banana'), g.test('banana'));
+// true true true false
+```
+
+The second line is the same pattern against the same subject four times, answering differently each
+time, because `/g` reads and writes `lastIndex` and resets it to 0 on a failure — which is exactly
+what makes `while (re.test(s))` terminate. Hoisting the first loop's literal would turn it into the
+second line. Both spellings are in `tests/golden/{ts,js}/regexp.*` and match Node byte-for-byte.
+
+**Decision.** `RegExpLiteral` is a leaf the emitter compiles at every evaluation: the pattern text is
+emitted inline and `jsrt_regexp_new` runs each time the expression is reached, with one rooted frame
+slot for the pattern string so it survives the flag string's allocation. The node's doc comment in
+`src/hir/nodes.ts` states the invariant, so a future const-folder reads it before it reaches for
+this node. The cost is a `lre_compile` per evaluation, which is the price of being right; a cache
+keyed on the literal's SOURCE POSITION (one compiled program per site, a fresh object per
+evaluation) is the shape a later optimization takes, and it is not this slice's business.
+
+## 103. Three places @@split and @@replace do not do the obvious thing (Task 4.3, 2026-08-30)
+
+**Finding.** The regexp forms of `split` and `replace` look like "find every match, then cut or
+substitute". Three details in ECMA-262 §22.2.5 make the obvious implementation wrong, and each one
+was found by a golden fixture diverging from the pinned Node rather than by reading ahead.
+
+**Evidence.**
+
+1. `@@split`'s loop is `Repeat, while q < size` (§22.2.5.14 step 14). A match starting AT the end of
+   the subject is therefore never attempted, even though it is a real match — and a pattern that can
+   match the empty string has one at every position including the last. The first implementation
+   scanned `at <= length`, which is right for `replace` and wrong here:
+
+   ```
+   stator: [ 'a', 'b', 'c', '' ]      node: [ 'a', 'b', 'c' ]     // 'abc'.split(/(?:)/)
+   stator: [ 'a', 'a', '' ]           node: [ 'a', 'a' ]          // 'abba'.split(/b*/)
+   ```
+
+   The fix is one guard in split alone: a match whose start is the subject's length ends the walk,
+   and step 15's final segment covers what is left.
+
+2. `@@split` builds its splitter with the STICKY flag added (step 7), so an attempt that fails only
+   proves there is no match *at that position* — the loop advances one and tries again. `RegExpExec`
+   in `@@replace` has no such retry: a forward search has already looked at every later position, so
+   a failure ends the scan. That single boolean is the only difference between the two loops, which
+   is why `scan()` takes it as a parameter rather than being written twice.
+
+3. `$n` in a replacement is a group reference only where the pattern HAS that group; above the count
+   it stays literal, and the two-digit form wins over the one-digit form only when both name a real
+   group. `'abc'.replace(/b/, '<$1>')` prints `<$1>` on Node, and a naive substituter prints `<>`.
+
+**Decision.** `runtime/src/jsrt_regexp.c` owns all three algorithms rather than `jsrt_string_ops.c`:
+each is a reading of one `scan()` over the vendored executor, and the string file dispatches to them
+on the pattern's tag. `lastIndex` follows RegExpBuiltinExec's rule and not the caller's intuition —
+read and written only by a `/g` or `/y` pattern, restored untouched by `search` (§22.2.5.9), and
+forced to 0 at both ends of a global `replace`. `tests/golden/{ts,js}/regexp_strings.*` pins all of
+it, including the two cases above, byte-for-byte against the pinned Node.
+
+## 104. Case mapping is not a per-unit walk, and Sigma proves it (Task 4.3, 2026-08-30)
+
+**Contradiction.** `docs/SUBSET.md` recorded `toUpperCase`/`toLowerCase` as implemented while the
+runtime ABORTED on any character above ASCII (`STA2005`, "Unicode case mapping is not yet
+supported"). That was the honest state — an ASCII mapping applied to a non-ASCII string is silently
+wrong for exactly the characters that made it non-ASCII — but it was a promise against a dependency
+that has now arrived: libunicode came into `runtime/vendor/quickjs-ng` with libregexp.
+
+**Evidence.** Three properties a per-code-unit walk cannot have, all pinned in
+`tests/golden/{ts,js}/unicode_strings.*` against the pinned Node:
+
+```js
+'Straße'.toUpperCase()   // 'STRASSE'  -- one code point becomes TWO
+'ﬃ'.toUpperCase()        // 'FFI'      -- one becomes THREE
+'\u{10428}'.toUpperCase() // one code point, two code UNITS, and it has a case
+'ΟΔΟΣ'.toLowerCase()     // 'οδος'     -- final sigma
+'ΣΟΣ'.toLowerCase()      // 'σος'      -- the same character, both forms, one string
+```
+
+The last pair is the whole argument: the mapping of U+03A3 depends on what surrounds it, so no
+table lookup keyed on the character alone can answer it. Unicode SpecialCasing's Final_Sigma
+condition is "a cased character precedes and none follows, skipping case-ignorable characters in
+both directions" — which is exactly why libunicode exports `lre_is_cased` and
+`lre_is_case_ignorable`, two predicates the regexp engine itself never calls.
+
+**Decision.** `runtime/src/jsrt_unicode.c` owns both operations and works in code points: decode,
+map (or normalize), re-encode. The buffer is sized against the exact worst case
+(`LRE_CC_RES_LEN_MAX` code points out per code point in, two UTF-16 units each) rather than grown,
+because the bound is small and known. A lone surrogate round-trips untouched — it is a legal JS
+string and neither operation is entitled to drop it. `jsrt_string_ops.c` keeps its ASCII fast path
+and delegates the moment it sees a unit above 0x7F: an ASCII string cannot change shape, so
+decoding one would buy nothing. `normalize` joined the same file rather than the string file for
+the same reason `jsrt_regexp.c` owns the regexp-driven string methods — the algorithm is the
+vendored library's, and this is the bridge to it.
+
+What this slice deliberately did NOT take: `localeCompare` and `toLocaleLowerCase`/
+`toLocaleUpperCase`. Those are collation and TAILORED casing — Turkish dotless i, Lithuanian dot
+above — which are locale data, not Unicode's own tables, and locale data is Task 4.4's ICU
+question. Answering them from the root tables would look right in a test and be wrong for the
+locales that are the entire reason those methods exist.
+
+---
+
+## 105. The ICU feature build costs a dependency, not ten megabytes (Task 4.4, 2026-08-30)
+
+**Contradiction.** `plan.md` Task 4.4 reads "Behind a Makefile feature flag, **off by default**
+(+10 MB when on — Boa's measured cost)". The flag part landed as written. The number does not
+describe what this compiler produces: 10 MB is what Boa pays because Boa links ICU **statically**
+into one Rust binary. Stator links the system ICU, so the compiled program grows by two `LC_LOAD_DYLIB`
+entries and nothing else, and the cost moves from the binary to a runtime dependency on a shared
+library that must be present on the machine that RUNS it.
+
+**Evidence.** The same fixture, built both ways on this machine (macOS 15, clang 17, Homebrew
+`icu4c@78`):
+
+```
+87112 bytes  unicode_strings.ts, default runtime
+87112 bytes  unicode_strings.ts, STATOR_RUNTIME=intl        (identical: dead-stripped, no ICU symbol referenced)
+69448 bytes  intl_locale.ts,     STATOR_RUNTIME=intl        (references ICU)
+```
+
+`otool -L` on the last one adds exactly `libicui18n.78.dylib` and `libicuuc.78.dylib`; the default
+build's only dependency is `libSystem`. What those two dylibs pull in is 37 MB on disk, 32 MB of it
+`libicudata` — the CLDR tables, which is the real number and nearly four times the plan's.
+
+**Decision.** Keep the flag, correct the cost, and say where it lands. `plan.md`'s Task 4.4 line is
+edited in this change (golden rule 6). Three consequences the plan did not anticipate:
+
+1. **A separate object directory, not a flag on the same one.** `make -C runtime intl` writes
+   `build-intl/`, parallel to `build-asan/`. `make` detects a stale timestamp, never a stale
+   `-DJSRT_HAVE_ICU`, so reusing `build/` would silently mix objects compiled with and without ICU.
+2. **The link flags are written next to the archive** (`build-intl/link-flags.txt`, from the same
+   `pkg-config` invocation that compiled it) and read back by `src/cli/build.ts`. Asking pkg-config
+   a second time, in a different environment, is how a binary ends up linking a different ICU than
+   its archive was compiled against.
+3. **`jsrt_intl.c` compiles in BOTH builds.** Without ICU its three entry points are `STA2005`
+   aborts naming the flag. The gate refuses them long before that (`STA1215`), which makes the
+   gate's refusal an optimisation rather than the only thing between the user and a linker error.
+
+**The locale argument is required, with the flag on.** §22.1.3.12 and §22.1.3.26 read the HOST's
+default locale when `locales` is absent, which would make a compiled program's output depend on the
+machine that runs it — and every golden test in this repo rests on that not being true. So the
+absent form stays refused even under `STATOR_RUNTIME=intl`, and `'a'.localeCompare('b')` is a
+`STA1214`, not a bug. `locales` as a string ARRAY and the `options` bag are Intl negotiation this
+compiler does not model, and are refused the same way.
+
+**Why the answers match Node byte-for-byte.** `process.versions.icu` on the pinned Node 26.7.0 is
+`78.3` with `icu_small: false`, and `/opt/homebrew/opt/icu4c@78` is ICU 78.3 / Unicode 17.0 — the
+same CLDR data, so `'ä'.localeCompare('z', 'sv')` answers `1` on both sides for the same reason.
+This is a property of THIS machine, not of the design, which is why the intl fixtures are named
+`intl_*`, skipped by the default golden run, and proven by `pnpm run test:intl` rather than by
+`pnpm run ci` — a CI host without ICU must stay green.
+
+---
+
+## 106. Nothing linked `-lgc`, and no machine had noticed (Task 4.5, 2026-08-30)
+
+**Contradiction.** `runtime/Makefile` has discovered Boehm through `pkg-config bdw-gc` since Task
+2.5 and compiles `GC_MALLOC` calls when it finds it. `src/cli/build.ts` — the driver that links
+every compiled program against that archive — never passed `$(GC_LIBS)`. The two halves of the
+same decision were written in different files and never compared.
+
+**Evidence.** Installing `bdw-gc` (the line `docs/TOOLCHAIN.md` prescribes, needed for this task's
+own Check) turned all 79 golden fixtures red at once:
+
+```
+Undefined symbols for architecture arm64:
+  "_GC_malloc", referenced from:
+      _jsrt_string_from_utf8 in libjsrt.a[16](jsrt_string.o)
+golden: 79 fixtures — 0 passed, 79 failed
+```
+
+Every machine this repo had run on lacked `bdw-gc`, so the fallback path was the only path ever
+taken and a link line that could not work was never executed.
+
+**Decision.** The fix is the mechanism Task 4.4 had just built for ICU, generalised: **every** build
+records the libraries a program linking its archive needs, into the directory that archive lives in
+(`build/link-flags.txt`, `build-asan/`, `build-intl/`), and `src/cli/build.ts` reads that file back
+for every flavour. The flags are written by the PHONY target rather than the archive rule, because
+installing `bdw-gc` changes the answer without changing a single `.c` file — the archive is
+up to date and the flags are not.
+
+**What it cost to not have this.** Nothing yet, and that is the point: under a conservative
+collector a missing root is invisible, and under a link that cannot happen the fallback is
+invisible too. Both are found by the same thing — actually running the configuration.
+
+---
+
+## 107. The frame audit found three slots the emitter never writes (Task 4.5, 2026-08-30)
+
+**Context.** `plan.md` Task 4.5 asks for "a codegen test that diffs emitted frames against emitted
+locals". `JSRT_FRAME(n)` is written once, at the top of a function, before a line of its body
+exists: a counting pass decides n and the emitter then writes whatever it writes. Nothing in C
+checks the two agree, and under Boehm nothing at RUNTIME checks either — the collector scans the
+stack conservatively and finds the value regardless. It stops being invisible when §12's precise GC
+lands, which is the moment the discipline exists to survive.
+
+**Evidence.** `tests/unit/frames.test.ts` emits the C for every standalone golden fixture and holds
+each function to four invariants. Written against the tree as it stood, it failed on three separate
+over-allocations, all of them the counting pass reserving storage the emitter had a better home for:
+
+1. **A captured local got two homes.** The parameter loop already skipped a name in `fn.envVars`
+   ("one variable, one home"), because a captured binding lives in the heap environment and
+   `slotRef` reads it there. `countBindings` did not: `closures.ts:_jsrt_fn_0` declared
+   `JSRT_FRAME(2)` and wrote only slot 0. Fixed by routing every named binding — parameters,
+   declarations, function declarations, `for…of` bindings, catch bindings — through one `bindSlot`
+   that holds the rule in one place.
+2. **Every function reserved a return slot.** The slot that holds a result across `JSRT_FRAME_POP()`
+   was claimed unconditionally, including in functions with no `return <expr>` at all. Now claimed
+   after counting, and only if the body produced one. A function that roots nothing then needs a
+   frame of zero, which C11 has no array for, so the frame takes the floor `JSRT_GLOBALS(n)` has
+   always had: one slot.
+3. **`{}` reserved a scratch slot it had nothing to store.** `dyn-object-literal` claimed two slots
+   — the object and one value scratch reused per entry — where the empty literal has no entry.
+
+**The one reservation that stays conservative.** A `try`/`finally` claims a slot to stash a caught
+exception while the finally body runs. Whether that path exists is decided while EMITTING the try
+body (a landing-pad label is marked used, or it is not), long after n had to be final. Predicting it
+during counting would mean a second copy of the unwind analysis drifting from the first — precisely
+the failure this test exists to catch. So the test counts the allowance instead: one unwritten slot
+per finally whose throw path never armed, and every other unwritten slot is a failure.
+
+**Decision.** Keep the audit exact rather than approximate. An over-allocated slot is harmless
+today; a counting pass that has quietly stopped describing the emitter it feeds is not, and the
+only difference between the two is how long you wait.
+
+---
+
+## 108. Boehm could not see a single reference the runtime held
+
+**Contradiction.** Task 4.5 landed a leak test that proves the collector reclaims garbage. It does.
+What no test asked was whether it keeps what is still live — and it did not. Boehm is
+*conservative*: it scans memory word by word and retains anything that looks like a heap address.
+A `jsrt_value` never looks like one. NaN-boxing puts the tag above bit 48, so every boxed reference
+— in a Map's entry table, an array's element buffer, an object slot, a `JSRT_LOCAL` — reads to the
+collector as a word that is not a pointer. Every object reachable only through a boxed reference
+was garbage the moment the last raw pointer to it left a register.
+
+**Evidence.** A probe built a 200-entry Map of strings, then read the entries back. Twice:
+
+```
+--- no collection:
+status 0 signal null
+stdout: "key-0-payload-that-is-long-enough-to-notice\nkey-150-payload…\n200\n"
+--- with collection (200 000 throwaway strings, then GC_gcollect() twice):
+status null signal SIGSEGV
+stdout: ""
+```
+
+Nothing about this is marginal, and nothing about it was visible: every existing golden fixture
+allocates far too little to reach Boehm's first collection, so the whole suite passed on the fact
+that the collector had never run. The leak test's 10M-object loop *does* collect — and passed
+because its objects are genuinely dead.
+
+**Why the one-line fix does not exist.** `GC_set_pointer_mask`/`GC_set_pointer_shift` — Boehm's own
+support for tagged pointers, which is exactly this problem — landed after 8.2. The pinned
+`bdw-gc 8.2.12` headers do not declare them.
+
+**Fix.** Unbox for the collector at the two places a reference can hide, in one new file,
+`runtime/src/jsrt_gc.c`:
+
+1. **The heap.** A custom object kind (`GC_new_kind` + `GC_new_proc`) whose mark procedure masks
+   every word with `JSRT_PAYLOAD_MASK` before testing it. All fourteen collected allocations now
+   come from one `jsrt_gc_alloc`, so the kind covers the whole heap by construction — previously
+   each site spelled its own `#ifdef JSRT_HAVE_BOEHM … GC_MALLOC … #else … malloc … #endif`, which
+   is also why the mistake could hide in plain sight.
+2. **The roots.** `GC_set_push_other_roots` over the `JSRT_FRAME` shadow stack, unboxing each slot
+   into a buffer of raw pointers and pushing that eagerly. This is the first thing that ever *read*
+   the shadow stack: until now `JSRT_FRAME` was bookkeeping for a precise GC that has not landed,
+   and the C stack scan found locals by accident.
+
+Masking is safe for both word shapes the runtime stores — a boxed payload is the low 48 bits, and a
+raw pointer's top 16 bits are zero, which `jsrt_init` already asserts against a real allocation, so
+the mask is the identity on raw pointers. A word that is neither (a double, a length) can mask to a
+plausible address and retain one object it does not own: ordinary conservative behaviour, costing
+memory and never correctness.
+
+**Check.** `tests/golden/ts/gc_reachability.ts` holds a 200-entry Map, a 200-element array and a
+local string live across 200 000 throwaway allocations — enough that the collector runs repeatedly
+while they are reachable only through boxed references — and prints them back. It is not vacuous:
+with the two hooks removed and `GC_MALLOC` restored, the fixture is the one failure in the suite,
+`compiled binary exited null` (SIGSEGV). With them, `golden: 80 fixtures — 80 passed, 0 failed`.
+
+**The second cell, found by the same reasoning.** `jsrt_throw`'s pending-exception mailbox is a
+`_Thread_local static jsrt_value` — static storage, which a conservative collector reads no better
+than it reads the heap. jsrt_value.h had already written the invariant down ("the collector must
+trace the pending slot as a root alongside the frame chain") and nothing implemented it. A `finally`
+running on the way out is not a hypothetical window: it runs arbitrary code, allocates freely, and
+the throwing frame is already popped. `jsrt_pending_slot()` publishes the cell and the root walk
+pushes it.
+
+**Honest limit on the second half.** The fixture's `unwinding()` case — value built and thrown in a
+callee, caught by the caller, 200 000 allocations in the `finally` between — still passes with that
+root removed. It is kept because throwing through a collecting `finally` is worth exercising, but it
+does NOT prove the root: at `-O2` the thrown value plausibly survives in a callee-saved register,
+which the collector scans. The fix stands on the argument, not on a red test, and the argument is
+the same one the mark procedure rests on. This is exactly the sort of thing §12's precise GC exists
+to stop depending on.
+
+**What this says about the tests that were green.** They were green on luck: a suite whose programs
+are all too small to trigger a collection cannot distinguish a working collector from one that
+never runs. The fixture above is the first that forces the question, and every future one that
+holds a collection's worth of live data now has something to fail against.
+
+## 109. The v2.1 changelog said there were no commits after commits existed (2026-08-30)
+
+**Contradiction.** The v2.1 verification entry in `plan.md` continued to say “no initial commit”
+long after the Phase 1 and Phase 3 implementation snapshots had been committed (`fa13a50` and
+`311007d`). That sentence was true when v2.1 was written, but became stale and contradicted the
+repository history while still correctly describing the open Phase-0 gate.
+
+**Fix.** Reworded the entry to keep the authoritative fact — Phase 0 has no human-approved
+`NICHE.md`/`phase-0-approved` tag and still gates Phase 2 — while recording that implementation
+snapshots are now committed.
+
+## 110. Private class fields leaked through object reflection (2026-08-30)
+
+**Finding.** Fixed-class instances exposed `#private` slots through `Object.keys`,
+`Object.getOwnPropertyNames`, `Object.values`, `Object.entries`, and `Object.hasOwn`,
+although ECMAScript private elements are not ordinary own properties.
+
+**Fix/check.** Reflection now skips private field names in `runtime/src/jsrt_object_ops.c`;
+`tests/golden/ts/private.ts` covers keys, names, and ownership while preserving public fields.
+
+## 111. Array filter reread mutated elements after callbacks (2026-08-30)
+
+**Finding.** `Array.prototype.filter` loaded an element for the callback and reread the array
+afterward when appending, so a callback mutating that index changed the value being selected.
+ECMAScript filter snapshots each visited value before invoking the callback.
+
+**Fix/check.** The runtime now appends the pre-callback value; TS and JS callback golden fixtures
+cover the mutation case in `tests/golden/{ts,js}/array_callbacks.*`.
+
+## 112. Dynamic object reflection used insertion order for integer keys (2026-08-30)
+
+**Finding.** Dynamic objects returned integer-like property names in insertion order, producing
+different `Object.keys` and `JSON.stringify` output from Node's OrdinaryOwnPropertyKeys ordering.
+
+**Fix/check.** Shapes now expose one canonical order helper that sorts array-index keys numerically
+before other keys in insertion order; object reflection and printing share it. Covered by
+`tests/golden/{ts,js}/object_builtins.*`.
+
+## 113. Unicode regexp empty matches could loop forever (2026-08-30)
+
+**Finding.** String regexp operations advanced an empty Unicode match by one UTF-16 code unit.
+When that landed on a surrogate boundary, the regexp engine rewound and returned the same match,
+making `split`/`replace` hang on astral characters.
+
+**Fix/check.** Added the spec's AdvanceStringIndex surrogate-pair step and used it for failed sticky
+retries and empty matches; `tests/golden/{ts,js}/regexp_strings.*` covers split and replace.
+
+## 114. Array index validation cast an unchecked double to uint32 (2026-08-30)
+
+**Finding.** `index_of` cast arbitrary doubles to `uint32_t` before checking range. Values such as
+Infinity or a huge finite number make that conversion undefined in C and can trip sanitizers.
+
+**Fix/check.** Range and integrality are checked against the double before conversion in
+`runtime/src/jsrt_value.c`; runtime builds remain clean under the existing strict warning flags.
+
+## 110. A live diagnostic code had been renumbered, and nothing could tell (Task 4.6, 2026-08-30)
+
+**Contradiction.** `docs/DIAGNOSTICS.md` is the sole allocator of `STA` codes, and four codes were
+being emitted with no row in it: `STA1216` and `STA1217` from `src/frontend/gate.ts`, `STA4087` and
+`STA4088` from `src/hir/verify.ts`. Three were ordinary omissions. The fourth was not: `STA1216` was
+top-level await, which the table had already allocated as **`STA1208`** — a live code, renumbered in
+place. Nothing failed. No test references a code that is never emitted, and no check compares the
+emitted set against the allocated one, so a renumbering reads as a clean build in both directions:
+the old code silently stops existing, and the new one silently starts.
+
+**Fix.** `gate.ts` emits `STA1208` for top-level await again, and the Promise-callback diagnostic
+took `STA1216` so the not-yet band stays contiguous — with its `phase` corrected from 4 to 5, which
+is where a runtime-level catch around a JS callback actually lands. `STA4087`/`STA4088` got the rows
+they never had. The reserved ranges in `docs/DIAGNOSTICS.md` moved to match (`STA1217–STA1299`,
+`STA4089–STA4999`), and `STA1207`/`STA1208` lost the "Phase 4" label they no longer deserve — both
+are Phase 7 module features, corrected in `docs/SUBSET.md` too.
+
+**What made it findable.** Reading every `code: 'STA` in `src/` and diffing that set against the
+table's rows — a script, not an eye. Worth automating into `ci` as a bidirectional check (emitted ⊆
+allocated, and each allocated code either emitted or explicitly retired), which is the only thing
+that would have caught this at the commit that introduced it rather than a phase later. Not done in
+this task; recorded here so the next diagnostics change has the reason in front of it.
+
+## 111. The subset matrix claimed a feature was deferred while it compiled (Task 4.6, 2026-08-30)
+
+**Contradiction.** `docs/SUBSET.md` carried `async`/`await` and generators as ONE row, marked
+not-yet under `STA1201`, and the decision tests agreed — `subset_async_functions_generators_{ts,js}`
+asserted `not-yet`. But async functions already compiled, and had since the codegen work that landed
+`jsrt_async_start`. Only generators were still refused. The bundled row made the matrix wrong about
+both: it under-reported what worked and hid that the gate's `STA1201` had narrowed to generators
+alone.
+
+**Fix.** Split the row and the fixtures. `subset_async_functions_{ts,js}` assert `static`/`dynamic`;
+`subset_generators_{ts,js}` assert `not-yet` with `STA1201`, and the `SUBSET.md` code row for
+`STA1201` is generators-only. The js-mode async fixture is `dynamic`, not `static` — an untyped
+parameter widens to `Unknown`, and an await of an `Unknown` is a dynamic await.
+
+**Second finding, from the same fixtures.** `subset_top_level_await_{ts,js}` had been carrying
+`@expected-fail: true` on the belief that js mode answered `STA0012` (a TypeScript-level syntax
+error) rather than the gate's diagnostic. It does not. That verdict came from running `explain` on a
+`.js` file WITHOUT `--mode=js`, which defaults to ts mode, where a `.js` root trips `allowJs` and
+fails before the gate ever sees the await. The subset runner passes `--mode` from the `@mode`
+directive, so both fixtures report `STA1208` correctly and the markers came off. A diagnostic read
+from a hand-run CLI invocation is only as trustworthy as its flags.

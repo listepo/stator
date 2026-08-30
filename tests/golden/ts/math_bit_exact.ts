@@ -1,0 +1,17 @@
+console.log(Math.clz32(1));
+console.log(Math.clz32(0));
+console.log(Math.clz32(4294967295));
+console.log(Math.clz32(-1));
+console.log(Math.clz32(3.9));
+console.log(Math.imul(3, 4));
+console.log(Math.imul(-5, 12));
+console.log(Math.imul(0xffffffff, 5));
+console.log(Math.imul(65536, 65536));
+console.log(Math.imul(2147483647, 2));
+console.log(Math.fround(5.5));
+console.log(Math.fround(5.05));
+console.log(Math.fround(0.1));
+console.log(Math.fround(-0));
+console.log(Math.fround(1 / 0));
+console.log(Math.fround(0 / 0));
+console.log(Math.fround(1.5e300));
