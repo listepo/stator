@@ -2511,3 +2511,28 @@ error) rather than the gate's diagnostic. It does not. That verdict came from ru
 fails before the gate ever sees the await. The subset runner passes `--mode` from the `@mode`
 directive, so both fixtures report `STA1208` correctly and the markers came off. A diagnostic read
 from a hand-run CLI invocation is only as trustworthy as its flags.
+
+## 112. Task 4.6 promised generators and Phase 4 ends without them (Task 4.6, 2026-08-30)
+
+**Contradiction.** `plan.md` Task 4.6 is titled "`async`/`await` + generators", and `STA1201` said
+so too: *"async/await and generators are not yet supported; planned for Phase 4 (runtime v1)"*. The
+async half landed. The generator half did not, and Phase 4 has no other task that could deliver it —
+so the phase would have closed with a diagnostic naming it as the deliverer, pointing at a phase
+that was over. A not-yet code whose named phase has already shipped is worse than no phase at all:
+it reads as a schedule and is actually a dead end.
+
+**Evidence for the split.** What Task 4.6 built is the suspension mechanism — a body re-entered at
+numbered resume points, with the locals that outlive a suspension living in a heap environment. A
+generator needs all of that and one more thing the async work had no reason to build: the ITERATOR
+protocol. An `await` answers a *scheduler*, which is why `jsrt_promise_subscribe` is the whole
+interface; a `yield` answers its *caller*, through an object with `next`/`return`/`throw` that hands
+back `{ value, done }`. That protocol is not generator-specific, and the builtins dashboard had
+already been saying so from the other end: `entries`, `keys` and `values` are the exact residue of
+`Array.prototype` (34/37), `Map.prototype` (7/10) and `Set.prototype` (13/16), missing for one
+shared reason, alongside `for-of`.
+
+**Fix.** Four surfaces, one blocker, one owner: **Phase 5, step 8** now carries the iterator
+protocol with generators last, and `STA1201` names Phase 5 in the gate, in `docs/DIAGNOSTICS.md` and
+in `docs/SUBSET.md` — with its message narrowed to generators, since async no longer reports it.
+Phase 5 is where it belongs on the merits rather than by elimination: the protocol is core language
+surface both modes need, and it is lowering work, not runtime work, so Phase 4 was never its home.

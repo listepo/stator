@@ -18,9 +18,10 @@ import { resolve } from 'node:path';
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
 import { createProgram } from '../frontend/program.ts';
-import type { Expression, Module, Statement } from '../hir/nodes.ts';
+import type { Expression, FunctionExpr, Module, Provenance, Statement } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
 import { lowerProgram } from '../lower/index.ts';
+import { rewriteModule } from '../passes/rewrite.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { renderDiagnostic } from '../support/diagnostics.ts';
 import { BuildError } from './build.ts';
@@ -32,6 +33,25 @@ export type Verdict = 'static' | 'dynamic' | 'error' | 'not-yet';
 export interface Explanation {
   readonly verdict: Verdict;
   readonly code?: string;
+  /** The static/dynamic split, one row per compiled function (plan.md §8 step 1). Absent when the
+   * file earned a verdict before lowering ran -- a program that was rejected has no functions to
+   * report, and an empty array would claim it had none. */
+  readonly functions?: readonly FunctionReport[];
+}
+
+/** One function's row. `provenance` is the HIR fact (where the SIGNATURE's types came from);
+ * `verdict` is that fact in the vocabulary the rest of this tool speaks.
+ *
+ * Both are about the signature, not the body, and that is the honest scope for a per-function row:
+ * a nested function is a separate compilation unit with a row of its own, and everything the
+ * enclosing one can see about it -- its type, the calls it makes -- is in the enclosing one's own
+ * signature or the file verdict. The FILE verdict above still counts every Unknown anywhere,
+ * bodies included, so a typed function full of `any` cannot hide behind a `static` row. */
+export interface FunctionReport {
+  readonly name: string;
+  readonly line: number;
+  readonly provenance: Provenance;
+  readonly verdict: 'static' | 'dynamic';
 }
 
 /** Returns the process exit code. A rejected program is still a SUCCESSFUL explain: the user asked
@@ -47,6 +67,12 @@ export function explain(entry: string, mode: Mode, json: boolean): number {
         ? `${entry}: ${result.verdict}\n`
         : `${entry}: ${result.verdict} (${result.code})\n`,
     );
+    // The file line first, then its functions indented under it: the file verdict is the stronger
+    // claim (it counts bodies), so a `dynamic` file over all-`static` rows reads as the narrowing
+    // it is rather than as a contradiction.
+    for (const fn of result.functions ?? []) {
+      process.stdout.write(`  ${fn.line}: ${fn.name}: ${fn.verdict} (${fn.provenance})\n`);
+    }
   }
   return 0;
 }
@@ -93,7 +119,51 @@ export function explainFile(entry: string, mode: Mode): Explanation {
     return { verdict: 'error', code: 'STA4021' };
   }
 
-  return { verdict: hasUnknown(module) ? 'dynamic' : 'static' };
+  return {
+    verdict: hasUnknown(module) ? 'dynamic' : 'static',
+    functions: functionReports(module),
+  };
+}
+
+/** Every function the module compiles, in source order.
+ *
+ * The walk is `rewriteModule` with an identity rewriter rather than a walk of its own: that file is
+ * the one place that enumerates HIR node kinds exhaustively, so a collector written on top of it
+ * keeps working when a kind is added, and a collector written beside it would silently stop
+ * reporting the new kind's functions. Both hooks are needed because a declaration's and a method's
+ * function is rewritten directly rather than as an expression, so the expression hook never sees
+ * it -- and for the same reason neither is reported twice. */
+function functionReports(module: Module): readonly FunctionReport[] {
+  const found: FunctionExpr[] = [];
+  rewriteModule(module, {
+    expression: (expr) => {
+      if (expr.kind === 'function') {
+        found.push(expr);
+      }
+      return expr;
+    },
+    statement: (stmt) => {
+      if (stmt.kind === 'function-declaration') {
+        found.push(stmt.fn);
+      } else if (stmt.kind === 'class-declaration') {
+        if (stmt.ctor !== undefined) {
+          found.push(stmt.ctor.fn);
+        }
+        found.push(...stmt.methods.map((m) => m.fn));
+      }
+      return [stmt];
+    },
+  });
+  return found
+    .map((fn) => ({
+      // An arrow has no name of its own and the binding it is assigned to is a different node, so
+      // the line is what identifies it. Reporting a guessed name would be worse than none.
+      name: fn.name ?? '<anonymous>',
+      line: fn.span.line,
+      provenance: fn.provenance,
+      verdict: fn.provenance === 'dynamic' ? ('dynamic' as const) : ('static' as const),
+    }))
+    .sort((a, b) => a.line - b.line);
 }
 
 /** null means "nothing here decides the verdict" — carry on to the typed answer. */
@@ -113,8 +183,11 @@ function classify(diagnostics: readonly Diagnostic[]): Explanation | null {
   return null;
 }
 
-/** One Unknown anywhere makes the whole file dynamic. Phase 2's verdict is per-file; per-function
- * granularity arrives with functions themselves in Phase 3. */
+/** One Unknown anywhere -- in a signature or buried in a body -- makes the whole FILE dynamic.
+ *
+ * This deliberately outranks the per-function rows, which see signatures only: a file whose every
+ * function is `static` can still be dynamic, and that is the honest reading. The rows say where the
+ * dynamic representation crosses a call; this says whether the file uses it at all. */
 function hasUnknown(module: Module): boolean {
   return module.statements.some(statementHasUnknown);
 }

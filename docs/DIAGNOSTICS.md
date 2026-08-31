@@ -157,7 +157,7 @@ These are language features on the roadmap. The message names the phase that wil
 
 | Code | Mode(s) | Class | Message template | Phase | Notes |
 |---|---|---|---|---|---|
-| STA1201 | both | not-yet | async/await and generators are not yet supported; planned for Phase 4 (runtime v1) | 4 | Coroutines require runtime support (event loop, task scheduling) |
+| STA1201 | both | not-yet | generators are not yet supported; planned for Phase 5 (the iterator protocol) | 5 | Task 4.6 delivered the other half of this code's original scope: `async`/`await` compiles, and only `function*` is still refused. What a generator needs beyond the state machine Task 4.6 built is the ITERATOR PROTOCOL — a `yield` answers its caller, not a scheduler — and that protocol is the same blocker holding `for-of` and the `keys`/`values`/`entries` triple on `Array`/`Map`/`Set`. They land together (Phase 5, step 8) |
 | STA1202 | js | not-yet | arguments pseudo-variable is not yet supported in js mode; planned for Phase 5 (stretch goal) | 5 | In js mode, `arguments` accesses require shape tables and runtime support. ts mode rejects it permanently (STA1105) |
 | STA1203 | js | not-yet | Proxy is not yet supported in js mode; planned for Phase 8 (dynamic tier) | 8 | Metaprogramming via proxies deferred to Phase-8 dynamic semantics |
 | STA1204 | js | not-yet | prototype mutation is not yet supported in js mode; planned for Phase 8 (dynamic tier) | 8 | Shape-based optimizations and dynamic shape tables for prototype chains require Phase-8 support |

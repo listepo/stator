@@ -99,12 +99,16 @@ export function createProgram(
 }
 
 /** Lower TypeScript source code to HIR.
- * Wraps createProgram + lowerSourceFile in a single call. */
-export function lowerSource(code: string): {
+ * Wraps createProgram + lowerSourceFile in a single call. `fileName` is how a caller asks for a
+ * `.js` file: the extension is what turns on allowJs/checkJs, so JSDoc types only exist under it. */
+export function lowerSource(
+  code: string,
+  fileName = '/test.ts',
+): {
   module: Module;
   diagnostics: readonly Diagnostic[];
 } {
-  const { program, sourceFile } = createProgram(code);
+  const { program, sourceFile } = createProgram(code, fileName);
   const checker = program.getTypeChecker();
   const result = lowerSourceFile(sourceFile, checker);
 
@@ -372,7 +376,15 @@ export function fn(
   const parameters: Parameter[] = params.map((p) => ({ name: p, type, span: span(line) }));
   // Captures default to none: a hand-built function in a unit test is the non-capturing case
   // unless a test says otherwise, which keeps rung 4a's static-closure path the default here too.
-  const capture = { envVars: [], captures: [], needsEnv: false, isAsync: false } as const;
+  // `typed`: the helper takes the function's HType, so a hand-built function's signature is
+  // asserted outright rather than worked out from a body.
+  const capture = {
+    envVars: [],
+    captures: [],
+    needsEnv: false,
+    isAsync: false,
+    provenance: 'typed',
+  } as const;
   return name === undefined
     ? { kind: 'function', type, span: span(line), params: parameters, body, ...capture }
     : { kind: 'function', type, span: span(line), name, params: parameters, body, ...capture };

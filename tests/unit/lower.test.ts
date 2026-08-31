@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import type { Declaration } from '../../src/hir/nodes.ts';
+import type { Declaration, FunctionExpr } from '../../src/hir/nodes.ts';
 import { verifyHir } from '../../src/hir/verify.ts';
-import { lowerSource } from './helpers.ts';
+import { hirNodes, lowerSource } from './helpers.ts';
 
 void test('console.log with arithmetic expression and correct precedence', () => {
   const result = lowerSource('console.log(1 + 2 * 3);');
@@ -306,5 +306,55 @@ test('assigning any type to an Unknown binding verifies clean', () => {
   assert.deepEqual(
     problems.map((p) => p.code),
     [],
+  );
+});
+
+/* Provenance (plan.md §8 step 1) is about the SIGNATURE: what the author asserted versus what the
+ * checker worked out. The distinction is rule 4's -- an annotation is a claim a boundary must
+ * check, an inference is derived from the code and is already sound -- so it is the annotations
+ * that are counted, not the resulting types. */
+test('provenance separates annotated signatures from inferred ones', () => {
+  const { module } = lowerSource(
+    'function both(x: number): number { return x; }\n' +
+      'function noReturn(x: number) { return x; }\n' +
+      'const arrow = (x: number) => x;\n',
+  );
+  assert.deepEqual(
+    hirNodes(module)
+      .filter((n): n is { kind: string } & FunctionExpr => n.kind === 'function')
+      .map((f) => [f.name ?? '<anonymous>', f.provenance]),
+    [
+      ['both', 'typed'],
+      ['noReturn', 'inferred'],
+      [
+        // The arrow's parameter is annotated but its return is not, so it is `inferred` for the
+        // same reason `noReturn` is -- the shape of the declaration never enters into it.
+        '<anonymous>',
+        'inferred',
+      ],
+    ],
+  );
+});
+
+/* The JSDoc freebie (plan.md §8 step 6). `@param {number} x` is the same claim by the same author
+ * as `x: number`, so annotated JavaScript must buy exactly what annotated TypeScript buys -- and be
+ * trusted exactly as little at a boundary. */
+test('JSDoc annotations are annotations, and their absence is Unknown', () => {
+  const { module } = lowerSource(
+    '/**\n * @param {number} x\n * @returns {number}\n */\n' +
+      'function documented(x) { return x; }\n' +
+      'function bare(x) { return x; }\n',
+    '/test.js',
+  );
+  assert.deepEqual(
+    hirNodes(module)
+      .filter((n): n is { kind: string } & FunctionExpr => n.kind === 'function')
+      .map((f) => [f.name ?? '<anonymous>', f.provenance]),
+    [
+      ['documented', 'typed'],
+      // Not `inferred`: nothing was inferred. An un-annotated js parameter is Unknown, which is the
+      // request for a dynamic value, and that outranks every other reading of the signature.
+      ['bare', 'dynamic'],
+    ],
   );
 });

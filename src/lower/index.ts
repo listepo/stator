@@ -71,6 +71,7 @@ import type {
   ObjectStaticMethod,
   Parameter,
   PromiseStaticMethod,
+  Provenance,
   RegExpOperation,
   ReturnStatement,
   Span,
@@ -100,6 +101,7 @@ import {
   hasTypeParam,
   hFunction,
   hPromise,
+  hTypeHasUnknown,
   hTypeName,
   hUnknown,
 } from '../hir/types.ts';
@@ -2502,8 +2504,44 @@ function lowerFunction(
     envVars: info?.envVars ?? [],
     captures: info?.captures ?? [],
     needsEnv: info?.needsEnv ?? false,
+    provenance: provenanceOf(node, params, type),
   };
   return fn;
+}
+
+/** Where a function's signature types came from (docs/HIR.md, plan.md §8 step 1).
+ *
+ * The question is about the SIGNATURE only. A fully annotated function whose body holds an Unknown
+ * is still `typed`: its callers see the signature, and the signature is what a boundary checks.
+ *
+ * Unknown is asked first because it outranks the other two -- an Unknown parameter is not an
+ * un-annotated one the checker happened to solve, it is the request for a dynamic value, and no
+ * amount of annotation elsewhere makes the call site static. */
+function provenanceOf(node: FunctionLike, params: readonly Parameter[], type: HType): Provenance {
+  const ret = type.kind === 'fn' ? type.ret : H_UNDEFINED;
+  if (params.some((p) => hTypeHasUnknown(p.type)) || hTypeHasUnknown(ret)) {
+    return 'dynamic';
+  }
+  return node.parameters.every(isAnnotated) && returnIsAnnotated(node) ? 'typed' : 'inferred';
+}
+
+/** An explicit type annotation, in either spelling. `x: number` and `@param {number} x` are the
+ * same claim by the same author, which is the whole of js mode's JSDoc freebie: annotated
+ * JavaScript buys exactly what annotated TypeScript does, and is trusted exactly as little at a
+ * boundary. `node.parameters` is the SOURCE's list, so the synthesized receiver never reaches
+ * here -- no author wrote it and its type comes from the class layout, not from a claim. */
+function isAnnotated(param: ts.ParameterDeclaration): boolean {
+  return param.type !== undefined || ts.getJSDocType(param) !== undefined;
+}
+
+/** A constructor's return is not writable in either spelling, so it cannot be the missing
+ * annotation that demotes one to `inferred`. */
+function returnIsAnnotated(node: FunctionLike): boolean {
+  return (
+    ts.isConstructorDeclaration(node) ||
+    node.type !== undefined ||
+    ts.getJSDocReturnType(node) !== undefined
+  );
 }
 
 /** Does this expression evaluate to an instance of a class this subset lays out?
@@ -3074,6 +3112,10 @@ function synthesizedConstructor(
     envVars: [],
     captures: [],
     needsEnv: false,
+    // Nothing here was written, so nothing here was inferred either: every type was copied from a
+    // declaration that already had one, and the synthesized constructor is exactly as typed as the
+    // ancestor whose parameters it forwards.
+    provenance: forwarded.some((p) => hTypeHasUnknown(p.type)) ? 'dynamic' : 'typed',
   };
 }
 

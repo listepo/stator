@@ -1299,8 +1299,8 @@ function generatorNotYet(): GateResult {
   return {
     kind: 'not-yet',
     code: 'STA1201',
-    message: 'generators are not yet supported; planned for Phase 4 (runtime v1)',
-    phase: 4,
+    message: 'generators are not yet supported; planned for Phase 5 (the iterator protocol)',
+    phase: 5,
   };
 }
 

@@ -715,7 +715,30 @@ export interface FunctionExpr extends Node {
    * bindings — including the emitter's own temporaries — lives in the heap environment, because a
    * suspended body's C frame is gone by the time it resumes. */
   readonly isAsync: boolean;
+  /** Where this function's SIGNATURE types came from (plan.md §8 step 1). About the signature
+   * alone, not the body: the signature is what a caller — and therefore a boundary — can see. */
+  readonly provenance: Provenance;
 }
+
+/** How much of a function's signature the author asserted, and how much the checker worked out.
+ *
+ * The distinction exists for boundary insertion, and it runs the way rule 4 does — an ANNOTATION is
+ * a claim, so it is the thing that can lie and the thing a boundary must check; an INFERENCE is
+ * derived from the code itself, so within the checked world it is already true. A JSDoc `@param`
+ * in a `.js` file is an annotation exactly as a `.ts` one is: same claim, same untrusted status
+ * when an untyped caller reaches it.
+ *
+ *   typed     every parameter and the return carry an explicit annotation (TS syntax or JSDoc)
+ *   inferred  no Unknown anywhere, but at least one type came from the checker rather than the
+ *             author — a contextually typed arrow (`xs.map((x) => x + 1)`) is the common case
+ *   dynamic   some parameter or the return is Unknown, so calls go through the dynamic
+ *             representation
+ *
+ * `dynamic` is a fact about the signature and NOT about the whole function: a fully typed signature
+ * whose body holds an Unknown is still `typed` here, because callers are unaffected by it. The
+ * file-level verdict `stator explain` prints alongside the per-function rows is the one that counts
+ * bodies, so nothing hides -- the two answer different questions and both are reported. */
+export type Provenance = 'typed' | 'inferred' | 'dynamic';
 
 /** `await e`.
  *
