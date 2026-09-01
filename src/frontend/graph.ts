@@ -125,8 +125,13 @@ function checkCollisions(
             mode,
             `'${name}' is declared at the top level of both ${owner} and ${file.fileName}; ` +
               'modules share one namespace in whole-program v0 -- rename one; ' +
-              'planned for Phase 4',
-            4,
+              'planned for Phase 5',
+            // Per-module namespaces, which is the module surface Phase 5 owns -- not builtins.
+            // This site named Phase 4 until 2026-09-01 and was missed by Task 4.7's first sweep,
+            // which read `gate.ts` alone: the gate is where MOST not-yets live, not where all of
+            // them do. `tests/unit/phases.test.ts` now scans every file under `src/` for exactly
+            // that reason (plan-notes 136).
+            5,
           ),
         );
       }

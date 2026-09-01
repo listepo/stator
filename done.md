@@ -449,7 +449,7 @@ Ten defects were found and fixed while making this Check pass; the ones with a l
 
 ---
 
-## Phase 4 — Runtime v1 — the landed tasks
+## Phase 4 — Runtime v1 ✅ COMPLETE (2026-09-01)
 
 *`plan.md` §7. **The phase is still open**: Task 4.2 (builtins) is in progress and its statement,
 along with the phase Check, is still in `plan.md`. What follows is the evidence for the slices that
@@ -731,8 +731,10 @@ it waits on being written, which is what `STA1214` means. Recorded rather than c
 `COMPLETED_PHASES` and documents the no-phase convention; `tests/unit/phases.test.ts` asks the
 general question four ways, because each catches what the others cannot:
 
-1. **Source scan** — parse `gate.ts`, read every phase argument and every `phase:` literal. The
-   only check that sees a site no fixture reaches, and most of the seventy were exactly that.
+1. **Source scan** — parse every `.ts` file under `src/` and read every phase argument, in all
+   three spellings: the `notYet`/`dateNotYet` helpers, the hand-written `{ kind: 'not-yet', ... }`
+   literals, and `diagnosticFromNode`'s positional 7th argument. The only check that sees a site no
+   fixture reaches, and most of the seventy were exactly that.
 2. **Message scan** — a phase can also be WRITTEN into a string, where the numeric field never
    sees it (plan §7 Task 4.7 step 7 requires both). Comments discussing a finished phase are
    allowed; string literals are not.
@@ -745,6 +747,20 @@ The guard was proved by breaking it: reverting one site to `notYet(…, 3)` fail
 `gate.ts:1461 notYet(...) names Phase 3` and `rest parameters are not yet supported; planned for
 Phase 3 — Phase 3 is complete`. A test that cannot fail is not a check.
 
+**And the guard's first version had the defect it was built to catch.** It scanned `gate.ts` alone
+— because that is where the 165 sites were — and `src/frontend/graph.ts` had been quietly naming
+Phase 4 the whole time, for cross-file top-level name collisions, whose blocker is per-module
+namespaces (Phase 5's module surface). Two things hid it: the file is not the gate, and the phase
+travels as `diagnosticFromNode`'s **positional 7th argument** rather than through `notYet`, so
+neither the helper-call arm nor the object-literal arm would have seen it even in the right file.
+`SUBSET.md` had already been corrected to "Phase 5" in this same change, so code and doc were
+disagreeing while every test passed. The scan now walks **every `.ts` file under `src/`** and reads
+all three spellings, and the message scan walks the AST rather than the lines — a "quote somewhere
+on this line" regex called three legitimate comments offenders, and comments SHOULD discuss
+finished phases. Re-broken to confirm: `frontend/graph.ts (diagnosticFromNode(...)) line 120 names
+Phase 4`. One place is never all the places, which is the entire lesson of this task, and it took
+being learned twice.
+
 **Docs synced in the same change**, the three surfaces that had already drifted apart once:
 `DIAGNOSTICS.md`'s `STA1210`/`STA1211`/`STA1215` rows and the `STA1209` footnote; `SUBSET.md`'s
 `STA1210`/`STA1211` reference rows, the eight `not-yet(STA1214, Phase 4)` module-surface verdicts,
@@ -755,20 +771,59 @@ own verdict column and the `STA1207` row below it both said Phase 5.
 
 ```
 biome check          Checked 65 files. No fixes applied.
-jscpd                55 clones · 0.8% duplication
+jscpd                58 clones · 0.8% duplication
 node --test          ℹ tests 319   ℹ pass 319   ℹ fail 0
 runtime              print corpus matches Node
 subset               272 fixtures — 209 passed, 63 expected-fail, 0 failed
 golden               93 fixtures — 93 passed, 0 failed
-leak                 10M objects — peak RSS 3040 KB of a 65536 KB cap, 18 samples, plateau
+leak                 10M objects — peak RSS 3024 KB of a 65536 KB cap, 18 samples, plateau
 ASan/UBSan           print corpus matches Node; golden 93 fixtures — 93 passed, 0 failed
 ```
 
 The four clauses of the task's own Check, each answered: the completed-phase regression test
 exists and passes (`tests/unit/phases.test.ts`, four tests, and it was proved able to FAIL);
 `pnpm run test` and `pnpm run test:subset` are green with **no verdict flips** — the sweep changed
-phase numbers, never codes, so no fixture's expectation moved; a parse of `gate.ts` finds zero
-not-yets naming a phase `done.md` marks complete (the remaining distribution is Phase 5 and Phase
+phase numbers, never codes, so no fixture's expectation moved; a parse of every file under `src/` finds
+zero not-yets naming a phase `done.md` marks complete (the remaining distribution is Phase 5 and Phase
 8 only, plus the two no-phase sites); and `DIAGNOSTICS.md` and `SUBSET.md` agree with `gate.ts` on
 every touched code.
 
+---
+
+**Phase 4 EXIT — the criterion, bullet by bullet (2026-09-01).** The phase's Check
+("runtime unit tests + ASan/UBSan clean + the leak test; builtins dashboard renders in CI; an async
+golden test (`await` chain + `Promise.all`) matches Node") is one `pnpm run ci` away, and it passed
+at exit 0. The exit CRITERION -- added mid-flight because a Check without a scope boundary made
+"is Phase 4 done?" unanswerable, and let four not-yet codes name this phase as their deliverer
+while it was closing (plan-notes 116) -- reads:
+
+| bullet | dashboard | verdict |
+|---|---|---|
+| `Math` | 42/42 (100%) [+1 nondeterministic] | ✅ every deterministic member on fdlibm; `Math.random` on the carve-out proof |
+| `Object` | 7/13 (54%) | ✅ `assign` was the only member Phase 4 owned. `freeze`/`isFrozen` need a runtime-RAISED exception (Phase 5 step 11); `create`/`defineProperty`/`getPrototypeOf`/`setPrototypeOf` are `STA1204`'s prototype surface (Phase 8) |
+| `console` | 12/12 (100%) [+3 nondeterministic] | ✅ `table` landed as ordinary work; `time`/`timeEnd`/`trace` on the carve-out |
+| `RegExp.prototype` | 13/15 (87%) | ✅ `compile` is Annex B in-place re-initialization (Phase 8); `unicodeSets` is unreachable under `lib: ["es2023"]` |
+| `Date` | 2/2 + 38/43 | ✅ slices A and B; the five left are ICU string forms -- the feature build, a flag rather than a phase |
+
+The dashboard counts MEMBERS, not blockers, which is why three of those five rows sit below 100%
+and the phase still exits (plan-notes 125). Every residue names an owner, and as of Task 4.7 that
+claim is machine-checked rather than asserted: `tests/unit/phases.test.ts` fails the build if any
+not-yet anywhere under `src/` names a phase this file marks complete -- which, from this commit, includes
+Phase 4 itself. `src/support/phases.ts` gained `4` in the same change, and the test's fourth case
+pins the two together.
+
+**Full evidence** (`pnpm run ci`, exit 0, Node v26.7.0):
+
+```
+biome check          Checked 65 files. No fixes applied.
+jscpd                58 clones · 0.8% duplication
+node --test          ℹ tests 319   ℹ pass 319   ℹ fail 0
+runtime              print corpus matches Node
+subset               272 fixtures — 209 passed, 63 expected-fail, 0 failed
+golden               93 fixtures — 93 passed, 0 failed
+builtins             207/238 surface members landed (87%), +5 nondeterministic
+leak                 10M objects — peak RSS 3024 KB of a 65536 KB cap, 18 samples, plateau
+ASan/UBSan           print corpus matches Node; golden 93 fixtures — 93 passed, 0 failed
+```
+
+**Next:** Phase 5 (§8) -- `js` mode, and the language surface Phases 3 and 4 deferred.

@@ -229,177 +229,39 @@ stay here so `§6 Task 3.N` references resolve:
 
 ---
 
-## 7. Phase 4 — Runtime v1 (C11; parallel with Phase 3)
+## 7. Phase 4 — Runtime v1 ✅ COMPLETE (2026-09-01)
 
-~~**Task 4.1 — Objects.**~~ ✅ Landed 2026-09-01. Evidence: [done.md](done.md) → Phase 4,
-Task 4.1. The last slice was the **array with properties** the phase exit criterion named:
-`JSRTArray` carries the dynamic object's property table, and `RegExp.prototype.exec` and
-`String.prototype.match` landed on it (plan-notes 120).
+All seven tasks landed and the phase's exit criterion — added mid-flight because the phase had a
+Check but no scope boundary (plan-notes 116) — is met on every bullet. `pnpm run ci` green:
+319 unit tests, 272 subset fixtures (209 passed, 63 expected-fail, 0 failed), **93 golden fixtures
+byte-for-byte against the pinned Node under both the release and the ASan/UBSan runtime**, the
+10M-object leak loop plateauing at 3.0 MB RSS, and the builtins dashboard rendering.
+**Evidence: [done.md](done.md) → Phase 4.** Titles stay here so `§7 Task 4.N` references resolve:
 
-**Task 4.2 — Builtins, driven by golden tests.** `Math`, `JSON`, `String.prototype` (~30 hot methods), `Array.prototype` (same), `Object`, `Map`, `Set`, `console`. A builtin counts as implemented when ≥1 golden test exercises it and matches Node. Coverage table `tests/golden/builtins_coverage.json`, rendered in CI (Porffor-style). New builtins enter via `SUBSET.md` + tests first, never ad hoc.
-Until this task lands, every global except `console.log` and `undefined` is deferred at the **gate** with a `not-yet` naming this phase — `String`, `NaN`, `Math`, `globalThis` and the rest used to be accepted and then hit `STA4035` in the lowering, which is an internal error raised by legal source (plan-notes 61). The three spellings that only mention a global name (a type position, a property name, and `console` in `console.log`) stay accepted, pinned by `tests/unit/gate.test.ts`.
+- ~~**Task 4.1** — Objects.~~ ✅ — shapes, inline caches, and the array-with-properties slice.
+- ~~**Task 4.2** — Builtins, driven by golden tests.~~ ✅ — `Math`, `JSON`, `String.prototype`,
+  `Array.prototype`, `Object`, `Map`, `Set`, `console`, `Date`. A builtin counted as implemented
+  when ≥1 golden test exercised it and matched Node, with a **determinism carve-out** for members
+  that cannot match by construction (`Math.random`, `Date.now`, zero-argument `new Date()`,
+  `console.time`/`timeEnd`/`trace`), which prove by shape assertion in `tests/unit/` instead.
+- ~~**Task 4.3** — RegExp.~~ ✅ — QuickJS-NG `libregexp` vendored; `libunicode` paid `toUpperCase`/
+  `toLowerCase`/`normalize`'s debt with it.
+- ~~**Task 4.4** — Intl/ICU.~~ ✅ — a feature build (`make -C runtime intl`), off by default.
+- ~~**Task 4.5** — GC hygiene tests.~~ ✅
+- ~~**Task 4.6** — `async`/`await`.~~ ✅ — generators split off to Phase 5 step 8, which owns the
+  iterator protocol they actually wait on.
+- ~~**Task 4.7** — Audit every not-yet phase pointer.~~ ✅ — and it is why this phase could close
+  honestly: 165 sites re-derived, 70 of which named a phase that had been complete for six days,
+  every one now naming the phase that owns its blocker, with `tests/unit/phases.test.ts` failing
+  the build if that ever stops being true (plan-notes 136, §15 rule 9).
 
-**In progress.** The landed slices — Math, String, Array, console, Object, JSON, callback
-methods, `Map`/`Set` and the ES2025 set operations — are recorded in [done.md](done.md) → Phase 4,
-Task 4.2. `pnpm run test:builtins` reports **166/196** deterministic surface members, with Math
-42/42 plus one nondeterministic proof for `Math.random`, `String.prototype` at 31/32 and
-`RegExp.prototype` at 13/15.
-**`Date` is DONE for everything this phase owns.** Slice A landed 2026-09-01 (plan-notes 132) and
-slice B the same day (plan-notes 133): `Date` 3/3, `Date.prototype` 38/43. The five that remain are
-the ICU-dependent string forms — `toString`/`toTimeString`, whose output appends the host zone's
-long display name, and the three `toLocale*` — all Task 4.4's feature build, none of them blockers.
-Records in [done.md](done.md). `STA1210` is now a RESIDUE code naming one member at a time, the
-shape `STA1211` has for RegExp. (`console.table` and the carve-out trio landed 2026-09-01; record
-below.)
-`Object` reads 7/13 on the dashboard but is DONE for everything this phase owns: `assign` landed
-2026-09-01 and the other five each wait on a mechanism Phase 4 does not build — `freeze`/`isFrozen`
-on runtime-raised exceptions (Phase 5 step 11), `create`/`defineProperty`/`getPrototypeOf`/
-`setPrototypeOf` on the prototype surface (Phase 8, `STA1204`). See plan-notes 125; the dashboard
-counts members, not blockers, so a percentage below 100 is not by itself open work. `RegExp.prototype` is DONE for everything this phase owns — the eleven data
-properties and `toString` landed 2026-09-01 (plan-notes 121), leaving `compile` (Annex B legacy,
-variadic arity) and `unicodeSets` (declared in lib.es2024; this project pins `lib: ["es2023"]`, so
-the checker refuses the read), neither of which is a Phase 4 blocker.
-
-**`Date` joins this task's list (2026-09-01, plan-notes 116).** The list above enumerates `Math`,
-`JSON`, `String.prototype`, `Array.prototype`, `Object`, `Map`, `Set` and `console` — not `Date` —
-while `STA1210`'s note in `docs/DIAGNOSTICS.md` claimed "Phase 4 Task 4.2" as its owner. It was
-owned by nobody, and it is not on the dashboard at all. It is a builtin and it is Phase 4; it is
-named here now.
-
-**Determinism carve-out (2026-09-01, plan-notes 116).** This task's bar — "a builtin counts as
-implemented when ≥1 golden test exercises it and matches Node" — is UNMEETABLE BY CONSTRUCTION for a
-member whose result is nondeterministic. `Math.random`, `Date.now()` and zero-argument `new Date()`
-cannot match Node byte-for-byte, ever. Left as written, the dashboard counts them missing forever
-and `Math` can never exceed 42/43, so the phase exit below could never be reached. These members
-land with a different proof — a range/property assertion in `tests/unit/`, or the runtime print
-corpus — and `builtins_coverage.json` marks them `nondeterministic` rather than counting them
-against coverage. The rule is unchanged for every member that CAN be pinned to Node; this is a
-carve-out for members the harness cannot express, not a lowered bar.
-
-**Steps — `Date` (added 2026-09-01; evidence audit in plan-notes 127).** The surface splits by
-what makes each member deterministic, and the slices land in this order:
-
-~~1. `docs/SUBSET.md` + decision tests first.~~ ~~2. Gate.~~ ~~3. HIR + frontend types.~~
-~~4. Runtime.~~ ~~5. Printing + JSON.~~ ~~6. Emitter.~~ ~~7. Slice A goldens + dashboard.~~
-✅ Steps 1–7 landed 2026-09-01 — slice A, the TZ-independent core, plus `Date.now` and
-zero-argument `new Date()` under the determinism carve-out. Evidence: [done.md](done.md) →
-Phase 4, Task 4.2. Four places the tree corrected these steps (the zero-argument constructor needed
-no node kind, `Date.UTC` takes 1–7 args rather than 2–7, the carve-out marker had to follow its
-proof, and a `STA4085` panic-string collision) are in plan-notes 132. Steps 8 and 9 remain open:
-
-~~8. Slice B.~~ ~~9. Docs sync.~~ ✅ Landed 2026-09-01 — the local-time half behind a `TZ=UTC`
-pin on the golden runner, plus `toDateString`, which turned out not to need ICU at all. Evidence:
-[done.md](done.md) → Phase 4, Task 4.2 (Date slice B), and plan-notes 133.
-
-**`console.table` and the carve-out trio — ✅ landed 2026-09-01, in a same-day race with this
-plan.** The step list that stood here was overtaken the day it was written: a parallel session
-landed `console.table` as `0ef7724` (measured against the pinned Node first, wcwidth-style
-display-width handling included — plan-notes 128) and `time`/`timeEnd`/`trace` under the
-determinism carve-out with `tests/unit/console-carveout.test.ts` as proof (plan-notes 129). The
-exit-criterion `console` bullet below is ✅ MET at `12/12 (100%) [+3 nondeterministic]`. Two
-residues remain open elsewhere, both flagged before the race resolved: the optional `properties`
-second argument (refused not-yet; joins Task 4.7's refinement group for an owner) and the
-`Map`/`Set` tabular form (deferred by name, `STA1214` — Node draws it as a different table, not a
-wider one).
-
-~~**Task 4.3 — RegExp.**~~ ✅ Landed 2026-08-30. Evidence: [done.md](done.md) → Phase 4,
-Task 4.3. The remaining `exec`/`match` surface is owned by Task 4.1's array-properties work; the
-iterator-shaped `matchAll` belongs to Phase 5 step 8.
-
-~~**Task 4.4 — Intl/ICU.**~~ ✅ Landed 2026-08-30. Evidence: [done.md](done.md) → Phase 4,
-Task 4.4.
-
-~~**Task 4.5 — GC hygiene tests.**~~ ✅ Landed 2026-08-30. Evidence: [done.md](done.md) →
-Phase 4, Task 4.5.
-
-~~**Task 4.6 — `async`/`await` (generators deferred to Phase 5).**~~ ✅ Landed 2026-08-30.
-Evidence: [done.md](done.md) → Phase 4, Task 4.6. Generators are Phase 5 step 8's iterator
-protocol work, not an unfinished part of this task.
-
-~~**Task 4.7 — Audit every not-yet phase pointer.**~~ ✅ Landed 2026-09-01. Evidence:
-[done.md](done.md) → Phase 4, Task 4.7. Step 1's recount rewrote the task: the inventory was **165**
-sites, not 63, and **70 of them named Phase 3, complete since 2026-08-30** — so the audit written to
-end this defect would have closed without touching a single one of them (plan-notes 136). The
-residue's owner is §8 Phase 5 **step 12**, added in the same change; the rule the task establishes
-is now §15 rule 9; and `tests/unit/phases.test.ts` fails the build if any not-yet ever names a
-completed phase again.
-
-**Rule this task established:** moved to **§15 rule 9** on 2026-09-01, where it applies to the whole
-project rather than to the block that happened to introduce it — living here was part of why it was
-never enforced (plan-notes 136).
-
-**Check:** runtime unit tests + ASan/UBSan clean + the leak test; builtins dashboard renders in CI; an async golden test (`await` chain + `Promise.all`) matches Node.
-
-**Phase exit criterion (added 2026-09-01, plan-notes 116).** This phase had a Check but no scope
-boundary, so "is Phase 4 done?" was unanswerable — and four not-yet codes named it as their
-deliverer while it was closing. The boundary is now explicit. **Phase 4 exits when the dashboard
-shows every surface member whose blocker Phase 4 OWNS:**
-
-- **`Math`** — all deterministic members are now covered by fdlibm and the dashboard; `Math.random`
-  is covered by the determinism carve-out proof.
-- **`Object`** — `assign` only (landed 2026-09-01; two-argument form over a growable target).
-  Three members left this bullet on 2026-09-01 (plan-notes 125) because their blockers are not
-  shape work and Phase 4 does not own them:
-  - `freeze`/`isFrozen` → **Phase 5, with step 11.** A write to a frozen object is a `TypeError`
-    in strict mode, which every module here is. The runtime cannot raise one: `jsrt_throw` sets a
-    pending cell that only GENERATED code reads, always paired with a `goto` to a landing pad the
-    library does not have. Step 11 already needs exactly this mechanism ("a handler's throw must
-    become a rejection, which needs a runtime-level catch around user code"), and `docs/SUBSET.md`
-    line 139 had recorded the same constraint independently. Aborting instead would turn a legal
-    program into a crash; ignoring the write is sloppy-mode semantics this language does not have.
-  - `create` → **Phase 8, with the prototype machinery.** `lib.es5.d.ts` types it `any`, which ts
-    mode bans outright, and its only in-subset spelling — `Object.create(null)` for a
-    prototype-less map — asks for something every object here already is. It is `STA1204`'s
-    surface, not a gap.
-  - `defineProperty`, `getPrototypeOf`, `setPrototypeOf` were already assigned to Phase 8 by
-    `STA1204`; they are listed here only so the bullet accounts for all 13 members.
-- **`console`** — `table` only. `time`, `timeEnd` and `trace` move to the **determinism carve-out**
-  above (corrected 2026-09-01, plan-notes 124): `time`/`timeEnd` print an ELAPSED DURATION and
-  `trace` prints a STACK, so "≥1 golden test matches Node byte-for-byte" is unmeetable by
-  construction for all three — the same defect the carve-out already fixed for `Math.random`, left
-  standing here because the criterion was written from the missing-members list rather than from
-  the reasons. `done.md` had already recorded them as "deferred, and for a reason that will not
-  change". Left as written, Phase 4 could never exit. They land with a different proof — a shape
-  assertion in `tests/unit/` (the label is echoed, a duration is printed, the unit is `ms`) — and
-  are marked `nondeterministic` on the dashboard. `table` is NOT carved out: its column layout is a
-  pure function of the data, and it **landed 2026-09-01** as ordinary Phase 4 work — the golden
-  fixtures hold Node's grid byte-for-byte in both modes. The Map/Set form is deferred by name
-  (`STA1214`): Node draws it with an `(iteration index)` column, and a Map with a second `Key`
-  column, which is a different table rather than a wider one.
-  ✅ **MET (2026-09-01).** All three carve-out members landed the same day with
-  `tests/unit/console-carveout.test.ts` as their proof (plan-notes 129), and the dashboard reads
-  `console: 12/12 (100%) [+3 nondeterministic]`.
-- **`RegExp.prototype`** — ✅ **met.** The array-with-properties half landed with Task 4.1
-  (plan-notes 120: `exec`, `String.prototype.match`), and the DATA property surface with Task 4.2
-  (plan-notes 121: the eleven properties of §22.2.6 plus `toString`, on a `REGEXP_FIELDS` table
-  beside the method table). 13/15. The two that remain are NOT this phase's: `compile` is Annex B
-  §B.2.4 legacy whose optional second argument a fixed-arity op table cannot express, and
-  `unicodeSets` is unreachable while `tsconfig.json` pins `lib: ["es2023"]` — the property is
-  declared in lib.es2024, so the checker refuses the read before the gate sees it, and raising
-  `lib` admits every other ES2024 addition at the same time. `String.prototype`'s iterator-shaped
-  `matchAll` remains Phase 5's.
-- **`Date`** — owned by Task 4.2's Date steps above, per-member: **slice A** ✅ MET
-  2026-09-01 (TZ-independent core — epoch/ISO/Date constructors, the two time-value reads, the 8
-  UTC getters, the 7 UTC setters, `toISOString`/`toJSON`/`toUTCString`, `Date.UTC`, ISO-only
-  `Date.parse`, plus `Date.now` and zero-argument `new Date()` under the determinism carve-out;
-  record in [done.md](done.md), plan-notes 132) and **slice B** ✅ MET 2026-09-01 (the 8 local
-  getters, `getTimezoneOffset`, the 7 local setters, the component constructor and `toDateString`,
-  behind the golden runner's `TZ=UTC` pin, with every zone-dependent claim proved in
-  `tests/unit/date-local.test.ts` under a non-UTC `TZ`; record in [done.md](done.md),
-  plan-notes 133). 38/43. **`Date` is DONE for everything this phase owns.**
-  `toString`/`toTimeString`, the call form `Date()`, and `toLocale*` are the intl
-  feature build's (ICU CLDR timezone/locale names — Task 4.4's model, non-blocking — and the first
-  two for a measured reason: their output appends the zone's LONG display name, which libc's `%Z`
-  cannot produce, plan-notes 133);
-  `[Symbol.toPrimitive]` is out of surface lists by standing rule; `toISOString` on an Invalid
-  Date needs a runtime-raised `RangeError` — Phase 5 step 11's mechanism, panic until then,
-  documented in `SUBSET.md`.
-
-Everything else still missing belongs to a later phase and is named with its owner in §8: the
-`keys`/`values`/`entries` triple, `for`-`of` over non-arrays, `function*`, and
-`String.prototype.matchAll` (it answers an **iterator**, which is why it splits from `match`) go to
-Phase 5 step 8; `Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)` to step 11
-under `STA1216`; the descriptor/prototype surface to Phase 8.
+**What is still missing from the dashboard is missing on purpose**, and each residue names its
+owner: `Object`'s `freeze`/`isFrozen` and the `Promise` prototype → Phase 5 step 11;
+`keys`/`values`/`entries`, `for`-`of` over non-arrays, `function*` and `String.prototype.matchAll`
+→ Phase 5 step 8; the descriptor/prototype surface and `RegExp.prototype.compile` → Phase 8; the
+five ICU-dependent `Date` string forms → the intl feature build, which is a flag rather than a
+phase. The dashboard counts MEMBERS, not blockers, so a percentage below 100 is not open work
+(plan-notes 125).
 
 ---
 
@@ -1187,3 +1049,4 @@ Standing practices:
 - **v2.7** (2026-09-01): **every remaining phase gained numbered Steps** (plan-notes 131) — Phase 5's eleven steps, Phase 6's three tasks, Phase 7's three tasks plus a phase preamble and an explicit v0 out-of-scope table, and Phase 8's nine. Written against the live tree rather than from the task lines, which changed several of them: Phase 5 step 1's substrate (`allowJs`/`checkJs` by mode, HIR `provenance`, `explain`'s per-function print) is already landed, so the step is now the `inferred` grade alone; step 5's boundary-trap proof cannot be a Node-diff golden, because Node runs a lying-JSDoc program happily — it needs an expected-stderr harness mode; step 11's mechanism is not a new one but a subsection of `docs/VALUE.md` §4.9's existing pending-cell protocol — a runtime-side call that checks `jsrt_pending()` and hands the builtin a completion value, which is precisely the gap `STA1216`'s row already names — and it carries an unlock sweep (`Object.freeze`/`isFrozen`, `toISOString` on an Invalid Date, every `SUBSET.md` row that reads "the spec throws, which builtins cannot raise yet"). Phase 6 is framed by its one failure mode — a green signal that proves less than it appears to — so Test262 skips are mapped from `SUBSET.md` rows with an unmapped feature tag a hard error, the corpus is fetched rather than vendored (~50k files, and no network here — plan-notes 28) with a missing corpus SKIPPING so `pnpm run ci` stays offline-runnable, the fuzzer is type-directed and seeded (no clock, no `Math.random`) so a finding replays from `--seed=N`, and Task 6.3 extends the existing `tests/bench/record.ts` instead of replacing it. Phase 7 gained the four things that make FFI four weeks instead of one line (memory, UTF-16 strings, C error codes, direction asymmetry), a concrete ABI table, and the two questions nobody can leave implicit: which side owns a pointer after a call, and what a C caller sees when TS throws. Phase 8's first two steps are not implementation — the human gate's evidence, then the marshaling design doc — and its vendoring step must match the `v0.16.2` commit `runtime/vendor/quickjs-ng/VENDOR.md` already pins, since the interpreter ships its own `libregexp` and a second copy is duplicate symbols at link time.
 - **v2.8** (2026-09-01): **Phase 0's Check restated so it can pass more than once** (plan-notes 135). The gate itself is unchanged — `NICHE.md` was approved by the owner on 2026-09-01 and its commit is tagged `phase-0-approved`, which supersedes v2.1's "Phase 0 remains open" above — but the Check was written as `git describe --tags --exact-match HEAD`, which asks whether HEAD *is* the approval commit and therefore answered `fatal: no tag exactly matches` from the next commit onward: a closed gate reporting itself open at every later HEAD, in the one section §15.1 makes every phase point at. It now asserts the durable fact (`git cat-file -e phase-0-approved:NICHE.md`, with the added-in-that-commit form as the stronger check), and §15 rule 2 gained the general form — a Check must stay re-runnable at any later HEAD, because an assertion *about* HEAD is a point-in-time observation, not a Check.
 - **v2.9** (2026-09-01): **the not-yet audit's own inventory was audited, and it was 2.6× short** (plan-notes 136). Task 4.7's step 1 says to re-derive the site list at execution HEAD; parsing `gate.ts` with the `typescript` API instead of grepping it finds **165** `notYet`/`dateNotYet` sites, not 63 — and 70 of them name **Phase 3, complete since 2026-08-30**, so `rest parameters are not yet supported; planned for Phase 3` is what the compiler prints today. The audit missed them because it asked "which sites name phase 4?" — a question about the phase that happened to be open — while the rule the task itself establishes implies the general one, "does any site name a completed phase?". Task 4.7's inventory paragraph is replaced by the parsed table, step 1 now carries the general question, and step 6 gains two groups (the 70-site ladder residue; the 10 `dateNotYet` sites, whose blocker is the intl feature BUILD and so is step 3's `STA1215` question again, not a phase). §8 Phase 5 gains **step 12**, which owns the residue — six construct families in landing order with their own Check — because it is `ts`-mode static surface §1.1 promises will compile and no phase owned it; deliberately not a new phase, since §15.3 forbids the renumbering that would break `plan.md §N` citations. Phase 5's title gained "3 and", and its bucket warning — previously a feeling — became a named split trigger.
+- **v3.0** (2026-09-01): **Phase 4 closed.** Task 4.7 was its last open task, and closing it is what made the phase closable honestly -- 165 not-yet sites re-derived, every one now naming the phase that owns its blocker, and `tests/unit/phases.test.ts` failing the build if that stops being true. §7 compresses to a completed-phase stub on §6's model (task numbers and titles stay, so `§7 Task 4.N` citations resolve); `done.md` gains the exit criterion answered bullet by bullet with the dashboard beside it, and its Phase 4 heading now reads ✅ COMPLETE, which `src/support/phases.ts` mirrors in the same change because the test pins the two together. Three of the five exit bullets sit below 100% on the dashboard and the phase still exits: the dashboard counts MEMBERS, not blockers, and every residue names an owner (plan-notes 125). Phase 5 is now the open phase.

@@ -72,8 +72,8 @@ diagnostic at all.
     "code": "STA1201",
     "class": "not-yet",
     "mode": "ts",
-    "message": "async/await is not yet supported; planned for Phase 4",
-    "phase": 4
+    "message": "generators are not yet supported; planned for Phase 5 (the iterator protocol)",
+    "phase": 5
   }
 ]
 ```
