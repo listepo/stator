@@ -443,9 +443,9 @@ void test('String.prototype ops in the landed set are accepted', () => {
 void test('String.prototype residue stays deferred', () => {
   // A method as a VALUE: there is no bound-function object to hand out yet.
   assert.deepEqual(codesFor('const f = "abc".trim;\nconsole.log(f());'), ['STA1214']);
-  // A member outside the landed set: `match` answers an array WITH properties, which the array
-  // representation has no room for yet.
-  assert.deepEqual(codesFor('console.log("abc".match(/b/));'), ['STA1214']);
+  // A member outside the landed set. `match` is no longer one -- it landed with Task 4.1's array
+  // with properties -- but `matchAll` still is, because it answers an ITERATOR.
+  assert.deepEqual(codesFor('console.log("abc".matchAll(/b/g));'), ['STA1214']);
   // split's limit argument changes the element-count contract; deferred with the rest.
   assert.deepEqual(codesFor('console.log("a,b".split(",", 1));'), ['STA1214']);
   // A REPLACEMENT that is a regexp is not a pattern: only argument zero takes one.
@@ -777,9 +777,25 @@ void test('regexp literals and test are accepted, the rest of the prototype defe
     ),
     [],
   );
-  // Everything else on the prototype -- methods that answer an array with properties, and the
-  // data properties the object model has no node for -- is deferred under STA1211.
-  assert.deepEqual(codesFor('console.log(/x/.exec("x"));'), ['STA1211']);
+  // Task 4.1, array-with-properties slice: `exec` landed once an array could carry the
+  // `index`/`input`/`groups` a match hangs off its result.
+  assert.deepEqual(codesFor('console.log(/x/.exec("x"));'), []);
+  // The four names a match exposes, off a receiver the checker narrowed and the HIR types Unknown.
+  assert.deepEqual(
+    codesFor('const m = /x/.exec("x");\nif (m !== null) { console.log(m.index); }'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('const m = /x/.exec("x");\nif (m !== null) { console.log(m[0]); }'),
+    [],
+  );
+  // Anything else on a match waits for it to have an HIR type of its own -- Phase 5's union work.
+  assert.deepEqual(
+    codesFor('const m = /x/.exec("x");\nif (m !== null) { console.log(m.slice(0)); }'),
+    ['STA1214'],
+  );
+  // The DATA properties the object model has no node for stay deferred under STA1211.
+  assert.deepEqual(codesFor('const re = /x/;\nconsole.log(re.source);'), ['STA1211']);
   assert.deepEqual(codesFor('const re = /x/;\nconsole.log(re.source);'), ['STA1211']);
   assert.deepEqual(codesFor('const re = /x/g;\nconsole.log(re.lastIndex);'), ['STA1211']);
   // A method as a VALUE is refused for the reason every other prototype method is: nothing here
@@ -799,6 +815,10 @@ void test('the regexp forms of the pattern-taking string methods are accepted', 
   assert.deepEqual(codesFor("console.log('a1b'.search('1'));"), ['STA1214']);
   // A regexp in a REPLACEMENT position is not a pattern; the string forms are unchanged.
   assert.deepEqual(codesFor("console.log('a1b'.replace('1', '#'));"), []);
-  // `match` is not in the op table at all: it answers an array with properties.
-  assert.deepEqual(codesFor("console.log('a1b'.match(/\\d/));"), ['STA1214']);
+  // Task 4.1, array-with-properties slice: `match` joined the table once an array could carry the
+  // `index`/`input`/`groups` a non-global match hangs off its result.
+  assert.deepEqual(codesFor("console.log('a1b'.match(/\\d/));"), []);
+  // `matchAll` did NOT: it answers an ITERATOR, which is Phase 5 step 8's protocol, and that is
+  // the whole reason the two split.
+  assert.deepEqual(codesFor("console.log('a1b'.matchAll(/\\d/g));"), ['STA1214']);
 });

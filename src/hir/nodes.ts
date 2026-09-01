@@ -905,6 +905,36 @@ export const REGEXP_OPS = {
 
 export type RegExpOperation = keyof typeof REGEXP_OPS;
 
+/** What a MATCH ARRAY -- the answer of `exec` and of a non-global `match` -- exposes beyond its
+ * elements. `index`, `input` and `groups` are ECMA-262 §22.2.7.2's properties of the result, which
+ * is why a jsrt array has a property table at all; `length` is the array's own and reads through
+ * the array header, not the table. The result types are the RUNTIME's, not a user annotation: this
+ * compiler built the value, so there is no claim here for a boundary check to doubt.
+ *
+ * `groups` is Unknown because it is an object or `undefined` depending on the pattern, which is a
+ * union the HIR does not model. */
+export const MATCH_FIELDS = {
+  index: 'number',
+  input: 'string',
+  groups: 'unknown',
+  length: 'number',
+} as const satisfies Record<string, 'number' | 'string' | 'unknown'>;
+
+export type MatchField = keyof typeof MATCH_FIELDS;
+
+/** `m.index` and its three siblings, where `m` is the match a `RegExp.prototype.exec` or a
+ * `String.prototype.match` answered.
+ *
+ * The target's HIR type is Unknown -- `exec` answers a match OR null, and the HIR has no union --
+ * so the CHECKER is what proved this receiver is a match, exactly as it proves a string receiver
+ * for a StringOp. The runtime settles it a second time: a wrong tag reaching `jsrt_get_prop` is a
+ * loud panic, never a silent misread. */
+export interface MatchRead extends Node {
+  readonly kind: 'match-read';
+  readonly field: MatchField;
+  readonly target: Expression;
+}
+
 export interface RegExpOp extends Node {
   readonly kind: 'regexp-op';
   readonly op: RegExpOperation;
@@ -913,6 +943,7 @@ export interface RegExpOp extends Node {
 }
 
 export type Expression =
+  | MatchRead
   | NumberLiteral
   | StringLiteral
   | BooleanLiteral

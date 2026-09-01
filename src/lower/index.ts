@@ -13,6 +13,7 @@ import {
   isGlobalMath,
   isGlobalObject,
   isGlobalPromise,
+  isMatchReceiver,
   isRegExpReceiver,
   isStringReceiver,
   MATH_CONSTANTS,
@@ -62,6 +63,7 @@ import type {
   IndexAccess,
   InstanceOf,
   LogicalOp,
+  MatchField,
   MathMethod,
   MethodCall,
   Module,
@@ -87,6 +89,7 @@ import {
   ARRAY_OPS,
   CONSOLE_METHODS,
   isSetOperation,
+  MATCH_FIELDS,
   REGEXP_OPS,
   STRING_OPS,
 } from '../hir/nodes.ts';
@@ -1568,6 +1571,27 @@ function lowerExpression(
         args: [],
       };
       return size;
+    }
+  }
+
+  // `m.index`, `m.input`, `m.groups`, `m.length` -- the match array's own surface. It sits ahead of
+  // the `.length` arm below because a match's `.length` is an ARRAY length read through a receiver
+  // the HIR types Unknown, which that arm's array check would refuse.
+  if (ts.isPropertyAccessExpression(node) && isMatchReceiver(node.expression, checker)) {
+    const field = node.name.text;
+    if (Object.hasOwn(MATCH_FIELDS, field)) {
+      const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+      if (target === null) {
+        return null;
+      }
+      const result = MATCH_FIELDS[field as MatchField];
+      return {
+        kind: 'match-read',
+        type: result === 'number' ? H_NUMBER : result === 'string' ? H_STRING : hUnknown(false),
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        field: field as MatchField,
+        target,
+      };
     }
   }
 

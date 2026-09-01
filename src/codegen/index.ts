@@ -951,6 +951,8 @@ class Emitter {
       // jsrt_get_prop allocates nothing and runs no user code -- a chain walk and a load -- so
       // the dynamic read is as slot-free as the static one.
       case 'dyn-field-access':
+      // A match read is a property load or a header read -- same story, nothing allocated.
+      case 'match-read':
       // Same as a field read: the test is a pointer comparison against a static descriptor, with
       // nothing allocated between evaluating the target and using it.
       case 'instanceof':
@@ -1807,6 +1809,17 @@ class Emitter {
       // pending check -- and a missing property is `undefined`, not an error.
       case 'dyn-field-access': {
         return `jsrt_get_prop(${this.emitExpression(expr.target)}, ${cNameLiteral(expr.field)}, &${this.icSite()})`;
+      }
+
+      // `index`, `input` and `groups` are PROPERTIES of the match array, so they read through the
+      // same shape chain and the same per-site cache any dynamic property does. `length` is not:
+      // it is the array header's own field, and reading it through the table would answer
+      // `undefined`. A receiver that is not a match panics inside the runtime either way.
+      case 'match-read': {
+        const target = this.emitExpression(expr.target);
+        return expr.field === 'length'
+          ? `jsrt_array_length(${target})`
+          : `jsrt_get_prop(${target}, ${cNameLiteral(expr.field)}, &${this.icSite()})`;
       }
 
       case 'new': {

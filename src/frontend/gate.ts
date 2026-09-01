@@ -4,6 +4,7 @@ import {
   ARRAY_OPS,
   CONSOLE_METHODS,
   isSetOperation,
+  MATCH_FIELDS,
   REGEXP_OPS,
   STRING_OPS,
 } from '../hir/nodes.ts';
@@ -1437,6 +1438,23 @@ export function isRegExpReceiver(expression: ts.Expression, checker: ts.TypeChec
   return tsTypeToHType(checker.getTypeAtLocation(expression), checker).kind === 'regexp';
 }
 
+/** Is this the MATCH ARRAY `exec` or a non-global `match` answered?
+ *
+ * The checker is the only thing that can say so: the value's HIR type is Unknown, because the call
+ * answers a match OR null and the HIR has no union — so a `RegExpExecArray` here is a narrowing the
+ * checker performed and this compiler trusts, exactly as it trusts `isStringReceiver`. The lib
+ * declares two names for one runtime shape: `exec` answers the first, `String.prototype.match` the
+ * second, and they differ only in whether `index`/`input` are optional. */
+export function isMatchReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  const type = checker.getTypeAtLocation(expression);
+  const name = type.getSymbol()?.getName();
+  if (name !== 'RegExpExecArray' && name !== 'RegExpMatchArray') {
+    return false;
+  }
+  const declarations = type.getSymbol()?.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
 /** True for the `x` in `for (const x of a)`, which is the one declaration with no initializer that
  * is nonetheless definitely assigned. */
 function isForOfBinding(decl: ts.VariableDeclaration): boolean {
@@ -2124,6 +2142,15 @@ function gateMemberAccess(
         ? { kind: 'accept' }
         : notYet('a property the dynamic shape does not declare is not yet supported', 5);
     }
+    // `m.index` and its siblings. A match array is not an HIR array — its HIR type is Unknown —
+    // so it reaches here rather than the array arms above, and the four names below are the whole
+    // of what it exposes. Anything else on it (`m.map`, `m.slice`) waits for the match array to
+    // have an HIR type of its own, which is Phase 5's union work.
+    if (isMatchReceiver(access.expression, checker)) {
+      return Object.hasOwn(MATCH_FIELDS, access.name.text)
+        ? { kind: 'accept' }
+        : notYet(`${access.name.text} on a RegExp match is not yet supported`, 5);
+    }
     return notYet('property access is not yet supported', 3);
   }
   // A class name reaching here with no static of that name is a member the subset cannot resolve
@@ -2176,7 +2203,13 @@ function gateElementAccess(
   access: ts.ElementAccessExpression,
   checker: ts.TypeChecker,
 ): GateResult {
-  if (!checker.isArrayType(checker.getTypeAtLocation(access.expression))) {
+  if (
+    !checker.isArrayType(checker.getTypeAtLocation(access.expression)) &&
+    !isMatchReceiver(access.expression, checker)
+  ) {
+    // A match array indexes like any array at run time -- it IS a dense jsrt array, carrying a
+    // property table beside its elements -- so `m[0]` is admitted even though its HIR type is the
+    // Unknown a match-or-null has to be. The verifier already accepts an Unknown index target.
     return notYet('index access on a non-array is not yet supported', 5);
   }
   return { kind: 'accept' };

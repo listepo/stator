@@ -33,6 +33,7 @@ import {
   CONSOLE_METHODS,
   consoleEntryPoint,
   isSetOperation,
+  MATCH_FIELDS,
   REGEXP_OPS,
   SET_OPS,
   STRING_OPS,
@@ -1500,6 +1501,30 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4088',
           message: `Promise.${expr.method} takes an array, not '${hTypeName(expr.arg.type)}'`,
+        });
+      }
+      break;
+    }
+
+    // A match read's receiver is Unknown by construction, and the FIELD is what fixes the result
+    // type -- the StringOp rule with a one-entry table per field. A wrong receiver is settled by
+    // the runtime (jsrt_get_prop panics on a tag it cannot walk), never silently misread.
+    case 'match-read': {
+      verifyExpression(expr.target, problems, bindings);
+      const want = MATCH_FIELDS[expr.field];
+      if (expr.target.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'match-read',
+          span: expr.span,
+          code: 'STA4089',
+          message: `${expr.field} on a receiver of type '${hTypeName(expr.target.type)}', not the unknown a match-or-null is`,
+        });
+      } else if (expr.type.kind !== want) {
+        problems.push({
+          kind: 'match-read',
+          span: expr.span,
+          code: 'STA4089',
+          message: `${expr.field} results in '${hTypeName(expr.type)}', not '${want}'`,
         });
       }
       break;

@@ -63,7 +63,7 @@
     "indexOf": ["ts/string_builtins.ts", "js/string_builtins.js"],
     "lastIndexOf": ["ts/string_builtins.ts", "js/string_builtins.js"],
     "localeCompare": ["ts/intl_locale.ts", "js/intl_locale.js"],
-    "match": [],
+    "match": ["ts/regexp_match.ts", "js/regexp_match.js"],
     "matchAll": [],
     "normalize": ["ts/unicode_strings.ts", "js/unicode_strings.js"],
     "padEnd": ["ts/string_builtins.ts", "js/string_builtins.js"],
@@ -215,7 +215,7 @@
   "RegExp.prototype": {
     "compile": [],
     "dotAll": [],
-    "exec": [],
+    "exec": ["ts/regexp_match.ts", "js/regexp_match.js"],
     "flags": [],
     "global": [],
     "hasIndices": [],

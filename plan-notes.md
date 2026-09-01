@@ -2647,3 +2647,72 @@ variation test proves `Math.random` under the determinism carve-out.
 `tests/golden/builtins_coverage.json`; `pnpm run test:builtins` now reports **152/196** deterministic
 members (Math **42/42**, plus one carved proof). Phase 4 Task 4.2 remains open for Object, Date,
 console, and the RegExp array-properties blocker.
+
+## 120. Arrays carry a property table; `exec` and `match` land (2026-09-01)
+
+**The blocker, restated.** Phase 4's exit criterion named one item Phase 4 owned and had not built:
+an **array with properties**. ECMA-262 §22.2.7.2 builds `exec`'s answer as an array of the capture
+groups that ALSO carries `index`, `input` and `groups` on it, and `console.log` prints all three —
+`[ '12-ab', '12', 'ab', index: 0, input: '12-ab', groups: undefined ]`. A dense `JSRTArray` had
+`length`/`capacity`/`elements` and nothing else, so `exec`, `String.prototype.match` and the
+`STA1211` family sat behind it (`docs/SUBSET.md`, `src/frontend/gate.ts`).
+
+**Resolution: one property table, two receivers.** `JSRTArray` gained the dynamic object's own
+layout — `shape` + out-of-line `slots` + `slot_capacity` — and `jsrt_shape.c` now drives both
+through a `PropTable` view, so `m.index` resolves through the same shape chain and the same per-site
+inline cache an `o.x` does. Reuse, not a parallel implementation: a cache filled at one site stays
+valid however the value was built. `shape == NULL` is "no properties", so every ordinary array pays
+one NULL word and no allocation. `jsrt_dyn_property_count`/`_order` became
+`jsrt_shape_property_count`/`_order`, keyed off the shape alone, because the printer and
+`Object.keys` now have two kinds of owner to ask.
+
+**Three things the spec forced that a smaller slice would have got wrong.**
+
+1. **`groups` has a NULL PROTOTYPE**, and Node's inspector says so: `[Object: null prototype]
+   { year: '2026' }`. Printing it as a plain `{ … }` would have been a byte-for-byte golden failure
+   dressed up as a passing test, so a second class descriptor (`jsrt_class_null_proto`, identical to
+   `jsrt_class_dynamic` in every field that means anything and distinct by ADDRESS) marks them, and
+   `jsrt_is_dynobj` answers true for both.
+2. **A capture that did not participate is `undefined` IN the array**, not a missing element —
+   `group_value` already answered that for `split`, and the match array reuses it.
+3. **`lre_get_groupnames`' stride is `strlen(name) + LRE_GROUP_NAME_TRAILER_LEN`, which is 2**, not
+   1: each entry is a NUL-terminated name followed by a scope byte. Striding by one lands mid-entry
+   and silently loses every name after the first — caught only because the runtime print corpus
+   diffs against Node, which is exactly what that corpus is for.
+
+**The typing decision: the match is Unknown, and that is honest.** `exec` answers
+`RegExpExecArray | null`. The HIR has no union, so the node's type is Unknown and the verdict is
+`dynamic` — a match array is NOT given an HType. Two routes were considered and rejected:
+
+- Mapping `RegExpExecArray` to `array<string>` and letting the existing narrowing machinery insert a
+  boundary check requires adding `array` to `CHECKABLE` in `src/frontend/narrowing.ts`. That set is
+  deliberately `number | string | boolean` — a tag test cannot settle an element type, and admitting
+  arrays would silently widen EVERY `unknown → T[]` narrowing in the language (`JSON.parse(t) as
+  string[]` included), which is a soundness decision this task has no evidence to make.
+- Giving the match array its own HType kind spreads a fourth structural type through the type model,
+  the verifier and every pass, to describe one builtin's answer.
+
+What landed instead is the discipline every other builtin surface already follows: a closed table
+(`MATCH_FIELDS` in `src/hir/nodes.ts` — `index`, `input`, `groups`, `length`), one HIR node
+(`MatchRead`, verifier `STA4089`), and the CHECKER as the proof that a receiver is a match
+(`isMatchReceiver`, exactly how `isStringReceiver` proves a string). `m[0]` indexes it like the
+dense array it is — the verifier already admitted an Unknown index target; only the gate's
+`checker.isArrayType` test had to learn about it. No boundary check is inserted on these reads and
+none is owed: the RUNTIME produced the values, so there is no annotation crossing a boundary to
+doubt, and a receiver that is not a match panics inside `jsrt_get_prop` rather than being misread.
+
+**What this does NOT close.** `m.map`, `m.slice`, spreading a match — anything needing the match to
+have an HIR type — is `not-yet(STA1214, Phase 5)`, the union work. `STA1211` survives, with a
+narrower meaning: the DATA property surface (`source`, `flags`, `lastIndex`, `global`, …) plus
+`toString`/`compile`, which need reads the object model has no node for. `String.prototype.matchAll`
+stays Phase 5 step 8 — it answers an ITERATOR, which is why it split from `match` in the first place
+(plan-notes 116).
+
+**Check.** `pnpm run ci` — 297 unit tests, 257 subset fixtures (192 passed / 65 expected-fail / 0
+failed), 85 golden fixtures both modes, runtime print corpus matches Node, ASan/UBSan clean.
+`pnpm run test:builtins`: **154/196** (was 152), `String.prototype` 31/32 (only `matchAll` left),
+`RegExp.prototype` 2/15 — and the 13 remaining there are all data properties, none of them blocked
+on this.
+
+**plan.md edited:** yes — §7 Task 4.1 closed and moved to `done.md`; Task 4.2's residue and the
+phase exit criterion's RegExp bullet updated to say the blocker is gone.

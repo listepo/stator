@@ -331,6 +331,14 @@ function expressionHasUnknown(expr: Expression): boolean {
     // at the top of this function has already answered it for this node.
     case 'field-access':
       return expressionHasUnknown(expr.target);
+    // A match read is STATIC even though its target is Unknown: `exec` answers a match or null, so
+    // the receiver cannot be typed, but the read itself is one fixed runtime call whose result type
+    // this compiler chose. Recursing into the target would report every one of them dynamic and say
+    // the opposite of what the code does -- the `boundary-check` reasoning below, one node over.
+    // `groups` is the exception and needs no arm: its own type is Unknown, which the type check at
+    // the top of this function has already answered.
+    case 'match-read':
+      return false;
     case 'method-call':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
     // The answer is a boolean whatever the target is, so only the target can be dynamic.

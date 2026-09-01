@@ -426,6 +426,34 @@ have landed.*
 
 ✅ **Done.** The fixed-shape half landed with Phase 3 rung 6 (classes and literal layouts — a field read is an offset load, no IC). This task added the dynamic residue: `JSRTShape` transition chains off one root shape, `JSRTDynObject` with out-of-line doubling slot storage, and per-SITE `JSRTIC {shape, offset}` caches, filled only on hit — get-misses answer `undefined` and are never cached, and construction stores carry `NULL` caches because every one transitions (docs/VALUE.md §4.10, `runtime/src/jsrt_shape.c`, print corpus `print_shapes`). The frontend consumer: a literal whose CONTEXTUAL type (`getContextualType ?? getTypeAtLocation` — the annotation must win, since later reads go through it) has an optional property or index signature lowers to `DynObjectLiteral`, and property sites on such receivers to `DynFieldAccess`/`DynFieldAssignment`, all typed Unknown under verifier discipline `STA4059` (docs/HIR.md). Structural aliasing of a fixed object into a dynamic site aborts loudly at run time — `STA2004`, the third runtime-emitted diagnostic — rather than guess a slot (plan-notes 80). Check: `pnpm run ci` — 268 unit tests, subset 183 fixtures (112 passed / 71 expected-fail / 0 failed), golden 47/47 both runtimes, ASan/UBSan clean.
 
+**Array-with-properties slice landed (2026-09-01), closing this task.** `JSRTArray` gained the
+dynamic object's own property layout — `shape` + out-of-line `slots` + `slot_capacity`, with
+`shape == NULL` meaning "no properties" so every ordinary array pays one NULL word and no
+allocation — and `runtime/src/jsrt_shape.c` now drives a dynamic object and an array through ONE
+`PropTable` view, so `m.index` resolves through the same shape chain and the same per-site inline
+cache an `o.x` does (docs/VALUE.md §4.4). One thing needs this and it is not an optimization: a
+RegExp match, which ECMA-262 §22.2.7.2 builds as an array of the capture groups carrying `index`,
+`input` and `groups` as properties. `RegExp.prototype.exec` and `String.prototype.match` landed on
+it, along with the print form Node uses — properties after the elements, no element grouping, and
+`groups` printed as the NULL-PROTOTYPE object it is (`[Object: null prototype] { year: '2026' }`,
+marked by a second class descriptor `jsrt_class_null_proto` that differs from `jsrt_class_dynamic`
+by address alone). A capture that did not participate is `undefined` IN the array; `lastIndex`
+moves exactly as `test` moves it, because exec and test are one algorithm with two answers; `match`
+without `/g` IS exec and with `/g` answers the plain CreateArrayFromList list, or `null`.
+
+The typing decision is recorded in full in plan-notes 120: the match's HIR type is **Unknown** and
+its verdict `dynamic`, because `exec` answers a match OR null and the HIR has no union. Rather than
+add `array` to `CHECKABLE` (which would silently widen every `unknown → T[]` narrowing in the
+language) or give the match array an HType of its own, the surface follows the discipline every
+other builtin follows: a closed table (`MATCH_FIELDS` — `index`, `input`, `groups`, `length`), one
+HIR node (`MatchRead`, verifier `STA4089`), and the CHECKER as the proof that a receiver is a match
+(`isMatchReceiver`, exactly as `isStringReceiver` proves a string). `m[0]` indexes it like the dense
+array it is. Everything else on a match — `m.map`, `m.slice`, spreading it — is
+`not-yet(STA1214, Phase 5)`, the union work. Check: `pnpm run ci` — 297 unit tests, 257 subset
+fixtures (192 passed / 65 expected-fail / 0 failed), 85 golden fixtures both modes, runtime print
+corpus matches Node, ASan/UBSan clean; `pnpm run test:builtins` 154/196 with `String.prototype`
+31/32.
+
 ### Task 4.2 — Builtins (in progress; these slices landed)
 
 **In progress — Math slice landed (2026-08-30).** The dashboard exists and runs in CI (`tests/golden/builtins_coverage.json` + `pnpm run test:builtins`, which verifies every claim: fixture exists AND mentions the member). Math's exactly-specified operations are done — `abs ceil floor round sign trunc sqrt pow min max`, all 8 constants, plus the `NaN`/`Infinity` globals — as one `MathCall` HIR node (CollectionOp precedent, `STA4080` verifier discipline) and one ECMA-exact C function each in `runtime/src/jsrt_math.c`; constants fold to the pinned Node's own doubles at lowering (plan-notes 81). The approximated transcendentals (`sin`, `log`, `exp`, `random`, …) are deliberately deferred until fdlibm is vendored — golden tests are byte-for-byte against Node, whose answers come from V8's fdlibm, not the host libm.

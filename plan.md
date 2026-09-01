@@ -215,22 +215,22 @@ stay here so `§6 Task 3.N` references resolve:
 
 ## 7. Phase 4 — Runtime v1 (C11; parallel with Phase 3)
 
-**Task 4.1 — Objects.** Fixed-shape structs for compiled classes; a shape table (hidden classes) + per-site inline caches **only for the dynamic residue** — compiled-path property access is a struct field load, no IC. (Boa's lesson: ICs matter exactly where types are unknown.)
-
-**In progress.** The fixed-shape and dynamic-object slices are complete; their evidence is in
-[done.md](done.md) → Phase 4, Task 4.1. The remaining Phase-4 blocker is an **array with
-properties** for `RegExp.prototype.exec` and `String.prototype.match` (the phase exit criterion
-below); a dense `JSRTArray` cannot yet carry the match metadata.
+~~**Task 4.1 — Objects.**~~ ✅ Landed 2026-09-01. Evidence: [done.md](done.md) → Phase 4,
+Task 4.1. The last slice was the **array with properties** the phase exit criterion named:
+`JSRTArray` carries the dynamic object's property table, and `RegExp.prototype.exec` and
+`String.prototype.match` landed on it (plan-notes 120).
 
 **Task 4.2 — Builtins, driven by golden tests.** `Math`, `JSON`, `String.prototype` (~30 hot methods), `Array.prototype` (same), `Object`, `Map`, `Set`, `console`. A builtin counts as implemented when ≥1 golden test exercises it and matches Node. Coverage table `tests/golden/builtins_coverage.json`, rendered in CI (Porffor-style). New builtins enter via `SUBSET.md` + tests first, never ad hoc.
 Until this task lands, every global except `console.log` and `undefined` is deferred at the **gate** with a `not-yet` naming this phase — `String`, `NaN`, `Math`, `globalThis` and the rest used to be accepted and then hit `STA4035` in the lowering, which is an internal error raised by legal source (plan-notes 61). The three spellings that only mention a global name (a type position, a property name, and `console` in `console.log`) stay accepted, pinned by `tests/unit/gate.test.ts`.
 
 **In progress.** The landed slices — Math, String, Array, console, Object, JSON, callback
 methods, `Map`/`Set` and the ES2025 set operations — are recorded in [done.md](done.md) → Phase 4,
-Task 4.2. **Still open:** `Object` 6/13, `Date` (STA1210) has no implementation, plus the remaining
-console and RegExp array-property surfaces. The fdlibm Math slice is now covered by the dashboard;
-`pnpm run test:builtins` reports 152/196 deterministic surface members, with Math 42/42 plus one
-nondeterministic proof for `Math.random`.
+Task 4.2. `pnpm run test:builtins` reports **154/196** deterministic surface members, with Math
+42/42 plus one nondeterministic proof for `Math.random`, and `String.prototype` at 31/32.
+**Still open:** `Object` 6/13, `Date` (STA1210) has no implementation, the four remaining `console`
+members, and `RegExp.prototype`'s DATA properties (`source`, `flags`, `lastIndex`, `global`, …,
+plus `toString`/`compile`) — reads the object model has no node for. The array-with-properties
+blocker is gone: Task 4.1 closed it, and `exec`/`match` landed with it.
 
 **`Date` joins this task's list (2026-09-01, plan-notes 116).** The list above enumerates `Math`,
 `JSON`, `String.prototype`, `Array.prototype`, `Object`, `Map`, `Set` and `console` — not `Date` —
@@ -290,10 +290,12 @@ shows every surface member whose blocker Phase 4 OWNS:**
   `defineProperty`, `getPrototypeOf` and `setPrototypeOf` are **not** Phase 4 — they are the
   descriptor and prototype-chain surface `STA1204` already assigns to Phase 8.
 - **`console`** — `table`, `time`, `timeEnd`, `trace`.
-- **`RegExp.prototype` and `String.prototype.match`** — blocked on the one thing the gate already
-  names (`src/frontend/gate.ts`, the `STA1211` site): an **array with properties**, since `index`,
-  `input` and `groups` hang off a match and a dense `JSRTArray` cannot carry them. That is Task
-  4.1's fixed/dynamic hybrid extended to arrays, so it is Phase 4's own work.
+- **`RegExp.prototype`** — the array-with-properties half is DONE (Task 4.1, plan-notes 120):
+  `exec` and `String.prototype.match` landed, and `String.prototype` is now 31/32 with only the
+  iterator-shaped `matchAll` left to Phase 5. What remains under `STA1211` is the DATA property
+  surface — `source`, `flags`, `lastIndex`, `global`, `dotAll`, `ignoreCase`, `multiline`,
+  `sticky`, `unicode`, `unicodeSets`, `hasIndices` — plus `toString` and `compile`. These are reads
+  the object model has no node for, not a representation gap, and they are Task 4.2's work.
 - **`Date`** — newly owned by Task 4.2 above.
 
 Everything else still missing belongs to a later phase and is named with its owner in §8: the

@@ -1,10 +1,11 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1211
+// @verdict: dynamic
 // SUBSET.md: RegExp.prototype methods
-// `exec` answers an ARRAY WITH PROPERTIES -- `index`, `input` and `groups` hang off the match
-// array -- and a jsrt array is dense with no property table. Landing it would mean either a wrong
-// answer or a representation change, so it keeps the family's code until the object model grows.
+// `exec` answers the MATCH ARRAY: a dense array of the capture groups that ALSO carries `index`,
+// `input` and `groups` as properties, which is why a jsrt array has a property table at all
+// (Task 4.1). The verdict is DYNAMIC rather than static because the answer is a match OR null --
+// a union the HIR does not model -- so the binding is Unknown even though every read off it
+// lowers to a fixed runtime call.
 
 const re = /(h)(e)llo/;
 const found = re.exec('hello world');

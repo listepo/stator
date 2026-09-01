@@ -8,10 +8,11 @@
 
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import type { Declaration } from '../../src/hir/nodes.ts';
+import type { Declaration, Expression, MatchField } from '../../src/hir/nodes.ts';
 import type { HType } from '../../src/hir/types.ts';
+import { H_NUMBER, H_STRING, hUnknown } from '../../src/hir/types.ts';
 import { verifyHir } from '../../src/hir/verify.ts';
-import { assign, decl, makeModule, num, str } from './helpers.ts';
+import { assign, decl, makeModule, num, span, str } from './helpers.ts';
 
 void test('a well-typed declaration followed by a matching assignment verifies clean', () => {
   const problems = verifyHir(makeModule([decl('x', num(1)), assign('x', num(2))]));
@@ -44,4 +45,66 @@ void test('a statement with no HType at all is STA4020, caught before anything r
   const problems = verifyHir(makeModule([untyped]));
   assert.equal(problems.length, 1);
   assert.equal(problems[0]?.code, 'STA4020');
+});
+
+/* Task 4.1's match reads (STA4089). Both halves of the node's contract are checkable and neither
+ * is reachable from source: the gate proves the receiver with the CHECKER before the lowering ever
+ * builds one, so a bad node here means the lowering built it from something that is not a match. */
+
+function matchRead(field: MatchField, target: Expression, type: HType): Expression {
+  return { kind: 'match-read', type, span: span(1), field, target };
+}
+
+/** An expression standing in for `re.exec(s)`: a match or null, which the HIR calls Unknown. An
+ * indexed read is the shortest Unknown-typed expression the verifier accepts on its own -- under
+ * `noUncheckedIndexedAccess` that IS its type -- so the test needs no binding in scope. */
+function matchTarget(): Expression {
+  return {
+    kind: 'index-access',
+    type: hUnknown(false),
+    span: span(1),
+    target: {
+      kind: 'array-literal',
+      type: { kind: 'array', element: H_STRING },
+      span: span(1),
+      elements: [],
+    },
+    index: num(0),
+  };
+}
+
+void test('a match read off an Unknown receiver, typed by its field, verifies clean', () => {
+  assert.deepEqual(
+    verifyHir(
+      makeModule([
+        decl('a', matchRead('index', matchTarget(), H_NUMBER)),
+        decl('b', matchRead('length', matchTarget(), H_NUMBER)),
+        decl('c', matchRead('input', matchTarget(), H_STRING)),
+        decl('d', matchRead('groups', matchTarget(), hUnknown(false))),
+      ]),
+    ),
+    [],
+  );
+});
+
+void test('a match read whose receiver is concretely typed is STA4089', () => {
+  // A match-or-null cannot be an array: a node claiming one means the lowering built this read
+  // from a value the checker never proved was a match.
+  const target: Expression = {
+    kind: 'array-literal',
+    type: { kind: 'array', element: H_STRING },
+    span: span(1),
+    elements: [],
+  };
+  const problems = verifyHir(makeModule([decl('a', matchRead('index', target, H_NUMBER))]));
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0]?.code, 'STA4089');
+});
+
+void test('a match read whose result type is not the field’s is STA4089', () => {
+  // `index` is a number the RUNTIME produced -- there is no annotation here to be wrong about, so
+  // a string result is a lowering bug rather than a program making a claim.
+  const problems = verifyHir(makeModule([decl('a', matchRead('index', matchTarget(), H_STRING))]));
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0]?.code, 'STA4089');
 });

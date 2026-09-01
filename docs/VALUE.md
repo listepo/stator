@@ -369,11 +369,39 @@ surfaces after §12 lands. This is ASan/UBSan-tested per plan.md §6 Task 3.10.
 
 ## 4.4 Arrays, and the `console.log` shape they print in
 
-A `JSRTArray` is a header — `length`, `capacity`, `elements` — boxed under the `Array` tag. The
-elements are a SEPARATE allocation rather than a flexible array member, because the buffer grows
-and a flexible member cannot move without invalidating every `jsrt_value` that boxes the header.
-The header's address is therefore stable for the array's whole life, which is what lets the emitter
-hold an array in a frame slot across a push.
+A `JSRTArray` is a header — `length`, `capacity`, `elements`, plus the property table below —
+boxed under the `Array` tag. The elements are a SEPARATE allocation rather than a flexible array
+member, because the buffer grows and a flexible member cannot move without invalidating every
+`jsrt_value` that boxes the header. The header's address is therefore stable for the array's whole
+life, which is what lets the emitter hold an array in a frame slot across a push.
+
+### An array with properties
+
+An array can also carry NAMED properties, in the same `shape` + out-of-line `slots` layout §4.10
+gives a dynamic object. `shape == NULL` means "no properties", which is every ordinary array: the
+table costs one NULL word and no allocation until something writes to it.
+
+One thing needs this, and it is not an optimization: a **RegExp match**. ECMA-262 §22.2.7.2 builds
+the answer of `exec` as an array of the capture groups that ALSO has `index`, `input` and `groups`
+on it, and `console.log` prints them — `[ '12-ab', '12', 'ab', index: 0, input: '12-ab', groups:
+undefined ]`. A dense buffer alone cannot hold that, which is why `exec` and `String.prototype.match`
+were deferred until this landed (plan.md §7 Task 4.1).
+
+The consequences worth stating:
+
+- **Indices never enter the table.** They live in `elements`, and a match is dense over its groups,
+  so the two spaces do not overlap. `jsrt_shape_property_count` therefore counts named properties
+  only, and `console.log` prints them after the elements, as Node does.
+- **One code path, two receivers.** `jsrt_get_prop`/`jsrt_set_prop` walk a `PropTable` view that a
+  dynamic object and an array both expose (`runtime/src/jsrt_shape.c`), so `m.index` resolves
+  through the same shape chain and the same per-site inline cache an `o.x` does. A cache filled at
+  one site stays valid however the value was built.
+- **`groups` has a NULL PROTOTYPE**, and Node says so when it prints one: `[Object: null prototype]
+  { w: 'a' }`. The layout is a dynamic object's exactly; a second class descriptor
+  (`jsrt_class_null_proto`) is the only difference, and it exists so the printer can tell them apart
+  by pointer. `jsrt_is_dynobj` answers true for both.
+- **Grouping is off** for an array with properties, the rule Node applies to objects: its
+  `groupArrayElements` is reached only for array-like output.
 
 Two ceilings are deliberate and recorded rather than hidden:
 
