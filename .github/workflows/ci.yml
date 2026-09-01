@@ -80,14 +80,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run test:subset
-      # These two unit files compile and execute native binaries, so they need
-      # the Unix runtime archive. Windows still exercises every frontend-only
-      # test through typecheck and the subset runner above.
-      - name: Native-dependent unit tests
+      # A handful of unit tests compile and execute a native binary, so they need the archive the
+      # Unix Makefile builds. Windows has no such toolchain, so those tests skip THEMSELVES there
+      # (`NATIVE_ONLY` in tests/unit/helpers.ts) and the rest of the file still runs -- which is
+      # why `pnpm run test` below is unconditional and only this build step is gated.
+      - name: Build runtime archive
         if: runner.os != 'Windows'
-        run: |
-          pnpm run runtime
-          pnpm run test
+        run: pnpm run runtime
+      - run: pnpm run test
 
   # The C runtime and everything that links it. Unix only: the runtime's make/clang toolchain is
   # not ported to Windows, and pretending otherwise with a red job helps nobody.

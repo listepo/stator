@@ -15,33 +15,37 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { compileAndRunLines } from './helpers.ts';
+import { compileAndRunLines, NATIVE_ONLY } from './helpers.ts';
 
-test('Date.now reads the wall clock: this era, whole milliseconds, never backwards', () => {
-  const out = compileAndRunLines(
-    `
+test(
+  'Date.now reads the wall clock: this era, whole milliseconds, never backwards',
+  NATIVE_ONLY,
+  () => {
+    const out = compileAndRunLines(
+      `
     console.log(Date.now());
     console.log(Date.now());
     console.log(Date.now());
   `,
-    'date',
-  );
-  assert.equal(out.length, 3);
-  const readings = out.map((l) => Number(l));
-  for (const ms of readings) {
-    // The WALL clock, not a monotonic one: a monotonic clock's origin is unspecified and on this
-    // platform is the boot time, which lands decades away from here. The window is deliberately
-    // enormous -- it is asking which clock was read, not what time it is.
-    assert.ok(ms > 1_700_000_000_000, `${String(ms)} is before 2023 — not the wall clock`);
-    assert.ok(ms < 4_000_000_000_000, `${String(ms)} is past 2096 — not the wall clock`);
-    assert.ok(Number.isInteger(ms), `${String(ms)} is not a whole number of milliseconds`);
-  }
-  const [first, second, third] = readings;
-  assert.ok(first !== undefined && second !== undefined && third !== undefined);
-  assert.ok(second >= first && third >= second, 'the clock ran backwards within one process');
-});
+      'date',
+    );
+    assert.equal(out.length, 3);
+    const readings = out.map((l) => Number(l));
+    for (const ms of readings) {
+      // The WALL clock, not a monotonic one: a monotonic clock's origin is unspecified and on this
+      // platform is the boot time, which lands decades away from here. The window is deliberately
+      // enormous -- it is asking which clock was read, not what time it is.
+      assert.ok(ms > 1_700_000_000_000, `${String(ms)} is before 2023 — not the wall clock`);
+      assert.ok(ms < 4_000_000_000_000, `${String(ms)} is past 2096 — not the wall clock`);
+      assert.ok(Number.isInteger(ms), `${String(ms)} is not a whole number of milliseconds`);
+    }
+    const [first, second, third] = readings;
+    assert.ok(first !== undefined && second !== undefined && third !== undefined);
+    assert.ok(second >= first && third >= second, 'the clock ran backwards within one process');
+  },
+);
 
-test('Date.now advances as real time passes — the check a frozen stub fails', () => {
+test('Date.now advances as real time passes — the check a frozen stub fails', NATIVE_ONLY, () => {
   // ~15ms of real work between the two readings, measured by a loop rather than a sleep (this
   // subset has no timer). The margin is one millisecond of movement, not the loop's duration:
   // what is being proved is that the reading is not a constant.
@@ -63,7 +67,7 @@ test('Date.now advances as real time passes — the check a frozen stub fails', 
   assert.deepEqual(out, ['true', 'true']);
 });
 
-test('new Date() is new Date(Date.now()) — same clock, same reading, wrapped', () => {
+test('new Date() is new Date(Date.now()) — same clock, same reading, wrapped', NATIVE_ONLY, () => {
   const out = compileAndRunLines(
     `
     const before = Date.now();

@@ -341,6 +341,7 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       const args = rewriteEach(expr.args, sub);
       return target === expr.target && args === expr.args ? expr : { ...expr, target, args };
     }
+    case 'date-components':
     case 'date-static':
     case 'math-call':
     case 'object-static': {

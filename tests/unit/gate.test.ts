@@ -636,11 +636,11 @@ void test('console methods in the landed set are accepted, the rest deferred', (
   assert.deepEqual(codesFor('const xs: [number] = [1];\nconsole.log(...xs);'), ['STA1214']);
 });
 
-// Task 4.2: `Date` slice A -- the TZ-INDEPENDENT surface. What the gate decides here is which
-// members exist, and every refusal carries STA1210 (Date's residue code, as STA1211 is RegExp's)
-// rather than the generic STA1214, so a program can tell "this builtin is partly here" from
-// "this construct is not".
-test('gate: Date slice A lands the UTC surface and refuses local time by name', () => {
+// Task 4.2: `Date`. What the gate decides here is which members exist, and every refusal carries
+// STA1210 (Date's residue code, as STA1211 is RegExp's) rather than the generic STA1214, so a
+// program can tell "this builtin is partly here" from "this construct is not". After slice B the
+// residue is exactly the ICU-dependent string forms.
+test('gate: Date lands the UTC and local surfaces and refuses the ICU forms by name', () => {
   // The constructor: one argument (a time value, an ISO string, another Date), or none at all.
   assert.deepEqual(codesFor('const d = new Date(0);'), []);
   assert.deepEqual(codesFor("const d = new Date('2024-01-01T00:00:00Z');"), []);
@@ -648,8 +648,10 @@ test('gate: Date slice A lands the UTC surface and refuses local time by name', 
   // The zero-argument form is ACCEPTED even though it reads a clock: nondeterminism is a proof
   // problem, not an acceptance problem, and tests/unit/date-clock.test.ts is the proof.
   assert.deepEqual(codesFor('const d = new Date();'), []);
-  // The COMPONENT constructor is local time, which is slice B.
-  assert.deepEqual(codesFor('const d = new Date(2024, 1, 29);'), ['STA1210']);
+  // The COMPONENT constructor, two components up to all seven. A spread is still refused: the
+  // arity a spread contributes is not knowable at the gate.
+  assert.deepEqual(codesFor('const d = new Date(2024, 1, 29);'), []);
+  assert.deepEqual(codesFor('const d = new Date(2024, 1, 29, 1, 2, 3, 4);'), []);
   assert.deepEqual(codesFor('const xs: [number] = [0];\nconst d = new Date(...xs);'), ['STA1210']);
 
   // The landed prototype surface: the two time-value reads, the eight UTC getters, the seven UTC
@@ -669,12 +671,18 @@ test('gate: Date slice A lands the UTC surface and refuses local time by name', 
   ]);
   assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.setUTCDate());'), ['STA1210']);
 
-  // Every LOCAL-time member is slice B, blocked on the golden runner's TZ pin.
-  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getFullYear());'), ['STA1210']);
-  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getTimezoneOffset());'), [
+  // The local surface, landed with slice B.
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getFullYear());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getTimezoneOffset());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.setHours(1, 2));'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toDateString());'), []);
+  // The residue: `toString` and `toTimeString` append the zone's LONG display name, which is ICU
+  // data libc cannot produce, so they sit with `toLocale*` rather than with `toDateString`.
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toString());'), ['STA1210']);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toTimeString());'), ['STA1210']);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toLocaleDateString());'), [
     'STA1210',
   ]);
-  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toString());'), ['STA1210']);
   // A method used as a VALUE has no function object to bind, the rule every builtin follows.
   assert.deepEqual(codesFor('const d = new Date(0);\nconst f = d.getTime;'), ['STA1214']);
 

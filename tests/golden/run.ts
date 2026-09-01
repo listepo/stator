@@ -16,6 +16,19 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
 const CLI = join(REPO, 'src', 'cli', 'main.ts');
 
+/* Every fixture runs with `TZ` PINNED (plan.md §7 Task 4.2, Date step 8). Without it a local-time
+ * fixture asserts what the machine's time zone happens to be, which is not a property of the
+ * compiler -- and it would pass on the author's laptop and fail in CI, or worse, pass in both for
+ * different reasons. UTC specifically, because the compiled binary reads the tzdb through libc's
+ * `localtime_r` while Node reads it through ICU: for UTC those two cannot disagree, while for a
+ * real zone a tzdata skew between them would surface as a golden diff that looks like a semantics
+ * bug and is not. Local-vs-UTC behaviour that UTC makes indistinguishable is proved instead by
+ * runtime unit tests under an explicit non-UTC `TZ`, where a disagreement is visible as itself.
+ *
+ * Applied to BOTH sides, and to the build too so a compile-time constant fold can never see a
+ * different zone from the run that checks it. */
+const PINNED_ENV = { ...process.env, TZ: 'UTC' };
+
 /* Fixtures named `intl_*` exercise the ICU feature build (Task 4.4), which is off by default and
  * may be absent on a machine entirely. They are SKIPPED unless this run links that archive, so
  * `pnpm run ci` stays green without ICU and `pnpm run test:intl` is what turns them on. */
@@ -60,11 +73,12 @@ function runCompiled(path: string, mode: 'ts' | 'js'): Streams {
     const out = join(work, 'app');
     const build = spawnSync(process.execPath, [CLI, 'build', path, '-o', out, `--mode=${mode}`], {
       encoding: 'utf8',
+      env: PINNED_ENV,
     });
     if (build.status !== 0) {
       throw new Error(`stator build failed: ${build.stderr.trim()}`);
     }
-    const exec = spawnSync(out, [], { encoding: 'utf8' });
+    const exec = spawnSync(out, [], { encoding: 'utf8', env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
     }
@@ -75,7 +89,7 @@ function runCompiled(path: string, mode: 'ts' | 'js'): Streams {
 }
 
 function runNode(path: string): Streams {
-  const result = spawnSync(process.execPath, [path], { encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [path], { encoding: 'utf8', env: PINNED_ENV });
   if (result.status !== 0) {
     throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);
   }

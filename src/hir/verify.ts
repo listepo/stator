@@ -1523,6 +1523,32 @@ function verifyExpression(
       break;
     }
 
+    // `new Date(y, m, ...)`. The component list is EXACTLY seven -- the lowering pads omitted
+    // trailing components with `undefined`, which the runtime reads as the spec's defaults, so a
+    // short list here is a lowering bug rather than a source property. The result is pinned for
+    // `date-new`'s reason: consumers dereference a JSRTDate without a tag test.
+    case 'date-components': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (expr.args.length !== 7) {
+        problems.push({
+          kind: 'date-components',
+          span: expr.span,
+          code: 'STA4092',
+          message: `new Date takes 7 components, not ${String(expr.args.length)}`,
+        });
+      } else if (expr.type.kind !== 'date') {
+        problems.push({
+          kind: 'date-components',
+          span: expr.span,
+          code: 'STA4092',
+          message: `new Date results in '${hTypeName(expr.type)}', not a Date`,
+        });
+      }
+      break;
+    }
+
     // `Date.UTC(...)` / `Date.parse(s)`: both answer a time value, so the result is pinned to
     // number. `parse`'s argument is unchecked for STA4081's reason -- an untyped string is the
     // js-mode norm and the runtime's tag check is the honest place to settle it.

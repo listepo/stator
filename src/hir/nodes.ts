@@ -963,8 +963,33 @@ export const DATE_OPS = {
     fn: 'jsrt_date_set_utc_milliseconds',
     result: 'number',
   },
+  // The LOCAL family (slice B). Same calendar arithmetic as the UTC rows over a reading shifted by
+  // the host zone -- so they share `set_fields`/`field_of` in the runtime and differ only in one
+  // bit. `getTimezoneOffset` is the odd one out: it reports MINUTES WEST, so UTC+2 answers -120.
+  getFullYear: { arity: 0, optional: 0, fn: 'jsrt_date_get_full_year', result: 'number' },
+  getMonth: { arity: 0, optional: 0, fn: 'jsrt_date_get_month', result: 'number' },
+  getDate: { arity: 0, optional: 0, fn: 'jsrt_date_get_date', result: 'number' },
+  getDay: { arity: 0, optional: 0, fn: 'jsrt_date_get_day', result: 'number' },
+  getHours: { arity: 0, optional: 0, fn: 'jsrt_date_get_hours', result: 'number' },
+  getMinutes: { arity: 0, optional: 0, fn: 'jsrt_date_get_minutes', result: 'number' },
+  getSeconds: { arity: 0, optional: 0, fn: 'jsrt_date_get_seconds', result: 'number' },
+  getMilliseconds: { arity: 0, optional: 0, fn: 'jsrt_date_get_milliseconds', result: 'number' },
+  getTimezoneOffset: {
+    arity: 0,
+    optional: 0,
+    fn: 'jsrt_date_get_timezone_offset',
+    result: 'number',
+  },
+  setFullYear: { arity: 3, optional: 2, fn: 'jsrt_date_set_full_year', result: 'number' },
+  setMonth: { arity: 2, optional: 1, fn: 'jsrt_date_set_month', result: 'number' },
+  setDate: { arity: 1, optional: 0, fn: 'jsrt_date_set_date', result: 'number' },
+  setHours: { arity: 4, optional: 3, fn: 'jsrt_date_set_hours', result: 'number' },
+  setMinutes: { arity: 3, optional: 2, fn: 'jsrt_date_set_minutes', result: 'number' },
+  setSeconds: { arity: 2, optional: 1, fn: 'jsrt_date_set_seconds', result: 'number' },
+  setMilliseconds: { arity: 1, optional: 0, fn: 'jsrt_date_set_milliseconds', result: 'number' },
   toISOString: { arity: 0, optional: 0, fn: 'jsrt_date_to_iso_string', result: 'string' },
   toJSON: { arity: 0, optional: 0, fn: 'jsrt_date_to_json', result: 'string' },
+  toDateString: { arity: 0, optional: 0, fn: 'jsrt_date_to_date_string', result: 'string' },
   toUTCString: { arity: 0, optional: 0, fn: 'jsrt_date_to_utc_string', result: 'string' },
 } as const satisfies Record<
   string,
@@ -1010,6 +1035,15 @@ export interface DateNew extends Node {
 /** A `Date.prototype` call: one runtime function per operation, over the receiver's time value.
  * `args` is always the table's full arity -- the lowering pads an omitted trailing component with
  * an undefined-literal, which is what the spec's "if the argument is present" step reads. */
+/** `new Date(y, m, d?, h?, mi?, s?, ms?)` -- §21.4.2.1 steps 4-11, which is `Date.UTC`'s arithmetic
+ * read as LOCAL time. It is a separate node from {@link DateNew} rather than a flag on it because
+ * the two have different shapes: one value in, versus seven components the lowering pads. Omitted
+ * trailing components arrive as `undefined`, which the runtime reads as the spec's default. */
+export interface DateComponents extends Node {
+  readonly kind: 'date-components';
+  readonly args: readonly Expression[];
+}
+
 export interface DateOp extends Node {
   readonly kind: 'date-op';
   readonly op: DateOperation;
@@ -1106,6 +1140,7 @@ export interface RegExpOp extends Node {
 export type Expression =
   | MatchRead
   | RegExpFieldRead
+  | DateComponents
   | DateNew
   | DateOp
   | DateStaticCall

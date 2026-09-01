@@ -15,9 +15,9 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { compileAndRunStreams } from './helpers.ts';
+import { compileAndRunStreams, NATIVE_ONLY } from './helpers.ts';
 
-void test('console.time/timeEnd echo the label with a duration in ms', () => {
+void test('console.time/timeEnd echo the label with a duration in ms', NATIVE_ONLY, () => {
   const { stdout } = compileAndRunStreams(
     "console.time('alpha');\nconsole.timeEnd('alpha');\nconsole.time();\nconsole.timeEnd();\n",
     'console',
@@ -31,42 +31,46 @@ void test('console.time/timeEnd echo the label with a duration in ms', () => {
   assert.match(lines[1] ?? '', /^default: \d+\.\d{3}ms$/);
 });
 
-void test('a longer interval measures longer, and a timer that never started prints nothing', () => {
-  // Ordering, not magnitude: the wall time a loop takes is not a number a test may assert, but
-  // "more work took longer" is a property a stub returning a constant cannot fake.
-  const { stdout } = compileAndRunStreams(
-    [
-      "console.time('quick');",
-      "console.timeEnd('quick');",
-      "console.time('slow');",
-      'let sink = 0;',
-      'for (let i = 0; i < 3000000; i++) {',
-      '  sink += i;',
-      '}',
-      "console.timeEnd('slow');",
-      'console.log(sink > 0);',
-      // Node warns for an unknown label and writes no duration to stdout. Warning is a channel
-      // this runtime does not have, so it prints nothing at all — the same observable stdout.
-      "console.timeEnd('never-started');",
-    ].join('\n'),
-    'console',
-  );
-  const lines = stdout.trimEnd().split('\n');
-  assert.deepEqual(
-    lines.map((line) => line.split(':')[0]),
-    ['quick', 'slow', 'true'],
-  );
-  const ms = (line: string): number => Number(/: ([\d.]+)ms$/.exec(line)?.[1] ?? Number.NaN);
-  const quick = ms(lines[0] ?? '');
-  const slow = ms(lines[1] ?? '');
-  assert.ok(Number.isFinite(quick) && Number.isFinite(slow), `not durations: ${stdout}`);
-  assert.ok(
-    slow > quick,
-    `three million adds did not measure longer: ${String(slow)} vs ${String(quick)}`,
-  );
-});
+void test(
+  'a longer interval measures longer, and a timer that never started prints nothing',
+  NATIVE_ONLY,
+  () => {
+    // Ordering, not magnitude: the wall time a loop takes is not a number a test may assert, but
+    // "more work took longer" is a property a stub returning a constant cannot fake.
+    const { stdout } = compileAndRunStreams(
+      [
+        "console.time('quick');",
+        "console.timeEnd('quick');",
+        "console.time('slow');",
+        'let sink = 0;',
+        'for (let i = 0; i < 3000000; i++) {',
+        '  sink += i;',
+        '}',
+        "console.timeEnd('slow');",
+        'console.log(sink > 0);',
+        // Node warns for an unknown label and writes no duration to stdout. Warning is a channel
+        // this runtime does not have, so it prints nothing at all — the same observable stdout.
+        "console.timeEnd('never-started');",
+      ].join('\n'),
+      'console',
+    );
+    const lines = stdout.trimEnd().split('\n');
+    assert.deepEqual(
+      lines.map((line) => line.split(':')[0]),
+      ['quick', 'slow', 'true'],
+    );
+    const ms = (line: string): number => Number(/: ([\d.]+)ms$/.exec(line)?.[1] ?? Number.NaN);
+    const quick = ms(lines[0] ?? '');
+    const slow = ms(lines[1] ?? '');
+    assert.ok(Number.isFinite(quick) && Number.isFinite(slow), `not durations: ${stdout}`);
+    assert.ok(
+      slow > quick,
+      `three million adds did not measure longer: ${String(slow)} vs ${String(quick)}`,
+    );
+  },
+);
 
-void test('console.trace writes its prefix to stderr, not stdout', () => {
+void test('console.trace writes its prefix to stderr, not stdout', NATIVE_ONLY, () => {
   const { stdout, stderr } = compileAndRunStreams(
     "console.trace('why');\nconsole.trace();\n",
     'console',

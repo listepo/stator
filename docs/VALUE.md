@@ -339,15 +339,21 @@ allocated (§2), and widening it would take a bit from `JSRT_NANBOX_MASK`, which
 entire positive-NaN space available to doubles. An environment is not a JavaScript value and does
 not need to become one. See plan-notes 50.
 
-### 4.1 Why this exists under Boehm, where it does almost nothing
+### 4.1 Why this exists, and what the collector actually reads
 
-Phase 2 uses Boehm GC, which is conservative: it scans the machine stack and would find these
-values anyway. Under Boehm these macros are nearly free and nearly pointless.
+Phase 2 uses Boehm GC, which is conservative: it scans memory word by word and retains anything
+that looks like a heap address. **A `jsrt_value` is not one.** NaN-boxing puts the tag above bit 48
+(§1.1), so a boxed reference is a word no conservative scan recognises — the machine-stack scan
+walks straight past every value a frame slot, an array, a Map or an object slot holds. These macros
+are therefore not bookkeeping the collector would duplicate anyway: the frame chain is the only
+root set there is, and §4.12 is the hook that reads it. This is measured, not theoretical — before
+that hook existed, a forced collection over a live 200-entry Map segfaulted (plan-notes 108).
 
-They are mandatory regardless, because §12's precise generational GC needs an exact root set. If
-codegen is written without the discipline and the discipline is retrofitted later, the retrofit
-*is* a codegen rewrite — which is precisely the history plan.md §0.7 cites from Boa. The cost of
-maintaining it now is a few macros; the cost of adding it later is the backend.
+They would be mandatory even under a collector that did see them, because §12's precise
+generational GC needs an exact root set. If codegen is written without the discipline and the
+discipline is retrofitted later, the retrofit *is* a codegen rewrite — which is precisely the
+history plan.md §0.7 cites from Boa. The cost of maintaining it now is a few macros; the cost of
+adding it later is the backend.
 
 Consequently: **a frame is opened even when the runtime would not need it.** Uniformity is what
 makes the codegen auditable, and plan.md §7 Task 4.5 requires a codegen test that diffs emitted
@@ -362,8 +368,8 @@ reverse scope order, before jumping.
 The invariant, stated so a reviewer can check it mechanically: **on every path leaving a
 function, the number of `JSRT_FRAME_POP()` executed equals the number of `JSRT_FRAME()`
 entered.** An unwind path that skips a pop leaves a dangling frame pointing at a dead stack
-region — which under a precise GC is a crash, and under Boehm is an invisible time bomb that only
-surfaces after §12 lands. This is ASan/UBSan-tested per plan.md §6 Task 3.10.
+region — which the root walk (§4.12) reads on the next collection, today, and which a precise GC
+would turn into a crash. This is ASan/UBSan-tested per plan.md §6 Task 3.10.
 
 ---
 
@@ -608,9 +614,10 @@ scope structure is known (docs/HIR.md §1.3 `TryStatement`). Two invariants tie 
 - **Frames pop on every exit path, landing pads included.** A function with no enclosing try gets
   one `_jsrt_unwind` pad that does `JSRT_FRAME_POP(); return JSRT_UNDEFINED;` — emitted only when
   something in the unit can actually throw.
-- **The pending slot is a GC root.** Between throw and take the cell may hold the only reference
-  to a heap object, so a precise collector must trace it alongside the frame chain (§4). Under
-  conservative Boehm today the invariant is latent, the same way it is for §12's plans.
+- **The pending slot is a GC root.** Between throw and take the cell may hold the only reference to
+  a heap object, and `finally` blocks on the way out allocate. The root walk pushes it alongside
+  the frame chain (§4.12) — not a §12 promise but a live requirement, because a boxed value in that
+  cell is invisible to a conservative stack scan and nothing else would keep it alive.
 
 ---
 
@@ -666,7 +673,7 @@ overwrite-in-place, undefined-on-miss, shared-IC reads across shape-sharing obje
 stale-cache miss after a transition, divergent histories landing on different shapes, and
 non-identifier keys printing quoted (`{ 'a-b': 1 }`).
 
-## 4.11 Dates — one double behind a class pointer (Task 4.2, slice A)
+## 4.11 Dates — one double behind a class pointer (Task 4.2)
 
 ```c
 typedef struct JSRTDate {
@@ -683,13 +690,22 @@ on the class before it looks at anything else.
 
 There are **no owned pointers**, so a Date adds no GC edges — the descriptor's field table is
 empty and the collector needs nothing new to trace it. A Date is nonetheless heap-allocated rather
-than a boxed double, because `setTime` and the seven `setUTC*` setters mutate it in place and two
+than a boxed double, because `setTime` and the fourteen `set*` setters mutate it in place and two
 bindings holding the same Date must both see the change.
 
 **Every `jsrt_date_*` entry point asserts the class pointer** (`STA4093`) before it dereferences.
 The verifier pins the receiver kind above the boundary (`STA4092`) for the same reason it pins a
 regexp receiver: a wrong kind here would read a `double` out of whatever object arrived, which is
 memory corruption rather than a wrong answer.
+
+**Local time is derived, never stored.** The struct holds an instant; a wall-clock reading is
+`t + LocalTZA(t)`, and the offset comes from libc `localtime_r` at call time — the runtime carries
+no zone rules of its own, and nothing about the host zone is cached in the object. The consequence
+worth knowing is that the inverse is **not a bijection**: a local reading inside a DST gap names no
+instant, and one inside a fold names two. §21.4.1.26 settles both with the offset in effect *before*
+the transition, which the runtime finds by probing one day either side — the spec's own window.
+Every local setter and the component constructor `new Date(y, m, …)` run through that inverse; the
+UTC family never touches it, which is the entire difference between the two halves of `DATE_OPS`.
 
 **Printing.** `inspect_date` renders the ISO string, which is what Node's inspect shows and is
 TZ-independent — the property that lets `console.log(d)` appear in a golden fixture at all. An
@@ -701,6 +717,58 @@ is the four characters `null` and not an abort.
 `RangeError` (§21.4.4.36). A builtin cannot raise — `jsrt_throw` sets a pending cell that only
 generated code reads — so it panics (`STA2005` pattern) until Phase 5 step 11 gives the runtime a
 catch around user code. Same ceiling as `Object.freeze`, and recorded the same way.
+
+## 4.12 The collector — Boehm, and the two hooks that make it see a value
+
+Everything above assumes the collector can find what is live. A conservative collector and a
+NaN-boxed value do not meet on their own (§4.1); `runtime/src/jsrt_gc.c` is where they are made to.
+
+**One allocation seam.** `jsrt_gc_alloc(bytes, what)` (`runtime/include/jsrt.h`) is the runtime's
+only collected allocation, and the only place that knows whether a collector is configured at all.
+Everything that can hold a `jsrt_value` comes from it — a value stored in memory from anywhere else
+is invisible to the collector, because the heap hook below does not cover that memory. `what` names
+the allocation in the out-of-memory panic; the call never returns NULL, so callers do not test it.
+
+**Hook 1 — the heap.** Every allocation belongs to a custom object kind (`GC_new_kind`) whose mark
+procedure masks each word with `JSRT_PAYLOAD_MASK` before offering it to `GC_MARK_AND_PUSH`. The
+word count comes from `GC_size(addr)`, so one procedure covers every allocation shape the runtime
+has — fixed struct, flexible array member, bare value buffer — without any of them carrying a
+layout descriptor.
+
+**Hook 2 — the roots.** `GC_set_push_other_roots` walks the `JSRT_FRAME` chain, unboxes each slot
+into a 128-pointer buffer and hands that buffer to `GC_push_all_eager`. The eager push scans a
+memory range *conservatively*, which is exactly what fails on a boxed word — unboxing into a plain
+array of raw pointers first is what makes the range scannable. The walk also pushes each frame's
+`env` (§4.3, the mark procedure then covers its slots and parent chain) and the pending-exception
+cell (§4.9).
+
+**Why masking is safe.** Only two word shapes reach it: a boxed value, whose payload is its low 48
+bits, and a raw pointer, whose top 16 bits are zero — `jsrt_init` asserts that against a real
+allocation and aborts on a platform where it does not hold (5-level paging, AArch64 TBI). On the
+first the mask yields the referent; on the second it is the identity. A word that is neither — a
+double, a length — can mask to a plausible address and retain one object it does not own. That is
+ordinary conservative-collector behaviour: it costs memory, never correctness.
+
+**Two configurations, both supported.** `runtime/Makefile` asks `pkg-config` for `bdw-gc`. Found:
+the archive compiles with `-DJSRT_HAVE_BOEHM` and records `-lgc` in `build*/link-flags.txt`, which
+`src/cli/build.ts` reads back so the emitted program links the same collector its archive was
+compiled against (plan-notes 106). Not found: `jsrt_gc_alloc` is plain `malloc`, nothing is ever
+collected, and every test still passes — the program simply keeps every object it allocates. `make`
+prints which one it built (`Runtime built with: Boehm GC` / `plain malloc (no collection)`).
+
+**The check.** `pnpm run test:leak` compiles a 10M-object loop and samples RSS from `ps`: the last
+third of the run must not sit meaningfully above the middle. It reads that same `link-flags.txt`
+and SKIPS when the build has no collector, because a build that never frees has no plateau to find.
+Retention is that test's job specifically — the sanitized suite runs with
+`ASAN_OPTIONS=detect_leaks=0`, and the rest of the corpus allocates far too little to reach Boehm's
+first collection, which is why the suite stayed green through the whole period the two hooks above
+did not exist (plan-notes 108).
+
+**What §12 changes.** A precise generational collector replaces both hooks: the object layout
+becomes traced rather than masked, and the frame chain becomes an exact root set rather than an
+unboxing pass over one. The discipline that makes that swap runtime-only is already emitted (§4.1).
+
+---
 
 ## 5. What Phase 2 actually implements
 
@@ -720,4 +788,4 @@ reads as scheduling, not omission:
 | `JSRT_FRAME` / `JSRT_LOCAL` | yes, from the first emitted function | — |
 | `jsrt_typeof` / `jsrt_check_*` | yes, from Task 3.5 (§4.7, §4.8) | `jsrt_check_*` for shapes: needs Task 4.1 |
 | Landing-pad frame discipline | yes, from Task 3.10 (§4.9): pads take the pending exception, unwind pads pop | — |
-| Boehm GC | yes | precise generational, §12 |
+| Boehm GC, with the mark procedure and root hook of §4.12 | yes, when `bdw-gc` is installed; plain `malloc` and no collection otherwise | precise generational, §12 |

@@ -578,6 +578,60 @@ runner's `TZ` pin) and the `toString`/`toLocale*` family (ICU CLDR data). Full r
 places the tree corrected the plan's steps: plan-notes 132. Dashboard: `Date` **3/3** (2 + 1
 carved), `Date.prototype` **21/43**, total 165/196 → **190/239 (79%)**.
 
+**Task 4.2 — `Date` slice B landed (2026-09-01).** The local-time half, plus `toDateString`. The
+whole slice rests on one identity, §21.4.1.7's `LocalTime(t) = t + LocalTZA(t)`, with the offset
+read from libc `localtime_r` at call time — the runtime carries no zone rules of its own and caches
+nothing about the host zone in the object, so `tm_gmtoff` is the only tzdb question it asks. The 8
+local getters were generated from the existing `DATE_GETTER` macro by adding one `local` flag to it
+rather than hand-writing eight near-copies, and the 14 setters (7 UTC + 7 local) were collapsed the
+same way into four shape macros over `set_fields(…, bool local)` — written out by hand that is
+~120 lines in which the two halves could silently drift, and it would have breached the 1%
+duplication gate besides.
+
+The one thing that is genuinely hard here is the INVERSE. `local_time` is a function; its inverse
+is not, because a wall-clock reading inside a DST gap names no instant and one inside a fold names
+two. The first implementation used a single probe (`offset_at(local)`, correct once, then retry)
+and got the fold wrong: on 2024-10-27 in Berlin, 02:30 local happens at 00:30Z under CEST and again
+at 01:30Z under CET, and Node answers the first. §21.4.1.26 says why — both the gap and the fold
+resolve to the offset in effect BEFORE the transition, which for the fold is the earlier instant.
+The fix probes the offset one day either side (the spec's own window: its `before` is `t - 1 day`),
+builds both candidate instants, and takes the first whose own offset validates it; when neither
+does — the gap — the pre-transition offset settles it. Verified against the pinned Node in seven
+zones covering DST both hemispheres, a 45-minute offset and a no-DST half-hour zone
+(`UTC`, `Europe/Berlin`, `America/New_York`, `Australia/Lord_Howe`, `Asia/Kolkata`,
+`Pacific/Chatham`, `America/Sao_Paulo`): byte-identical in all seven.
+
+**The proof split is the point of the slice.** The golden runner now pins `TZ=UTC` via one
+`PINNED_ENV` on all three `spawnSync` calls — the compiled binary AND the Node ground truth. UTC is
+chosen deliberately over a zone that would make the fixtures distinguish local from UTC: the binary
+reads the tzdb through libc while Node reads it through ICU, and for any real zone a tzdata skew
+between the two surfaces as a byte diff that looks exactly like a semantics bug and is not. Under
+that pin `tests/golden/{ts,js}/date_local.{ts,js}` prove the wiring end to end and the calendar
+arithmetic, and every zone-dependent claim moves to `tests/unit/date-local.test.ts`, which names its
+own `TZ` per case (Berlin for DST, Kolkata for the half-hour control) and asserts against dates
+whose rules have been settled since 1996. `compileAndRunStreams`/`compileAndRunLines` gained an
+optional `tz` that pins the RUN only; the build reads no clock and no tzdb.
+
+`new Date(y, m, …)` became its own HIR node, `date-components`, rather than a discriminant on
+`DateNew`: the two have different shapes (one value versus seven padded components), and a
+`form` flag would have forced `arg` optional across five shared switch arms that all destructure it.
+As a separate node it joined the existing N-argument family beside `date-static` and cost one arm
+each in the verifier, the rewriter, `explain`, and the two emitter passes.
+
+**Two things the tree corrected in the plan** (plan-notes 133). First, `toDateString` was listed
+with the ICU family in `SUBSET.md`, `DIAGNOSTICS.md` and the exit criterion — wrongly: its output is
+`Mon Jul 15 2024`, with no zone name in it, so it landed here. Its siblings `toString` and
+`toTimeString` genuinely are ICU-blocked, and now for a MEASURED reason rather than an assumed one:
+Node prints `(Central European Summer Time)` where libc's `%Z` gives `CEST`. Second, slice A's
+`toUTCString` padded a negative year to six digits on the strength of a comment that no fixture
+contradicted; Node pads it to four (`Fri, 01 Jan -0001 00:00:00 GMT`) and only `toISOString`'s
+expanded-year form uses six. The new fixture has a negative year in it, which is how this surfaced.
+
+Residue under `STA1210` is now exactly five members, all ICU-dependent: `toString`, `toTimeString`
+and the three `toLocale*`, plus the call form `Date()`. Nothing time-zone-dependent remains, which
+is what Date step 9 asked for. Dashboard: **207/238 (87%) +5 nondeterministic**, `Date` 3/3,
+`Date.prototype` **38/43**.
+
 ### Task 4.3 — RegExp
 
 **Task 4.3 landed (2026-08-30).** `libregexp` (+ `libunicode`, `cutils`) is vendored from quickjs-ng `v0.16.2` into `runtime/vendor/quickjs-ng/`, recorded in its own `VENDOR.md`, and compiled with `-Wall` alone rather than this repo's `-Wall -Wextra -Werror`: upstream code is not ours to fix, and a warning flag is not a correctness flag (plan-notes 101). The engine asks its embedder for exactly three functions — an allocator, a stack-depth question and a timeout question — and `runtime/src/jsrt_regexp.c` is the whole bridge. Two facts about that bridge were read out of the engine rather than assumed: `lre_compile` takes UTF-8, or CESU-8 when the pattern is not a unicode one (a lone surrogate is legal in a non-unicode pattern and has no UTF-8 encoding), and the capture array must be sized by `lre_get_alloc_count`, NOT by twice the capture count — the executor spills its own registers into the same array, and upstream's comment records the heap overflow that taught it. The subject needs no conversion at all: our strings ARE UTF-16 code units, which is `cbuf_type` 1, and the engine promotes that to 2 by itself for a unicode pattern. Above the C boundary, `RegExpLiteral` and `RegExpOp` joined the HIR on the `StringOp` table discipline (`REGEXP_OPS`, verifier `STA4086`): the pattern and the flags travel as TEXT, so nothing in this compiler parses them and nothing in it can disagree with the engine, and the literal is compiled at EVERY evaluation rather than hoisted — §22.2.4.1 makes each evaluation a fresh object, and it has to be, because `lastIndex` is mutable state on it (plan-notes 102). `test` is the landed surface; `exec` and the non-global `match` stay under `STA1211` because they answer an array WITH properties and a jsrt array is dense with no property table, and `new RegExp(...)` stays deferred because a pattern that is not in the source is a pattern the compiler cannot see. Dashboard: **123/186 (66%)**, `RegExp.prototype` at 1/15 — the denominator grew by the whole prototype, which is the dashboard's rule (plan-notes 95). Next on this task's own ground: the RegExp-taking `String.prototype` methods.

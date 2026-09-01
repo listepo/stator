@@ -12,6 +12,7 @@ import type {
   ClassMethod,
   CollectionOp,
   CollectionOperation,
+  DateComponents,
   DateNew,
   DateOp,
   DateStaticCall,
@@ -228,6 +229,7 @@ class Emitter {
     | JsonParse
     | JsonStringify
     | CollectionOp
+    | DateComponents
     | DateNew
     | DateOp
     | DateStaticCall
@@ -427,7 +429,16 @@ class Emitter {
     if (this.icCount > 0) {
       out.push('');
     }
-    out.push(...functionLines, ...mainLines);
+    // Appended one line at a time, never spread: `functionLines` is the whole program's emitted
+    // code, and `push(...arr)` passes every element as an argument — which blows the engine's
+    // argument limit (RangeError) somewhere around a 100k-line input, in the emitter, on a program
+    // the front end accepted. Same reason as the loop in `emitFunctionUnits`.
+    for (const line of functionLines) {
+      out.push(line);
+    }
+    for (const line of mainLines) {
+      out.push(line);
+    }
 
     return `${out.join('\n')}\n`;
   }
@@ -480,7 +491,9 @@ class Emitter {
       if (unit === undefined) {
         continue;
       }
-      out.push(...this.emitFunctionUnit(unit));
+      for (const line of this.emitFunctionUnit(unit)) {
+        out.push(line);
+      }
     }
     return out;
   }
@@ -929,6 +942,7 @@ class Emitter {
       // result, and `Object.hasOwn(o, k)` must hold BOTH operands across the call.
       // `Date.UTC(y, m, ...)` sequences for the same reason, even though every operand is an
       // immediate: C would otherwise pick the order of the calls that produce them.
+      case 'date-components':
       case 'date-static':
       case 'object-static':
         this.callSlots.set(expr, this.slotCount);
@@ -2105,15 +2119,18 @@ class Emitter {
       // One runtime function per method, number -> number. The single-argument form nests
       // directly; the binary form sequences its arguments through slots because C would otherwise
       // pick the order (`Math.pow(f(), g())` must run f first).
+      case 'date-components':
       case 'date-static':
       case 'math-call':
       case 'object-static': {
         const name =
           expr.kind === 'math-call'
             ? `jsrt_math_${expr.method}`
-            : expr.kind === 'date-static'
-              ? DATE_STATICS[expr.method].fn
-              : `jsrt_object_${snakeCase(expr.method)}`;
+            : expr.kind === 'date-components'
+              ? 'jsrt_date_from_components'
+              : expr.kind === 'date-static'
+                ? DATE_STATICS[expr.method].fn
+                : `jsrt_object_${snakeCase(expr.method)}`;
         // Math takes immediates, so a lone argument has neither an order to fix nor anything to
         // keep rooted and nests directly. An Object walk always uses its slots (see counting).
         if (expr.kind === 'math-call' && expr.args.length <= 1) {

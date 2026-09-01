@@ -450,6 +450,15 @@ export function call(
   return { kind: 'call', type, span: span(line), callee, args };
 }
 
+/** A `node:test` option object that skips a test which compiles and runs a native binary.
+ *
+ * Producing one needs `runtime/build/libjsrt.a` and clang, a toolchain the runtime's Makefile does
+ * not target on Windows. Every OTHER unit test is portable TypeScript, so gating these few HERE is
+ * what lets `pnpm run test` run on all six CI platforms instead of only the Unix four — a skipped
+ * proof is visible in the runner's output, a whole unrun file is not. */
+export const NATIVE_ONLY =
+  process.platform === 'win32' ? { skip: 'no native toolchain on Windows' } : {};
+
 /** Compile `source` in ts mode, run the binary, and hand back both streams separately.
  *
  * The determinism carve-out's proofs (plan §7 Task 4.2) all need this and nothing else needs it:
@@ -457,10 +466,16 @@ export function call(
  * diff, so each one compiles a small program and asserts a PROPERTY of what it printed. The
  * streams stay separate because which stream a line lands on is part of what `console.trace`
  * promises. `prefix` only names the scratch directory, so a failing run says which proof it was.
+ *
+ * `tz` pins the RUN's zone (never the build's, which reads no clock and no tzdb). Local-time
+ * behaviour is the other thing a golden diff cannot prove: the golden runner pins `TZ=UTC` on both
+ * sides precisely so a tzdata skew between libc and Node's ICU cannot masquerade as a semantics
+ * bug, which leaves every DST question to a proof that names its own zone here.
  */
 export function compileAndRunStreams(
   source: string,
   prefix: string,
+  tz?: string,
 ): { stdout: string; stderr: string } {
   const cli = fileURLToPath(new URL('../../src/cli/main.ts', import.meta.url));
   const dir = mkdtempSync(join(tmpdir(), `stator-${prefix}-`));
@@ -472,7 +487,10 @@ export function compileAndRunStreams(
       encoding: 'utf8',
     });
     assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
-    const run = spawnSync(out, [], { encoding: 'utf8' });
+    const run = spawnSync(out, [], {
+      encoding: 'utf8',
+      ...(tz !== undefined && { env: { ...process.env, TZ: tz } }),
+    });
     assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
     return { stdout: run.stdout, stderr: run.stderr };
   } finally {
@@ -482,8 +500,8 @@ export function compileAndRunStreams(
 
 /** `compileAndRunStreams`, reduced to stdout's non-empty lines — what a proof that does not care
  * about the stream split wants. */
-export function compileAndRunLines(source: string, prefix: string): string[] {
-  return compileAndRunStreams(source, prefix)
+export function compileAndRunLines(source: string, prefix: string, tz?: string): string[] {
+  return compileAndRunStreams(source, prefix, tz)
     .stdout.split('\n')
     .filter((line) => line !== '');
 }

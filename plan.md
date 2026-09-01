@@ -235,12 +235,13 @@ methods, `Map`/`Set` and the ES2025 set operations — are recorded in [done.md]
 Task 4.2. `pnpm run test:builtins` reports **166/196** deterministic surface members, with Math
 42/42 plus one nondeterministic proof for `Math.random`, `String.prototype` at 31/32 and
 `RegExp.prototype` at 13/15.
-**Still open for THIS PHASE:** `Date` **slice B** — the local-time getters/setters, the component
-constructor, and the `TZ=UTC` pin on the golden runner they all depend on (Date step 8 below).
-Slice A landed 2026-09-01 (`Date` 3/3, `Date.prototype` 21/43 — the missing 22 are slice B's 16
-and the intl family's 6); its record is in [done.md](done.md) and plan-notes 132. `STA1210` is now
-a RESIDUE code naming one member at a time, the shape `STA1211` has for RegExp. (`console.table`
-and the carve-out trio landed 2026-09-01; record below.)
+**`Date` is DONE for everything this phase owns.** Slice A landed 2026-09-01 (plan-notes 132) and
+slice B the same day (plan-notes 133): `Date` 3/3, `Date.prototype` 38/43. The five that remain are
+the ICU-dependent string forms — `toString`/`toTimeString`, whose output appends the host zone's
+long display name, and the three `toLocale*` — all Task 4.4's feature build, none of them blockers.
+Records in [done.md](done.md). `STA1210` is now a RESIDUE code naming one member at a time, the
+shape `STA1211` has for RegExp. (`console.table` and the carve-out trio landed 2026-09-01; record
+below.)
 `Object` reads 7/13 on the dashboard but is DONE for everything this phase owns: `assign` landed
 2026-09-01 and the other five each wait on a mechanism Phase 4 does not build — `freeze`/`isFrozen`
 on runtime-raised exceptions (Phase 5 step 11), `create`/`defineProperty`/`getPrototypeOf`/
@@ -277,18 +278,9 @@ Phase 4, Task 4.2. Four places the tree corrected these steps (the zero-argument
 no node kind, `Date.UTC` takes 1–7 args rather than 2–7, the carve-out marker had to follow its
 proof, and a `STA4085` panic-string collision) are in plan-notes 132. Steps 8 and 9 remain open:
 
-8. **Slice B.** First pin `TZ=UTC` in the golden runner (an `env` on the three `spawnSync` calls
-   in `tests/golden/run.ts` — the compiled binary AND the Node ground truth; today both inherit
-   the machine's TZ, so any local-time fixture is machine-dependent). Then land the local
-   getters/setters and `getTimezoneOffset` via `localtime_r`/`mktime` — libc owns the tzdb.
-   DST-sensitive semantics get runtime unit tests with an explicit non-UTC `TZ` on dates whose
-   rules are stable, never goldens.
-9. **Docs sync.** The residue-code rewrite landed with slice A — `DIAGNOSTICS.md`'s `STA1210` row
-   now names members rather than the class, `SUBSET.md` carries the sliced rows, and the
-   exit-criterion Date bullet below tracks the same split. What is left for step 8 to do here:
-   flip the slice-B rows from not-yet to implemented, and confirm the residue under `STA1210` is
-   then exactly the intl family — which is Task 4.7's rule (a code may not name a closed phase)
-   applied to this code.
+~~8. Slice B.~~ ~~9. Docs sync.~~ ✅ Landed 2026-09-01 — the local-time half behind a `TZ=UTC`
+pin on the golden runner, plus `toDateString`, which turned out not to need ICU at all. Evidence:
+[done.md](done.md) → Phase 4, Task 4.2 (Date slice B), and plan-notes 133.
 
 **`console.table` and the carve-out trio — ✅ landed 2026-09-01, in a same-day race with this
 plan.** The step list that stood here was overtaken the day it was written: a parallel session
@@ -433,11 +425,15 @@ shows every surface member whose blocker Phase 4 OWNS:**
   2026-09-01 (TZ-independent core — epoch/ISO/Date constructors, the two time-value reads, the 8
   UTC getters, the 7 UTC setters, `toISOString`/`toJSON`/`toUTCString`, `Date.UTC`, ISO-only
   `Date.parse`, plus `Date.now` and zero-argument `new Date()` under the determinism carve-out;
-  record in [done.md](done.md), plan-notes 132) and **slice B** (local-time getters/setters +
-  `getTimezoneOffset` + the component constructor, behind the golden runner's `TZ=UTC` pin) still
-  open in this phase;
-  `toString`/`toDateString`/`toTimeString`, the call form `Date()`, and `toLocale*` are the intl
-  feature build's (ICU CLDR timezone/locale names — Task 4.4's model, non-blocking);
+  record in [done.md](done.md), plan-notes 132) and **slice B** ✅ MET 2026-09-01 (the 8 local
+  getters, `getTimezoneOffset`, the 7 local setters, the component constructor and `toDateString`,
+  behind the golden runner's `TZ=UTC` pin, with every zone-dependent claim proved in
+  `tests/unit/date-local.test.ts` under a non-UTC `TZ`; record in [done.md](done.md),
+  plan-notes 133). 38/43. **`Date` is DONE for everything this phase owns.**
+  `toString`/`toTimeString`, the call form `Date()`, and `toLocale*` are the intl
+  feature build's (ICU CLDR timezone/locale names — Task 4.4's model, non-blocking — and the first
+  two for a measured reason: their output appends the zone's LONG display name, which libc's `%Z`
+  cannot produce, plan-notes 133);
   `[Symbol.toPrimitive]` is out of surface lists by standing rule; `toISOString` on an Invalid
   Date needs a runtime-raised `RangeError` — Phase 5 step 11's mechanism, panic until then,
   documented in `SUBSET.md`.
@@ -1007,14 +1003,117 @@ Ordering rule (from the Boa deep-dive): **memory first, codegen last**. Each ste
 | 4 | Hot/cold field split in object layout; IC hit-rate counters on dynamic-residue paths to find type-check hotspots | 5–10% (Nova-inspired) | 1–2 wk |
 | 5 | String ropes for concat-heavy code + small-string inlining | 5–15% on string workloads (V8/JSC precedent) | 3–5 wk |
 | 6 | Direct LLVM backend: emit `.ll` text (no bindings needed from TS) on the hot path; LTO + PGO; keep the C emitter as `--emit=c` debug backend | clang already does most of this — measure before believing | 4–8 wk |
-| 7 | Startup: snapshot initialized globals/builtins into the binary (V8 snapshot model) | 50–200 ms class wins for CLI tools | 4–6 wk |
+| 7 | Startup: snapshot initialized globals/builtins into the binary (V8 snapshot model) | **none available here** — an empty binary already starts in 3.2 ms (measured; see rung 7 below) | not scheduled |
 | 8 | WasmGC backend — cross-browser baseline since Safari 18.2 (Dec 2024). Strategic optionality, not perf | new target, not a speedup | months |
 
+**Entry criterion, and why nothing here is a task yet.** No rung starts before Task 6.3's benchmark
+harness exists and its perf-regression gate has a **measured** noise floor (6.3 step 7). Every row
+above is a claim about a number; without the harness there is no way for one to be wrong, and a
+ladder of unfalsifiable claims is a wish list. When a rung is scheduled it becomes a numbered task in
+a phase, with Steps and a Check like any other — this table is an ordering, not a backlog.
+
+**The discipline every rung shares:**
+- **Baseline, change, re-measure on the same host**, recording version, flags, hardware and the exact
+  program (§15.5). Cross-host comparison is not evidence: `tests/bench/baseline.json` is explicitly
+  machine-local.
+- **Keep only if the geomean moves past the noise floor; otherwise revert** — and write the negative
+  result into `plan-notes.md`. An unrecorded non-gain is re-attempted by the next person at full
+  price, which is the most expensive kind of missing note.
+- **Semantics are not a variable.** Golden suites stay byte-for-byte, ASan/UBSan and `test:leak` stay
+  green, and both GC configurations still build. An optimization that changes output is a semantics
+  bug wearing a speedup's clothes.
+- **Anything that adds a dependency or a build mode is feature-flagged** on the `make intl` model
+  (Task 4.4): its own build directory, its own CI job, default archive unchanged.
+
+**1 — Allocator.** Check the premise before spending the days: Boa's 5–15% is an *object*-allocator
+result, and here the object allocator is Boehm. Every collected allocation goes through
+`GC_generic_malloc` in `jsrt_gc_alloc` (`runtime/src/jsrt_gc.c`), which mimalloc under `malloc` never
+sees. What a swapped allocator does reach is the non-collected sites — regexp capture and key
+scratch, shape key encoding, unicode conversion buffers, JSON digit buffers, the `console.count` /
+`console.time` tables, Intl — plus the no-Boehm fallback, where `jsrt_gc_alloc` *is* `malloc`.
+So profile those sites first; if they are a couple of percent, record it and skip the rung.
+Otherwise this lands **after** rung 3, when the collector is ours and its backing allocator is a real
+choice. Acquisition is a vendor drop with a `VENDOR.md` pin under the no-network constraint
+(plan-notes 28), never a package fetch — and never a global `malloc` interposition while Boehm is in
+the process: two allocators contending for one symbol is a debugging session, not a benchmark.
+
+**2 — Escape analysis.** The preconditions already hold: allocation sites are visible in HIR (object
+and array literals, closures), and the pass belongs in `src/passes/` beside `constfold`/`dce`/
+`inline`, with `verifyHir` running after it like every other pass. Conservative by default — an
+allocation escapes unless proven otherwise — and three things escape: stores into a global slot,
+anything a callee can reach, and anything live on a landing-pad path out of the frame. The trap is
+specific to this design: `jsrt_push_roots` masks every frame slot and hands it to Boehm as a heap
+address, so a stack-allocated or arena object must **never** occupy a `JSRT_FRAME` slot. Make that an
+HIR-verifier check (a stack allocation's uses are all frame-local), not a code-review habit. LICM and
+the integer div/mod fast paths named in the row are separate changes — land them separately or the
+geomean cannot attribute the win to any of the three.
+
+**3 — Precise GC.** Half of it is already paid for: root enumeration is real and load-bearing
+(`jsrt_push_roots` walks the shadow stack), which is what §2's rooting discipline was always for.
+What is missing is *heap* precision — `jsrt_mark` masks every word and marks conservatively, with a
+documented ceiling of retaining objects it does not own. Precise means a layout descriptor per
+collected allocation, which touches every `jsrt_gc_alloc` call site. Two things settle before code:
+(a) **MMTk's API is Rust**, and "no Rust anywhere" is settled (§15.4) — evaluating MMTk is fine,
+adopting it reopens a settled decision and needs measured evidence in `plan-notes.md`, not a
+preference; (b) a **moving** collector invalidates any NaN-boxed reference a C local holds across a
+safepoint, so "a reference that crosses an allocation lives in a frame slot" must become an enforced
+codegen invariant *before* anything moves. The second win is easy to miss: the no-Boehm build never
+collects at all today (`runtime/Makefile`: "plain malloc (no collection)"), so this rung is also what
+makes `pnpm run test:leak` meaningful on a machine without bdw-gc instead of skipping.
+
+**4 — Hot/cold split and IC counters.** Cheap because both mechanisms exist already
+(`runtime/src/jsrt_shape.c`, the emitter's `icSite()`); this is instrumentation, not machinery.
+Counters first — hit / miss / megamorphic per site, dumped at exit — and the field split follows what
+they say. Splitting layout before the counters exist optimizes the profile you imagined. Counters
+live behind the feature-flag rule above, so the default archive keeps its size.
+
+**5 — String ropes.** Codegen is already insulated: `jsrt_value.h` states that generated C touches
+string contents only through `jsrt_string_length`/`jsrt_string_char` so exactly this change stays
+runtime-only. The cost is inside the runtime, where ~93 direct `->data` uses across six files
+(`jsrt_string.c`, `jsrt_string_ops.c`, `jsrt_regexp.c`, `jsrt_print.c`, `jsrt_unicode.c`,
+`jsrt_intl.c`) assume a flat buffer — each becomes a flatten call or a rope-aware rewrite, and the
+regexp bridge is the one place flattening is not optional (libregexp wants contiguous units).
+Small-string inlining is a *different* change with a heavier blast radius: it redefines what a
+NaN-boxed payload can hold, so it edits `docs/VALUE.md` and `jsrt_value.h` — the codegen↔runtime
+contract — in the same commit. Identity is the correctness trap: `===` on strings is by value, and no
+rope may make two equal strings distinguishable. Justification comes from Task 6.3's string-churn
+program, not from V8/JSC precedent.
+
+**6 — LLVM backend.** Cheapest rung first, and here that is not LLVM: measure what `-O2` C leaves
+behind by building the compute set with `-O3`, `-flto` and PGO through the existing path
+(`src/cli/build.ts` passes a single `-O2` today). If LTO+PGO recovers most of the gap, this row is
+days of flag work rather than 4–8 weeks and the backend is unnecessary. If it is built, `--emit=c`
+stays permanently — it is how a codegen bug gets reported (`--keep-c`) — and the real cost is not
+instruction selection but everything clang was doing for free, starting with `#line` maps becoming
+`!dbg` metadata.
+
+**7 — Startup snapshot: measured, and not scheduled.** V8 snapshots exist because V8 *constructs* a
+builtin object graph at startup. Stator does not: `jsrt_init()` is a 48-bit-pointer probe plus
+`GC_INIT()`, builtins are dead-stripped C functions rather than constructed objects, and `main()`
+opens a globals frame and runs the program. Measured 2026-09-01 (Apple M3 Max, Darwin 25.6, Apple
+clang 21.0.0, `-O2`, Boehm build, Node v26.7.0, best of 15 spawns): empty compiled program
+**3.2 ms**, `node` on an empty module **27.0 ms**, `/bin/true` **0.23 ms**. The whole budget a
+snapshot could attack is ~3 ms, most of it dynamic linking — the row's "50–200 ms class wins" was
+inherited from an architecture Stator does not have (plan-notes 133). The rung goes live only if a
+profile shows a startup floor worth attacking, and the lever then is link-time (static linking,
+page-in behaviour), not a heap snapshot.
+
+**8 — WasmGC.** The row is honest that it is optionality, not speed; gate it like Phase 8, on a named
+user needing a browser target, recorded before work starts. Be equally honest about the size: under
+WasmGC the *host* owns objects, so NaN-boxing, Boehm, and the shadow-stack rooting discipline all
+stop applying. That is a second backend and a second runtime sharing a frontend — which is why it is
+months, and why it is last.
+
 Standing practices:
-- **Split emitted C per module and compile in parallel** — generated megafiles make toolchains miserable. Also the v0 incremental-build answer: whole-program HIR, per-module C object caching keyed by content hash.
+- **Split emitted C per module and compile in parallel** — today `emitC(module)` returns one string
+  and `linkExecutable` makes one `clang -O2` call over it (`src/codegen/index.ts`,
+  `src/cli/build.ts`), so a large program is one translation unit on one core. This is also the v0
+  incremental-build answer: whole-program HIR, per-module C, `.o` cached by content hash of (C text +
+  flags + runtime archive). Measure the trade rather than assuming it — separate TUs lose
+  cross-module inlining at `-O2`, which is precisely the hole `-flto` (rung 6) fills.
 - **Compiler throughput:** reuse the `ts.Program`/checker across builds (watch mode later); if parsing/checking exceeds the §13 tripwire, move parsing to `oxc-parser` (napi) and keep the checker for types only; re-evaluate tsgo quarterly.
-- **Perf-regression gate in CI** (Boa's lesson: conformance work silently taxes performance ~1–2%/release without a gate).
-- **Publish the conformance % and benchmarks** — the field's trust currency.
+- **Perf-regression gate in CI** (Boa's lesson: conformance work silently taxes performance ~1–2%/release without a gate). It is specified in Task 6.3 step 7, threshold included: the gate sits above a *measured* spread, because an alarm that fires on noise costs more than no gate.
+- **Publish the conformance % and benchmarks** — the field's trust currency. Task 6.1 steps 6–8 own the number and the honesty rules that travel with it (skips counted by feature, printed beside the percentage).
 
 ---
 

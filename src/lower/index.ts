@@ -1778,6 +1778,17 @@ function lowerExpression(
         method: 'now',
         args: [],
       };
+      // The COMPONENT form is a different node: seven operands rather than one, and local-time
+      // semantics rather than a time value. Omitted trailing components are padded with
+      // `undefined`, which the runtime reads as the spec's defaults (day 1, the rest 0) -- the
+      // same padding convention every `date-op` setter uses.
+      if (args.length >= 2) {
+        const padded = [...args];
+        while (padded.length < 7) {
+          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+        }
+        return { kind: 'date-components', type, span, args: padded };
+      }
       return {
         kind: 'date-new',
         type,

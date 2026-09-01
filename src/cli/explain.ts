@@ -386,6 +386,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     // A namespace walk answers what its argument holds, so an Unknown ARGUMENT carries through --
     // except for `fromEntries`, whose result is a dynamic shape and therefore Unknown outright,
     // which the check at the top of this function has already answered.
+    case 'date-components':
     case 'date-static':
     case 'object-static':
       return expr.args.some(expressionHasUnknown);

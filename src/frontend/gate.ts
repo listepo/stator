@@ -1988,11 +1988,9 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
       phase: 5,
     };
   }
-  // `new Date(v)` -- a time value, an ISO string, or another Date -- is slice A. The ZERO-argument
-  // form reads the clock: it cannot be proved by a golden test and lands under Task 4.2's
-  // determinism carve-out with `Date.now`, so it is refused here BY NAME rather than by falling
-  // through to a message about classes. The multi-argument component form is LOCAL time, which is
-  // slice B.
+  // `new Date(...)` in each of its three forms: the zero-argument clock read, the one-argument time
+  // value / ISO string / Date copy (slice A), and the component list read as LOCAL time (slice B).
+  // Every one of them is accepted; the arity ceiling is the spec's own seven.
   if (isGlobalDate(node.expression, checker)) {
     const args = node.arguments ?? [];
     // The zero-argument form is ACCEPTED: it reads a clock, and nondeterminism is a proof problem
@@ -2001,12 +1999,13 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
     if (args.length === 0) {
       return { kind: 'accept' };
     }
-    if (args.length !== 1) {
-      return dateNotYet('new Date(year, month, ...) in local time');
-    }
-    const [argument] = args;
-    if (argument === undefined || ts.isSpreadElement(argument)) {
+    if (args.some((argument) => ts.isSpreadElement(argument))) {
       return dateNotYet('a spread argument to new Date');
+    }
+    // Seven is the whole component list (§21.4.2.1); the checker's own overloads already reject
+    // more, so this only guards against a lib that does not.
+    if (args.length > 7) {
+      return dateNotYet(`new Date with ${String(args.length)} arguments`);
     }
     return { kind: 'accept' };
   }

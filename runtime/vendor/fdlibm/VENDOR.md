@@ -51,7 +51,10 @@ file exists to remove. The prefix makes the choice explicit at every call site.
 
 **Never hand-edit `fdlibm.c`** (AGENTS.md, Don'ts). It is generated. A change that turns out to be
 necessary is a `plan-notes.md` entry first, then an edit to `port.mjs` — which keeps the next
-version bump a re-run rather than a merge.
+version bump a re-run rather than a merge: `node runtime/vendor/update.mjs fdlibm [ref]` downloads
+upstream's `ieee754.cc` into a temp dir and runs `port.mjs` over it. `LICENSE` is assembled by hand
+(SunSoft's notice + V8's, neither of which is a file upstream), so that script never touches it —
+re-read it when a bump crosses a license change.
 
 Like `quickjs-ng/`, this directory compiles with `-Wall` alone rather than the runtime's full
 `-Wall -Wextra -Werror` (plan-notes 101): holding code we may not edit to our own warning policy

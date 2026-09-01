@@ -13,11 +13,11 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { compileAndRunLines } from './helpers.ts';
+import { compileAndRunLines, NATIVE_ONLY } from './helpers.ts';
 
 const SAMPLES = 2000;
 
-void test('Math.random stays in [0, 1) and varies', () => {
+void test('Math.random stays in [0, 1) and varies', NATIVE_ONLY, () => {
   const lines = compileAndRunLines(
     `for (let i = 0; i < ${String(SAMPLES)}; i++) {\n  console.log(Math.random());\n}\n`,
     'random',

@@ -3267,3 +3267,116 @@ time rather than the class. What remains under it is slice B (local time, blocke
 in the golden runner — Phase 4's own step 8) and the `toString`/`toLocale*` family (ICU CLDR data,
 Task 4.4's feature build). Per §15's rule, closing Phase 4 means every member still under it is
 delivered or reassigned.
+
+---
+
+## 133. The optimization ladder gets details, and one rung dies of a measurement (2026-09-01)
+
+`plan.md` §12 was eight table rows and four one-line practices — the only section of the plan with no
+detail under it, written from research figures rather than from this tree. Details added per rung:
+the entry criterion (nothing starts before Task 6.3's harness and its measured noise floor), the
+discipline every rung shares (baseline on one host, revert what does not move the geomean and record
+the non-gain, semantics never a variable, feature-flag anything that adds a build mode), and for each
+row its actual precondition, its trap in this codebase, and its abort rule. Three of the corrections
+are worth naming here because they change what the rows mean.
+
+**Rung 1's premise does not hold for this runtime.** Boa's "5–15% from mimalloc" is an *object*-
+allocator result. Here the object allocator is Boehm: `jsrt_gc_alloc` calls `GC_generic_malloc`
+(`runtime/src/jsrt_gc.c`), which a swapped `malloc` never sees. What is left for an allocator swap is
+the non-collected scratch (regexp captures and keys, shape key encoding, unicode buffers, JSON
+digits, the `console.count`/`time` tables, Intl) plus the no-Boehm fallback where `jsrt_gc_alloc` *is*
+`malloc`. So the rung is now conditional on profiling those sites, and ordered after rung 3 rather
+than first if it survives at all.
+
+**Rung 7 is measured out of the schedule.** V8's snapshot exists because V8 constructs a builtin
+object graph at startup; Stator's `jsrt_init()` is a 48-bit-pointer probe plus `GC_INIT()`, and
+builtins are dead-stripped C functions, not constructed objects — there is nothing to snapshot.
+Measured 2026-09-01 on this machine (Apple M3 Max, Darwin 25.6, Apple clang 21.0.0, `-O2`, Boehm
+build via `pkg-config bdw-gc`, Node v26.7.0; best of 15 spawns each, timed by `spawnSync` around
+`process.hrtime.bigint()`), with `export {};` as the empty program and an empty `.mjs` for Node:
+
+| program | best of 15 |
+|---|---|
+| `stator build` output, empty program (51,656 bytes) | **3.23 ms** |
+| `node empty.mjs` | 27.04 ms |
+| `/bin/true` (process-spawn floor) | 0.23 ms |
+
+Roughly 3 ms of budget exists in total, most of it dynamic linking. The row's inherited "50–200 ms
+class wins for CLI tools" is now recorded as **none available here**, effort **not scheduled**, and
+the rung is gated on a profile showing a floor worth attacking. Per §15.5 this is a measurement, not
+a quote: the numbers above were produced on this host and are re-measurable from the same three
+programs. (The favourable half of the comparison — an 8× faster start than Node — is a *finding of
+this measurement*, not a benchmark claim: it belongs to Task 6.3's harness before it is published
+anywhere, per §15.5 and the §12 practice above it.)
+
+**Two practices had no home and now point at one.** The perf-regression gate and the published
+conformance number were listed in §12 as standing practices with no owning task; they are specified
+in Task 6.3 step 7 and Task 6.1 steps 6–8 respectively, so §12 now cites those rather than restating
+them. The per-module C split gained the same treatment in the opposite direction: it now names what
+it would actually change (`emitC` returns one string, `linkExecutable` makes one `clang -O2` call)
+and the cost it must be measured against (separate TUs lose cross-module inlining, which is the hole
+rung 6's `-flto` fills).
+
+No code changed; `plan.md` §12 and this entry are the whole diff.
+
+
+## 133. Date slice B: the local-time inverse, and two plan corrections (2026-09-01)
+
+**Context.** Date step 8 (plan §7 Task 4.2) — the local-time getters/setters, `getTimezoneOffset`
+and the component constructor, behind a `TZ=UTC` pin on the golden runner.
+
+**What the tree corrected in the plan.**
+
+1. **`toDateString` is not ICU-blocked.** `docs/SUBSET.md`, `docs/DIAGNOSTICS.md` and plan §7's
+   exit criterion all grouped it with `toString`/`toTimeString`/`toLocale*` as needing ICU CLDR
+   names. Measured against the pinned Node under `TZ=Europe/Berlin`:
+   `toString()` → `Mon Jul 15 2024 14:00:00 GMT+0200 (Central European Summer Time)`,
+   `toTimeString()` → `14:00:00 GMT+0200 (Central European Summer Time)`,
+   `toDateString()` → `Mon Jul 15 2024`. The third has no zone name in it, so it is a pure
+   local-calendar read and landed with slice B. The other two are confirmed ICU-blocked for a
+   reason now measured rather than assumed: the same instant through libc `strftime` with `%Z`
+   gives `(CEST)`, the abbreviation — Node's long display name comes from ICU. All three docs and
+   the exit criterion were edited in the same change.
+
+2. **Step 9's residue claim needed widening.** It asked that the residue under `STA1210` be "exactly
+   the intl family". After slice B it is `toString`, `toTimeString`, the three `toLocale*` and the
+   call form `Date()` — five members and a call form, of which only three are locale-dependent in
+   the `Intl` sense. The honest predicate is *ICU-dependent*, not *intl*: `toString` and
+   `toTimeString` need ICU's timezone display names without going near a locale API. The docs now
+   say ICU-dependent; the substance of the claim — nothing time-zone-dependent is left under the
+   code — holds.
+
+3. **A slice-A bug the new fixture caught.** `jsrt_date_to_utc_string` padded a negative year to six
+   digits (`Sat, 01 Jan -000001 00:00:00 GMT`) on the strength of a comment claiming Node does. Node
+   pads to four: `Fri, 01 Jan -0001 00:00:00 GMT`. Six is `toISOString`'s expanded-year form only.
+   No slice-A fixture had a negative year, so nothing contradicted the comment. `write_year` now
+   pads to four for both human string forms and `toISOString` keeps formatting its own year;
+   `tests/golden/ts/date_local.ts` carries a year -1 through both.
+
+**The design decision worth recording: the local→instant inverse.** `LocalTime(t) = t + LocalTZA(t)`
+is a function; `UTC(local)` is not its inverse, because across a DST transition a wall-clock reading
+either names no instant (the spring-forward gap) or names two (the autumn fold). The first
+implementation probed once — `offset_at(local)`, subtract, re-probe, retry if the offset moved — and
+is correct everywhere except the fold, where it returns the LATER instant. Node returns the earlier:
+2024-10-27T02:30 in Berlin is `2024-10-27T00:30:00.000Z` (CEST), not `01:30Z` (CET).
+
+§21.4.1.26 is explicit about why: both the gap and the fold are resolved with the offset in effect
+*before* the transition, which for the fold is `possibleInstants[0]`, the earlier one. The
+implementation follows the spec's own shape — probe the offset one day either side (its `before` is
+`t - 1 day`), build both candidates, take the first whose own offset validates it, and fall back to
+the pre-transition candidate when neither validates, which is exactly the gap. One day is a wider
+window than any real zone's offset (max ±14:00) and narrower than any pair of transitions.
+
+**Evidence.** Cross-checked against the pinned Node (v26.7.0) in seven zones — `UTC`,
+`Europe/Berlin`, `America/New_York`, `Australia/Lord_Howe`, `Asia/Kolkata`, `Pacific/Chatham`,
+`America/Sao_Paulo` — over a probe covering both DST hemispheres, 30- and 45-minute offsets, a
+no-DST control, pre-epoch instants, every month boundary, rollover in both directions and the
+Invalid-Date recovery path. Byte-identical in all seven.
+
+**Why `TZ=UTC` and not a zone that would exercise the difference.** A non-UTC pin would make the
+golden fixtures actually distinguish local from UTC — but the compiled binary reads the tzdb through
+libc and the Node ground truth reads it through ICU, and those two ship on independent schedules. A
+tzdata skew between them would surface as a golden byte diff indistinguishable from a semantics bug.
+Under UTC they cannot disagree. The cost is that goldens can only prove wiring and arithmetic, which
+is why every zone-dependent claim moved to `tests/unit/date-local.test.ts` with an explicit `TZ` per
+case, on dates whose rules have been fixed since 1996.

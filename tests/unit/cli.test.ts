@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { NATIVE_ONLY } from './helpers.ts';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = join(REPO, 'src', 'cli', 'main.ts');
@@ -72,26 +73,30 @@ void test('build and explain report a missing entry file as a path error', () =>
 });
 
 // `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('a builtin the program never references is not in the binary (Task 3.12)', () => {
-  const work = mkdtempSync(join(tmpdir(), 'stator-shake-'));
-  try {
-    const src = join(work, 'hello.ts');
-    const out = join(work, 'hello');
-    writeFileSync(src, 'console.log("hello");\n');
-    const { status, stderr } = stator('build', src, '-o', out);
-    assert.equal(status, 0, stderr);
-    // The symbol table's strings live in the file, so a byte search is a portable stand-in for
-    // `nm`: a dead-stripped builtin's name is gone, a referenced one's remains.
-    const binary = readFileSync(out).toString('latin1');
-    assert.ok(binary.includes('jsrt_print'), 'the referenced builtin must survive the link');
-    assert.ok(
-      !binary.includes('jsrt_map_new'),
-      'an unreferenced builtin must be dead-stripped, not dragged in with its object file',
-    );
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
+void test(
+  'a builtin the program never references is not in the binary (Task 3.12)',
+  NATIVE_ONLY,
+  () => {
+    const work = mkdtempSync(join(tmpdir(), 'stator-shake-'));
+    try {
+      const src = join(work, 'hello.ts');
+      const out = join(work, 'hello');
+      writeFileSync(src, 'console.log("hello");\n');
+      const { status, stderr } = stator('build', src, '-o', out);
+      assert.equal(status, 0, stderr);
+      // The symbol table's strings live in the file, so a byte search is a portable stand-in for
+      // `nm`: a dead-stripped builtin's name is gone, a referenced one's remains.
+      const binary = readFileSync(out).toString('latin1');
+      assert.ok(binary.includes('jsrt_print'), 'the referenced builtin must survive the link');
+      assert.ok(
+        !binary.includes('jsrt_map_new'),
+        'an unreferenced builtin must be dead-stripped, not dragged in with its object file',
+      );
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  },
+);
 
 // `void`: node:test returns a promise the runner owns; we are not awaiting it here.
 void test('a relative entry path resolves its imports (module graph is cwd-independent)', () => {
@@ -120,22 +125,26 @@ void test('a relative entry path resolves its imports (module graph is cwd-indep
 // property site — `b`'s annotation says shape table, `a`'s literal built a layout, and the checker
 // blesses the assignment. Answering the read would require guessing a slot; the runtime aborts
 // with the not-yet instead (golden rule 4: loudly unimplemented beats silently wrong).
-void test('a fixed-shape object reaching a dynamic site aborts with STA2004, not a wrong answer', () => {
-  const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
-  try {
-    const entry = join(work, 'alias.ts');
-    writeFileSync(
-      entry,
-      'const a: { x: number } = { x: 1 };\nconst b: { x?: number } = a;\nconsole.log(b.x);\n',
-    );
-    const binary = join(work, 'alias');
-    const build = stator('build', entry, '-o', binary);
-    assert.equal(build.status, 0, build.stderr);
-    const run = spawnSync(binary, [], { encoding: 'utf8' });
-    assert.notEqual(run.status, 0, 'the aliased read must abort, never answer');
-    assert.match(run.stderr, /STA2004/);
-    assert.equal(run.stdout, '', 'nothing may print before the abort');
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
+void test(
+  'a fixed-shape object reaching a dynamic site aborts with STA2004, not a wrong answer',
+  NATIVE_ONLY,
+  () => {
+    const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
+    try {
+      const entry = join(work, 'alias.ts');
+      writeFileSync(
+        entry,
+        'const a: { x: number } = { x: 1 };\nconst b: { x?: number } = a;\nconsole.log(b.x);\n',
+      );
+      const binary = join(work, 'alias');
+      const build = stator('build', entry, '-o', binary);
+      assert.equal(build.status, 0, build.stderr);
+      const run = spawnSync(binary, [], { encoding: 'utf8' });
+      assert.notEqual(run.status, 0, 'the aliased read must abort, never answer');
+      assert.match(run.stderr, /STA2004/);
+      assert.equal(run.stdout, '', 'nothing may print before the abort');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  },
+);

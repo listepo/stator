@@ -748,12 +748,49 @@ jsrt_value jsrt_date_set_utc_minutes(jsrt_value v, jsrt_value mi, jsrt_value s, 
 jsrt_value jsrt_date_set_utc_seconds(jsrt_value v, jsrt_value s, jsrt_value ms);
 jsrt_value jsrt_date_set_utc_milliseconds(jsrt_value v, jsrt_value ms);
 
+/* The LOCAL field getters and setters (§21.4.4.x), and `getTimezoneOffset`. Same calendar
+ * arithmetic as the UTC family over a shifted reading: the offset comes from libc `localtime_r`,
+ * which owns the tzdb -- the runtime never carries zone rules of its own. A setter rebuilds a
+ * WALL-CLOCK time and converts it back to an instant, which is not a bijection across a DST
+ * transition; the spec's `UTC()` (§21.4.1.26) is what resolves the gap and the overlap.
+ *
+ * `getTimezoneOffset` answers MINUTES WEST of UTC -- the sign is inverted relative to the offset
+ * itself, so UTC+2 reads -120. */
+jsrt_value jsrt_date_get_full_year(jsrt_value v);
+jsrt_value jsrt_date_get_month(jsrt_value v);
+jsrt_value jsrt_date_get_date(jsrt_value v);
+jsrt_value jsrt_date_get_day(jsrt_value v);
+jsrt_value jsrt_date_get_hours(jsrt_value v);
+jsrt_value jsrt_date_get_minutes(jsrt_value v);
+jsrt_value jsrt_date_get_seconds(jsrt_value v);
+jsrt_value jsrt_date_get_milliseconds(jsrt_value v);
+jsrt_value jsrt_date_get_timezone_offset(jsrt_value v);
+jsrt_value jsrt_date_set_full_year(jsrt_value v, jsrt_value year, jsrt_value month, jsrt_value day);
+jsrt_value jsrt_date_set_month(jsrt_value v, jsrt_value month, jsrt_value day);
+jsrt_value jsrt_date_set_date(jsrt_value v, jsrt_value day);
+jsrt_value jsrt_date_set_hours(jsrt_value v, jsrt_value h, jsrt_value mi, jsrt_value s,
+                               jsrt_value ms);
+jsrt_value jsrt_date_set_minutes(jsrt_value v, jsrt_value mi, jsrt_value s, jsrt_value ms);
+jsrt_value jsrt_date_set_seconds(jsrt_value v, jsrt_value s, jsrt_value ms);
+jsrt_value jsrt_date_set_milliseconds(jsrt_value v, jsrt_value ms);
+
+/* `new Date(y, m, d?, h?, mi?, s?, ms?)` (§21.4.2.1 steps 4-11). The same arithmetic as `Date.UTC`
+ * -- two-digit-year rule included -- read as LOCAL time, which is the only difference between the
+ * two and the reason this cannot just call `jsrt_date_utc`. */
+jsrt_value jsrt_date_from_components(jsrt_value year, jsrt_value month, jsrt_value day,
+                                     jsrt_value hours, jsrt_value minutes, jsrt_value seconds,
+                                     jsrt_value ms);
+
 /* The string forms that need no locale. `toISOString` PANICS on an Invalid Date, where the spec
  * throws a RangeError the runtime cannot raise until Phase 5 step 11; `toJSON` answers null there
  * instead, which is why `JSON.stringify(new Date(NaN))` is "null" rather than an abort. */
 jsrt_value jsrt_date_to_iso_string(jsrt_value v);
 jsrt_value jsrt_date_to_json(jsrt_value v);
 jsrt_value jsrt_date_to_utc_string(jsrt_value v);
+/* `toDateString` is the LOCAL calendar date alone. Its siblings `toString` and `toTimeString` are
+ * NOT here: both append the host zone's long display name, which Node sources from ICU and libc's
+ * `%Z` cannot produce -- so they stay residue under STA1210 with the `toLocale*` family. */
+jsrt_value jsrt_date_to_date_string(jsrt_value v);
 
 /* The two statics. `Date.UTC` takes all seven components, absent ones as `undefined`; `Date.parse`
  * accepts the §21.4.1.32 Date Time String Format ONLY and answers NaN for anything else. */
