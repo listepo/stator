@@ -81,11 +81,14 @@ entry.ts / entry.js (+ module graph)
         for eval/untyped modules (Phase 8, js mode only)
 ```
 
+`docs/ARCHITECTURE.md` renders this section as Mermaid diagrams (component, sequence, package,
+value-flow views). It is a visualization of this section, never an authority over it.
+
 **Repo layout (fixed):**
 
 ```
 plan.md AGENTS.md plan-notes.md NICHE.md          # root
-docs/    MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
+docs/    ARCHITECTURE.md MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
 src/     cli/  frontend/  hir/  lower/  passes/  codegen/  support/
 runtime/ include/jsrt_value.h  src/  vendor/  Makefile     → runtime/build/libjsrt.a
 tests/   unit/  subset/  golden/ts/  golden/js/  differential/  bench/
@@ -229,11 +232,15 @@ Until this task lands, every global except `console.log` and `undefined` is defe
 
 **In progress.** The landed slices — Math, String, Array, console, Object, JSON, callback
 methods, `Map`/`Set` and the ES2025 set operations — are recorded in [done.md](done.md) → Phase 4,
-Task 4.2. `pnpm run test:builtins` reports **165/196** deterministic surface members, with Math
+Task 4.2. `pnpm run test:builtins` reports **166/196** deterministic surface members, with Math
 42/42 plus one nondeterministic proof for `Math.random`, `String.prototype` at 31/32 and
 `RegExp.prototype` at 13/15.
-**Still open:** `Object` 6/13, `Date` (STA1210) has no implementation, and the four remaining
-`console` members. `RegExp.prototype` is DONE for everything this phase owns — the eleven data
+**Still open for THIS PHASE:** `Date` (STA1210) has no implementation, and `console.table`.
+`Object` reads 7/13 on the dashboard but is DONE for everything this phase owns: `assign` landed
+2026-09-01 and the other five each wait on a mechanism Phase 4 does not build — `freeze`/`isFrozen`
+on runtime-raised exceptions (Phase 5 step 11), `create`/`defineProperty`/`getPrototypeOf`/
+`setPrototypeOf` on the prototype surface (Phase 8, `STA1204`). See plan-notes 125; the dashboard
+counts members, not blockers, so a percentage below 100 is not by itself open work. `RegExp.prototype` is DONE for everything this phase owns — the eleven data
 properties and `toString` landed 2026-09-01 (plan-notes 121), leaving `compile` (Annex B legacy,
 variadic arity) and `unicodeSets` (declared in lib.es2024; this project pins `lib: ["es2023"]`, so
 the checker refuses the read), neither of which is a Phase 4 blocker.
@@ -292,10 +299,32 @@ shows every surface member whose blocker Phase 4 OWNS:**
 
 - **`Math`** — all deterministic members are now covered by fdlibm and the dashboard; `Math.random`
   is covered by the determinism carve-out proof.
-- **`Object`** — `assign`, `create`, `freeze`, `isFrozen`: shape work, on Task 4.1's machinery.
-  `defineProperty`, `getPrototypeOf` and `setPrototypeOf` are **not** Phase 4 — they are the
-  descriptor and prototype-chain surface `STA1204` already assigns to Phase 8.
-- **`console`** — `table`, `time`, `timeEnd`, `trace`.
+- **`Object`** — `assign` only (landed 2026-09-01; two-argument form over a growable target).
+  Three members left this bullet on 2026-09-01 (plan-notes 125) because their blockers are not
+  shape work and Phase 4 does not own them:
+  - `freeze`/`isFrozen` → **Phase 5, with step 11.** A write to a frozen object is a `TypeError`
+    in strict mode, which every module here is. The runtime cannot raise one: `jsrt_throw` sets a
+    pending cell that only GENERATED code reads, always paired with a `goto` to a landing pad the
+    library does not have. Step 11 already needs exactly this mechanism ("a handler's throw must
+    become a rejection, which needs a runtime-level catch around user code"), and `docs/SUBSET.md`
+    line 139 had recorded the same constraint independently. Aborting instead would turn a legal
+    program into a crash; ignoring the write is sloppy-mode semantics this language does not have.
+  - `create` → **Phase 8, with the prototype machinery.** `lib.es5.d.ts` types it `any`, which ts
+    mode bans outright, and its only in-subset spelling — `Object.create(null)` for a
+    prototype-less map — asks for something every object here already is. It is `STA1204`'s
+    surface, not a gap.
+  - `defineProperty`, `getPrototypeOf`, `setPrototypeOf` were already assigned to Phase 8 by
+    `STA1204`; they are listed here only so the bullet accounts for all 13 members.
+- **`console`** — `table` only. `time`, `timeEnd` and `trace` move to the **determinism carve-out**
+  above (corrected 2026-09-01, plan-notes 124): `time`/`timeEnd` print an ELAPSED DURATION and
+  `trace` prints a STACK, so "≥1 golden test matches Node byte-for-byte" is unmeetable by
+  construction for all three — the same defect the carve-out already fixed for `Math.random`, left
+  standing here because the criterion was written from the missing-members list rather than from
+  the reasons. `done.md` had already recorded them as "deferred, and for a reason that will not
+  change". Left as written, Phase 4 could never exit. They land with a different proof — a shape
+  assertion in `tests/unit/` (the label is echoed, a duration is printed, the unit is `ms`) — and
+  are marked `nondeterministic` on the dashboard. `table` is NOT carved out: its column layout is a
+  pure function of the data, so it stays here as ordinary Phase 4 work.
 - **`RegExp.prototype`** — ✅ **met.** The array-with-properties half landed with Task 4.1
   (plan-notes 120: `exec`, `String.prototype.match`), and the DATA property surface with Task 4.2
   (plan-notes 121: the eleven properties of §22.2.6 plus `toString`, on a `REGEXP_FIELDS` table

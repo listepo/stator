@@ -202,8 +202,9 @@ function linkExecutable(cPath: string, out: string): void {
       '-L',
       RUNTIME_LIB_DIR,
       '-ljsrt',
+      // The archive states its own system dependencies in `link-flags.txt` (SYS_LIBS, plan-notes
+      // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
       ...extraLinkFlags(),
-      '-lm',
       '-o',
       out,
     ],

@@ -681,7 +681,31 @@ void test('Object namespace methods are accepted, the rest deferred', () => {
   assert.deepEqual(codesFor('console.log(Object.values({ x: 1 }));'), []);
   assert.deepEqual(codesFor('console.log(Object.entries({ x: 1 }));'), []);
   // The rest of the namespace, and a method as a value, stay deferred by name.
+  // `assign` writes, so the two arguments are asked different questions. A fixed-shape TARGET is
+  // refused (its reads are slot indices fixed at build time, so an added key is unreadable) while a
+  // fixed-shape SOURCE is fine -- reading a fixed shape's keys is what `Object.entries` already
+  // does. Growability comes from an optional property or an index signature, never from inference.
   assert.deepEqual(codesFor('console.log(Object.assign({ x: 1 }, { y: 2 }));'), ['STA1214']);
+  assert.deepEqual(
+    codesFor(
+      'const t: Record<string, number> = { x: 1 };\nconsole.log(Object.assign(t, { y: 2 }));',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('const t: { x?: number } = {};\nconsole.log(Object.assign(t, { x: 2 }));'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('const t: Record<string, number> = {};\nconsole.log(Object.assign(t, [1, 2]));'),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    codesFor(
+      'const t: Record<string, number> = {};\nconsole.log(Object.assign(t, { a: 1 }, { b: 2 }));',
+    ),
+    ['STA1214'],
+  );
   assert.deepEqual(codesFor('const f = Object.keys;\nconsole.log(f({ x: 1 }));'), ['STA1214']);
   // An argument the runtime cannot walk: an array answers index strings in Node, which neither
   // object layout's walk would produce.

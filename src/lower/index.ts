@@ -2076,7 +2076,7 @@ function lowerExpression(
       // and `hasOwn` a boolean; for `values`/`entries` the checker's answer is kept when it maps
       // to an array, and the element degrades to Unknown when it does not (a mixed shape makes
       // the element genuinely a union this type model does not carry). `fromEntries` builds a
-      // DYNAMIC shape, so it is Unknown outright — the same honest answer `JSON.parse` gives,
+      // DYNAMIC shape and `assign` returns a target that just GREW one, so both are Unknown outright — the same honest answer `JSON.parse` gives,
       // and every read of it is a boundary.
       if (isGlobalObject(obj, checker) && Object.hasOwn(OBJECT_STATICS, propName)) {
         const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
@@ -2091,7 +2091,7 @@ function lowerExpression(
           type = { kind: 'array', element: H_STRING };
         } else if (method === 'hasOwn') {
           type = H_BOOLEAN;
-        } else if (method === 'fromEntries') {
+        } else if (method === 'fromEntries' || method === 'assign') {
           type = hUnknown(false);
         } else {
           type =

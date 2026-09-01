@@ -73,3 +73,29 @@ const indexed = Object.fromEntries([
 console.log(Object.keys(indexed));
 console.log(JSON.stringify(indexed));
 console.log(indexed);
+
+// `Object.assign(target, source)` in its two-argument form. The TARGET must be a shape the runtime
+// can GROW -- an index signature or an optional property, which is what makes lookups go through
+// the shape table rather than a slot index fixed at build time -- so an all-required literal is
+// refused here by design, not by omission.
+const base: Record<string, number> = { a: 1, b: 2 };
+const patch: Record<string, number> = { b: 20, c: 30 };
+const merged = Object.assign(base, patch);
+console.log(JSON.stringify(base));
+// The return value IS the target, not a copy: mutating through one name shows through the other.
+console.log(merged === base);
+console.log(Object.keys(base));
+
+// An overwrite keeps the key's ORIGINAL position; only a genuinely new key appends. `b` was
+// second before the merge and is second after it, even though `patch` wrote it last.
+const order: Record<string, string> = { x: 'x', y: 'y' };
+Object.assign(order, { y: 'Y', z: 'Z' });
+console.log(Object.entries(order));
+
+// An empty source changes nothing, and a fixed-shape source is a legal source (only the TARGET
+// has to be growable -- reading a fixed shape's keys is what `Object.entries` already does).
+const acc: Record<string, number> = {};
+Object.assign(acc, {});
+console.log(Object.keys(acc).length);
+Object.assign(acc, { one: 1 });
+console.log(acc);

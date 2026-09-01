@@ -2835,3 +2835,106 @@ completion record added to `done.md` → Phase 0. The commit carrying `NICHE.md`
 
 **plan.md edited:** yes — §3 status and the Task 0.1 stub; the five steps stay in `plan.md` because
 they are the gate's definition and §15.1 points at them.
+
+## 124. Phase 4's exit criterion demanded three members no golden test can hold (2026-09-01)
+
+**Found by:** reviewing the roadmap on owner instruction, not by a failing test — which is the point.
+
+**The defect.** §7's exit criterion listed `console` as `table`, `time`, `timeEnd`, `trace`. Task
+4.2's bar is "a builtin counts as implemented when ≥1 golden test exercises it and matches Node
+byte-for-byte". `console.time`/`timeEnd` print an elapsed DURATION and `console.trace` prints a
+STACK — neither is a function of the program's input, so no golden test can hold either to Node.
+The criterion therefore could not be met, and Phase 4 could not close, for reasons that had nothing
+to do with the work remaining.
+
+This is the SAME defect plan-notes 116 identified and fixed for `Math.random`, `Date.now()` and
+zero-argument `new Date()`. The carve-out it created was correct and is unchanged; it simply was
+never applied to console, because the exit criterion was written from the dashboard's
+missing-members list rather than from the reasons those members were missing. `done.md`'s console
+addendum had already recorded the right reasoning on 2026-08-30 — "deferred, and for a reason that
+will not change" — so the two documents disagreed for two days with the archive being the correct
+one, which is exactly the failure mode §15.3 exists to prevent.
+
+**The fix.** `time`, `timeEnd` and `trace` move under the existing determinism carve-out: they land
+with a shape assertion in `tests/unit/` (the label is echoed, a duration is printed, the unit is
+`ms`) and are marked `nondeterministic` in `builtins_coverage.json` rather than counted against
+coverage. The bar is unchanged for every member that CAN be pinned to Node.
+
+**`table` is deliberately NOT carved out.** Its column layout is a pure function of the data it is
+given — same input, same box-drawing characters, same widths — so it is ordinary Phase 4 work and
+stays in the exit criterion. Carving out the whole namespace because three of its four members are
+untestable would have hidden a real gap behind a real exemption.
+
+**Rule this reinforces:** an exit criterion is written from BLOCKERS, never from a list of what is
+currently red. A criterion assembled from a dashboard inherits every reason a member is missing,
+including the reasons that will never change (plan-notes 116's rule, applied one level up).
+
+**plan.md edited:** yes — §7's `console` bullet in the phase exit criterion.
+
+## 125. `Object`'s remaining four were four different problems, not one (2026-09-01)
+
+**Context.** Phase 4's exit criterion listed `assign`, `create`, `freeze`, `isFrozen` under one
+justification: "shape work, on Task 4.1's machinery." Building them found that exactly one of the
+four is shape work.
+
+**Evidence.**
+
+1. **`assign` is shape work, and landed.** Two-argument form, target restricted to a growable
+   shape. `grep -rn "jsrt_throw" runtime/src/*.c src/codegen/*.ts` shows the write path needs no
+   exception, and the golden fixture matches Node byte-for-byte.
+
+2. **`freeze`/`isFrozen` are blocked on RUNTIME-RAISED EXCEPTIONS, not on a frozen bit.** The bit is
+   trivial. The problem is what a write to a frozen object must do: §10.4.7 makes it a `TypeError`,
+   and ES modules are always strict, so silently dropping the write is not an available reading.
+   The runtime cannot raise one. `jsrt_throw` sets a pending cell, and every one of its three call
+   sites is in `src/codegen/index.ts`, two of them literally `jsrt_throw(...); goto <pad>` — the
+   pad is emitted per-function by codegen, so a library function has nothing to jump to.
+   `runtime/src/` calls `jsrt_throw` zero times. `jsrt_panic` (abort) is the only tool a builtin
+   has, and aborting turns a legal program into a crash.
+
+   This was already recorded, twice, by people who were not looking for it: `docs/SUBSET.md`'s
+   `JSON.stringify` row says a cycle aborts because "the spec throws TypeError, which builtins
+   cannot raise yet", and `jsrt_value.h`'s `jsrt_call` comment says calling a non-function is fatal
+   "until ... the runtime exceptions". Two independent notes of the same missing mechanism, and the
+   exit criterion still assigned work that needs it to the phase that does not build it.
+
+   Phase 5 step 11 builds it — "a handler's throw must become a rejection, which needs a
+   runtime-level catch around user code" is the same mechanism under a different motivation.
+   `freeze`/`isFrozen` move there.
+
+3. **`create` is prototype machinery, and is `any`.** `lib.es5.d.ts` declares
+   `create(o: object | null): any`, which ts mode rejects before any subset question is reached.
+   And its one in-subset spelling, `Object.create(null)`, asks for a prototype-less object — which
+   every object in both layouts already is, since neither has a reachable prototype. It is
+   `STA1204`'s Phase 8 surface, where `getPrototypeOf`/`setPrototypeOf` already are.
+
+**A stale pointer found on the way.** `jsrt_value.h`'s comment named **Phase 6** as the deliverer of
+runtime exceptions. Phase 6 is conformance and differential fuzzing; the mechanism moved when
+plan-notes 116 restructured the phases, and the comment did not. Corrected to Phase 5 step 11.
+
+**Decision.** Phase 4's `Object` bullet is now `assign` alone. `freeze`/`isFrozen` → Phase 5 step
+11; `create` → Phase 8 with `STA1204`.
+
+**The rule this is the second instance of.** Note 124 found an exit criterion written from a list of
+what was red rather than from the reasons. This is the same defect one level in: four members
+grouped under one justification that fitted one of them. **A criterion that names members must name
+each member's blocker, because that is the only thing that says which phase owns it** — grouping
+hides exactly the mismatch that makes a phase unexitable. Checked the rest of the criterion under
+this rule while here: the `console` bullet (note 124) and the `Math` bullet each now carry a
+per-member reason, and no other bullet groups members under a shared justification.
+
+## 126. Architecture diagrams added as docs/ARCHITECTURE.md (2026-09-01)
+
+**Request.** Owner asked for a UML diagram of how Stator works, wired into AGENTS.md, plan.md, and
+docs/.
+
+**What landed.** `docs/ARCHITECTURE.md`: Mermaid renderings of plan §2 — the compile pipeline
+(component view), a `stator build` invocation (sequence view), `src/` module dependencies with the
+two structural invariants (`ts.Type` stops at frontend; mode stops at the gate), and value flow at
+a type boundary (raw vs NaN-boxed, STA2001). Mermaid because GitHub renders it natively — no
+tooling, no image files to drift.
+
+**Plan edit.** §2's "fixed" repo layout lists docs/ files, so adding a doc file is a plan edit:
+`ARCHITECTURE.md` added to that list and to AGENTS.md's repo map, plus one line in §2 stating the
+diagrams visualize that section and are never an authority over it — same subordination rule as
+MODES.md/SUBSET.md to §1. No spec content changed; the doc is derived, not normative.

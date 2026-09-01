@@ -168,7 +168,7 @@
     "warn": ["ts/console_streams.ts", "js/console_streams.js"]
   },
   "Object": {
-    "assign": [],
+    "assign": ["ts/object_builtins.ts"],
     "create": [],
     "defineProperty": [],
     "entries": ["ts/object_builtins.ts", "js/object_builtins.js"],

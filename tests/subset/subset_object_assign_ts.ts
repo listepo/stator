@@ -1,10 +1,11 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: dynamic
 // SUBSET.md: Object namespace
-// `assign` MUTATES its target, which a fixed-shape object cannot accept at all, and it is
-// variadic besides. The rest of the deferred namespace has its own reasons: `freeze`/`isFrozen`
-// need a frozen bit every write site would consult, and the prototype methods are machinery ts
-// mode bans by design.
+// The landed form: two arguments, and a TARGET the runtime can grow. An index signature (or an
+// optional property) is what routes lookups through the shape table instead of a slot index fixed
+// at build time, and growing a slot list after the fact is the thing that cannot be done. The
+// verdict follows from that: a growable target IS the dynamic representation, so `assign` is a
+// dynamic-path operation in ts mode too -- there is no static form of it to reach.
 
-export const merged = Object.assign({ x: 1 }, { y: 2 });
+const target: Record<string, number> = { x: 1 };
+export const merged = Object.assign(target, { y: 2 });

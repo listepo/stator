@@ -1006,20 +1006,25 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet('a spread argument to an Object method is not yet supported', 4);
       }
-      const argType = typeChecker.getTypeAtLocation(argument);
-      const accepted =
-        shape.receiver === 'pairs'
-          ? tsTypeToHType(argType, typeChecker).kind === 'array'
-          : tsTypeToHType(argType, typeChecker).kind === 'object' ||
-            isDynamicShape(argType, typeChecker);
-      if (!accepted) {
+      if (!acceptsObjectArgument(shape.receiver, argument, typeChecker)) {
         return notYet(`Object.${method} on this argument type is not yet supported`, 4);
+      }
+      if (shape.second === 'none') {
+        return { kind: 'accept' };
+      }
+      if (second === undefined) {
+        return notYet(`Object.${method} without a second argument is not yet supported`, 4);
       }
       // The key is a runtime string: a symbol or a number reads a property neither layout holds,
       // and converting one is the ToPropertyKey the object model owns.
-      return !shape.key || (second !== undefined && isStringReceiver(second, typeChecker))
+      if (shape.second === 'key') {
+        return isStringReceiver(second, typeChecker)
+          ? { kind: 'accept' }
+          : notYet(`Object.${method} with a key that is not a string is not yet supported`, 4);
+      }
+      return acceptsObjectArgument('shaped', second, typeChecker)
         ? { kind: 'accept' }
-        : notYet(`Object.${method} with a key that is not a string is not yet supported`, 4);
+        : notYet(`Object.${method} from this source type is not yet supported`, 4);
     }
     // The Promise namespace calls. `all` wants an ARRAY specifically -- the runtime walks one,
     // and every other iterable is the Symbol.iterator protocol -- while `resolve` and `reject`
@@ -2329,25 +2334,51 @@ function isGlobalNamed(node: ts.Expression, checker: ts.TypeChecker, name: strin
  *
  * `arity` is exact — none of these is variadic in the landed form. `receiver` says what the FIRST
  * argument must be: `shaped` is an object whose keys a walk can enumerate (a fixed shape, whose
- * class descriptor lists its fields, or a dynamic shape, whose chain does), and `pairs` is an
- * array, which is the only `fromEntries` input the runtime iterates. `key` marks the methods that
- * additionally take a string key.
+ * class descriptor lists its fields, or a dynamic shape, whose chain does), `pairs` is an array,
+ * which is the only `fromEntries` input the runtime iterates, and `dynamic` is the strictest --
+ * a shape that looks keys up through its shape table, which is the only kind `assign` may WRITE
+ * to, because a fixed shape's reads are slot indices decided at build time. `second` says the same
+ * about the second argument, `none` meaning there is not one.
  *
  * Everything else on `Object` stays deferred, and each for a reason rather than a backlog:
- * `freeze`/`isFrozen` need a frozen bit every write site would have to consult; `create`,
- * `defineProperty`, `getPrototypeOf` and `setPrototypeOf` are prototype machinery, which ts mode
- * bans by design and js mode leaves to the object model; `assign` mutates a target, which a
- * FIXED shape cannot accept at all. */
+ * `freeze`/`isFrozen` cannot be honest until the RUNTIME can throw -- a write to a frozen object
+ * is a TypeError in strict mode, which every module here is, and `jsrt_throw` is reachable only
+ * from generated code holding a landing pad (plan-notes 125); `create`, `defineProperty`,
+ * `getPrototypeOf` and `setPrototypeOf` are prototype machinery, which ts mode bans by design and
+ * js mode leaves to the object model. */
+/** Whether an argument matches an `OBJECT_STATICS` receiver kind. `dynamic` is not a subset of
+ * `shaped` by accident: a fixed shape enumerates fine but cannot be WRITTEN to, which is the whole
+ * difference between reading a shape and growing one. */
+function acceptsObjectArgument(
+  want: 'dynamic' | 'pairs' | 'shaped',
+  argument: ts.Expression,
+  checker: ts.TypeChecker,
+): boolean {
+  const type = checker.getTypeAtLocation(argument);
+  if (want === 'pairs') {
+    return tsTypeToHType(type, checker).kind === 'array';
+  }
+  if (want === 'dynamic') {
+    return isDynamicShape(type, checker);
+  }
+  return tsTypeToHType(type, checker).kind === 'object' || isDynamicShape(type, checker);
+}
+
 export const OBJECT_STATICS = {
-  entries: { arity: 1, receiver: 'shaped', key: false },
-  fromEntries: { arity: 1, receiver: 'pairs', key: false },
-  getOwnPropertyNames: { arity: 1, receiver: 'shaped', key: false },
-  hasOwn: { arity: 2, receiver: 'shaped', key: true },
-  keys: { arity: 1, receiver: 'shaped', key: false },
-  values: { arity: 1, receiver: 'shaped', key: false },
+  assign: { arity: 2, receiver: 'dynamic', second: 'shaped' },
+  entries: { arity: 1, receiver: 'shaped', second: 'none' },
+  fromEntries: { arity: 1, receiver: 'pairs', second: 'none' },
+  getOwnPropertyNames: { arity: 1, receiver: 'shaped', second: 'none' },
+  hasOwn: { arity: 2, receiver: 'shaped', second: 'key' },
+  keys: { arity: 1, receiver: 'shaped', second: 'none' },
+  values: { arity: 1, receiver: 'shaped', second: 'none' },
 } as const satisfies Record<
   string,
-  { readonly arity: number; readonly receiver: 'pairs' | 'shaped'; readonly key: boolean }
+  {
+    readonly arity: number;
+    readonly receiver: 'dynamic' | 'pairs' | 'shaped';
+    readonly second: 'key' | 'none' | 'shaped';
+  }
 >;
 
 /** The `Promise` namespace calls that lower. Each takes exactly one argument -- the combinators

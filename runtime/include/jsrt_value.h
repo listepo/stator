@@ -504,6 +504,9 @@ jsrt_value jsrt_object_entries(jsrt_value v);
 jsrt_value jsrt_object_get_own_property_names(jsrt_value v);
 jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key);
 jsrt_value jsrt_object_from_entries(jsrt_value pairs);
+/* Object.assign, two-argument form. The TARGET must be a dynamic-shape object: a fixed shape's
+ * reads are slot indices fixed at build time, so a target that can grow is the only sound one. */
+jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source);
 
 /* JSON.stringify (§25.5.2), single-argument form — runtime/src/jsrt_print.c, with the rest of
  * stringification. Non-finite numbers and -0 serialize per spec ("null", "0"); a cycle or a
@@ -853,8 +856,10 @@ static inline jsrt_value jsrt_arg(uint32_t argc, const jsrt_value *argv, uint32_
   return i < argc ? argv[i] : JSRT_UNDEFINED;
 }
 
-/* Calling a non-function is a TypeError. Until Phase 6 gives the runtime exceptions, it is fatal --
- * loud and located, rather than a jump through a garbage pointer. */
+/* Calling a non-function is a TypeError. Until Phase 5 step 11 gives the runtime a catch around
+ * user code, it is fatal -- loud and located, rather than a jump through a garbage pointer.
+ * (Phase 6 until 2026-09-01: the phase restructuring of plan-notes 116 moved the mechanism, and
+ * Phase 6 is conformance fuzzing. Corrected in plan-notes 125.) */
 jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
 
 /* ------------------------------------------------------------ promises */

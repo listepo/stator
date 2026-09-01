@@ -128,3 +128,25 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
   }
   return out;
 }
+
+/* Object.assign (§20.1.2.1) in its two-argument form, copying the source's own enumerable string
+ * keys onto the target and returning the target. The gate restricts the TARGET to a dynamic shape
+ * for a reason a comment has to carry: a fixed shape's reads compile to slot indices decided at
+ * build time, so a key this adds could never be read, and a key it overwrites is fine only because
+ * the type system already listed it. A dynamic shape looks every key up through the shape table,
+ * which is what makes a target that GROWS legal at all.
+ *
+ * `collect(OBJ_ENTRIES)` is the same walk `Object.entries` uses -- one order for both, so the
+ * copy's insertion order and `Object.entries(src)` can never disagree. */
+jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
+  if (!jsrt_is_dynobj(target)) {
+    jsrt_panic("STA4084: Object.assign onto a value that is not a dynamic-shape object");
+  }
+  const jsrt_value pairs = collect(source, OBJ_ENTRIES);
+  const JSRTArray *list = jsrt_as_array(pairs);
+  for (uint32_t i = 0; i < list->length; i++) {
+    const JSRTArray *entry = jsrt_as_array(list->elements[i]);
+    jsrt_set_prop(target, jsrt_shape_key(entry->elements[0]), entry->elements[1], NULL);
+  }
+  return target;
+}

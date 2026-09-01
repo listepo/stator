@@ -603,8 +603,14 @@ export interface ArrayOp extends Node {
  * element where the shape makes the element genuinely mixed. Enumeration order is field
  * declaration order (fixed shapes) or insertion order (dynamic shapes), which IS the spec's
  * string-key order because every key here is an identifier — integer-like keys cannot be spelled
- * through the property syntax these objects are built from. */
+ * through the property syntax these objects are built from.
+ *
+ * `assign` is the one that WRITES: it copies the source's own keys onto the target and returns the
+ * target, so its target argument is restricted to a dynamic shape (see OBJECT_STATICS) and its
+ * result type is Unknown -- the checker answers `T & S`, an intersection this type model does not
+ * carry, and every read of the merged object is therefore a boundary. */
 export type ObjectStaticMethod =
+  | 'assign'
   | 'entries'
   | 'fromEntries'
   | 'getOwnPropertyNames'

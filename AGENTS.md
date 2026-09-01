@@ -37,7 +37,7 @@ done.md            completion record for finished tasks (archive; not normative)
 AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
-docs/              MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
+docs/              ARCHITECTURE.md (pipeline diagrams) MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
 src/cli/           argument parsing, build/explain drivers
 src/frontend/      ts.Program loading, mode policy gate, ts.Type → HType (only place ts.Type may appear)
 src/hir/           typed HIR definitions, HType model, verifier

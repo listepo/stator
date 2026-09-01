@@ -1598,6 +1598,7 @@ const COLLECTION_ARITY: Readonly<Record<'map' | 'set', Readonly<Record<string, n
  * "some array" (the element follows the checker, which may be Unknown for a mixed shape), and
  * `unknown` pins nothing -- `fromEntries` builds a dynamic shape, which every read must check. */
 const OBJECT_STATIC_SHAPES = {
+  assign: { arity: 2, result: 'unknown' },
   entries: { arity: 1, result: 'array' },
   fromEntries: { arity: 1, result: 'unknown' },
   getOwnPropertyNames: { arity: 1, result: 'strings' },
