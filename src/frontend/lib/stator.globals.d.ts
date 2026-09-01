@@ -32,6 +32,17 @@ interface Console {
   group(label?: number | string | boolean | null | readonly unknown[] | object): void;
   /** Outdents one level. Unmatched, it is a no-op — Node's behaviour, not an error. */
   groupEnd(): void;
+  /** The box-drawn grid: a leading `(index)` column, one column per key seen across the rows in
+   * first-seen order, and a trailing `Values` column for rows that are not objects. Cells are
+   * inspect form (a string cell is quoted), a missing key leaves the cell empty, and a value that
+   * is not a collection of rows falls back to `log` — all of it Node's own rule set, held to it
+   * byte-for-byte by `tests/golden/ts/console_builtins.ts`.
+   *
+   * The parameter is deliberately wider than what draws a table: `console.table(x)` is legal in
+   * Node for any value, and the fallback is part of the behaviour. A `Map` or a `Set` is refused
+   * by the gate instead of typed out, because Node draws those with a different table (an
+   * `(iteration index)` column, plus `Key` for a Map) that has not landed. */
+  table(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
   /** Per-label tally, printed as `label: n`; the label-less form counts under `default`. */
   count(label?: string): void;
   /** Zeroes a tally and prints nothing. */

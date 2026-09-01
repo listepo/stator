@@ -996,6 +996,9 @@ jsrt_value jsrt_check_boolean(jsrt_value v, const char *where);
 void jsrt_print(jsrt_value v); /* console.log semantics: prints -0 as "-0" */
 void jsrt_eprint(jsrt_value v);      /* console.error/warn: same form, stderr */
 void jsrt_console_dir(jsrt_value v); /* console.dir: inspect form, no bare-string exception */
+/* console.table: the box-drawn grid, over an array or a plain object. Anything else falls back to
+ * console.log, which is Node's own rule for a value that is not a collection of rows. */
+void jsrt_console_table(jsrt_value v);
 /* console.group/assert take their optional argument by ENTRY POINT, not by a JSRT_UNDEFINED
  * sentinel: Node prints an explicitly passed undefined ("undefined"; "Assertion failed undefined")
  * where the omitted form prints nothing, so the two forms are genuinely two calls. The lowering

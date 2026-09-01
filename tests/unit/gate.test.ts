@@ -609,9 +609,16 @@ void test('console methods in the landed set are accepted, the rest deferred', (
   assert.deepEqual(codesFor('console.countReset("k");'), []);
   assert.deepEqual(codesFor('console.assert(true);'), []);
   assert.deepEqual(codesFor('console.assert(false, "why");'), []);
-  // `table` is a column-layout algorithm of its own; `time`/`timeEnd` print an elapsed duration
-  // and `trace` a stack, none of which is output a golden test can pin to Node.
-  assert.deepEqual(codesFor('console.table([1]);'), ['STA1214']);
+  // `table` landed: its column layout is a pure function of the data, so a golden test CAN pin it
+  // to Node. The Map/Set form is not -- Node draws that with an `(iteration index)` column, and a
+  // Map with a second `Key` column, which is a different table rather than a wider one.
+  assert.deepEqual(codesFor('console.table([1]);'), []);
+  assert.deepEqual(codesFor('console.table({ a: 1 });'), []);
+  assert.deepEqual(codesFor("console.table('x');"), []);
+  assert.deepEqual(codesFor('console.table(new Map([["k", 1]]));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.table(new Set([1]));'), ['STA1214']);
+  // `time`/`timeEnd` print an elapsed duration and `trace` a stack, neither of which is output a
+  // golden test can pin to Node -- they land under the determinism carve-out (plan-notes 124).
   assert.deepEqual(codesFor('console.time("t");'), ['STA1214']);
   assert.deepEqual(codesFor('console.trace("t");'), ['STA1214']);
   // Arity is part of the accepted form, not a detail the emitter shrugs off.

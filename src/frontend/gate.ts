@@ -930,9 +930,19 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet(`a spread argument to console.${method} is not yet supported`, 3);
       }
-      return given <= shape.arity && given >= shape.arity - shape.optional
+      if (given > shape.arity || given < shape.arity - shape.optional) {
+        return notYet(`console.${method} with ${String(given)} arguments is not yet supported`, 3);
+      }
+      // `console.table` is the one console method whose ARGUMENT changes the output shape. Node
+      // draws a Map or a Set with an `(iteration index)` column -- and a Map with a second `Key`
+      // column -- which is a different table, not a wider one. Refusing it keeps the runtime from
+      // drawing something Node does not; the array and object forms are what landed.
+      const first = call.arguments[0];
+      return method !== 'table' ||
+        first === undefined ||
+        collectionOf(first, typeChecker) === undefined
         ? { kind: 'accept' }
-        : notYet(`console.${method} with ${String(given)} arguments is not yet supported`, 3);
+        : notYet('console.table on a Map or a Set is not yet supported', 4);
     }
     // A Math method: one runtime function per operation, like a collection op. Spread arguments
     // are refused here rather than lowered wrong -- `Math.min(...xs)` has no fixed arity to fold.

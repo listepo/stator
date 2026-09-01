@@ -850,6 +850,7 @@ export const CONSOLE_METHODS = {
   groupEnd: { arity: 0, optional: 0, fn: 'jsrt_console_group_end' },
   info: { arity: 1, optional: 0, fn: 'jsrt_print' },
   log: { arity: 1, optional: 0, fn: 'jsrt_print' },
+  table: { arity: 1, optional: 0, fn: 'jsrt_console_table' },
   warn: { arity: 1, optional: 0, fn: 'jsrt_eprint' },
 } as const satisfies Record<
   string,

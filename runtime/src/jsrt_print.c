@@ -1053,6 +1053,308 @@ void jsrt_console_assert_bare(jsrt_value condition) {
   }
 }
 
+/* ============================================================================
+ * console.table
+ * ============================================================================
+ *
+ * The layout Node draws (WHATWG console "table", as Node implements it in `lib/internal/cli_table`)
+ * is a box-drawn grid: a leading `(index)` column, one column per key seen across the rows, and a
+ * trailing `Values` column for rows that are not objects. Every cell is one space, the content
+ * left-aligned, then padding to the column's width, then one more space -- so a divider segment is
+ * always the column width plus two.
+ *
+ * Cells are rendered with `inspect_value`, which is why a string cell is QUOTED (`'x'`) while the
+ * index label is not: the label is a key, not a value. Missing keys leave the cell empty rather
+ * than printing `undefined`, and a row that is not an object contributes to `Values` instead of to
+ * any key column.
+ *
+ * Deferred by name: the Map/Set form, which Node draws with an `(iteration index)` column and, for
+ * a Map, a separate `Key` column -- a different table, not a wider one. The gate refuses it
+ * (`STA1214`) rather than this drawing something Node does not. */
+
+/* A growable list of owned strings -- column names, and one row's rendered cells. */
+typedef struct {
+  char **items;
+  size_t len;
+  size_t cap;
+} StrVec;
+
+static void sv_init(StrVec *v) {
+  v->items = NULL;
+  v->len = 0;
+  v->cap = 0;
+}
+
+static void sv_push(StrVec *v, char *owned) {
+  if (v->len == v->cap) {
+    v->cap = v->cap == 0 ? 8 : v->cap * 2;
+    char **grown = (char **)realloc(v->items, v->cap * sizeof(char *));
+    if (grown == NULL) {
+      jsrt_panic("out of memory building a console.table");
+    }
+    v->items = grown;
+  }
+  v->items[v->len++] = owned;
+}
+
+static void sv_free(StrVec *v) {
+  for (size_t i = 0; i < v->len; i++) {
+    free(v->items[i]);
+  }
+  free(v->items);
+}
+
+static size_t sv_find(const StrVec *v, const char *name) {
+  for (size_t i = 0; i < v->len; i++) {
+    if (strcmp(v->items[i], name) == 0) {
+      return i;
+    }
+  }
+  return SIZE_MAX;
+}
+
+/* A NUL-terminated copy of a buffer's contents, and the buffer released. */
+static char *buf_take(Buf *b) {
+  buf_putc(b, '\0');
+  return b->data;
+}
+
+/* One value rendered the way a table CELL renders it: inspect form, strings quoted. */
+static char *cell_of(jsrt_value v) {
+  Buf b;
+  buf_init(&b);
+  inspect_value(&b, v, 1, 0);
+  return buf_take(&b);
+}
+
+/* Node pads by DISPLAY width, not byte count: a column holding `'日本'` is as wide as one holding
+ * six ASCII characters. Continuation bytes never count, combining marks count zero, and the
+ * East-Asian Wide and Fullwidth blocks count two -- which is `getStringWidth`'s rule for every
+ * code point a table cell in this subset can hold. The full Unicode width table it consults for
+ * the rarer blocks is not reproduced here: a cell containing one would be padded one column
+ * narrow, which misaligns the row rather than corrupting it. */
+static size_t cell_width(const char *s) {
+  size_t width = 0;
+  for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
+    if ((*p & 0xC0) == 0x80) {
+      continue; /* a continuation byte is part of the code point already counted */
+    }
+    uint32_t cp = *p;
+    if (cp >= 0xF0) {
+      cp = ((cp & 0x07u) << 18) | ((uint32_t)(p[1] & 0x3F) << 12) | ((uint32_t)(p[2] & 0x3F) << 6) |
+           (uint32_t)(p[3] & 0x3F);
+    } else if (cp >= 0xE0) {
+      cp = ((cp & 0x0Fu) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) | (uint32_t)(p[2] & 0x3F);
+    } else if (cp >= 0xC0) {
+      cp = ((cp & 0x1Fu) << 6) | (uint32_t)(p[1] & 0x3F);
+    }
+    const bool combining = (cp >= 0x0300 && cp <= 0x036F) || (cp >= 0x200B && cp <= 0x200F) ||
+                           (cp >= 0xFE00 && cp <= 0xFE0F);
+    const bool wide = (cp >= 0x1100 && cp <= 0x115F) || (cp >= 0x2E80 && cp <= 0xA4CF) ||
+                      (cp >= 0xAC00 && cp <= 0xD7A3) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+                      (cp >= 0xFE30 && cp <= 0xFE6F) || (cp >= 0xFF00 && cp <= 0xFF60) ||
+                      (cp >= 0xFFE0 && cp <= 0xFFE6) || (cp >= 0x1F300 && cp <= 0x1F64F) ||
+                      (cp >= 0x20000 && cp <= 0x3FFFD);
+    width += combining ? 0 : (wide ? 2 : 1);
+  }
+  return width;
+}
+
+/* Whether a row's value contributes KEY COLUMNS (an object or an array) rather than a `Values`
+ * cell. Maps, sets, regexps and promises are values here, not rows: `console.table([/a/])` puts
+ * `/a/` under `Values`, which is what Node does with anything whose own properties it will not
+ * enumerate. */
+static bool tabular_row(jsrt_value v) {
+  return (jsrt_is(v, JSRT_TAG_ARRAY) || jsrt_is(v, JSRT_TAG_OBJECT)) && !jsrt_is_map_or_set(v) &&
+         !jsrt_is_regexp(v) && !jsrt_is_promise(v);
+}
+
+/* `n` copies of `s`, for the horizontal rules. The existing `buf_repeat` takes a CHAR, and a box
+ * rule is drawn with U+2500, which is three bytes. */
+static void buf_repeat_utf8(Buf *b, const char *s, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    buf_puts(b, s);
+  }
+}
+
+/* One cell: a space, the content, padding to `width`, a space. */
+static void buf_cell(Buf *b, const char *text, size_t width) {
+  buf_putc(b, ' ');
+  buf_puts(b, text);
+  for (size_t pad = cell_width(text); pad < width; pad++) {
+    buf_putc(b, ' ');
+  }
+  buf_putc(b, ' ');
+}
+
+static void buf_rule(Buf *b, const char *left, const char *mid, const char *right,
+                     const size_t *widths, size_t count) {
+  buf_puts(b, left);
+  for (size_t c = 0; c < count; c++) {
+    buf_repeat_utf8(b, "─", widths[c] + 2);
+    buf_puts(b, c + 1 == count ? right : mid);
+  }
+  buf_putc(b, '\n');
+}
+
+void jsrt_console_table(jsrt_value v) {
+  /* Node falls back to console.log for anything that is not a collection of rows, and that
+   * fallback is REACHABLE here: the gate accepts `console.table` on an Unknown receiver, so a
+   * scalar can arrive at run time. */
+  if (!tabular_row(v)) {
+    jsrt_print(v);
+    return;
+  }
+
+  /* Rows, as (index label, value). An array indexes by position; an object by its own keys, in
+   * the enumeration order `Object.entries` already fixes for both layouts. */
+  StrVec labels;
+  sv_init(&labels);
+  StrVec row_values; /* the `Values` cell, or an empty string when the row has key columns */
+  sv_init(&row_values);
+  StrVec columns;
+  sv_init(&columns);
+  /* cells[row * columns.len + col] once the column set is known -- built after the walk, because
+   * a column discovered by the last row still needs an empty cell in the first. */
+  StrVec keys_flat; /* every row's keys, run-length delimited by `key_counts` */
+  sv_init(&keys_flat);
+  StrVec vals_flat;
+  sv_init(&vals_flat);
+  size_t *key_counts = NULL;
+  size_t row_count = 0;
+  bool any_values = false;
+
+  const bool from_array = jsrt_is(v, JSRT_TAG_ARRAY);
+  const jsrt_value rows = from_array ? v : jsrt_object_entries(v);
+  const JSRTArray *row_list = jsrt_as_array(rows);
+  row_count = row_list->length;
+  key_counts = (size_t *)calloc(row_count == 0 ? 1 : row_count, sizeof(size_t));
+  if (key_counts == NULL) {
+    jsrt_panic("out of memory building a console.table");
+  }
+
+  for (uint32_t i = 0; i < row_count; i++) {
+    jsrt_value value;
+    if (from_array) {
+      Buf label;
+      buf_init(&label);
+      inspect_scalar(&label, jsrt_number((double)i), false);
+      sv_push(&labels, buf_take(&label));
+      value = row_list->elements[i];
+    } else {
+      const JSRTArray *pair = jsrt_as_array(row_list->elements[i]);
+      Buf label;
+      buf_init(&label);
+      inspect_scalar(&label, pair->elements[0], false); /* a key prints unquoted */
+      sv_push(&labels, buf_take(&label));
+      value = pair->elements[1];
+    }
+
+    if (!tabular_row(value)) {
+      sv_push(&row_values, cell_of(value));
+      any_values = true;
+      continue;
+    }
+    sv_push(&row_values, strdup(""));
+    /* An ARRAY row's keys are its indices, which is why `[[1,2]]` tables as columns `0` and `1`. */
+    if (jsrt_is(value, JSRT_TAG_ARRAY)) {
+      const JSRTArray *inner = jsrt_as_array(value);
+      for (uint32_t k = 0; k < inner->length; k++) {
+        Buf name;
+        buf_init(&name);
+        inspect_scalar(&name, jsrt_number((double)k), false);
+        sv_push(&keys_flat, buf_take(&name));
+        sv_push(&vals_flat, cell_of(inner->elements[k]));
+        key_counts[i]++;
+      }
+      continue;
+    }
+    const JSRTArray *entries = jsrt_as_array(jsrt_object_entries(value));
+    for (uint32_t k = 0; k < entries->length; k++) {
+      const JSRTArray *pair = jsrt_as_array(entries->elements[k]);
+      Buf name;
+      buf_init(&name);
+      inspect_scalar(&name, pair->elements[0], false);
+      sv_push(&keys_flat, buf_take(&name));
+      sv_push(&vals_flat, cell_of(pair->elements[1]));
+      key_counts[i]++;
+    }
+  }
+
+  /* Column order is FIRST-SEEN across rows, with `Values` last if any row needed it. */
+  for (size_t k = 0; k < keys_flat.len; k++) {
+    if (sv_find(&columns, keys_flat.items[k]) == SIZE_MAX) {
+      sv_push(&columns, strdup(keys_flat.items[k]));
+    }
+  }
+  const size_t values_col = any_values ? columns.len : SIZE_MAX;
+  if (any_values) {
+    sv_push(&columns, strdup("Values"));
+  }
+
+  /* Widths: the index column plus one per data column, each the widest of its header and cells. */
+  const size_t total = columns.len + 1;
+  size_t *widths = (size_t *)calloc(total, sizeof(size_t));
+  char **grid = (char **)calloc(row_count * columns.len + 1, sizeof(char *));
+  if (widths == NULL || grid == NULL) {
+    jsrt_panic("out of memory building a console.table");
+  }
+  widths[0] = cell_width("(index)");
+  for (size_t c = 0; c < columns.len; c++) {
+    widths[c + 1] = cell_width(columns.items[c]);
+  }
+  size_t flat = 0;
+  for (size_t i = 0; i < row_count; i++) {
+    widths[0] = widths[0] > cell_width(labels.items[i]) ? widths[0] : cell_width(labels.items[i]);
+    for (size_t k = 0; k < key_counts[i]; k++, flat++) {
+      const size_t c = sv_find(&columns, keys_flat.items[flat]);
+      grid[i * columns.len + c] = vals_flat.items[flat];
+    }
+    if (values_col != SIZE_MAX && row_values.items[i][0] != '\0') {
+      grid[i * columns.len + values_col] = row_values.items[i];
+    }
+    for (size_t c = 0; c < columns.len; c++) {
+      const char *cell = grid[i * columns.len + c];
+      const size_t w = cell == NULL ? 0 : cell_width(cell);
+      widths[c + 1] = widths[c + 1] > w ? widths[c + 1] : w;
+    }
+  }
+
+  Buf out;
+  buf_init(&out);
+  buf_rule(&out, "┌", "┬", "┐", widths, total);
+  buf_puts(&out, "│");
+  buf_cell(&out, "(index)", widths[0]);
+  for (size_t c = 0; c < columns.len; c++) {
+    buf_puts(&out, "│");
+    buf_cell(&out, columns.items[c], widths[c + 1]);
+  }
+  buf_puts(&out, "│\n");
+  buf_rule(&out, "├", "┼", "┤", widths, total);
+  for (size_t i = 0; i < row_count; i++) {
+    buf_puts(&out, "│");
+    buf_cell(&out, labels.items[i], widths[0]);
+    for (size_t c = 0; c < columns.len; c++) {
+      const char *cell = grid[i * columns.len + c];
+      buf_puts(&out, "│");
+      buf_cell(&out, cell == NULL ? "" : cell, widths[c + 1]);
+    }
+    buf_puts(&out, "│\n");
+  }
+  buf_rule(&out, "└", "┴", "┘", widths, total);
+  write_grouped(out.data, out.len, stdout);
+
+  buf_free(&out);
+  free(grid);
+  free(widths);
+  free(key_counts);
+  sv_free(&labels);
+  sv_free(&row_values);
+  sv_free(&columns);
+  sv_free(&keys_flat);
+  sv_free(&vals_flat);
+}
+
 _Noreturn void jsrt_uncaught(void) {
   /* Same inspect form console.log uses, so `throw {x: 1}` reads as `{ x: 1 }` -- but on STDERR,
    * because stdout is the program's output and an uncaught exception is not part of it. The text

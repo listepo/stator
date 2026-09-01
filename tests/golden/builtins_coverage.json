@@ -161,7 +161,7 @@
     "groupEnd": ["ts/console_streams.ts", "js/console_streams.js"],
     "info": ["ts/console_streams.ts", "js/console_streams.js"],
     "log": ["ts/console_streams.ts", "js/console_streams.js"],
-    "table": [],
+    "table": ["ts/console_builtins.ts", "js/console_builtins.js"],
     "time": [],
     "timeEnd": [],
     "trace": [],

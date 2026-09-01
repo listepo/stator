@@ -1,9 +1,9 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: console
-// The console methods that lower are the ones a golden test can hold to Node byte-for-byte.
-// `table` is a column-layout algorithm of its own; `time`/`timeEnd` print an elapsed duration and
-// `trace` a stack, none of which is reproducible output. All four stay deferred.
+// `table` landed 2026-09-01: its column layout is a pure function of the data, so a golden test
+// CAN hold it to Node byte-for-byte -- which is exactly what separates it from `time`/`timeEnd`
+// (an elapsed duration) and `trace` (a stack), the three that stay under the determinism
+// carve-out rather than deferred.
 
 console.table([1, 2]);

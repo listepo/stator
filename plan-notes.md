@@ -2938,3 +2938,104 @@ tooling, no image files to drift.
 `ARCHITECTURE.md` added to that list and to AGENTS.md's repo map, plus one line in §2 stating the
 diagrams visualize that section and are never an authority over it — same subordination rule as
 MODES.md/SUBSET.md to §1. No spec content changed; the doc is derived, not normative.
+
+## 127. The two open Phase-4 tasks get detailed Steps; the audit behind them (2026-09-01)
+
+**What changed.** plan.md Task 4.2 gained two step lists (`Date`; `console.table` + the
+`time`/`timeEnd`/`trace` carve-out trio), Task 4.7 gained Steps and its own Check, and the
+exit-criterion `Date` bullet was rewritten per-member (the rule note 125 established). Evidence:
+a five-agent audit of the working tree at `39cf053` plus measurements against the pinned Node
+v26.7.0 (which the active `node` matches exactly).
+
+**Task 4.7's count was stale.** The task said "58 call sites hardcode phase 4"; at `39cf053` the
+audit counts **63** — 60 `notYet(…, 4)` (all `STA1214`) plus two `STA1211` literals
+(gate.ts:1207, 2101) and one `STA1215` (gate.ts:1116). The RegExp-properties and Object.assign
+slices landed after the original count. Grouping: 2 sites are purely Phase 5 step 8 (their own
+comments name the iterator protocol), 2 purely step 11 (the Promise property-access pair — the
+call-side Promise sites already say phase 5, but as `STA1214` while the plan assigns the surface
+to `STA1216`; the code question is now an explicit step), 8 are catch-alls straddling several
+owners (one hardcoded phase cannot be right for them — they need member-level splits), and **51
+fit no group the plan names** (7 module-surface, 32 arity/spread/argument-shape refinements, 5
+method-as-value, 4 Math/JSON residues, 2 dedicated `STA1211` + 1 `STA1215`). Assigning those 51 a
+phase mechanically would recreate the lie the task exists to remove, so the step list makes "give
+the blocker an owner by plan edit" part of the task. Also found: nothing in `src/` knows which
+phases are complete and `gate.test.ts` never reads the `phase` field — the regression test the
+task demands has no substrate, so building one (a completed-phases constant in `src/support/`) is
+now step 2. `STA1215` carries `phase: 4` while its DIAGNOSTICS row says the message names a build
+flag, not a phase — sentinel exemption is step 3. The async-method example the task named as wrong
+was already fixed to phase 5 before this audit.
+
+**Date slicing is forced by determinism, measured, not assumed.** With TZ=UTC vs
+TZ=America/New_York on the pinned Node: `toISOString`/`toJSON`/`toUTCString`/`getTime`/the
+`getUTC*` family/`Date.UTC`/ISO `Date.parse` are byte-identical (slice A); the local getters/
+setters/`getTimezoneOffset`/`new Date(y,m,…)` differ by TZ (slice B — legal only after the golden
+runner pins `TZ=UTC`; today all three `spawnSync` calls in tests/golden/run.ts inherit the
+machine's environment); `toString` embeds an ICU CLDR long zone name ("(Coordinated Universal
+Time)"), which puts the `toString` family and `toLocale*` with Task 4.4's intl feature build.
+`console.log(new Date(0))` prints the ISO string — TZ-independent, so Date values are golden-safe
+to print. Two divergences are documented rather than papered over: `Date.parse` is ISO-grammar
+only (non-ISO answers `NaN`, which §21.4.3.2 permits; Node's non-ISO heuristics are TZ-dependent
+and implementation-defined — pinned by a runtime unit test, never a golden fixture), and
+`toISOString` on an Invalid Date panics until Phase 5 step 11 delivers runtime-raised exceptions
+(the `freeze`/`isFrozen` precedent). `Date.now`/zero-arg `new Date()` go the `Math.random`
+carve-out road. Dashboard: `Date` is absent from builtins_coverage.json entirely; adding the
+namespaces is a JSON-only change (the runner iterates namespaces dynamically).
+
+**console.table ground truth captured from the pinned Node** (it changed across Node majors:
+v26.7.0 left-aligns with one-space padding, `(index)`/`Values` headers, key-union columns in
+first-seen order, blank missing cells, inspect-quoted strings, header-only table for `[]`,
+console.log fallback for non-tabular input, no ANSI when piped). Two scope cuts recorded:
+the optional `properties` argument is refused (joins 4.7's refinement group for an owner), and v1
+width counting is code points, not wcwidth display columns — non-ASCII cells may misalign vs Node
+(which uses a wcwidth-style `getStringWidth`); the ceiling is named in SUBSET.md and a code
+comment. One trap the steps encode: output must route through `write_grouped`, because Node
+indents tables inside `console.group`. And the carve-out trio (`time`/`timeEnd`/`trace`) is NOT
+implemented today (absent from `CONSOLE_METHODS`) — note 124 moved their *proof* to the
+carve-out, but the members still must land; that is now an explicit step.
+
+**Also confirmed.** The working tree's uncommitted changes are the complete, coherent
+Object.assign slice plan.md records as landed 2026-09-01 (typecheck passes) plus this session's
+ARCHITECTURE.md rider — the new steps build on that state and touch none of it.
+
+## 126. `console.table` — measured first, then built (2026-09-01)
+
+**Why this one needed measuring.** Every other console method is a formatting rule with one shape.
+`table` is a layout ALGORITHM, and the spec (WHATWG console, "table") describes what it means, not
+what it draws. The only authority on the bytes is Node. So the first step was not design, it was
+`node -e`-equivalent probes over ten shapes: array of objects, mixed rows, object argument, array
+rows, empty, wide cells, nested inspect cells, scalar, `Map`, `Set`, and a table inside a group.
+
+**What the probes settled**, none of which was guessable:
+
+- A cell is a space, the content, padding to the column width, then a space — so a divider segment
+  is always the width plus two.
+- Column order is FIRST-SEEN across rows, with `Values` appended last if any row was not an object.
+- A missing key is an EMPTY cell, not `undefined`.
+- Cells are inspect form (`'x'` quoted) but the index LABEL is not (`r1`, not `'r1'`) — a key is
+  not a value.
+- An ARRAY row contributes its indices as column names, so `[[1,2]]` tables under `0` and `1`.
+- A non-collection argument falls back to `console.log` — `console.table('scalar')` prints `scalar`.
+- A `Map` gets an `(iteration index)` column and a `Key` column; a `Set` gets `(iteration index)`
+  and `Values`. **A different table, not a wider one.**
+
+**What landed.** Arrays and plain objects, both modes, held byte-for-byte by
+`tests/golden/{ts,js}/console_builtins.*`. The runtime reuses what was already there rather than
+re-deriving it: cells go through `inspect_value` (so a table cell and an array element can never
+format differently), rows through `jsrt_object_entries` (so column order and `Object.entries` can
+never disagree), and the finished grid through `write_grouped` (so the group indent applies to
+every line of the table for free, which the fixture proves).
+
+**What did not, and why by name.** The Map/Set form is refused at the gate (`STA1214`). Drawing it
+means a second table shape, and a runtime that guessed at it would print something Node does not —
+the failure mode a golden test exists to prevent. Refusing is the honest half.
+
+**One ceiling, marked in the source.** Padding is by DISPLAY width, and `cell_width` implements
+`getStringWidth`'s rule for the code points a cell in this subset can hold — continuation bytes
+never count, combining marks count zero, East-Asian Wide and Fullwidth count two. The full Unicode
+width table is not reproduced; a cell holding one of the rarer wide blocks pads one column narrow,
+which misaligns a row rather than corrupting it. Named in the comment so the next person hits a
+note rather than a mystery.
+
+**Phase 4's `console` bullet is now the three carve-out proofs alone.** `time`/`timeEnd`/`trace`
+were moved there by note 124 for a reason that does not change; `table` was the one member of that
+bullet a golden test could ever hold, and it holds.

@@ -261,6 +261,105 @@ corpus — and `builtins_coverage.json` marks them `nondeterministic` rather tha
 against coverage. The rule is unchanged for every member that CAN be pinned to Node; this is a
 carve-out for members the harness cannot express, not a lowered bar.
 
+**Steps — `Date` (added 2026-09-01; evidence audit in plan-notes 127).** The surface splits by
+what makes each member deterministic, and the slices land in this order:
+
+1. **`docs/SUBSET.md` + decision tests first** (this task's own entry rule). Replace the
+   `[proposed]` Date row with the sliced surface. **Slice A — TZ-independent (21 prototype
+   members + 2 statics):** `new Date(ms)` / `new Date(isoString)`; `getTime`/`valueOf`/`setTime`;
+   the 8 `getUTC*` getters; the 7 `setUTC*` setters; `toISOString`/`toJSON`/`toUTCString`;
+   `Date.UTC` (2–7 args — spec defaults filled at lower time, the Math-fold model, so the runtime
+   entry stays fixed-arity); `Date.parse` restricted to the §21.4.3.2 ISO grammar — non-ISO input
+   answers `NaN`, which the spec permits but Node does not do (its heuristics are TZ-dependent and
+   implementation-defined), so this is a **documented divergence** pinned by a runtime unit test
+   and never exercised in a golden fixture. **Slice B — local-time (16 members), blocked on
+   step 8's TZ pinning:** the 8 local getters, `getTimezoneOffset`, the 7 local setters, and
+   `new Date(y, m, d?, …)` (local-time semantics per spec). **Intl-build residue (6 members):**
+   `toString`/`toDateString`/`toTimeString`, the call form `Date()`, and `toLocale*` — their long
+   timezone/locale names are ICU CLDR data, so they join Task 4.4's `intl_*` feature surface
+   (non-blocking, like the rest of the flag build). `[Symbol.toPrimitive]` stays out (Symbol-keyed
+   members are out of every surface list). `d2 - d1` needs no gate work in `ts` mode — the checker
+   already rejects Date arithmetic; assert that in a decision test and document `getTime()` as the
+   sanctioned spelling.
+2. **Gate.** Date leaves the generic-global catch-all (today `new Date()` is refused as `STA1214`
+   at the identifier gate and again by `gateNew`'s non-class branch) and gets the RegExp
+   treatment: closed `DATE_STATICS`/`DATE_OPS` tables; accepted members pass; every other Date
+   member answers **`STA1210`** — Date's residue code, as `STA1211` is RegExp's — naming the phase
+   that owns its blocker (slice B: this phase; the toString family: the intl build flag, the
+   `STA1215` model). `gateNew` opens for Date: zero-arg is **accepted** (nondeterminism is a proof
+   problem, not an acceptance problem — the carve-out covers it), and the one-arg
+   `number | string | Date` union parameter is resolved at lower time from the checker's argument
+   type, since HIR carries no unions. The two `@expected-fail` `subset_date_builtin_*` tests are
+   rewritten in the commit their construct lands: `new Date()` flips to its landed verdict and a
+   deferred member (e.g. `d.toString()`) becomes the `STA1210` fixture.
+3. **HIR + frontend types.** `H_DATE` HType kind and the `ts.Type → HType` mapping (the
+   `H_REGEXP` model); `'date-new'`/`'date-op'` node kinds driven by the closed tables; verifier
+   rows (arity + result types); `docs/HIR.md` gains the worked example.
+4. **Runtime.** `runtime/src/jsrt_date.c` with `JSRTDate { const JSRTClass *cls; double epoch_ms; }`
+   under `JSRT_TAG_OBJECT` and a `jsrt_class_date` descriptor (the RegExp layout; no owned
+   pointers, so no new GC edges). `docs/VALUE.md` and `jsrt_value.h` change together — they are the
+   contract. The §21.4.1 time algorithms (MakeTime/MakeDay/MakeDate/TimeClip) are pure double
+   math — slice A needs no `<time.h>`; `jsrt_date_now` is `clock_gettime(CLOCK_REALTIME)`. The ISO
+   parser and the `toISOString`/`toUTCString` formatters must be byte-exact against Node (year
+   padding, expanded `±YYYYYY` years, `Invalid Date` printing). **Known ceiling:** `toISOString`
+   on an Invalid Date must throw a `RangeError`, and the runtime cannot raise one until Phase 5
+   step 11 — it panics until then, documented in `SUBSET.md` (the `freeze`/`isFrozen` precedent).
+5. **Printing + JSON.** Node's inspect prints a Date as its ISO string — TZ-independently, so it
+   is golden-safe: add `inspect_date` to `print_to`'s dispatch (including nested in
+   arrays/objects/maps) and route `JSON.stringify` through `toJSON` → ISO. A `print_dates` corpus
+   pair rides `make -C runtime test`.
+6. **Emitter.** `'date-new'`/`'date-op'` → `jsrt_date_new`/`jsrt_date_<snake>` direct calls — the
+   `regexp-op` pattern, results boxed per the accessor discipline.
+7. **Slice A goldens + dashboard.** `tests/golden/ts/date_builtins.ts` + `js/date_builtins.js`:
+   ctor forms, UTC getters/setters including mutation ordering, ISO round-trip, `Date.UTC`,
+   ISO `Date.parse`, `console.log(d)`, `JSON.stringify({d})`. `builtins_coverage.json` gains a
+   `"Date"` namespace (`parse`, `UTC`, and `now` as a `{"nondeterministic": …}` marker) and a
+   `"Date.prototype"` namespace — the runner picks new namespaces up with no code change.
+   `Date.now` and zero-arg `new Date()` prove by a range/monotonicity unit test, the
+   `Math.random` model.
+8. **Slice B.** First pin `TZ=UTC` in the golden runner (an `env` on the three `spawnSync` calls
+   in `tests/golden/run.ts` — the compiled binary AND the Node ground truth; today both inherit
+   the machine's TZ, so any local-time fixture is machine-dependent). Then land the local
+   getters/setters and `getTimezoneOffset` via `localtime_r`/`mktime` — libc owns the tzdb.
+   DST-sensitive semantics get runtime unit tests with an explicit non-UTC `TZ` on dates whose
+   rules are stable, never goldens.
+9. **Docs sync.** `DIAGNOSTICS.md`'s `STA1210` row rewritten to residue-code semantics (per-member
+   blockers, the Task 4.7 rule); final `SUBSET.md` rows; the exit-criterion Date bullet below
+   tracks the same per-member split.
+
+**Steps — `console.table`, and the `console` carve-out trio (added 2026-09-01):**
+
+1. **Ground truth is the pinned Node only.** v26.7.0 left-aligns cells with one space of padding
+   each side, headers `(index)`/`Values`, columns = the union of row keys in first-seen order,
+   missing cells blank, strings quoted by inspect, `[]` prints a header-only table, non-tabular
+   input falls back to `console.log` semantics, zero ANSI when piped. Node has changed this format
+   across majors — never code it from memory; the harness verifies fixtures against Node itself.
+2. **Surface decision in `SUBSET.md` + decision tests first.** Arity 1. The optional `properties`
+   second argument is refused not-yet and joins Task 4.7's refinement group for an owner. Accepted
+   `data` in v1: arrays (of primitives, fixed-shape or dynamic objects), plain objects of objects,
+   and the `console.log` fallback for every non-tabular value. `Map`/`Set` tabular special cases
+   (`(iteration index)`/Key columns) stay refused — capture fresh Node bytes before ever adding
+   them. The two `subset_console_table_*` tests flip in the landing commit.
+3. **Compiler.** Add `table` to `CONSOLE_METHODS` (`{ arity: 1, fn: 'jsrt_console_table' }`) —
+   gate, lowering, verifier and emitter all read that one table (plan-notes 117), so this is the
+   only compiler change.
+4. **Runtime `jsrt_console_table`** in `jsrt_print.c`: column discovery via the existing
+   keys/entries walk (it already covers both object layouts), cells rendered by the existing
+   inspect machinery, per-column width = max(header, widest cell), the whole table built into a
+   `Buf` and written through `write_grouped` so `console.group` indentation holds (Node indents
+   tables inside groups), on stdout. **Known ceiling:** v1 counts code points, not wcwidth display
+   columns — non-ASCII cells may misalign vs Node (which uses a wcwidth-style `getStringWidth`);
+   the `SUBSET.md` row and a code comment name the ceiling; add real width logic only when a real
+   fixture needs it.
+5. **Tests + dashboard.** A `print_table` corpus pair, plus golden fixtures `ts/console_table.ts`
+   and `js/console_table.js` covering step 1's cases; `builtins_coverage.json` flips `"table"`
+   from `[]` to the fixtures.
+6. **`time`/`timeEnd`/`trace`** — the exit criterion moved them to the determinism carve-out, but
+   they still must LAND: implement them (a label → monotonic-start map for the timer pair; `trace`
+   prints the label — the stack is what makes it nondeterministic), prove by shape assertions in
+   `tests/unit/` (label echoed, a duration printed, the unit is `ms`), and mark all three
+   `{"nondeterministic": …}` on the dashboard.
+
 ~~**Task 4.3 — RegExp.**~~ ✅ Landed 2026-08-30. Evidence: [done.md](done.md) → Phase 4,
 Task 4.3. The remaining `exec`/`match` surface is owned by Task 4.1's array-properties work; the
 iterator-shaped `matchAll` belongs to Phase 5 step 8.
@@ -276,14 +375,63 @@ Evidence: [done.md](done.md) → Phase 4, Task 4.6. Generators are Phase 5 step 
 protocol work, not an unfinished part of this task.
 
 **Task 4.7 — Audit every not-yet phase pointer** (added 2026-09-01, plan-notes 116). `STA1214` is
-parameterized — its message names the delivering phase per construct — and **58 call sites in
-`src/frontend/gate.ts` hardcode phase 4**, from `Promise.${method} is not yet supported` to `an
-async method is not yet supported`. Phase 4 is closing, so each of those is a claim that will be
-false the moment it does. Several are already known wrong: the `Promise` ones belong to Phase 5
-step 11 under `STA1216`, the async-method one to Phase 5. Walk all 58, give each the phase that owns
-its actual blocker, and add a test that fails when a not-yet diagnostic names a phase already marked
-complete — which is the check that would have caught `STA1201`, `STA1207`, `STA1208` and `STA1214`
-without anyone reading the table.
+parameterized — its message names the delivering phase per construct — and **63 call sites in
+`src/frontend/gate.ts` name phase 4** (audited 2026-09-01 at `39cf053`, plan-notes 127: 60
+`notYet(…, 4)` → `STA1214`, two `STA1211` literals, one `STA1215`; the count was 58 when this task
+was written and moves with every slice — enumerate at execution, never assume). Phase 4 is closing,
+so each of those is a claim that will be false the moment it does. The async-method site has since
+been corrected to phase 5; the two `Promise` property-access sites still hardcode 4 while the
+`Promise` surface belongs to Phase 5 step 11 under `STA1216`. Walk all of them, give each the phase
+that owns its actual blocker, and add a test that fails when a not-yet diagnostic names a phase
+already marked complete — which is the check that would have caught `STA1201`, `STA1207`, `STA1208`
+and `STA1214` without anyone reading the table.
+
+Steps (added 2026-09-01; grouping evidence in plan-notes 127):
+
+1. **Recount at execution HEAD.** The audit's inventory (63 = 60/2/1 above) is the working list;
+   re-derive it from `gate.ts` before touching anything, since 4.2's remaining slices move it.
+2. **Build the substrate the required test needs** — nothing in `src/` knows which phases are
+   complete, and `gate.test.ts` asserts codes only, never the `phase` field. Add one
+   machine-readable completed-phases source of truth in `src/support/`, then the regression test:
+   scan every not-yet the gate can emit (drive representative fixtures AND source-scan
+   `notYet(…, N)` / `phase: N` literals in `gate.ts`) and fail when any names a completed phase.
+3. **`STA1215` exemption.** Its own `DIAGNOSTICS.md` row says the message names a build FLAG, not
+   a phase, yet the diagnostic carries `phase: 4` — give it a no-phase sentinel so the new test
+   does not flag it the day Phase 4 closes; update the row in the same change.
+4. **Reassign the sites whose owners this plan already names.** The two `Map`/`Set` sites whose
+   own comments name `Symbol.iterator`/`keys()` as the blocker → Phase 5 step 8. The two `Promise`
+   property-access sites → Phase 5 step 11 — and settle the code question there: the call-side
+   `Promise` sites already say phase 5 but still as `STA1214`, while this plan puts the surface
+   under `STA1216`; unify on one code, tests updated in the same commit.
+5. **Split the eight straddling catch-alls** (the unmodeled-global site; the `Object`, `String`,
+   `Array` method + property catch-all pairs; the `Map`/`Set` member-as-value site). One hardcoded
+   phase cannot be right for members owned by 5.8, 5.11 and 8 at once: named members answer their
+   owner's phase (`freeze`/`isFrozen` → 5; `create`/`defineProperty`/`getPrototypeOf`/
+   `setPrototypeOf` → 8, `STA1204`'s surface; `keys`/`values`/`entries` + `matchAll` → 5; `Date` →
+   this phase's Date steps), and the residue keeps the catch-all with an honest owner.
+6. **Decide the 51 sites that fit no named group — and where a blocker has no owning phase, EDIT
+   §8/§11 in the same change to give it one** (§15.3; a not-yet may not name a phase that does not
+   own its blocker). By group: **module surface ×7** (renamed imports/exports, re-exports,
+   `export =`, default/namespace imports — lowering work; candidate owner is Phase 5's
+   language-surface half, with namespace imports sharing step 10's module-namespace-object
+   blocker); **arity/spread/argument-shape refinements ×32** (per-construct: forms fixable by
+   lower-time defaulting/folding land where their builtin lives; spread/variadic and
+   callback-shape sites name the dynamic tier — two already say "until the dynamic tier"
+   informally); **method-as-value ×5** (bound-function values — candidate Phase 5 step 4's dynamic
+   lowering or Phase 8; pick one and record why); **`Math`/`JSON` namespace residues ×4** (members
+   that are nonexistent, nondeterministic, or outside the pinned lib — some are `never`, not
+   `not-yet`; deciding which is the point); **dedicated `STA1211` ×2** (`compile` is Annex B
+   legacy whose blocker no phase owns — candidate: never-by-design, or Phase 8). Every
+   reassignment lands in `gate.ts` + `SUBSET.md` + `DIAGNOSTICS.md` together — three surfaces
+   that have already drifted apart once.
+7. **Move the blocker rule below into §15 proper** — today it exists only inside this task's
+   block — then re-run the sweep: zero remaining sites name a completed phase, in the numeric
+   field and in the message strings.
+
+**Check (Task 4.7):** the completed-phase regression test exists and passes; `pnpm run test` and
+`pnpm run test:subset` green, with every deliberate verdict flip in the same commit as its gate
+change; a scan of `gate.ts` finds no not-yet naming a phase marked complete in `done.md`; the
+phase column in `DIAGNOSTICS.md` and `SUBSET.md` agrees with `gate.ts` for every touched code.
 
 **Rule this establishes (§15, applies from here on):** a `not-yet` diagnostic names the phase that
 owns its **blocker**, never the phase that happens to be open. When a phase closes, every code
@@ -324,7 +472,11 @@ shows every surface member whose blocker Phase 4 OWNS:**
   change". Left as written, Phase 4 could never exit. They land with a different proof — a shape
   assertion in `tests/unit/` (the label is echoed, a duration is printed, the unit is `ms`) — and
   are marked `nondeterministic` on the dashboard. `table` is NOT carved out: its column layout is a
-  pure function of the data, so it stays here as ordinary Phase 4 work.
+  pure function of the data, and it **landed 2026-09-01** as ordinary Phase 4 work — the golden
+  fixtures hold Node's grid byte-for-byte in both modes. The Map/Set form is deferred by name
+  (`STA1214`): Node draws it with an `(iteration index)` column, and a Map with a second `Key`
+  column, which is a different table rather than a wider one. Only the three carve-out proofs are
+  left on this bullet.
 - **`RegExp.prototype`** — ✅ **met.** The array-with-properties half landed with Task 4.1
   (plan-notes 120: `exec`, `String.prototype.match`), and the DATA property surface with Task 4.2
   (plan-notes 121: the eleven properties of §22.2.6 plus `toString`, on a `REGEXP_FIELDS` table
@@ -334,7 +486,16 @@ shows every surface member whose blocker Phase 4 OWNS:**
   declared in lib.es2024, so the checker refuses the read before the gate sees it, and raising
   `lib` admits every other ES2024 addition at the same time. `String.prototype`'s iterator-shaped
   `matchAll` remains Phase 5's.
-- **`Date`** — newly owned by Task 4.2 above.
+- **`Date`** — owned by Task 4.2's Date steps above, per-member: **slice A** (TZ-independent
+  core — epoch/ISO constructors, UTC getters/setters, `toISOString`/`toJSON`/`toUTCString`,
+  `Date.UTC`, ISO-only `Date.parse`) and **slice B** (local-time getters/setters +
+  `getTimezoneOffset`, behind the golden runner's `TZ=UTC` pin) both land in this phase;
+  `Date.now` and zero-argument `new Date()` prove via the determinism carve-out;
+  `toString`/`toDateString`/`toTimeString`, the call form `Date()`, and `toLocale*` are the intl
+  feature build's (ICU CLDR timezone/locale names — Task 4.4's model, non-blocking);
+  `[Symbol.toPrimitive]` is out of surface lists by standing rule; `toISOString` on an Invalid
+  Date needs a runtime-raised `RangeError` — Phase 5 step 11's mechanism, panic until then,
+  documented in `SUBSET.md`.
 
 Everything else still missing belongs to a later phase and is named with its owner in §8: the
 `keys`/`values`/`entries` triple, `for`-`of` over non-arrays, `function*`, and
@@ -499,3 +660,4 @@ Standing practices:
 - **v2.2** (2026-09-01): **the log resumes** — it had stopped at v2.1 while Phases 2, 3 and 4 were built, so the plan's own change history was silent for the largest stretch of work in the project. Recorded now, from `plan-notes.md` and the phase Check lines: **Phase 2 ✅ COMPLETE** (2026-08-29, walking skeleton end to end); **Phase 3 ✅ COMPLETE** (2026-08-30, all twelve tasks and eight ladder rungs; the phase exit ran a 477-line five-module transit route planner byte-for-byte against Node); **Phase 4 in progress** — 4.1, 4.3, 4.4, 4.5 landed and 4.6 landed its async half, with 4.2 (builtins) open at 131/197 dashboard members.
 - **v2.3** (2026-09-01): **`plan.md` split** — completion records moved to `done.md`, leaving this file at open work only (761 → ~420 lines). Section numbers and every task's number and title are unchanged so the ~60 `plan.md §N Task X.Y` references in `docs/`, `src/`, `runtime/src/` and `tests/` still resolve (plan-notes 115). **Phase 4 gained an explicit exit criterion**, which it had never had — it had a Check but no scope boundary, which is why four not-yet codes named it as their deliverer while it was closing. The residue is now assigned by blocker: `Date` to Task 4.2 (which had never actually named it), `RegExp`'s `exec`/`match` to Phase 4's own array-with-properties work, `matchAll` and the iterator surface to Phase 5 step 8, top-level `await` to step 9, dynamic `import()` to step 10, the descriptor/prototype surface to Phase 8. Phase 5 is retitled to admit that steps 8–11 are not `js`-mode work. New **Task 4.7** audits the 58 gate call sites that hardcode phase 4, and §15 gains the rule that a not-yet code names the phase owning its **blocker**, never the phase that happens to be open (plan-notes 116).
 - **v2.4** (2026-09-01): Re-reviewed the Phase-4 implementation and roadmap. The completed Task 4.3–4.6 records were already preserved in `done.md`; their duplicate narratives were replaced here by required one-line stubs. Task 4.1 remains open for the array-with-properties blocker, and Task 4.2 remains open at the live dashboard's 131/197 surface members (plan-notes 118).
+- **v2.5** (2026-09-01): **the two open tasks gained numbered Steps** (plan-notes 127), backed by a five-agent evidence audit of the repo and the pinned Node v26.7.0. Task 4.2's remainder is now two step lists — `Date` (sliced by what makes each member deterministic: a TZ-independent core, a local-time slice behind a golden-runner `TZ=UTC` pin, an intl-build residue for the ICU-named `toString`/`toLocale*` family, and the carve-out pair; ISO-only `Date.parse` recorded as a documented divergence) and `console.table` + the `time`/`timeEnd`/`trace` carve-out trio. Task 4.7 gained Steps and its own Check; its site count was corrected from 58 to the audited **63** (60 `STA1214` + 2 `STA1211` + 1 `STA1215` at `39cf053`), with the audit's grouping (2 pure-5.8, 2 pure-5.11, 8 straddling catch-alls, 51 unowned) folded into the steps. The exit-criterion `Date` bullet was rewritten per-member per the plan-notes-125 rule.
