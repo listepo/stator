@@ -34,6 +34,7 @@ import {
   consoleEntryPoint,
   isSetOperation,
   MATCH_FIELDS,
+  REGEXP_FIELDS,
   REGEXP_OPS,
   SET_OPS,
   STRING_OPS,
@@ -1447,6 +1448,13 @@ function verifyExpression(
           code: 'STA4086',
           message: `${expr.op} results in '${hTypeName(expr.type)}', not a boolean`,
         });
+      } else if (REGEXP_OPS[expr.op].result === 'string' && !hTypeEquals(expr.type, H_STRING)) {
+        problems.push({
+          kind: 'regexp-op',
+          span: expr.span,
+          code: 'STA4086',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not a string`,
+        });
       } else if (REGEXP_OPS[expr.op].result === 'match' && expr.type.kind !== 'unknown') {
         // `exec` answers a match array OR null, and the HIR has no union: Unknown is the honest
         // type, and a node claiming `array` here would be a match the compiler has not made.
@@ -1524,6 +1532,30 @@ function verifyExpression(
           kind: 'match-read',
           span: expr.span,
           code: 'STA4089',
+          message: `${expr.field} results in '${hTypeName(expr.type)}', not '${want}'`,
+        });
+      }
+      break;
+    }
+
+    // The mirror of `match-read`, with the receiver pinned the other way: a regexp IS concretely
+    // typed, and the C accessors dereference a `JSRTRegExp` without asking -- so a wrong kind here
+    // is memory corruption rather than a wrong answer, exactly as it is for a `regexp-op`.
+    case 'regexp-read': {
+      verifyExpression(expr.target, problems, bindings);
+      const want = REGEXP_FIELDS[expr.field].result;
+      if (expr.target.type.kind !== 'regexp') {
+        problems.push({
+          kind: 'regexp-read',
+          span: expr.span,
+          code: 'STA4090',
+          message: `${expr.field} on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+      } else if (expr.type.kind !== want) {
+        problems.push({
+          kind: 'regexp-read',
+          span: expr.span,
+          code: 'STA4090',
           message: `${expr.field} results in '${hTypeName(expr.type)}', not '${want}'`,
         });
       }

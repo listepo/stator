@@ -326,6 +326,7 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'instanceof':
     case 'field-access':
     case 'match-read':
+    case 'regexp-read':
     case 'dyn-field-access': {
       const target = sub(expr.target);
       return target === expr.target ? expr : { ...expr, target };

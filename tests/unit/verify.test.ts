@@ -8,9 +8,9 @@
 
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import type { Declaration, Expression, MatchField } from '../../src/hir/nodes.ts';
+import type { Declaration, Expression, MatchField, RegExpField } from '../../src/hir/nodes.ts';
 import type { HType } from '../../src/hir/types.ts';
-import { H_NUMBER, H_STRING, hUnknown } from '../../src/hir/types.ts';
+import { H_BOOLEAN, H_NUMBER, H_STRING, hUnknown } from '../../src/hir/types.ts';
 import { verifyHir } from '../../src/hir/verify.ts';
 import { assign, decl, makeModule, num, span, str } from './helpers.ts';
 
@@ -107,4 +107,52 @@ void test('a match read whose result type is not the field’s is STA4089', () =
   const problems = verifyHir(makeModule([decl('a', matchRead('index', matchTarget(), H_STRING))]));
   assert.equal(problems.length, 1);
   assert.equal(problems[0]?.code, 'STA4089');
+});
+
+/* Task 4.2's RegExp field reads (STA4090) -- the mirror of the above with the receiver pinned the
+ * other way. A regexp IS concretely typed, and `jsrt_regexp_source` and friends dereference a
+ * `JSRTRegExp` without asking, so a wrong receiver kind here is a wrong dereference. */
+
+function regexpRead(field: RegExpField, target: Expression, type: HType): Expression {
+  return { kind: 'regexp-read', type, span: span(1), field, target };
+}
+
+function regexpTarget(): Expression {
+  return {
+    kind: 'regexp-literal',
+    type: { kind: 'regexp' },
+    span: span(1),
+    source: 'a',
+    flags: '',
+  };
+}
+
+void test('a regexp read off a regexp receiver, typed by its field, verifies clean', () => {
+  assert.deepEqual(
+    verifyHir(
+      makeModule([
+        decl('a', regexpRead('source', regexpTarget(), H_STRING)),
+        decl('b', regexpRead('flags', regexpTarget(), H_STRING)),
+        decl('c', regexpRead('lastIndex', regexpTarget(), H_NUMBER)),
+        decl('d', regexpRead('global', regexpTarget(), H_BOOLEAN)),
+      ]),
+    ),
+    [],
+  );
+});
+
+void test('a regexp read whose receiver is not a regexp is STA4090', () => {
+  const problems = verifyHir(makeModule([decl('a', regexpRead('source', str('x'), H_STRING))]));
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0]?.code, 'STA4090');
+});
+
+void test('a regexp read whose result type is not the field’s is STA4090', () => {
+  // `global` is a bit test: there is no annotation here to be wrong about, so a number result is a
+  // lowering bug rather than a program making a claim.
+  const problems = verifyHir(
+    makeModule([decl('a', regexpRead('global', regexpTarget(), H_NUMBER))]),
+  );
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0]?.code, 'STA4090');
 });

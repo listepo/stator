@@ -225,12 +225,14 @@ Until this task lands, every global except `console.log` and `undefined` is defe
 
 **In progress.** The landed slices — Math, String, Array, console, Object, JSON, callback
 methods, `Map`/`Set` and the ES2025 set operations — are recorded in [done.md](done.md) → Phase 4,
-Task 4.2. `pnpm run test:builtins` reports **154/196** deterministic surface members, with Math
-42/42 plus one nondeterministic proof for `Math.random`, and `String.prototype` at 31/32.
-**Still open:** `Object` 6/13, `Date` (STA1210) has no implementation, the four remaining `console`
-members, and `RegExp.prototype`'s DATA properties (`source`, `flags`, `lastIndex`, `global`, …,
-plus `toString`/`compile`) — reads the object model has no node for. The array-with-properties
-blocker is gone: Task 4.1 closed it, and `exec`/`match` landed with it.
+Task 4.2. `pnpm run test:builtins` reports **165/196** deterministic surface members, with Math
+42/42 plus one nondeterministic proof for `Math.random`, `String.prototype` at 31/32 and
+`RegExp.prototype` at 13/15.
+**Still open:** `Object` 6/13, `Date` (STA1210) has no implementation, and the four remaining
+`console` members. `RegExp.prototype` is DONE for everything this phase owns — the eleven data
+properties and `toString` landed 2026-09-01 (plan-notes 121), leaving `compile` (Annex B legacy,
+variadic arity) and `unicodeSets` (declared in lib.es2024; this project pins `lib: ["es2023"]`, so
+the checker refuses the read), neither of which is a Phase 4 blocker.
 
 **`Date` joins this task's list (2026-09-01, plan-notes 116).** The list above enumerates `Math`,
 `JSON`, `String.prototype`, `Array.prototype`, `Object`, `Map`, `Set` and `console` — not `Date` —
@@ -290,12 +292,15 @@ shows every surface member whose blocker Phase 4 OWNS:**
   `defineProperty`, `getPrototypeOf` and `setPrototypeOf` are **not** Phase 4 — they are the
   descriptor and prototype-chain surface `STA1204` already assigns to Phase 8.
 - **`console`** — `table`, `time`, `timeEnd`, `trace`.
-- **`RegExp.prototype`** — the array-with-properties half is DONE (Task 4.1, plan-notes 120):
-  `exec` and `String.prototype.match` landed, and `String.prototype` is now 31/32 with only the
-  iterator-shaped `matchAll` left to Phase 5. What remains under `STA1211` is the DATA property
-  surface — `source`, `flags`, `lastIndex`, `global`, `dotAll`, `ignoreCase`, `multiline`,
-  `sticky`, `unicode`, `unicodeSets`, `hasIndices` — plus `toString` and `compile`. These are reads
-  the object model has no node for, not a representation gap, and they are Task 4.2's work.
+- **`RegExp.prototype`** — ✅ **met.** The array-with-properties half landed with Task 4.1
+  (plan-notes 120: `exec`, `String.prototype.match`), and the DATA property surface with Task 4.2
+  (plan-notes 121: the eleven properties of §22.2.6 plus `toString`, on a `REGEXP_FIELDS` table
+  beside the method table). 13/15. The two that remain are NOT this phase's: `compile` is Annex B
+  §B.2.4 legacy whose optional second argument a fixed-arity op table cannot express, and
+  `unicodeSets` is unreachable while `tsconfig.json` pins `lib: ["es2023"]` — the property is
+  declared in lib.es2024, so the checker refuses the read before the gate sees it, and raising
+  `lib` admits every other ES2024 addition at the same time. `String.prototype`'s iterator-shaped
+  `matchAll` remains Phase 5's.
 - **`Date`** — newly owned by Task 4.2 above.
 
 Everything else still missing belongs to a later phase and is named with its owner in §8: the

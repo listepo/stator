@@ -43,7 +43,13 @@ import type {
   UnaryOp,
   VtableEntry,
 } from '../hir/nodes.ts';
-import { arrayOpCallsBack, consoleEntryPoint, REGEXP_OPS, SET_OPS } from '../hir/nodes.ts';
+import {
+  arrayOpCallsBack,
+  consoleEntryPoint,
+  REGEXP_FIELDS,
+  REGEXP_OPS,
+  SET_OPS,
+} from '../hir/nodes.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
  *
@@ -951,8 +957,10 @@ class Emitter {
       // jsrt_get_prop allocates nothing and runs no user code -- a chain walk and a load -- so
       // the dynamic read is as slot-free as the static one.
       case 'dyn-field-access':
-      // A match read is a property load or a header read -- same story, nothing allocated.
+      // A match read is a property load or a header read -- same story, nothing allocated. So is
+      // a regexp read: a struct field or a bit test.
       case 'match-read':
+      case 'regexp-read':
       // Same as a field read: the test is a pointer comparison against a static descriptor, with
       // nothing allocated between evaluating the target and using it.
       case 'instanceof':
@@ -1820,6 +1828,19 @@ class Emitter {
         return expr.field === 'length'
           ? `jsrt_array_length(${target})`
           : `jsrt_get_prop(${target}, ${cNameLiteral(expr.field)}, &${this.icSite()})`;
+      }
+
+      // Eleven reads off the compiled struct, none of them allocating and none of them a property
+      // in the shape-table sense: `source` and `flags` are the strings the runtime normalized at
+      // construction, `lastIndex` is a header field, and the eight predicates are one bit test
+      // each -- passed the flag's LETTER, because the LRE_FLAG_* constants belong to the vendored
+      // engine's header and generated C does not include it.
+      case 'regexp-read': {
+        const target = this.emitExpression(expr.target);
+        const spec = REGEXP_FIELDS[expr.field];
+        return 'flag' in spec
+          ? `jsrt_bool(jsrt_regexp_flag(${target}, '${spec.flag}'))`
+          : `jsrt_regexp_${snakeCase(expr.field)}(${target})`;
       }
 
       case 'new': {

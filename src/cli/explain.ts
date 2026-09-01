@@ -341,7 +341,10 @@ function expressionHasUnknown(expr: Expression): boolean {
       return false;
     case 'method-call':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
-    // The answer is a boolean whatever the target is, so only the target can be dynamic.
+    // The answer is a boolean whatever the target is, so only the target can be dynamic. A regexp
+    // read is the same shape and, unlike a match read, has a target the HIR types concretely --
+    // so recursing into it says what the code does rather than the opposite.
+    case 'regexp-read':
     case 'instanceof':
       return expressionHasUnknown(expr.target);
     // A literal's own type stops the deep walk for the same reason a class's does, so what makes

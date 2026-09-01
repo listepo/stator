@@ -794,10 +794,29 @@ void test('regexp literals and test are accepted, the rest of the prototype defe
     codesFor('const m = /x/.exec("x");\nif (m !== null) { console.log(m.slice(0)); }'),
     ['STA1214'],
   );
-  // The DATA properties the object model has no node for stay deferred under STA1211.
-  assert.deepEqual(codesFor('const re = /x/;\nconsole.log(re.source);'), ['STA1211']);
-  assert.deepEqual(codesFor('const re = /x/;\nconsole.log(re.source);'), ['STA1211']);
-  assert.deepEqual(codesFor('const re = /x/g;\nconsole.log(re.lastIndex);'), ['STA1211']);
+  // The DATA properties landed with Task 4.2: a closed table of eleven, read off the compiled
+  // regexp. `unicodeSets` is the twelfth and is deliberately absent here -- it is declared in
+  // lib.es2024 and this project's `lib` is es2023, so it fails the CHECKER before the gate sees it.
+  for (const field of [
+    'source',
+    'flags',
+    'lastIndex',
+    'global',
+    'ignoreCase',
+    'multiline',
+    'dotAll',
+    'sticky',
+    'unicode',
+    'hasIndices',
+  ]) {
+    assert.deepEqual(codesFor(`const re = /x/g;\nconsole.log(re.${field});`), [], field);
+  }
+  assert.deepEqual(codesFor('const re = /x/;\nconsole.log(re.toString());'), []);
+  // A WRITE is not a read spelled backwards: it is an assignment target, and the assignment gate
+  // admits a field of a class and nothing else -- so it keeps the generic code, not STA1211.
+  assert.deepEqual(codesFor('const re = /x/g;\nre.lastIndex = 3;'), ['STA1214']);
+  // `compile` is the one member outside both tables (plan-notes 121).
+  assert.deepEqual(codesFor("const re = /x/;\nre.compile('y', 'g');"), ['STA1211']);
   // A method as a VALUE is refused for the reason every other prototype method is: nothing here
   // builds the bound closure it would need.
   assert.deepEqual(codesFor('const re = /x/;\nconst t = re.test;\nconsole.log(t);'), ['STA1211']);

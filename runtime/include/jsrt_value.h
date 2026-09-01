@@ -714,6 +714,26 @@ jsrt_value jsrt_regexp_exec(jsrt_value re, jsrt_value str);
  * CreateArrayFromList, so it carries no properties -- or `null` when nothing matched. */
 jsrt_value jsrt_regexp_match(jsrt_value re, jsrt_value str);
 
+/* ------------------------------------------------- the data-property surface (§22.2.6)
+ *
+ * All eleven properties are DERIVED -- nothing here is stored a second time. `source` and `flags`
+ * are the strings `jsrt_regexp_new` normalized once (empty pattern -> `(?:)`, flags -> the spec's
+ * canonical `dgimsuvy` order), and the eight flag predicates are one bit test each, which is why
+ * they take the flag's LETTER: the LRE_FLAG_* constants live in the vendored header and generated
+ * C must not need it. */
+static inline jsrt_value jsrt_regexp_source(jsrt_value re) { return jsrt_as_regexp(re)->source; }
+static inline jsrt_value jsrt_regexp_flags(jsrt_value re) { return jsrt_as_regexp(re)->flags; }
+static inline jsrt_value jsrt_regexp_last_index(jsrt_value re) {
+  return jsrt_number((double)jsrt_as_regexp(re)->last_index);
+}
+
+/* `re.global` and its seven siblings, by the flag letter: one of `dgimsuvy`. */
+bool jsrt_regexp_flag(jsrt_value re, int letter);
+
+/* `re.toString()` -- §22.2.6.13, which is `/source/flags` off the two normalized strings, so it
+ * is always a spelling that parses back to an equal pattern. */
+jsrt_value jsrt_regexp_to_string(jsrt_value re);
+
 jsrt_value jsrt_regexp_search(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_split(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_replace(jsrt_value re, jsrt_value str, jsrt_value replacement, bool all);

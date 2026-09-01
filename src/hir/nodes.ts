@@ -901,9 +901,52 @@ export interface RegExpLiteral extends Node {
 export const REGEXP_OPS = {
   test: { arity: 1, result: 'boolean' },
   exec: { arity: 1, result: 'match' },
-} as const satisfies Record<string, { arity: number; result: 'boolean' | 'match' }>;
+  toString: { arity: 0, result: 'string' },
+} as const satisfies Record<string, { arity: number; result: 'boolean' | 'match' | 'string' }>;
 
 export type RegExpOperation = keyof typeof REGEXP_OPS;
+
+/** `RegExp.prototype`'s DATA properties (§22.2.6), which are reads and not calls -- the other half
+ * of the surface `REGEXP_OPS` covers.
+ *
+ * Every one is DERIVED from the compiled regexp, so none of them is state this compiler has to keep
+ * in step: `source` and `flags` are the two strings the runtime normalized at construction, and the
+ * eight predicates are one bit test each. `flag` carries the letter rather than a bit because the
+ * `LRE_FLAG_*` constants belong to the vendored engine's header, which generated C never includes.
+ *
+ * `lastIndex` is READ-ONLY here. The spec makes it a writable property and `re.lastIndex = 0` is
+ * how a program restarts a /g scan, but a WRITE is an assignment target, and the object model has
+ * no node for assigning into a builtin -- so the gate refuses it by name rather than lowering a
+ * read into a store (plan-notes 121). */
+export const REGEXP_FIELDS = {
+  source: { result: 'string' },
+  flags: { result: 'string' },
+  lastIndex: { result: 'number' },
+  hasIndices: { result: 'boolean', flag: 'd' },
+  global: { result: 'boolean', flag: 'g' },
+  ignoreCase: { result: 'boolean', flag: 'i' },
+  multiline: { result: 'boolean', flag: 'm' },
+  dotAll: { result: 'boolean', flag: 's' },
+  unicode: { result: 'boolean', flag: 'u' },
+  unicodeSets: { result: 'boolean', flag: 'v' },
+  sticky: { result: 'boolean', flag: 'y' },
+} as const satisfies Record<
+  string,
+  { result: 'string' | 'number' | 'boolean'; flag?: 'd' | 'g' | 'i' | 'm' | 's' | 'u' | 'v' | 'y' }
+>;
+
+export type RegExpField = keyof typeof REGEXP_FIELDS;
+
+/** `re.source`, `re.global` and their nine siblings.
+ *
+ * Unlike a `MatchRead`, the target here is CONCRETELY typed -- a regexp is a regexp, the checker
+ * says so and the HIR carries it -- so the verifier pins the receiver's type the way it pins a
+ * `RegExpOp`'s, and the read is a struct load behind a fixed C signature. */
+export interface RegExpFieldRead extends Node {
+  readonly kind: 'regexp-read';
+  readonly field: RegExpField;
+  readonly target: Expression;
+}
 
 /** What a MATCH ARRAY -- the answer of `exec` and of a non-global `match` -- exposes beyond its
  * elements. `index`, `input` and `groups` are ECMA-262 §22.2.7.2's properties of the result, which
@@ -944,6 +987,7 @@ export interface RegExpOp extends Node {
 
 export type Expression =
   | MatchRead
+  | RegExpFieldRead
   | NumberLiteral
   | StringLiteral
   | BooleanLiteral

@@ -74,6 +74,7 @@ import type {
   Parameter,
   PromiseStaticMethod,
   Provenance,
+  RegExpField,
   RegExpOperation,
   ReturnStatement,
   Span,
@@ -90,6 +91,7 @@ import {
   CONSOLE_METHODS,
   isSetOperation,
   MATCH_FIELDS,
+  REGEXP_FIELDS,
   REGEXP_OPS,
   STRING_OPS,
 } from '../hir/nodes.ts';
@@ -1595,6 +1597,26 @@ function lowerExpression(
     }
   }
 
+  // `re.source`, `re.global` and their nine siblings. Ahead of the `.length` arm for no reason of
+  // its own -- a regexp has no `.length` -- but beside the match read it mirrors.
+  if (ts.isPropertyAccessExpression(node) && isRegExpReceiver(node.expression, checker)) {
+    const field = node.name.text;
+    if (Object.hasOwn(REGEXP_FIELDS, field)) {
+      const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+      if (target === null) {
+        return null;
+      }
+      const result = REGEXP_FIELDS[field as RegExpField].result;
+      return {
+        kind: 'regexp-read',
+        type: result === 'number' ? H_NUMBER : result === 'string' ? H_STRING : H_BOOLEAN,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        field: field as RegExpField,
+        target,
+      };
+    }
+  }
+
   // `s.length` and `a.length`. The gate already confirmed the object is a string or an array; a
   // property access that is neither never reaches here, and `console.log` is the call case. The
   // two produce different nodes because they become different runtime calls, and this is the last
@@ -2174,9 +2196,9 @@ function lowerExpression(
         };
       }
 
-      // The landed RegExp.prototype surface, which is `test` alone. The result is taken from the
-      // node rather than the table because there is nothing else it can be -- the verifier pins it
-      // to boolean, and this keeps a checker that says otherwise visible instead of overwritten.
+      // The landed RegExp.prototype METHODS. The result is taken from the node rather than the
+      // table because the verifier pins it either way, and this keeps a checker that says
+      // otherwise visible instead of overwritten.
       if (isRegExpReceiver(obj, checker) && Object.hasOwn(REGEXP_OPS, propName)) {
         const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
         if (target === null) {

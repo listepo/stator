@@ -8,7 +8,8 @@ console.log(plain);
 console.log(plain.test('xxabcyy'));
 console.log(plain.test('xxabyy'));
 
-// Flags, in the order the source writes them -- the `flags` string is carried verbatim.
+// Flags. The `flags` string is NOT carried verbatim: §22.2.6.4 orders it `d g i m s u v y`, and
+// the runtime normalizes at construction so every reader agrees (tests/golden/ts/regexp_fields.ts).
 const ci = /HeLLo/i;
 console.log(ci);
 console.log(ci.test('say hello there'));

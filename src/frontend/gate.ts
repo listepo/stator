@@ -5,6 +5,7 @@ import {
   CONSOLE_METHODS,
   isSetOperation,
   MATCH_FIELDS,
+  REGEXP_FIELDS,
   REGEXP_OPS,
   STRING_OPS,
 } from '../hir/nodes.ts';
@@ -1193,9 +1194,8 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       }
       return { kind: 'accept' };
     }
-    // The landed `RegExp.prototype` surface, which is `test` alone. Everything else keeps STA1211:
-    // `exec` and the non-global `match` answer an ARRAY WITH PROPERTIES (`index`, `input`,
-    // `groups` hang off it), which a dense jsrt array cannot represent, and the rest wait on that.
+    // `RegExp.prototype`'s METHODS -- `test`, `exec`, `toString`. The one member left under
+    // STA1211 is `compile`, whose blocker is neither of this phase's (plan-notes 121).
     if (isRegExpReceiver(callee.expression, typeChecker)) {
       const op = callee.name.text;
       if (!Object.hasOwn(REGEXP_OPS, op)) {
@@ -1210,9 +1210,12 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
         return notYet('a spread argument to a RegExp method is not yet supported', 4);
       }
       const arity = REGEXP_OPS[op as RegExpOperation].arity;
-      const subject = call.arguments[0];
-      if (call.arguments.length !== arity || subject === undefined) {
+      if (call.arguments.length !== arity) {
         return notYet(`${op} with other than ${String(arity)} arguments is not yet supported`, 4);
+      }
+      const subject = call.arguments[0];
+      if (subject === undefined) {
+        return { kind: 'accept' }; // `toString`, the one nullary method: no subject to vet
       }
       // The JSON.parse rule: a value the checker types as something OTHER than a string is the
       // program leaning on ToString, which the bridge does not perform, and the compiler can say
@@ -2076,12 +2079,18 @@ function gateMemberAccess(
     return { kind: 'accept' }; // gateCall vets the operation itself
   }
 
-  // RegExp.prototype follows String's and Array's rule: a method is a CALLEE and nothing else.
-  // The data properties (`source`, `flags`, `lastIndex`, `global`, ...) are reads the object model
-  // has no node for yet, so they are deferred by name under the family's own code.
+  // RegExp.prototype follows String's and Array's rule for its METHODS: one is a CALLEE and
+  // nothing else. Its DATA properties are the other half of the surface -- `REGEXP_FIELDS` is the
+  // closed set of them -- and they are reads, so they are admitted here and nowhere else.
   if (isRegExpReceiver(access.expression, checker)) {
     if (ts.isCallExpression(access.parent) && access.parent.expression === access) {
       return { kind: 'accept' }; // gateCall vets the operation itself
+    }
+    // A READ. `re.lastIndex = 0` is a write into a builtin -- not a read spelled backwards -- and
+    // is refused by the assignment gate above, which admits a field of a CLASS and nothing else
+    // (plan-notes 121).
+    if (Object.hasOwn(REGEXP_FIELDS, access.name.text)) {
+      return { kind: 'accept' };
     }
     return {
       kind: 'not-yet',

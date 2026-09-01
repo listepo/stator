@@ -55,6 +55,13 @@ else
   GC_STATUS := plain malloc (no collection)
 endif
 
+# libm. Part of libSystem on macOS, where this flag is a harmless no-op; a SEPARATE library on
+# glibc, where omitting it fails the link of anything that calls `floor`, `trunc`, `sqrt` or `fmod`
+# -- which is most of the runtime: ToInt32, array indexing, and the print path all do. It belongs
+# in link-flags.txt as much as in the rules below, because the EMITTED program links the same
+# archive and hits the same undefined symbols (plan-notes 122).
+SYS_LIBS := -lm
+
 # Intl/ICU (plan.md Task 4.4) is a FEATURE BUILD, not a configuration of the default one: the
 # default archive must stay byte-identical whether or not ICU happens to be installed, because a
 # runtime that silently changes with the host's package set is not reproducible. So ICU lives in
@@ -102,15 +109,15 @@ NODE ?= node
 # changing a single .c file, and an archive compiled WITH Boehm linked WITHOUT -lgc is an
 # undefined-symbol error at the end of every compile (plan-notes 106).
 all: build/libjsrt.a
-	@printf '%s\n' '$(GC_LIBS)' > build/link-flags.txt
+	@printf '%s\n' '$(GC_LIBS) $(SYS_LIBS)' > build/link-flags.txt
 	@echo "Runtime built with: $(GC_STATUS)"
 
 asan: build-asan/libjsrt.a
-	@printf '%s\n' '$(GC_LIBS)' > build-asan/link-flags.txt
+	@printf '%s\n' '$(GC_LIBS) $(SYS_LIBS)' > build-asan/link-flags.txt
 	@echo "Runtime (ASan) built with: $(GC_STATUS)"
 
 intl: build-intl/libjsrt.a
-	@printf '%s\n' '$(GC_LIBS) $(ICU_LIBS)' > build-intl/link-flags.txt
+	@printf '%s\n' '$(GC_LIBS) $(ICU_LIBS) $(SYS_LIBS)' > build-intl/link-flags.txt
 	@echo "Runtime (Intl/ICU) built with: $(GC_STATUS)"
 
 # Every corpus is a .c/.mjs pair with the same name: the C prints through the runtime, the .mjs
@@ -142,10 +149,10 @@ test-asan: $(addprefix build-asan/,$(CORPORA))
 	@echo "runtime: print corpus matches Node (ASan/UBSan)"
 
 build/%: tests/%.c build/libjsrt.a
-	$(CC) $(CFLAGS_REL) $< -Lbuild -ljsrt $(GC_LIBS) -o $@
+	$(CC) $(CFLAGS_REL) $< -Lbuild -ljsrt $(GC_LIBS) $(SYS_LIBS) -o $@
 
 build-asan/%: tests/%.c build-asan/libjsrt.a
-	$(CC) $(CFLAGS_ASAN) $< -Lbuild-asan -ljsrt $(GC_LIBS) -o $@
+	$(CC) $(CFLAGS_ASAN) $< -Lbuild-asan -ljsrt $(GC_LIBS) $(SYS_LIBS) -o $@
 
 build/libjsrt.a: $(OBJ_REL) $(VENDOR_REL)
 	$(AR) rcs $@ $^

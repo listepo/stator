@@ -2716,3 +2716,86 @@ on this.
 
 **plan.md edited:** yes — §7 Task 4.1 closed and moved to `done.md`; Task 4.2's residue and the
 phase exit criterion's RegExp bullet updated to say the blocker is gone.
+
+## 121. `RegExp.prototype`'s data properties, and the two members that stay out (2026-09-01)
+
+**Task:** plan.md §7 Task 4.2, the residue the phase exit criterion names as `RegExp.prototype`'s
+DATA property surface — the thing left after Task 4.1 closed the array-with-properties blocker.
+
+**What it is.** Eleven properties (§22.2.6) and `toString`, all DERIVED: `source` and `flags` are
+two strings on `JSRTRegExp`, `lastIndex` is a header field, and the eight flag predicates are one
+bit test each against `lre_flags`. Nothing here is state the compiler has to keep in step, and
+nothing needed a new representation — which is why this was never blocked on Task 4.1 and why the
+exit criterion was right to call it "reads the object model has no node for" rather than a gap.
+
+**The shape.** Two closed tables side by side rather than one: `REGEXP_OPS` (methods — a callee and
+nothing else) and the new `REGEXP_FIELDS` (data — a read and nothing else). They were not merged,
+though a data property is arguably a nullary method: `toString` and `source` are both arity 0, so a
+single table could not tell `re.toString()` from `re.source` without a `form` discriminant, which is
+two tables wearing one name. One HIR node (`regexp-read`), one verifier code (**STA4090**), the
+`MatchRead` shape with the receiver pinned the other way — a regexp IS concretely typed, so the
+verifier pins the receiver as it does a `RegExpOp`'s, where a match read has to pin it Unknown.
+
+**The bug this found.** `re->flags` stored the flag string AS WRITTEN. §22.2.6.4 builds it in the
+canonical `d g i m s u v y` order, and Node normalizes everywhere: `/a/ig` has `.flags === "gi"` and
+PRINTS as `/a/gi`. The old `console.log(/a/ig)` therefore disagreed with Node on any literal whose
+flags were out of order — a live golden-output bug that no fixture happened to write. Fixed at the
+single place that can fix it, `jsrt_regexp_new`, so `flags`, `toString` and `inspect` read one
+normalized string and cannot drift apart. `tests/golden/ts/regexp.ts`'s "carried verbatim" comment
+was describing the bug and is corrected.
+
+**Three members that do NOT land, each for a different reason — none of them "later":**
+
+- **`lastIndex` as a WRITE.** `re.lastIndex = 0` is how a program restarts a /g scan, and it is not
+  the read spelled backwards: it is an assignment TARGET, and `isAssignableTarget` admits an
+  identifier, an element access, and a field of a CLASS — nothing else. Lowering the read into a
+  store to make the spelling work would put a builtin's mutable state behind a node that was never
+  designed to carry it. Refused by name (STA1214), pinned by a decision test in both modes.
+- **`unicodeSets`.** In the table, unreachable in this project: the property is declared in
+  `lib.es2024.regexp.d.ts` and `tsconfig.json` pins `lib: ["es2023"]`, so the CHECKER refuses the
+  read before the gate sees it. Raising `lib` is a subset-wide scope change (it admits every other
+  ES2024 addition at the same time) and is not this task's to make. It stays in `REGEXP_FIELDS`
+  because the table describes the SPEC surface and the runtime already handles /v; the dashboard
+  counts it missing, which is the honest answer.
+- **`compile`.** Annex B §B.2.4 legacy — the only builtin that RECOMPILES a regexp in place — with
+  an optional second argument that a fixed-`arity` op table cannot express. Keeps STA1211.
+
+**Dashboard:** `RegExp.prototype` 2/15 → **13/15**, missing exactly `compile` and `unicodeSets`.
+Total 154/196 → 165/196.
+
+**Codes allocated:** STA4090 (verifier: a `regexp-read`'s receiver or result type), STA4091
+(runtime: a flag letter outside `dgimsuvy`, STA4084-style — the emitter having invented a property).
+
+**plan.md edited:** yes — Task 4.2's residue no longer lists the RegExp data properties, and the
+phase exit criterion's `RegExp.prototype` bullet now names `compile` and `unicodeSets` with the
+reasons above, neither of which Phase 4 owns.
+
+## 122. The platform matrix found two real bugs on its first run (2026-09-01)
+
+**Task:** the CI workflow's platform × arch matrix (`.github/workflows/ci.yml`), decomposed into
+five parallel jobs — `static` once, `frontend` on six platform/arch pairs, and `runtime`, `asan`
+and `intl` on the four Unix ones.
+
+**It was not a formality.** The matrix went red on its first run for two reasons, both real, both
+invisible on the machine this project is developed on:
+
+1. **`-lm` was never linked.** macOS puts libm in libSystem, so a Darwin-only history never needed
+   the flag; glibc keeps it separate, and every Linux link failed on `floor`, `fmod`, `trunc`,
+   `sqrt` and `round` — ToInt32, array indexing and the print path all call one. Fixed as
+   `SYS_LIBS` in `runtime/Makefile`, applied to the test-program rules AND to `link-flags.txt`,
+   because `src/cli/build.ts` reads that file to link the EMITTED program: without it, `stator
+   build` on Linux would have failed for any program that indexes an array, which is every program.
+   The flag is a no-op on macOS, so there is no host conditional.
+2. **UB in `out_units` (`runtime/src/jsrt_regexp.c`).** `memcpy(o->units + o->len, src, 0)` while
+   `o->units` is still NULL: both `NULL + 0` and a zero-length `memcpy` with a null argument are
+   undefined (C11 §7.24.1p2). Appending nothing is a real case — an empty replacement, a `$&` for a
+   zero-length match, the tail after a match ending at the last unit — so the fix is an early
+   return, not a guard at one call site. Reported by UBSan on macOS CI and NOT by the local ASan
+   run, which is the whole argument for running the sanitizer job on more than one host.
+
+**What this says about the local gate.** `pnpm run ci` passing is necessary and was never
+sufficient: it proves one OS, one arch, one libc, one sanitizer build. The workflow's job map (a
+comment at the top of `ci.yml`) is what keeps the two from drifting apart — every step of the
+serial local chain names the parallel job that inherited it.
+
+**plan.md edited:** no. Nothing here changes the roadmap; both fixes are defects in landed work.

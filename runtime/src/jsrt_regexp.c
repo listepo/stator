@@ -155,6 +155,55 @@ static int flags_to_lre(jsrt_value flags) {
   return out;
 }
 
+/* The flag set back as a STRING, in §22.2.6.4's order -- `d g i m s u v y` -- which is not the
+ * order the program wrote them in. Node normalizes: `/a/ig` has `.flags === "gi"` and PRINTS as
+ * `/a/gi`. Normalizing here rather than at each reader is what keeps `re.flags`, `re.toString()`
+ * and `console.log(re)` from ever disagreeing. */
+static jsrt_value canonical_flags(int lre_flags) {
+  static const struct {
+    int bit;
+    char letter;
+  } order[] = {
+      {LRE_FLAG_INDICES, 'd'},      {LRE_FLAG_GLOBAL, 'g'},  {LRE_FLAG_IGNORECASE, 'i'},
+      {LRE_FLAG_MULTILINE, 'm'},    {LRE_FLAG_DOTALL, 's'},  {LRE_FLAG_UNICODE, 'u'},
+      {LRE_FLAG_UNICODE_SETS, 'v'}, {LRE_FLAG_STICKY, 'y'},
+  };
+  char out[sizeof order / sizeof order[0]];
+  size_t n = 0;
+  for (size_t i = 0; i < sizeof order / sizeof order[0]; i++) {
+    if ((lre_flags & order[i].bit) != 0) {
+      out[n++] = order[i].letter;
+    }
+  }
+  return jsrt_string_from_utf8(out, n);
+}
+
+/* The letter -> bit map `canonical_flags` walks, read the other way. Anything but one of the eight
+ * letters is the emitter having invented a property, which is a compiler bug, not bad data. */
+bool jsrt_regexp_flag(jsrt_value re_value, int letter) {
+  const JSRTRegExp *re = jsrt_as_regexp(re_value);
+  int bit;
+  switch (letter) {
+    case 'd': bit = LRE_FLAG_INDICES; break;
+    case 'g': bit = LRE_FLAG_GLOBAL; break;
+    case 'i': bit = LRE_FLAG_IGNORECASE; break;
+    case 'm': bit = LRE_FLAG_MULTILINE; break;
+    case 's': bit = LRE_FLAG_DOTALL; break;
+    case 'u': bit = LRE_FLAG_UNICODE; break;
+    case 'v': bit = LRE_FLAG_UNICODE_SETS; break;
+    case 'y': bit = LRE_FLAG_STICKY; break;
+    default: jsrt_panic("STA4091: a RegExp flag property the runtime does not know");
+  }
+  return (re->lre_flags & bit) != 0;
+}
+
+jsrt_value jsrt_regexp_to_string(jsrt_value re_value) {
+  const JSRTRegExp *re = jsrt_as_regexp(re_value);
+  const jsrt_value slash = jsrt_string_from_utf8("/", 1);
+  return jsrt_string_concat(jsrt_string_concat(jsrt_string_concat(slash, re->source), slash),
+                            re->flags);
+}
+
 jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags) {
   const int lre_flags = flags_to_lre(flags);
   size_t pattern_len = 0;
@@ -184,7 +233,9 @@ jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags) {
    * `/source/flags` is always a spelling that parses back. Normalized once, here, because every
    * reader of `source` (printing today, the `.source` property later) wants the same answer. */
   re->source = jsrt_string_length(source) == 0 ? jsrt_string_from_utf8("(?:)", 4) : source;
-  re->flags = flags;
+  /* Not the string the program wrote: §22.2.6.4 orders the flags, and every reader wants that
+   * one answer. `flags` above has already been validated by `flags_to_lre`. */
+  re->flags = canonical_flags(lre_flags);
   re->lre_flags = lre_flags;
   re->last_index = 0;
   re->bytecode = bytecode;
@@ -534,6 +585,15 @@ typedef struct {
 } Out;
 
 static void out_units(Out *o, const uint16_t *src, uint32_t n) {
+  /* Appending NOTHING is a real case -- an empty replacement, a `$&` for a zero-length match, the
+   * tail after a match that ended at the last unit -- and it has to return before the arithmetic
+   * below. Until the first grow, `o->units` is NULL, and both `NULL + 0` and a zero-length memcpy
+   * with a null argument are undefined (C11 §7.24.1p2), which UBSan reports as "applying zero
+   * offset to null pointer". It fires only where the sanitizer looks, so it cost a green local run
+   * and a red macOS CI job to find. */
+  if (n == 0) {
+    return;
+  }
   if (o->len + n > o->cap) {
     uint32_t want = o->cap == 0 ? 32 : o->cap;
     while (want < o->len + n) {
