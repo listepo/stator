@@ -475,8 +475,10 @@ shows every surface member whose blocker Phase 4 OWNS:**
   pure function of the data, and it **landed 2026-09-01** as ordinary Phase 4 work — the golden
   fixtures hold Node's grid byte-for-byte in both modes. The Map/Set form is deferred by name
   (`STA1214`): Node draws it with an `(iteration index)` column, and a Map with a second `Key`
-  column, which is a different table rather than a wider one. Only the three carve-out proofs are
-  left on this bullet.
+  column, which is a different table rather than a wider one.
+  ✅ **MET (2026-09-01).** All three carve-out members landed the same day with
+  `tests/unit/console-carveout.test.ts` as their proof (plan-notes 127), and the dashboard reads
+  `console: 12/12 (100%) [+3 nondeterministic]`.
 - **`RegExp.prototype`** — ✅ **met.** The array-with-properties half landed with Task 4.1
   (plan-notes 120: `exec`, `String.prototype.match`), and the DATA property surface with Task 4.2
   (plan-notes 121: the eleven properties of §22.2.6 plus `toString`, on a `REGEXP_FIELDS` table

@@ -618,9 +618,15 @@ void test('console methods in the landed set are accepted, the rest deferred', (
   assert.deepEqual(codesFor('console.table(new Map([["k", 1]]));'), ['STA1214']);
   assert.deepEqual(codesFor('console.table(new Set([1]));'), ['STA1214']);
   // `time`/`timeEnd` print an elapsed duration and `trace` a stack, neither of which is output a
-  // golden test can pin to Node -- they land under the determinism carve-out (plan-notes 124).
-  assert.deepEqual(codesFor('console.time("t");'), ['STA1214']);
-  assert.deepEqual(codesFor('console.trace("t");'), ['STA1214']);
+  // golden test can pin to Node -- so they landed under the DETERMINISM CARVE-OUT instead
+  // (plan-notes 124/127), proved by tests/unit/console-carveout.test.ts. The gate treats them like
+  // any other console member: only arity is its business.
+  assert.deepEqual(codesFor('console.time("t");'), []);
+  assert.deepEqual(codesFor('console.time();'), []);
+  assert.deepEqual(codesFor('console.timeEnd("t");'), []);
+  assert.deepEqual(codesFor('console.trace("t");'), []);
+  assert.deepEqual(codesFor('console.trace();'), []);
+  assert.deepEqual(codesFor('console.time("a", "b");'), ['STA1214']);
   // Arity is part of the accepted form, not a detail the emitter shrugs off.
   assert.deepEqual(codesFor('console.groupEnd(1);'), ['STA1214']);
   assert.deepEqual(codesFor('console.assert();'), ['STA1214']);

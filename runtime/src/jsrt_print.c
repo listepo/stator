@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ============================================================================
  * Shortest round-trip digits
@@ -1015,6 +1016,142 @@ jsrt_value jsrt_console_count(jsrt_value label) {
 jsrt_value jsrt_console_count_reset(jsrt_value label) {
   count_entry(count_label(label))->count = 0;
   return JSRT_UNDEFINED;
+}
+
+/* console.time / console.timeEnd / console.trace -- the three console members under the
+ * DETERMINISM CARVE-OUT (plan.md §7 Task 4.2, plan-notes 116/124). Every other builtin is proved
+ * by a golden test that diffs stdout against the pinned Node byte-for-byte. These three cannot be:
+ * a duration is a measurement of THIS machine on THIS run, and a stack is frames this runtime does
+ * not have. "Matches Node" is not a property they HAVE, so they land with a shape assertion
+ * (tests/unit/console-carveout.test.ts) instead, and the dashboard marks them nondeterministic.
+ *
+ * What IS pinned, and what the proof asserts: the label is echoed, a duration follows it, the unit
+ * is `ms` below a second, and a timer that was never started prints nothing at all. */
+
+/* Per-label start times. The same linked list `console.count` uses, for the same reason: the
+ * labels a program times are a handful of literals, and the list keeps the keys immortal. */
+typedef struct TimerEntry {
+  const char *label;
+  double started_ms;
+  bool running;
+  struct TimerEntry *next;
+} TimerEntry;
+
+static TimerEntry *timers = NULL;
+
+/* A MONOTONIC clock, not a wall clock: `console.time` measures elapsed time, and a wall clock can
+ * step backwards under NTP, which would print a negative duration for a program that did nothing
+ * wrong. CLOCK_MONOTONIC is POSIX and present on both platforms the runtime builds for. */
+static double monotonic_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
+}
+
+static TimerEntry *timer_entry(const char *label, bool create) {
+  for (TimerEntry *e = timers; e != NULL; e = e->next) {
+    if (e->label == label || strcmp(e->label, label) == 0) {
+      return e;
+    }
+  }
+  if (!create) {
+    return NULL;
+  }
+  TimerEntry *fresh = (TimerEntry *)malloc(sizeof(TimerEntry));
+  if (fresh == NULL) {
+    jsrt_panic("out of memory: console.time");
+  }
+  fresh->label = label;
+  fresh->started_ms = 0.0;
+  fresh->running = false;
+  fresh->next = timers;
+  timers = fresh;
+  return fresh;
+}
+
+/* Node's own unit ladder (`lib/internal/console/constructor.js`, `formatTime`): milliseconds below
+ * a second, seconds below a minute, and `m:ss.mmm` with the format spelled out after it above one.
+ * Reproduced rather than simplified to `ms` -- the VALUE cannot match Node, but the shape can, and
+ * a ten-minute build printing `600000.000ms` would differ from Node in a way that is not the
+ * measurement's fault. */
+static void format_time(Buf *out, double ms) {
+  char text[64];
+  if (ms < 1000.0) {
+    snprintf(text, sizeof text, "%.3fms", ms);
+    buf_puts(out, text);
+    return;
+  }
+  if (ms < 60000.0) {
+    snprintf(text, sizeof text, "%.3fs", ms / 1000.0);
+    buf_puts(out, text);
+    return;
+  }
+  const bool hours = ms >= 3600000.0;
+  const int h = (int)(ms / 3600000.0);
+  const double after_hours = ms - (double)h * 3600000.0;
+  const int m = (int)(after_hours / 60000.0);
+  const double seconds = (after_hours - (double)m * 60000.0) / 1000.0;
+  if (hours) {
+    snprintf(text, sizeof text, "%d:%02d:%06.3f (h:mm:ss.mmm)", h, m, seconds);
+  } else {
+    snprintf(text, sizeof text, "%d:%06.3f (m:ss.mmm)", m, seconds);
+  }
+  buf_puts(out, text);
+}
+
+jsrt_value jsrt_console_time(jsrt_value label) {
+  TimerEntry *entry = timer_entry(count_label(label), true);
+  /* Node warns and KEEPS the original start when a label is timed twice, so a re-`time` on a
+   * running label must not restart it. */
+  if (!entry->running) {
+    entry->started_ms = monotonic_ms();
+    entry->running = true;
+  }
+  return JSRT_UNDEFINED;
+}
+
+jsrt_value jsrt_console_time_end(jsrt_value label) {
+  const double now = monotonic_ms();
+  const char *name = count_label(label);
+  TimerEntry *entry = timer_entry(name, false);
+  /* A label that was never started warns in Node and prints no duration. Warning is a channel this
+   * runtime does not have (the `countReset` rule), so it prints nothing -- which is exactly what
+   * Node writes to stdout for this case. */
+  if (entry == NULL || !entry->running) {
+    return JSRT_UNDEFINED;
+  }
+  entry->running = false;
+  Buf out;
+  buf_init(&out);
+  buf_puts(&out, name);
+  buf_puts(&out, ": ");
+  format_time(&out, now - entry->started_ms);
+  buf_putc(&out, '\n');
+  write_grouped(out.data, out.len, stdout);
+  buf_free(&out);
+  return JSRT_UNDEFINED;
+}
+
+/* console.trace: `Trace: <message>` on STDERR, or bare `Trace` without one. Node follows it with
+ * stack frames; this runtime has no unwinder and does not fabricate any -- the same decision
+ * `jsrt_uncaught` already made and for the same reason, that inventing frames would be worse than
+ * omitting them. The observable contract kept here is the stream and the prefix. */
+void jsrt_console_trace(jsrt_value message) {
+  Buf out;
+  buf_init(&out);
+  buf_puts(&out, "Trace: ");
+  inspect_scalar(&out, message, false);
+  buf_putc(&out, '\n');
+  write_grouped(out.data, out.len, stderr);
+  buf_free(&out);
+}
+
+void jsrt_console_trace_bare(void) {
+  Buf out;
+  buf_init(&out);
+  buf_puts(&out, "Trace\n");
+  write_grouped(out.data, out.len, stderr);
+  buf_free(&out);
 }
 
 /* console.assert: nothing at all when the condition holds, `Assertion failed` on STDERR when it

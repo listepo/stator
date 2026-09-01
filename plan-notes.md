@@ -3039,3 +3039,40 @@ note rather than a mystery.
 **Phase 4's `console` bullet is now the three carve-out proofs alone.** `time`/`timeEnd`/`trace`
 were moved there by note 124 for a reason that does not change; `table` was the one member of that
 bullet a golden test could ever hold, and it holds.
+
+## 127. The carve-out's second use, and what it is actually for (2026-09-01)
+
+**Landed.** `console.time`, `console.timeEnd` and `console.trace`, proved by
+`tests/unit/console-carveout.test.ts`. `console` now reads `12/12 (100%) [+3 nondeterministic]`,
+and Phase 4's `console` exit-criterion bullet is ✅ MET.
+
+**What the proof asserts, and why each assertion is there.** The carve-out is not permission to
+skip a test; note 116 defined it as a DIFFERENT test, and the dashboard's checker verifies a
+carved member's proof exactly as hard as a golden one (the file must exist and must mention it).
+So each assertion is aimed at a specific way of faking the member:
+
+- The label is echoed and the unit is `ms` — a shape a stub can pass, and the baseline the plan
+  named ("the label is echoed, a duration is printed, the unit is `ms`").
+- Two timers produce TWO lines, not four — `console.time` printing nothing is part of the contract.
+- Three million adds measure longer than nothing — this is the one a constant-returning stub
+  cannot pass. Magnitude is not assertable; ORDERING is.
+- `trace` writes to stderr and stdout stays empty — the half of `trace` that IS reproducible.
+
+**Two behaviours that came out of measuring Node rather than reading the spec.** Re-timing a label
+that is already running keeps the ORIGINAL start (Node warns and does not restart), and
+`timeEnd` on a label that was never started writes nothing to stdout. The second follows the rule
+`console.countReset` already set: Node warns, this runtime has no warning channel, and the
+observable stdout is identical either way.
+
+**`trace` prints no frames, deliberately.** Node follows the prefix with a stack; this runtime has
+no unwinder. `jsrt_uncaught` had already faced this exact choice and taken the same answer — its
+comment says the text "intentionally does not chase Node's (which prints source excerpts and stack
+frames this runtime does not have); the OBSERVABLE contract is stderr + exit 1." Fabricating frames
+would make the output look right and be wrong, which is the failure mode every golden test in this
+repo exists to prevent.
+
+**Node's unit ladder is reproduced, not simplified.** Milliseconds below a second, `s` below a
+minute, `m:ss.mmm` above one. The VALUE cannot match Node, but the FORMAT can, and a ten-minute
+build printing `600000.000ms` would differ from Node in a way that is not the measurement's fault.
+This is the line the carve-out draws in general: carve out what the machine decides, keep
+everything the format decides.

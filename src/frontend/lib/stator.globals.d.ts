@@ -43,6 +43,21 @@ interface Console {
    * by the gate instead of typed out, because Node draws those with a different table (an
    * `(iteration index)` column, plus `Key` for a Map) that has not landed. */
   table(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  /** Starts a timer under `label` (`default` when omitted) and prints nothing. Re-timing a label
+   * that is already running keeps the ORIGINAL start, as in Node. */
+  time(label?: string): void;
+  /** Prints `label: <duration>` on stdout and stops the timer — Node's unit ladder, milliseconds
+   * below a second. A label that was never started prints nothing, which is what Node writes to
+   * stdout for that case (it warns on a channel this runtime does not have).
+   *
+   * Under the DETERMINISM CARVE-OUT with `time` and `trace`: a duration measures this machine on
+   * this run, so no golden test can hold it to Node. `tests/unit/console-carveout.test.ts` is the
+   * proof instead — the label is echoed, a duration follows, the unit is `ms`. */
+  timeEnd(label?: string): void;
+  /** `Trace: <message>` on STDERR, or bare `Trace` without one. Node follows it with stack frames;
+   * this runtime has no unwinder and does not fabricate any — the same decision `jsrt_uncaught`
+   * made, that inventing frames is worse than omitting them. Carved out for that reason. */
+  trace(message?: string): void;
   /** Per-label tally, printed as `label: n`; the label-less form counts under `default`. */
   count(label?: string): void;
   /** Zeroes a tally and prints nothing. */

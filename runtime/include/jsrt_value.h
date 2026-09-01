@@ -1011,6 +1011,14 @@ void jsrt_console_assert(jsrt_value condition, jsrt_value message);
 void jsrt_console_assert_bare(jsrt_value condition);
 jsrt_value jsrt_console_count(jsrt_value label);       /* label may be JSRT_UNDEFINED: "default" */
 jsrt_value jsrt_console_count_reset(jsrt_value label); /* same, and prints nothing */
+/* The three determinism carve-out members (plan.md §7 Task 4.2): a duration measures THIS run and
+ * a stack is frames this runtime does not have, so neither can be pinned to Node byte-for-byte.
+ * `time` prints nothing; `timeEnd` prints `label: <duration>` on stdout, and nothing at all for a
+ * label that was never started; `trace` prints `Trace[: message]` on STDERR without frames. */
+jsrt_value jsrt_console_time(jsrt_value label);
+jsrt_value jsrt_console_time_end(jsrt_value label);
+void jsrt_console_trace(jsrt_value message);
+void jsrt_console_trace_bare(void);
 jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
 
 /* ----------------------------------------------------------- exceptions */

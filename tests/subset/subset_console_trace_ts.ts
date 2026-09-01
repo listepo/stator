@@ -6,5 +6,4 @@
 // byte-for-byte. The proof is a shape assertion instead -- tests/unit/console-carveout.test.ts.
 // The gate treats them like every other console member: only arity is its business.
 
-console.time('t');
-console.timeEnd('t');
+console.trace('why');

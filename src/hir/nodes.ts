@@ -851,6 +851,9 @@ export const CONSOLE_METHODS = {
   info: { arity: 1, optional: 0, fn: 'jsrt_print' },
   log: { arity: 1, optional: 0, fn: 'jsrt_print' },
   table: { arity: 1, optional: 0, fn: 'jsrt_console_table' },
+  time: { arity: 1, optional: 1, fn: 'jsrt_console_time' },
+  timeEnd: { arity: 1, optional: 1, fn: 'jsrt_console_time_end' },
+  trace: { arity: 1, optional: 1, fn: 'jsrt_console_trace', bare: 'jsrt_console_trace_bare' },
   warn: { arity: 1, optional: 0, fn: 'jsrt_eprint' },
 } as const satisfies Record<
   string,
