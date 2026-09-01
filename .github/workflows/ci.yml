@@ -6,10 +6,41 @@ on:
 
 jobs:
   build:
+    name: build (${{ matrix.platform }}/${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          # Unix runners execute the complete compiler, runtime, golden, leak and
+          # sanitizer suite.  Keep the labels explicit so both word sizes and
+          # operating-system ABIs are exercised instead of following `-latest`.
+          - platform: linux
+            arch: x64
+            os: ubuntu-24.04
+            suite: full
+          - platform: linux
+            arch: arm64
+            os: ubuntu-24.04-arm
+            suite: full
+          - platform: macos
+            arch: x64
+            os: macos-15-intel
+            suite: full
+          - platform: macos
+            arch: arm64
+            os: macos-14
+            suite: full
+          # The frontend test suite is portable to Windows; the C runtime's
+          # make/clang toolchain remains Unix-only until a Windows toolchain is
+          # deliberately supported.
+          - platform: windows
+            arch: x64
+            os: windows-2025
+            suite: portable
+          - platform: windows
+            arch: arm64
+            os: windows-11-arm
+            suite: portable
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -19,18 +50,42 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - name: Record toolchain
+        shell: bash
         run: |
           node --version
-          clang --version
-          uname -srm
+          node -p "process.platform + '/' + process.arch"
+          clang --version || true
+          uname -srm || true
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run ci
+      - name: Full test suite
+        if: matrix.suite == 'full'
+        run: pnpm run ci
+      - name: Portable frontend test suite
+        if: matrix.suite == 'portable'
+        run: |
+          pnpm run typecheck
+          pnpm run lint
+          pnpm run test
+          pnpm run test:subset
 
   asan:
+    name: asan (${{ matrix.platform }}/${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - platform: linux
+            arch: x64
+            os: ubuntu-24.04
+          - platform: linux
+            arch: arm64
+            os: ubuntu-24.04-arm
+          - platform: macos
+            arch: x64
+            os: macos-15-intel
+          - platform: macos
+            arch: arm64
+            os: macos-14
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +95,5 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Sanitized runtime
-        run: make -C runtime asan
-      # Golden tests run against the sanitized archive once Phase 2 lands them
-      # (plan.md §5 Task 2.7). Until then this job proves the archive builds clean.
+      - name: Sanitized runtime and golden tests
+        run: pnpm run test:asan
