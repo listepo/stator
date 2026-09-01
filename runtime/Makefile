@@ -43,7 +43,10 @@ CFLAGS_VENDOR := -std=c11 -Wall $(VENDOR_POSIX_CFLAGS) -Iinclude $(VENDOR_INC) \
 BDW_CFLAGS := $(shell pkg-config --cflags bdw-gc 2>/dev/null)
 BDW_LIBS := $(shell pkg-config --libs bdw-gc 2>/dev/null)
 
-ifdef BDW_CFLAGS
+# Debian's libgc-dev exposes the linker flags but no include directory (the headers live in the
+# standard search path), so testing CFLAGS alone silently selected the malloc fallback on Linux.
+# The library flags are the actual capability signal; CFLAGS may legitimately be empty.
+ifneq ($(strip $(BDW_LIBS)),)
   CFLAGS_COMMON += -DJSRT_HAVE_BOEHM $(BDW_CFLAGS)
   GC_LIBS := $(BDW_LIBS)
   GC_STATUS := Boehm GC
