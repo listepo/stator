@@ -316,96 +316,17 @@ Phase 4, Task 4.5.
 Evidence: [done.md](done.md) → Phase 4, Task 4.6. Generators are Phase 5 step 8's iterator
 protocol work, not an unfinished part of this task.
 
-**Task 4.7 — Audit every not-yet phase pointer** (added 2026-09-01, plan-notes 116). `STA1214` is
-parameterized — its message names the delivering phase per construct — and the gate is full of
-hardcoded phase numbers. Walk all of them, give each the phase that owns its actual blocker, and
-add a test that fails when a not-yet diagnostic names a phase already marked complete — which is
-the check that would have caught `STA1201`, `STA1207`, `STA1208` and `STA1214` without anyone
-reading the table.
+~~**Task 4.7 — Audit every not-yet phase pointer.**~~ ✅ Landed 2026-09-01. Evidence:
+[done.md](done.md) → Phase 4, Task 4.7. Step 1's recount rewrote the task: the inventory was **165**
+sites, not 63, and **70 of them named Phase 3, complete since 2026-08-30** — so the audit written to
+end this defect would have closed without touching a single one of them (plan-notes 136). The
+residue's owner is §8 Phase 5 **step 12**, added in the same change; the rule the task establishes
+is now §15 rule 9; and `tests/unit/phases.test.ts` fails the build if any not-yet ever names a
+completed phase again.
 
-**Inventory (re-derived 2026-09-01 at `89de482` by parsing `gate.ts` with the `typescript` API —
-plan-notes 136; the earlier greps under-counted by 2.6×). 165 sites:**
-
-| phase named | sites | what they are |
-|---|---|---|
-| **3** | **70** | the lowering ladder's residue — `ts`-mode static language surface. **Phase 3 has been COMPLETE since 2026-08-30**, so all 70 are user-visible lies today (`rest parameters are not yet supported; planned for Phase 3`). |
-| 4 | 63 | the originally-audited group: builtin arity/spread/member catch-alls, module surface |
-| 4, via `dateNotYet` | 10 | the `Date` residue — the phase is hardcoded inside the helper, not passed |
-| 5 | 18 | already re-homed by earlier slices |
-| 8 · 7 · 6 | 2 · 1 · 1 | `with`/`eval` · package imports · for-of binding destructuring |
-
-Phase 4 is closing, so its 73 are claims that go false the moment it does; the 70 naming Phase 3
-are already false. The count moves with every slice — **enumerate at execution, never assume**, and
-parse rather than grep (a multi-line `notYet(` call is invisible to a single-line pattern, which is
-what produced both under-counts — see plan-notes 130).
-
-Steps (added 2026-09-01; grouping evidence in plan-notes 127, corrected by 136):
-
-1. **Recount at execution HEAD, and ask the general question.** Re-derive the inventory from
-   `gate.ts` before touching anything — 4.2's slices move it. The question is *"does any site name
-   a phase already complete?"*, **not** *"which sites name the open phase?"*: the second is what the
-   2026-09-01 audit asked, and it is why 70 sites naming a phase that closed six days earlier
-   survived an audit written to end exactly that defect (plan-notes 136).
-2. **Build the substrate the required test needs** — nothing in `src/` knows which phases are
-   complete, and `gate.test.ts` asserts codes only, never the `phase` field. Add one
-   machine-readable completed-phases source of truth in `src/support/`, then the regression test:
-   scan every not-yet the gate can emit (drive representative fixtures AND source-scan
-   `notYet(…, N)` / `phase: N` literals in `gate.ts`) and fail when any names a completed phase.
-3. **`STA1215` exemption.** Its own `DIAGNOSTICS.md` row says the message names a build FLAG, not
-   a phase, yet the diagnostic carries `phase: 4` — give it a no-phase sentinel so the new test
-   does not flag it the day Phase 4 closes; update the row in the same change.
-4. **Reassign the sites whose owners this plan already names.** The two `Map`/`Set` sites whose
-   own comments name `Symbol.iterator`/`keys()` as the blocker → Phase 5 step 8. The two `Promise`
-   property-access sites → Phase 5 step 11 — and settle the code question there: the call-side
-   `Promise` sites already say phase 5 but still as `STA1214`, while this plan puts the surface
-   under `STA1216`; unify on one code, tests updated in the same commit.
-5. **Split the eight straddling catch-alls** (the unmodeled-global site; the `Object`, `String`,
-   `Array` method + property catch-all pairs; the `Map`/`Set` member-as-value site). One hardcoded
-   phase cannot be right for members owned by 5.8, 5.11 and 8 at once: named members answer their
-   owner's phase (`freeze`/`isFrozen` → 5; `create`/`defineProperty`/`getPrototypeOf`/
-   `setPrototypeOf` → 8, `STA1204`'s surface; `keys`/`values`/`entries` + `matchAll` → 5; `Date` →
-   this phase's Date steps), and the residue keeps the catch-all with an honest owner.
-6. **Decide the sites that fit no named group — and where a blocker has no owning phase, EDIT
-   §8/§11 in the same change to give it one** (§15.3; a not-yet may not name a phase that does not
-   own its blocker). By group: **the lowering ladder's residue ×70** (added 2026-09-01,
-   plan-notes 136 — the whole phase-3 row of the inventory: rest/default/optional/destructuring
-   parameters, destructuring declarations and catch bindings, the class member surface
-   (accessors, statics, static blocks, computed and `#private` names, overloads, override rules,
-   `extends` forms), generics beyond monomorphization (constrained and defaulted type parameters,
-   generic classes, generic functions as values, explicit type arguments), object-literal forms
-   (shorthand, spread, method, accessor, non-identifier keys), `this`/`super`/`new` forms, bound
-   method values, and the property-access catch-alls). Their blocker is lowering work no phase
-   owned; **§8 step 12 is added in the same change to own them** — they are `ts`-mode static
-   surface, so §11's dynamic tier is the wrong home for all but the genuinely dynamic residue;
-   **the `Date` residue ×10** (`dateNotYet` hardcodes "Phase 4 (builtins)" inside the helper, but
-   every member it refuses is ICU-dependent — the intl FEATURE BUILD, which is a flag and not a
-   phase, so this is step 3's `STA1215` question a second time, not a phase reassignment);
-   **module surface ×7** (renamed imports/exports, re-exports,
-   `export =`, default/namespace imports — lowering work; candidate owner is Phase 5's
-   language-surface half, with namespace imports sharing step 10's module-namespace-object
-   blocker); **arity/spread/argument-shape refinements ×32** (per-construct: forms fixable by
-   lower-time defaulting/folding land where their builtin lives; spread/variadic and
-   callback-shape sites name the dynamic tier — two already say "until the dynamic tier"
-   informally); **method-as-value ×5** (bound-function values — candidate Phase 5 step 4's dynamic
-   lowering or Phase 8; pick one and record why); **`Math`/`JSON` namespace residues ×4** (members
-   that are nonexistent, nondeterministic, or outside the pinned lib — some are `never`, not
-   `not-yet`; deciding which is the point); **dedicated `STA1211` ×2** (`compile` is Annex B
-   legacy whose blocker no phase owns — candidate: never-by-design, or Phase 8). Every
-   reassignment lands in `gate.ts` + `SUBSET.md` + `DIAGNOSTICS.md` together — three surfaces
-   that have already drifted apart once.
-7. **Move the blocker rule below into §15 proper** — today it exists only inside this task's
-   block — then re-run the sweep: zero remaining sites name a completed phase, in the numeric
-   field and in the message strings.
-
-**Check (Task 4.7):** the completed-phase regression test exists and passes; `pnpm run test` and
-`pnpm run test:subset` green, with every deliberate verdict flip in the same commit as its gate
-change; a scan of `gate.ts` finds no not-yet naming a phase marked complete in `done.md`; the
-phase column in `DIAGNOSTICS.md` and `SUBSET.md` agrees with `gate.ts` for every touched code.
-
-**Rule this establishes (§15, applies from here on):** a `not-yet` diagnostic names the phase that
-owns its **blocker**, never the phase that happens to be open. When a phase closes, every code
-naming it is either delivered or reassigned in that same change — a not-yet code pointing at a
-finished phase reads as a schedule and is a dead end (plan-notes 112).
+**Rule this task established:** moved to **§15 rule 9** on 2026-09-01, where it applies to the whole
+project rather than to the block that happened to introduce it — living here was part of why it was
+never enforced (plan-notes 136).
 
 **Check:** runtime unit tests + ASan/UBSan clean + the leak test; builtins dashboard renders in CI; an async golden test (`await` chain + `Promise.all`) matches Node.
 
@@ -1179,7 +1100,7 @@ opens a globals frame and runs the program. Measured 2026-09-01 (Apple M3 Max, D
 clang 21.0.0, `-O2`, Boehm build, Node v26.7.0, best of 15 spawns): empty compiled program
 **3.2 ms**, `node` on an empty module **27.0 ms**, `/bin/true` **0.23 ms**. The whole budget a
 snapshot could attack is ~3 ms, most of it dynamic linking — the row's "50–200 ms class wins" was
-inherited from an architecture Stator does not have (plan-notes 133). The rung goes live only if a
+inherited from an architecture Stator does not have (plan-notes 137). The rung goes live only if a
 profile shows a startup floor worth attacking, and the lever then is link-time (static linking,
 page-in behaviour), not a heap snapshot.
 
@@ -1243,6 +1164,7 @@ Standing practices:
 6. Ambiguity rule: if a task still leaves you guessing, the gap is a bug in this plan — record it in `plan-notes.md` and resolve it by editing the plan, not by inventing an undocumented convention in code.
 7. `tsconfig.json` and the Biome rules are load-bearing. Never weaken them to make code compile — fix the code, or follow rule 3.
 8. Generated C is never hand-edited; fix the emitter. Vendored code (`runtime/vendor/`) is never modified except by documented, minimal patches recorded in `plan-notes.md`.
+9. **A `not-yet` diagnostic names the phase that owns its BLOCKER**, never the phase that happens to be open — and when a phase closes, every code naming it is delivered or reassigned in that same change. A not-yet pointing at a finished phase reads as a schedule and is a dead end (plan-notes 112). Two corollaries, both learned the hard way (plan-notes 136): a blocker that is a **build flag** is not a phase at all, so the diagnostic omits `phase` and names the flag; and a **catch-all** takes the phase that owns most of what it refuses, with the named exceptions answered from a table beside it. This rule lived only inside §7 Task 4.7 until 2026-09-01, which is part of why seventy sites survived naming a phase that had been complete for six days. `tests/unit/phases.test.ts` enforces it against `src/support/phases.ts`, which `done.md` pins.
 
 ---
 

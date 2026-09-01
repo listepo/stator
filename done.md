@@ -676,3 +676,99 @@ Unhandled rejections are counted at settle and checked **after** the drain, not 
 Ground truth comes in a pair, `runtime/tests/print_promise.{c,mjs}`: the same promises, the same subscriptions, the same order, expressed as native continuations on one side and `.then` on the other. That is the only way this file can assert anything about ORDER — an implementation cannot check its own tick count against itself. The golden half is `{ts,js}/async_await.{ts,js}`: interleaved starts, a three-deep await chain, a throw in an async body caught by an awaiting `try`, and `Promise.all` proving input order survives out-of-order settling plus first-rejection-wins. The js fixture prints its `Promise.all` result whole rather than indexed, because without an annotation the checker calls it a tuple and indexing one is a property access the js tier does not have yet (STA1214) — the claim under test is order, and printing the array whole makes it.
 
 Auditing the emitted diagnostics against `docs/DIAGNOSTICS.md` found four codes with no table row, and one of them was worse than missing: top-level await had been renumbered from the allocated **STA1208** to a fresh code, which the sole-allocator rule exists to prevent. Restored, and the Promise-callback code renumbered down to keep the band contiguous (plan-notes 110). Top-level await and `import()` moved from Phase 4 to Phase 7 in `docs/SUBSET.md`, where the module work actually lives. `pnpm run ci` is green end to end: 290 unit tests, 253 subset fixtures (188 passed, 65 expected-fail, 0 failed), 82 golden fixtures, the print corpus byte-for-byte against Node under both `-O2` and ASan/UBSan, and the leak test at 3072 KB of a 65536 KB cap. Dashboard: **131/197 (66%)** — down from 69%, because `Promise` and `Promise.prototype` joined the surface with their combinators empty, and a namespace that grows the denominator honestly is the point of the dashboard (plan-notes 95).
+
+**Task 4.7 landed (2026-09-01).** Every not-yet phase pointer in `src/frontend/gate.ts` now names
+the phase that owns its blocker, and a test fails the build if that ever stops being true.
+
+**Step 1 rewrote the task.** The audit this task was written from counted **63** phase-4 sites by
+grep. Parsing `gate.ts` with the `typescript` API instead — the tool the compiler already uses, so
+a multi-line call, a template-literal message and a nested ternary each count exactly once — found
+**165**, and the distribution was the finding: **70 of them named Phase 3, complete since
+2026-08-30**. Not latent, either. `node src/cli/main.ts build /tmp/rest.ts` answered `rest
+parameters are not yet supported; planned for Phase 3` — a shipped promise pointing at finished
+work, in the compiler's default mode. The audit missed them because it asked *"which sites name
+phase 4?"*, a question about the phase that happened to be open, while the rule the task itself
+establishes implies the general one. Phase 3's ladder had deferred its surface under
+`notYet(…, 3)` rung by rung — honest when written — and the residue outlived its owner. Full
+evidence and root cause in plan-notes 136; the plan was edited in the same change (Task 4.7's
+inventory table, §8 Phase 5 step 12, §15 rule 9).
+
+**The reassignment, by group.** 70 phase-3 sites → **Phase 5 step 12**, the `ts`-mode static
+language surface added to §8 to own them (parameters, destructuring, the class member surface,
+generics beyond monomorphization, object-literal forms, `this`/`super`/`new` positions, bound
+method values). 63 phase-4 sites → Phase 5 as well: the module surface, the builtin arity and
+argument-shape refinements, and the method-as-value family are all lowering work, and Phase 4 owns
+none of it now that its exit criterion is met. Three groups did NOT follow the majority, and each
+is why the sweep had to be per-construct rather than a rename:
+
+- **`Object`'s catch-all straddled two phases.** One number cannot be right for six unlanded
+  members that wait on two mechanisms: `freeze`/`isFrozen`/`seal`/`isSealed` need a
+  RUNTIME-RAISED exception (Phase 5 step 11's pending-cell extension), while
+  `create`/`defineProperty`/`getPrototypeOf`/`setPrototypeOf` are `STA1204`'s prototype surface in
+  Phase 8. `OBJECT_STATIC_OWNER` answers by member; the catch-all keeps 5 for the residue.
+- **`STA1215` and the `Date` residue name a FLAG, not a phase.** `STA1215`'s own
+  `DIAGNOSTICS.md` row already said its message names `make -C runtime intl` rather than a
+  release — and the object still set `phase: 4`, so the day Phase 4 closed it would have promised
+  a finished release. It now omits `phase` entirely, which is the no-phase sentinel
+  (`src/support/phases.ts`), and `dateNotYet` gained the same split: `Date.prototype`'s member
+  catch-all is now exactly the ICU family (`toString`/`toTimeString` and the three `toLocale*`)
+  and carries no phase, while the arity and spread refusals under the same code are ordinary
+  lowering work at Phase 5.
+- **`STA1211` moved to Phase 8.** Everything under it has landed except `compile`, and `compile`
+  is not a builtin Phase 4 declined to write: it is Annex B §B.2.4 legacy that RE-INITIALIZES an
+  existing RegExp in place, which is the mutate-a-built-object surface Phase 8 owns with
+  `STA1204`. `unicodeSets`, the other name the access-side catch-all would refuse, never reaches
+  the gate — it is declared in lib.es2024 and `tsconfig.json` pins `lib: ["es2023"]`.
+
+**The `Promise` code question the task raised resolves as "already split correctly".** Step 4 asked
+whether the call-side `Promise` sites should move from `STA1214` to `STA1216`. They should not.
+`STA1216`'s recorded blocker is *a throw crossing back out of a JS callback*, which is true of
+`new Promise(executor)` and `Promise.prototype.then`/`catch`/`finally` and of nothing else. The
+combinator residue (`allSettled`/`any`/`race`/`withResolvers`/`try`) takes promises, not callbacks;
+it waits on being written, which is what `STA1214` means. Recorded rather than changed.
+
+**The mechanism, which is the part that outlives the sweep.** `src/support/phases.ts` exports
+`COMPLETED_PHASES` and documents the no-phase convention; `tests/unit/phases.test.ts` asks the
+general question four ways, because each catches what the others cannot:
+
+1. **Source scan** — parse `gate.ts`, read every phase argument and every `phase:` literal. The
+   only check that sees a site no fixture reaches, and most of the seventy were exactly that.
+2. **Message scan** — a phase can also be WRITTEN into a string, where the numeric field never
+   sees it (plan §7 Task 4.7 step 7 requires both). Comments discussing a finished phase are
+   allowed; string literals are not.
+3. **End to end** — compile three programs from three families and read what a user gets, so a
+   phase that is right in the call and lost on the way to the terminal still fails.
+4. **`COMPLETED_PHASES` against `done.md`** — this file is the authority and `phases.ts` is its
+   projection, so marking a phase complete in one and not the other fails.
+
+The guard was proved by breaking it: reverting one site to `notYet(…, 3)` fails tests 1 and 3 with
+`gate.ts:1461 notYet(...) names Phase 3` and `rest parameters are not yet supported; planned for
+Phase 3 — Phase 3 is complete`. A test that cannot fail is not a check.
+
+**Docs synced in the same change**, the three surfaces that had already drifted apart once:
+`DIAGNOSTICS.md`'s `STA1210`/`STA1211`/`STA1215` rows and the `STA1209` footnote; `SUBSET.md`'s
+`STA1210`/`STA1211` reference rows, the eight `not-yet(STA1214, Phase 4)` module-surface verdicts,
+the globals catch-all row, and the dynamic-`import()` row, whose prose ended "Phase 7." while its
+own verdict column and the `STA1207` row below it both said Phase 5.
+
+**Check — PASSED** (2026-09-01, `pnpm run ci` exit 0 on the pinned Node v26.7.0):
+
+```
+biome check          Checked 65 files. No fixes applied.
+jscpd                55 clones · 0.8% duplication
+node --test          ℹ tests 319   ℹ pass 319   ℹ fail 0
+runtime              print corpus matches Node
+subset               272 fixtures — 209 passed, 63 expected-fail, 0 failed
+golden               93 fixtures — 93 passed, 0 failed
+leak                 10M objects — peak RSS 3040 KB of a 65536 KB cap, 18 samples, plateau
+ASan/UBSan           print corpus matches Node; golden 93 fixtures — 93 passed, 0 failed
+```
+
+The four clauses of the task's own Check, each answered: the completed-phase regression test
+exists and passes (`tests/unit/phases.test.ts`, four tests, and it was proved able to FAIL);
+`pnpm run test` and `pnpm run test:subset` are green with **no verdict flips** — the sweep changed
+phase numbers, never codes, so no fixture's expectation moved; a parse of `gate.ts` finds zero
+not-yets naming a phase `done.md` marks complete (the remaining distribution is Phase 5 and Phase
+8 only, plus the two no-phase sites); and `DIAGNOSTICS.md` and `SUBSET.md` agree with `gate.ts` on
+every touched code.
+

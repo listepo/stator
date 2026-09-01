@@ -149,8 +149,12 @@ type GateResult =
   | { kind: 'accept' }
   /** Rejected by design and forever -- STA10xx/STA11xx, and never a phase (plan §1.3). */
   | { kind: 'never'; code: string; message: string }
-  /** Outside the current subset but scheduled -- STA12xx, and the phase is part of the message. */
-  | { kind: 'not-yet'; code: string; message: string; phase: number };
+  /** Outside the current subset but scheduled -- STA12xx, and the phase is part of the message.
+   *
+   * `phase` is OPTIONAL because some blockers are not phases: a build flag is not a release to
+   * wait for, it is a flag to turn on (src/support/phases.ts). Omit it there rather than writing a
+   * number the user cannot act on. */
+  | { kind: 'not-yet'; code: string; message: string; phase?: number };
 
 /** Decide whether one construct is in the Phase 2 micro-subset.
  *
@@ -228,7 +232,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       // A type-only alias is erased whole, so renaming one changes nothing at runtime.
       return spec.propertyName === undefined || importIsTypeOnly(spec)
         ? { kind: 'accept' }
-        : notYet("renaming an import ('x as y') is not yet supported", 4);
+        : notYet("renaming an import ('x as y') is not yet supported", 5);
     }
     // `export { x }` (no specifier). The re-export form carries a specifier and is an ALIAS: the
     // local file never binds the name, so name-resolution through the merge cannot find it.
@@ -236,7 +240,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       const decl = node as ts.ExportDeclaration;
       return decl.moduleSpecifier === undefined
         ? { kind: 'accept' }
-        : notYet("re-exports (export { x } from '...') are not yet supported", 4);
+        : notYet("re-exports (export { x } from '...') are not yet supported", 5);
     }
     case ts.SyntaxKind.ExportSpecifier: {
       const spec = node as ts.ExportSpecifier;
@@ -244,7 +248,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       const typeOnly = spec.isTypeOnly || (ts.isExportDeclaration(parent) && parent.isTypeOnly);
       return spec.propertyName === undefined || typeOnly
         ? { kind: 'accept' }
-        : notYet("renaming an export ('x as y') is not yet supported", 4);
+        : notYet("renaming an export ('x as y') is not yet supported", 5);
     }
     // `export default <literal>`. Nothing can import a default in v0 (default imports are
     // refused below), so the only thing at stake is the expression's side effects -- which a
@@ -252,11 +256,11 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.ExportAssignment: {
       const assignment = node as ts.ExportAssignment;
       if (assignment.isExportEquals) {
-        return notYet('export = is not yet supported', 4);
+        return notYet('export = is not yet supported', 5);
       }
       return isLiteralValue(assignment.expression)
         ? { kind: 'accept' }
-        : notYet('a default export with a computed value is not yet supported', 4);
+        : notYet('a default export with a computed value is not yet supported', 5);
     }
 
     // `catch (e)` / `catch {`. The binding must be a plain name -- `catch ({ message })`
@@ -269,7 +273,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       const binding = clause.variableDeclaration;
       return binding === undefined || ts.isIdentifier(binding.name)
         ? { kind: 'accept' }
-        : notYet('destructuring a caught value is not yet supported', 3);
+        : notYet('destructuring a caught value is not yet supported', 5);
     }
 
     // The three function spellings share one HIR node (`FunctionExpr`), so they share one gate.
@@ -302,7 +306,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       const labelled = (node as ts.LabeledStatement).statement;
       return isLabellable(labelled)
         ? { kind: 'accept' }
-        : notYet('a label on anything but a loop or switch is not yet supported', 3);
+        : notYet('a label on anything but a loop or switch is not yet supported', 5);
     }
 
     // `;` on its own lowers to nothing at all -- accepted so it is not a diagnostic, dropped by
@@ -352,7 +356,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       }
       return ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node
         ? { kind: 'accept' }
-        : notYet('super as a value is not yet supported', 3);
+        : notYet('super as a value is not yet supported', 5);
 
     // `extends A` / `implements I`. gateClass vetted the whole clause -- that there is one base,
     // that it is a class declaration, and that nothing is overridden -- and these two nodes are
@@ -442,7 +446,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return generatorNotYet();
 
     default:
-      return notYet(`${describeKind(kind)} is not yet supported`, 3);
+      return notYet(`${describeKind(kind)} is not yet supported`, 5);
   }
 }
 
@@ -475,10 +479,10 @@ function gateImport(node: ts.ImportDeclaration): GateResult {
     return { kind: 'accept' };
   }
   if (clause.name !== undefined) {
-    return notYet('default imports are not yet supported', 4);
+    return notYet('default imports are not yet supported', 5);
   }
   if (clause.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
-    return notYet('namespace imports (import * as ns) are not yet supported', 4);
+    return notYet('namespace imports (import * as ns) are not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -511,16 +515,29 @@ function notYet(message: string, phase: number): GateResult {
 
 /** `Date`'s residue code, as `STA1211` is `RegExp`'s: a Date member outside the landed tables is
  * refused under its own number rather than the generic `STA1214`, so a program can tell "this
- * builtin is partly here" from "this construct is not". Every remaining member is slice B --
- * local time, blocked on the golden runner's TZ pin -- or the `toString`/`toLocale*` family, whose
- * CLDR names belong to the ICU feature build (plan §7 Task 4.2, Date steps 8-9). */
-function dateNotYet(message: string): GateResult {
-  return {
-    kind: 'not-yet',
-    code: 'STA1210',
-    message: `${message} is not yet supported; planned for Phase 4 (builtins)`,
-    phase: 4,
-  };
+ * builtin is partly here" from "this construct is not".
+ *
+ * Slices A and B landed the whole surface Phase 4 owns, so the ten sites that reach here split two
+ * ways and the helper takes the phase rather than hardcoding one (plan-notes 136). ARITY and
+ * SPREAD refusals are ordinary lowering work and name Phase 5; the MEMBER catch-all is now exactly
+ * the ICU-dependent family -- `toString`/`toTimeString`, whose output carries the zone's long
+ * display name, and the three `toLocale*` -- whose blocker is the FEATURE BUILD and therefore no
+ * phase at all (src/support/phases.ts), so it omits `phase` and names the flag. */
+function dateNotYet(message: string, phase?: number): GateResult {
+  return phase === undefined
+    ? {
+        kind: 'not-yet',
+        code: 'STA1210',
+        message:
+          `${message} needs the ICU feature build: rebuild with ` +
+          '`make -C runtime intl` and compile with STATOR_RUNTIME=intl',
+      }
+    : {
+        kind: 'not-yet',
+        code: 'STA1210',
+        message: `${message} is not yet supported; planned for Phase ${String(phase)}`,
+        phase,
+      };
 }
 
 /** Readable construct names for the catch-all message. `ts.SyntaxKind[kind]` gives the enum name
@@ -571,7 +588,7 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker): GateR
     !ts.isTypeNode(node.parent) &&
     !namesAClassInPlace(node, typeChecker)
   ) {
-    return notYet('using a class as a value is not yet supported', 3);
+    return notYet('using a class as a value is not yet supported', 5);
   }
   // A generic function has no value: monomorphization replaces it with one specialization per
   // tuple, and `const f = box` names none of them. The declaration's own name is exempt, and so is
@@ -584,7 +601,7 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker): GateR
     ts.getNameOfDeclaration(decl) !== node &&
     !(ts.isCallExpression(node.parent) && node.parent.expression === node)
   ) {
-    return notYet('using a generic function as a value is not yet supported', 3);
+    return notYet('using a generic function as a value is not yet supported', 5);
   }
   // A global the compiler does not model -- `String`, `Number`, `parseInt`, `NaN`, `Infinity`,
   // `Math`, `globalThis`, `console` as a value, and everything else that resolves outside the
@@ -611,7 +628,11 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker): GateR
     // user binding, whatever else merges into it.
     const declarations = symbol.declarations ?? [];
     if (declarations.every((d) => d.getSourceFile().isDeclarationFile)) {
-      return notYet(`the global '${node.text}' is not yet supported`, 4);
+      // A catch-all keeps the phase that owns MOST of what it refuses (plan §7 Task 4.7 step 5).
+      // What is left of the global surface is `Symbol` and the iterator protocol around it, which
+      // is Phase 5 step 8; `globalThis` and `Reflect` are Phase 8's, and `Proxy` is a `never` the
+      // ts-mode table answers before this arm is reached, so neither moves the majority.
+      return notYet(`the global '${node.text}' is not yet supported`, 5);
     }
   }
   if (decl === undefined || enclosingFunction(decl) === enclosingFunction(node)) {
@@ -619,7 +640,7 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker): GateR
   }
   return loopScopeOf(decl) === undefined
     ? { kind: 'accept' }
-    : notYet('capturing a variable declared inside a loop is not yet supported', 3);
+    : notYet('capturing a variable declared inside a loop is not yet supported', 5);
 }
 
 /** `x as T` and `typeof x`.
@@ -753,11 +774,11 @@ function gateDeclaration(decl: ts.VariableDeclaration): GateResult {
   // A catch binding is a VariableDeclaration too, and the loop's reasoning applies to it as well:
   // the CATCH assigns it, definitely, before its block runs.
   if (decl.initializer === undefined && !isForOfBinding(decl) && !ts.isCatchClause(decl.parent)) {
-    return notYet('a declaration without an initializer is not yet supported', 3);
+    return notYet('a declaration without an initializer is not yet supported', 5);
   }
   // Destructuring binds several names from one value; the HIR has one name per Declaration.
   if (!ts.isIdentifier(decl.name)) {
-    return notYet('destructuring declarations are not yet supported', 3);
+    return notYet('destructuring declarations are not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -800,7 +821,7 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
       return ts.isIdentifier(bin.right) &&
         classDeclarationOf(typeChecker.getTypeAtLocation(bin.right)) !== undefined
         ? { kind: 'accept' }
-        : notYet('instanceof against anything but a class name is not yet supported', 3);
+        : notYet('instanceof against anything but a class name is not yet supported', 5);
 
     case ts.SyntaxKind.EqualsToken:
       // A bare name is HIR Assignment, `a[i] = v` is IndexAssignment, `o.x = v` is FieldAssignment.
@@ -813,7 +834,7 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
         (ts.isPropertyAccessExpression(bin.left) &&
           isDynamicShape(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker))
         ? { kind: 'accept' }
-        : notYet('assignment to anything but a variable is not yet supported', 3);
+        : notYet('assignment to anything but a variable is not yet supported', 5);
 
     // `x += e` on an identifier folds to `x = x + e`, sound because a bare identifier cannot have
     // side effects. An element target cannot use that fold -- `a[i()] += 1` must call `i` ONCE --
@@ -825,12 +846,12 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
     case ts.SyntaxKind.SlashEqualsToken:
     case ts.SyntaxKind.PercentEqualsToken:
       if (!isAssignableTarget(bin.left, typeChecker)) {
-        return notYet('compound assignment to anything but a variable is not yet supported', 3);
+        return notYet('compound assignment to anything but a variable is not yet supported', 5);
       }
       return gateUpdate(bin);
 
     default:
-      return notYet('this operator is not yet supported', 3);
+      return notYet('this operator is not yet supported', 5);
   }
 }
 
@@ -850,12 +871,12 @@ function gatePrefixUnary(unary: ts.PrefixUnaryExpression, typeChecker: ts.TypeCh
     case ts.SyntaxKind.PlusPlusToken:
     case ts.SyntaxKind.MinusMinusToken:
       if (!isAssignableTarget(unary.operand, typeChecker)) {
-        return notYet('++ and -- on anything but a variable are not yet supported', 3);
+        return notYet('++ and -- on anything but a variable are not yet supported', 5);
       }
       return gateUpdate(unary);
 
     default:
-      return notYet('this unary operator is not yet supported', 3);
+      return notYet('this unary operator is not yet supported', 5);
   }
 }
 
@@ -892,7 +913,7 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
 function gateUpdate(node: ts.Node): GateResult {
   const parent: ts.Node | undefined = node.parent;
   if (parent === undefined) {
-    return notYet('++, -- and compound assignment are not yet supported here', 3);
+    return notYet('++, -- and compound assignment are not yet supported here', 5);
   }
   // Statement position: the value is discarded by the language itself.
   if (ts.isExpressionStatement(parent)) {
@@ -904,7 +925,7 @@ function gateUpdate(node: ts.Node): GateResult {
   if (ts.isForStatement(parent) && parent.incrementor === node) {
     return { kind: 'accept' };
   }
-  return notYet('using the value of ++, -- or a compound assignment is not yet supported', 3);
+  return notYet('using the value of ++, -- or a compound assignment is not yet supported', 5);
 }
 
 /** Loops and switches are the only statements with somewhere to put a label. */
@@ -926,11 +947,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
   if (generic.kind === 'unresolved') {
     return notYet(
       'a generic call whose type arguments no argument determines is not yet supported',
-      3,
+      5,
     );
   }
   if (generic.kind === 'not-generic' && call.typeArguments !== undefined) {
-    return notYet('explicit type arguments on a call are not yet supported', 3);
+    return notYet('explicit type arguments on a call are not yet supported', 5);
   }
   const callee = skipParens(call.expression);
 
@@ -945,10 +966,10 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       // A spread argument is refused here rather than counted: the lowering pads and the emitter
       // picks an entry point by COUNT, and a spread's count is not its arity.
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet(`a spread argument to console.${method} is not yet supported`, 3);
+        return notYet(`a spread argument to console.${method} is not yet supported`, 5);
       }
       if (given > shape.arity || given < shape.arity - shape.optional) {
-        return notYet(`console.${method} with ${String(given)} arguments is not yet supported`, 3);
+        return notYet(`console.${method} with ${String(given)} arguments is not yet supported`, 5);
       }
       // `console.table` is the one console method whose ARGUMENT changes the output shape. Node
       // draws a Map or a Set with an `(iteration index)` column -- and a Map with a second `Key`
@@ -959,23 +980,23 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
         first === undefined ||
         collectionOf(first, typeChecker) === undefined
         ? { kind: 'accept' }
-        : notYet('console.table on a Map or a Set is not yet supported', 4);
+        : notYet('console.table on a Map or a Set is not yet supported', 5);
     }
     // A Math method: one runtime function per operation, like a collection op. Spread arguments
     // are refused here rather than lowered wrong -- `Math.min(...xs)` has no fixed arity to fold.
     if (isGlobalMath(callee.expression, typeChecker)) {
       if (!MATH_METHODS.has(callee.name.text)) {
-        return notYet(`Math.${callee.name.text} is not yet supported`, 4);
+        return notYet(`Math.${callee.name.text} is not yet supported`, 5);
       }
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet('a spread argument to a Math method is not yet supported', 4);
+        return notYet('a spread argument to a Math method is not yet supported', 5);
       }
       // hypot is the one variadic Math method the lowering CANNOT fold, because it is not
       // associative: V8 computes the three-argument form with a Kahan compensation term, so
       // folding it into nested binary calls would agree with Node on easy inputs and disagree
       // exactly where the compensation is doing work. Refused rather than approximated.
       if (callee.name.text === 'hypot' && call.arguments.length > 2) {
-        return notYet('Math.hypot with more than two arguments is not yet supported', 4);
+        return notYet('Math.hypot with more than two arguments is not yet supported', 5);
       }
       return { kind: 'accept' };
     }
@@ -984,14 +1005,14 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
     if (isGlobalJson(callee.expression, typeChecker)) {
       const method = callee.name.text;
       if (method !== 'stringify' && method !== 'parse') {
-        return notYet(`JSON.${method} is not yet supported`, 4);
+        return notYet(`JSON.${method} is not yet supported`, 5);
       }
       const [argument] = call.arguments;
       if (call.arguments.length !== 1 || argument === undefined) {
-        return notYet(`JSON.${method} with other than one argument is not yet supported`, 4);
+        return notYet(`JSON.${method} with other than one argument is not yet supported`, 5);
       }
       if (ts.isSpreadElement(argument)) {
-        return notYet(`a spread argument to JSON.${method} is not yet supported`, 4);
+        return notYet(`a spread argument to JSON.${method} is not yet supported`, 5);
       }
       // parse reads TEXT. A value the checker types as something OTHER than a string is the
       // program leaning on ToString, a conversion the runtime parser does not do, and the
@@ -1003,12 +1024,12 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
         const untyped = (argumentType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
         return untyped || isStringReceiver(argument, typeChecker)
           ? { kind: 'accept' }
-          : notYet('JSON.parse of a value that is not a string is not yet supported', 4);
+          : notYet('JSON.parse of a value that is not a string is not yet supported', 5);
       }
       return admitsUnserializable(typeChecker.getTypeAtLocation(argument), typeChecker)
         ? notYet(
             'JSON.stringify of a value that may be undefined or a function is not yet supported',
-            4,
+            5,
           )
         : { kind: 'accept' };
     }
@@ -1020,38 +1041,38 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
     if (isGlobalObject(callee.expression, typeChecker)) {
       const method = callee.name.text;
       if (!Object.hasOwn(OBJECT_STATICS, method)) {
-        return notYet(`Object.${method} is not yet supported`, 4);
+        return notYet(`Object.${method} is not yet supported`, OBJECT_STATIC_OWNER[method] ?? 5);
       }
       const shape = OBJECT_STATICS[method as keyof typeof OBJECT_STATICS];
       const [argument, second] = call.arguments;
       if (call.arguments.length !== shape.arity || argument === undefined) {
         return notYet(
           `Object.${method} with other than ${String(shape.arity)} arguments is not yet supported`,
-          4,
+          5,
         );
       }
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet('a spread argument to an Object method is not yet supported', 4);
+        return notYet('a spread argument to an Object method is not yet supported', 5);
       }
       if (!acceptsObjectArgument(shape.receiver, argument, typeChecker)) {
-        return notYet(`Object.${method} on this argument type is not yet supported`, 4);
+        return notYet(`Object.${method} on this argument type is not yet supported`, 5);
       }
       if (shape.second === 'none') {
         return { kind: 'accept' };
       }
       if (second === undefined) {
-        return notYet(`Object.${method} without a second argument is not yet supported`, 4);
+        return notYet(`Object.${method} without a second argument is not yet supported`, 5);
       }
       // The key is a runtime string: a symbol or a number reads a property neither layout holds,
       // and converting one is the ToPropertyKey the object model owns.
       if (shape.second === 'key') {
         return isStringReceiver(second, typeChecker)
           ? { kind: 'accept' }
-          : notYet(`Object.${method} with a key that is not a string is not yet supported`, 4);
+          : notYet(`Object.${method} with a key that is not a string is not yet supported`, 5);
       }
       return acceptsObjectArgument('shaped', second, typeChecker)
         ? { kind: 'accept' }
-        : notYet(`Object.${method} from this source type is not yet supported`, 4);
+        : notYet(`Object.${method} from this source type is not yet supported`, 5);
     }
     // The `Date` namespace calls slice A lands: `Date.UTC` and `Date.parse`. `now` reads the
     // clock and is refused here by name -- it proves through Task 4.2's determinism carve-out,
@@ -1061,15 +1082,15 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
     if (isGlobalDate(callee.expression, typeChecker)) {
       const method = callee.name.text;
       if (!Object.hasOwn(DATE_STATICS, method)) {
-        return dateNotYet(`Date.${method}`);
+        return dateNotYet(`Date.${method}`, 5);
       }
       const shape = DATE_STATICS[method as DateStatic];
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return dateNotYet('a spread argument to a Date method');
+        return dateNotYet('a spread argument to a Date method', 5);
       }
       return call.arguments.length > shape.arity ||
         call.arguments.length < shape.arity - shape.optional
-        ? dateNotYet(`Date.${method} with ${String(call.arguments.length)} arguments`)
+        ? dateNotYet(`Date.${method} with ${String(call.arguments.length)} arguments`, 5)
         : { kind: 'accept' };
     }
     // The Promise namespace calls. `all` wants an ARRAY specifically -- the runtime walks one,
@@ -1118,18 +1139,18 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
     if (isStringReceiver(callee.expression, typeChecker)) {
       const op = callee.name.text;
       if (!Object.hasOwn(STRING_OPS, op)) {
-        return notYet(`String.prototype.${op} is not yet supported`, 4);
+        return notYet(`String.prototype.${op} is not yet supported`, 5);
       }
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet('a spread argument to a string method is not yet supported', 4);
+        return notYet('a spread argument to a string method is not yet supported', 5);
       }
       if (op === 'concat' && call.arguments.length !== 1) {
         // Variadic concat has no node to fold into (the array-concat rule), and the
         // zero-argument copy is pointless on an immutable string.
-        return notYet('concat with other than one argument is not yet supported', 4);
+        return notYet('concat with other than one argument is not yet supported', 5);
       }
       if (op === 'split' && call.arguments.length > 1) {
-        return notYet('split with a limit is not yet supported', 4);
+        return notYet('split with a limit is not yet supported', 5);
       }
       // The two argument shapes a closed op set cannot express, both of which are legal
       // TypeScript at these positions. A PATTERN may be a string or a regexp -- the runtime
@@ -1141,14 +1162,14 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
           const kind = tsTypeToHType(typeChecker.getTypeAtLocation(argument), typeChecker).kind;
           const patternPosition = index === 0;
           if (kind === 'regexp' ? !patternPosition : kind !== 'string') {
-            return notYet(`${op} with this argument type is not yet supported`, 4);
+            return notYet(`${op} with this argument type is not yet supported`, 5);
           }
         }
         // `search` has no string form at all: the spec builds a RegExp out of whatever it is
         // given, and `new RegExp(...)` is a constructor this compiler does not have.
         const pattern = call.arguments[0];
         if (op === 'search' && (pattern === undefined || !isRegExpReceiver(pattern, typeChecker))) {
-          return notYet('search with anything but a regular expression is not yet supported', 4);
+          return notYet('search with anything but a regular expression is not yet supported', 5);
         }
       }
       // The locale-sensitive trio is the one part of this surface that Unicode's own tables cannot
@@ -1159,26 +1180,28 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       // source, and every golden test in this repo rests on that not being true.
       if (op === 'localeCompare' || op === 'toLocaleLowerCase' || op === 'toLocaleUpperCase') {
         if (!intlEnabled()) {
+          // No `phase`: the blocker is a BUILD FLAG, not a release (src/support/phases.ts). The
+          // feature is available right now to anyone who rebuilds; a phase number here would tell
+          // the user to wait for something that has already shipped.
           return {
             kind: 'not-yet',
             code: 'STA1215',
             message:
               `String.prototype.${op} needs the ICU feature build: rebuild with ` +
               '`make -C runtime intl` and compile with STATOR_RUNTIME=intl',
-            phase: 4,
           };
         }
         if (call.arguments.length !== STRING_OPS[op].arity) {
           // No padding here, unlike every other op in the table: an absent locale is not the same
           // request with a default filled in, it is the host-dependent form refused above.
-          return notYet(`${op} without an explicit locale is not yet supported`, 4);
+          return notYet(`${op} without an explicit locale is not yet supported`, 5);
         }
         for (const argument of call.arguments) {
           const kind = tsTypeToHType(typeChecker.getTypeAtLocation(argument), typeChecker).kind;
           if (kind !== 'string') {
             // `locales` is also legally a string[] and `options` an object; both are Intl
             // negotiation this compiler does not model.
-            return notYet(`${op} with this argument type is not yet supported`, 4);
+            return notYet(`${op} with this argument type is not yet supported`, 5);
           }
         }
       }
@@ -1192,21 +1215,21 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
     if (isArrayReceiver(callee.expression, typeChecker)) {
       const op = callee.name.text;
       if (!Object.hasOwn(ARRAY_OPS, op)) {
-        return notYet(`Array.prototype.${op} is not yet supported`, 4);
+        return notYet(`Array.prototype.${op} is not yet supported`, 5);
       }
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet('a spread argument to an array method is not yet supported', 4);
+        return notYet('a spread argument to an array method is not yet supported', 5);
       }
       if ((op === 'push' || op === 'unshift') && call.arguments.length !== 1) {
-        return notYet(`${op} with other than one argument is not yet supported`, 4);
+        return notYet(`${op} with other than one argument is not yet supported`, 5);
       }
       if (op === 'lastIndexOf' && call.arguments.length > 1) {
-        return notYet('lastIndexOf with a position is not yet supported', 4);
+        return notYet('lastIndexOf with a position is not yet supported', 5);
       }
       if ((op === 'splice' || op === 'toSpliced') && call.arguments.length !== 2) {
         // splice(start) deletes to the END while an explicit undefined deleteCount deletes
         // nothing (the lastIndexOf rule), and the insertion form is variadic.
-        return notYet(`${op} with other than two arguments is not yet supported`, 4);
+        return notYet(`${op} with other than two arguments is not yet supported`, 5);
       }
       if ((op === 'sort' || op === 'toSorted') && call.arguments.length === 0) {
         return { kind: 'accept' }; // the ToString default; an explicit undefined means the same
@@ -1215,10 +1238,10 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
         // The zero-initial form seeds from the first element and cannot share the padded
         // signature: an explicit `undefined` initial IS an initial.
         if (call.arguments.length !== 2) {
-          return notYet(`${op} without an initial value is not yet supported`, 4);
+          return notYet(`${op} without an initial value is not yet supported`, 5);
         }
       } else if (Object.hasOwn(CALLBACK_ARRAY_OPS, op) && call.arguments.length !== 1) {
-        return notYet(`${op} with a thisArg is not yet supported`, 4);
+        return notYet(`${op} with a thisArg is not yet supported`, 5);
       }
       if (Object.hasOwn(CALLBACK_ARRAY_OPS, op)) {
         const cb = call.arguments[0];
@@ -1230,7 +1253,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
           typeChecker.getSignaturesOfType(typeChecker.getTypeAtLocation(cb), ts.SignatureKind.Call)
             .length === 0
         ) {
-          return notYet(`${op} with a non-function callback is not yet supported`, 4);
+          return notYet(`${op} with a non-function callback is not yet supported`, 5);
         }
       }
       if (op === 'concat') {
@@ -1240,29 +1263,31 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
           arg === undefined ||
           !typeChecker.isArrayType(typeChecker.getTypeAtLocation(arg))
         ) {
-          return notYet('concat with anything but one array is not yet supported', 4);
+          return notYet('concat with anything but one array is not yet supported', 5);
         }
       }
       return { kind: 'accept' };
     }
     // `RegExp.prototype`'s METHODS -- `test`, `exec`, `toString`. The one member left under
-    // STA1211 is `compile`, whose blocker is neither of this phase's (plan-notes 121).
+    // STA1211 is `compile`: Annex B B.2.4 legacy that RE-INITIALIZES an existing RegExp in place,
+    // which is the mutate-a-built-object surface Phase 8 owns with STA1204, not a builtin this
+    // phase declined to write (plan-notes 121, 136).
     if (isRegExpReceiver(callee.expression, typeChecker)) {
       const op = callee.name.text;
       if (!Object.hasOwn(REGEXP_OPS, op)) {
         return {
           kind: 'not-yet',
           code: 'STA1211',
-          message: `RegExp.prototype.${op} is not yet supported; planned for Phase 4 (builtins)`,
-          phase: 4,
+          message: `RegExp.prototype.${op} is not yet supported; planned for Phase 8`,
+          phase: 8,
         };
       }
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet('a spread argument to a RegExp method is not yet supported', 4);
+        return notYet('a spread argument to a RegExp method is not yet supported', 5);
       }
       const arity = REGEXP_OPS[op as RegExpOperation].arity;
       if (call.arguments.length !== arity) {
-        return notYet(`${op} with other than ${String(arity)} arguments is not yet supported`, 4);
+        return notYet(`${op} with other than ${String(arity)} arguments is not yet supported`, 5);
       }
       const subject = call.arguments[0];
       if (subject === undefined) {
@@ -1276,7 +1301,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       const untyped = (subjectType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
       return untyped || isStringReceiver(subject, typeChecker)
         ? { kind: 'accept' }
-        : notYet(`${op} of a value that is not a string is not yet supported`, 4);
+        : notYet(`${op} of a value that is not a string is not yet supported`, 5);
     }
     // `Date.prototype`'s methods. Slice A is the TZ-independent core: the UTC getters and setters,
     // the three string forms, and the two time-value reads. Every LOCAL-time member (getFullYear,
@@ -1288,12 +1313,12 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
         return dateNotYet(`Date.prototype.${op}`);
       }
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return dateNotYet('a spread argument to a Date method');
+        return dateNotYet('a spread argument to a Date method', 5);
       }
       const shape = DATE_OPS[op as DateOperation];
       return call.arguments.length > shape.arity ||
         call.arguments.length < shape.arity - shape.optional
-        ? dateNotYet(`${op} with ${String(call.arguments.length)} arguments`)
+        ? dateNotYet(`${op} with ${String(call.arguments.length)} arguments`, 5)
         : { kind: 'accept' };
     }
     // A Map or a Set: one runtime function per operation, and no user declaration anywhere, so
@@ -1309,11 +1334,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
     }
     const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(callee.expression));
     if (declaration === undefined) {
-      return notYet('method calls are not yet supported', 3);
+      return notYet('method calls are not yet supported', 5);
     }
     return methodDeclaringClass(declaration, callee.name.text, typeChecker) !== undefined
       ? { kind: 'accept' }
-      : notYet('calling a class field is not yet supported', 3);
+      : notYet('calling a class field is not yet supported', 5);
   }
 
   // `super(...)`, which the gate reaches only after gateClass proved it is the first statement of a
@@ -1335,7 +1360,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
   if (ts.isFunctionExpression(callee) || ts.isArrowFunction(callee)) {
     return { kind: 'accept' };
   }
-  return notYet('calling an arbitrary expression is not yet supported', 3);
+  return notYet('calling an arbitrary expression is not yet supported', 5);
 }
 
 /** Rung 4a: functions with no captured environment. Each rejection below is a feature whose
@@ -1357,18 +1382,18 @@ function gateFunction(
     fn.typeParameters.length > 0 &&
     !ts.isFunctionDeclaration(fn)
   ) {
-    return notYet('a generic function expression or arrow is not yet supported', 3);
+    return notYet('a generic function expression or arrow is not yet supported', 5);
   }
   if (fn.body === undefined) {
-    return notYet('overload signatures are not yet supported', 3);
+    return notYet('overload signatures are not yet supported', 5);
   }
   // An arrow's expression body (`(x) => x * 2`) is a Block in the HIR with a single return; the
   // lowering synthesises it, so nothing is gated here beyond what the expression itself gates.
   if (ts.isFunctionExpression(fn) && fn.name !== undefined) {
-    return notYet('named function expressions are not yet supported', 3);
+    return notYet('named function expressions are not yet supported', 5);
   }
   if (ts.isFunctionDeclaration(fn) && !isBodyTopLevel(fn.parent)) {
-    return notYet('a function declaration inside a block, loop or branch is not yet supported', 3);
+    return notYet('a function declaration inside a block, loop or branch is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -1423,26 +1448,26 @@ function gateAwait(node: ts.Node): GateResult {
  * time), and each arrives with the feature it belongs to. */
 function gateTypeParameter(parameter: ts.TypeParameterDeclaration): GateResult {
   if (parameter.constraint !== undefined) {
-    return notYet('a constrained type parameter is not yet supported', 3);
+    return notYet('a constrained type parameter is not yet supported', 5);
   }
   if (parameter.default !== undefined) {
-    return notYet('a type parameter with a default is not yet supported', 3);
+    return notYet('a type parameter with a default is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
 
 function gateParameter(param: ts.ParameterDeclaration): GateResult {
   if (param.dotDotDotToken !== undefined) {
-    return notYet('rest parameters are not yet supported', 3);
+    return notYet('rest parameters are not yet supported', 5);
   }
   if (param.initializer !== undefined) {
-    return notYet('default parameter values are not yet supported', 3);
+    return notYet('default parameter values are not yet supported', 5);
   }
   if (param.questionToken !== undefined) {
-    return notYet('optional parameters are not yet supported', 3);
+    return notYet('optional parameters are not yet supported', 5);
   }
   if (!ts.isIdentifier(param.name)) {
-    return notYet('destructuring parameters are not yet supported', 3);
+    return notYet('destructuring parameters are not yet supported', 5);
   }
   if (param.name.text === 'this') {
     return notYet('a `this` parameter is not yet supported', 5);
@@ -1582,11 +1607,11 @@ function gateObjectLiteral(
     if (!ts.isPropertyAssignment(property)) {
       return notYet(
         'an object literal with a shorthand, spread, method or accessor member is not yet supported',
-        3,
+        5,
       );
     }
     if (!ts.isIdentifier(property.name)) {
-      return notYet('an object literal key that is not an identifier is not yet supported', 3);
+      return notYet('an object literal key that is not an identifier is not yet supported', 5);
     }
   }
   // The CONTEXTUAL type decides the dynamic question, and the order matters: in
@@ -1614,10 +1639,10 @@ function gateObjectLiteral(
  * there is a shape to look it up in. */
 function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): GateResult {
   if (declaration.name === undefined) {
-    return notYet('an anonymous class is not yet supported', 3);
+    return notYet('an anonymous class is not yet supported', 5);
   }
   if (declaration.typeParameters !== undefined) {
-    return notYet('a generic class is not yet supported', 3);
+    return notYet('a generic class is not yet supported', 5);
   }
   const heritage = gateHeritage(declaration, checker);
   if (heritage.kind !== 'accept') {
@@ -1634,13 +1659,13 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
     // the name, not about accessors as such.
     if (ts.isGetAccessor(member) || ts.isSetAccessor(member)) {
       if (isStaticMember(member)) {
-        return notYet('a static getter or setter is not yet supported', 3);
+        return notYet('a static getter or setter is not yet supported', 5);
       }
       if (member.body === undefined) {
-        return notYet('an accessor with no body is not yet supported', 3);
+        return notYet('an accessor with no body is not yet supported', 5);
       }
       if (!ts.isIdentifier(member.name)) {
-        return notYet('a computed or #private accessor name is not yet supported', 3);
+        return notYet('a computed or #private accessor name is not yet supported', 5);
       }
       // An accessor re-declaring an inherited name is overriding, and an accessor is dispatched
       // directly -- the method table is indexed only where the lowering proved a method is
@@ -1648,13 +1673,13 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       if (inheritedInstance.has(member.name.text)) {
         return notYet(
           `overriding the inherited member '${member.name.text}' is not yet supported`,
-          3,
+          5,
         );
       }
       continue;
     }
     if (ts.isIndexSignatureDeclaration(member)) {
-      return notYet('an index signature on a class is not yet supported', 3);
+      return notYet('an index signature on a class is not yet supported', 5);
     }
     if (ts.isSemicolonClassElement(member)) {
       continue; // a stray `;` between members declares nothing
@@ -1663,14 +1688,14 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
     // where `this` is the class. There is no class object here -- a static is one plain binding --
     // so there is nothing for the block's `this` to be.
     if (ts.isClassStaticBlockDeclaration(member)) {
-      return notYet('a static initialization block is not yet supported', 3);
+      return notYet('a static initialization block is not yet supported', 5);
     }
     if (
       member.name !== undefined &&
       !ts.isIdentifier(member.name) &&
       !ts.isPrivateIdentifier(member.name)
     ) {
-      return notYet('a computed class member name is not yet supported', 3);
+      return notYet('a computed class member name is not yet supported', 5);
     }
     // Two `#x` in one chain are TWO fields in JavaScript -- a private name is scoped to the class
     // body that writes it, so a subclass's `#x` does not override its base's, and an instance
@@ -1684,7 +1709,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
     ) {
       return notYet(
         `a #private member named '${member.name.text}' that an ancestor also declares is not yet supported`,
-        3,
+        5,
       );
     }
     if (ts.isConstructorDeclaration(member)) {
@@ -1692,7 +1717,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       // An overload signature has no body and declares nothing to emit; two BODIES would be two
       // constructors for one layout, which the checker rejects anyway.
       if (member.body === undefined) {
-        return notYet('a constructor overload signature is not yet supported', 3);
+        return notYet('a constructor overload signature is not yet supported', 5);
       }
       // A derived constructor must open with `super(...)`. JavaScript already forbids touching
       // `this` before it, and requiring the CALL to be the first statement is what lets the
@@ -1701,7 +1726,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       if (baseClassOf(declaration, checker) !== undefined && !opensWithSuperCall(member)) {
         return notYet(
           'a derived constructor that does not open with super(...) is not yet supported',
-          3,
+          5,
         );
       }
       continue;
@@ -1727,7 +1752,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       if (!overridesMethod) {
         return notYet(
           `overriding the inherited member '${member.name.text}' is not yet supported`,
-          3,
+          5,
         );
       }
       // A method table is one file-scope constant per class, so no method in an overriding family
@@ -1736,13 +1761,13 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       if (!ts.isSourceFile(declaration.parent)) {
         return notYet(
           'overriding a method in a class declared inside a function is not yet supported',
-          3,
+          5,
         );
       }
     }
     if (ts.isMethodDeclaration(member)) {
       if (member.body === undefined) {
-        return notYet('a method overload signature is not yet supported', 3);
+        return notYet('a method overload signature is not yet supported', 5);
       }
       if (member.asteriskToken !== undefined) {
         return generatorNotYet();
@@ -1754,7 +1779,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
         return notYet('an async method is not yet supported', 5);
       }
       if (member.questionToken !== undefined) {
-        return notYet('an optional method is not yet supported', 3);
+        return notYet('an optional method is not yet supported', 5);
       }
       continue;
     }
@@ -1762,14 +1787,14 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       if (member.questionToken !== undefined) {
         // `x?: number` is `number | undefined` with a distinction the slot cannot keep: an absent
         // property and one holding `undefined` read the same, but `in` and inspect tell them apart.
-        return notYet('an optional class field is not yet supported', 3);
+        return notYet('an optional class field is not yet supported', 5);
       }
       continue;
     }
-    return notYet('this class member is not yet supported', 3);
+    return notYet('this class member is not yet supported', 5);
   }
   if (constructors > 1) {
-    return notYet('more than one constructor is not yet supported', 3);
+    return notYet('more than one constructor is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -1784,10 +1809,10 @@ function gateHeritage(declaration: ts.ClassDeclaration, checker: ts.TypeChecker)
       continue;
     }
     if (clause.types.length !== 1) {
-      return notYet('extending other than exactly one class is not yet supported', 3);
+      return notYet('extending other than exactly one class is not yet supported', 5);
     }
     if (baseClassOf(declaration, checker) === undefined) {
-      return notYet('extending anything but a class declaration is not yet supported', 3);
+      return notYet('extending anything but a class declaration is not yet supported', 5);
     }
   }
   return { kind: 'accept' };
@@ -1928,7 +1953,7 @@ function gateCollectionCall(
   if (call.arguments.length !== arity) {
     return notYet(
       `${collectionName(collection)}.${callee.name.text} with ${String(call.arguments.length)} arguments is not yet supported`,
-      4,
+      5,
     );
   }
   if (isSetOperation(callee.name.text)) {
@@ -1940,7 +1965,7 @@ function gateCollectionCall(
     if (other === undefined || collectionOf(other, checker) !== 'set') {
       return notYet(
         `Set.${callee.name.text} with an argument that is not a Set is not yet supported`,
-        4,
+        5,
       );
     }
     return { kind: 'accept' };
@@ -1956,7 +1981,7 @@ function gateCollectionCall(
     ) {
       return notYet(
         `${collectionName(collection)}.forEach with a non-function callback is not yet supported`,
-        4,
+        5,
       );
     }
   }
@@ -1975,7 +2000,7 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
       ? { kind: 'accept' }
       : notYet(
           `constructing a ${collectionName(collection)} from an iterable is not yet supported`,
-          4,
+          5,
         );
   }
   if (isGlobalPromise(node.expression, checker)) {
@@ -2000,23 +2025,23 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
       return { kind: 'accept' };
     }
     if (args.some((argument) => ts.isSpreadElement(argument))) {
-      return dateNotYet('a spread argument to new Date');
+      return dateNotYet('a spread argument to new Date', 5);
     }
     // Seven is the whole component list (§21.4.2.1); the checker's own overloads already reject
     // more, so this only guards against a lib that does not.
     if (args.length > 7) {
-      return dateNotYet(`new Date with ${String(args.length)} arguments`);
+      return dateNotYet(`new Date with ${String(args.length)} arguments`, 5);
     }
     return { kind: 'accept' };
   }
   if (node.typeArguments !== undefined) {
-    return notYet('explicit type arguments on a constructor call are not yet supported', 3);
+    return notYet('explicit type arguments on a constructor call are not yet supported', 5);
   }
   if (!ts.isIdentifier(node.expression)) {
-    return notYet('new on anything but a named class is not yet supported', 3);
+    return notYet('new on anything but a named class is not yet supported', 5);
   }
   if (classDeclarationOf(checker.getTypeAtLocation(node)) === undefined) {
-    return notYet('new on this type is not yet supported', 3);
+    return notYet('new on this type is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -2039,7 +2064,7 @@ function gateThis(node: ts.Node): GateResult {
       ts.isPropertyDeclaration(n)
     ) {
       return isStaticMember(n)
-        ? notYet('this in a static class member is not yet supported', 3)
+        ? notYet('this in a static class member is not yet supported', 5)
         : { kind: 'accept' };
     }
     // An arrow does NOT stop the walk: it has no `this` of its own and sees the enclosing one,
@@ -2049,7 +2074,7 @@ function gateThis(node: ts.Node): GateResult {
       break;
     }
   }
-  return notYet('this outside a class member is not yet supported', 3);
+  return notYet('this outside a class member is not yet supported', 5);
 }
 
 /** `o.x` and `o.m` on a class instance. A name the class does not declare cannot reach here — the
@@ -2065,14 +2090,14 @@ function gateMemberAccess(
   // and the spelling would promise a distinction the layout cannot make.
   if (access.expression.kind === ts.SyntaxKind.SuperKeyword) {
     if (!(ts.isCallExpression(access.parent) && access.parent.expression === access)) {
-      return notYet('super as a value is not yet supported', 3);
+      return notYet('super as a value is not yet supported', 5);
     }
     const base = classDeclarationOf(checker.getTypeAtLocation(access.expression));
     return base !== undefined &&
       ts.isIdentifier(access.name) &&
       methodDeclaringClass(base, access.name.text, checker) !== undefined
       ? { kind: 'accept' }
-      : notYet('super on anything but an inherited method is not yet supported', 3);
+      : notYet('super on anything but an inherited method is not yet supported', 5);
   }
   // `Math.floor` and `Math.PI` -- decided before anything that looks for a class, because Math
   // resolves to no declaration this compiler models. A constant is a plain read the lowering
@@ -2086,9 +2111,9 @@ function gateMemberAccess(
     if (MATH_METHODS.has(member)) {
       return ts.isCallExpression(access.parent) && access.parent.expression === access
         ? { kind: 'accept' }
-        : notYet('using a Math method as a value is not yet supported', 4);
+        : notYet('using a Math method as a value is not yet supported', 5);
     }
-    return notYet(`Math.${member} is not yet supported`, 4);
+    return notYet(`Math.${member} is not yet supported`, 5);
   }
 
   // Object namespace members follow Math's rules: a method exists only as a callee, and a member
@@ -2098,9 +2123,9 @@ function gateMemberAccess(
     if (Object.hasOwn(OBJECT_STATICS, member)) {
       return ts.isCallExpression(access.parent) && access.parent.expression === access
         ? { kind: 'accept' }
-        : notYet('using an Object method as a value is not yet supported', 4);
+        : notYet('using an Object method as a value is not yet supported', 5);
     }
-    return notYet(`Object.${member} is not yet supported`, 4);
+    return notYet(`Object.${member} is not yet supported`, OBJECT_STATIC_OWNER[member] ?? 5);
   }
 
   // The Date namespace, by Math's rules. `now` is named separately from an unlanded member
@@ -2110,9 +2135,9 @@ function gateMemberAccess(
     if (Object.hasOwn(DATE_STATICS, member)) {
       return ts.isCallExpression(access.parent) && access.parent.expression === access
         ? { kind: 'accept' }
-        : notYet('using a Date method as a value is not yet supported', 4);
+        : notYet('using a Date method as a value is not yet supported', 5);
     }
-    return dateNotYet(`Date.${member}`);
+    return dateNotYet(`Date.${member}`, 5);
   }
 
   // A Date.prototype method exists only as a callee, the rule every builtin receiver follows.
@@ -2123,7 +2148,7 @@ function gateMemberAccess(
     if (Object.hasOwn(DATE_OPS, member)) {
       return ts.isCallExpression(access.parent) && access.parent.expression === access
         ? { kind: 'accept' }
-        : notYet('using a Date method as a value is not yet supported', 4);
+        : notYet('using a Date method as a value is not yet supported', 5);
     }
     return dateNotYet(`Date.prototype.${member}`);
   }
@@ -2136,9 +2161,9 @@ function gateMemberAccess(
     if (Object.hasOwn(PROMISE_STATICS, member)) {
       return ts.isCallExpression(access.parent) && access.parent.expression === access
         ? { kind: 'accept' }
-        : notYet('using a Promise method as a value is not yet supported', 4);
+        : notYet('using a Promise method as a value is not yet supported', 5);
     }
-    return notYet(`Promise.${member} is not yet supported`, 4);
+    return notYet(`Promise.${member} is not yet supported`, 5);
   }
 
   // JSON follows the same rules: stringify and parse exist only as callees; the rest are
@@ -2148,9 +2173,9 @@ function gateMemberAccess(
     if (member === 'stringify' || member === 'parse') {
       return ts.isCallExpression(access.parent) && access.parent.expression === access
         ? { kind: 'accept' }
-        : notYet(`using JSON.${member} as a value is not yet supported`, 4);
+        : notYet(`using JSON.${member} as a value is not yet supported`, 5);
     }
-    return notYet(`JSON.${member} is not yet supported`, 4);
+    return notYet(`JSON.${member} is not yet supported`, 5);
   }
 
   // A String.prototype method exists only as a callee -- there is no function value to bind, the
@@ -2163,8 +2188,8 @@ function gateMemberAccess(
     !ts.isCallExpression(access.parent)
   ) {
     return Object.hasOwn(STRING_OPS, access.name.text)
-      ? notYet('using a string method as a value is not yet supported', 4)
-      : notYet(`String.prototype.${access.name.text} is not yet supported`, 4);
+      ? notYet('using a string method as a value is not yet supported', 5)
+      : notYet(`String.prototype.${access.name.text} is not yet supported`, 5);
   }
   if (
     isStringReceiver(access.expression, checker) &&
@@ -2183,8 +2208,8 @@ function gateMemberAccess(
     !(ts.isCallExpression(access.parent) && access.parent.expression === access)
   ) {
     return Object.hasOwn(ARRAY_OPS, access.name.text)
-      ? notYet('using an array method as a value is not yet supported', 4)
-      : notYet(`Array.prototype.${access.name.text} is not yet supported`, 4);
+      ? notYet('using an array method as a value is not yet supported', 5)
+      : notYet(`Array.prototype.${access.name.text} is not yet supported`, 5);
   }
   if (
     isArrayReceiver(access.expression, checker) &&
@@ -2207,11 +2232,15 @@ function gateMemberAccess(
     if (Object.hasOwn(REGEXP_FIELDS, access.name.text)) {
       return { kind: 'accept' };
     }
+    // The data properties are closed, so what reaches here is the rest of the prototype object --
+    // Phase 8's surface, the same as `compile` above. `unicodeSets` is the one name a user might
+    // reasonably write, and it never gets this far: it is declared in lib.es2024 and this project
+    // pins `lib: ["es2023"]`, so the checker refuses the read first (plan-notes 136).
     return {
       kind: 'not-yet',
       code: 'STA1211',
-      message: `RegExp.prototype.${access.name.text} is not yet supported; planned for Phase 4 (builtins)`,
-      phase: 4,
+      message: `RegExp.prototype.${access.name.text} is not yet supported; planned for Phase 8`,
+      phase: 8,
     };
   }
 
@@ -2224,7 +2253,7 @@ function gateMemberAccess(
   if (asStatic !== undefined) {
     return ts.isMethodDeclaration(asStatic.member) &&
       !(ts.isCallExpression(access.parent) && access.parent.expression === access)
-      ? notYet('using a method as a value is not yet supported', 3)
+      ? notYet('using a method as a value is not yet supported', 5)
       : { kind: 'accept' };
   }
   // `m.size`, and the method names that are only ever callees. `size` is a READ of a count the
@@ -2239,7 +2268,7 @@ function gateMemberAccess(
       ? { kind: 'accept' } // gateCall decides it; reaching here means it already did
       : notYet(
           `${collectionName(collection)}.${access.name.text} as a value is not yet supported`,
-          4,
+          5,
         );
   }
   const declaration = classDeclarationOf(checker.getTypeAtLocation(access.expression));
@@ -2250,7 +2279,7 @@ function gateMemberAccess(
     if (shape.kind === 'object') {
       return shape.fields.some((f) => f.name === access.name.text)
         ? { kind: 'accept' }
-        : notYet('a property that is not a field of the shape is not yet supported', 3);
+        : notYet('a property that is not a field of the shape is not yet supported', 5);
     }
     // `p.x` on a DYNAMIC shape -- one with an optional property or an index signature -- resolves
     // through the shape table at run time (docs/VALUE.md §4.10). Reads and writes only: a name the
@@ -2275,7 +2304,7 @@ function gateMemberAccess(
         ? { kind: 'accept' }
         : notYet(`${access.name.text} on a RegExp match is not yet supported`, 5);
     }
-    return notYet('property access is not yet supported', 3);
+    return notYet('property access is not yet supported', 5);
   }
   // A class name reaching here with no static of that name is a member the subset cannot resolve
   // -- `C.prototype`, `C.name` and the rest of the class object, which does not exist here.
@@ -2283,14 +2312,14 @@ function gateMemberAccess(
     ts.isIdentifier(access.expression) &&
     checker.getSymbolAtLocation(access.expression)?.valueDeclaration === declaration
   ) {
-    return notYet('using a class as a value is not yet supported', 3);
+    return notYet('using a class as a value is not yet supported', 5);
   }
   // `o.x` on an accessor is a CALL, so a read is fine and a read-modify-write is not: `o.x += 1`
   // is a get and a set of one property, and the machinery that evaluates a receiver exactly once
   // across the pair hoists a SLOT, which an accessor is not.
   if (accessorDeclaringClass(declaration, access.name.text, checker) !== undefined) {
     return isReadModifyWrite(access)
-      ? notYet('a compound assignment to an accessor is not yet supported', 3)
+      ? notYet('a compound assignment to an accessor is not yet supported', 5)
       : { kind: 'accept' };
   }
   // A method used as a VALUE (`const f = o.m`) would have to build a bound closure, which is a
@@ -2298,7 +2327,7 @@ function gateMemberAccess(
   // is the shape gateCall sees. The search runs up the chain: an inherited method is a method.
   const isMethod = methodDeclaringClass(declaration, access.name.text, checker) !== undefined;
   if (isMethod && !(ts.isCallExpression(access.parent) && access.parent.expression === access)) {
-    return notYet('using a method as a value is not yet supported', 3);
+    return notYet('using a method as a value is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -2502,6 +2531,29 @@ export const OBJECT_STATICS = {
     readonly second: 'key' | 'none' | 'shaped';
   }
 >;
+
+/** Which phase owns each `Object` static that has NOT landed. One hardcoded number cannot be right
+ * for this namespace: the six unlanded members wait on two different mechanisms in two different
+ * phases (plan §7 Task 4.7 step 5, plan-notes 125 and 136).
+ *
+ * `freeze`/`isFrozen` wait on a RUNTIME-RAISED exception -- a write to a frozen object is a
+ * TypeError in strict mode, and `jsrt_throw` sets a pending cell only generated code reads, which
+ * is Phase 5 step 11's mechanism. The prototype/descriptor four are STA1204's surface, in Phase 8.
+ * A name in neither list is one `lib.es5.d.ts` declares and nothing here models yet, and member
+ * growth lands with the language surface, so Phase 5 is the honest default. */
+const OBJECT_STATIC_OWNER: Readonly<Record<string, number>> = {
+  create: 8,
+  defineProperties: 8,
+  defineProperty: 8,
+  freeze: 5,
+  getOwnPropertyDescriptor: 8,
+  getOwnPropertyDescriptors: 8,
+  getPrototypeOf: 8,
+  isFrozen: 5,
+  seal: 5,
+  isSealed: 5,
+  setPrototypeOf: 8,
+};
 
 /** The `Promise` namespace calls that lower. Each takes exactly one argument -- the combinators
  * that take two or more are the ones that need `.then`, and the executor form needs a callback
