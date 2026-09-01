@@ -12,6 +12,34 @@ Ordering follows `plan.md`: phases ascending, tasks ascending within a phase.
 
 ---
 
+## Phase 0 — Go/no-go gate ✅ CLOSED (2026-09-01)
+
+*`plan.md` §3. The gate's five steps stay in `plan.md`: they are the gate's own definition, and
+§15.1 — no phase entered without its gate — is enforced by pointing at them.*
+
+~~**Task 0.1 — Build-vs-join check.**~~ ✅ **Approved by the repository owner on 2026-09-01**, by
+this document's own title: "Stator niche decision — explicit static/dynamic policy for tooling
+binaries". `NICHE.md` names all three required elements — the niche (small standalone
+developer-tool and worker binaries being migrated from JavaScript to strict TypeScript, under an
+explicit two-mode policy over ONE module graph), the competitor that almost serves it
+([scriptc](https://github.com/vercel-labs/scriptc), whose public contract is construct-level static
+compilation with an embedded QuickJS-NG fallback), and why it does not: Stator's contract is two
+auditable source-POLICY modes in the same graph, with typed/dynamic provenance carried through HIR
+and mandatory checks where dynamic JavaScript enters typed TypeScript. Step 3's disqualifier is
+answered in the file and stands: if the real requirement is extensible end-user scripting, embedding
+an engine is the lower-risk choice and Stator should not be used. Every market claim is a product
+SELF-DESCRIPTION with a link — no competitor benchmark number is cited as evidence, per the rule in
+AGENTS.md. Two conditions ride with the approval: scriptc is re-evaluated quarterly, and reopening
+the decision needs §15.4's bar (new measured evidence in `plan-notes.md`), not a change of mind.
+
+**Check:** `NICHE.md` exists with the three required elements ✅; `git describe --tags
+--exact-match HEAD` resolves to `phase-0-approved` on its commit ✅ (see plan-notes 123).
+
+Phase 1 had already run ahead of this gate on explicit owner instruction — recorded at the time as
+an exception under §15.1 rather than as a reinterpretation of it. That exception is now moot.
+
+---
+
 ## Phase 1 — Bootstrap and specifications ✅ COMPLETE (2026-08-29)
 
 *`plan.md` §4. The locked `tsconfig.json` this phase produced stays in `plan.md` — it is normative

@@ -109,9 +109,12 @@ tests/   unit/  subset/  golden/ts/  golden/js/  differential/  bench/
 
 ## 3. Phase 0 — Go/no-go gate (human decision)
 
-> **Status: ⏳ STILL OPEN.** `NICHE.md` does not exist and there is no `phase-0-approved` tag. The initial repository snapshot is committed (`fa13a50`), but the human decision and tag are still required before Phase 2 work starts; Phase 1 was executed first on explicit owner instruction (`plan-notes.md`, Open items), and that exception does not extend further.
+> **Status: ✅ CLOSED 2026-09-01.** `NICHE.md` exists and carries the owner's explicit approval;
+> the commit that added it is tagged `phase-0-approved`. Evidence: [done.md](done.md) → Phase 0.
+> The steps below stay here because they are the gate's own definition, and §15.1's rule — that no
+> phase may be entered without its gate — is enforced by pointing at them.
 
-**Task 0.1 — Build-vs-join check.**
+~~**Task 0.1 — Build-vs-join check.**~~ ✅
 
 Steps:
 1. Re-read the field summary in §0.1. The four funded-or-active players: Static Hermes, Perry, Porffor, scriptc. A new compiler is justified only by a niche they don't serve.
@@ -138,8 +141,9 @@ logged in `plan-notes.md` (entries 1–20). Titles stay here so `§4 Task 1.N` r
 **Open follow-up:** the Node pin is **26.7.0**, which satisfies "≥ 24" but may be Current rather than
 LTS — owner to confirm or drop to 24.x (notes #9). It is the differential ground truth, so settle it
 before Phase 6's fuzzing leans on it. (The "nothing is committed yet" follow-up is closed: the tree
-has been committed since 2026-08-30. **Phase 0 remains open** — no `NICHE.md`, no
-`phase-0-approved` tag; it was bypassed on explicit owner instruction and still gates per §15.1.)
+has been committed since 2026-08-30. **Phase 0 is now closed too** — `NICHE.md` was approved by the
+owner on 2026-09-01 and its commit is tagged `phase-0-approved`, so the §15.1 exception that let
+Phase 1 run ahead of it no longer has anything to except.)
 
 The **locked `tsconfig.json`** this phase produced is normative and lives here, not in `done.md`
 (§15.7 — changes require a plan edit):

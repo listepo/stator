@@ -2799,3 +2799,39 @@ comment at the top of `ci.yml`) is what keeps the two from drifting apart — ev
 serial local chain names the parallel job that inherited it.
 
 **plan.md edited:** no. Nothing here changes the roadmap; both fixes are defects in landed work.
+
+## 123. Phase 0's gate is closed — the owner approved the niche (2026-09-01)
+
+**Decision:** the repository owner approved `NICHE.md` by name, quoting its own title: "Stator
+niche decision — explicit static/dynamic policy for tooling binaries". Recorded, not granted — the
+gate says an agent must not self-approve it (plan.md §3 Task 0.1 step 4), and this entry exists so
+that the approval has a dated record independent of the tag.
+
+**What was approved.** The niche as written: small standalone developer-tool and worker binaries
+migrating from JavaScript to strict TypeScript, under an explicit two-mode policy over ONE module
+graph — `--mode=ts` strict and unapologetic about it, `--mode=js` accepting the untyped residue and
+marking it dynamic, with runtime checks at every JS→typed-TS boundary and `stator explain --json`
+reporting which constructs stayed static. The competitor that almost serves it is scriptc, and the
+difference claimed is narrow and honest: scriptc's contract is construct-level static compilation
+with an embedded QuickJS-NG fallback; Stator's is two auditable source-POLICY modes in the same
+graph with typed/dynamic provenance carried through HIR.
+
+**Two conditions ride with it**, both already in the file and now normative: scriptc is
+re-evaluated QUARTERLY before further investment, and reopening this decision needs §15.4's bar —
+new measured evidence recorded here — not a change of mind. The file also keeps its own
+disqualifier: if the real requirement is extensible end-user scripting, embed an engine and do not
+use Stator.
+
+**Sequencing.** Phase 1 ran ahead of this gate on explicit owner instruction, recorded at the time
+as an exception under §15.1 rather than as a reinterpretation of it. Closing the gate makes that
+exception moot rather than retroactively correct — the rule that no phase may be entered without
+its gate is unchanged.
+
+**Actions taken:** `NICHE.md` status header updated from "proposed" to approved with the date and
+the approving words; §3's status block flipped from ⏳ STILL OPEN to ✅ CLOSED with a pointer to
+`done.md`; the stale "Phase 0 remains open" clause under Phase 1's open follow-up corrected; the
+completion record added to `done.md` → Phase 0. The commit carrying `NICHE.md` is tagged
+`phase-0-approved`, which is what Task 0.1's machine-verifiable Check reads.
+
+**plan.md edited:** yes — §3 status and the Task 0.1 stub; the five steps stay in `plan.md` because
+they are the gate's definition and §15.1 points at them.
