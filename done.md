@@ -32,8 +32,13 @@ SELF-DESCRIPTION with a link — no competitor benchmark number is cited as evid
 AGENTS.md. Two conditions ride with the approval: scriptc is re-evaluated quarterly, and reopening
 the decision needs §15.4's bar (new measured evidence in `plan-notes.md`), not a change of mind.
 
-**Check:** `NICHE.md` exists with the three required elements ✅; `git describe --tags
---exact-match HEAD` resolves to `phase-0-approved` on its commit ✅ (see plan-notes 123).
+**Check — PASSED** (2026-09-01; re-verified at HEAD `e27e118` the same day, five commits later):
+`NICHE.md` exists with the three required elements ✅ (the read is the paragraph above);
+`git cat-file -e phase-0-approved:NICHE.md` → exit 0, and
+`git log --diff-filter=A --format=%H phase-0-approved -- NICHE.md` → `f5bdb0c6da59ac746cfddf925a09bccae6adfe24`,
+equal to `git rev-parse phase-0-approved^{commit}` — the tagged commit is the one that added the
+file ✅ (plan-notes 123). The Check originally read `git describe --tags --exact-match HEAD`, which
+stopped passing with the next commit; replaced in `plan.md` §3 and explained in plan-notes 135.
 
 Phase 1 had already run ahead of this gate on explicit owner instruction — recorded at the time as
 an exception under §15.1 rather than as a reinterpretation of it. That exception is now moot.

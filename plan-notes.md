@@ -3380,3 +3380,110 @@ tzdata skew between them would surface as a golden byte diff indistinguishable f
 Under UTC they cannot disagree. The cost is that goldens can only prove wiring and arithmetic, which
 is why every zone-dependent claim moved to `tests/unit/date-local.test.ts` with an explicit `TZ` per
 case, on dates whose rules have been fixed since 1996.
+
+---
+
+## 134. The §13 `typescript`-API tripwire, measured: not tripped — the cost at scale is ours (2026-09-01)
+
+**Plan:** §13's first risk row arms a tripwire on the `typescript` API — *"checking >30% of compile
+wall-time, or OOM on a 100k-line graph"* — whose response is program reuse and caching first, then
+`oxc-parser` for parsing with the checker kept for types only, and a quarterly tsgo re-test recorded
+here. §12 repeats it as a standing practice. This is that measurement, and it is the first one.
+
+**Method.** A generated chain of `ts`-mode modules (N modules × 40 exported functions, each a typed
+loop plus a branch; every function reachable from `main`, so DCE keeps the whole graph and clang
+really compiles it). Each stage timed in-process around the same functions `src/cli/build.ts` calls,
+then the whole `stator build` — node startup and clang included — timed around the CLI. Host: Apple
+M3 Max, Darwin 25.6.0 arm64, Apple clang 21.0.0, Node v26.7.0, release runtime built against Boehm.
+The harness stays out of the tree: it is a measurement, not a test.
+
+| lines | createProgram | gate | lower | verify | emitC | front end | full build | `typescript` share |
+|---|---|---|---|---|---|---|---|---|
+| 11,350 | 262 ms | 39 ms | 126 ms | 190 ms | 18 ms | 0.65 s | 3.1 s | **13.6%** |
+| 44,700 | 538 ms | 137 ms | 690 ms | 3.6 s | 209 ms | 5.2 s | 14.9 s | **9.2%** |
+| 111,750 | 1.18 s | 342 ms | 2.95 s | 21.5 s | 158 ms | 26.2 s | 52.3 s | **8.5%** |
+
+The share is `createProgram` + gate + lowering's checker queries over the full build's wall time.
+Peak RSS at 111,750 lines was 856 MB, on the default heap — no OOM, no `--max-old-space-size`.
+
+**Result: not tripped, and moving away from the wire.** The `typescript` API's share *falls* as the
+graph grows, because everything that grows faster is ours. `oxc-parser` and tsgo stay parked; next
+re-test due 2026-12. Note what a smaller, more natural corpus would have said: at 11k lines the
+share is 13.6%, and on a corpus where most code is dead it read 58% — the number is meaningless
+without a graph the backend actually compiles, which is why the fixture keeps every function live.
+
+**What the measurement did find, in order of size.**
+
+1. **`verifyHir` is quadratic in program size.** `verifyFunction` and `verifyBlock` each copy the
+   entire enclosing scope (`new Map(bindings)`, `src/hir/verify.ts:587` and `:569`), so a module of
+   M hoisted functions pays O(M) per scope entered, and every function body enters several. Measured
+   190 ms → 3.6 s → 21.5 s across the three sizes: n^2.1 then n^1.9. At 111,750 lines it is 82% of
+   the front end and 41% of the entire build — five times the whole `typescript` API. A parent-linked
+   scope (lookup walks the chain; `set` writes to the innermost) removes the copy without changing
+   what the verifier accepts. **Not done here** — it is a pass rewrite with its own Check, not a
+   side effect of a measurement.
+2. **One translation unit is half the build.** clang takes ~26 s of the 52 s at 111,750 lines, on a
+   44 MB `.c`. That is §12's "split emitted C per module and compile in parallel" standing practice,
+   now with a number attached rather than an assumption.
+3. **A crash, fixed in this change.** At 111,750 lines the emitter died before clang ever ran:
+   `RangeError: Maximum call stack size exceeded` at `src/codegen/index.ts:432` —
+   `out.push(...functionLines, ...mainLines)` spreads the whole program's emitted lines into the
+   argument list, which overflows somewhere between 45k and 112k input lines. It reached the user as
+   a raw V8 stack trace, since `main()` rethrows anything that is not a `StatorError`/`BuildError`.
+   Both program-scale spreads (`:432`, and `:485` per function unit) are loops now. Golden suite
+   93/93 after the change, so the emitted bytes are unchanged.
+
+**plan.md edited:** yes — §13's row records this measurement and its date, and §12 gains the
+verifier finding as a standing practice with its numbers, since nothing in the ladder covered it.
+
+---
+
+## 135. Task 0.1's Check could only pass on the commit that closed it (2026-09-01)
+
+**Plan:** §3 Task 0.1's Check read "`NICHE.md` exists with the three required elements; `git
+describe --tags --exact-match HEAD` succeeds on its commit with tag `phase-0-approved`."
+
+**Contradiction.** That command asks whether HEAD *is* the approval commit. It was, for exactly one
+commit — `f5bdb0c`, tagged `phase-0-approved` — and has been false at every HEAD since. Five commits
+later:
+
+```
+$ git describe --tags --exact-match HEAD
+fatal: no tag exactly matches 'e27e118bf3fd763995e900d5bd41c6e564ab788c'
+$ git rev-list --count phase-0-approved..HEAD
+5
+```
+
+So the gate that §15.1 makes every later phase point at reported itself un-passed, permanently,
+while the fact it was meant to establish — an owner-approved `NICHE.md` under a tag — had not
+changed at all. Under golden rule 1 ("a task is done only when its Check passes") that is not a
+cosmetic defect: re-running the Check is how a reader confirms Phase 0 without taking `done.md`'s
+word for it, and `done.md` is explicitly not an authority.
+
+**Fix.** The Check now asserts the durable fact instead of the position of HEAD:
+
+```
+$ git cat-file -e phase-0-approved:NICHE.md            # exit 0 — tag resolves AND carries the file
+$ git log --diff-filter=A --format=%H phase-0-approved -- NICHE.md
+f5bdb0c6da59ac746cfddf925a09bccae6adfe24              # == git rev-parse phase-0-approved^{commit}
+```
+
+One command proves what the gate is for (a tag named `phase-0-approved` whose commit carries the
+approved `NICHE.md`); the second, kept as the stronger form, proves that commit is the one that
+*added* the file rather than one that happened to inherit it. Neither mentions HEAD, so both answer
+the same at any future HEAD, on any clone that has the tag.
+
+**The general rule, added to §15 rule 2.** A Check must stay re-runnable at any later HEAD. An
+assertion *about* HEAD — `--exact-match HEAD`, "the working tree is clean", a line number — is a
+point-in-time observation, not a Check, and it converts finished work into work that reports itself
+unfinished. Task 0.1 was the only Check in `plan.md` written that way (`grep -n HEAD plan.md done.md`
+finds one other hit, §7 Task 4.7 step 1's "recount at execution HEAD", which is an instruction to
+the executing agent, not an assertion).
+
+**What was NOT changed.** The approval itself, `NICHE.md`, and the tag: the gate is closed and stays
+closed, and nothing here re-decides it — that would need §15.4's bar and a human, per AGENTS.md.
+The five gate steps stay in `plan.md` §3 for the reason both files already give: they are the gate's
+definition, and §15.1 enforces itself by pointing at them.
+
+**plan.md edited:** yes — §3's Check replaced (with the discarded form and why, kept as a warning),
+and §15 rule 2 extended. `done.md`'s Phase 0 record now cites the re-verified output.
