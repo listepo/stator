@@ -56,9 +56,16 @@ Expressions produce values; statements do not. An expression-statement wraps an 
 - `TemplateLiteral` — `` `a${x}b` ``, as `quasis` and `expressions` with the invariant `quasis.length === expressions.length + 1`
 - `StringLength` — `.length` on a string, in **UTF-16 code units** (an astral character counts twice)
 - `ConsoleLogCall` — builtin console call. `method` names one of the eleven members of `CONSOLE_METHODS` (`src/hir/nodes.ts`), the single table the gate, the lowering, the verifier and the emitter all read: it gives each member its arity, how many trailing arguments are optional, and the C entry point the emitter calls. `args` is therefore either exactly `arity` long or, for the two members whose omitted tail is its own C entry point (`group`, `assert`), that minus its optional tail: the lowering pads an omitted optional with an `undefined` literal only where explicit `undefined` means what absence means. `consoleEntryPoint(method, width)` maps a width to the C call, and `STA4019` holds every node to a width it answers
-- `FunctionExpr` — a function expression or arrow function; `params`, a `body` Block, and an
+- `FunctionExpr` — a function expression or arrow function; `params`, a `body` Block, an
   optional `name` (a declaration's name, or the binding a function expression is assigned to, so
-  `[Function: name]` survives to the runtime)
+  `[Function: name]` survives to the runtime), and a `provenance` grade (plan.md §8 step 1). The
+  grade is about the SIGNATURE and answers where its types came from: `typed` if the author
+  annotated it whole — `x: number` and `@param {number} x` are the same claim in two spellings —
+  `inferred` if the checker finished it, and `dynamic` if an `Unknown` is anywhere in it, which
+  outranks the other two because an un-annotated `js` parameter is a request for a dynamic value
+  rather than an omission. A fully annotated function whose BODY holds an `Unknown` is still
+  `typed`: callers see the signature, and the signature is what a boundary checks. `stator explain`
+  prints it per function; it is not a trust ordering (see plan-notes 140)
 - `CallExpr` — a call to an arbitrary callee expression
 
 `TemplateLiteral` is a node rather than sugar for `+`, and this is the same kind of decision as

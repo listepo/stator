@@ -148,3 +148,66 @@ void test(
     }
   },
 );
+
+/* Provenance has to survive the trip to stdout (plan.md §8 step 1). `lower.test.ts` proves the HIR
+ * fact; this proves the report carries it, because a grade that is right in the HIR and lost on the
+ * way out is still a wrong answer to the question the user asked.
+ *
+ * All three grades in one matrix, because each is defined against the other two: `typed` is a
+ * signature its AUTHOR wrote whole, `inferred` is one the checker finished, and `dynamic` is one
+ * holding an Unknown -- which outranks both, since an un-annotated js parameter is not an omission
+ * the checker happened to solve, it is the request for a dynamic value. The js half is the half
+ * worth pinning: JSDoc is an annotation by the same author in a second spelling, so a fully
+ * documented `.js` function grades `typed`, and only the PARTLY documented one is `inferred`
+ * (plan-notes 140). */
+void test('explain --json grades every function typed, inferred or dynamic', () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-provenance-'));
+  try {
+    // One statement per call: `console.log` takes one argument until plan §8 step 12 lands the rest.
+    writeFileSync(
+      join(work, 'grades.ts'),
+      'function whole(x: number): number { return x; }\n' +
+        'function halfWritten(x: number) { return x; }\n' +
+        'console.log(whole(1));\n' +
+        'console.log(halfWritten(2));\n',
+    );
+    writeFileSync(
+      join(work, 'grades.js'),
+      '/**\n * @param {number} x\n * @returns {number}\n */\n' +
+        'function whole(x) { return x; }\n' +
+        '/** @param {number} x */\n' +
+        'function halfWritten(x) { return x; }\n' +
+        'function none(x) { return x; }\n' +
+        'console.log(whole(1));\n' +
+        'console.log(halfWritten(2));\n' +
+        'console.log(none(3));\n',
+    );
+
+    const ts = stator('explain', join(work, 'grades.ts'), '--json');
+    assert.equal(ts.status, 0, ts.stderr);
+    assert.deepEqual(JSON.parse(ts.stdout), {
+      verdict: 'static',
+      functions: [
+        { name: 'whole', line: 1, provenance: 'typed', verdict: 'static' },
+        // An inferred RETURN is enough to demote it: the question is what the author asserted, and
+        // the shape of the declaration never enters into it.
+        { name: 'halfWritten', line: 2, provenance: 'inferred', verdict: 'static' },
+      ],
+    });
+
+    const js = stator('explain', join(work, 'grades.js'), '--mode=js', '--json');
+    assert.equal(js.status, 0, js.stderr);
+    assert.deepEqual(JSON.parse(js.stdout), {
+      // The FILE is dynamic because `none` is; its two annotated neighbours still compile static,
+      // which is the js-mode claim §8 step 6 calls the JSDoc freebie.
+      verdict: 'dynamic',
+      functions: [
+        { name: 'whole', line: 5, provenance: 'typed', verdict: 'static' },
+        { name: 'halfWritten', line: 7, provenance: 'inferred', verdict: 'static' },
+        { name: 'none', line: 8, provenance: 'dynamic', verdict: 'dynamic' },
+      ],
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

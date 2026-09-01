@@ -286,13 +286,20 @@ depend on.
 
 Steps (all eleven detailed 2026-09-01 against the live substrate — much of step 1 is already real;
 plan-notes 131):
-1. Frontend: `allowJs` + `checkJs`-style inference in the `ts.Program`; per-function "typed | inferred | dynamic" provenance recorded into HIR (drives boundary insertion and `explain` output).
-   **Substrate already landed:** `program.ts` wires `allowJs`/`checkJs` by mode, HIR functions carry
-   `provenance`, and `explain` prints `verdict (provenance)` per function. **Remaining:** the
-   `inferred` middle grade — today lowering grades only typed-vs-dynamic; a `.js` function whose
-   signature the checker recovered (JSDoc or inference) must report `inferred`, because step 5
-   keys boundary insertion on exactly that distinction. Unit tests on `explain --json` for all
-   three grades.
+1. ~~Frontend: `allowJs` + `checkJs`-style inference in the `ts.Program`; per-function
+   "typed | inferred | dynamic" provenance recorded into HIR.~~ ✅ **landed** — the substrate
+   (`program.ts` wiring `allowJs`/`checkJs` by mode, HIR's `provenance` field, `explain`'s
+   per-function `verdict (provenance)` row), the `inferred` middle grade in `provenanceOf`
+   (`5e9f2b4`, 2026-08-31 — this step's "Remaining" clause was written a day AFTER the thing it
+   asks for), and the `explain --json` grade matrix in `tests/unit/cli.test.ts` (2026-09-01).
+   **The grade answers what the AUTHOR wrote, not which file it lives in** (plan-notes 140):
+   `typed` is a signature annotated whole in either spelling — `x: number` and `@param {number} x`
+   are the same claim by the same author — `inferred` is one the checker finished, and `dynamic` is
+   one holding an `Unknown`, which outranks both because an un-annotated `.js` parameter is not an
+   omission the checker happened to solve, it is the request for a dynamic value. This step
+   previously graded a fully JSDoc'd `.js` function `inferred`; that reading collapses the
+   annotated/un-annotated split INSIDE `.js`, which is the only split js mode trades on, and the
+   `.ts`/`.js` distinction it was reaching for is already in the report's own file path.
 2. Gate: switch the diagnostic table by mode. Concretely: (a) `any`/`as any` in `js` mode stops
    being `STA1001` and lowers to `Unknown` (the dynamic path) — decision tests asserting the SAME
    source flips verdict by mode; (b) `var` becomes legal in `js` mode only (its `ts`-mode "never"
@@ -317,14 +324,28 @@ plan-notes 131):
    `NUMERIC.md` §6.3 and pin the table's rows (null/undefined pairs, number↔string,
    boolean coercion, object→primitive) with decision + golden tests.
 5. Mixed-graph boundaries: imports from `.js` into `.ts` get boundary checks against the
-   declared/inferred type at the import site (Task 3.5's machinery, keyed on step 1's
-   provenance — `typed` callers trust, `inferred`/`dynamic` sources get checks); a lying JSDoc
-   produces a located runtime type error. **Proof shape (refined 2026-09-01):** the trap fixture
-   CANNOT be a Node-diff golden — Node runs the lying program happily, so there is nothing to
-   byte-match. It lands as a pinned-expectation test instead: the harness gains an
-   expected-stderr mode for fixtures whose POINT is the trap, and the happy-path mixed graph
-   stays an ordinary vs-Node golden.
-6. JSDoc freebie test: a `.js` file with correct JSDoc types stays on the static path — assert via `stator explain` that its functions report `static` with provenance `inferred`.
+   declared/inferred type at the import site (Task 3.5's machinery).
+   **Answer the KEY before building (2026-09-01, plan-notes 140).** This step used to say "keyed
+   on step 1's provenance — `typed` callers trust, `inferred`/`dynamic` sources get checks", and a
+   measurement killed that: `program.ts` sets `checkJs` in js mode and surfaces every `tsc`
+   diagnostic as a fatal `STA0012`, so a JSDoc contradicting its own body, and a call contradicting
+   a JSDoc, are both COMPILE errors today — `const r: number = double("5")` against
+   `@param {number} x` answers `STA0012 [js] Argument of type 'string' is not assignable`, never a
+   runtime trap. What survives to runtime is not a lying signature but a **dynamic argument
+   reaching an annotated one**, which is a property of the EDGE that no per-function grade can
+   express. So the key is the edge; provenance narrows what to check once the edge says to check.
+   **Proof shape (refined 2026-09-01, corrected 2026-09-01):** the trap fixture cannot be a
+   Node-diff golden — Node runs the trapping program happily, so there is nothing to byte-match —
+   and it cannot be a lying JSDoc either, because that program no longer reaches runtime. It lands
+   as a pinned-expectation test over a DYNAMIC value narrowed at the boundary: the harness gains an
+   expected-stderr mode for fixtures whose POINT is the trap, and the happy-path mixed graph stays
+   an ordinary vs-Node golden.
+6. JSDoc freebie test: a `.js` file with correct JSDoc types stays on the static path — assert via
+   `stator explain` that its functions report `static` with provenance **`typed`** (an annotation is
+   an annotation in either spelling; this step said `inferred` until 2026-09-01, plan-notes 140).
+   The per-function half is already pinned by `tests/unit/cli.test.ts`; what remains is the FILE
+   claim — a fully JSDoc'd `.js` module whose file verdict is `static` — and a golden fixture
+   proving it runs, byte-for-byte against Node, on the static path.
 7. Flip the `js`-column decision tests from expected-fail — **64 fixture files still carry the
    marker today**; each flips in the commit that lands its construct, never in bulk — and add the
    capstone `tests/golden/js/` fixture: one real ~200-line untyped utility library exercising
@@ -1050,3 +1071,4 @@ Standing practices:
 - **v2.8** (2026-09-01): **Phase 0's Check restated so it can pass more than once** (plan-notes 135). The gate itself is unchanged — `NICHE.md` was approved by the owner on 2026-09-01 and its commit is tagged `phase-0-approved`, which supersedes v2.1's "Phase 0 remains open" above — but the Check was written as `git describe --tags --exact-match HEAD`, which asks whether HEAD *is* the approval commit and therefore answered `fatal: no tag exactly matches` from the next commit onward: a closed gate reporting itself open at every later HEAD, in the one section §15.1 makes every phase point at. It now asserts the durable fact (`git cat-file -e phase-0-approved:NICHE.md`, with the added-in-that-commit form as the stronger check), and §15 rule 2 gained the general form — a Check must stay re-runnable at any later HEAD, because an assertion *about* HEAD is a point-in-time observation, not a Check.
 - **v2.9** (2026-09-01): **the not-yet audit's own inventory was audited, and it was 2.6× short** (plan-notes 136). Task 4.7's step 1 says to re-derive the site list at execution HEAD; parsing `gate.ts` with the `typescript` API instead of grepping it finds **165** `notYet`/`dateNotYet` sites, not 63 — and 70 of them name **Phase 3, complete since 2026-08-30**, so `rest parameters are not yet supported; planned for Phase 3` is what the compiler prints today. The audit missed them because it asked "which sites name phase 4?" — a question about the phase that happened to be open — while the rule the task itself establishes implies the general one, "does any site name a completed phase?". Task 4.7's inventory paragraph is replaced by the parsed table, step 1 now carries the general question, and step 6 gains two groups (the 70-site ladder residue; the 10 `dateNotYet` sites, whose blocker is the intl feature BUILD and so is step 3's `STA1215` question again, not a phase). §8 Phase 5 gains **step 12**, which owns the residue — six construct families in landing order with their own Check — because it is `ts`-mode static surface §1.1 promises will compile and no phase owned it; deliberately not a new phase, since §15.3 forbids the renumbering that would break `plan.md §N` citations. Phase 5's title gained "3 and", and its bucket warning — previously a feeling — became a named split trigger.
 - **v3.0** (2026-09-01): **Phase 4 closed.** Task 4.7 was its last open task, and closing it is what made the phase closable honestly -- 165 not-yet sites re-derived, every one now naming the phase that owns its blocker, and `tests/unit/phases.test.ts` failing the build if that stops being true. §7 compresses to a completed-phase stub on §6's model (task numbers and titles stay, so `§7 Task 4.N` citations resolve); `done.md` gains the exit criterion answered bullet by bullet with the dashboard beside it, and its Phase 4 heading now reads ✅ COMPLETE, which `src/support/phases.ts` mirrors in the same change because the test pins the two together. Three of the five exit bullets sit below 100% on the dashboard and the phase still exits: the dashboard counts MEMBERS, not blockers, and every residue names an owner (plan-notes 125). Phase 5 is now the open phase.
+- **v3.1** (2026-09-01): **Phase 5 step 1 was already landed, and its own wording was the thing that needed fixing** (plan-notes 140). The `inferred` grade shipped in `5e9f2b4` the day before v2.7 wrote it up as remaining; what was actually missing was the `explain --json` test, now in `tests/unit/cli.test.ts` and proved able to fail. The step's spec half was worse than stale: it graded a fully JSDoc'd `.js` function `inferred` while the tree grades it `typed`, and step 5 was about to key boundary insertion on a field whose two readings put the trust axis in OPPOSITE directions. A measurement settled it — `checkJs` plus `program.ts`'s fatal `STA0012` means a lying JSDoc is a compile error, not a runtime trap, so what needs checking is a dynamic argument reaching an annotated signature, which is a property of the EDGE and not of any per-function grade. Steps 1, 5 and 6 edited accordingly; `docs/MODES.md` §4 Example 1 (which asserted a runtime check for a call `tsc` rejects statically) and `docs/HIR.md`'s undocumented `provenance` field fixed in the same change.

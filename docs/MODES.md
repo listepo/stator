@@ -121,7 +121,7 @@ When a value flows from a `.js` module (untyped or partially typed) into `.ts` c
 
 ### Boundary-check examples
 
-**Example 1: JSDoc lie**
+**Example 1: a value the checker cannot see, narrowed in `.ts`**
 
 ```javascript
 // math.js
@@ -130,20 +130,30 @@ When a value flows from a `.js` module (untyped or partially typed) into `.ts` c
  * @returns {number}
  */
 export function double(x) {
-  return x * 2;  // Runtime-checked at call site in .ts
+  return x * 2;
+}
+
+/** No annotation, so `settings` is `any` and so is everything read out of it. */
+export function factorFrom(settings) {
+  return settings.factor;
 }
 ```
 
 ```typescript
 // main.ts
-import { double } from "./math.js";
+import { double, factorFrom } from "./math.js";
 
-const result: number = double("5");  // Type-checks (JSDoc says number)
-// Emitted: check("5", "number") → STA2001 runtime error:
-//   "type error at main.ts:3:28: expected number, got string"
+const factor: number = factorFrom(JSON.parse(raw));  // Type-checks: `any` narrows to `number`
+// Emitted: check(factorFrom(...), "number") → STA2001 runtime error:
+//   "type error at main.ts:3:24: expected number, got string"
+console.log(double(factor));
 ```
 
-The JSDoc is trusted by the type checker (strict compliance), but the runtime check catches the lie.
+The JSDoc on `double` is not what needs checking, and cannot be: `checkJs` verifies it against the
+body and Stator makes that verdict fatal, so `double("5")` is a **compile** error (`STA0012 [js]
+Argument of type 'string' is not assignable to parameter of type 'number'`) rather than a runtime
+one — measured 2026-09-01, plan-notes 140. What no checker can see is the value `factorFrom`
+actually answers, and narrowing it to `number` is where the boundary check goes.
 
 **Example 2: Inferred type from untyped .js**
 

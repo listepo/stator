@@ -3569,3 +3569,93 @@ entries numbered `133` (lines 3273 and 3323, both 2026-09-01). Note 115 set the 
 the newer entry, never retroactively renumber a note others may cite. Both 133s predate this entry
 and both are already cited, so neither is safe to move by the rule that produced the rule; recorded
 here so the next collision is the fourth, not a surprise.
+
+## 140. The `inferred` provenance grade was already landed, and the plan asked for it in the wrong words (2026-09-01)
+
+**Context.** Phase 5 step 1's only remaining item, per its own text: *"the `inferred` middle grade
+— today lowering grades only typed-vs-dynamic; a `.js` function whose signature the checker
+recovered (JSDoc or inference) must report `inferred`."*
+
+**Finding 1: it was landed before the sentence was written.** `provenanceOf`
+(`src/lower/index.ts`) has returned all three grades since `5e9f2b4` (2026-08-31); the step-1
+detail that calls it remaining was written on 2026-09-01 (plan-notes 131, v2.7), a day later.
+Live, at this HEAD:
+
+```
+$ node src/cli/main.ts explain grades.ts --json
+{"verdict":"static","functions":[
+  {"name":"whole","line":1,"provenance":"typed","verdict":"static"},
+  {"name":"halfWritten","line":2,"provenance":"inferred","verdict":"static"}]}
+$ node src/cli/main.ts explain grades.js --mode=js --json
+{"verdict":"dynamic","functions":[
+  {"name":"whole","line":5,"provenance":"typed","verdict":"static"},
+  {"name":"halfWritten","line":7,"provenance":"inferred","verdict":"static"},
+  {"name":"none","line":8,"provenance":"dynamic","verdict":"dynamic"}]}
+```
+
+Plan-notes 131's method — write the steps against the live tree — is the right one; it read
+`explain`'s printer and `program.ts`, saw the substrate, and did not read `provenanceOf`. The
+lesson is 136's again at a smaller scale: a step that says "already landed: A, B, C — remaining:
+D" has to check D against the tree with the same care it checked A, B and C.
+
+**Finding 2: the plan and the tree disagree on what `inferred` MEANS, and they are inverted.**
+Step 1 and step 6 both grade a JSDoc-annotated `.js` function `inferred`; the tree grades it
+`typed`, on the ground that `@param {number} x` is the same claim by the same author as
+`x: number`. Worse, the two readings put the trust axis in opposite directions: step 5 says
+"`typed` callers trust, `inferred`/`dynamic` sources get checks", while the landed test comment
+says "an annotation is a claim a boundary must check, an inference is derived from the code and is
+already sound". One field, two contradictory meanings, and step 5 was about to be keyed on it.
+
+**Finding 3, the measurement that settles it.** Step 5's premise — a lying JSDoc produces a
+located RUNTIME type error — does not hold. `program.ts` sets `checkJs: mode === 'js'` and
+surfaces every `ts.getPreEmitDiagnostics` entry as a fatal `STA0012`, so the lie never reaches a
+runtime check:
+
+```
+$ cat math.js
+/** @param {number} x @returns {number} */
+export function double(x) { return x * 2; }
+$ cat main.ts
+import { double } from "./math.js";
+const result: number = double("5");
+$ node src/cli/main.ts build main.ts -o app --mode=js
+main.ts:2:31 STA0012 [js] Argument of type 'string' is not assignable to parameter of type 'number'.
+```
+
+A JSDoc that contradicts its own body fails the same way. So a JSDoc is not an unverified claim in
+this compiler — `checkJs` verifies it, and the gate makes the verdict fatal. What DOES survive to
+runtime is a dynamic argument reaching an annotated signature (a value from `JSON.parse`, from an
+un-annotated `.js` export, later from FFI). That is a property of the EDGE, and no per-function
+grade can express it.
+
+**Decision: keep the tree's semantics.** `typed` = the author annotated the signature whole, in
+either spelling; `inferred` = the checker finished it; `dynamic` = an `Unknown` is in it, which
+outranks both. Three reasons: it answers the question the field's name asks; it is strictly more
+informative, since the `.ts`/`.js` split the plan wanted is already in the report's own file path;
+and collapsing JSDoc to `inferred` would erase the annotated/un-annotated split INSIDE `.js`,
+which is the only split js mode trades on. Note that within `.ts` the `typed`/`inferred` line
+carries no trust difference at all — `strict` verifies both — which is the clearest sign that
+provenance was never the right key for boundary insertion.
+
+**plan.md edited** (same change, §15 rule 6):
+
+- §8 step 1: struck through and marked landed, with the commit and the test; the JSDoc clause
+  corrected, and the reason it was wrong recorded in the step itself so the next reader does not
+  re-derive it.
+- §8 step 5: the provenance key removed and replaced by the measurement above, with the edge named
+  as the actual key. Its proof shape is corrected too: the trap fixture cannot be a lying JSDoc,
+  because that program no longer reaches runtime.
+- §8 step 6: provenance `inferred` → `typed`; the per-function half is landed, the file-level claim
+  and its golden are what remain.
+
+**Also fixed, in the same change:**
+
+- `docs/MODES.md` §4 Example 1 asserted that `double("5")` against a `@param {number}` "type-checks
+  (JSDoc says number)" and is caught by an emitted runtime check. It does not type-check, and no
+  future work makes it — `tsc` reads the JSDoc, so the call is statically wrong. The example is
+  rewritten to a lie `tsc` cannot see, which is what a boundary check is actually for.
+- `docs/HIR.md`'s `FunctionExpr` bullet gained `provenance`. `provenanceOf`'s doc comment has cited
+  `docs/HIR.md` since `5e9f2b4` and the field was never described there.
+
+**Not fixed here:** `MODES.md` §4's other two examples describe boundary checks that are step 5's
+to make true; they are not wrong in the way Example 1 was, so they stay as written.
