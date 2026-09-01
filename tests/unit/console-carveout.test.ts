@@ -14,38 +14,13 @@
  * satisfies the shape and fails the ordering check; one printing to stdout fails the stream check.
  */
 import { strict as assert } from 'node:assert';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
-
-const CLI = fileURLToPath(new URL('../../src/cli/main.ts', import.meta.url));
-
-/** Compile `source` in ts mode, run it, and hand back both streams separately — the stream a line
- * lands on is part of what these three promise, so the two cannot be merged here. */
-function compileAndRun(source: string): { stdout: string; stderr: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'stator-console-'));
-  try {
-    const entry = join(dir, 'main.ts');
-    const out = join(dir, 'main');
-    writeFileSync(entry, source);
-    const build = spawnSync(process.execPath, [CLI, 'build', entry, '-o', out, '--mode=ts'], {
-      encoding: 'utf8',
-    });
-    assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
-    const run = spawnSync(out, [], { encoding: 'utf8' });
-    assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
-    return { stdout: run.stdout, stderr: run.stderr };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
+import { compileAndRunStreams } from './helpers.ts';
 
 void test('console.time/timeEnd echo the label with a duration in ms', () => {
-  const { stdout } = compileAndRun(
+  const { stdout } = compileAndRunStreams(
     "console.time('alpha');\nconsole.timeEnd('alpha');\nconsole.time();\nconsole.timeEnd();\n",
+    'console',
   );
   const lines = stdout.trimEnd().split('\n');
   assert.equal(lines.length, 2);
@@ -59,7 +34,7 @@ void test('console.time/timeEnd echo the label with a duration in ms', () => {
 void test('a longer interval measures longer, and a timer that never started prints nothing', () => {
   // Ordering, not magnitude: the wall time a loop takes is not a number a test may assert, but
   // "more work took longer" is a property a stub returning a constant cannot fake.
-  const { stdout } = compileAndRun(
+  const { stdout } = compileAndRunStreams(
     [
       "console.time('quick');",
       "console.timeEnd('quick');",
@@ -74,6 +49,7 @@ void test('a longer interval measures longer, and a timer that never started pri
       // this runtime does not have, so it prints nothing at all — the same observable stdout.
       "console.timeEnd('never-started');",
     ].join('\n'),
+    'console',
   );
   const lines = stdout.trimEnd().split('\n');
   assert.deepEqual(
@@ -91,7 +67,10 @@ void test('a longer interval measures longer, and a timer that never started pri
 });
 
 void test('console.trace writes its prefix to stderr, not stdout', () => {
-  const { stdout, stderr } = compileAndRun("console.trace('why');\nconsole.trace();\n");
+  const { stdout, stderr } = compileAndRunStreams(
+    "console.trace('why');\nconsole.trace();\n",
+    'console',
+  );
   // Node's stream split, which is the half of `trace` that IS reproducible. The frames are not:
   // this runtime has no unwinder and does not fabricate any, so the contract is the prefix.
   assert.equal(stdout, '');

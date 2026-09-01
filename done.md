@@ -537,6 +537,47 @@ store), `unicodeSets` (declared in lib.es2024, unreachable while `tsconfig.json`
 fixed-arity table cannot express). Dashboard: `RegExp.prototype` 2/15 → **13/15**, total
 154/196 → **165/196**.
 
+**`Date` slice A landed (2026-09-01) — the TZ-independent core.** Plan §7 Task 4.2's Date steps
+1-7. A Date is one `double` on the heap behind a `jsrt_class_date` descriptor (`docs/VALUE.md`
+§4.11) — the `JSRTRegExp` layout with a number where the pattern strings were, so it prefix-shares
+`const JSRTClass *cls` with `JSRTObject`, adds no GC edges, and `jsrt_is_date` is a pointer
+comparison. Three HIR nodes on the closed-table discipline: `DateOp` over `DATE_OPS` (22 members),
+`DateStaticCall` over `DATE_STATICS` (`UTC`, `parse`, `now`), and `DateNew`, with verifier code
+**STA4092** and runtime contract **STA4093**. `DATE_OPS` writes each C name out explicitly rather
+than deriving it, because the mechanical camelCase→snake_case rule the string ops use turns
+`getUTCFullYear` into `get_u_t_c_full_year`.
+
+The landed surface: `new Date(ms | isoString | date)` and `new Date()`; `getTime`/`valueOf`/
+`setTime`; the 8 `getUTC*` getters; the 7 `setUTC*` setters; `toISOString`/`toJSON`/`toUTCString`;
+`Date.UTC` (1-7 args, spec defaults filled at lower time so the runtime entry stays fixed-arity);
+ISO-only `Date.parse`; `Date.now`. Calendar arithmetic is Hinnant's `days_from_civil`/
+`civil_from_days` over the proleptic Gregorian calendar §21.4.1 defines, validated against Node by
+its own runtime corpus (`runtime/tests/print_dates.{c,mjs}`) BEFORE the compiler was touched — pre-
+epoch flooring, the 1900/2000 leap exceptions, TimeClip at ±8.64e15, expanded ±6-digit years,
+rolling setters, §21.4.4.21's Invalid-Date recovery for `setUTCFullYear` alone, and `toJSON`'s
+`null`.
+
+`new Date()` needed no node of its own: §21.4.2.1 step 2 defines it as the current time value, so
+the lowering desugars it to `new Date(Date.now())`, which keeps `date-new` in the four switch arms
+it shares with `json-parse` and costs the HIR nothing. It is a desugaring and not padding because
+`new Date(undefined)` is an Invalid Date — an absent argument and an explicit `undefined` are
+different programs. `Date.now` and the zero-argument constructor are ACCEPTED rather than deferred:
+nondeterminism is a proof problem, not an acceptance problem, and they prove through the
+determinism carve-out (`tests/unit/date-clock.test.ts` — wall-clock era, whole milliseconds,
+monotonicity, real advance across ~3M iterations, and the desugaring bracketed by two readings of
+the same clock).
+
+Three documented ceilings, each recorded rather than worked around: `Date.parse` is ISO-only (Node's
+non-ISO heuristics are TZ-dependent and implementation-defined, so a golden over one would pin this
+machine); `toISOString` on an Invalid Date aborts where §21.4.4.36 throws a `RangeError`, the
+`Object.freeze` ceiling exactly, until Phase 5 step 11; and `toJSON` answers `null` for an Invalid
+Date though `lib.es5.d.ts` declares it `(): string` — §21.4.4.37 and Node both say `null`, which is
+what makes `JSON.stringify(new Date(NaN))` the string `"null"`. `STA1210` became a RESIDUE code
+(the `STA1211` shape) naming one member at a time: slice B (local time, blocked on the golden
+runner's `TZ` pin) and the `toString`/`toLocale*` family (ICU CLDR data). Full record and the four
+places the tree corrected the plan's steps: plan-notes 132. Dashboard: `Date` **3/3** (2 + 1
+carved), `Date.prototype` **21/43**, total 165/196 → **190/239 (79%)**.
+
 ### Task 4.3 — RegExp
 
 **Task 4.3 landed (2026-08-30).** `libregexp` (+ `libunicode`, `cutils`) is vendored from quickjs-ng `v0.16.2` into `runtime/vendor/quickjs-ng/`, recorded in its own `VENDOR.md`, and compiled with `-Wall` alone rather than this repo's `-Wall -Wextra -Werror`: upstream code is not ours to fix, and a warning flag is not a correctness flag (plan-notes 101). The engine asks its embedder for exactly three functions — an allocator, a stack-depth question and a timeout question — and `runtime/src/jsrt_regexp.c` is the whole bridge. Two facts about that bridge were read out of the engine rather than assumed: `lre_compile` takes UTF-8, or CESU-8 when the pattern is not a unicode one (a lone surrogate is legal in a non-unicode pattern and has no UTF-8 encoding), and the capture array must be sized by `lre_get_alloc_count`, NOT by twice the capture count — the executor spills its own registers into the same array, and upstream's comment records the heap overflow that taught it. The subject needs no conversion at all: our strings ARE UTF-16 code units, which is `cbuf_type` 1, and the engine promotes that to 2 by itself for a unicode pattern. Above the C boundary, `RegExpLiteral` and `RegExpOp` joined the HIR on the `StringOp` table discipline (`REGEXP_OPS`, verifier `STA4086`): the pattern and the flags travel as TEXT, so nothing in this compiler parses them and nothing in it can disagree with the engine, and the literal is compiled at EVERY evaluation rather than hoisted — §22.2.4.1 makes each evaluation a fresh object, and it has to be, because `lastIndex` is mutable state on it (plan-notes 102). `test` is the landed surface; `exec` and the non-global `match` stay under `STA1211` because they answer an array WITH properties and a jsrt array is dense with no property table, and `new RegExp(...)` stays deferred because a pattern that is not in the source is a pattern the compiler cannot see. Dashboard: **123/186 (66%)**, `RegExp.prototype` at 1/15 — the denominator grew by the whole prototype, which is the dashboard's rule (plan-notes 95). Next on this task's own ground: the RegExp-taking `String.prototype` methods.

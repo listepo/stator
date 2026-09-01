@@ -12,38 +12,15 @@
  * plausible ways to get this wrong.
  */
 import { strict as assert } from 'node:assert';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { compileAndRunLines } from './helpers.ts';
 
-const CLI = fileURLToPath(new URL('../../src/cli/main.ts', import.meta.url));
 const SAMPLES = 2000;
 
-/** Compile `source` in ts mode, run it, and hand back the lines it printed. */
-function compileAndRun(source: string): string[] {
-  const dir = mkdtempSync(join(tmpdir(), 'stator-random-'));
-  try {
-    const entry = join(dir, 'main.ts');
-    const out = join(dir, 'main');
-    writeFileSync(entry, source);
-    const build = spawnSync(process.execPath, [CLI, 'build', entry, '-o', out, '--mode=ts'], {
-      encoding: 'utf8',
-    });
-    assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
-    const run = spawnSync(out, [], { encoding: 'utf8' });
-    assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
-    return run.stdout.trimEnd().split('\n');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
 void test('Math.random stays in [0, 1) and varies', () => {
-  const lines = compileAndRun(
+  const lines = compileAndRunLines(
     `for (let i = 0; i < ${String(SAMPLES)}; i++) {\n  console.log(Math.random());\n}\n`,
+    'random',
   );
   assert.equal(lines.length, SAMPLES);
 

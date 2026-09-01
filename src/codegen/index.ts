@@ -12,6 +12,9 @@ import type {
   ClassMethod,
   CollectionOp,
   CollectionOperation,
+  DateNew,
+  DateOp,
+  DateStaticCall,
   DynFieldAssignment,
   DynObjectLiteral,
   EnvCapture,
@@ -46,6 +49,8 @@ import type {
 import {
   arrayOpCallsBack,
   consoleEntryPoint,
+  DATE_OPS,
+  DATE_STATICS,
   REGEXP_FIELDS,
   REGEXP_OPS,
   SET_OPS,
@@ -223,6 +228,9 @@ class Emitter {
     | JsonParse
     | JsonStringify
     | CollectionOp
+    | DateNew
+    | DateOp
+    | DateStaticCall
     | DynObjectLiteral
     | MathCall
     | MethodCall
@@ -892,6 +900,9 @@ class Emitter {
       // `m.set(f(), g())` must run f before g (plan-notes 55).
       // One rooted slot for the argument: the runtime walk allocates its result while the
       // argument must stay reachable, and a slot is the frame discipline's way to promise that.
+      // `new Date(x)` is the same shape: the argument (a string, or another Date) must stay
+      // reachable across the JSRTDate allocation.
+      case 'date-new':
       case 'json-parse':
       case 'json-stringify':
         this.callSlots.set(expr, this.slotCount);
@@ -916,6 +927,9 @@ class Emitter {
         break;
       // The same reachability promise, one slot per argument: an Object walk allocates its
       // result, and `Object.hasOwn(o, k)` must hold BOTH operands across the call.
+      // `Date.UTC(y, m, ...)` sequences for the same reason, even though every operand is an
+      // immediate: C would otherwise pick the order of the calls that produce them.
+      case 'date-static':
       case 'object-static':
         this.callSlots.set(expr, this.slotCount);
         this.slotCount += expr.args.length;
@@ -928,8 +942,11 @@ class Emitter {
       // argument order.
       // A regexp op is the same shape: `re.test(s)` holds the compiled pattern rooted while the
       // subject is evaluated, and the subject rooted while the engine allocates.
+      // A date op is the same shape again: `d.setUTCHours(f(), g())` must run f before g, and
+      // the receiver stays rooted while a string-producing op (toISOString) allocates.
       case 'array-op':
       case 'collection-op':
+      case 'date-op':
       case 'regexp-op':
       case 'string-op':
         this.callSlots.set(expr, this.slotCount);
@@ -1979,6 +1996,7 @@ class Emitter {
       }
 
       // A single-operand runtime walk: the argument rides in its rooted slot across the call.
+      case 'date-new':
       case 'json-parse':
       case 'json-stringify':
       case 'promise-static': {
@@ -1996,10 +2014,14 @@ class Emitter {
         if (expr.kind === 'promise-static') {
           this.usedAsync = true;
         }
+        // One C function covers all three `new Date(x)` argument forms -- number, string and
+        // Date -- because the discrimination is a tag test the runtime already has to make.
         const runtimeCall =
           expr.kind === 'promise-static'
             ? `jsrt_promise_${expr.method}`
-            : `jsrt_json_${expr.kind === 'json-parse' ? 'parse' : 'stringify'}`;
+            : expr.kind === 'date-new'
+              ? 'jsrt_date_from_value'
+              : `jsrt_json_${expr.kind === 'json-parse' ? 'parse' : 'stringify'}`;
         const opCall = `${runtimeCall}(${this.slotAt(base)})`;
         if (!flushed) {
           parts.push(opCall);
@@ -2016,6 +2038,7 @@ class Emitter {
       // jsrt_string_char_code_at, indexOf -> jsrt_array_index_of).
       case 'collection-op':
       case 'array-op':
+      case 'date-op':
       case 'regexp-op':
       case 'string-op': {
         const base = this.callSlots.get(expr);
@@ -2042,17 +2065,21 @@ class Emitter {
           this.slotAt(base),
           ...expr.args.map((_, index) => this.slotAt(base + 1 + index)),
         ].join(', ');
+        // A date op names its C function from the table rather than deriving it: snakeCase would
+        // turn `getUTCFullYear` into `get_u_t_c_full_year`.
         const opCall =
           expr.kind === 'collection-op'
             ? collectionCall(expr.op, expr.collection, operands)
-            : expr.kind === 'regexp-op'
-              ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
-                // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
-                // `exec` already answers a value: the match array, or null.
-                REGEXP_OPS[expr.op].result === 'boolean'
-                ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
-                : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
-              : `jsrt_${expr.kind === 'array-op' ? 'array' : 'string'}_${snakeCase(expr.op)}(${operands})`;
+            : expr.kind === 'date-op'
+              ? `${DATE_OPS[expr.op].fn}(${operands})`
+              : expr.kind === 'regexp-op'
+                ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
+                  // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
+                  // `exec` already answers a value: the match array, or null.
+                  REGEXP_OPS[expr.op].result === 'boolean'
+                  ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
+                  : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
+                : `jsrt_${expr.kind === 'array-op' ? 'array' : 'string'}_${snakeCase(expr.op)}(${operands})`;
         // An op that calls back into compiled code can throw, so it gets its own STATEMENT and a
         // pending check -- the same discipline `call` follows, and for the same reason: the check
         // has to sit between the op and whatever consumes its result, which a comma expression
@@ -2078,12 +2105,15 @@ class Emitter {
       // One runtime function per method, number -> number. The single-argument form nests
       // directly; the binary form sequences its arguments through slots because C would otherwise
       // pick the order (`Math.pow(f(), g())` must run f first).
+      case 'date-static':
       case 'math-call':
       case 'object-static': {
         const name =
           expr.kind === 'math-call'
             ? `jsrt_math_${expr.method}`
-            : `jsrt_object_${snakeCase(expr.method)}`;
+            : expr.kind === 'date-static'
+              ? DATE_STATICS[expr.method].fn
+              : `jsrt_object_${snakeCase(expr.method)}`;
         // Math takes immediates, so a lone argument has neither an order to fix nor anything to
         // keep rooted and nests directly. An Object walk always uses its slots (see counting).
         if (expr.kind === 'math-call' && expr.args.length <= 1) {

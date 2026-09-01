@@ -226,6 +226,27 @@ it. `test` is the whole table for now; `exec` is absent because it answers an AR
 (`index`, `input`, `groups` hang off the match array) and a jsrt array is dense with no property
 table, so landing it would mean either a wrong answer or a representation change.
 
+Task 4.2's Date slice added three nodes on the same table discipline, and one of them is
+interesting for what it does NOT need. `DateOp` is `StringOp`'s shape over `DATE_OPS`, with the
+receiver kind pinned the way `RegExpOp`'s is (`STA4092`) — the `jsrt_date_*` accessors read a
+`JSRTDate` without a tag test. The table writes each C name out explicitly rather than deriving
+it, because the mechanical `camelCase → snake_case` rule the string and array ops use turns
+`getUTCFullYear` into `get_u_t_c_full_year`; that is the whole reason `DATE_OPS` carries an `fn`
+field where `STRING_OPS` carries none. `DateStaticCall` is `ObjectStaticCall`'s namespace shape
+over `DATE_STATICS`, pinned to `number` because both `Date.UTC` and `Date.parse` answer a time
+value.
+
+`DateNew` is the interesting one. It is neither a `NewExpr` (there is no descriptor and no
+constructor body) nor a `CollectionNew` (that one never takes an argument), and it carries exactly
+one argument for three source forms — a time value, an ISO string, another Date — because the
+discrimination is a tag test the runtime has to make anyway, so hoisting it into three node kinds
+would buy the compiler nothing it could then check. The ZERO-argument form gets no node at all:
+§21.4.2.1 step 2 defines `new Date()` as the current time value, so the lowering desugars it to
+`new Date(Date.now())` — a `date-static` sitting in the `arg` slot. That is not padding, and the
+distinction matters: `new Date(undefined)` is an Invalid Date, so an absent argument and an
+explicit `undefined` are different programs, which is why the desugaring is to an explicit `now`
+call rather than to the undefined-literal every other optional position gets.
+
 Task 3.10 added exceptions, as two statements:
 
 - **`ThrowStatement`** carries the thrown expression. Its type is `undefined`, but nothing consumes

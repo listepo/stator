@@ -334,17 +334,20 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'array-op':
     case 'method-call':
     case 'collection-op':
+    case 'date-op':
     case 'regexp-op':
     case 'string-op': {
       const target = sub(expr.target);
       const args = rewriteEach(expr.args, sub);
       return target === expr.target && args === expr.args ? expr : { ...expr, target, args };
     }
+    case 'date-static':
     case 'math-call':
     case 'object-static': {
       const args = rewriteEach(expr.args, sub);
       return args === expr.args ? expr : { ...expr, args };
     }
+    case 'date-new':
     case 'json-parse':
     case 'json-stringify':
     case 'promise-static': {

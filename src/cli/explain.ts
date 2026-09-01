@@ -377,13 +377,16 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'math-call':
       return expr.args.some(expressionHasUnknown);
     case 'array-op':
+    case 'date-op':
     case 'string-op':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    case 'date-new':
     case 'json-stringify':
       return expressionHasUnknown(expr.arg);
     // A namespace walk answers what its argument holds, so an Unknown ARGUMENT carries through --
     // except for `fromEntries`, whose result is a dynamic shape and therefore Unknown outright,
     // which the check at the top of this function has already answered.
+    case 'date-static':
     case 'object-static':
       return expr.args.some(expressionHasUnknown);
     // A promise's own value type is what makes the awaited result dynamic or not, and that type

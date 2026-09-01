@@ -3,6 +3,7 @@ import type { HField, HType } from '../hir/types.ts';
 import {
   accessorName,
   H_BOOLEAN,
+  H_DATE,
   H_NULL,
   H_NUMBER,
   H_REGEXP,
@@ -94,6 +95,10 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
 
   if (isLibInterface(type, 'RegExp')) {
     return H_REGEXP;
+  }
+
+  if (isLibInterface(type, 'Date')) {
+    return H_DATE;
   }
 
   const object = classTypeToHType(type, checker, depth);

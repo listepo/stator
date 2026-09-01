@@ -636,6 +636,61 @@ void test('console methods in the landed set are accepted, the rest deferred', (
   assert.deepEqual(codesFor('const xs: [number] = [1];\nconsole.log(...xs);'), ['STA1214']);
 });
 
+// Task 4.2: `Date` slice A -- the TZ-INDEPENDENT surface. What the gate decides here is which
+// members exist, and every refusal carries STA1210 (Date's residue code, as STA1211 is RegExp's)
+// rather than the generic STA1214, so a program can tell "this builtin is partly here" from
+// "this construct is not".
+test('gate: Date slice A lands the UTC surface and refuses local time by name', () => {
+  // The constructor: one argument (a time value, an ISO string, another Date), or none at all.
+  assert.deepEqual(codesFor('const d = new Date(0);'), []);
+  assert.deepEqual(codesFor("const d = new Date('2024-01-01T00:00:00Z');"), []);
+  assert.deepEqual(codesFor('const a = new Date(0);\nconst b = new Date(a);'), []);
+  // The zero-argument form is ACCEPTED even though it reads a clock: nondeterminism is a proof
+  // problem, not an acceptance problem, and tests/unit/date-clock.test.ts is the proof.
+  assert.deepEqual(codesFor('const d = new Date();'), []);
+  // The COMPONENT constructor is local time, which is slice B.
+  assert.deepEqual(codesFor('const d = new Date(2024, 1, 29);'), ['STA1210']);
+  assert.deepEqual(codesFor('const xs: [number] = [0];\nconst d = new Date(...xs);'), ['STA1210']);
+
+  // The landed prototype surface: the two time-value reads, the eight UTC getters, the seven UTC
+  // setters, the three string forms.
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getTime());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.valueOf());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getUTCFullYear());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getUTCMilliseconds());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toISOString());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toJSON());'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toUTCString());'), []);
+  // Trailing components may be omitted -- the lowering pads them -- but not added.
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.setUTCHours(1));'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.setUTCHours(1, 2, 3, 4));'), []);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.setUTCHours(1, 2, 3, 4, 5));'), [
+    'STA1210',
+  ]);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.setUTCDate());'), ['STA1210']);
+
+  // Every LOCAL-time member is slice B, blocked on the golden runner's TZ pin.
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getFullYear());'), ['STA1210']);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.getTimezoneOffset());'), [
+    'STA1210',
+  ]);
+  assert.deepEqual(codesFor('const d = new Date(0);\nconsole.log(d.toString());'), ['STA1210']);
+  // A method used as a VALUE has no function object to bind, the rule every builtin follows.
+  assert.deepEqual(codesFor('const d = new Date(0);\nconst f = d.getTime;'), ['STA1214']);
+
+  // The namespace. `now` is a landed member under the carve-out; everything else is refused.
+  assert.deepEqual(codesFor('console.log(Date.UTC(2024, 0, 1));'), []);
+  assert.deepEqual(codesFor('console.log(Date.UTC(2024, 0, 1, 2, 3, 4, 5));'), []);
+  // Only the YEAR is required: §21.4.3.4 defaults month to 0 and the rest to 0/1, and the lib
+  // declares every later parameter optional, so a one-argument call is legal both ways.
+  assert.deepEqual(codesFor('console.log(Date.UTC(2024));'), []);
+  assert.deepEqual(codesFor('console.log(Date.UTC());'), ['STA1210']);
+  assert.deepEqual(codesFor('console.log(Date.UTC(2024, 0, 1, 2, 3, 4, 5, 6));'), ['STA1210']);
+  assert.deepEqual(codesFor("console.log(Date.parse('2024-01-01'));"), []);
+  assert.deepEqual(codesFor('console.log(Date.now());'), []);
+  assert.deepEqual(codesFor('const f = Date.now;'), ['STA1214']);
+});
+
 // Task 4.2: Map/Set forEach takes a CALLBACK, not an iterator — the distinction that lets it land
 // while `keys`/`values`/`entries` wait on the Symbol.iterator protocol.
 void test('Map and Set forEach are accepted; the iterator forms stay deferred', () => {

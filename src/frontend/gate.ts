@@ -1,8 +1,10 @@
 import * as ts from 'typescript';
-import type { ConsoleMethod, RegExpOperation } from '../hir/nodes.ts';
+import type { ConsoleMethod, DateOperation, DateStatic, RegExpOperation } from '../hir/nodes.ts';
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
+  DATE_OPS,
+  DATE_STATICS,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -507,6 +509,20 @@ function notYet(message: string, phase: number): GateResult {
   };
 }
 
+/** `Date`'s residue code, as `STA1211` is `RegExp`'s: a Date member outside the landed tables is
+ * refused under its own number rather than the generic `STA1214`, so a program can tell "this
+ * builtin is partly here" from "this construct is not". Every remaining member is slice B --
+ * local time, blocked on the golden runner's TZ pin -- or the `toString`/`toLocale*` family, whose
+ * CLDR names belong to the ICU feature build (plan §7 Task 4.2, Date steps 8-9). */
+function dateNotYet(message: string): GateResult {
+  return {
+    kind: 'not-yet',
+    code: 'STA1210',
+    message: `${message} is not yet supported; planned for Phase 4 (builtins)`,
+    phase: 4,
+  };
+}
+
 /** Readable construct names for the catch-all message. `ts.SyntaxKind[kind]` gives the enum name
  * ("ForStatement"), which is accurate but reads like an internal error to a user. */
 function describeKind(kind: ts.SyntaxKind): string {
@@ -677,6 +693,7 @@ function isGlobalReference(node: ts.Identifier): boolean {
       parent.name === node ||
       (parent.expression === node &&
         (isConsoleLog(parent) ||
+          node.text === 'Date' ||
           node.text === 'Math' ||
           node.text === 'Object' ||
           node.text === 'Promise' ||
@@ -1036,6 +1053,25 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
         ? { kind: 'accept' }
         : notYet(`Object.${method} from this source type is not yet supported`, 4);
     }
+    // The `Date` namespace calls slice A lands: `Date.UTC` and `Date.parse`. `now` reads the
+    // clock and is refused here by name -- it proves through Task 4.2's determinism carve-out,
+    // not a golden test. Trailing components may be omitted (the lowering pads them); an argument
+    // count ABOVE the table's arity is the spec's own "extra arguments are ignored", which this
+    // compiler does not silently perform.
+    if (isGlobalDate(callee.expression, typeChecker)) {
+      const method = callee.name.text;
+      if (!Object.hasOwn(DATE_STATICS, method)) {
+        return dateNotYet(`Date.${method}`);
+      }
+      const shape = DATE_STATICS[method as DateStatic];
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return dateNotYet('a spread argument to a Date method');
+      }
+      return call.arguments.length > shape.arity ||
+        call.arguments.length < shape.arity - shape.optional
+        ? dateNotYet(`Date.${method} with ${String(call.arguments.length)} arguments`)
+        : { kind: 'accept' };
+    }
     // The Promise namespace calls. `all` wants an ARRAY specifically -- the runtime walks one,
     // and every other iterable is the Symbol.iterator protocol -- while `resolve` and `reject`
     // take any value at all, which is why neither checks the argument's type.
@@ -1241,6 +1277,24 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       return untyped || isStringReceiver(subject, typeChecker)
         ? { kind: 'accept' }
         : notYet(`${op} of a value that is not a string is not yet supported`, 4);
+    }
+    // `Date.prototype`'s methods. Slice A is the TZ-independent core: the UTC getters and setters,
+    // the three string forms, and the two time-value reads. Every LOCAL-time member (getFullYear,
+    // toString, getTimezoneOffset, ...) is refused by name here and lands in slice B, where the
+    // golden runner's TZ pin makes it provable.
+    if (isDateReceiver(callee.expression, typeChecker)) {
+      const op = callee.name.text;
+      if (!Object.hasOwn(DATE_OPS, op)) {
+        return dateNotYet(`Date.prototype.${op}`);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return dateNotYet('a spread argument to a Date method');
+      }
+      const shape = DATE_OPS[op as DateOperation];
+      return call.arguments.length > shape.arity ||
+        call.arguments.length < shape.arity - shape.optional
+        ? dateNotYet(`${op} with ${String(call.arguments.length)} arguments`)
+        : { kind: 'accept' };
     }
     // A Map or a Set: one runtime function per operation, and no user declaration anywhere, so
     // this is decided before anything that looks for a class.
@@ -1934,6 +1988,28 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
       phase: 5,
     };
   }
+  // `new Date(v)` -- a time value, an ISO string, or another Date -- is slice A. The ZERO-argument
+  // form reads the clock: it cannot be proved by a golden test and lands under Task 4.2's
+  // determinism carve-out with `Date.now`, so it is refused here BY NAME rather than by falling
+  // through to a message about classes. The multi-argument component form is LOCAL time, which is
+  // slice B.
+  if (isGlobalDate(node.expression, checker)) {
+    const args = node.arguments ?? [];
+    // The zero-argument form is ACCEPTED: it reads a clock, and nondeterminism is a proof problem
+    // rather than an acceptance problem (plan §7's determinism carve-out). It proves through a
+    // monotonicity unit test instead of a golden fixture.
+    if (args.length === 0) {
+      return { kind: 'accept' };
+    }
+    if (args.length !== 1) {
+      return dateNotYet('new Date(year, month, ...) in local time');
+    }
+    const [argument] = args;
+    if (argument === undefined || ts.isSpreadElement(argument)) {
+      return dateNotYet('a spread argument to new Date');
+    }
+    return { kind: 'accept' };
+  }
   if (node.typeArguments !== undefined) {
     return notYet('explicit type arguments on a constructor call are not yet supported', 3);
   }
@@ -2026,6 +2102,31 @@ function gateMemberAccess(
         : notYet('using an Object method as a value is not yet supported', 4);
     }
     return notYet(`Object.${member} is not yet supported`, 4);
+  }
+
+  // The Date namespace, by Math's rules. `now` is named separately from an unlanded member
+  // because its blocker is a proof method, not an implementation (Task 4.2's carve-out).
+  if (isGlobalDate(access.expression, checker)) {
+    const member = access.name.text;
+    if (Object.hasOwn(DATE_STATICS, member)) {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' }
+        : notYet('using a Date method as a value is not yet supported', 4);
+    }
+    return dateNotYet(`Date.${member}`);
+  }
+
+  // A Date.prototype method exists only as a callee, the rule every builtin receiver follows.
+  // `Date` has no data properties at all -- its time value is internal -- so a non-method member
+  // read here is a member of the real prototype that has not landed.
+  if (isDateReceiver(access.expression, checker)) {
+    const member = access.name.text;
+    if (Object.hasOwn(DATE_OPS, member)) {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' }
+        : notYet('using a Date method as a value is not yet supported', 4);
+    }
+    return dateNotYet(`Date.prototype.${member}`);
   }
 
   // The Promise namespace, same rules again. `.then`/`.catch`/`.finally` are NOT here: they are
@@ -2264,7 +2365,7 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
   return { kind: 'accept' };
 }
 
-/** The whole Math surface (§21.3.2), complete as of plan-notes 117. The approximated
+/** The whole Math surface (§21.3.2), complete as of plan-notes 119. The approximated
  * transcendentals used to be absent because the host libm disagrees with Node in the last ulp;
  * they now come from the vendored fdlibm — the same code V8 runs — so the agreement is structural.
  * `random` is here too, under plan.md §7 Task 4.2's determinism carve-out: it is proved by
@@ -2330,6 +2431,18 @@ export function isGlobalMath(node: ts.Expression, checker: ts.TypeChecker): bool
 /** The `Object` namespace, by the same test. */
 export function isGlobalObject(node: ts.Expression, checker: ts.TypeChecker): boolean {
   return isGlobalNamed(node, checker, 'Object');
+}
+
+/** The `Date` CONSTRUCTOR read as a namespace -- `Date.UTC`, `Date.parse`, `Date.now`. The same
+ * declaration-file test, which is what keeps a user `class Date` on the ordinary class path. */
+export function isGlobalDate(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'Date');
+}
+
+/** The checker says the receiver is a Date -- decided through the HType mapping, so the gate and
+ * the lowering agree on what a date receiver is, exactly as they do for a regexp. */
+export function isDateReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  return tsTypeToHType(checker.getTypeAtLocation(expression), checker).kind === 'date';
 }
 
 function isGlobalNamed(node: ts.Expression, checker: ts.TypeChecker, name: string): boolean {

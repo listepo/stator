@@ -1,4 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
@@ -445,4 +448,42 @@ export function call(
   line = 1,
 ): CallExpr {
   return { kind: 'call', type, span: span(line), callee, args };
+}
+
+/** Compile `source` in ts mode, run the binary, and hand back both streams separately.
+ *
+ * The determinism carve-out's proofs (plan §7 Task 4.2) all need this and nothing else needs it:
+ * `Math.random`, `console.time`/`timeEnd`/`trace` and `Date.now` cannot be proved by a golden
+ * diff, so each one compiles a small program and asserts a PROPERTY of what it printed. The
+ * streams stay separate because which stream a line lands on is part of what `console.trace`
+ * promises. `prefix` only names the scratch directory, so a failing run says which proof it was.
+ */
+export function compileAndRunStreams(
+  source: string,
+  prefix: string,
+): { stdout: string; stderr: string } {
+  const cli = fileURLToPath(new URL('../../src/cli/main.ts', import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), `stator-${prefix}-`));
+  try {
+    const entry = join(dir, 'main.ts');
+    const out = join(dir, 'main');
+    writeFileSync(entry, source);
+    const build = spawnSync(process.execPath, [cli, 'build', entry, '-o', out, '--mode=ts'], {
+      encoding: 'utf8',
+    });
+    assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
+    const run = spawnSync(out, [], { encoding: 'utf8' });
+    assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
+    return { stdout: run.stdout, stderr: run.stderr };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** `compileAndRunStreams`, reduced to stdout's non-empty lines — what a proof that does not care
+ * about the stream split wants. */
+export function compileAndRunLines(source: string, prefix: string): string[] {
+  return compileAndRunStreams(source, prefix)
+    .stdout.split('\n')
+    .filter((line) => line !== '');
 }

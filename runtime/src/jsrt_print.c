@@ -845,8 +845,23 @@ static void inspect_promise(Buf *out, jsrt_value v, int recurse, size_t indent) 
   buf_puts(out, " }");
 }
 
+/* Node prints a Date as its ISO string with NO quotes, at top level and nested alike --
+ * `console.log(d)` is `2024-02-29T13:45:06.789Z` and `console.log([d])` is
+ * `[ 2024-02-29T13:45:06.789Z ]`. An Invalid Date prints `Invalid Date`, which is why this cannot
+ * simply call `jsrt_date_to_iso_string` (that one panics, per the spec's RangeError). */
+static void inspect_date(Buf *out, jsrt_value v) {
+  const jsrt_value text = jsrt_date_to_json(v);
+  if (text == JSRT_NULL) {
+    buf_puts(out, "Invalid Date");
+    return;
+  }
+  append_string(out, (const JSString *)jsrt_ptr(text));
+}
+
 static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent) {
-  if (jsrt_is_regexp(v)) {
+  if (jsrt_is_date(v)) {
+    inspect_date(out, v);
+  } else if (jsrt_is_regexp(v)) {
     inspect_regexp(out, v);
   } else if (jsrt_is_promise(v)) {
     inspect_promise(out, v, recurse, indent);
@@ -905,7 +920,9 @@ static void print_to(jsrt_value v, FILE *stream, bool bare) {
   Buf out;
   buf_init(&out);
 
-  if (jsrt_is_regexp(v)) {
+  if (jsrt_is_date(v)) {
+    inspect_date(&out, v);
+  } else if (jsrt_is_regexp(v)) {
     inspect_regexp(&out, v);
   } else if (jsrt_is_promise(v)) {
     inspect_promise(&out, v, 0, 0);
@@ -1303,7 +1320,7 @@ static size_t cell_width(const char *s) {
  * enumerate. */
 static bool tabular_row(jsrt_value v) {
   return (jsrt_is(v, JSRT_TAG_ARRAY) || jsrt_is(v, JSRT_TAG_OBJECT)) && !jsrt_is_map_or_set(v) &&
-         !jsrt_is_regexp(v) && !jsrt_is_promise(v);
+         !jsrt_is_regexp(v) && !jsrt_is_promise(v) && !jsrt_is_date(v);
 }
 
 /* `n` copies of `s`, for the horizontal rules. The existing `buf_repeat` takes a CHAR, and a box
@@ -1619,6 +1636,15 @@ static void json_check_cycle(const void *ptr, const JSONAncestor *chain) {
 }
 
 static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
+  /* §25.5.2.2 step 2: SerializeJSONProperty calls the value's own `toJSON` before doing anything
+   * else, and `Date.prototype.toJSON` is the only one the subset has. It answers a STRING, or
+   * `null` for an Invalid Date -- which is why `JSON.stringify(new Date(NaN))` is "null" and not
+   * an abort, unlike `toISOString`. Serializing the ANSWER, not the Date, is what keeps this one
+   * arm from needing a cycle check or a shape walk. */
+  if (jsrt_is_date(v)) {
+    json_value(out, jsrt_date_to_json(v), chain);
+    return;
+  }
   if (jsrt_is(v, JSRT_TAG_NULL)) {
     buf_puts(out, "null");
     return;

@@ -32,6 +32,8 @@ import {
   ARRAY_OPS,
   CONSOLE_METHODS,
   consoleEntryPoint,
+  DATE_OPS,
+  DATE_STATICS,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -1463,6 +1465,84 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4086',
           message: `${expr.op} results in '${hTypeName(expr.type)}', not the unknown a match-or-null is`,
+        });
+      }
+      break;
+    }
+
+    // `new Date(x)`. The ARGUMENT is deliberately unchecked -- `jsrt_date_from_value` discriminates
+    // number/string/Date by tag and answers an Invalid Date for anything else, which is what the
+    // spec's ToPrimitive-then-ToNumber path amounts to. The RESULT is pinned: every consumer below
+    // here (a `date-op` receiver, `inspect_date`) dereferences a JSRTDate without asking.
+    case 'date-new': {
+      verifyExpression(expr.arg, problems, bindings);
+      if (expr.type.kind !== 'date') {
+        problems.push({
+          kind: 'date-new',
+          span: expr.span,
+          code: 'STA4092',
+          message: `new Date results in '${hTypeName(expr.type)}', not a Date`,
+        });
+      }
+      break;
+    }
+
+    // A `Date.prototype` call, pinned where a regexp op's receiver is and for the same reason: the
+    // C accessors read a `JSRTDate` without a tag test, so a wrong receiver kind here is memory
+    // corruption rather than a wrong answer. Arity is EXACT because the lowering pads omitted
+    // trailing components to the table's full count -- a short list is a lowering bug, never a
+    // source property.
+    case 'date-op': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const want = DATE_OPS[expr.op];
+      if (expr.target.type.kind !== 'date') {
+        problems.push({
+          kind: 'date-op',
+          span: expr.span,
+          code: 'STA4092',
+          message: `${expr.op} on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+      } else if (expr.args.length !== want.arity) {
+        problems.push({
+          kind: 'date-op',
+          span: expr.span,
+          code: 'STA4092',
+          message: `${expr.op} takes ${String(want.arity)} arguments, not ${String(expr.args.length)}`,
+        });
+      } else if (!hTypeEquals(expr.type, want.result === 'number' ? H_NUMBER : H_STRING)) {
+        problems.push({
+          kind: 'date-op',
+          span: expr.span,
+          code: 'STA4092',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not a ${want.result}`,
+        });
+      }
+      break;
+    }
+
+    // `Date.UTC(...)` / `Date.parse(s)`: both answer a time value, so the result is pinned to
+    // number. `parse`'s argument is unchecked for STA4081's reason -- an untyped string is the
+    // js-mode norm and the runtime's tag check is the honest place to settle it.
+    case 'date-static': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (expr.args.length !== DATE_STATICS[expr.method].arity) {
+        problems.push({
+          kind: 'date-static',
+          span: expr.span,
+          code: 'STA4092',
+          message: `Date.${expr.method} takes ${String(DATE_STATICS[expr.method].arity)} arguments, not ${String(expr.args.length)}`,
+        });
+      } else if (!hTypeEquals(expr.type, H_NUMBER)) {
+        problems.push({
+          kind: 'date-static',
+          span: expr.span,
+          code: 'STA4092',
+          message: `Date.${expr.method} results in '${hTypeName(expr.type)}', not a number`,
         });
       }
       break;

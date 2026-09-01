@@ -916,6 +916,114 @@ export const REGEXP_OPS = {
 
 export type RegExpOperation = keyof typeof REGEXP_OPS;
 
+/** `Date.prototype`, SLICE A: everything that is a pure function of the time value (plan.md §7
+ * Task 4.2). The local-time getters and `getTimezoneOffset` are slice B; `toString`, the call form
+ * `Date()`, and every `toLocale*` need CLDR names and belong to the intl feature build.
+ *
+ * `fn` is written out rather than derived. The mechanical camelCase-to-snake_case rule the string
+ * and array tables use turns `getUTCFullYear` into `get_u_t_c_full_year`, and a special case for
+ * runs of capitals would be a rule invented to serve one table -- naming the C function is both
+ * shorter and greppable from either side.
+ *
+ * `optional` counts TRAILING arguments the caller may omit. The spec gives an omitted component the
+ * meaning "keep the current value", which an explicitly passed `undefined` also has, so the
+ * lowering pads to full arity and the runtime reads absence off `JSRT_UNDEFINED` -- the
+ * `CONSOLE_METHODS` rule, on the side where padding IS observably identical.
+ *
+ * `toJSON` is declared `(): string` by `lib.es5.d.ts`, but §21.4.4.37 answers `null` for an Invalid
+ * Date and Node agrees. The result is typed as the checker sees it; the divergence is the lib's,
+ * is documented in docs/SUBSET.md, and is what makes `JSON.stringify(new Date(NaN))` the string
+ * "null" rather than an abort. */
+export const DATE_OPS = {
+  getTime: { arity: 0, optional: 0, fn: 'jsrt_date_get_time', result: 'number' },
+  valueOf: { arity: 0, optional: 0, fn: 'jsrt_date_get_time', result: 'number' },
+  getUTCFullYear: { arity: 0, optional: 0, fn: 'jsrt_date_get_utc_full_year', result: 'number' },
+  getUTCMonth: { arity: 0, optional: 0, fn: 'jsrt_date_get_utc_month', result: 'number' },
+  getUTCDate: { arity: 0, optional: 0, fn: 'jsrt_date_get_utc_date', result: 'number' },
+  getUTCDay: { arity: 0, optional: 0, fn: 'jsrt_date_get_utc_day', result: 'number' },
+  getUTCHours: { arity: 0, optional: 0, fn: 'jsrt_date_get_utc_hours', result: 'number' },
+  getUTCMinutes: { arity: 0, optional: 0, fn: 'jsrt_date_get_utc_minutes', result: 'number' },
+  getUTCSeconds: { arity: 0, optional: 0, fn: 'jsrt_date_get_utc_seconds', result: 'number' },
+  getUTCMilliseconds: {
+    arity: 0,
+    optional: 0,
+    fn: 'jsrt_date_get_utc_milliseconds',
+    result: 'number',
+  },
+  setTime: { arity: 1, optional: 0, fn: 'jsrt_date_set_time', result: 'number' },
+  setUTCFullYear: { arity: 3, optional: 2, fn: 'jsrt_date_set_utc_full_year', result: 'number' },
+  setUTCMonth: { arity: 2, optional: 1, fn: 'jsrt_date_set_utc_month', result: 'number' },
+  setUTCDate: { arity: 1, optional: 0, fn: 'jsrt_date_set_utc_date', result: 'number' },
+  setUTCHours: { arity: 4, optional: 3, fn: 'jsrt_date_set_utc_hours', result: 'number' },
+  setUTCMinutes: { arity: 3, optional: 2, fn: 'jsrt_date_set_utc_minutes', result: 'number' },
+  setUTCSeconds: { arity: 2, optional: 1, fn: 'jsrt_date_set_utc_seconds', result: 'number' },
+  setUTCMilliseconds: {
+    arity: 1,
+    optional: 0,
+    fn: 'jsrt_date_set_utc_milliseconds',
+    result: 'number',
+  },
+  toISOString: { arity: 0, optional: 0, fn: 'jsrt_date_to_iso_string', result: 'string' },
+  toJSON: { arity: 0, optional: 0, fn: 'jsrt_date_to_json', result: 'string' },
+  toUTCString: { arity: 0, optional: 0, fn: 'jsrt_date_to_utc_string', result: 'string' },
+} as const satisfies Record<
+  string,
+  {
+    readonly arity: number;
+    readonly optional: number;
+    readonly fn: string;
+    readonly result: 'number' | 'string';
+  }
+>;
+
+export type DateOperation = keyof typeof DATE_OPS;
+
+/** The `Date` namespace calls slice A lands. `parse` accepts the §21.4.1.32 Date Time String
+ * Format only -- a documented divergence from Node, whose non-ISO heuristics are TZ-dependent and
+ * implementation-defined (docs/SUBSET.md).
+ *
+ * `now` reads a clock. Nondeterminism is a PROOF problem, not an acceptance problem (plan §7's
+ * determinism carve-out), so it is an ordinary table row here and proves through a unit test
+ * instead of a golden fixture. */
+export const DATE_STATICS = {
+  UTC: { arity: 7, optional: 6, fn: 'jsrt_date_utc' },
+  parse: { arity: 1, optional: 0, fn: 'jsrt_date_parse' },
+  now: { arity: 0, optional: 0, fn: 'jsrt_date_now' },
+} as const satisfies Record<
+  string,
+  { readonly arity: number; readonly optional: number; readonly fn: string }
+>;
+
+export type DateStatic = keyof typeof DATE_STATICS;
+
+/** `new Date(x)` for a given x -- a number of milliseconds, an ISO string, or another Date.
+ *
+ * Not a `NewExpr` (no descriptor, no constructor body) and not a `CollectionNew` (that one takes no
+ * argument). The ZERO-argument form does not need a node of its own: §21.4.2.1 step 2 defines it as
+ * the current time value, so the lowering desugars `new Date()` to `new Date(Date.now())` -- which
+ * is a `date-static` argument here and identical in every observable way. */
+export interface DateNew extends Node {
+  readonly kind: 'date-new';
+  readonly arg: Expression;
+}
+
+/** A `Date.prototype` call: one runtime function per operation, over the receiver's time value.
+ * `args` is always the table's full arity -- the lowering pads an omitted trailing component with
+ * an undefined-literal, which is what the spec's "if the argument is present" step reads. */
+export interface DateOp extends Node {
+  readonly kind: 'date-op';
+  readonly op: DateOperation;
+  readonly target: Expression;
+  readonly args: readonly Expression[];
+}
+
+/** `Date.UTC(...)` or `Date.parse(s)`. Padded to full arity for the same reason `DateOp` is. */
+export interface DateStaticCall extends Node {
+  readonly kind: 'date-static';
+  readonly method: DateStatic;
+  readonly args: readonly Expression[];
+}
+
 /** `RegExp.prototype`'s DATA properties (§22.2.6), which are reads and not calls -- the other half
  * of the surface `REGEXP_OPS` covers.
  *
@@ -998,6 +1106,9 @@ export interface RegExpOp extends Node {
 export type Expression =
   | MatchRead
   | RegExpFieldRead
+  | DateNew
+  | DateOp
+  | DateStaticCall
   | NumberLiteral
   | StringLiteral
   | BooleanLiteral

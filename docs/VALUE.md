@@ -666,6 +666,42 @@ overwrite-in-place, undefined-on-miss, shared-IC reads across shape-sharing obje
 stale-cache miss after a transition, divergent histories landing on different shapes, and
 non-identifier keys printing quoted (`{ 'a-b': 1 }`).
 
+## 4.11 Dates — one double behind a class pointer (Task 4.2, slice A)
+
+```c
+typedef struct JSRTDate {
+  const JSRTClass *cls; /* &jsrt_class_date */
+  double time;          /* ms since 1970-01-01T00:00:00Z, or NaN for an Invalid Date */
+} JSRTDate;
+```
+
+Boxed under `JSRT_TAG_OBJECT`, like `JSRTObject` and `JSRTRegExp`. The load-bearing property is the
+**prefix share**: `cls` sits first in all three, so `jsrt_as_object(v)->cls` is a legal read of any
+of them and `jsrt_is_date` is a pointer comparison against `&jsrt_class_date`. That is why every
+"is this an object" test already answers yes for a Date, and why `print_to`'s dispatch can branch
+on the class before it looks at anything else.
+
+There are **no owned pointers**, so a Date adds no GC edges — the descriptor's field table is
+empty and the collector needs nothing new to trace it. A Date is nonetheless heap-allocated rather
+than a boxed double, because `setTime` and the seven `setUTC*` setters mutate it in place and two
+bindings holding the same Date must both see the change.
+
+**Every `jsrt_date_*` entry point asserts the class pointer** (`STA4093`) before it dereferences.
+The verifier pins the receiver kind above the boundary (`STA4092`) for the same reason it pins a
+regexp receiver: a wrong kind here would read a `double` out of whatever object arrived, which is
+memory corruption rather than a wrong answer.
+
+**Printing.** `inspect_date` renders the ISO string, which is what Node's inspect shows and is
+TZ-independent — the property that lets `console.log(d)` appear in a golden fixture at all. An
+Invalid Date prints `Invalid Date`. `JSON.stringify` routes a Date through `jsrt_date_to_json`,
+which answers the ISO string or `JSRT_NULL`; the `null` case is why `JSON.stringify(new Date(NaN))`
+is the four characters `null` and not an abort.
+
+**The one thing this layout cannot do yet.** `toISOString` on an Invalid Date must throw a
+`RangeError` (§21.4.4.36). A builtin cannot raise — `jsrt_throw` sets a pending cell that only
+generated code reads — so it panics (`STA2005` pattern) until Phase 5 step 11 gives the runtime a
+catch around user code. Same ceiling as `Object.freeze`, and recorded the same way.
+
 ## 5. What Phase 2 actually implements
 
 The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap

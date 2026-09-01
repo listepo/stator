@@ -687,6 +687,80 @@ typedef struct JSRTRegExp {
   uint8_t *bytecode;
 } JSRTRegExp;
 
+/* A `Date`: one double, milliseconds since the epoch, or NaN for an Invalid Date. Prefix-shared
+ * with JSRTObject the way JSRTRegExp is, so `jsrt_is_date` is a class-pointer comparison and every
+ * abstract operation that asks "is this an object" already answers yes.
+ *
+ * There is nothing else to store. Every field a program can read -- year, month, weekday, the ISO
+ * string -- is DERIVED from this double by calendar arithmetic (runtime/src/jsrt_date.c), so a
+ * Date cannot hold two facts that disagree, and `setUTCMonth` rolling into the next year is
+ * arithmetic rather than a normalization pass. */
+typedef struct JSRTDate {
+  const JSRTClass *cls; /* &jsrt_class_date */
+  double time;
+} JSRTDate;
+
+extern const JSRTClass jsrt_class_date;
+
+static inline bool jsrt_is_date(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) && jsrt_as_object(v)->cls == &jsrt_class_date;
+}
+
+/* Construction. `jsrt_date_new` TimeClips its argument (§21.4.1.31): a value outside +-8.64e15 is
+ * an Invalid Date, not a clamped one. `jsrt_date_from_value` is `new Date(x)` for a non-number x --
+ * a string goes through the ISO parser, a Date copies its time value, anything else ToNumber. */
+jsrt_value jsrt_date_new(double time);
+/* The wall clock, in whole milliseconds since the epoch (§21.4.3.1). `jsrt_date_now` is the
+ * `Date.now()` entry point; `jsrt_date_now_ms` is the same reading as a double, which is what
+ * zero-argument `new Date()` hands to `jsrt_date_new`. Nothing else in the runtime reads a clock,
+ * which is what keeps every other Date operation golden-testable. */
+jsrt_value jsrt_date_now(void);
+double jsrt_date_now_ms(void);
+jsrt_value jsrt_date_from_value(jsrt_value v);
+double jsrt_date_value(jsrt_value v);
+
+/* The time value itself. `getTime` and `valueOf` are the same operation under two names. */
+jsrt_value jsrt_date_get_time(jsrt_value v);
+jsrt_value jsrt_date_set_time(jsrt_value v, jsrt_value ms);
+
+/* The UTC field getters (§21.4.4.x). Every one answers NaN for an Invalid Date. `month` is
+ * ZERO-based and `day` is the weekday, both as the language exposes them. */
+jsrt_value jsrt_date_get_utc_full_year(jsrt_value v);
+jsrt_value jsrt_date_get_utc_month(jsrt_value v);
+jsrt_value jsrt_date_get_utc_date(jsrt_value v);
+jsrt_value jsrt_date_get_utc_day(jsrt_value v);
+jsrt_value jsrt_date_get_utc_hours(jsrt_value v);
+jsrt_value jsrt_date_get_utc_minutes(jsrt_value v);
+jsrt_value jsrt_date_get_utc_seconds(jsrt_value v);
+jsrt_value jsrt_date_get_utc_milliseconds(jsrt_value v);
+
+/* The UTC field setters (§21.4.4.2x). Each rebuilds the time value from the fields it is NOT
+ * changing, so an out-of-range component ROLLS -- `setUTCMonth(13)` is February of the next year.
+ * An omitted trailing component arrives as `undefined` and keeps its current value. All return the
+ * new time value, and all mutate in place. */
+jsrt_value jsrt_date_set_utc_full_year(jsrt_value v, jsrt_value year, jsrt_value month,
+                                       jsrt_value day);
+jsrt_value jsrt_date_set_utc_month(jsrt_value v, jsrt_value month, jsrt_value day);
+jsrt_value jsrt_date_set_utc_date(jsrt_value v, jsrt_value day);
+jsrt_value jsrt_date_set_utc_hours(jsrt_value v, jsrt_value h, jsrt_value mi, jsrt_value s,
+                                   jsrt_value ms);
+jsrt_value jsrt_date_set_utc_minutes(jsrt_value v, jsrt_value mi, jsrt_value s, jsrt_value ms);
+jsrt_value jsrt_date_set_utc_seconds(jsrt_value v, jsrt_value s, jsrt_value ms);
+jsrt_value jsrt_date_set_utc_milliseconds(jsrt_value v, jsrt_value ms);
+
+/* The string forms that need no locale. `toISOString` PANICS on an Invalid Date, where the spec
+ * throws a RangeError the runtime cannot raise until Phase 5 step 11; `toJSON` answers null there
+ * instead, which is why `JSON.stringify(new Date(NaN))` is "null" rather than an abort. */
+jsrt_value jsrt_date_to_iso_string(jsrt_value v);
+jsrt_value jsrt_date_to_json(jsrt_value v);
+jsrt_value jsrt_date_to_utc_string(jsrt_value v);
+
+/* The two statics. `Date.UTC` takes all seven components, absent ones as `undefined`; `Date.parse`
+ * accepts the §21.4.1.32 Date Time String Format ONLY and answers NaN for anything else. */
+jsrt_value jsrt_date_utc(jsrt_value year, jsrt_value month, jsrt_value day, jsrt_value hours,
+                        jsrt_value minutes, jsrt_value seconds, jsrt_value ms);
+jsrt_value jsrt_date_parse(jsrt_value text);
+
 extern const JSRTClass jsrt_class_regexp;
 
 static inline JSRTRegExp *jsrt_as_regexp(jsrt_value v) { return (JSRTRegExp *)jsrt_ptr(v); }

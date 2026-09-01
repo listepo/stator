@@ -9,6 +9,8 @@
 import * as ts from 'typescript';
 import {
   isArrayReceiver,
+  isDateReceiver,
+  isGlobalDate,
   isGlobalJson,
   isGlobalMath,
   isGlobalObject,
@@ -53,6 +55,8 @@ import type {
   CollectionOperation,
   ConsoleLogCall,
   ConsoleMethod,
+  DateOperation,
+  DateStatic,
   Declaration,
   Expression,
   FieldAccess,
@@ -89,6 +93,8 @@ import type {
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
+  DATE_OPS,
+  DATE_STATICS,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -1752,6 +1758,33 @@ function lowerExpression(
       };
       return created;
     }
+    // A Date is allocated too, but unlike a collection it takes an ARGUMENT: the one-argument form
+    // is the only one the gate let through, and `jsrt_date_from_value` discriminates its three
+    // shapes -- a time value, an ISO string, another Date -- by tag.
+    if (type.kind === 'date') {
+      const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+      if (args === null) {
+        return null;
+      }
+      // `new Date()` is `new Date(Date.now())`: §21.4.2.1 step 2 defines the zero-argument form as
+      // the current time value, so desugaring it here costs the HIR no second node kind and keeps
+      // the clock read in exactly one place. It is NOT `new Date(undefined)`, which is an Invalid
+      // Date -- which is why the desugaring is to an explicit `now` call and not to padding.
+      const arg: Expression = args[0] ?? {
+        kind: 'date-static',
+        type: H_NUMBER,
+        span,
+        method: 'now',
+        args: [],
+      };
+      return {
+        kind: 'date-new',
+        type,
+        span,
+        arg,
+      };
+    }
     if (type.kind !== 'object') {
       diagnostics.push(
         diagnosticFromNode(
@@ -2102,6 +2135,25 @@ function lowerExpression(
         return { kind: 'object-static', type, span, method, args };
       }
 
+      // `Date.UTC(...)` and `Date.parse(s)`. Both answer a time VALUE, so the type is pinned to
+      // number here rather than taken from the node -- the checker agrees, and the verifier holds
+      // it either way. Omitted trailing components are padded with undefined-literals: §21.4.3.4
+      // reads absence off the argument list and the runtime reads it off JSRT_UNDEFINED, which is
+      // the same question asked one layer down.
+      if (isGlobalDate(obj, checker) && Object.hasOwn(DATE_STATICS, propName)) {
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const method = propName as DateStatic;
+        const padded: Expression[] = [...args];
+        while (padded.length < DATE_STATICS[method].arity) {
+          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+        }
+        return { kind: 'date-static', type: H_NUMBER, span, method, args: padded };
+      }
+
       // The two JSON calls, both single-argument. `stringify` is always a string: the gate
       // already refused arguments whose type admits `undefined` or a function at the top level,
       // the two cases where the spec's answer is `undefined` rather than a string. `parse` is
@@ -2194,6 +2246,28 @@ function lowerExpression(
           method: propName as MathMethod,
           args,
         };
+      }
+
+      // The landed `Date.prototype` surface, on the string ops' padding discipline and for the
+      // same reason: every setter's spec text reads an omitted trailing component exactly as it
+      // reads an explicitly-passed undefined. The result type comes from the table.
+      if (isDateReceiver(obj, checker) && Object.hasOwn(DATE_OPS, propName)) {
+        const op = propName as DateOperation;
+        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+        if (target === null) {
+          return null;
+        }
+        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (args === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const padded: Expression[] = [...args];
+        while (padded.length < DATE_OPS[op].arity) {
+          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+        }
+        const type = DATE_OPS[op].result === 'number' ? H_NUMBER : H_STRING;
+        return { kind: 'date-op', type, span, op, target, args: padded };
       }
 
       // The landed RegExp.prototype METHODS. The result is taken from the node rather than the

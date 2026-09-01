@@ -235,7 +235,12 @@ methods, `Map`/`Set` and the ES2025 set operations — are recorded in [done.md]
 Task 4.2. `pnpm run test:builtins` reports **166/196** deterministic surface members, with Math
 42/42 plus one nondeterministic proof for `Math.random`, `String.prototype` at 31/32 and
 `RegExp.prototype` at 13/15.
-**Still open for THIS PHASE:** `Date` (STA1210) has no implementation, and `console.table`.
+**Still open for THIS PHASE:** `Date` **slice B** — the local-time getters/setters, the component
+constructor, and the `TZ=UTC` pin on the golden runner they all depend on (Date step 8 below).
+Slice A landed 2026-09-01 (`Date` 3/3, `Date.prototype` 21/43 — the missing 22 are slice B's 16
+and the intl family's 6); its record is in [done.md](done.md) and plan-notes 132. `STA1210` is now
+a RESIDUE code naming one member at a time, the shape `STA1211` has for RegExp. (`console.table`
+and the carve-out trio landed 2026-09-01; record below.)
 `Object` reads 7/13 on the dashboard but is DONE for everything this phase owns: `assign` landed
 2026-09-01 and the other five each wait on a mechanism Phase 4 does not build — `freeze`/`isFrozen`
 on runtime-raised exceptions (Phase 5 step 11), `create`/`defineProperty`/`getPrototypeOf`/
@@ -264,101 +269,37 @@ carve-out for members the harness cannot express, not a lowered bar.
 **Steps — `Date` (added 2026-09-01; evidence audit in plan-notes 127).** The surface splits by
 what makes each member deterministic, and the slices land in this order:
 
-1. **`docs/SUBSET.md` + decision tests first** (this task's own entry rule). Replace the
-   `[proposed]` Date row with the sliced surface. **Slice A — TZ-independent (21 prototype
-   members + 2 statics):** `new Date(ms)` / `new Date(isoString)`; `getTime`/`valueOf`/`setTime`;
-   the 8 `getUTC*` getters; the 7 `setUTC*` setters; `toISOString`/`toJSON`/`toUTCString`;
-   `Date.UTC` (2–7 args — spec defaults filled at lower time, the Math-fold model, so the runtime
-   entry stays fixed-arity); `Date.parse` restricted to the §21.4.3.2 ISO grammar — non-ISO input
-   answers `NaN`, which the spec permits but Node does not do (its heuristics are TZ-dependent and
-   implementation-defined), so this is a **documented divergence** pinned by a runtime unit test
-   and never exercised in a golden fixture. **Slice B — local-time (16 members), blocked on
-   step 8's TZ pinning:** the 8 local getters, `getTimezoneOffset`, the 7 local setters, and
-   `new Date(y, m, d?, …)` (local-time semantics per spec). **Intl-build residue (6 members):**
-   `toString`/`toDateString`/`toTimeString`, the call form `Date()`, and `toLocale*` — their long
-   timezone/locale names are ICU CLDR data, so they join Task 4.4's `intl_*` feature surface
-   (non-blocking, like the rest of the flag build). `[Symbol.toPrimitive]` stays out (Symbol-keyed
-   members are out of every surface list). `d2 - d1` needs no gate work in `ts` mode — the checker
-   already rejects Date arithmetic; assert that in a decision test and document `getTime()` as the
-   sanctioned spelling.
-2. **Gate.** Date leaves the generic-global catch-all (today `new Date()` is refused as `STA1214`
-   at the identifier gate and again by `gateNew`'s non-class branch) and gets the RegExp
-   treatment: closed `DATE_STATICS`/`DATE_OPS` tables; accepted members pass; every other Date
-   member answers **`STA1210`** — Date's residue code, as `STA1211` is RegExp's — naming the phase
-   that owns its blocker (slice B: this phase; the toString family: the intl build flag, the
-   `STA1215` model). `gateNew` opens for Date: zero-arg is **accepted** (nondeterminism is a proof
-   problem, not an acceptance problem — the carve-out covers it), and the one-arg
-   `number | string | Date` union parameter is resolved at lower time from the checker's argument
-   type, since HIR carries no unions. The two `@expected-fail` `subset_date_builtin_*` tests are
-   rewritten in the commit their construct lands: `new Date()` flips to its landed verdict and a
-   deferred member (e.g. `d.toString()`) becomes the `STA1210` fixture.
-3. **HIR + frontend types.** `H_DATE` HType kind and the `ts.Type → HType` mapping (the
-   `H_REGEXP` model); `'date-new'`/`'date-op'` node kinds driven by the closed tables; verifier
-   rows (arity + result types); `docs/HIR.md` gains the worked example.
-4. **Runtime.** `runtime/src/jsrt_date.c` with `JSRTDate { const JSRTClass *cls; double epoch_ms; }`
-   under `JSRT_TAG_OBJECT` and a `jsrt_class_date` descriptor (the RegExp layout; no owned
-   pointers, so no new GC edges). `docs/VALUE.md` and `jsrt_value.h` change together — they are the
-   contract. The §21.4.1 time algorithms (MakeTime/MakeDay/MakeDate/TimeClip) are pure double
-   math — slice A needs no `<time.h>`; `jsrt_date_now` is `clock_gettime(CLOCK_REALTIME)`. The ISO
-   parser and the `toISOString`/`toUTCString` formatters must be byte-exact against Node (year
-   padding, expanded `±YYYYYY` years, `Invalid Date` printing). **Known ceiling:** `toISOString`
-   on an Invalid Date must throw a `RangeError`, and the runtime cannot raise one until Phase 5
-   step 11 — it panics until then, documented in `SUBSET.md` (the `freeze`/`isFrozen` precedent).
-5. **Printing + JSON.** Node's inspect prints a Date as its ISO string — TZ-independently, so it
-   is golden-safe: add `inspect_date` to `print_to`'s dispatch (including nested in
-   arrays/objects/maps) and route `JSON.stringify` through `toJSON` → ISO. A `print_dates` corpus
-   pair rides `make -C runtime test`.
-6. **Emitter.** `'date-new'`/`'date-op'` → `jsrt_date_new`/`jsrt_date_<snake>` direct calls — the
-   `regexp-op` pattern, results boxed per the accessor discipline.
-7. **Slice A goldens + dashboard.** `tests/golden/ts/date_builtins.ts` + `js/date_builtins.js`:
-   ctor forms, UTC getters/setters including mutation ordering, ISO round-trip, `Date.UTC`,
-   ISO `Date.parse`, `console.log(d)`, `JSON.stringify({d})`. `builtins_coverage.json` gains a
-   `"Date"` namespace (`parse`, `UTC`, and `now` as a `{"nondeterministic": …}` marker) and a
-   `"Date.prototype"` namespace — the runner picks new namespaces up with no code change.
-   `Date.now` and zero-arg `new Date()` prove by a range/monotonicity unit test, the
-   `Math.random` model.
+~~1. `docs/SUBSET.md` + decision tests first.~~ ~~2. Gate.~~ ~~3. HIR + frontend types.~~
+~~4. Runtime.~~ ~~5. Printing + JSON.~~ ~~6. Emitter.~~ ~~7. Slice A goldens + dashboard.~~
+✅ Steps 1–7 landed 2026-09-01 — slice A, the TZ-independent core, plus `Date.now` and
+zero-argument `new Date()` under the determinism carve-out. Evidence: [done.md](done.md) →
+Phase 4, Task 4.2. Four places the tree corrected these steps (the zero-argument constructor needed
+no node kind, `Date.UTC` takes 1–7 args rather than 2–7, the carve-out marker had to follow its
+proof, and a `STA4085` panic-string collision) are in plan-notes 132. Steps 8 and 9 remain open:
+
 8. **Slice B.** First pin `TZ=UTC` in the golden runner (an `env` on the three `spawnSync` calls
    in `tests/golden/run.ts` — the compiled binary AND the Node ground truth; today both inherit
    the machine's TZ, so any local-time fixture is machine-dependent). Then land the local
    getters/setters and `getTimezoneOffset` via `localtime_r`/`mktime` — libc owns the tzdb.
    DST-sensitive semantics get runtime unit tests with an explicit non-UTC `TZ` on dates whose
    rules are stable, never goldens.
-9. **Docs sync.** `DIAGNOSTICS.md`'s `STA1210` row rewritten to residue-code semantics (per-member
-   blockers, the Task 4.7 rule); final `SUBSET.md` rows; the exit-criterion Date bullet below
-   tracks the same per-member split.
+9. **Docs sync.** The residue-code rewrite landed with slice A — `DIAGNOSTICS.md`'s `STA1210` row
+   now names members rather than the class, `SUBSET.md` carries the sliced rows, and the
+   exit-criterion Date bullet below tracks the same split. What is left for step 8 to do here:
+   flip the slice-B rows from not-yet to implemented, and confirm the residue under `STA1210` is
+   then exactly the intl family — which is Task 4.7's rule (a code may not name a closed phase)
+   applied to this code.
 
-**Steps — `console.table`, and the `console` carve-out trio (added 2026-09-01):**
-
-1. **Ground truth is the pinned Node only.** v26.7.0 left-aligns cells with one space of padding
-   each side, headers `(index)`/`Values`, columns = the union of row keys in first-seen order,
-   missing cells blank, strings quoted by inspect, `[]` prints a header-only table, non-tabular
-   input falls back to `console.log` semantics, zero ANSI when piped. Node has changed this format
-   across majors — never code it from memory; the harness verifies fixtures against Node itself.
-2. **Surface decision in `SUBSET.md` + decision tests first.** Arity 1. The optional `properties`
-   second argument is refused not-yet and joins Task 4.7's refinement group for an owner. Accepted
-   `data` in v1: arrays (of primitives, fixed-shape or dynamic objects), plain objects of objects,
-   and the `console.log` fallback for every non-tabular value. `Map`/`Set` tabular special cases
-   (`(iteration index)`/Key columns) stay refused — capture fresh Node bytes before ever adding
-   them. The two `subset_console_table_*` tests flip in the landing commit.
-3. **Compiler.** Add `table` to `CONSOLE_METHODS` (`{ arity: 1, fn: 'jsrt_console_table' }`) —
-   gate, lowering, verifier and emitter all read that one table (plan-notes 117), so this is the
-   only compiler change.
-4. **Runtime `jsrt_console_table`** in `jsrt_print.c`: column discovery via the existing
-   keys/entries walk (it already covers both object layouts), cells rendered by the existing
-   inspect machinery, per-column width = max(header, widest cell), the whole table built into a
-   `Buf` and written through `write_grouped` so `console.group` indentation holds (Node indents
-   tables inside groups), on stdout. **Known ceiling:** v1 counts code points, not wcwidth display
-   columns — non-ASCII cells may misalign vs Node (which uses a wcwidth-style `getStringWidth`);
-   the `SUBSET.md` row and a code comment name the ceiling; add real width logic only when a real
-   fixture needs it.
-5. **Tests + dashboard.** A `print_table` corpus pair, plus golden fixtures `ts/console_table.ts`
-   and `js/console_table.js` covering step 1's cases; `builtins_coverage.json` flips `"table"`
-   from `[]` to the fixtures.
-6. **`time`/`timeEnd`/`trace`** — the exit criterion moved them to the determinism carve-out, but
-   they still must LAND: implement them (a label → monotonic-start map for the timer pair; `trace`
-   prints the label — the stack is what makes it nondeterministic), prove by shape assertions in
-   `tests/unit/` (label echoed, a duration printed, the unit is `ms`), and mark all three
-   `{"nondeterministic": …}` on the dashboard.
+**`console.table` and the carve-out trio — ✅ landed 2026-09-01, in a same-day race with this
+plan.** The step list that stood here was overtaken the day it was written: a parallel session
+landed `console.table` as `0ef7724` (measured against the pinned Node first, wcwidth-style
+display-width handling included — plan-notes 128) and `time`/`timeEnd`/`trace` under the
+determinism carve-out with `tests/unit/console-carveout.test.ts` as proof (plan-notes 129). The
+exit-criterion `console` bullet below is ✅ MET at `12/12 (100%) [+3 nondeterministic]`. Two
+residues remain open elsewhere, both flagged before the race resolved: the optional `properties`
+second argument (refused not-yet; joins Task 4.7's refinement group for an owner) and the
+`Map`/`Set` tabular form (deferred by name, `STA1214` — Node draws it as a different table, not a
+wider one).
 
 ~~**Task 4.3 — RegExp.**~~ ✅ Landed 2026-08-30. Evidence: [done.md](done.md) → Phase 4,
 Task 4.3. The remaining `exec`/`match` surface is owned by Task 4.1's array-properties work; the
@@ -477,7 +418,7 @@ shows every surface member whose blocker Phase 4 OWNS:**
   (`STA1214`): Node draws it with an `(iteration index)` column, and a Map with a second `Key`
   column, which is a different table rather than a wider one.
   ✅ **MET (2026-09-01).** All three carve-out members landed the same day with
-  `tests/unit/console-carveout.test.ts` as their proof (plan-notes 127), and the dashboard reads
+  `tests/unit/console-carveout.test.ts` as their proof (plan-notes 129), and the dashboard reads
   `console: 12/12 (100%) [+3 nondeterministic]`.
 - **`RegExp.prototype`** — ✅ **met.** The array-with-properties half landed with Task 4.1
   (plan-notes 120: `exec`, `String.prototype.match`), and the DATA property surface with Task 4.2
@@ -488,11 +429,13 @@ shows every surface member whose blocker Phase 4 OWNS:**
   declared in lib.es2024, so the checker refuses the read before the gate sees it, and raising
   `lib` admits every other ES2024 addition at the same time. `String.prototype`'s iterator-shaped
   `matchAll` remains Phase 5's.
-- **`Date`** — owned by Task 4.2's Date steps above, per-member: **slice A** (TZ-independent
-  core — epoch/ISO constructors, UTC getters/setters, `toISOString`/`toJSON`/`toUTCString`,
-  `Date.UTC`, ISO-only `Date.parse`) and **slice B** (local-time getters/setters +
-  `getTimezoneOffset`, behind the golden runner's `TZ=UTC` pin) both land in this phase;
-  `Date.now` and zero-argument `new Date()` prove via the determinism carve-out;
+- **`Date`** — owned by Task 4.2's Date steps above, per-member: **slice A** ✅ MET
+  2026-09-01 (TZ-independent core — epoch/ISO/Date constructors, the two time-value reads, the 8
+  UTC getters, the 7 UTC setters, `toISOString`/`toJSON`/`toUTCString`, `Date.UTC`, ISO-only
+  `Date.parse`, plus `Date.now` and zero-argument `new Date()` under the determinism carve-out;
+  record in [done.md](done.md), plan-notes 132) and **slice B** (local-time getters/setters +
+  `getTimezoneOffset` + the component constructor, behind the golden runner's `TZ=UTC` pin) still
+  open in this phase;
   `toString`/`toDateString`/`toTimeString`, the call form `Date()`, and `toLocale*` are the intl
   feature build's (ICU CLDR timezone/locale names — Task 4.4's model, non-blocking);
   `[Symbol.toPrimitive]` is out of surface lists by standing rule; `toISOString` on an Invalid
@@ -517,20 +460,75 @@ owner. They are here because the mechanism each one waits on is **lowering** wor
 and Phase 4 is the runtime phase. If this phase starts feeling like a bucket, that is the signal to
 split steps 8–11 into their own phase — do it by plan edit (§15.3), not by drift.
 
-Steps:
+Steps (all eleven detailed 2026-09-01 against the live substrate — much of step 1 is already real;
+plan-notes 131):
 1. Frontend: `allowJs` + `checkJs`-style inference in the `ts.Program`; per-function "typed | inferred | dynamic" provenance recorded into HIR (drives boundary insertion and `explain` output).
-2. Gate: switch the diagnostic table by mode — `any` becomes dynamic, `var` becomes legal, `.js` files accepted; `eval` flips from never(ts) to not-yet(js).
-3. Lower `var`: function-scoped binding, hoisting, `undefined` init; decision + golden tests (classic hoisting pitfalls, loop-var closure capture).
-4. Dynamic lowering completion: property access/call/index on `Unknown` receivers through shapes + ICs (Task 4.1); `==` dynamic path per `NUMERIC.md`.
-5. Mixed-graph boundaries: imports from `.js` into `.ts` get boundary checks against the declared/inferred type (same machinery as Task 3.5); a lying JSDoc produces a located runtime type error — add a golden test proving it.
-6. JSDoc freebie test: a `.js` file with correct JSDoc types stays on the static path — assert via `stator explain` that its functions report `static`.
-7. Flip all `js`-column decision tests from expected-fail; add `tests/golden/js/` including one real ~200-line untyped utility library.
+   **Substrate already landed:** `program.ts` wires `allowJs`/`checkJs` by mode, HIR functions carry
+   `provenance`, and `explain` prints `verdict (provenance)` per function. **Remaining:** the
+   `inferred` middle grade — today lowering grades only typed-vs-dynamic; a `.js` function whose
+   signature the checker recovered (JSDoc or inference) must report `inferred`, because step 5
+   keys boundary insertion on exactly that distinction. Unit tests on `explain --json` for all
+   three grades.
+2. Gate: switch the diagnostic table by mode. Concretely: (a) `any`/`as any` in `js` mode stops
+   being `STA1001` and lowers to `Unknown` (the dynamic path) — decision tests asserting the SAME
+   source flips verdict by mode; (b) `var` becomes legal in `js` mode only (its `ts`-mode "never"
+   code is untouched); (c) `.js` acceptance is already real (the `js` golden fixtures compile
+   today) — pin the other direction with a decision test that a `.js` entry under `ts` mode stays
+   `STA1002` with the "use `--mode=js`" hint; (d) `eval`/`new Function` in `js` mode emit
+   **`STA1206`** — allocated in DIAGNOSTICS.md but emitted NOWHERE in src/ today — as not-yet
+   naming Phase 8; `ts` mode keeps `STA1101`/`STA1103` never.
+3. Lower `var`: function-scoped binding, hoisting to the enclosing function (or module) scope,
+   `undefined` init before the first statement runs, legal redeclaration folding to one slot.
+   Decision + golden tests: read-before-write answers `undefined` (not a TDZ trap), the classic
+   loop-var closure capture (one shared binding — build the closures in a loop, call them after),
+   `var` shadowing a parameter, and `var` inside a block escaping it.
+4. Dynamic lowering completion. The RUNTIME half exists — Task 4.1's shape chains and per-site
+   inline caches ("same shape implies same offset") are live in `jsrt_value.h` — what is missing
+   is the LOWERING that targets it: (a) HIR nodes for property get/set, index, and call on an
+   `Unknown` receiver, emitted as IC-site runtime calls (each syntactic site owns one static
+   cache slot, the model the shape doc already promises); (b) the dynamic call convention —
+   callee check, `this`, arity padding — with the located `STA2001`-style trap for calling a
+   non-function; (c) `==`/`!=` on dynamic operands: `jsrt_loose_equals` already exists and `==`
+   already lowers on typed paths — finish the ToPrimitive coercion path exactly per
+   `NUMERIC.md` §6.3 and pin the table's rows (null/undefined pairs, number↔string,
+   boolean coercion, object→primitive) with decision + golden tests.
+5. Mixed-graph boundaries: imports from `.js` into `.ts` get boundary checks against the
+   declared/inferred type at the import site (Task 3.5's machinery, keyed on step 1's
+   provenance — `typed` callers trust, `inferred`/`dynamic` sources get checks); a lying JSDoc
+   produces a located runtime type error. **Proof shape (refined 2026-09-01):** the trap fixture
+   CANNOT be a Node-diff golden — Node runs the lying program happily, so there is nothing to
+   byte-match. It lands as a pinned-expectation test instead: the harness gains an
+   expected-stderr mode for fixtures whose POINT is the trap, and the happy-path mixed graph
+   stays an ordinary vs-Node golden.
+6. JSDoc freebie test: a `.js` file with correct JSDoc types stays on the static path — assert via `stator explain` that its functions report `static` with provenance `inferred`.
+7. Flip the `js`-column decision tests from expected-fail — **64 fixture files still carry the
+   marker today**; each flips in the commit that lands its construct, never in bulk — and add the
+   capstone `tests/golden/js/` fixture: one real ~200-line untyped utility library exercising
+   steps 2–4 together (the existing `js` goldens cover builtins, not untyped-object-graph code).
 8. **The iterator protocol, and generators with it** (inherited from Task 4.6, which delivered `async`/`await` and deferred the rest — see plan-notes 112). One blocker, **four** surfaces: `for`-`of` over anything but an array (a string, `Map`, `Set` or user iterable — **`STA1214`**, and note that for-of over an array already works, so this step narrows that code rather than clearing it), the `keys`/`values`/`entries` triple that `Array.prototype`, `Map.prototype` and `Set.prototype` are each missing, `String.prototype.matchAll` (it answers an iterator, which is what splits it from `match` — `match` stays Phase 4), and `function*` (**`STA1201`**). Generators are last because they are the only one that also needs a state machine, and Task 4.6 already built that half — a `yield` differs from an `await` in who it answers (its caller, not a scheduler), not in how it suspends. `STA1201` names this phase.
+   In order: (a) the representation decision FIRST, in `docs/VALUE.md` — compile-time-known
+   iterables (string, array, `Map`, `Set`) lower to SPECIALIZED loops with no protocol object
+   allocated (the AOT-friendly path); only a user iterable (a `[Symbol.iterator]` the checker can
+   see) gets a real protocol object, and its struct shape is written down before any code;
+   (b) the nine `keys`/`values`/`entries` members (Array/Map/Set × 3) land on that representation
+   and flip their dashboard triples; (c) `for`-`of` over string/`Map`/`Set`/user iterables,
+   narrowing `STA1214` per this step's own note; (d) `matchAll` (the RegExp machinery exists —
+   only the iterator-shaped answer is new); (e) `function*` last, on Task 4.6's suspension state
+   machine with caller-driven resume — and a recorded scope decision before building: `next(v)`
+   lands; `return`/`throw` on the generator object may defer under their own named not-yet if
+   they fight the state machine. Decide, don't drift.
 9. **Top-level await** (**`STA1208`**, moved here from Phase 4 on 2026-09-01). The gate's message
    already names the blocker exactly — "a module body has no resume point to suspend into" — and
    Task 4.6 built resume points for functions. This step makes the module init function an async
    unit, which also forces the question the whole-program model has so far avoided: what a
    suspending module body means for the topological init order Task 3.11 established.
+   In order: (a) answer the ordering question BEFORE coding, with a differential fixture — the
+   spec permits sibling-subgraph concurrency and Node implements it, so measure what Node
+   actually interleaves, then decide (and record in `docs/MODES.md`) whether Stator awaits
+   dependency init promises strictly in Task 3.11's topological order (simpler, observably
+   different only in sibling interleavings) or mirrors Node; (b) make the module init function an
+   async unit on Task 4.6's resume points; (c) goldens where the order is observable (a TLA
+   module plus siblings that log during init). `STA1208` clears here.
 10. **Dynamic `import()`** (**`STA1207`**, moved here from Phase 4 on 2026-09-01). Its old note said
    it "cannot land before async/await"; async landed and it did not, because the real blocker is a
    **module namespace object** — an object whose shape is the module's export list. With a LITERAL
@@ -538,20 +536,187 @@ Steps:
    already-resolved promise, and it belongs here. With a COMPUTED specifier it needs runtime module
    resolution the whole-program model does not have: that half is Phase 8, and the split needs owner
    confirmation before either half is built.
+   In order: (a) the module namespace object — an object whose shape IS the export list, already
+   whole-program-known, sealed, reads flowing through the live bindings; (b) literal-specifier
+   `import()` answers an already-resolved promise of that namespace (consuming it with `await`
+   works the day this lands; consuming it with `.then` waits on step 11); (c) the computed half
+   stays split for Phase 8, unchanged, pending owner confirmation.
 11. **`Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)`** (**`STA1216`**,
    already assigned here). Both wait on the same thing: a handler's throw must become a rejection,
    which needs a runtime-level catch around user code.
+   In order: (a) the MECHANISM first, and in `docs/VALUE.md` before any member — but as an
+   EXTENSION of §4.9's existing pending-cell protocol, not a new one beside it. §4.9 already has
+   `jsrt_throw` / `jsrt_pending` / `jsrt_take_exception`; what it gives to GENERATED code (check
+   the flag after every call that can run user code, jump to the nearest landing pad) is exactly
+   what a builtin cannot do today, which is `STA1216`'s recorded blocker in `docs/DIAGNOSTICS.md`
+   ("the pending-exception protocol gives that catch to generated code, not to a builtin"). So the
+   doc gains a subsection: a runtime-side call that invokes a user closure, checks `jsrt_pending()`
+   on return, takes the exception, and yields it as a COMPLETION VALUE to the builtin — which then
+   settles a promise with it instead of unwinding into library C. Reuse the vocabulary §4.9 already
+   defines; a second name for one mailbox is how two protocols get built by accident;
+   (b) `then`/`catch`/`finally` on Task 4.6's
+   microtask machinery, handler throws becoming rejections via (a); (c) `new Promise(executor)`,
+   the executor running protected the same way; (d) the unlock sweep in the same change:
+   `Object.freeze`/`isFrozen` (the exit criterion moved them here), `toISOString` on an Invalid
+   Date, and every `SUBSET.md` row reading "the spec throws, which builtins cannot raise yet" —
+   those rows are IOUs written against exactly this step, so grep for them and close or re-date
+   them; (e) `STA1216` clears; then enumerate the `Promise` combinator residue
+   (`allSettled`/`any`/`race`/`withResolvers`/`try`) and name each member's owner — most need
+   only (a); iterating a non-array argument also needs step 8.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
 
 ## 9. Phase 6 — Conformance and differential fuzzing (starts after Phase 3; Test262 needs Phase 5; then forever)
 
+This phase produces no language features. It produces **evidence** — a conformance number, a
+divergence hunt, and measurements — and its output is only as good as its honesty, so every step
+below is written against one failure mode: a green signal that proves less than it appears to. A
+skipped test counted as a pass, a fuzzer that generates programs the compiler already handles, a
+benchmark of the wrong answer computed quickly. Each step names the dishonest version it exists to
+prevent.
+
+The three tasks are independent and can be built in any order (6.2 can start right after Phase 3;
+6.1 needs Phase 5 because Test262 is `.js`). The phase's Check has one clause per task.
+
 **Task 6.1 — Test262 runner** (`js` mode — Test262 files are `.js`; `ts`-mode conformance is carried by decision/golden suites). The runner reads each test's `features:` frontmatter and skips any feature not in the subset matrix; skipped tests are **counted and reported by feature** (`450 passed, 120 skipped (async: 80, proxy: 40), 5 failed`), never silently dropped. The % is CI-visible on every commit (Porffor's model — conformance as the public heartbeat).
+
+Steps (detailed 2026-09-01; plan-notes 131):
+1. **Corpus acquisition, under the no-network constraint.** `tc39/test262` is ~50k files — too
+   large to vendor, and this environment cannot fetch it (plan-notes 28, the same constraint that
+   deferred Ryū). So the repo holds the RUNNER, not the corpus: `tests/test262/` gets `run.ts`,
+   `features.ts`, `pin.json` (the corpus commit SHA — a conformance % against an unpinned corpus is
+   not a tracked number), and a `fetch.ts` that shallow-clones the pinned SHA into a git-ignored
+   `tests/test262/corpus/`. Resolution order for the corpus path: `$STATOR_TEST262`, then the
+   git-ignored default. **Missing corpus SKIPS with a message naming the fetch command — never
+   fails** — so `pnpm run ci` stays runnable offline; the skip must be visible in the output, since
+   a silently-skipped conformance suite is the dishonest version of this whole task.
+2. **Frontmatter parser** (~40 lines, no dependency): the `/*---` … `---*/` block is a fixed subset
+   of YAML — `esid`, `features`, `includes`, `flags`, `negative`, `locale`. Parse exactly those
+   keys and **hard-error on an unknown key** rather than ignoring it; an unrecognized key is how a
+   corpus bump silently changes the meaning of a test.
+3. **Harness adapter.** Each test is `harness/assert.js` + `harness/sta.js` + every file named in
+   `includes:` (`compareArray.js`, `propertyHelper.js`, …), concatenated ahead of the test body,
+   then compiled as one `js`-mode unit. `flags: [raw]` means no harness and no strict wrapper;
+   `onlyStrict`/`noStrict`/`module`/`async` each change how the file is built and run
+   (`async` tests print `Test262:AsyncTestComplete` and need Task 4.6's microtask drain). Flags
+   the adapter does not implement are a SKIP with the flag as the reason, counted like any other.
+4. **Negative tests.** `negative: {phase, type}` inverts the verdict: for `phase: parse` or
+   `resolution`, a Stator **compile-time diagnostic** is the pass — but only if it is the right
+   error, so one table maps `STA` codes to spec error classes (`SyntaxError`, `ReferenceError`,
+   `TypeError`), and a diagnostic outside the table fails the test rather than passing it by
+   accident. A `not-yet` (`STA12xx`) diagnostic on a negative test is **not** a pass: it is a skip
+   attributed to that code. For `phase: runtime`, the built binary must exit nonzero naming that
+   error class.
+5. **Feature → subset mapping** (`features.ts`): each Test262 feature tag maps to
+   `supported | not-yet(STAxxxx) | never(row in docs/SUBSET.md)`. **An unmapped tag is a runner
+   error, not a skip** — that is the tripwire that makes a corpus bump introduce new tags visibly
+   instead of quietly inflating the skip bucket. Rows must cite `SUBSET.md`, which stays the
+   authority (§15.6): the mapping table points at rows, it does not invent them.
+6. **Reporting.** Human line exactly as the task states, plus machine-readable
+   `tests/test262/results.json` (per-feature counts, per-test verdicts). Print **both** the
+   pass rate over `passed + failed` and the raw skip count on the same line: a percentage computed
+   with skips excluded is meaningful only when the skip count is next to it, and quoting one
+   without the other is how conformance numbers become marketing.
+7. **Ratchet, which is what "monotonically tracked" means.** `tests/test262/ratchet.json` records
+   `{passed, failed, skipped}` at the pinned SHA; the runner fails if `passed` drops or `failed`
+   rises. Known failures live in `tests/test262/expected-fail.txt` as `path # reason` where the
+   reason is an `STA` code or a `SUBSET.md` row — and **an unexpected PASS in that list also
+   fails**, because a stale expectation list is the same drift as a stale plan (§15.3). Updating
+   the ratchet is a deliberate commit, never a side effect of a test run.
+8. **CI heartbeat.** A `test262` job in `.github/workflows/ci.yml`, one platform only
+   (`ubuntu-24.04`) — conformance is host-independent, and the existing matrix already proves
+   portability. Cache the corpus keyed by `pin.json`'s SHA. The summary line goes to
+   `$GITHUB_STEP_SUMMARY` so the number is visible without opening logs. `pnpm run test262` is NOT
+   added to `pnpm run ci` (that chain must stay offline-runnable, per step 1); the CI job is what
+   makes it per-commit.
+
+Satisfies the Check's first clause (% visible and monotonically tracked) via steps 6–8.
 
 **Task 6.2 — Differential fuzzing.** Generate random programs within the subset (grammar-based generator first, coverage-guided later) — typed programs for `ts` mode (can start right after Phase 3), untyped for `js` mode; run compiled vs pinned Node, diff outputs. Every divergence becomes a golden test.
 
+Steps (detailed 2026-09-01; plan-notes 131):
+1. **Create `tests/differential/`.** `AGENTS.md`'s repo map already names it ("fuzzer corpus") and
+   the directory does not exist — the map describes the target state. It gets `generate.ts`,
+   `minimize.ts`, `run.ts`, and `corpus/` (committed seeds that once diverged).
+2. **Determinism before generation.** A ~10-line seeded xorshift PRNG, and NO other entropy source
+   anywhere in the generator (no `Date.now`, no `Math.random`). Every run prints its seed; every
+   run is reproducible from `--seed=N` alone. A fuzzer whose findings cannot be replayed produces
+   bug reports nobody can act on, which is worse than no fuzzer.
+3. **Type-directed generation, not text generation.** Choose the type first, then build an
+   expression that inhabits it — so the program compiles **by construction**. This is the step that
+   decides whether the fuzzer is useful: a generator that emits raw JS spends its whole budget
+   rediscovering that unsupported syntax is unsupported. Consequence to hold firmly: a generated
+   program that fails to compile is a **generator bug** and the generator gets fixed — unless the
+   diagnostic is `STA4xxx` (internal error), which is a real finding — an exception reaching the
+   CLI is always a compiler bug (`AGENTS.md`'s diagnostics conventions).
+4. **Weight the grammar toward what the golden suite cannot enumerate**, because everything else is
+   already covered by fixtures: float formatting and the shortest-round-trip boundary
+   (`docs/NUMERIC.md`), the `i32` refinement's overflow edges, string indexing across surrogate
+   pairs, `Map`/`Set` key identity (`-0`, `NaN`), and — once Phase 5 lands — coercion order in `==`.
+   These are the regions where a divergence is a semantics bug rather than a typo.
+5. **Oracle.** Compile and run, then run the same source on the pinned Node from `.node-version`
+   (and only that Node — the differential ground truth is the pinned one, `AGENTS.md`'s testing
+   rules). Compare stdout **byte-for-byte** and exit status; a timeout counts
+   as a divergence (an infinite loop in emitted code is a bug, not a slow test). Never normalize
+   output to make a comparison pass — the golden-test rule (`AGENTS.md`) applies here identically.
+6. **Minimizer.** Delta-debug: drop statements, then shrink subexpressions, keeping only reductions
+   that preserve the divergence, until nothing can be removed. Report the minimized program, its
+   seed, both outputs, and the first differing byte offset.
+7. **Every divergence becomes a golden test, in the commit that fixes it.** The minimized program
+   goes to `tests/golden/ts|js` with a header comment carrying the seed and the date; the raw
+   pre-minimization program goes to `tests/differential/corpus/`. Fixing the bug without landing
+   the fixture is how the same divergence returns.
+8. **`js`-mode arm after Phase 5.** Same generator, untyped output, plus weights for `var` hoisting,
+   loose equality, and dynamic property access — the three places `js` mode can disagree with Node
+   in ways `ts` mode structurally cannot.
+9. **Nightly job.** The repo has no scheduled workflow yet; add `.github/workflows/nightly.yml`
+   with a `schedule:` cron running `--minutes=60`. Derive the starting seed from
+   `github.run_number` (**not** the clock) so any nightly run can be replayed exactly. On
+   divergence: fail the job and upload the minimized program plus both outputs as an artifact.
+
+Satisfies the Check's second clause (≥1 h nightly, zero unexplained divergences) via steps 5–9.
+
 **Task 6.3 — Benchmark harness** (weekly, results committed): startup time, binary size, RSS, and a compute set (fib, nbody, JSON round-trip, string churn) vs Node, Bun, QuickJS, and — where installable — Perry/scriptc/Static Hermes. Record version, flags, and hardware with every number. **Never quote a competitor's self-published figure as a measurement.**
+
+Steps (detailed 2026-09-01; plan-notes 131):
+1. **Extend `tests/bench/record.ts`; do not replace it.** It already exists from Task 2.7 and
+   already gets the hard parts right — best-of-5 (the minimum is the one number a scheduling hiccup
+   cannot inflate), and a `baseline.json` that stamps host, CPU, Node, clang, and the `-O2` flag
+   string. What it measures today is only COMPILE time and binary size over `tests/golden/ts`. This
+   task adds run-time measurement, a program set, and other engines onto that existing shape.
+2. **The compute set is its own directory** (`tests/bench/programs/`): fib, nbody, JSON round-trip,
+   string churn. They are deliberately NOT golden fixtures — they run for seconds and the golden
+   suite must stay fast — but **each is verified against Node once at record time**, and a
+   mismatch aborts the recording. A benchmark that computes the wrong answer quickly is not a data
+   point, and this is the only guard against that.
+3. **Metrics per program:** startup floor (an empty program, which is what separates "our binary
+   starts fast" from "our fib is fast"), wall-time best-of-N via the existing rule, peak RSS, and
+   binary size. RSS has a portability trap worth naming in the code: `ru_maxrss` is **kilobytes on
+   Linux and bytes on macOS**. Normalize to bytes and record the raw value beside it, or the first
+   cross-platform comparison silently reports a 1000× regression.
+4. **Competitor matrix by discovery, never by assumption.** Probe `node`, `bun`, `qjs` (and
+   Perry/scriptc/Static Hermes where installable) on `PATH`; record each engine's **own** version
+   string. An engine that is absent is recorded as `"absent"` — never omitted — because an omitted
+   row and a slow row look identical in a results file six months later. `AGENTS.md`'s rule stands
+   above all of this: a competitor number that was not produced by this harness on this machine is
+   not a measurement and does not go in the file.
+5. **Results layout.** `baseline.json` stays the machine-local reference it already is; runs land in
+   `tests/bench/results/<ISO-date>-<host-id>.json`, appended, never overwritten. The "benchmark
+   page" of the Check is `tests/bench/README.md`, **generated** from the newest results file per
+   host — "auto-updates" means generated and committed by a job, not hand-maintained prose.
+6. **Weekly job**, sharing `nightly.yml` from Task 6.2 with a different cron. Default to uploading
+   the results file as an artifact and writing the summary to `$GITHUB_STEP_SUMMARY`. Committing
+   results back to `main` from CI is a repo-policy decision for the owner — record the answer in
+   `plan-notes.md` before wiring it, either way.
+7. **Perf-regression gate** (§12's standing practice, which has no home until this harness exists).
+   Compare against the previous results file **for the same host** and fail on a geomean regression
+   beyond a threshold. Measure the threshold before setting it: record the same commit twice, take
+   the observed spread, and set the gate above it. A gate below the noise floor fires on noise, and
+   an alarm that fires on noise is one people learn to ignore — which costs more than having no
+   gate at all.
+
+Satisfies the Check's third clause (benchmark page auto-updates) via steps 5–6.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates.
 
@@ -561,11 +726,207 @@ Steps:
 
 Research verdict: only Static Hermes has bidirectional, header-driven FFI — and even there the binding generator is an experimental in-tree script. A differentiator worth building properly; emitting C makes it natural.
 
+"Emitting C makes it natural" is true of the CALL and false of everything around it. The call itself
+is a line of C. The phase is four weeks because of what surrounds it, and all four surprises are the
+same shape — a thing that is implicit inside the compiled world and must become explicit at the
+edge:
+
+- **Memory.** Inside, Boehm sees every pointer because generated code keeps them in `JSRT_FRAME`
+  slots. A pointer handed to C is invisible to the collector for the duration of the call, and the
+  callee may keep it after returning. Every FFI signature therefore has to say who owns what and
+  for how long — the compiler cannot infer it, and getting it wrong is a use-after-free, not a
+  diagnostic.
+- **Strings.** The runtime's strings are UTF-16 (a settled decision, §15.4); C wants bytes. There is
+  no free conversion, so there is no implicit one.
+- **Errors.** C reports failure by return value, `errno`, or an out-param, and it never unwinds.
+  A JS exception must never propagate into a C frame, and a C error code only becomes an exception
+  if the declaration says how.
+- **Direction asymmetry.** 7.1 (calling out) is a compile-time question. 7.2 (being called in) is a
+  runtime-lifecycle question: initialization, stack roots, threads, and what a C caller sees when
+  TS throws. They share the ABI table and nothing else.
+
+Order is 7.1 → 7.2 → 7.3 and it is not arbitrary: 7.2 reuses 7.1's type mapping in reverse, and 7.3
+generates the declarations 7.1 consumes — a generator built before the shape of a hand-written
+binding is known would be generating guesses.
+
+**Out of scope for v0, stated here so it is a decision rather than an omission** (each may return as
+its own task, with a `plan-notes.md` entry and a `SUBSET.md` row):
+
+| Not in v0 | Why |
+|---|---|
+| Struct **by value** across the boundary | ABI-specific layout/alignment per platform and per struct; by-pointer covers the real use cases |
+| Varargs (`printf`) | No sound signature; each call site is a different function type |
+| C++ symbols, name mangling, exceptions | A second ABI, not an extension of this one |
+| C **calling back into** a JS closure | Needs a trampoline plus a GC root for the closure that outlives the call. Task 7.2's exported functions are the supported way for C to call in |
+| Threads | Single-threaded runtime; see Task 7.2 step 6 |
+
 **Task 7.1 — Calling C from TS.** `declare` + a marker (mirroring `$SHBuiltin.extern_c`) lowers to a direct call — no boxing for primitives; ownership rules for pointers/strings documented per-signature.
+
+Steps (detailed 2026-09-01; plan-notes 131):
+1. **Decide the surface before writing lowering, and write it down first.** Nothing under
+   `src/frontend/` handles ambient `declare function` today, so this is new gate surface rather
+   than a tweak to an existing path. Pick the marker — a `declare function` in a `.d.ts` plus an
+   explicit per-declaration marker, TS-native, rather than Static Hermes's `$SHBuiltin.extern_c`
+   call form — and land it in `docs/SUBSET.md` + a new `docs/FFI.md` **before** any code. Per
+   §15.6, inventing this convention in code instead of in the docs is the failure mode. Three
+   sub-decisions the doc has to settle, because each becomes unchangeable once bindings exist:
+   where the marker attaches (declaration, or a whole `.d.ts` file), how the C symbol name is
+   spelled when it differs from the TS name, and whether an extern declaration is legal outside a
+   `.d.ts` (recommend no — keeping it in declaration files is what makes 7.3's generator's output a
+   drop-in).
+2. **The ABI table is the contract, and it is small on purpose.** It lives in `docs/FFI.md`:
+
+   | TS type | C type | Notes |
+   |---|---|---|
+   | `number` | `double` | The unmarked case; no conversion |
+   | `number` + `i32` refinement | `int32_t` | The refinement already exists (`docs/NUMERIC.md`) |
+   | `boolean` | `bool` | `<stdbool.h>` |
+   | `void` | `void` | Return position only |
+   | branded pointer type | `T*` | Opaque; never dereferenced by generated code |
+   | explicit `CString`-style wrapper | `const char*` | Allocates; see step 3 |
+   | anything else | — | Compile error |
+
+   **`string` deliberately maps to nothing.** UTF-16 in, bytes out means a real conversion with a
+   real allocation, so it is spelled at the declaration and never inferred. `Unknown`, objects,
+   arrays, and closures are errors here by construction — they are the cases that would need
+   boxing, and "no boxing for primitives" is only meaningful if the non-primitives are refused
+   rather than silently boxed. Each refusal gets its own code, allocated in `docs/DIAGNOSTICS.md`
+   (the sole allocator — never here).
+3. **String conversion, both directions, with the lifetime written down.** In: allocate a NUL-
+   terminated UTF-8 copy for the call and free it after (the callee gets a borrow; if it stores the
+   pointer, the declaration must say so and the copy must be transferred instead). Out: a
+   `const char*` return is copied into a runtime string at the boundary — never wrapped, because a
+   wrapper's lifetime belongs to the C library and nothing in the runtime can track it. Embedded
+   NULs and invalid UTF-8 need a stated answer, not an accident.
+4. **Errors: C returns codes, and only the declaration knows what they mean.** Fix the policy here
+   or every binding invents its own. Default: the return value is a plain value and a failing call
+   is not an exception. Opt in per declaration to one of a closed set of conventions — nonzero is
+   an error, negative is an error, NULL is an error, `errno` carries it — and the lowering emits
+   the throw. Two absolutes: a JS exception must **never** unwind through a C frame (the call is
+   made outside any construct that could throw across it), and an unmapped nonzero return must not
+   be silently discarded.
+5. **Lowering and the emitter.** An extern-marked call becomes a direct C call: typed values are
+   already unboxed, so the work is making sure the emitter does not route them through `jsrt_value`
+   on the way out, that the `#include` reaches the emitted translation unit, and that argument
+   evaluation order and any temporaries (step 3's string copies) are freed on **every** exit path,
+   landing pads included — the same discipline `JSRT_FRAME` already demands of generated code.
+6. **GC and ownership, per signature, in the declaration.** A pointer handed to C is invisible to
+   Boehm for the duration of the call; the frame that owns it must stay live across the call, and
+   the callee must not retain it past return unless the declaration says it takes ownership. Two
+   options only — **borrowed for the call** or **copied/transferred** — because a third would be a
+   lifetime the compiler cannot express. This is documentation the compiler cannot check, which is
+   exactly why it is per-signature rather than one global paragraph. A binding that keeps a pointer
+   (SQLite's statement handles) uses the branded-pointer type, whose lifetime is the C library's,
+   not the collector's.
+7. **Link plumbing.** An extern declaration needs a header to include and a library to link.
+   `linkExecutable` in `src/cli/build.ts` already assembles the clang link line (and already
+   handles conditional `-lgc`), so extern-declared libraries append there; flags come from the
+   declaration file plus a `--link=` CLI escape hatch. Duplicate libraries are deduplicated while
+   preserving order — link order is load-bearing for static archives, and a "helpful" sort here
+   breaks builds in a way that looks like a missing symbol.
+8. **Name the trust boundary honestly.** §0 rule 2 says never trust an annotation without a
+   boundary — but a C return value **cannot** be runtime-checked, so FFI is the one boundary where
+   the annotation is asserted by a human and not verified. Do not paper over that: `stator explain`
+   marks extern calls as an **unchecked boundary** so an audit can enumerate every one of them, and
+   `docs/FFI.md` states the asymmetry in the same words. This is also the honest answer to "why is
+   FFI not available in `ts` mode's safety story" — it is, with the caveat printed.
+9. **`js` mode.** Arguments arriving from untyped code are dynamic, so they get a boundary check at
+   the call and `STA2001` on mismatch — the existing runtime trap doing its existing job, not a new
+   mechanism. The extern declaration itself is identical in both modes; only the checks differ.
+10. **Tests.** Decision tests in both modes (extern call, refused non-primitive, refused varargs).
+   The golden test links **libm** — `sqrt`, `fmod` — and a two-function `.c` fixture the harness
+   compiles itself, so the golden suite depends on nothing installed; SQLite belongs to Task 7.3
+   and the phase Check. At least one ASan test where C writes into a buffer the runtime owns, since
+   that is the failure this design is most likely to produce and the ASan job already exists.
 
 **Task 7.2 — Exposing TS to C.** `--emit-header` generates a `.h` for exported functions (Static Hermes `--exported-unit` model); values crossing out are C ABI types where sound, `jsrt_value` otherwise.
 
+Steps (detailed 2026-09-01; plan-notes 131):
+1. **`--emit-header` in the CLI**, reusing Task 7.1's ABI table in the other direction: an exported
+   function whose WHOLE signature is in the table gets a plain C prototype; anything else takes and
+   returns `jsrt_value`. One table, two directions — a second, subtly different mapping is how the
+   two halves drift apart. The flag also implies a build-mode change: the output is a linkable
+   object/archive rather than an executable, since a unit exposed to C usually has no `main`.
+2. **Decide what is exportable, and refuse the rest with a diagnostic.** Exported `function`
+   declarations with in-table signatures are the core. Exported `const` of a primitive type can be
+   a `#define`-free `extern const`. Classes, closures, generics, and mutable module state are NOT
+   exported in v0 — a generic has no single C signature, and a closure has captured state with a
+   lifetime C cannot hold. Refusing them loudly is the difference between a small feature and a
+   half-working one.
+3. **The init contract is the load-bearing part.** A C `main()` must initialize the runtime — GC,
+   interned strings, and every module's top-level side effects **in dependency order** — before
+   calling anything. Emit `stator_init_<unit>(void)`, declare it first in the header, make it
+   idempotent (a second call is a no-op, because a library's init being called by two independent
+   consumers is normal), and state in the header's own comment that calling an exported function
+   first is undefined behavior. Getting this wrong is silent, not loud — which is why it is a
+   generated declaration rather than a line in a doc.
+4. **What C sees when TS throws.** Exceptions cannot cross the C ABI, so decide once and generate
+   the same thing everywhere: an exported function's generated stub catches everything at the
+   boundary. In-table signatures have no room in the return value for an error, so the escape is a
+   companion `stator_last_error(void)` (NULL when the last call succeeded) plus a documented
+   sentinel return, and the header says the call must be checked. The alternative — abort the
+   process on an uncaught exception — is defensible for v0 but must be a written choice, not the
+   default that happens if nobody decides. Whatever is chosen, an exception must never unwind into
+   the C caller's frame.
+5. **Frame and stack roots.** A function entered from C has no parent `JSRT_FRAME`, and Boehm needs
+   that thread's stack base to scan conservatively; the generated entry stub establishes both, and
+   pops the frame on every exit path including the one step 4 introduces.
+6. **Threads: single-threaded in v0, said out loud.** Calling in from a second thread is undefined
+   until a task says otherwise, and the generated header carries that sentence. Discovering it
+   from a crash is the expensive way to learn it.
+7. **Name mangling and ABI identity.** Exported `foo` from unit `m` becomes `stator_m_foo`;
+   `--unit-name` sets the prefix (the `--exported-unit` model). A collision is a compile error,
+   never a silent last-writer-wins. Emit a version symbol the header asserts against, so a header
+   from one build linked against an archive from another fails at link time instead of at runtime.
+8. **The header must be deterministic.** Same input, byte-identical output — no timestamps, no
+   absolute paths, no hash-ordered iteration. A generated file that changes on every build cannot be
+   committed, diffed, or reviewed, and this one is the artifact users will commit.
+9. **CI example.** A small `main.c` + the emitted header, compiled and run inside the existing
+   `runtime` job (which already has clang and the archive), asserting both a successful call and
+   the step-4 error path. An FFI story that is not built in CI decays within a month.
+
 **Task 7.3 — Bindings for existing headers.** Start **manual** (hand-written `declare` files for the demo libs). A libclang-driven generator (functions + scalars + structs-by-pointer only) is built only after ≥3 manual bindings exist to define its spec.
+
+Steps (detailed 2026-09-01; plan-notes 131):
+1. **Three manual bindings, chosen for three different shapes** — that is what makes them a spec
+   rather than three examples of the same case:
+   - **libm** — scalars only, no allocation, no lifetime. Proves the plain path and needs nothing
+     installed (it is also Task 7.1's golden test).
+   - **SQLite** — opaque handles (`sqlite3*`, `sqlite3_stmt*`), out-params, strings in both
+     directions, and error codes. It exercises every hard rule at once, which is why the phase
+     Check uses it.
+   - **A struct-by-pointer library** — POSIX `stat`, or zlib. Proves the one aggregate shape v0
+     supports, including field offsets the binding must not guess.
+   Each lands in `examples/ffi/` as a `.d.ts` with its link pragma plus a runnable example.
+2. **Record every ambiguity as it is hit**, in `plan-notes.md`, while writing the bindings — those
+   notes ARE the generator's requirements document, they are what "define its spec" means in the
+   task line, and they are unrecoverable afterwards. Expect them to cluster on: which pointers the
+   library retains, which returned strings the caller must free, and which error codes mean
+   "failure" versus "no more rows".
+3. **Then choose the generator's front end, cheapest rung first.** libclang via napi bindings is a
+   new native dependency, and the dependency budget is `typescript` only. `clang -Xclang
+   -ast-dump=json` needs **no** new dependency, and clang is already a hard requirement of every
+   build. Start there; overturning it needs measured evidence that the JSON AST cannot express
+   something the bindings need — recorded in `plan-notes.md` (§15.3), not a preference.
+4. **The generator's shape:** parse the header's declarations into a small IR, map each C type
+   through Task 7.1's ABI table **in reverse**, and print a `.d.ts`. Everything the table cannot
+   map is refused, not approximated. Typedef chains resolve to their underlying type; an anonymous
+   struct behind a typedef is still a branded pointer. Output must be deterministic and stable
+   across runs (same rule as 7.2 step 8) — a generated binding is a file people commit.
+5. **Scope limits are enforced, not documented.** Functions, scalars, and structs-by-pointer only.
+   Varargs, function pointers, unions, bitfields, macro constants, and inline functions are
+   **rejected with a diagnostic naming the construct and its header line** — a generator that
+   silently skips what it cannot express produces a binding that looks complete and is not, which
+   is the single worst failure mode available to this task. A summary line reports how many
+   declarations were emitted and how many refused, per reason.
+6. **The manual bindings become the generator's oracle.** Regenerate SQLite's binding and diff it
+   against the hand-written one; every difference is either a generator bug or a manual-binding bug,
+   and each one gets resolved rather than tolerated. This is the only cheap test that the generator
+   understands real headers, and it costs nothing because both files already exist.
+7. **The phase Check's SQLite demo is assembled from GENERATED bindings** once the generator exists;
+   the manual binding stays in the tree as step 6's oracle. The demo also exercises Task 7.2 (the
+   same example is called from a C `main()`), which is what makes the Check one example instead of
+   two.
 
 **Check:** an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
@@ -577,6 +938,58 @@ Gate: real users blocked on untyped npm dependencies or `eval`. Do not build spe
 
 - Embed **QuickJS-NG** in the runtime (scriptc `--dynamic` / Perry-eval model): `eval`, `new Function`, `Proxy`, and stubborn untyped modules run interpreted; a marshaling layer converts `jsrt_value` ↔ `JSValue` at the boundary (objects proxied by handle, not deep-copied).
 - Makefile feature flag so pure-static builds are unchanged. **`ts` mode is untouched: `eval` stays `STA1101`, permanently.**
+
+Steps (detailed 2026-09-01; plan-notes 131). Steps 1 and 2 are not implementation — they are the
+two things that must exist before implementation is allowed to start:
+1. **Close the gate with evidence, the way Phase 0 was closed.** The gate is "real users blocked on
+   untyped npm dependencies or `eval`", and the entry criterion is a written record of WHICH users
+   and WHICH dependency or `eval` site — named, not estimated. Owner approval is recorded like
+   Phase 0's (plan-notes 123). Until that record exists, this phase does not start; "do not build
+   speculatively" is the whole gate, and a phase this large is exactly what a speculative build
+   costs.
+2. **Design doc before code: the marshaling layer, in `docs/` and reviewed.** It is the entire risk
+   of the phase, and it has to answer three things. (a) **Handles both ways, never deep copies** — a
+   `jsrt_value` object reaching interpreted code becomes a `JSValue` holding an opaque handle, and
+   the reverse; a copy would make mutation invisible across the boundary. (b) **Identity must round-
+   trip**: an object that crosses out and back must be `===` to itself, which means a two-way handle
+   table, not a per-crossing wrapper. (c) **Two collectors** — Boehm (conservative, ours) and
+   QuickJS's refcount-plus-cycle collector — so a live handle must be a root on both sides
+   simultaneously. State plainly which cases leak: a cycle spanning the boundary is uncollectable
+   in v0, and that ceiling belongs in the doc rather than being discovered later.
+3. **Vendor the interpreter at the version already in the tree.**
+   `runtime/vendor/quickjs-ng/VENDOR.md` pins `v0.16.2` (`1ab8676…`, vendored 2026-08-30) for
+   `libregexp`/`libunicode`. The interpreter ships its own copies of those files, so a second
+   version — or a naive add of the full source next to the existing subset — is duplicate symbols
+   at link time, not a merge conflict a compiler will catch. Vendor `quickjs.c`/`quickjs.h` at the
+   **same commit**, extend the existing `VENDOR.md` rather than starting a second one, and check who
+   supplies the `lre_*` embedder callbacks once both halves are present. Acquisition is also
+   constrained: this environment has no network (plan-notes 28), so the source has to arrive by the
+   same route the existing vendor drop did.
+4. **Feature flag on the Task 4.4 model, which already works.** `make -C runtime dynamic` builds a
+   separate archive into its own build directory, exactly as `make intl` does, and gets its own CI
+   job like `intl` has. The default archive must not gain a byte — which is what the flag is FOR,
+   and step 8 is how that claim is checked instead of asserted.
+5. **`eval` and `new Function` in `js` mode:** `STA1206` was allocated for this and has never been
+   emitted; it becomes deliverable here. Compile the string at runtime through the interpreter,
+   marshal the result back, and give the interpreted scope access to the compiled module's bindings
+   through the handle table (the scope bridge, not just the value bridge — a decision the step-2 doc
+   has to settle, since a design where `eval` cannot see the enclosing scope is a different feature
+   with the same name).
+6. **`Proxy` and the descriptor/prototype surface** (`STA1204`): `Object.create`, `defineProperty`,
+   `getPrototypeOf`/`setPrototypeOf` were assigned here by §7's exit criterion. They land as
+   interpreted-tier objects — the shape model deliberately cannot express them, which is why they
+   waited for this phase and not for more shape work.
+7. **The computed-specifier half of dynamic `import()`** (Phase 5 step 10c): runtime module
+   resolution needs a runtime module system, which is what this tier is. It lands here only if step
+   10's owner-confirmed split still says so.
+8. **`ts` mode is untouched, and that is a test, not a promise.** A decision test asserts `eval` in
+   `ts` mode is still `STA1101` **with the dynamic tier built in**. For the Check's byte-identical
+   clause: record the default archive's size and content hash before and after the phase, and have
+   CI compare them — a size that is "the same as far as anyone looked" is not the claim being made.
+9. **Every code flip is a decision-test change in the same commit** (`// @verdict: not-yet` →
+   `dynamic`, with the `// @expected-fail: true` marker removed in that same commit — the standing
+   rule in `AGENTS.md`). A `not-yet` code that stops being emitted while its fixture still expects
+   it is drift, and the subset runner is what catches it.
 
 **Check:** a `js`-mode program mixing one compiled module + one `eval` call runs correctly; binaries built without the feature (and all `ts`-mode binaries) are byte-identical in size to before.
 
@@ -663,3 +1076,5 @@ Standing practices:
 - **v2.3** (2026-09-01): **`plan.md` split** — completion records moved to `done.md`, leaving this file at open work only (761 → ~420 lines). Section numbers and every task's number and title are unchanged so the ~60 `plan.md §N Task X.Y` references in `docs/`, `src/`, `runtime/src/` and `tests/` still resolve (plan-notes 115). **Phase 4 gained an explicit exit criterion**, which it had never had — it had a Check but no scope boundary, which is why four not-yet codes named it as their deliverer while it was closing. The residue is now assigned by blocker: `Date` to Task 4.2 (which had never actually named it), `RegExp`'s `exec`/`match` to Phase 4's own array-with-properties work, `matchAll` and the iterator surface to Phase 5 step 8, top-level `await` to step 9, dynamic `import()` to step 10, the descriptor/prototype surface to Phase 8. Phase 5 is retitled to admit that steps 8–11 are not `js`-mode work. New **Task 4.7** audits the 58 gate call sites that hardcode phase 4, and §15 gains the rule that a not-yet code names the phase owning its **blocker**, never the phase that happens to be open (plan-notes 116).
 - **v2.4** (2026-09-01): Re-reviewed the Phase-4 implementation and roadmap. The completed Task 4.3–4.6 records were already preserved in `done.md`; their duplicate narratives were replaced here by required one-line stubs. Task 4.1 remains open for the array-with-properties blocker, and Task 4.2 remains open at the live dashboard's 131/197 surface members (plan-notes 118).
 - **v2.5** (2026-09-01): **the two open tasks gained numbered Steps** (plan-notes 127), backed by a five-agent evidence audit of the repo and the pinned Node v26.7.0. Task 4.2's remainder is now two step lists — `Date` (sliced by what makes each member deterministic: a TZ-independent core, a local-time slice behind a golden-runner `TZ=UTC` pin, an intl-build residue for the ICU-named `toString`/`toLocale*` family, and the carve-out pair; ISO-only `Date.parse` recorded as a documented divergence) and `console.table` + the `time`/`timeEnd`/`trace` carve-out trio. Task 4.7 gained Steps and its own Check; its site count was corrected from 58 to the audited **63** (60 `STA1214` + 2 `STA1211` + 1 `STA1215` at `39cf053`), with the audit's grouping (2 pure-5.8, 2 pure-5.11, 8 straddling catch-alls, 51 unowned) folded into the steps. The exit-criterion `Date` bullet was rewritten per-member per the plan-notes-125 rule.
+- **v2.6** (2026-09-01): **reconciliation after a same-day race** (plan-notes 130). The `console.table` + carve-out-trio step list added in v2.5 was overtaken by a parallel session that landed the work (`0ef7724`; carve-out proof `tests/unit/console-carveout.test.ts`) while the steps were being adversarially verified — the list is replaced by a landed record, leaving `Date` as Task 4.2's only remaining builtin. The race also produced the second plan-notes numbering collision (see note 115): two same-day entries each took 126 and 127; the later pair is renumbered 128/129 and the one inbound reference fixed. The verification pass on v2.5's own text resolved three challenges: the 63-site count STANDS (the challengers' single-line greps miss multi-line `notYet(` calls — a multiline-aware recount of the current tree finds 61 + 2 + 1 = 64, moved by the console slices exactly as Task 4.7 step 1 predicts), the Promise call-side phase-5 claim stands, and one bad reference (plan-notes 117, which does not exist — the console plumbing note is 94) went away with the replaced step list.
+- **v2.7** (2026-09-01): **every remaining phase gained numbered Steps** (plan-notes 131) — Phase 5's eleven steps, Phase 6's three tasks, Phase 7's three tasks plus a phase preamble and an explicit v0 out-of-scope table, and Phase 8's nine. Written against the live tree rather than from the task lines, which changed several of them: Phase 5 step 1's substrate (`allowJs`/`checkJs` by mode, HIR `provenance`, `explain`'s per-function print) is already landed, so the step is now the `inferred` grade alone; step 5's boundary-trap proof cannot be a Node-diff golden, because Node runs a lying-JSDoc program happily — it needs an expected-stderr harness mode; step 11's mechanism is not a new one but a subsection of `docs/VALUE.md` §4.9's existing pending-cell protocol — a runtime-side call that checks `jsrt_pending()` and hands the builtin a completion value, which is precisely the gap `STA1216`'s row already names — and it carries an unlock sweep (`Object.freeze`/`isFrozen`, `toISOString` on an Invalid Date, every `SUBSET.md` row that reads "the spec throws, which builtins cannot raise yet"). Phase 6 is framed by its one failure mode — a green signal that proves less than it appears to — so Test262 skips are mapped from `SUBSET.md` rows with an unmapped feature tag a hard error, the corpus is fetched rather than vendored (~50k files, and no network here — plan-notes 28) with a missing corpus SKIPPING so `pnpm run ci` stays offline-runnable, the fuzzer is type-directed and seeded (no clock, no `Math.random`) so a finding replays from `--seed=N`, and Task 6.3 extends the existing `tests/bench/record.ts` instead of replacing it. Phase 7 gained the four things that make FFI four weeks instead of one line (memory, UTF-16 strings, C error codes, direction asymmetry), a concrete ABI table, and the two questions nobody can leave implicit: which side owns a pointer after a call, and what a C caller sees when TS throws. Phase 8's first two steps are not implementation — the human gate's evidence, then the marshaling design doc — and its vendoring step must match the `v0.16.2` commit `runtime/vendor/quickjs-ng/VENDOR.md` already pins, since the interpreter ships its own `libregexp` and a second copy is duplicate symbols at link time.

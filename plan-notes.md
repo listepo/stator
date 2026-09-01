@@ -2997,7 +2997,10 @@ carve-out, but the members still must land; that is now an explicit step.
 Object.assign slice plan.md records as landed 2026-09-01 (typecheck passes) plus this session's
 ARCHITECTURE.md rider — the new steps build on that state and touch none of it.
 
-## 126. `console.table` — measured first, then built (2026-09-01)
+## 128. `console.table` — measured first, then built (2026-09-01)
+
+> Renumbered from 126 (2026-09-01): two sessions appended entries the same day and both picked
+> 126/127 — the second occurrence of the note-115 defect. This pair was the later append; see 130.
 
 **Why this one needed measuring.** Every other console method is a formatting rule with one shape.
 `table` is a layout ALGORITHM, and the spec (WHATWG console, "table") describes what it means, not
@@ -3040,7 +3043,9 @@ note rather than a mystery.
 were moved there by note 124 for a reason that does not change; `table` was the one member of that
 bullet a golden test could ever hold, and it holds.
 
-## 127. The carve-out's second use, and what it is actually for (2026-09-01)
+## 129. The carve-out's second use, and what it is actually for (2026-09-01)
+
+> Renumbered from 127 (2026-09-01) — same collision as 128; see 130.
 
 **Landed.** `console.time`, `console.timeEnd` and `console.trace`, proved by
 `tests/unit/console-carveout.test.ts`. `console` now reads `12/12 (100%) [+3 nondeterministic]`,
@@ -3076,3 +3081,189 @@ minute, `m:ss.mmm` above one. The VALUE cannot match Node, but the FORMAT can, a
 build printing `600000.000ms` would differ from Node in a way that is not the measurement's fault.
 This is the line the carve-out draws in general: carve out what the machine decides, keep
 everything the format decides.
+
+## 130. A same-day race: the console work landed while its steps were being written (2026-09-01)
+
+**What happened.** Two sessions worked this repo concurrently on 2026-09-01. One wrote detailed
+Steps into plan.md for Task 4.2's remainder (`Date`, `console.table`, the carve-out trio) and
+Task 4.7, grounded in a five-agent evidence audit at `39cf053` (note 127). The other implemented
+`console.table` and the trio, committing `0ef7724` — which also swept the first session's
+uncommitted plan edits into history. Result: plan.md briefly instructed work that was already
+done, and plan-notes gained two entries numbered 126 and two numbered 127.
+
+**Resolutions, in the order applied.**
+1. **Numbering.** Second occurrence of the note-115 defect (append without checking the tail).
+   Per that precedent the later pair renumbered: console.table → **128**, carve-out trio →
+   **129**, with renumber banners left in place and the one inbound reference (plan.md's console
+   exit bullet) repointed. Note 127 (the steps audit) keeps its number — plan.md references it
+   four times.
+2. **plan.md.** The console step list is replaced by a landed record pointing at 128/129; the
+   Task 4.2 "still open" line now names `Date` alone; §16 v2.6 records the reconciliation. Two
+   residues the steps had flagged stay open and are preserved in the record: the optional
+   `properties` argument (Task 4.7's refinement group) and the `Map`/`Set` tabular form
+   (`STA1214`, deferred by name in 128's landing).
+3. **The count dispute is resolved in the audit's favor.** A low-cost verification pass challenged
+   note 127's "63 sites" as impossible, counting 53–57 — but its method was a single-line
+   `grep 'notYet.*4)'`, and many `notYet(…)` calls span lines. A multiline-aware recount
+   (regex over the file, not per-line) of the post-`0ef7724` tree finds **61** `notYet(…, 4)`
+   + 2 `STA1211` + 1 `STA1215` = 64, consistent with 63 at `39cf053` plus the console slices.
+   The lesson is already encoded as Task 4.7 step 1: the number moves; enumerate, never assume —
+   and enumerate with a parser-shaped tool, not a line grep. The same pass DID catch one real
+   defect: the step list cited "plan-notes 117", an entry that does not exist (the numbering jumps
+   116 → 118); the console single-table plumbing note is **94**. That citation died with the
+   replaced step list — and the sweep for other "117" citations found a pre-existing one in
+   `gate.ts`'s Math-surface comment, fixed to **119** (the fdlibm entry that actually completed
+   the surface).
+
+**Standing fix for the collision class.** Before appending an entry, read the last heading and
+take max+1 — and when two sessions may be active, expect the tail to move between reading and
+committing. This note is itself numbered by that rule.
+
+---
+
+## 131. Steps for every remaining phase, written against the tree rather than the task lines (2026-09-01)
+
+**What changed.** `plan.md` had detailed Steps only where work was imminent: Phases 5–8 carried
+task LINES (one paragraph each) but no executable steps, so "what is the next action" was
+answerable only for Phase 4. All four now have numbered steps — Phase 5's eleven, Phase 6's three
+task lists, Phase 7's three plus a phase preamble and an out-of-scope table, Phase 8's nine.
+§16 gains **v2.7**.
+
+**Method, and why it matters more than the length.** Every step was grounded by reading the current
+tree, not by elaborating the task line. Done from the task lines alone, half of these steps would
+describe work that is already finished or cannot work as written. What the reading changed:
+
+1. **Phase 5 step 1 is mostly landed.** `src/frontend/program.ts` already wires `allowJs`/`checkJs`
+   by mode, `src/hir/nodes.ts` already carries `provenance`, `src/lower/index.ts` has
+   `provenanceOf`, and `src/cli/explain.ts` already prints `verdict (provenance)` per function. The
+   step is now the **`inferred` middle grade** alone — lowering grades typed-vs-dynamic today, and
+   step 5's boundary insertion keys on exactly the distinction that does not exist yet.
+2. **Phase 5 step 5's proof shape was wrong.** A `.js` file whose JSDoc lies, caught at the boundary
+   by `STA2001`, cannot be a Node-diff golden test: Node runs that program happily and prints the
+   wrong answer, so "matches Node byte-for-byte" is the failure, not the pass. It needs an
+   expected-stderr harness mode — recorded in the step so the first agent to reach it does not
+   discover it by writing a fixture that cannot pass.
+3. **Phase 5 step 11 is a contract change, not a builtin** — and specifically an EXTENSION of an
+   existing contract, which the first draft of the step got wrong. `Promise.prototype.then` and
+   `new Promise(executor)` both need a user closure's throw to become a rejection instead of
+   unwinding into library C. The step originally called that a "protected call" and asked for a new
+   `docs/VALUE.md` section; the verification pass found `VALUE.md` **§4.9 already defines the
+   mechanism** — the pending cell and landing-pad protocol (`jsrt_throw` / `jsrt_pending` /
+   `jsrt_take_exception`) — and `DIAGNOSTICS.md`'s own `STA1216` row already states the gap in one
+   line: "the pending-exception protocol gives that catch to generated code, not to a builtin." So
+   the step now asks for a SUBSECTION of §4.9 (a runtime-side call that checks `jsrt_pending()` on
+   return and yields a completion value to the builtin) in §4.9's existing vocabulary. Inventing a
+   second name for one mailbox is how a codebase ends up with two exception protocols. It also unlocks a
+   backlog nobody had counted: `Object.freeze`/`isFrozen`, `toISOString` on an Invalid Date, and
+   every `SUBSET.md` row reading "the spec throws, which builtins cannot raise yet" — those rows
+   are IOUs written against this one mechanism, and the step says to grep for them and close or
+   re-date each.
+4. **Test262 cannot be vendored, and this environment cannot fetch it.** ~50k files, plus the
+   no-network constraint of note 28 (the same one that deferred Ryū). So `tests/test262/` holds the
+   runner and a pinned SHA; the corpus is git-ignored and fetched; a missing corpus **skips
+   visibly** so `pnpm run ci` stays offline-runnable, and the CI job — not the `ci` chain — is what
+   makes the number per-commit. Two anti-dishonesty rules are written in: an unmapped `features:`
+   tag is a runner ERROR (otherwise a corpus bump inflates the skip bucket silently), and the pass
+   rate is never printed without the skip count beside it.
+5. **`tests/differential/` does not exist**, though `AGENTS.md`'s repo map names it — the map
+   describes the target state. Step 1 of Task 6.2 creates it. The fuzzer is specified as
+   type-directed (choose the type, then build an expression inhabiting it, so programs compile by
+   construction) because a text-level generator would spend its budget rediscovering that
+   unsupported syntax is unsupported; and seeded from a 10-line xorshift with **no** clock and no
+   `Math.random`, so every finding replays from `--seed=N`.
+6. **`tests/bench/record.ts` already exists and already gets the hard parts right** (best-of-5,
+   because the minimum is the one number a scheduling hiccup cannot inflate; a `baseline.json` that
+   stamps host, CPU, Node, clang, and the `-O2` string). Task 6.3 extends it rather than replacing
+   it. Named traps: `ru_maxrss` is **KB on Linux, bytes on macOS** (a silent 1000× on the first
+   cross-platform comparison), an absent engine must be recorded as `"absent"` rather than omitted,
+   and the §12 perf gate's threshold must be measured from a same-commit double run before it is
+   set — a gate below the noise floor trains people to ignore alarms.
+7. **There is no scheduled workflow.** `.github/workflows/ci.yml` runs on push/PR only, so both the
+   nightly fuzz and the weekly bench need a new `nightly.yml`; the seed comes from
+   `github.run_number`, never the clock, so a nightly finding is replayable.
+8. **Nothing under `src/frontend/` handles ambient `declare function`** — Phase 7 starts from new
+   gate surface. The phase preamble now names the four things that make FFI four weeks rather than
+   one line of C: pointers are invisible to Boehm for the duration of a call, UTF-16↔bytes is a
+   real allocation so `string` maps to nothing implicitly, C reports errors by return value and
+   never unwinds, and the two directions share only the ABI table. Two questions are marked as
+   undeferrable: who owns a pointer after the call returns (borrowed or transferred — there is no
+   third option the compiler can express), and what a C caller sees when an exported TS function
+   throws (`stator_last_error` plus a sentinel, or abort — but a written choice either way, since
+   an exception must never unwind into a C frame). An explicit out-of-scope table covers
+   struct-by-value, varargs, C++, callbacks into closures, and threads. The generator's front end
+   is provisionally `clang -Xclang -ast-dump=json` rather than libclang bindings: clang is already
+   a hard requirement and the dependency budget is `typescript` only.
+9. **QuickJS-NG is already partly vendored.** `runtime/vendor/quickjs-ng/VENDOR.md` pins `v0.16.2`
+   (`1ab8676…`) for `libregexp`/`libunicode`. The interpreter ships its own copies, so Phase 8's
+   vendoring step must take the **same commit** and extend the existing `VENDOR.md` — a second
+   version, or a naive add of the full source beside the existing subset, is duplicate symbols at
+   link time rather than a conflict any compiler will point at. Phase 8's first two steps are also
+   marked as not-implementation: the human gate's evidence (named users, named blocked
+   dependency — closed the way Phase 0's was, note 123), then the marshaling design doc, whose
+   three questions are handles-not-copies, identity round-tripping (`x === x` across two
+   crossings ⇒ a two-way handle table), and two collectors with a boundary-spanning cycle that
+   leaks in v0 — a ceiling to state, not to discover.
+
+**Ordering note.** `plan.md` §16's log is ascending; v2.7 was first appended above v2.6 and moved.
+Trivial, but the same slip in a step list would put a dependency after its dependent.
+
+**No agents were used for this pass** (owner instruction). Everything above came from direct reads
+of the tree — which is also why the corrections in items 1, 5, and 9 exist: they are the kind of
+"already landed" / "does not exist" / "already vendored" facts a plan-only pass cannot see.
+
+## 132. `Date` slice A: what the plan's steps got right, and the four places the tree corrected them (2026-09-01)
+
+Slice A landed as written in plan §7 Task 4.2's Date steps 1–7: `H_DATE` + the `DATE_OPS`/
+`DATE_STATICS` tables, `runtime/src/jsrt_date.c`, the print/JSON integration, the emitter arms,
+goldens in both modes, and the dashboard rows. `pnpm run ci` is the evidence. Four things the
+steps specified turned out differently once the code existed, and all four are recorded because
+they are decisions, not typos.
+
+**1. The zero-argument constructor needed no node kind.** Step 2 says `gateNew` opens for Date and
+zero-arg is accepted; step 3 lists `'date-new'`/`'date-op'` node kinds. The obvious reading is a
+`DateNew` whose argument is optional, and the first attempt did exactly that — which immediately
+split `date-new` out of the four shared switch arms it otherwise rides (counting, emission,
+rewriting, `explain`, verification), because every one of them destructures `expr.arg`
+unconditionally. §21.4.2.1 step 2 defines `new Date()` as *the current time value*, so the lowering
+desugars it to `new Date(Date.now())` instead: a `date-static` node sitting in the `arg` slot, zero
+plumbing, and the spec's own definition rather than a paraphrase of it. The distinction that makes
+this a desugaring and not padding: `new Date(undefined)` is an Invalid Date, so an absent argument
+and an explicit `undefined` are different programs — which is why the desugaring is to an explicit
+`now` call rather than to the undefined-literal every other optional position gets.
+
+**2. `Date.UTC` takes 1–7 arguments, not 2–7.** Step 1 says "2–7 args". §21.4.3.4 defaults `month`
+to 0, and the pinned TypeScript's `lib.es5.d.ts` declares every parameter after `year` optional, so
+`Date.UTC(2024)` is legal both ways and Node answers `1704067200000`. The gate accepts it. Caught
+by a gate unit test asserting the refusal the plan implied; the test was wrong, not the code.
+
+**3. The `now` coverage marker had to wait for its proof.** Step 7 says the dashboard gains `now`
+as a `{"nondeterministic": …}` marker. The marker is verified as hard as a golden claim — the file
+it names must exist and must mention the member — so writing it before
+`tests/unit/date-clock.test.ts` existed would have failed the dashboard rather than deferred it.
+That is the carve-out working as designed (note 129): the marker is not a free pass, and the
+ordering it forces is proof-then-marker, never the reverse.
+
+**4. A code collision, found by reading rather than by a test.** The first draft of
+`jsrt_date.c`'s receiver assertion panicked with `STA4085`, which `docs/DIAGNOSTICS.md` had already
+allocated to `JSON.stringify`'s verifier claim. Nothing would have caught this: a panic string is
+not compared against anything, and both codes are internal errors nobody's test asserts. It is now
+`STA4093`, allocated properly alongside the verifier's `STA4092`. The general lesson is the one
+`AGENTS.md` already states — `docs/DIAGNOSTICS.md` is the sole allocator — with the addition that
+*runtime panic strings are diagnostics too*, and the file is the only place that can say a number
+is free.
+
+**What is deliberately NOT in slice A, and why each is not a gap.** `Date.parse` is ISO-only: Node's
+non-ISO heuristics are TZ-dependent and implementation-defined, so a golden fixture over one would
+pin this machine rather than the language. A date-time string with no offset is local time and
+answers `NaN` for the same reason. `toISOString` on an Invalid Date aborts where the spec throws a
+`RangeError` — a builtin cannot raise until Phase 5 step 11, the `Object.freeze` ceiling exactly.
+And `toJSON` answers `null` for an Invalid Date though `lib.es5.d.ts` declares it `(): string`;
+§21.4.4.37 and Node both say `null`, so the divergence is the lib's, it is documented in
+`docs/SUBSET.md`, and it is what makes `JSON.stringify(new Date(NaN))` the string `"null"` rather
+than an abort.
+
+**`STA1210` is now a residue code**, the shape `STA1211` has for RegExp: it names one member at a
+time rather than the class. What remains under it is slice B (local time, blocked on pinning `TZ`
+in the golden runner — Phase 4's own step 8) and the `toString`/`toLocale*` family (ICU CLDR data,
+Task 4.4's feature build). Per §15's rule, closing Phase 4 means every member still under it is
+delivered or reassigned.

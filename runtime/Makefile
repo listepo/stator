@@ -125,7 +125,7 @@ intl: build-intl/libjsrt.a
 # -- never a table of expectations written next to the implementation, which would only assert
 # that the code agrees with itself.
 CORPORA := print_numbers print_arrays print_objects print_maps print_shapes print_typeof \
-           print_regexp print_promise
+           print_regexp print_promise print_dates
 
 DEPS      := $(OBJ_REL:.o=.d) $(OBJ_ASAN:.o=.d) $(OBJ_INTL:.o=.d) \
              $(VENDOR_REL:.o=.d) $(VENDOR_ASAN:.o=.d) $(VENDOR_INTL:.o=.d) \

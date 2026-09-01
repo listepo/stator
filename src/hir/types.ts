@@ -104,6 +104,19 @@ export interface HRegExp {
   readonly kind: 'regexp';
 }
 
+/** A `Date`: one instant, as milliseconds since the epoch.
+ *
+ * A leaf like `regexp`, and for the same reason -- an instant contains no values. It is the second
+ * builtin with MUTABLE state the language exposes (`setUTCMonth` and its siblings write the time
+ * value in place), which is why a Date is allocated per evaluation and never folded to a constant.
+ *
+ * The type carries no timezone. It cannot: a time value IS an instant, and every operation slice A
+ * lands reads it in UTC. The local-time getters slice B adds read the same double against a zone
+ * resolved at RUN time, so they change no type here either. */
+export interface HDate {
+  readonly kind: 'date';
+}
+
 /** A `Promise<T>`: the value a call to an async function evaluates to, and the only thing `await`
  * accepts without first wrapping it.
  *
@@ -179,6 +192,7 @@ export type HType =
   | HMap
   | HSet
   | HRegExp
+  | HDate
   | HPromise
   | HObject
   | HTypeParam;
@@ -189,6 +203,7 @@ export const H_BOOLEAN: HBoolean = { kind: 'boolean' };
 export const H_UNDEFINED: HUndefined = { kind: 'undefined' };
 export const H_NULL: HNull = { kind: 'null' };
 export const H_REGEXP: HRegExp = { kind: 'regexp' };
+export const H_DATE: HDate = { kind: 'date' };
 
 export function hFunction(params: readonly HType[], ret: HType): HFunction {
   return { kind: 'fn', params, ret };
@@ -405,5 +420,8 @@ export function hTypeName(t: HType): string {
   }
   // The one leaf whose spelling is not its kind: TypeScript calls it `RegExp`, and a message that
   // said `regexp` would not match what the user reads in their own editor.
-  return t.kind === 'regexp' ? 'RegExp' : t.kind;
+  if (t.kind === 'regexp') {
+    return 'RegExp';
+  }
+  return t.kind === 'date' ? 'Date' : t.kind;
 }
