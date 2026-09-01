@@ -30,7 +30,7 @@
     "test:intl": "make -C runtime intl && STATOR_RUNTIME=intl node tests/golden/run.ts",
     "runtime": "make -C runtime",
     "dupes": "cpd .",
-    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run test && pnpm run runtime && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
+    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run runtime && pnpm run test && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
     "test:builtins": "node tests/golden/builtins.ts"
   },
   "dependencies": {

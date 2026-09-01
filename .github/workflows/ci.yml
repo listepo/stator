@@ -4,43 +4,65 @@ on:
   push:
   pull_request:
 
+# A push that supersedes an in-flight run cancels it: six platforms times five jobs is a lot of
+# runner time to spend proving something about a commit nobody is waiting on any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# `pnpm run ci` is ONE SERIAL CHAIN by design -- it is the gate a human runs before claiming a task
+# done (AGENTS.md golden rule 1), and serial is what makes its first failure the interesting one.
+# CI wants the opposite: every step that does not feed another should run at the same time. So the
+# chain is decomposed here, and this map is what says nothing was dropped in the process:
+#
+#   typecheck   -> static (once) + frontend (every platform)
+#   lint        -> static
+#   dupes       -> static
+#   test        -> frontend
+#   runtime     -> runtime
+#   test:runtime-> runtime
+#   test:subset -> frontend
+#   test:golden -> runtime
+#   test:builtins-> runtime
+#   test:leak   -> runtime
+#   test:asan   -> asan
+#
+# Plus `test:intl`, which is deliberately NOT part of `pnpm run ci` (the ICU feature build is off by
+# default, plan.md Task 4.4) and therefore had no coverage at all until this job existed.
+
 jobs:
-  build:
-    name: build (${{ matrix.platform }}/${{ matrix.arch }})
+  # Host-independent by construction: no native code, no filesystem semantics, no clang. Running
+  # these six times would prove the same thing six times.
+  static:
+    name: static analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm run dupes
+
+  # The compiler itself, which is portable TypeScript -- so this is the half of the suite Windows
+  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: Biome's formatter
+  # would be arguing with git's line-ending translation, not with the code.
+  frontend:
+    name: frontend (${{ matrix.platform }}/${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Unix runners execute the complete compiler, runtime, golden, leak and
-          # sanitizer suite.  Keep the labels explicit so both word sizes and
-          # operating-system ABIs are exercised instead of following `-latest`.
-          - platform: linux
-            arch: x64
-            os: ubuntu-24.04
-            suite: full
-          - platform: linux
-            arch: arm64
-            os: ubuntu-24.04-arm
-            suite: full
-          - platform: macos
-            arch: x64
-            os: macos-15-intel
-            suite: full
-          - platform: macos
-            arch: arm64
-            os: macos-14
-            suite: full
-          # The frontend test suite is portable to Windows; the C runtime's
-          # make/clang toolchain remains Unix-only until a Windows toolchain is
-          # deliberately supported.
-          - platform: windows
-            arch: x64
-            os: windows-2025
-            suite: portable
-          - platform: windows
-            arch: arm64
-            os: windows-11-arm
-            suite: portable
+          - { platform: linux, arch: x64, os: ubuntu-24.04 }
+          - { platform: linux, arch: arm64, os: ubuntu-24.04-arm }
+          - { platform: macos, arch: x64, os: macos-15-intel }
+          - { platform: macos, arch: arm64, os: macos-14 }
+          - { platform: windows, arch: x64, os: windows-2025 }
+          - { platform: windows, arch: arm64, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,38 +76,31 @@ jobs:
         run: |
           node --version
           node -p "process.platform + '/' + process.arch"
-          clang --version || true
           uname -srm || true
       - run: pnpm install --frozen-lockfile
-      - name: Full test suite
-        if: matrix.suite == 'full'
-        run: pnpm run ci
-      - name: Portable frontend test suite
-        if: matrix.suite == 'portable'
+      - run: pnpm run typecheck
+      - run: pnpm run test:subset
+      # These two unit files compile and execute native binaries, so they need
+      # the Unix runtime archive. Windows still exercises every frontend-only
+      # test through typecheck and the subset runner above.
+      - name: Native-dependent unit tests
+        if: runner.os != 'Windows'
         run: |
-          pnpm run typecheck
-          pnpm run lint
+          pnpm run runtime
           pnpm run test
-          pnpm run test:subset
 
-  asan:
-    name: asan (${{ matrix.platform }}/${{ matrix.arch }})
+  # The C runtime and everything that links it. Unix only: the runtime's make/clang toolchain is
+  # not ported to Windows, and pretending otherwise with a red job helps nobody.
+  runtime:
+    name: runtime (${{ matrix.platform }}/${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: linux
-            arch: x64
-            os: ubuntu-24.04
-          - platform: linux
-            arch: arm64
-            os: ubuntu-24.04-arm
-          - platform: macos
-            arch: x64
-            os: macos-15-intel
-          - platform: macos
-            arch: arm64
-            os: macos-14
+          - { platform: linux, arch: x64, os: ubuntu-24.04 }
+          - { platform: linux, arch: arm64, os: ubuntu-24.04-arm }
+          - { platform: macos, arch: x64, os: macos-15-intel }
+          - { platform: macos, arch: arm64, os: macos-14 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +109,91 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      # Without bdw-gc the Makefile silently falls back to malloc and `test:leak` SKIPS -- a green
+      # run that proved nothing about GC hygiene (plan.md Task 4.5). Installing it is what makes
+      # the leak job's plateau assertion a real assertion.
+      - name: Install Boehm GC
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y libgc-dev
+          else
+            brew install bdw-gc
+          fi
+      - name: Record toolchain
+        shell: bash
+        run: |
+          clang --version
+          uname -srm
       - run: pnpm install --frozen-lockfile
-      - name: Sanitized runtime and golden tests
-        run: pnpm run test:asan
+      - run: pnpm run runtime
+      - run: pnpm run test:runtime
+      - run: pnpm run test:golden
+      - run: pnpm run test:builtins
+      - run: pnpm run test:leak
+
+  # Its own job rather than the tail of `runtime`: an ASan build is a second full compile of the
+  # runtime AND of every golden fixture's generated C, so serializing it behind the ordinary
+  # golden run doubles the platform's wall clock for no ordering reason.
+  asan:
+    name: asan (${{ matrix.platform }}/${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, arch: x64, os: ubuntu-24.04 }
+          - { platform: linux, arch: arm64, os: ubuntu-24.04-arm }
+          - { platform: macos, arch: x64, os: macos-15-intel }
+          - { platform: macos, arch: arm64, os: macos-14 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Install Boehm GC
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y libgc-dev
+          else
+            brew install bdw-gc
+          fi
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test:asan
+
+  # The ICU FEATURE build (plan.md Task 4.4), which the default archive must stay byte-identical
+  # without -- so it is a separate build directory, a separate archive, and a separate job.
+  intl:
+    name: intl (${{ matrix.platform }}/${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, arch: x64, os: ubuntu-24.04 }
+          - { platform: linux, arch: arm64, os: ubuntu-24.04-arm }
+          - { platform: macos, arch: x64, os: macos-15-intel }
+          - { platform: macos, arch: arm64, os: macos-14 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      # icu4c is keg-only on Homebrew, so its .pc files are not on the default search path and
+      # `make intl` would report ICU missing on a machine that has it.
+      - name: Install ICU and Boehm GC
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y libicu-dev libgc-dev
+          else
+            brew install icu4c bdw-gc
+            echo "PKG_CONFIG_PATH=$(brew --prefix icu4c)/lib/pkgconfig" >> "$GITHUB_ENV"
+          fi
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test:intl
