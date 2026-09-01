@@ -21,7 +21,17 @@ CFLAGS_COMMON := -std=c11 -Wall -Wextra -Werror -Iinclude $(VENDOR_INC) \
 # -Werror. It is not ours to edit -- AGENTS.md forbids hand-editing vendor/, so holding it to our
 # warning policy would force exactly the edits that rule forbids. Everything in src/, including the
 # bridge that calls into it, keeps the full flags (plan-notes 101).
-CFLAGS_VENDOR := -std=c11 -Wall -Iinclude $(VENDOR_INC) -ffunction-sections -fdata-sections
+# QuickJS-NG's POSIX timing/path helpers are hidden by glibc's strict C11 headers unless the
+# requested POSIX revision is declared before any system header. This affects only vendored
+# translation units on Linux; Apple's SDK selects different malloc/pthread declarations when that
+# macro is present, so leave the macOS vendor flags untouched.
+ifeq ($(shell uname -s),Linux)
+  VENDOR_POSIX_CFLAGS := -D_POSIX_C_SOURCE=200809L
+else
+  VENDOR_POSIX_CFLAGS :=
+endif
+CFLAGS_VENDOR := -std=c11 -Wall $(VENDOR_POSIX_CFLAGS) -Iinclude $(VENDOR_INC) \
+                 -ffunction-sections -fdata-sections
 
 # Boehm GC detection: if bdw-gc is available via pkg-config, use it; otherwise,
 # fall back to plain malloc with optional GC disabled. Both configurations
