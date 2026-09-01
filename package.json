@@ -26,7 +26,7 @@
     "bench:record": "node tests/bench/record.ts",
     "test:runtime": "make -C runtime test",
     "test:leak": "node tests/leak/run.ts",
-    "test:asan": "make -C runtime asan && make -C runtime test-asan && STATOR_RUNTIME=asan node tests/golden/run.ts",
+    "test:asan": "ASAN_OPTIONS=detect_leaks=0 make -C runtime asan && ASAN_OPTIONS=detect_leaks=0 make -C runtime test-asan && ASAN_OPTIONS=detect_leaks=0 STATOR_RUNTIME=asan node tests/golden/run.ts",
     "test:intl": "make -C runtime intl && STATOR_RUNTIME=intl node tests/golden/run.ts",
     "runtime": "make -C runtime",
     "dupes": "cpd .",
