@@ -13,14 +13,15 @@ AR ?= ar
 # dead-stripping (Task 3.12) removes builtins the program never references at FUNCTION granularity
 # rather than pulling whole .o files out of the archive. Free on Mach-O (per-symbol subsections are
 # the default there); required on ELF for --gc-sections to have anything to drop.
-CFLAGS_COMMON := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/quickjs-ng \
+VENDOR_INC := -Ivendor/quickjs-ng -Ivendor/fdlibm
+CFLAGS_COMMON := -std=c11 -Wall -Wextra -Werror -Iinclude $(VENDOR_INC) \
                  -ffunction-sections -fdata-sections
 
-# Vendored code (runtime/vendor/, currently quickjs-ng's libregexp) is compiled WITHOUT -Wextra
+# Vendored code (runtime/vendor/: quickjs-ng's libregexp, V8's fdlibm) is compiled WITHOUT -Wextra
 # -Werror. It is not ours to edit -- AGENTS.md forbids hand-editing vendor/, so holding it to our
 # warning policy would force exactly the edits that rule forbids. Everything in src/, including the
 # bridge that calls into it, keeps the full flags (plan-notes 101).
-CFLAGS_VENDOR := -std=c11 -Wall -Iinclude -Ivendor/quickjs-ng -ffunction-sections -fdata-sections
+CFLAGS_VENDOR := -std=c11 -Wall -Iinclude $(VENDOR_INC) -ffunction-sections -fdata-sections
 
 # Boehm GC detection: if bdw-gc is available via pkg-config, use it; otherwise,
 # fall back to plain malloc with optional GC disabled. Both configurations
@@ -67,11 +68,14 @@ OBJ_ASAN  := $(patsubst src/%.c,build-asan/%.o,$(SRC))
 OBJ_INTL  := $(patsubst src/%.c,build-intl/%.o,$(SRC))
 
 # Vendored objects get a `vendor_` prefix so they cannot collide with a src/ file of the same name
-# in the flat build directory.
-VENDOR_SRC   := $(wildcard vendor/quickjs-ng/*.c)
-VENDOR_REL   := $(patsubst vendor/quickjs-ng/%.c,build/vendor_%.o,$(VENDOR_SRC))
-VENDOR_ASAN  := $(patsubst vendor/quickjs-ng/%.c,build-asan/vendor_%.o,$(VENDOR_SRC))
-VENDOR_INTL  := $(patsubst vendor/quickjs-ng/%.c,build-intl/vendor_%.o,$(VENDOR_SRC))
+# in the flat build directory. Basenames must stay unique ACROSS vendor directories for the same
+# reason -- the prefix carries no directory -- which is true today (libregexp/libunicode/fdlibm).
+VENDOR_SRC   := $(wildcard vendor/*/*.c)
+VENDOR_REL   := $(addprefix build/vendor_,$(notdir $(VENDOR_SRC:.c=.o)))
+VENDOR_ASAN  := $(addprefix build-asan/vendor_,$(notdir $(VENDOR_SRC:.c=.o)))
+VENDOR_INTL  := $(addprefix build-intl/vendor_,$(notdir $(VENDOR_SRC:.c=.o)))
+# Let the pattern rules below find a vendored .c without naming its directory.
+vpath %.c $(sort $(dir $(VENDOR_SRC)))
 
 NODE ?= node
 
@@ -150,13 +154,13 @@ build-intl/%.o: src/%.c | build-intl
 
 # The sanitizers DO cover vendored code: a heap overflow in the regexp engine is a heap overflow in
 # the compiled program, and finding it is the point of the ASan job.
-build/vendor_%.o: vendor/quickjs-ng/%.c | build
+build/vendor_%.o: %.c | build
 	$(CC) $(CFLAGS_VENDOR) $(DEPFLAGS) -O2 -c $< -o $@
 
-build-asan/vendor_%.o: vendor/quickjs-ng/%.c | build-asan
+build-asan/vendor_%.o: %.c | build-asan
 	$(CC) $(CFLAGS_VENDOR) $(DEPFLAGS) -O1 -g -fsanitize=address,undefined -c $< -o $@
 
-build-intl/vendor_%.o: vendor/quickjs-ng/%.c | build-intl
+build-intl/vendor_%.o: %.c | build-intl
 	$(CC) $(CFLAGS_VENDOR) $(DEPFLAGS) -O2 -c $< -o $@
 
 build build-asan:

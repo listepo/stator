@@ -386,6 +386,98 @@ static jsrt_value group_value(const JSString *s, const uint32_t *m, uint32_t g) 
                               : jsrt_string_from_units(s->data + m[2 * g], m[2 * g + 1] - m[2 * g]);
 }
 
+/* The `groups` object of a match: the named capture groups, or `undefined` when the pattern has
+ * none -- §22.2.7.2 step 29 makes it `undefined` in exactly that case, and Node prints it.
+ *
+ * `lre_get_groupnames` answers one entry PER CAPTURE GROUP from group 1 up, each a NUL-terminated
+ * name (empty where the group is unnamed) followed by a scope byte -- `LRE_GROUP_NAME_TRAILER_LEN`
+ * is 2, not 1, and striding by one lands mid-entry and loses every name after the first. It is NULL
+ * unless the pattern declared at least one name, which is the condition step 29 itself tests. */
+static jsrt_value match_groups(const JSRTRegExp *re, const JSString *s, const uint32_t *m,
+                               uint32_t ncap) {
+  const char *names = lre_get_groupnames(re->bytecode);
+  if (names == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  const jsrt_value groups = jsrt_null_proto_new();
+  for (uint32_t g = 1; g < ncap; g++) {
+    if (names[0] != '\0') {
+      /* The key must outlive the program the way every shape key does, and these names live in the
+       * bytecode -- which is never freed for a live regexp, but IS owned by the engine. Copy. */
+      const size_t n = strlen(names);
+      char *key = (char *)malloc(n + 1);
+      if (key == NULL) {
+        jsrt_panic("out of memory: group name");
+      }
+      memcpy(key, names, n + 1);
+      jsrt_set_prop(groups, key, group_value(s, m, g), NULL);
+    }
+    names += strlen(names) + LRE_GROUP_NAME_TRAILER_LEN;
+  }
+  return groups;
+}
+
+/* The match array §22.2.7.2 builds: element 0 the whole match, element g each group (or
+ * `undefined` where it did not participate), carrying `index`, `input` and `groups` as PROPERTIES.
+ * That last part is the whole reason a jsrt array has a property table at all. */
+static jsrt_value match_array(const JSRTRegExp *re, const JSString *s, jsrt_value str,
+                              const uint32_t *m, uint32_t ncap) {
+  const jsrt_value out = jsrt_array_new(0, NULL);
+  for (uint32_t g = 0; g < ncap; g++) {
+    jsrt_array_push(out, group_value(s, m, g));
+  }
+  /* Insertion order is the spec's own creation order, and it is what console.log prints. */
+  jsrt_set_prop(out, "index", jsrt_number((double)m[0]), NULL);
+  jsrt_set_prop(out, "input", str, NULL);
+  jsrt_set_prop(out, "groups", match_groups(re, s, m, ncap), NULL);
+  return out;
+}
+
+jsrt_value jsrt_regexp_exec(jsrt_value re_value, jsrt_value str) {
+  const JSString *s = subject_of(str, "exec");
+  JSRTRegExp *re = jsrt_as_regexp(re_value);
+  /* Identical `lastIndex` handling to `test`, because RegExpBuiltinExec is what test runs too: a
+   * /g or /y pattern resumes from the cursor and resets it to 0 on a failure. */
+  const bool stateful = (re->lre_flags & (LRE_FLAG_GLOBAL | LRE_FLAG_STICKY)) != 0;
+  Matches m = scan(re, s, stateful ? re->last_index : 0, 1, false);
+  if (m.count == 0) {
+    matches_free(&m);
+    if (stateful) {
+      re->last_index = 0;
+    }
+    return JSRT_NULL;
+  }
+  const uint32_t *hit = match_of(&m, 0);
+  if (stateful) {
+    re->last_index = hit[1];
+  }
+  const jsrt_value out = match_array(re, s, str, hit, m.ncap);
+  matches_free(&m);
+  return out;
+}
+
+jsrt_value jsrt_regexp_match(jsrt_value re_value, jsrt_value str) {
+  JSRTRegExp *re = jsrt_as_regexp(re_value);
+  if ((re->lre_flags & LRE_FLAG_GLOBAL) == 0) {
+    return jsrt_regexp_exec(re_value, str); /* §22.2.5.6 step 5: without /g, match IS exec */
+  }
+  const JSString *s = subject_of(str, "match");
+  /* With /g the cursor is reset FIRST and left at 0, and the answer is built by CreateArrayFromList
+   * -- a plain array of whole-match strings, with no `index`/`input`/`groups` on it. */
+  re->last_index = 0;
+  Matches m = scan(re, s, 0, UINT32_MAX, false);
+  if (m.count == 0) {
+    matches_free(&m);
+    return JSRT_NULL;
+  }
+  const jsrt_value out = jsrt_array_new(0, NULL);
+  for (uint32_t i = 0; i < m.count; i++) {
+    jsrt_array_push(out, group_value(s, match_of(&m, i), 0));
+  }
+  matches_free(&m);
+  return out;
+}
+
 jsrt_value jsrt_regexp_split(jsrt_value re_value, jsrt_value str) {
   const JSString *s = subject_of(str, "split");
   const JSRTRegExp *re = jsrt_as_regexp(re_value);

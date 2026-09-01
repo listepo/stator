@@ -329,14 +329,21 @@ typedef struct JSRTIC {
  * its field list is empty -- the SHAPE owns the layout, not the class. */
 extern const JSRTClass jsrt_class_dynamic;
 
-jsrt_value jsrt_dynobj_new(void);
+/* The `groups` object a RegExp match carries has a NULL prototype -- §22.2.7.2 builds it with
+ * OrdinaryObjectCreate(null) -- and Node's inspector says so out loud: `[Object: null prototype]
+ * { w: 'a' }`. The layout is a dynamic object's exactly; this second descriptor is the only thing
+ * that differs, and it exists so the printer can tell them apart by pointer. */
+extern const JSRTClass jsrt_class_null_proto;
 
-/* Own-property order for a dynamic object: canonical array-index keys first in numeric order,
+jsrt_value jsrt_dynobj_new(void);
+jsrt_value jsrt_null_proto_new(void);
+
+/* Own-property order for a shape -- a dynamic object's, or the table a match array carries: canonical array-index keys first in numeric order,
  * followed by the remaining string keys in insertion order (ECMA-262 OrdinaryOwnPropertyKeys).
  * The returned shape-pointer array is malloc-owned by the caller; it contains metadata pointers,
  * not GC values, and is therefore safe to hold outside a JSRT_FRAME. */
-uint32_t jsrt_dyn_property_count(const JSRTDynObject *dyn);
-const JSRTShape **jsrt_dyn_property_order(const JSRTDynObject *dyn, uint32_t count);
+uint32_t jsrt_shape_property_count(const JSRTShape *shape);
+const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t count);
 
 /* A shape key from a JS string: an immortal NUL-terminated UTF-8 copy, the lifetime the shape
  * table already gives every key. A key containing U+0000 aborts -- a C string cannot hold one. */
@@ -350,9 +357,11 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic);
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic);
 bool jsrt_has_prop(jsrt_value obj, const char *key);
 
-/* Math builtins (jsrt_math.c) — number -> number, ECMA-262 §21.3.2 exactly; only the
- * exactly-specified operations exist (the approximated transcendentals wait on vendored fdlibm).
- * min/max are BINARY: the frontend folds the variadic forms into nested calls. */
+/* Math builtins (jsrt_math.c) — number -> number, ECMA-262 §21.3.2 exactly. The approximated
+ * transcendentals below come from the vendored fdlibm (the code V8 runs), never the host libm,
+ * so they agree with Node bit-for-bit (plan-notes 117).
+ * min/max/hypot are BINARY: the frontend folds min/max's variadic forms into nested calls, and
+ * gates hypot above two arguments because hypot is not associative. */
 jsrt_value jsrt_math_abs(jsrt_value x);
 jsrt_value jsrt_math_clz32(jsrt_value x);
 jsrt_value jsrt_math_fround(jsrt_value x);
@@ -366,6 +375,30 @@ jsrt_value jsrt_math_trunc(jsrt_value x);
 jsrt_value jsrt_math_pow(jsrt_value base, jsrt_value exponent);
 jsrt_value jsrt_math_min(jsrt_value a, jsrt_value b);
 jsrt_value jsrt_math_max(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_math_acos(jsrt_value x);
+jsrt_value jsrt_math_acosh(jsrt_value x);
+jsrt_value jsrt_math_asin(jsrt_value x);
+jsrt_value jsrt_math_asinh(jsrt_value x);
+jsrt_value jsrt_math_atan(jsrt_value x);
+jsrt_value jsrt_math_atan2(jsrt_value y, jsrt_value x);
+jsrt_value jsrt_math_atanh(jsrt_value x);
+jsrt_value jsrt_math_cbrt(jsrt_value x);
+jsrt_value jsrt_math_cos(jsrt_value x);
+jsrt_value jsrt_math_cosh(jsrt_value x);
+jsrt_value jsrt_math_exp(jsrt_value x);
+jsrt_value jsrt_math_expm1(jsrt_value x);
+jsrt_value jsrt_math_hypot(jsrt_value a, jsrt_value b);
+jsrt_value jsrt_math_log(jsrt_value x);
+jsrt_value jsrt_math_log10(jsrt_value x);
+jsrt_value jsrt_math_log1p(jsrt_value x);
+jsrt_value jsrt_math_log2(jsrt_value x);
+/* Nondeterministic by specification — proved by range/distribution assertions in tests/unit/,
+ * never by a golden test (plan.md §7 Task 4.2, determinism carve-out). */
+jsrt_value jsrt_math_random(void);
+jsrt_value jsrt_math_sin(jsrt_value x);
+jsrt_value jsrt_math_sinh(jsrt_value x);
+jsrt_value jsrt_math_tan(jsrt_value x);
+jsrt_value jsrt_math_tanh(jsrt_value x);
 
 /* String.prototype builtins (jsrt_string_ops.c) — UTF-16 code-unit semantics, ECMA-262 §22.1.3
  * exactly. Optional arguments arrive as JSRT_UNDEFINED (the lowering pads them; for every method
@@ -395,6 +428,7 @@ jsrt_value jsrt_unicode_normalize(jsrt_value s, jsrt_value form);
 /* `s.search(re)` -- the one String.prototype method the subset admits ONLY with a regexp: the spec
  * converts a non-regexp with `new RegExp(...)`, a constructor the compiler does not have. */
 jsrt_value jsrt_string_search(jsrt_value s, jsrt_value re);
+jsrt_value jsrt_string_match(jsrt_value s, jsrt_value re);
 jsrt_value jsrt_string_normalize(jsrt_value s, jsrt_value form);
 jsrt_value jsrt_string_split(jsrt_value s, jsrt_value sep);
 jsrt_value jsrt_string_replace(jsrt_value s, jsrt_value pattern, jsrt_value replacement);
@@ -486,7 +520,11 @@ jsrt_value jsrt_string_to_lower_case(jsrt_value s);
 static inline bool jsrt_is_dynobj(jsrt_value v) {
   /* JSRT_TAG_OBJECT specifically: jsrt_is_object also answers true for arrays and closures,
    * which carry no JSRTClass and must not be dereferenced as one. */
-  return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_dynamic;
+  if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
+    return false;
+  }
+  const JSRTClass *cls = ((const JSRTObject *)jsrt_ptr(v))->cls;
+  return cls == &jsrt_class_dynamic || cls == &jsrt_class_null_proto;
 }
 
 static inline JSRTObject *jsrt_as_object(jsrt_value v) {
@@ -665,13 +703,25 @@ bool jsrt_regexp_test(jsrt_value re, jsrt_value str);
 /* The regexp-taking String.prototype methods (§22.2.5). They live here rather than in
  * jsrt_string_ops.c because they are the ENGINE's algorithms: everything they do is a scan, and
  * the scan is the vendored executor. jsrt_string_ops.c dispatches to them on the pattern's tag. */
+/* `re.exec(s)` -- RegExpBuiltinExec, §22.2.7.2. Answers the MATCH ARRAY (element 0 the whole match,
+ * element g the g'th group, or `undefined` where a group did not participate) carrying `index`,
+ * `input` and `groups`, or `null` when the pattern does not match. It reads and writes `lastIndex`
+ * for a /g or /y pattern exactly as `test` does: they are one algorithm with two answers. */
+jsrt_value jsrt_regexp_exec(jsrt_value re, jsrt_value str);
+
+/* `s.match(re)` -- §22.2.5.6. Without /g this IS exec. With /g it resets `lastIndex` to 0 and
+ * answers a PLAIN dense array of the whole-match strings -- the spec builds that one with
+ * CreateArrayFromList, so it carries no properties -- or `null` when nothing matched. */
+jsrt_value jsrt_regexp_match(jsrt_value re, jsrt_value str);
+
 jsrt_value jsrt_regexp_search(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_split(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_replace(jsrt_value re, jsrt_value str, jsrt_value replacement, bool all);
 
 /* ---------------------------------------------------------------- arrays */
 
-/* A dense array: `length` contiguous elements, no holes and no property table.
+/* A dense array: `length` contiguous elements and no holes, plus the named-property table below
+ * (empty for every array but a RegExp match).
  *
  * `elements` is a separate allocation rather than a flexible array member, because `length` grows
  * (a write past the end extends the array) and a flexible member cannot move without invalidating
@@ -688,6 +738,18 @@ typedef struct JSRTArray {
   uint32_t length;
   uint32_t capacity;
   jsrt_value *elements;
+  /* The NAMED-property table an array carries only once something hangs a property off it -- today
+   * that is exactly a RegExp match, whose `index`, `input` and `groups` are properties of the
+   * result array (ECMA-262 §22.2.7.2). `shape == NULL` is "no properties", which is every ordinary
+   * array: an empty table costs one NULL word, not an allocation.
+   *
+   * The layout is the dynamic object's, deliberately: jsrt_shape.c drives both through one walk, so
+   * `m.index` resolves through the same shape chain and the same per-site inline cache a `{ }`
+   * receiver uses. Indices stay in `elements` and never enter this table -- a match array is dense
+   * over its capture groups, so the two never overlap. */
+  JSRTShape *shape;
+  jsrt_value *slots;
+  uint32_t slot_capacity;
 } JSRTArray;
 
 /* Build an array from `count` initial elements; `items` may be NULL when `count` is 0. Returns an

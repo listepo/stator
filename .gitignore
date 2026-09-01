@@ -2,6 +2,8 @@ node_modules/
 dist/
 runtime/build/
 runtime/build-asan/
+runtime/build-intl/
 *.o
 *.a
 .DS_Store
+/.serena

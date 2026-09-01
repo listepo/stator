@@ -247,6 +247,7 @@ static void append_string(Buf *out, const JSString *str) {
 #define SEPARATOR_SPACE 2 /* ", " between two entries */
 
 static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent);
+static void append_key(Buf *out, const char *key);
 
 /* Quoting follows Node: single quotes, unless the string contains one and no double quote, and
  * backticks only when it contains both. The quote actually chosen is then the only quote that
@@ -505,7 +506,11 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   const uint32_t length = a->length;
   const size_t shown = length > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : length;
   const bool truncated = length > shown;
-  const size_t count = shown + (truncated ? 1 : 0);
+  /* A RegExp match is an array with NAMED properties, and Node prints them after the elements:
+   * `[ 'a', index: 0, input: 'a', groups: undefined ]`. Every other array has none, so this is
+   * zero and nothing below it changes. */
+  const size_t props = jsrt_shape_property_count(a->shape);
+  const size_t count = shown + (truncated ? 1 : 0) + props;
 
   if (count == 0) {
     buf_puts(out, "[]");
@@ -531,12 +536,23 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
     buf_init(&entries[shown]);
     buf_puts(&entries[shown], more);
   }
+  if (props > 0) {
+    const JSRTShape **links = jsrt_shape_property_order(a->shape, (uint32_t)props);
+    for (size_t i = 0; i < props; i++) {
+      Buf *entry = &entries[shown + (truncated ? 1 : 0) + i];
+      buf_init(entry);
+      append_key(entry, links[i]->key);
+      buf_puts(entry, ": ");
+      inspect_value(entry, a->slots[links[i]->offset], recurse + 1, indent + 2);
+    }
+    free(links);
+  }
 
   /* Grouping is attempted first, because whether it fired decides the layout below: if it changed
    * the number of lines, the single-line form is not even considered. */
   Buf *rows = NULL;
   size_t row_count = 0;
-  if (count > 6) {
+  if (count > 6 && props == 0) {
     rows = (Buf *)calloc(count, sizeof(Buf));
     if (rows == NULL) {
       jsrt_panic("out of memory: print buffer");
@@ -650,19 +666,25 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
    * values from the out-of-line slots, and insertion order is the chain reversed. Everything
    * below the collection step -- entries, budget, line breaking -- is shared with fixed-shape
    * objects, which is the point: the two print identically because Node cannot tell them apart. */
-  const JSRTDynObject *dyn = cls == &jsrt_class_dynamic ? (const JSRTDynObject *)o : NULL;
+  const JSRTDynObject *dyn = jsrt_is_dynobj(v) ? (const JSRTDynObject *)o : NULL;
 
   /* An object LITERAL has no constructor name, and Node prints none: `{ x: 1 }`, not `Object
    * { x: 1 }`. Its descriptor carries the empty name, which is unambiguous -- no class may be
    * called "" -- and every place the name would print becomes a place it does not. A dynamic
    * object is a plain object and prints namelessly for the same reason. */
-  const bool named = cls->name[0] != '\0';
+  /* The null-prototype object §22.2.7.2 builds for `groups` prints Node's marker where a class name
+   * would go -- `[Object: null prototype] { w: 'a' }` -- and it counts toward the line budget the
+   * same way. Every other nameless object (a literal, a plain dynamic object) still prints bare. */
+  const char *const name = cls == &jsrt_class_null_proto  ? "[Object: null prototype]"
+                           : cls->name[0] != '\0'         ? cls->name
+                                                          : NULL;
+  const bool named = name != NULL;
 
   if (recurse > INSPECT_MAX_DEPTH) {
     /* `[Deep]`, not `[Object]`: past the cap Node still names the constructor it stopped at --
      * and for a literal, which has no constructor, that name IS `Object`. */
     buf_putc(out, '[');
-    buf_puts(out, named ? cls->name : "Object");
+    buf_puts(out, named ? name : "Object");
     buf_putc(out, ']');
     return;
   }
@@ -673,7 +695,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
    * start with one. Printing therefore walks the visible slots, not every slot. */
   size_t count = 0;
   if (dyn != NULL) {
-    count = jsrt_dyn_property_count(dyn);
+    count = jsrt_shape_property_count(dyn->shape);
   } else {
     for (uint32_t i = 0; i < cls->field_count; i++) {
       if (cls->fields[i][0] != '#') {
@@ -683,7 +705,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
   }
   if (count == 0) {
     if (named) {
-      buf_puts(out, cls->name);
+      buf_puts(out, name);
       buf_putc(out, ' ');
     }
     buf_puts(out, "{}");
@@ -697,7 +719,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
   size_t next = 0;
   if (dyn != NULL) {
     /* Dynamic keys follow OrdinaryOwnPropertyKeys: integer indices first, then insertion order. */
-    const JSRTShape **links = jsrt_dyn_property_order(dyn, (uint32_t)count);
+    const JSRTShape **links = jsrt_shape_property_order(dyn->shape, (uint32_t)count);
     for (size_t i = 0; i < count; i++) {
       Buf *entry = &entries[next++];
       buf_init(entry);
@@ -721,9 +743,9 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
 
   /* The name and the space after it are part of the prefix Node measures, along with the `{`. A
    * literal contributes neither, so its budget is one character wider. */
-  const size_t prefix = named ? strlen(cls->name) + 1 /* the space */ + 1 : 1 /* "{" */;
+  const size_t prefix = named ? strlen(name) + 1 /* the space */ + 1 : 1 /* "{" */;
   if (named) {
-    buf_puts(out, cls->name);
+    buf_puts(out, name);
     buf_putc(out, ' ');
   }
   emit_braced(out, entries, count, indent, prefix);

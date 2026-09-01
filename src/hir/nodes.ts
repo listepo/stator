@@ -459,6 +459,7 @@ export const STRING_OPS = {
   padEnd: { arity: 2, result: 'string' },
   padStart: { arity: 2, result: 'string' },
   repeat: { arity: 1, result: 'string' },
+  match: { arity: 1, result: 'match' },
   search: { arity: 1, result: 'number' },
   replace: { arity: 2, result: 'string' },
   replaceAll: { arity: 2, result: 'string' },
@@ -477,7 +478,7 @@ export const STRING_OPS = {
   valueOf: { arity: 0, result: 'string' },
 } as const satisfies Record<
   string,
-  { arity: number; result: 'boolean' | 'element' | 'number' | 'string' | 'string-array' }
+  { arity: number; result: 'boolean' | 'element' | 'match' | 'number' | 'string' | 'string-array' }
 >;
 
 export type StringOpName = keyof typeof STRING_OPS;
@@ -656,20 +657,50 @@ export interface JsonParse extends Node {
   readonly arg: Expression;
 }
 
-/** The Math methods the HIR can spell. After lowering, arity is FIXED: `abs`..`trunc` take one
- * argument, `pow`/`min`/`max` exactly two — the variadic `Math.min(a, b, c)` was folded into
- * nested binary nodes by the lowering, and the zero-argument forms into their identity literals
- * (`Infinity` / `-Infinity`), so no node below the gate is variadic. */
+/** The Math methods the HIR can spell. After lowering, arity is FIXED and per-method (the table
+ * lives in the verifier): most take one argument, `pow`/`min`/`max`/`imul`/`atan2`/`hypot` take
+ * exactly two, and `random` takes none. The variadic `Math.min(a, b, c)` was folded into nested
+ * binary nodes by the lowering, and the zero-argument forms into their identity literals
+ * (`Infinity` / `-Infinity`), so no node below the gate is variadic.
+ *
+ * `hypot` is the one that does NOT get the min/max folding treatment, because it is not
+ * associative: `hypot(a, b, c)` is a different computation from `hypot(hypot(a, b), c)` (V8 adds a
+ * Kahan compensation term for it). Above two arguments it stays gated rather than approximated. */
 export type MathMethod =
   | 'abs'
+  | 'acos'
+  | 'acosh'
+  | 'asin'
+  | 'asinh'
+  | 'atan'
+  | 'atan2'
+  | 'atanh'
+  | 'cbrt'
   | 'ceil'
+  | 'clz32'
+  | 'cos'
+  | 'cosh'
+  | 'exp'
+  | 'expm1'
   | 'floor'
+  | 'fround'
+  | 'hypot'
+  | 'imul'
+  | 'log'
+  | 'log10'
+  | 'log1p'
+  | 'log2'
   | 'max'
   | 'min'
   | 'pow'
+  | 'random'
   | 'round'
   | 'sign'
+  | 'sin'
+  | 'sinh'
   | 'sqrt'
+  | 'tan'
+  | 'tanh'
   | 'trunc';
 
 /** `Math.floor(x)` and friends — one node for the Math surface, on the CollectionOp precedent.
@@ -863,13 +894,14 @@ export interface RegExpLiteral extends Node {
 /** The `RegExp.prototype` surface, on the `COLLECTION_OPS` discipline: a closed set of methods,
  * each one runtime function with a fixed C signature, never a function value.
  *
- * `test` is the whole of it for now. `exec` is deliberately absent: it answers an ARRAY WITH
- * PROPERTIES (`index`, `input`, `groups` hang off the match array), and a jsrt array is dense with
- * no property table — so landing it would mean either a wrong answer or a representation change,
- * and neither belongs in this slice. */
+ * `result` is what the C function hands back, and the two entries differ: `test` answers a C `bool`
+ * the emitter has to box, `exec` answers a `jsrt_value` already. `exec`'s HIR type is Unknown
+ * rather than an array because the checker's own answer is `RegExpExecArray | null` — the null is
+ * real, and a node typed `array` would be the compiler asserting a match it has not made. */
 export const REGEXP_OPS = {
-  test: 1,
-} as const satisfies Record<string, number>;
+  test: { arity: 1, result: 'boolean' },
+  exec: { arity: 1, result: 'match' },
+} as const satisfies Record<string, { arity: number; result: 'boolean' | 'match' }>;
 
 export type RegExpOperation = keyof typeof REGEXP_OPS;
 

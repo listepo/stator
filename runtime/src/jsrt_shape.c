@@ -18,6 +18,11 @@
 
 const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL};
 
+/* Identical to `jsrt_class_dynamic` in every field that means anything -- the SHAPE owns the layout
+ * -- and distinct from it by address, which is the whole job: it marks the objects §22.2.7.2 builds
+ * with a null prototype so the printer writes Node's `[Object: null prototype]` prefix. */
+const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL};
+
 /* The one shape with no key: every dynamic object starts here. Static, so "has no properties"
  * needs no allocation and compares by address. */
 static JSRTShape shape_root = {NULL, NULL, 0, NULL, NULL};
@@ -75,17 +80,19 @@ static bool property_before(const JSRTShape *a, const JSRTShape *b) {
   return a->offset < b->offset;
 }
 
-uint32_t jsrt_dyn_property_count(const JSRTDynObject *dyn) {
-  return dyn->shape->key == NULL ? 0 : dyn->shape->offset + 1;
+uint32_t jsrt_shape_property_count(const JSRTShape *shape) {
+  /* NULL is an array that never gained a property -- the same "no properties" the root shape means
+   * for a dynamic object, spelled without an allocation. */
+  return shape == NULL || shape->key == NULL ? 0 : shape->offset + 1;
 }
 
-const JSRTShape **jsrt_dyn_property_order(const JSRTDynObject *dyn, uint32_t count) {
+const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t count) {
   const JSRTShape **links =
       (const JSRTShape **)malloc((size_t)count * sizeof(const JSRTShape *));
   if (links == NULL && count > 0) {
     jsrt_panic("out of memory: dynamic object keys");
   }
-  for (const JSRTShape *s = dyn->shape; s != NULL && s->key != NULL; s = s->parent) {
+  for (const JSRTShape *s = shape; s != NULL && s->key != NULL; s = s->parent) {
     links[s->offset] = s;
   }
   /* Stable insertion sort is sufficient for shape-sized key sets and avoids a comparator carrying
@@ -109,8 +116,7 @@ static JSRTDynObject *as_dynobj(jsrt_value v, const char *op) {
    * with a slot layout, the site expects the shape table, and answering the read anyway would be
    * silently wrong for exactly the values where it matters — so it is a loud runtime not-yet
    * until Phase 5 teaches these entry points to read through a JSRTClass descriptor. */
-  if (jsrt_is(v, JSRT_TAG_OBJECT) &&
-      ((const JSRTObject *)jsrt_ptr(v))->cls != &jsrt_class_dynamic) {
+  if (jsrt_is(v, JSRT_TAG_OBJECT) && !jsrt_is_dynobj(v)) {
     jsrt_panic(
         "STA2004: a statically-shaped object reached a dynamic property site; planned for Phase 5");
   }
@@ -120,6 +126,28 @@ static JSRTDynObject *as_dynobj(jsrt_value v, const char *op) {
     jsrt_panic("STA4058: dynamic property access on a non-object value");
   }
   return (JSRTDynObject *)jsrt_ptr(v);
+}
+
+/* The property table, as the two receivers that own one both expose it: a dynamic object keeps it
+ * inline, an array keeps it beside its elements. Everything below walks this view, so a match
+ * array's `m.index` and a `{ }` receiver's `o.x` are literally the same code path -- which is what
+ * makes an inline cache filled at one site valid however the value was built. */
+typedef struct {
+  JSRTShape **shape;
+  jsrt_value **slots;
+  uint32_t *capacity;
+} PropTable;
+
+static PropTable as_prop_table(jsrt_value v, const char *op) {
+  if (jsrt_is(v, JSRT_TAG_ARRAY)) {
+    JSRTArray *a = jsrt_as_array(v);
+    if (a->shape == NULL) {
+      a->shape = &shape_root; /* first touch: an ordinary array pays nothing until here */
+    }
+    return (PropTable){&a->shape, &a->slots, &a->slot_capacity};
+  }
+  JSRTDynObject *o = as_dynobj(v, op);
+  return (PropTable){&o->shape, &o->slots, &o->capacity};
 }
 
 /* A shape key from a JS string. The shape table stores keys as NUL-terminated UTF-8 and keeps the
@@ -167,14 +195,18 @@ const char *jsrt_shape_key(jsrt_value name) {
   return key;
 }
 
-jsrt_value jsrt_dynobj_new(void) {
+static jsrt_value dynobj_new(const JSRTClass *cls) {
   JSRTDynObject *o = (JSRTDynObject *)slots_alloc(sizeof(JSRTDynObject));
-  o->cls = &jsrt_class_dynamic;
+  o->cls = cls;
   o->shape = &shape_root;
   o->capacity = 0;
   o->slots = NULL;
   return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)o);
 }
+
+jsrt_value jsrt_dynobj_new(void) { return dynobj_new(&jsrt_class_dynamic); }
+
+jsrt_value jsrt_null_proto_new(void) { return dynobj_new(&jsrt_class_null_proto); }
 
 /* The chain walk both get and set share: the object's live keys are exactly the keys on the path
  * from its shape back to the root. Pointer compare first — generated C passes string literals,
@@ -190,46 +222,46 @@ static const JSRTShape *shape_find(const JSRTShape *shape, const char *key) {
 }
 
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
-  JSRTDynObject *o = as_dynobj(obj, "get");
-  if (ic != NULL && ic->shape == o->shape) {
-    return o->slots[ic->offset];
+  const PropTable o = as_prop_table(obj, "get");
+  if (ic != NULL && ic->shape == *o.shape) {
+    return (*o.slots)[ic->offset];
   }
-  const JSRTShape *hit = shape_find(o->shape, key);
+  const JSRTShape *hit = shape_find(*o.shape, key);
   if (hit == NULL) {
     return JSRT_UNDEFINED;
   }
   if (ic != NULL) {
-    ic->shape = o->shape;
+    ic->shape = *o.shape;
     ic->offset = hit->offset;
   }
-  return o->slots[hit->offset];
+  return (*o.slots)[hit->offset];
 }
 
 bool jsrt_has_prop(jsrt_value obj, const char *key) {
-  JSRTDynObject *o = as_dynobj(obj, "has");
-  return shape_find(o->shape, key) != NULL;
+  const PropTable o = as_prop_table(obj, "has");
+  return shape_find(*o.shape, key) != NULL;
 }
 
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic) {
-  JSRTDynObject *o = as_dynobj(obj, "set");
-  if (ic != NULL && ic->shape == o->shape) {
-    o->slots[ic->offset] = value;
+  const PropTable o = as_prop_table(obj, "set");
+  if (ic != NULL && ic->shape == (*o.shape)) {
+    (*o.slots)[ic->offset] = value;
     return;
   }
-  const JSRTShape *hit = shape_find(o->shape, key);
+  const JSRTShape *hit = shape_find((*o.shape), key);
   if (hit != NULL) {
     if (ic != NULL) {
-      ic->shape = o->shape;
+      ic->shape = (*o.shape);
       ic->offset = hit->offset;
     }
-    o->slots[hit->offset] = value;
+    (*o.slots)[hit->offset] = value;
     return;
   }
 
   /* New property: take (or build) the transition. Reuse before allocation is what keeps two
    * same-history objects on ONE shape. */
   JSRTShape *next = NULL;
-  for (JSRTShape *s = o->shape->transitions; s != NULL; s = s->sibling) {
+  for (JSRTShape *s = (*o.shape)->transitions; s != NULL; s = s->sibling) {
     if (s->key == key || strcmp(s->key, key) == 0) {
       next = s;
       break;
@@ -240,31 +272,31 @@ void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic
     if (next == NULL) {
       jsrt_panic("out of memory: shape");
     }
-    next->parent = o->shape;
+    next->parent = (*o.shape);
     next->key = key;
-    next->offset = shape_slot_count(o->shape);
+    next->offset = shape_slot_count((*o.shape));
     next->transitions = NULL;
-    next->sibling = o->shape->transitions;
-    o->shape->transitions = next;
+    next->sibling = (*o.shape)->transitions;
+    (*o.shape)->transitions = next;
   }
 
-  if (next->offset >= o->capacity) {
+  if (next->offset >= (*o.capacity)) {
     /* Double from 4 so repeated additions stay amortized O(1). The old slots are copied, not
      * reallocated in place: under Boehm the old block is simply dropped for the collector. */
-    uint32_t grown = o->capacity == 0 ? 4 : o->capacity * 2;
+    uint32_t grown = (*o.capacity) == 0 ? 4 : (*o.capacity) * 2;
     jsrt_value *fresh = (jsrt_value *)slots_alloc((size_t)grown * sizeof(jsrt_value));
-    for (uint32_t i = 0; i < o->capacity; i++) {
-      fresh[i] = o->slots[i];
+    for (uint32_t i = 0; i < (*o.capacity); i++) {
+      fresh[i] = (*o.slots)[i];
     }
 #ifndef JSRT_HAVE_BOEHM
-    free(o->slots);
+    free((*o.slots));
 #endif
-    o->slots = fresh;
-    o->capacity = grown;
+    (*o.slots) = fresh;
+    (*o.capacity) = grown;
   }
-  o->slots[next->offset] = value;
+  (*o.slots)[next->offset] = value;
   /* Transitions are not IC-cached: each object performs a given addition exactly once, so a
    * transition cache would only ever hit across objects — worth building when Phase 5 measures
    * construction-heavy dynamic code, not before. */
-  o->shape = next;
+  (*o.shape) = next;
 }

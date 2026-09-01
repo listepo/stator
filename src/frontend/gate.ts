@@ -938,9 +938,17 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       if (!MATH_METHODS.has(callee.name.text)) {
         return notYet(`Math.${callee.name.text} is not yet supported`, 4);
       }
-      return call.arguments.some((a) => ts.isSpreadElement(a))
-        ? notYet('a spread argument to a Math method is not yet supported', 4)
-        : { kind: 'accept' };
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to a Math method is not yet supported', 4);
+      }
+      // hypot is the one variadic Math method the lowering CANNOT fold, because it is not
+      // associative: V8 computes the three-argument form with a Kahan compensation term, so
+      // folding it into nested binary calls would agree with Node on easy inputs and disagree
+      // exactly where the compensation is doing work. Refused rather than approximated.
+      if (callee.name.text === 'hypot' && call.arguments.length > 2) {
+        return notYet('Math.hypot with more than two arguments is not yet supported', 4);
+      }
+      return { kind: 'accept' };
     }
     // JSON.stringify and JSON.parse, single-argument forms. A replacer, an indent, or a reviver
     // changes the whole shape of the operation and stays deferred.
@@ -1017,20 +1025,20 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
     if (isGlobalPromise(callee.expression, typeChecker)) {
       const method = callee.name.text;
       if (!Object.hasOwn(PROMISE_STATICS, method)) {
-        return notYet(`Promise.${method} is not yet supported`, 4);
+        return notYet(`Promise.${method} is not yet supported`, 5);
       }
       if (call.arguments.length !== 1) {
-        return notYet(`Promise.${method} with other than one argument is not yet supported`, 4);
+        return notYet(`Promise.${method} with other than one argument is not yet supported`, 5);
       }
       const [argument] = call.arguments;
       if (argument === undefined || ts.isSpreadElement(argument)) {
-        return notYet('a spread argument to a Promise method is not yet supported', 4);
+        return notYet('a spread argument to a Promise method is not yet supported', 5);
       }
       if (
         PROMISE_STATICS[method as keyof typeof PROMISE_STATICS].array &&
         !isArrayOrTuple(typeChecker.getTypeAtLocation(argument), typeChecker)
       ) {
-        return notYet('Promise.all over a non-array is not yet supported', 4);
+        return notYet('Promise.all over a non-array is not yet supported', 5);
       }
       return { kind: 'accept' };
     }
@@ -1200,7 +1208,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet('a spread argument to a RegExp method is not yet supported', 4);
       }
-      const arity = REGEXP_OPS[op as RegExpOperation];
+      const arity = REGEXP_OPS[op as RegExpOperation].arity;
       const subject = call.arguments[0];
       if (call.arguments.length !== arity || subject === undefined) {
         return notYet(`${op} with other than ${String(arity)} arguments is not yet supported`, 4);
@@ -1323,7 +1331,7 @@ function gateAwait(node: ts.Node): GateResult {
     ) {
       return n.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true
         ? { kind: 'accept' }
-        : notYet('await outside an async function is not yet supported', 4);
+        : notYet('await outside an async function is not yet supported', 5);
     }
   }
   return {
@@ -1331,7 +1339,9 @@ function gateAwait(node: ts.Node): GateResult {
     code: 'STA1208',
     message:
       'top-level await is not yet supported: a module body has no resume point to suspend into',
-    phase: 4,
+    // Phase 5 step 9, not 4: Task 4.6 built resume points for FUNCTIONS, and making the module
+    // init function an async unit is lowering work (plan-notes 116).
+    phase: 5,
   };
 }
 
@@ -1651,7 +1661,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
         // The async lowering gives a function one heap environment holding every binding it has.
         // A method also has a receiver, which arrives as a parameter and would have to join them;
         // that is a second question, and it lands with the second slice rather than by accident.
-        return notYet('an async method is not yet supported', 4);
+        return notYet('an async method is not yet supported', 5);
       }
       if (member.questionToken !== undefined) {
         return notYet('an optional method is not yet supported', 3);
@@ -1823,7 +1833,7 @@ function gateCollectionCall(
   }
   const arity = COLLECTION_OPS[collection][callee.name.text];
   if (arity === undefined) {
-    return notYet(`${callee.name.text} on a ${collectionName(collection)} is not yet supported`, 4);
+    return notYet(`${callee.name.text} on a ${collectionName(collection)} is not yet supported`, 5);
   }
   if (call.arguments.length !== arity) {
     return notYet(
@@ -2112,7 +2122,7 @@ function gateMemberAccess(
       return checker.getPropertyOfType(receiver, access.name.text) !== undefined ||
         checker.getIndexInfosOfType(receiver).length > 0
         ? { kind: 'accept' }
-        : notYet('a property the dynamic shape does not declare is not yet supported', 4);
+        : notYet('a property the dynamic shape does not declare is not yet supported', 5);
     }
     return notYet('property access is not yet supported', 3);
   }
@@ -2197,23 +2207,46 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
   return { kind: 'accept' };
 }
 
-/** The Math surface Task 4.2 has landed: the EXACTLY-specified operations only. The approximated
- * transcendentals (sin, log, exp, …) are deliberately absent — Node's answers come from V8's
- * fdlibm and the host libm may differ in the last ulp, so they wait on vendoring fdlibm rather
- * than shipping golden tests that depend on whichever libm built the runtime. */
+/** The whole Math surface (§21.3.2), complete as of plan-notes 117. The approximated
+ * transcendentals used to be absent because the host libm disagrees with Node in the last ulp;
+ * they now come from the vendored fdlibm — the same code V8 runs — so the agreement is structural.
+ * `random` is here too, under plan.md §7 Task 4.2's determinism carve-out: it is proved by
+ * range/distribution assertions rather than by a golden test, because no golden test can pin it. */
 export const MATH_METHODS: ReadonlySet<string> = new Set([
   'abs',
+  'acos',
+  'acosh',
+  'asin',
+  'asinh',
+  'atan',
+  'atan2',
+  'atanh',
+  'cbrt',
   'ceil',
   'clz32',
+  'cos',
+  'cosh',
+  'exp',
+  'expm1',
   'floor',
   'fround',
+  'hypot',
   'imul',
+  'log',
+  'log10',
+  'log1p',
+  'log2',
   'max',
   'min',
   'pow',
+  'random',
   'round',
   'sign',
+  'sin',
+  'sinh',
   'sqrt',
+  'tan',
+  'tanh',
   'trunc',
 ]);
 

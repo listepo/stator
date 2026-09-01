@@ -95,5 +95,28 @@ int main(void) {
   show_test(plain, "aa");
   show_test(plain, "aa");
 
+  /* exec/match: the ARRAY WITH PROPERTIES. `index`, `input` and `groups` are properties of the
+   * result, printed after the elements -- the representation this whole slice exists for. A group
+   * that did not participate is `undefined` IN the array, not a missing element. */
+  jsrt_value pair = re("(\\d+)-(\\w+)", "");
+  jsrt_print(jsrt_regexp_exec(pair, str("12-ab")));
+  jsrt_print(jsrt_regexp_exec(pair, str("nope")));
+  jsrt_value optional = re("a(x)?(b)", "");
+  jsrt_print(jsrt_regexp_exec(optional, str("ab")));
+  /* Named groups: `groups` is a NULL-PROTOTYPE object, and Node says so when it prints one. */
+  jsrt_value named = re("(?<year>\\d{4})-(?<month>\\d{2})", "");
+  jsrt_print(jsrt_regexp_exec(named, str("2026-09")));
+  jsrt_print(jsrt_get_prop(jsrt_regexp_exec(named, str("2026-09")), "index", NULL));
+  /* exec on a /g pattern walks the subject through lastIndex, exactly as test does. */
+  jsrt_value walker = re("a", "g");
+  jsrt_print(jsrt_regexp_exec(walker, str("aab")));
+  jsrt_print(jsrt_regexp_exec(walker, str("aab")));
+  jsrt_print(jsrt_regexp_exec(walker, str("aab")));
+  /* match: without /g it IS exec; with /g it is the plain list of whole matches, no properties. */
+  jsrt_print(jsrt_regexp_match(pair, str("12-ab")));
+  jsrt_print(jsrt_regexp_match(re("[a-z]+", "g"), str("a bc def")));
+  jsrt_print(jsrt_regexp_match(re("z", "g"), str("a bc def")));
+  jsrt_print(jsrt_regexp_match(re("z", ""), str("a bc def")));
+
   return 0;
 }

@@ -2130,6 +2130,17 @@ function lowerExpression(
           }
           return folded;
         }
+        // hypot's degenerate arities, which the runtime entry point (binary, like min/max) cannot
+        // express. These two are not folds of a binary hypot -- they are what the spec says the
+        // answer IS: hypot() is +0, and hypot(x) is |x|. Three or more arguments never reach here;
+        // the gate refuses them, because hypot is not associative (see the gate's note).
+        if (propName === 'hypot' && args.length < 2) {
+          const [only] = args;
+          if (only === undefined) {
+            return { kind: 'number-literal', type: H_NUMBER, span, value: 0 };
+          }
+          return { kind: 'math-call', type: H_NUMBER, span, method: 'abs', args: [only] };
+        }
         return {
           kind: 'math-call',
           type: H_NUMBER,
@@ -2183,7 +2194,7 @@ function lowerExpression(
           padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
         }
         const type: HType =
-          shape.result === 'element'
+          shape.result === 'element' || shape.result === 'match'
             ? hUnknown(false)
             : shape.result === 'string-array'
               ? { kind: 'array', element: H_STRING }

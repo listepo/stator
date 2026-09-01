@@ -133,6 +133,11 @@ jsrt_value jsrt_array_new(uint32_t count, const jsrt_value *items) {
   array->elements = alloc_elements(capacity);
   array->capacity = capacity;
   array->length = count;
+  /* No named-property table until something hangs a property off this array (a RegExp match is the
+   * only thing that does today), which is what NULL means to jsrt_shape.c. */
+  array->shape = NULL;
+  array->slots = NULL;
+  array->slot_capacity = 0;
   for (uint32_t i = 0; i < count; i++) {
     array->elements[i] = items[i];
   }

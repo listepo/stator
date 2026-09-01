@@ -43,7 +43,7 @@ import type {
   UnaryOp,
   VtableEntry,
 } from '../hir/nodes.ts';
-import { arrayOpCallsBack, consoleEntryPoint, SET_OPS } from '../hir/nodes.ts';
+import { arrayOpCallsBack, consoleEntryPoint, REGEXP_OPS, SET_OPS } from '../hir/nodes.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
  *
@@ -2012,9 +2012,12 @@ class Emitter {
           expr.kind === 'collection-op'
             ? collectionCall(expr.op, expr.collection, operands)
             : expr.kind === 'regexp-op'
-              ? // The one op family that answers a C bool rather than a jsrt_value: the engine has
-                // no notion of our values, so the boxing is the bridge's job (see jsrt_regexp.c).
-                `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
+              ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
+                // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
+                // `exec` already answers a value: the match array, or null.
+                REGEXP_OPS[expr.op].result === 'boolean'
+                ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
+                : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
               : `jsrt_${expr.kind === 'array-op' ? 'array' : 'string'}_${snakeCase(expr.op)}(${operands})`;
         // An op that calls back into compiled code can throw, so it gets its own STATEMENT and a
         // pending check -- the same discipline `call` follows, and for the same reason: the check

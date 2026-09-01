@@ -409,12 +409,26 @@ void test('the bit-exact Math members are accepted', () => {
   assert.deepEqual(codesFor('console.log(Math.fround(0.1));'), []);
 });
 
-void test('a Math method as a VALUE and an unlanded Math member stay deferred', () => {
+// The approximated transcendentals used to be deferred here, waiting on vendored fdlibm. They
+// landed with it (plan-notes 117), so this now pins the opposite: they must be ACCEPTED, and the
+// host libm must not be what answers them.
+void test('the approximated transcendentals are accepted', () => {
+  assert.deepEqual(codesFor('console.log(Math.sin(1));'), []);
+  assert.deepEqual(codesFor('console.log(Math.log2(8));'), []);
+  assert.deepEqual(codesFor('console.log(Math.atan2(1, 2));'), []);
+  assert.deepEqual(codesFor('console.log(Math.random());'), []);
+});
+
+void test('a Math method as a VALUE and an unfoldable variadic stay deferred', () => {
   assert.deepEqual(codesFor('const f = Math.floor;\nconsole.log(f(1));'), ['STA1214']);
-  // sin is implementation-approximated: it waits on vendored fdlibm (golden tests are
-  // byte-for-byte against Node, whose answers come from V8's fdlibm, not the host libm).
-  assert.deepEqual(codesFor('console.log(Math.sin(1));'), ['STA1214']);
   assert.deepEqual(codesFor('const xs = [1, 2];\nconsole.log(Math.min(...xs));'), ['STA1214']);
+  // hypot is not associative, so unlike min/max its variadic form cannot be folded into nested
+  // binary calls -- V8 computes the 3-argument case with a Kahan compensation term. Refused
+  // rather than approximated; the binary and degenerate arities are accepted.
+  assert.deepEqual(codesFor('console.log(Math.hypot(1, 2, 3));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(Math.hypot(3, 4));'), []);
+  assert.deepEqual(codesFor('console.log(Math.hypot(-7));'), []);
+  assert.deepEqual(codesFor('console.log(Math.hypot());'), []);
 });
 
 // Task 4.2, String slice: the closed STRING_OPS set is accepted only in callee position on a

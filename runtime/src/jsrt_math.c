@@ -1,12 +1,16 @@
 /* Math builtins (plan.md §7 Task 4.2) — number -> number, ECMA-262 §21.3.2 exactly.
  *
- * Only the EXACTLY-SPECIFIED operations live here. floor/ceil/trunc/abs/sqrt are IEEE-defined and
- * libm is required to be correct on them; round, sign, min, max and the pow special cases are
- * where ECMA and C89's libm disagree, and each wrapper below exists for a named disagreement.
- * The implementation-approximated transcendentals (sin, log, exp, cbrt, hypot, …) are deliberately
- * ABSENT: golden tests diff against Node byte-for-byte, Node's answers come from V8's fdlibm, and
- * the host libm is allowed to differ in the last ulp — shipping them would make the golden suite
- * hostage to whichever libm built the runtime. They land when fdlibm is vendored, not before.
+ * Three groups live here, and which group a member is in decides where its answer comes from:
+ *
+ * 1. IEEE-defined (floor/ceil/trunc/abs/sqrt): the host libm is REQUIRED to be correct, so it is
+ *    called directly. round, sign, min, max and pow's special cases are where ECMA and C89's libm
+ *    disagree, and each wrapper below exists for a named disagreement.
+ * 2. Approximated transcendentals (sin, log, exp, cbrt, …): the host libm is ALLOWED to differ in
+ *    the last ulp, and measurably does — up to 41% of random inputs disagree with Node (plan-notes
+ *    117). They go to the vendored fdlibm, which is the same code V8 runs, so agreement with Node
+ *    is structural rather than lucky. This is what `vendor/fdlibm/` exists for.
+ * 3. Not in fdlibm at all (hypot, random): V8 implements these itself, so we mirror V8's own
+ *    algorithm — see each function's comment.
  *
  * Everything here takes and returns boxed values, canonicalized by jsrt_number like every other
  * producer — arguments are typed `number` by the frontend, and inside checked code annotations
@@ -14,7 +18,10 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
+#include "fdlibm.h"
 #include "jsrt_value.h"
 
 static double arg(jsrt_value v) { return jsrt_number_value(v); }
@@ -114,3 +121,95 @@ jsrt_value jsrt_math_imul(jsrt_value a, jsrt_value b) {
 
 /* Round-trip through IEEE single precision -- the double nearest to the float nearest to x. */
 jsrt_value jsrt_math_fround(jsrt_value v) { return jsrt_number((double)(float)arg(v)); }
+
+/* ---- Group 2: the transcendentals, through the vendored fdlibm (plan-notes 117) ----
+ *
+ * Each is a one-line hand-off. The wrapper exists at all only so the boxing convention is the same
+ * as every other member here; the arithmetic is entirely V8's. Do NOT "simplify" any of these to
+ * the libm call of the same name -- that is precisely the bug the vendoring fixed, and it is
+ * invisible until a golden test disagrees with Node in the seventeenth digit. */
+#define JSRT_MATH_FDLIBM_1(name)                     \
+  jsrt_value jsrt_math_##name(jsrt_value x) {        \
+    return jsrt_number(fdlibm_##name(arg(x)));       \
+  }
+JSRT_MATH_FDLIBM_1(acos)
+JSRT_MATH_FDLIBM_1(acosh)
+JSRT_MATH_FDLIBM_1(asin)
+JSRT_MATH_FDLIBM_1(asinh)
+JSRT_MATH_FDLIBM_1(atan)
+JSRT_MATH_FDLIBM_1(atanh)
+JSRT_MATH_FDLIBM_1(cbrt)
+JSRT_MATH_FDLIBM_1(cos)
+JSRT_MATH_FDLIBM_1(cosh)
+JSRT_MATH_FDLIBM_1(exp)
+JSRT_MATH_FDLIBM_1(expm1)
+JSRT_MATH_FDLIBM_1(log)
+JSRT_MATH_FDLIBM_1(log10)
+JSRT_MATH_FDLIBM_1(log1p)
+JSRT_MATH_FDLIBM_1(log2)
+JSRT_MATH_FDLIBM_1(sin)
+JSRT_MATH_FDLIBM_1(sinh)
+JSRT_MATH_FDLIBM_1(tan)
+JSRT_MATH_FDLIBM_1(tanh)
+#undef JSRT_MATH_FDLIBM_1
+
+jsrt_value jsrt_math_atan2(jsrt_value y, jsrt_value x) {
+  return jsrt_number(fdlibm_atan2(arg(y), arg(x)));
+}
+
+/* ---- Group 3: members V8 implements outside ieee754.cc ---- */
+
+/* Math.hypot, BINARY form (§21.3.2.18). Mirrors V8's FastMathHypot two-argument path exactly
+ * (src/builtins/math.tq): scale both operands by the larger before squaring, so a^2 + b^2 cannot
+ * overflow when the true result is finite. The order of operations is load-bearing -- computing
+ * sqrt(a*a + b*b) instead agrees with V8 on most inputs and disagrees on the interesting ones.
+ *
+ * BINARY only, like min/max: the frontend folds those variadic forms into nested binary calls, but
+ * hypot is NOT associative, so hypot(a, b, c) is a separate computation V8 does with a Kahan
+ * compensation term. That form is gated, not approximated. */
+jsrt_value jsrt_math_hypot(jsrt_value va, jsrt_value vb) {
+  const double a = fabs(arg(va));
+  const double b = fabs(arg(vb));
+  if (a == INFINITY || b == INFINITY) {
+    return jsrt_number(INFINITY); /* before the NaN check: hypot(Inf, NaN) is Inf, not NaN */
+  }
+  const double max = a > b ? a : b;
+  if (isnan(max)) {
+    return jsrt_number((double)NAN);
+  }
+  if (max == 0.0) {
+    return jsrt_number(0.0);
+  }
+  return jsrt_number(sqrt((a / max) * (a / max) + (b / max) * (b / max)) * max);
+}
+
+/* Math.random (§21.3.2.27) -- xorshift128+, the generator V8 uses.
+ *
+ * This is the one member that CANNOT be pinned to Node by a golden test, by construction: the spec
+ * requires an implementation-chosen value, so "matches Node byte-for-byte" is not a property it can
+ * have. It lands under plan.md's determinism carve-out instead, proved by the range and
+ * distribution assertions in tests/unit/ rather than by the golden suite.
+ *
+ * The seed is fixed rather than drawn from the OS. That is a deliberate v0 choice, not an
+ * oversight: a reproducible program is worth more than an unpredictable one while the compiler is
+ * being differentially tested, and nothing here is security-bearing. It must NOT be used for
+ * anything that needs unpredictability. */
+static uint64_t rng_state0 = 0x853c49e6748fea9bULL;
+static uint64_t rng_state1 = 0xda3e39cb94b95bdbULL;
+
+jsrt_value jsrt_math_random(void) {
+  uint64_t s1 = rng_state0;
+  const uint64_t s0 = rng_state1;
+  rng_state0 = s0;
+  s1 ^= s1 << 23;
+  s1 ^= s1 >> 17;
+  s1 ^= s0;
+  s1 ^= s0 >> 26;
+  rng_state1 = s1;
+  /* Top 52 bits into the mantissa of 1.0, then subtract 1 -- the standard construction for a
+   * uniform double in [0, 1) that never rounds up to 1.0. */
+  const uint64_t bits = ((rng_state0 + rng_state1) >> 12) | 0x3FF0000000000000ULL;
+  double d;
+  memcpy(&d, &bits, sizeof d);
+  return jsrt_number(d - 1.0);
+}

@@ -1248,7 +1248,7 @@ function verifyExpression(
       const shape = STRING_OPS[expr.op];
       // `element` is unchecked, the array-op rule: the honest answer is Unknown.
       const want: HType | undefined =
-        shape.result === 'element'
+        shape.result === 'element' || shape.result === 'match'
           ? undefined
           : shape.result === 'string-array'
             ? { kind: 'array', element: H_STRING }
@@ -1432,19 +1432,28 @@ function verifyExpression(
           code: 'STA4086',
           message: `${expr.op} on a receiver of type '${hTypeName(expr.target.type)}'`,
         });
-      } else if (expr.args.length !== REGEXP_OPS[expr.op]) {
+      } else if (expr.args.length !== REGEXP_OPS[expr.op].arity) {
         problems.push({
           kind: 'regexp-op',
           span: expr.span,
           code: 'STA4086',
-          message: `${expr.op} takes ${String(REGEXP_OPS[expr.op])} arguments, not ${String(expr.args.length)}`,
+          message: `${expr.op} takes ${String(REGEXP_OPS[expr.op].arity)} arguments, not ${String(expr.args.length)}`,
         });
-      } else if (!hTypeEquals(expr.type, H_BOOLEAN)) {
+      } else if (REGEXP_OPS[expr.op].result === 'boolean' && !hTypeEquals(expr.type, H_BOOLEAN)) {
         problems.push({
           kind: 'regexp-op',
           span: expr.span,
           code: 'STA4086',
           message: `${expr.op} results in '${hTypeName(expr.type)}', not a boolean`,
+        });
+      } else if (REGEXP_OPS[expr.op].result === 'match' && expr.type.kind !== 'unknown') {
+        // `exec` answers a match array OR null, and the HIR has no union: Unknown is the honest
+        // type, and a node claiming `array` here would be a match the compiler has not made.
+        problems.push({
+          kind: 'regexp-op',
+          span: expr.span,
+          code: 'STA4086',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not the unknown a match-or-null is`,
         });
       }
       break;
@@ -1553,16 +1562,39 @@ function objectStaticWant(result: 'array' | 'boolean' | 'strings' | 'unknown'): 
 
 const MATH_ARITY: Readonly<Record<string, number>> = {
   abs: 1,
+  acos: 1,
+  acosh: 1,
+  asin: 1,
+  asinh: 1,
+  atan: 1,
+  atanh: 1,
+  cbrt: 1,
   clz32: 1,
+  cos: 1,
+  cosh: 1,
+  exp: 1,
+  expm1: 1,
   fround: 1,
+  log: 1,
+  log10: 1,
+  log1p: 1,
+  log2: 1,
+  sin: 1,
+  sinh: 1,
+  tan: 1,
+  tanh: 1,
   ceil: 1,
   floor: 1,
   round: 1,
   sign: 1,
   sqrt: 1,
   trunc: 1,
+  atan2: 2,
+  hypot: 2,
   pow: 2,
   imul: 2,
   min: 2,
   max: 2,
+  // Nondeterministic and nullary — the one Math node with no operand to type-check.
+  random: 0,
 };

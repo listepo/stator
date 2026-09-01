@@ -35,10 +35,10 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
     jsrt_panic("STA4084: Object.keys/values/entries on a non-object value");
   }
   const JSRTObject *fixed = (const JSRTObject *)jsrt_ptr(v);
-  const bool dynamic = fixed->cls == &jsrt_class_dynamic;
+  const bool dynamic = jsrt_is_dynobj(v);
   const JSRTDynObject *dyn = (const JSRTDynObject *)jsrt_ptr(v);
-  const uint32_t count = dynamic ? jsrt_dyn_property_count(dyn) : fixed->cls->field_count;
-  const JSRTShape **links = dynamic ? jsrt_dyn_property_order(dyn, count) : NULL;
+  const uint32_t count = dynamic ? jsrt_shape_property_count(dyn->shape) : fixed->cls->field_count;
+  const JSRTShape **links = dynamic ? jsrt_shape_property_order(dyn->shape, count) : NULL;
 
   jsrt_value out = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; i < count; i++) {
@@ -88,7 +88,7 @@ jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key) {
     jsrt_panic("STA2005: Object.hasOwn with a non-string key is not yet supported");
   }
   const JSRTObject *fixed = (const JSRTObject *)jsrt_ptr(v);
-  if (fixed->cls == &jsrt_class_dynamic) {
+  if (jsrt_is_dynobj(v)) {
     return jsrt_bool(jsrt_has_prop(v, jsrt_shape_key(key)));
   }
   for (uint32_t i = 0; i < fixed->cls->field_count; i++) {

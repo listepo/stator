@@ -63,6 +63,6 @@ These arrive with the phase that needs them; do not add them to CI before that:
 
 - **Boehm GC (`bdw-gc`)** — Phase 2 Task 2.5. macOS: `brew install bdw-gc`;
   Debian/Ubuntu: `apt-get install libgc-dev`. Discovered via `pkg-config --libs bdw-gc`.
-- **Ryū** (`runtime/vendor/ryu/`) — Phase 2 Task 2.5, vendored, not a package dependency.
+- **Ryū** — **NOT vendored.** Planned by Phase 2 Task 2.5 for `runtime/vendor/ryu/`; it was never fetched (no network access), and `shortest_digits()` in `runtime/src/jsrt_print.c` stands in for it with a round-trip search over `%.*e`. Correct, and slow: up to 18 `snprintf`+`strtod` pairs per number printed. See plan-notes 28 — this line claimed it was vendored until 2026-09-01.
 - **QuickJS-NG `libregexp`** (`runtime/vendor/`) — Phase 4.
 - **Test262 checkout** — Phase 6.

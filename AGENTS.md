@@ -2,6 +2,8 @@
 
 Instructions for AI agents (and humans) working in this repository. Read this file fully, then read `plan.md` — the roadmap and spec. When this file and `plan.md` disagree, `plan.md` wins; report the conflict in `plan-notes.md`.
 
+`plan.md` holds only what is **still open**. Completed tasks live in `done.md`; read it when you need to know how something was built, not to decide what to build next.
+
 ## What this project is
 
 **Stator** is an ahead-of-time compiler that turns TypeScript/JavaScript into native binaries, in two modes:
@@ -20,6 +22,7 @@ If `src/` does not exist yet, the project is pre-Phase-1: the only files may be 
 ## Golden rules
 
 1. **Roadmap discipline.** Work `plan.md` top-down. A task is done only when its **Check** passes, and "done" is claimed only with the Check's command output cited. No Check, no done.
+   **When a task's Check passes, move its record to `done.md` in the same change** — the evidence narrative goes there, and `plan.md` keeps the task's number and title as a struck-through one-line stub pointing at it. `plan.md` shrinks as work lands; that is the point. Three things never move: anything still **normative** (the locked `tsconfig.json`, a live Check), any part of a task that has **not** landed, and the task's **number and title**, because `plan.md §N Task X.Y` is referenced from code comments and `docs/` and must keep resolving. `done.md` is an archive, never an authority — if you find yourself citing it to justify a decision, the rule you want belongs in `plan.md` or `docs/`.
 2. **The compiler is strict TypeScript.** No `any`, no non-null assertions, no `enum`/`namespace`/parameter properties (banned by `erasableSyntaxOnly`). Never weaken `tsconfig.json` or Biome rules to make code compile — fix the code.
 3. **Compile a typed subset; never statically analyze untyped JS.** Untyped code goes to the dynamic representation or the Phase-8 tier. This rule killed every project that ignored it (see plan §0.1).
 4. **Never trust a type annotation across a boundary.** `unknown`, unions, `JSON.parse`, FFI, and `.js`→`.ts` imports get runtime checks at the narrowing point. Inside checked code, trust types fully.
@@ -29,7 +32,8 @@ If `src/` does not exist yet, the project is pre-Phase-1: the only files may be 
 ## Repo map
 
 ```
-plan.md            roadmap + spec (the authority)
+plan.md            roadmap + spec (the authority) — OPEN work only
+done.md            completion record for finished tasks (archive; not normative)
 AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
@@ -106,11 +110,12 @@ node src/cli/main.ts explain file.ts --json     # per-construct verdicts (decisi
 
 ## Workflow
 
-1. Find the first unmet Check in `plan.md` (phases in order, tasks in order). That's the current task, unless the human directs otherwise.
+1. Find the first unmet Check in `plan.md` (phases in order, tasks in order). That's the current task, unless the human directs otherwise. A struck-through stub is done — its evidence is in `done.md`; don't redo it.
 2. Before coding, read the docs the task references (`docs/VALUE.md`, `docs/NUMERIC.md`, …). If the task leaves you guessing, that's a plan bug — fix `plan.md` via `plan-notes.md`, don't invent conventions in code.
 3. Implement with tests (see Testing rules). Run `pnpm run ci` locally.
-4. Report: what changed, the Check command + its output, any `plan-notes.md` entries added.
-5. Commit style: short imperative subject naming the task (`phase2: emit JSRT_FRAME prologue (task 2.4)`); one task per commit where practical.
+4. Move the finished task's record from `plan.md` to `done.md` (golden rule 1), leaving the stub behind.
+5. Report: what changed, the Check command + its output, any `plan-notes.md` entries added.
+6. Commit style: short imperative subject naming the task (`phase2: emit JSRT_FRAME prologue (task 2.4)`); one task per commit where practical.
 
 ## Don'ts
 

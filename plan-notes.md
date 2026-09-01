@@ -1309,8 +1309,6 @@ binding), and `C.name`/`C.prototype` (the class object again).
 
 **plan.md edited:** yes — rung 6b now records statics as done.
 
----
-
 ## Open items carried forward
 
 - **Phase 0 is not approved.** `NICHE.md` does not exist and no `phase-0-approved` tag has been
@@ -2536,3 +2534,116 @@ protocol with generators last, and `STA1201` names Phase 5 in the gate, in `docs
 in `docs/SUBSET.md` — with its message narrowed to generators, since async no longer reports it.
 Phase 5 is where it belongs on the merits rather than by elimination: the protocol is core language
 surface both modes need, and it is lowering work, not runtime work, so Phase 4 was never its home.
+
+## 115. `plan.md` split: finished work moved to `done.md` (2026-08-31)
+
+**Problem.** `plan.md` had grown to 761 lines and 494 of them were completion records — Phase 3's
+Task 3.3 alone was 275 lines of rung-by-rung evidence. The file is read top-down to find the first
+unmet Check (§15.1), so every landed task made that job harder. A roadmap that grows as work
+finishes is measuring the wrong thing.
+
+**Split.** Evidence narratives for Phases 1-3 (complete) and Phase 4's landed tasks moved to a new
+`done.md` (493 lines). `plan.md` is now 387 lines and holds open work only.
+
+**What deliberately did NOT move**, because the split must not cost anything:
+1. **Normative residue.** The locked `tsconfig.json` stays in §4 — it is normative under §15.7 and
+   changing it requires a plan edit. `done.md` is an archive; nothing in it binds.
+2. **Live Checks.** Phase 4's Check stays in §7: the phase is open (Task 4.2 in progress).
+3. **Unlanded parts of landed tasks.** Task 4.2's gate rule ("every global except `console.log` and
+   `undefined` is deferred with a not-yet") is behaviour, not history, and stayed.
+4. **Task numbers and titles.** Roughly 60 `plan.md §N Task X.Y` references live in `docs/`, `src/`,
+   `runtime/src/` and `tests/`. Every task keeps a struck-through one-line stub in `plan.md` under
+   its original section, so all of them still resolve — in both files, since `done.md` repeats the
+   numbering. Section numbers §0-§16 are unchanged.
+
+**Verification.** Every line of the pre-split `plan.md` at least 60 characters long was checked to
+appear verbatim in `plan.md` + `done.md`. Three do not, all intentional: the Phase 1 intro paragraph
+(rewritten — its "nothing is committed yet" follow-up is closed as of the 2026-08-30 commits) and
+the Phase 2 and Phase 3 headers (retitled `✅ COMPLETE`). One line WAS lost by the first pass — the
+Task 4.2 gate rule in item 3 — and this check is what caught it; it was restored.
+
+**AGENTS.md edited:** yes. Golden rule 1 now requires moving a task's record to `done.md` in the
+same change its Check passes, and names the four things that never move. The workflow gains the
+step and the repo map gains the file.
+
+**Numbering note.** This entry is **115** because 110-114 are taken and **110, 111 and 112 are each
+used twice** — a second run restarts at 110 partway down the file. That predates this change and is
+not fixed here: commit 5e9f2b4 already cites "plan-notes 112", and renumbering an evidence log to
+resolve a collision is the same mistake `DIAGNOSTICS.md` forbids for codes. Owner call.
+
+## 116. Phase 4 had a Check but no scope, so its not-yet codes had nowhere to point (2026-09-01)
+
+**Root cause.** Entry 112 fixed `STA1201`'s dead-end phase pointer one code at a time. It was one
+instance of a structural defect: **Phase 4 never defined what it contained.** It has a Check
+(runtime tests, ASan, leak test, dashboard renders, one async golden test) but no scope boundary, so
+"is Phase 4 done?" was unanswerable — and four more codes named it as their deliverer while it
+closed. Fixing pointers one at a time would have kept reproducing the bug.
+
+**What the audit found**, beyond the five known pointers:
+1. **`Date` was owned by nobody.** `STA1210` and `SUBSET.md` both named "Phase 4 Task 4.2", but
+   Task 4.2's builtin list is `Math`, `JSON`, `String.prototype`, `Array.prototype`, `Object`,
+   `Map`, `Set`, `console` — `Date` is not in it, and `Date` is not on the dashboard at all.
+2. **`SUBSET.md` and `DIAGNOSTICS.md` disagreed.** `STA1207` and `STA1208` were **Phase 7** in
+   `SUBSET.md` and **Phase 4** in `DIAGNOSTICS.md`, with the gate emitting 4. Phase 7 is FFI;
+   neither code has anything to do with it. Nobody had reasoned either number.
+3. **Task 4.2's completion bar is unmeetable for three members.** "A builtin counts as implemented
+   when ≥1 golden test exercises it and matches Node" cannot ever be satisfied by `Math.random`,
+   `Date.now()` or zero-argument `new Date()`. `random` sits in `builtins_coverage.json` with an
+   empty fixture list, counted against coverage, so `Math` could never exceed 42/43 and the phase
+   exit could never be reached. The only existing carve-out (`intl_*`) is about the BUILD, not
+   determinism.
+4. **58 gate call sites hardcode phase 4** for the parameterized `STA1214`, several already wrong
+   (`Promise.${method}` belongs to Phase 5 step 11 under `STA1216`; `an async method` to Phase 5).
+5. **`STA1214`'s table row claimed Phase 3**, which is meaningless for a code whose message names
+   the phase per construct — and Phase 3 is closed.
+
+**Fixes.** Phase 4 gets an explicit **exit criterion** listing the members whose blocker it owns,
+with the residue assigned by blocker rather than by whichever phase was open: `matchAll` splits from
+`match` (it answers an iterator → Phase 5 step 8) while `exec`/`match` stay Phase 4 (an ARRAY WITH
+PROPERTIES, which is Task 4.1's hybrid extended to arrays — the gate comment already named this);
+`STA1208` → Phase 5 step 9 and `STA1207` → step 10, both new steps with their blockers spelled out;
+`Date` joins Task 4.2's list explicitly; the descriptor/prototype surface goes to Phase 8 where
+`STA1204` already sits. Task 4.2 gains a **determinism carve-out** — nondeterministic members land
+with a range/property proof and are marked in the dashboard, not counted missing forever. New
+**Task 4.7** walks all 58 hardcoded pointers and adds the test that would have caught this class
+without anyone reading a table: a not-yet diagnostic must not name a phase already marked complete.
+Phase 5 is retitled "`js` mode, and the language surface Phase 4 deferred", because steps 8–11 are
+not `js`-mode work and pretending otherwise is how a phase becomes a bucket.
+
+**Rule added to the plan (§7, and it generalizes).** A `not-yet` diagnostic names the phase that
+owns its **blocker**, never the phase that happens to be open. When a phase closes, every code
+naming it is either delivered or reassigned in that same change.
+
+**Also fixed while here:** `docs/TOOLCHAIN.md` claimed Ryū was vendored at `runtime/vendor/ryu/`.
+It is not, and never was — entry 28 records why, and `runtime/vendor/` contains only `quickjs-ng`.
+The line now says so and points at entry 28.
+
+**plan.md edited:** yes — §7 (exit criterion, Task 4.2 carve-out and `Date`, new Task 4.7), §8
+(retitle, step 8 corrected from "three surfaces" to four, new steps 9–11), §16 (v2.2 resumes the log
+for Phases 2–4, v2.3 records the `done.md` split and this change).
+
+## 118. Phase-4 completion records must not duplicate the active roadmap (2026-09-01)
+
+**Review.** The Phase 1–3 records had been reduced to the required task-number/title stubs in
+`plan.md`, but four already-landed Phase-4 records (Tasks 4.3–4.6) still repeated their completion
+status and evidence there even though their full narratives already lived in `done.md`. That made the
+open roadmap ambiguous about whether those tasks still had work.
+
+**Resolution.** Replaced the duplicate Task 4.3–4.6 narratives with struck-through stubs pointing to
+`done.md`. Task 4.1 remains active: fixed and dynamic objects are archived, but the Phase-4 exit
+still needs arrays carrying match properties for `RegExp.prototype.exec` and
+`String.prototype.match`. Task 4.2 remains active: `pnpm run test:builtins` currently reports
+**131/197** members, with Math 21/43 and Object 6/13 among its open surface. No task was marked done
+without its Check.
+
+## 119. Math transcendental slice completed and dashboard synchronized (2026-09-01)
+
+**Implementation/check.** Vendored fdlibm now backs the remaining Math transcendental wrappers, with
+V8-compatible binary/degenerate `hypot` handling and a deterministic xorshift `Math.random` proof.
+The new `tests/golden/ts/math_transcendental.ts` matches Node byte-for-byte; the unit range/
+variation test proves `Math.random` under the determinism carve-out.
+
+**Plan/dashboard update.** Added the transcendental fixture claims and nondeterministic proof to
+`tests/golden/builtins_coverage.json`; `pnpm run test:builtins` now reports **152/196** deterministic
+members (Math **42/42**, plus one carved proof). Phase 4 Task 4.2 remains open for Object, Date,
+console, and the RegExp array-properties blocker.
