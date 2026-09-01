@@ -317,21 +317,35 @@ Evidence: [done.md](done.md) → Phase 4, Task 4.6. Generators are Phase 5 step 
 protocol work, not an unfinished part of this task.
 
 **Task 4.7 — Audit every not-yet phase pointer** (added 2026-09-01, plan-notes 116). `STA1214` is
-parameterized — its message names the delivering phase per construct — and **63 call sites in
-`src/frontend/gate.ts` name phase 4** (audited 2026-09-01 at `39cf053`, plan-notes 127: 60
-`notYet(…, 4)` → `STA1214`, two `STA1211` literals, one `STA1215`; the count was 58 when this task
-was written and moves with every slice — enumerate at execution, never assume). Phase 4 is closing,
-so each of those is a claim that will be false the moment it does. The async-method site has since
-been corrected to phase 5; the two `Promise` property-access sites still hardcode 4 while the
-`Promise` surface belongs to Phase 5 step 11 under `STA1216`. Walk all of them, give each the phase
-that owns its actual blocker, and add a test that fails when a not-yet diagnostic names a phase
-already marked complete — which is the check that would have caught `STA1201`, `STA1207`, `STA1208`
-and `STA1214` without anyone reading the table.
+parameterized — its message names the delivering phase per construct — and the gate is full of
+hardcoded phase numbers. Walk all of them, give each the phase that owns its actual blocker, and
+add a test that fails when a not-yet diagnostic names a phase already marked complete — which is
+the check that would have caught `STA1201`, `STA1207`, `STA1208` and `STA1214` without anyone
+reading the table.
 
-Steps (added 2026-09-01; grouping evidence in plan-notes 127):
+**Inventory (re-derived 2026-09-01 at `89de482` by parsing `gate.ts` with the `typescript` API —
+plan-notes 136; the earlier greps under-counted by 2.6×). 165 sites:**
 
-1. **Recount at execution HEAD.** The audit's inventory (63 = 60/2/1 above) is the working list;
-   re-derive it from `gate.ts` before touching anything, since 4.2's remaining slices move it.
+| phase named | sites | what they are |
+|---|---|---|
+| **3** | **70** | the lowering ladder's residue — `ts`-mode static language surface. **Phase 3 has been COMPLETE since 2026-08-30**, so all 70 are user-visible lies today (`rest parameters are not yet supported; planned for Phase 3`). |
+| 4 | 63 | the originally-audited group: builtin arity/spread/member catch-alls, module surface |
+| 4, via `dateNotYet` | 10 | the `Date` residue — the phase is hardcoded inside the helper, not passed |
+| 5 | 18 | already re-homed by earlier slices |
+| 8 · 7 · 6 | 2 · 1 · 1 | `with`/`eval` · package imports · for-of binding destructuring |
+
+Phase 4 is closing, so its 73 are claims that go false the moment it does; the 70 naming Phase 3
+are already false. The count moves with every slice — **enumerate at execution, never assume**, and
+parse rather than grep (a multi-line `notYet(` call is invisible to a single-line pattern, which is
+what produced both under-counts — see plan-notes 130).
+
+Steps (added 2026-09-01; grouping evidence in plan-notes 127, corrected by 136):
+
+1. **Recount at execution HEAD, and ask the general question.** Re-derive the inventory from
+   `gate.ts` before touching anything — 4.2's slices move it. The question is *"does any site name
+   a phase already complete?"*, **not** *"which sites name the open phase?"*: the second is what the
+   2026-09-01 audit asked, and it is why 70 sites naming a phase that closed six days earlier
+   survived an audit written to end exactly that defect (plan-notes 136).
 2. **Build the substrate the required test needs** — nothing in `src/` knows which phases are
    complete, and `gate.test.ts` asserts codes only, never the `phase` field. Add one
    machine-readable completed-phases source of truth in `src/support/`, then the regression test:
@@ -351,9 +365,22 @@ Steps (added 2026-09-01; grouping evidence in plan-notes 127):
    owner's phase (`freeze`/`isFrozen` → 5; `create`/`defineProperty`/`getPrototypeOf`/
    `setPrototypeOf` → 8, `STA1204`'s surface; `keys`/`values`/`entries` + `matchAll` → 5; `Date` →
    this phase's Date steps), and the residue keeps the catch-all with an honest owner.
-6. **Decide the 51 sites that fit no named group — and where a blocker has no owning phase, EDIT
+6. **Decide the sites that fit no named group — and where a blocker has no owning phase, EDIT
    §8/§11 in the same change to give it one** (§15.3; a not-yet may not name a phase that does not
-   own its blocker). By group: **module surface ×7** (renamed imports/exports, re-exports,
+   own its blocker). By group: **the lowering ladder's residue ×70** (added 2026-09-01,
+   plan-notes 136 — the whole phase-3 row of the inventory: rest/default/optional/destructuring
+   parameters, destructuring declarations and catch bindings, the class member surface
+   (accessors, statics, static blocks, computed and `#private` names, overloads, override rules,
+   `extends` forms), generics beyond monomorphization (constrained and defaulted type parameters,
+   generic classes, generic functions as values, explicit type arguments), object-literal forms
+   (shorthand, spread, method, accessor, non-identifier keys), `this`/`super`/`new` forms, bound
+   method values, and the property-access catch-alls). Their blocker is lowering work no phase
+   owned; **§8 step 12 is added in the same change to own them** — they are `ts`-mode static
+   surface, so §11's dynamic tier is the wrong home for all but the genuinely dynamic residue;
+   **the `Date` residue ×10** (`dateNotYet` hardcodes "Phase 4 (builtins)" inside the helper, but
+   every member it refuses is ICU-dependent — the intl FEATURE BUILD, which is a flag and not a
+   phase, so this is step 3's `STA1215` question a second time, not a phase reassignment);
+   **module surface ×7** (renamed imports/exports, re-exports,
    `export =`, default/namespace imports — lowering work; candidate owner is Phase 5's
    language-surface half, with namespace imports sharing step 10's module-namespace-object
    blocker); **arity/spread/argument-shape refinements ×32** (per-construct: forms fixable by
@@ -455,15 +482,24 @@ under `STA1216`; the descriptor/prototype surface to Phase 8.
 
 ---
 
-## 8. Phase 5 — `js` mode, and the language surface Phase 4 deferred (est. +4–6 weeks; needs Phase 4's shapes/ICs)
+## 8. Phase 5 — `js` mode, and the language surface Phases 3 and 4 deferred (est. +4–6 weeks; needs Phase 4's shapes/ICs)
 
 Until here, every pipeline stage was built `ts`-mode-first but mode-agnostic below the gate (§0.8). This phase turns on the second policy.
 
-The title gained its second half on 2026-09-01 (plan-notes 116). Steps 8–11 are not `js`-mode work:
-they are language surface that needs one more mechanism, which Phase 4 deferred without naming an
-owner. They are here because the mechanism each one waits on is **lowering** work, not runtime work,
-and Phase 4 is the runtime phase. If this phase starts feeling like a bucket, that is the signal to
-split steps 8–11 into their own phase — do it by plan edit (§15.3), not by drift.
+The title gained its second half on 2026-09-01 (plan-notes 116) and its "3 and" on the same day
+(plan-notes 136). Steps 8–12 are not `js`-mode work: they are language surface that needs one more
+mechanism, which an earlier phase deferred without naming an owner. They are here because the
+mechanism each one waits on is **lowering** work, not runtime work, and Phases 3 and 4 closed on
+the rungs and the runtime respectively, not on the surface they deferred.
+
+**Split trigger (armed 2026-09-01, plan-notes 136).** The earlier wording — *"if this phase starts
+feeling like a bucket"* — was a feeling, and step 12 arrived carrying 70 gate sites on its own, more
+than steps 8–11 combined. Feeling is now replaced by a condition: **split steps 8–12 into their own
+phase the moment step 12's construct families stop landing as one dependency chain** — concretely,
+when two of its families are being worked by different people at once, or when the step's own Check
+has to be split to report progress. Do it by plan edit (§15.3), not by drift, and take a new phase
+NUMBER rather than renumbering 6/7/8, which `plan.md §N` citations in code comments and `docs/`
+depend on.
 
 Steps (all eleven detailed 2026-09-01 against the live substrate — much of step 1 is already real;
 plan-notes 131):
@@ -568,6 +604,46 @@ plan-notes 131):
    them; (e) `STA1216` clears; then enumerate the `Promise` combinator residue
    (`allSettled`/`any`/`race`/`withResolvers`/`try`) and name each member's owner — most need
    only (a); iterating a non-array argument also needs step 8.
+12. **The lowering ladder's residue — `ts`-mode static language surface** (added 2026-09-01,
+    plan-notes 136). Phase 3's rungs each landed a core and deferred its surface under
+    `notYet(…, 3)` while Phase 3 was open; Phase 3 closed on 2026-08-30 having passed a Check about
+    the eight rungs, not about what they deferred, and **70 gate sites outlived their owner** —
+    still telling users, today, that rest parameters are "planned for Phase 3". This step owns
+    them. It is not `js`-mode work and not the dynamic tier: every construct here is typed
+    TypeScript with a statically known shape, which §1.1 promises will "eventually compile", in the
+    product's DEFAULT mode. Land by family, each family flipping its `tests/subset/` rows out of
+    expected-fail in the commit that lands it, never in bulk:
+    (a) **Parameter and binding forms** first, because every later family calls functions: rest,
+    default, optional and destructuring parameters; destructuring declarations; a declaration
+    without an initializer; destructuring a caught value.
+    (b) **Expression-position residue** next — cheap, and it unblocks the decision corpus: labels
+    on anything but a loop or switch, capturing a variable declared inside a loop, `instanceof`
+    against anything but a class name, assignment and compound assignment to a non-variable,
+    `++`/`--` on a non-variable and in value position, and the binary/unary/statement catch-alls
+    (`describeKind`).
+    (c) **Object literal forms**: shorthand, spread, method and accessor members; keys that are not
+    identifiers.
+    (d) **The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
+    static getters and setters, accessors with no body, computed and `#private` accessor names,
+    index signatures, static initialization blocks, computed member names, a `#private` name an
+    ancestor also declares, constructor and method overload signatures, a derived constructor that
+    does not open with `super(...)`, more than one constructor, optional methods and fields, the
+    override rules, anonymous classes, and the `extends` forms. The `this`/`super`/`new` position
+    sites ride here (`this` in a static member or outside a class member; `super` on anything but
+    an inherited method; `new` on anything but a named class).
+    (e) **Values that need a closure or a class object**: bound method values (`const f = o.m` —
+    the sites' own comments already name the blocker, "a bound closure nothing here builds"), a
+    class used as a value, `super` as a value, named function expressions, function declarations
+    inside a block/loop/branch, calling a class field, and calling an arbitrary expression. Decide
+    the bound-method REPRESENTATION in `docs/VALUE.md` before writing any of it — this family is
+    where an accidental second closure representation gets built.
+    (f) **Generics beyond monomorphization** last, because they multiply everything above:
+    constrained and defaulted type parameters, generic classes, generic function expressions and
+    arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a
+    generic call whose type arguments no argument determines.
+    **Check (step 12):** one golden fixture per family matching the pinned Node byte-for-byte; the
+    decision-test rows for every construct named above out of expected-fail; and `gate.ts` emits no
+    `not-yet` for any construct this step names.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
@@ -1188,3 +1264,4 @@ Standing practices:
 - **v2.6** (2026-09-01): **reconciliation after a same-day race** (plan-notes 130). The `console.table` + carve-out-trio step list added in v2.5 was overtaken by a parallel session that landed the work (`0ef7724`; carve-out proof `tests/unit/console-carveout.test.ts`) while the steps were being adversarially verified — the list is replaced by a landed record, leaving `Date` as Task 4.2's only remaining builtin. The race also produced the second plan-notes numbering collision (see note 115): two same-day entries each took 126 and 127; the later pair is renumbered 128/129 and the one inbound reference fixed. The verification pass on v2.5's own text resolved three challenges: the 63-site count STANDS (the challengers' single-line greps miss multi-line `notYet(` calls — a multiline-aware recount of the current tree finds 61 + 2 + 1 = 64, moved by the console slices exactly as Task 4.7 step 1 predicts), the Promise call-side phase-5 claim stands, and one bad reference (plan-notes 117, which does not exist — the console plumbing note is 94) went away with the replaced step list.
 - **v2.7** (2026-09-01): **every remaining phase gained numbered Steps** (plan-notes 131) — Phase 5's eleven steps, Phase 6's three tasks, Phase 7's three tasks plus a phase preamble and an explicit v0 out-of-scope table, and Phase 8's nine. Written against the live tree rather than from the task lines, which changed several of them: Phase 5 step 1's substrate (`allowJs`/`checkJs` by mode, HIR `provenance`, `explain`'s per-function print) is already landed, so the step is now the `inferred` grade alone; step 5's boundary-trap proof cannot be a Node-diff golden, because Node runs a lying-JSDoc program happily — it needs an expected-stderr harness mode; step 11's mechanism is not a new one but a subsection of `docs/VALUE.md` §4.9's existing pending-cell protocol — a runtime-side call that checks `jsrt_pending()` and hands the builtin a completion value, which is precisely the gap `STA1216`'s row already names — and it carries an unlock sweep (`Object.freeze`/`isFrozen`, `toISOString` on an Invalid Date, every `SUBSET.md` row that reads "the spec throws, which builtins cannot raise yet"). Phase 6 is framed by its one failure mode — a green signal that proves less than it appears to — so Test262 skips are mapped from `SUBSET.md` rows with an unmapped feature tag a hard error, the corpus is fetched rather than vendored (~50k files, and no network here — plan-notes 28) with a missing corpus SKIPPING so `pnpm run ci` stays offline-runnable, the fuzzer is type-directed and seeded (no clock, no `Math.random`) so a finding replays from `--seed=N`, and Task 6.3 extends the existing `tests/bench/record.ts` instead of replacing it. Phase 7 gained the four things that make FFI four weeks instead of one line (memory, UTF-16 strings, C error codes, direction asymmetry), a concrete ABI table, and the two questions nobody can leave implicit: which side owns a pointer after a call, and what a C caller sees when TS throws. Phase 8's first two steps are not implementation — the human gate's evidence, then the marshaling design doc — and its vendoring step must match the `v0.16.2` commit `runtime/vendor/quickjs-ng/VENDOR.md` already pins, since the interpreter ships its own `libregexp` and a second copy is duplicate symbols at link time.
 - **v2.8** (2026-09-01): **Phase 0's Check restated so it can pass more than once** (plan-notes 135). The gate itself is unchanged — `NICHE.md` was approved by the owner on 2026-09-01 and its commit is tagged `phase-0-approved`, which supersedes v2.1's "Phase 0 remains open" above — but the Check was written as `git describe --tags --exact-match HEAD`, which asks whether HEAD *is* the approval commit and therefore answered `fatal: no tag exactly matches` from the next commit onward: a closed gate reporting itself open at every later HEAD, in the one section §15.1 makes every phase point at. It now asserts the durable fact (`git cat-file -e phase-0-approved:NICHE.md`, with the added-in-that-commit form as the stronger check), and §15 rule 2 gained the general form — a Check must stay re-runnable at any later HEAD, because an assertion *about* HEAD is a point-in-time observation, not a Check.
+- **v2.9** (2026-09-01): **the not-yet audit's own inventory was audited, and it was 2.6× short** (plan-notes 136). Task 4.7's step 1 says to re-derive the site list at execution HEAD; parsing `gate.ts` with the `typescript` API instead of grepping it finds **165** `notYet`/`dateNotYet` sites, not 63 — and 70 of them name **Phase 3, complete since 2026-08-30**, so `rest parameters are not yet supported; planned for Phase 3` is what the compiler prints today. The audit missed them because it asked "which sites name phase 4?" — a question about the phase that happened to be open — while the rule the task itself establishes implies the general one, "does any site name a completed phase?". Task 4.7's inventory paragraph is replaced by the parsed table, step 1 now carries the general question, and step 6 gains two groups (the 70-site ladder residue; the 10 `dateNotYet` sites, whose blocker is the intl feature BUILD and so is step 3's `STA1215` question again, not a phase). §8 Phase 5 gains **step 12**, which owns the residue — six construct families in landing order with their own Check — because it is `ts`-mode static surface §1.1 promises will compile and no phase owned it; deliberately not a new phase, since §15.3 forbids the renumbering that would break `plan.md §N` citations. Phase 5's title gained "3 and", and its bucket warning — previously a feeling — became a named split trigger.

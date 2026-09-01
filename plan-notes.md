@@ -3487,3 +3487,85 @@ definition, and §15.1 enforces itself by pointing at them.
 
 **plan.md edited:** yes — §3's Check replaced (with the discarded form and why, kept as a warning),
 and §15 rule 2 extended. `done.md`'s Phase 0 record now cites the re-verified output.
+
+---
+
+## 136. Task 4.7's inventory was 2.6× short, and 70 of the sites name a phase that closed on 2026-08-30 (2026-09-01)
+
+**Plan:** §7 Task 4.7 says **63 call sites in `src/frontend/gate.ts` name phase 4** (audited at
+`39cf053`, plan-notes 127), and its step 1 says to re-derive the inventory at execution HEAD rather
+than assume it. This is that re-derivation, and it did not just move the number.
+
+**Method.** The earlier counts were greps, which is why note 130 already had to defend the 63
+against challengers whose single-line patterns missed multi-line `notYet(` calls. This one parses:
+a `ts.createSourceFile` walk over `gate.ts` collecting every `CallExpression` whose callee is
+`notYet` or `dateNotYet`, reporting each site's line, its second argument verbatim, and its
+enclosing function. Same tool the compiler itself uses, so a multi-line call, a template-literal
+message and a nested ternary all count exactly once.
+
+**Result at `89de482`** — 165 sites, not 63:
+
+| phase named | sites | what they are |
+|---|---|---|
+| **3** | **70** | the lowering ladder's residue — `ts`-mode static language surface |
+| 4 | 63 | the audited group (builtin arity/spread/member catch-alls, module surface) |
+| `dateNotYet` → 4 | 10 | the `Date` residue, hardcoded inside the helper |
+| 5 | 18 | already re-homed by earlier slices |
+| 8 | 2 | `with`, `eval` |
+| 7 | 1 | `importing a package` |
+| 6 | 1 | `destructuring in a for-of binding` |
+
+**The finding is the first row.** Phase 3 is **COMPLETE (2026-08-30)** — `done.md` line 108, and
+`plan.md` §6's heading. Seventy diagnostics name it as their deliverer. This is not a latent
+mislabel; it is user-visible today:
+
+```
+$ node src/cli/main.ts build /tmp/rest.ts -o /tmp/rest
+/tmp/rest.ts:1:12 STA1214 [ts] rest parameters are not yet supported; planned for Phase 3
+```
+
+`notYet(message, phase)` renders `${message}; planned for Phase ${phase}`, so every one of the 70 is
+a shipped promise pointing at finished work. Exactly the defect Task 4.7 exists to end — and the
+task would have closed without touching a single one of them.
+
+**Root cause, and it is the same shape as note 116's.** Task 4.7 was written while Phase 4 was
+closing, so it asked *"which sites name phase 4?"* — a question about the phase that happened to be
+open. The rule the task itself establishes ("a not-yet names the phase that owns its **blocker**,
+never the phase that happens to be open") implies the general question: *does any site name a phase
+already complete?* Nobody asked it, because the audit inherited the framing of the moment. Phase 3
+closed on 2026-08-30 and no sweep ran; Phases 1 and 2 closed earlier and, by luck, left no
+pointers behind (a `notYet(…, 2)` search finds none — the walking-skeleton deferrals were rewritten
+to 3 and 4 as the ladder advanced, which is the same sweep, done informally, that nobody repeated
+for 3).
+
+**How the 70 got there.** The ladder's rungs each landed a core and deferred its surface under
+`notYet(…, 3)` *while Phase 3 was open* — rung 4 landed calls and deferred rest/default/optional/
+destructuring parameters, rung 6 landed class layout and deferred accessors, statics, computed
+names, `#private` collisions, overloads and override rules, and so on. Each was honest when
+written. Phase 3's Check passed on the eight rungs it named, not on the surface they deferred, and
+the residue outlived its owner.
+
+**No phase owns them.** §1.1 promises *"Everything else that is typed TS should eventually compile
+… Gaps on the way are 'not yet' diagnostics naming the phase that delivers them."* Phase 5 is `js`
+mode plus the surface **Phase 4** deferred; 6 is conformance, 7 FFI, 8 the dynamic tier. The
+`ts`-mode static surface Phase 3 deferred — rest parameters, destructuring, the class member
+surface, generics beyond monomorphization, object-literal forms, bound method values — is
+unscheduled, in the mode that is the product's default.
+
+**plan.md edited:** yes, in this change.
+- §7 Task 4.7: the inventory paragraph now carries the parsed 165 and its distribution, step 1
+  gains the general question (*any* completed phase, not phase 4), and a new group is added to
+  step 6 for the ladder residue.
+- §8 Phase 5: **step 12** added — "the lowering ladder's residue" — owning the static-TS surface,
+  grouped by construct family, with its own Check. This follows Task 4.7 step 6's own instruction
+  ("EDIT §8/§11 in the same change to give it one"); it is deliberately NOT a new phase, because
+  §15.3 forbids renumbering (`plan.md §N Task X.Y` is cited from code comments and `docs/`).
+  Phase 5's preamble already warns that steps 8–11 becoming a bucket is the signal to split; step
+  12 makes that warning live, so the preamble now names the split trigger explicitly instead of
+  leaving it to feel.
+
+**Also observed, not fixed here:** `plan-notes.md` has a **third** numbering collision — two
+entries numbered `133` (lines 3273 and 3323, both 2026-09-01). Note 115 set the handling: renumber
+the newer entry, never retroactively renumber a note others may cite. Both 133s predate this entry
+and both are already cited, so neither is safe to move by the rule that produced the rule; recorded
+here so the next collision is the fourth, not a surprise.
