@@ -77,27 +77,60 @@ function valueImports(
 ): { readonly target: ts.SourceFile; readonly at: ts.Node }[] {
   const edges: { target: ts.SourceFile; at: ts.Node }[] = [];
   for (const stmt of file.statements) {
-    if (!ts.isImportDeclaration(stmt) || stmt.importClause?.isTypeOnly === true) {
+    if (ts.isImportDeclaration(stmt)) {
+      if (stmt.importClause?.isTypeOnly === true) {
+        continue;
+      }
+      if (!ts.isStringLiteral(stmt.moduleSpecifier)) {
+        continue;
+      }
+      pushResolved(program, file, stmt.moduleSpecifier.text, stmt, edges);
       continue;
     }
-    if (!ts.isStringLiteral(stmt.moduleSpecifier)) {
-      continue;
-    }
-    const resolved = ts.resolveModuleName(
-      stmt.moduleSpecifier.text,
-      file.fileName,
-      program.getCompilerOptions(),
-      ts.sys,
-    ).resolvedModule;
-    if (resolved === undefined) {
-      continue;
-    }
-    const target = program.getSourceFile(resolved.resolvedFileName);
-    if (target !== undefined && !target.isDeclarationFile) {
-      edges.push({ target, at: stmt });
-    }
+    collectImportCallEdges(program, file, stmt, edges);
   }
   return edges;
+}
+
+function collectImportCallEdges(
+  program: ts.Program,
+  file: ts.SourceFile,
+  node: ts.Node,
+  edges: { target: ts.SourceFile; at: ts.Node }[],
+): void {
+  if (
+    ts.isCallExpression(node) &&
+    node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+    node.arguments[0] !== undefined &&
+    ts.isStringLiteral(node.arguments[0])
+  ) {
+    pushResolved(program, file, node.arguments[0].text, node, edges);
+  }
+  ts.forEachChild(node, (child) => {
+    collectImportCallEdges(program, file, child, edges);
+  });
+}
+
+function pushResolved(
+  program: ts.Program,
+  file: ts.SourceFile,
+  specifier: string,
+  at: ts.Node,
+  edges: { target: ts.SourceFile; at: ts.Node }[],
+): void {
+  const resolved = ts.resolveModuleName(
+    specifier,
+    file.fileName,
+    program.getCompilerOptions(),
+    ts.sys,
+  ).resolvedModule;
+  if (resolved === undefined) {
+    return;
+  }
+  const target = program.getSourceFile(resolved.resolvedFileName);
+  if (target !== undefined && !target.isDeclarationFile) {
+    edges.push({ target, at });
+  }
 }
 
 /** One namespace for the whole program means one owner per name. Two files declaring the same

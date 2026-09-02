@@ -276,7 +276,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.CatchClause: {
       const clause = node as ts.CatchClause;
       const binding = clause.variableDeclaration;
-      return binding === undefined || ts.isIdentifier(binding.name)
+      return binding === undefined || isSimpleBindingPattern(binding.name)
         ? { kind: 'accept' }
         : notYet('destructuring a caught value is not yet supported', 5);
     }
@@ -288,6 +288,12 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return gateFunction(
         node as ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction,
       );
+
+    case ts.SyntaxKind.ObjectBindingPattern:
+    case ts.SyntaxKind.ArrayBindingPattern:
+    case ts.SyntaxKind.BindingElement:
+    case ts.SyntaxKind.OmittedExpression:
+      return { kind: 'accept' };
 
     case ts.SyntaxKind.Parameter:
       return gateParameter(node as ts.ParameterDeclaration);
@@ -476,6 +482,31 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
  * and nothing else; `import type` is erased whole. What is refused binds a NAME the exporting
  * file does not own under that spelling: a default import (the export is anonymous) and a
  * namespace import (`ns.x` would need an object no module is). */
+/** `import(s)`. A string literal names a file already in the whole-program graph. Anything
+ * else needs runtime resolution, which is Phase 8 (plan.md §8 step 10c). */
+function gateImportCall(call: ts.CallExpression): GateResult {
+  const spec = call.arguments[0];
+  if (call.arguments.length !== 1 || spec === undefined) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1207',
+      message:
+        'dynamic import() is not yet supported; planned for Phase 5 (module namespace objects)',
+      phase: 5,
+    };
+  }
+  if (!ts.isStringLiteral(spec)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1207',
+      message:
+        'import() with a computed specifier is not yet supported; planned for Phase 8 (runtime module resolution)',
+      phase: 8,
+    };
+  }
+  return { kind: 'accept' };
+}
+
 function gateImport(node: ts.ImportDeclaration): GateResult {
   const spec = node.moduleSpecifier;
   if (ts.isStringLiteral(spec) && node.importClause?.isTypeOnly !== true) {
@@ -895,28 +926,37 @@ function gateDeclarationList(list: ts.VariableDeclarationList, mode: Mode): Gate
   return { kind: 'accept' };
 }
 
+/** Identifier, or a shallow object/array pattern of identifiers with no rest, default, or nest. */
+export function isSimpleBindingPattern(name: ts.BindingName): boolean {
+  if (ts.isIdentifier(name)) {
+    return true;
+  }
+  if (ts.isObjectBindingPattern(name)) {
+    return name.elements.every(
+      (el) =>
+        el.dotDotDotToken === undefined &&
+        el.initializer === undefined &&
+        ts.isIdentifier(el.name) &&
+        (el.propertyName === undefined || ts.isIdentifier(el.propertyName)),
+    );
+  }
+  if (ts.isArrayBindingPattern(name)) {
+    return name.elements.every(
+      (el) =>
+        ts.isOmittedExpression(el) ||
+        (ts.isBindingElement(el) &&
+          el.dotDotDotToken === undefined &&
+          el.initializer === undefined &&
+          ts.isIdentifier(el.name)),
+    );
+  }
+  return false;
+}
+
 function gateDeclaration(decl: ts.VariableDeclaration): GateResult {
-  // `let x;` would need definite-assignment analysis to know whether a read yields undefined,
-  // which is Phase 5 step 12 work. The HIR's Declaration requires an initializer for the same
-  // reason. A for-of binding is the exception and not an exception to the reasoning:
-  // `for (const x of a)` has no initializer to write because the LOOP assigns it, definitely,
-  // before the body runs. A catch binding is a VariableDeclaration too, and the loop's
-  // reasoning applies to it as well: the CATCH assigns it, definitely, before its block runs.
-  // `var x;` is the other exception: there is no TDZ, the slot exists from function entry, and
-  // a read before the initializer (or with none) answers `undefined`.
-  if (
-    decl.initializer === undefined &&
-    !isForOfBinding(decl) &&
-    !ts.isCatchClause(decl.parent) &&
-    !isVarBinding(decl)
-  ) {
-    return notYet('a declaration without an initializer is not yet supported', 5);
-  }
-  // Destructuring binds several names from one value; the HIR has one name per Declaration.
-  if (!ts.isIdentifier(decl.name)) {
-    return notYet('destructuring declarations are not yet supported', 5);
-  }
-  return { kind: 'accept' };
+  return isSimpleBindingPattern(decl.name)
+    ? { kind: 'accept' }
+    : notYet('destructuring declarations are not yet supported', 5);
 }
 
 function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): GateResult {
@@ -1085,6 +1125,10 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   const dynamicCode = dynamicCodeGeneration(call.expression, typeChecker);
   if (dynamicCode !== undefined) {
     return dynamicCode === 'eval' ? evalResult(mode) : functionCtorResult(mode);
+  }
+
+  if (skipParens(call.expression).kind === ts.SyntaxKind.ImportKeyword) {
+    return gateImportCall(call);
   }
 
   // Asked first, because it is what decides whether the type arguments below are a feature or a
@@ -1263,19 +1307,23 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       }
       return { kind: 'accept' };
     }
-    // A method ON a promise -- `.then`, `.catch`, `.finally` -- runs a JS callback whose own throw
-    // must become a rejection of the derived promise. That is a runtime-level catch, and the
-    // pending-exception protocol gives one to generated code, not to a builtin. An async function
-    // needs none of them: its landing pad rejects its own promise in emitted C.
+    // A method ON a promise. then/catch/finally land via jsrt_call_protected (Phase 5 step 11).
     if (
       tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind ===
       'promise'
     ) {
+      const method = callee.name.text;
+      if (method === 'then' || method === 'catch' || method === 'finally') {
+        if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+          return notYet(`a spread argument to Promise.prototype.${method} is not yet supported`, 5);
+        }
+        return { kind: 'accept' };
+      }
       return {
         kind: 'not-yet',
         code: 'STA1216',
         message:
-          `Promise.prototype.${callee.name.text} is not yet supported: use an async function, ` +
+          `Promise.prototype.${method} is not yet supported: use an async function, ` +
           'whose await and return do the same work',
         phase: 5,
       };
@@ -1648,9 +1696,6 @@ function gateAwait(node: ts.Node): GateResult {
   return { kind: 'accept' };
 }
 
-/** A parameter the HIR can bind: one plain name, always present, never defaulted. Everything
- * else is a binding form (patterns, rest) or a control-flow one (defaults run code at call
- * time), and each arrives with the feature it belongs to. */
 function gateTypeParameter(parameter: ts.TypeParameterDeclaration): GateResult {
   if (parameter.constraint !== undefined) {
     return notYet('a constrained type parameter is not yet supported', 5);
@@ -1661,20 +1706,19 @@ function gateTypeParameter(parameter: ts.TypeParameterDeclaration): GateResult {
   return { kind: 'accept' };
 }
 
+/** A value parameter the HIR can bind: one plain identifier. Rest packs extras; a default runs
+ * when the argument is `undefined`. Destructuring patterns stay not-yet. */
 function gateParameter(param: ts.ParameterDeclaration): GateResult {
   if (param.dotDotDotToken !== undefined) {
-    return notYet('rest parameters are not yet supported', 5);
+    if (!ts.isIdentifier(param.name) || param.initializer !== undefined) {
+      return notYet('rest parameters are not yet supported', 5);
+    }
+    return { kind: 'accept' };
   }
-  if (param.initializer !== undefined) {
-    return notYet('default parameter values are not yet supported', 5);
-  }
-  if (param.questionToken !== undefined) {
-    return notYet('optional parameters are not yet supported', 5);
-  }
-  if (!ts.isIdentifier(param.name)) {
+  if (!isSimpleBindingPattern(param.name)) {
     return notYet('destructuring parameters are not yet supported', 5);
   }
-  if (param.name.text === 'this') {
+  if (ts.isIdentifier(param.name) && param.name.text === 'this') {
     return notYet('a `this` parameter is not yet supported', 5);
   }
   return { kind: 'accept' };
@@ -1774,11 +1818,6 @@ export function isGeneratorReceiver(expression: ts.Expression, checker: ts.TypeC
 
 /** True for the `x` in `for (const x of a)`, which is the one declaration with no initializer that
  * is nonetheless definitely assigned. */
-function isForOfBinding(decl: ts.VariableDeclaration): boolean {
-  const list = decl.parent;
-  return ts.isVariableDeclarationList(list) && ts.isForOfStatement(list.parent);
-}
-
 /** A `var` binding: neither `let` nor `const` on the enclosing list.
  *
  * Exported so the lowering can desugar the same set the gate just accepted, rather than
@@ -2259,6 +2298,11 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
         );
   }
   if (isGlobalPromise(node.expression, checker)) {
+    const args = node.arguments ?? [];
+    const executor = args[0];
+    if (args.length === 1 && executor !== undefined && !ts.isSpreadElement(executor)) {
+      return { kind: 'accept' };
+    }
     return {
       kind: 'not-yet',
       code: 'STA1216',
@@ -2427,6 +2471,23 @@ function gateMemberAccess(
         : notYet('using a Promise method as a value is not yet supported', 5);
     }
     return notYet(`Promise.${member} is not yet supported`, 5);
+  }
+
+  if (tsTypeToHType(checker.getTypeAtLocation(access.expression), checker).kind === 'promise') {
+    const member = access.name.text;
+    if (member === 'then' || member === 'catch' || member === 'finally') {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' }
+        : notYet(`using Promise.prototype.${member} as a value is not yet supported`, 5);
+    }
+    return {
+      kind: 'not-yet',
+      code: 'STA1216',
+      message:
+        `Promise.prototype.${member} is not yet supported: use an async function, ` +
+        'whose await and return do the same work',
+      phase: 5,
+    };
   }
 
   // JSON follows the same rules: stringify and parse exist only as callees; the rest are
@@ -2808,9 +2869,11 @@ function acceptsObjectArgument(
 export const OBJECT_STATICS = {
   assign: { arity: 2, receiver: 'dynamic', second: 'shaped' },
   entries: { arity: 1, receiver: 'shaped', second: 'none' },
+  freeze: { arity: 1, receiver: 'shaped', second: 'none' },
   fromEntries: { arity: 1, receiver: 'pairs', second: 'none' },
   getOwnPropertyNames: { arity: 1, receiver: 'shaped', second: 'none' },
   hasOwn: { arity: 2, receiver: 'shaped', second: 'key' },
+  isFrozen: { arity: 1, receiver: 'shaped', second: 'none' },
   keys: { arity: 1, receiver: 'shaped', second: 'none' },
   values: { arity: 1, receiver: 'shaped', second: 'none' },
 } as const satisfies Record<
@@ -2826,30 +2889,25 @@ export const OBJECT_STATICS = {
  * for this namespace: the six unlanded members wait on two different mechanisms in two different
  * phases (plan §7 Task 4.7 step 5, plan-notes 125 and 136).
  *
- * `freeze`/`isFrozen` wait on a RUNTIME-RAISED exception -- a write to a frozen object is a
- * TypeError in strict mode, and `jsrt_throw` sets a pending cell only generated code reads, which
- * is Phase 5 step 11's mechanism. The prototype/descriptor four are STA1204's surface, in Phase 8.
+ * `freeze`/`isFrozen` landed in Phase 5 step 11. `seal`/`isSealed` still need a [[Sealed]] bit
+ * distinct from frozen. The prototype/descriptor four are STA1204's surface, in Phase 8.
  * A name in neither list is one `lib.es5.d.ts` declares and nothing here models yet, and member
  * growth lands with the language surface, so Phase 5 is the honest default. */
 const OBJECT_STATIC_OWNER: Readonly<Record<string, number>> = {
   create: 8,
   defineProperties: 8,
   defineProperty: 8,
-  freeze: 5,
   getOwnPropertyDescriptor: 8,
   getOwnPropertyDescriptors: 8,
   getPrototypeOf: 8,
-  isFrozen: 5,
   seal: 5,
   isSealed: 5,
   setPrototypeOf: 8,
 };
 
-/** The `Promise` namespace calls that lower. Each takes exactly one argument -- the combinators
- * that take two or more are the ones that need `.then`, and the executor form needs a callback
- * whose throw has to become a rejection, which only generated code can do (see PromiseStaticCall
- * in src/hir/nodes.ts). `all` additionally requires an ARRAY: the runtime walks one, and any other
- * iterable is the Symbol.iterator protocol. */
+/** The `Promise` namespace calls that lower as `promise-static`. `all` additionally requires an
+ * ARRAY: the runtime walks one, and any other iterable is the Symbol.iterator protocol.
+ * `.then`/`.catch`/`.finally` and `new Promise` are gated separately (Phase 5 step 11). */
 export const PROMISE_STATICS = {
   all: { array: true },
   reject: { array: false },

@@ -172,6 +172,8 @@ export interface HObject {
    * the inherited fields, in the ancestors' slot order, so nothing downstream has to follow this to
    * lay an object out. */
   readonly bases: readonly string[];
+  /** A module namespace: field reads compile to the export's global slot (docs/VALUE.md §4.14). */
+  readonly namespace?: true;
 }
 
 /** The `T` of `function box<T>(item: T): T` — a type the program does not have yet.
@@ -249,8 +251,11 @@ export function hObject(
   fields: readonly HField[],
   methods: readonly HField[],
   bases: readonly string[] = [],
+  namespace?: true,
 ): HObject {
-  return { kind: 'object', name, fields, methods, bases };
+  return namespace === true
+    ? { kind: 'object', name, fields, methods, bases, namespace }
+    : { kind: 'object', name, fields, methods, bases };
 }
 
 /** A getter or setter is a METHOD, under a name no source can spell: `get x`, `set x`. The space

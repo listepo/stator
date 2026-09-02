@@ -81,9 +81,11 @@ allocation, which is the path rung 4a established and 4b leaves intact. Only a c
 is heap-allocated via `jsrt_closure_new`, once per evaluation of its function expression, which is
 what makes two evaluations close over different variables.
 
-`arity` is the *declared* parameter count. It never bounds what a call site may pass: JavaScript
-drops extra arguments and fills missing ones with `undefined`, so every callee reads parameters
-through `jsrt_arg` rather than indexing `argv` directly.
+`arity` is `Function.prototype.length`: parameters to the left of the first rest parameter or the
+first parameter with a default. It never bounds what a call site may pass: JavaScript drops extra
+arguments and fills missing ones with `undefined`, so every callee reads parameters through
+`jsrt_arg` rather than indexing `argv` directly. A rest parameter is packed with `jsrt_args_rest`.
+A default expression runs when `jsrt_arg` yields `undefined`.
 
 ```c
 #define JSRT_TAG_SHIFT  48
@@ -623,6 +625,16 @@ scope structure is known (docs/HIR.md §1.3 `TryStatement`). Two invariants tie 
   the frame chain (§4.12) — not a §12 promise but a live requirement, because a boxed value in that
   cell is invisible to a conservative stack scan and nothing else would keep it alive.
 
+**Runtime-side catch (Phase 5 step 11).** Generated C is the only client the protocol had: after
+`jsrt_call` it checks `jsrt_pending()` and jumps to a landing pad. A builtin that must *handle* a
+throw — a `then` handler, a `new Promise` executor — cannot jump to a pad it does not have. It
+calls `jsrt_call_protected`, which is the same `jsrt_call` plus `jsrt_pending` / `jsrt_take_exception`
+on the way back, and yields a `JSRTCompletion { value, threw }`. The builtin then settles a promise
+with that value instead of leaving the cell pending. Same mailbox, one extra consumer; a second
+pending cell is how two protocols get built by accident. `jsrt_throw_str` boxes a message so a
+builtin can raise (`Object.freeze` writes, `toISOString` on an Invalid Date) and generated C's
+existing pending check after the op is the landing pad.
+
 ---
 
 ## 4.10 Dynamic objects — the shape table and inline caches (Task 4.1)
@@ -718,10 +730,8 @@ Invalid Date prints `Invalid Date`. `JSON.stringify` routes a Date through `jsrt
 which answers the ISO string or `JSRT_NULL`; the `null` case is why `JSON.stringify(new Date(NaN))`
 is the four characters `null` and not an abort.
 
-**The one thing this layout cannot do yet.** `toISOString` on an Invalid Date must throw a
-`RangeError` (§21.4.4.36). A builtin cannot raise — `jsrt_throw` sets a pending cell that only
-generated code reads — so it panics (`STA2005` pattern) until Phase 5 step 11 gives the runtime a
-catch around user code. Same ceiling as `Object.freeze`, and recorded the same way.
+**Invalid Date.** `toISOString` throws a `RangeError` through `jsrt_throw` (§21.4.4.36); generated
+C checks `jsrt_pending()` after the op (Phase 5 step 11).
 
 ## 4.12 The collector — Boehm, and the two hooks that make it see a value
 
@@ -867,6 +877,21 @@ NEW value, not the one it completed with) and `throw(e)` rethrows to the caller.
 `Symbol.iterator` as a *stored value* stays `STA1212` until the Symbol primitive lands. A class
 method named `[Symbol.iterator]` is not that value: it is a compile-time-known method stored under
 TypeScript's `__@iterator`, which is why user-iterable `for-of` compiled without a Symbol tag.
+
+## 4.14 Module namespace objects (Phase 5 step 10)
+
+A module namespace is not a new NaN-box tag. It is an `HObject` with `namespace: true` whose
+fields ARE the target file's export list, in source order. The merged program still has one global
+slot per name (Task 3.11); a namespace field read compiles to that slot, so `ns.x` and the
+export's own binding are the same cell — live bindings, not a snapshot taken at `import()` time.
+
+The object VALUE exists so `import()` has something to put in a Promise. It is a sealed dummy
+(an object literal of the exported identifiers, evaluated once). Identity, printing, and
+`Object.keys` are not the spec's Module exotic object; those wait on a real per-module runtime.
+A literal specifier is resolved into the whole-program graph as an init edge, so the target's
+top-level code has already run when the Promise is produced; `import()` is `Promise.resolve`
+of that namespace. A computed specifier stays `STA1207` (Phase 8): the graph cannot name a file
+it has not seen.
 
 ## 5. What Phase 2 actually implements
 

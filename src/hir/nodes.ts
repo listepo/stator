@@ -622,9 +622,11 @@ export interface ArrayOp extends Node {
 export type ObjectStaticMethod =
   | 'assign'
   | 'entries'
+  | 'freeze'
   | 'fromEntries'
   | 'getOwnPropertyNames'
   | 'hasOwn'
+  | 'isFrozen'
   | 'keys'
   | 'values';
 
@@ -640,11 +642,9 @@ export interface ObjectStaticCall extends Node {
  * the runtime walks -- and settles with an array of the same length in INPUT order; `resolve` and
  * `reject` are the two one-argument constructors that need no executor.
  *
- * `new Promise(executor)`, `.then`, `.catch` and `.finally` are deliberately absent, and not as a
- * backlog: each runs a JS callback whose own throw has to become a rejection, which is a
- * runtime-level catch the pending-exception protocol gives to GENERATED code and not to a builtin.
- * An async function needs none of them -- its landing pad rejects its own promise in emitted C --
- * which is why async lands first and the combinators follow the object model's exceptions. */
+ * `.then` / `.catch` / `.finally` / `new Promise(executor)` are `PromiseMethodCall` and
+ * `PromiseConstruct`: a handler throw is a completion from `jsrt_call_protected` (docs/VALUE.md
+ * §4.9), not an unwind into library C. */
 export type PromiseStaticMethod = 'all' | 'reject' | 'resolve';
 
 export interface PromiseStaticCall extends Node {
@@ -652,6 +652,24 @@ export interface PromiseStaticCall extends Node {
   readonly method: PromiseStaticMethod;
   readonly arg: Expression;
   /** What the resulting promise settles with — `T` for `resolve`/`reject`, `T[]` for `all`. */
+  readonly type: HType;
+}
+
+export type PromiseInstanceMethod = 'catch' | 'finally' | 'then';
+
+/** `p.then(f, r)` / `.catch` / `.finally`. Args are padded with `undefined` to the runtime arity. */
+export interface PromiseMethodCall extends Node {
+  readonly kind: 'promise-method';
+  readonly method: PromiseInstanceMethod;
+  readonly target: Expression;
+  readonly args: readonly Expression[];
+  readonly type: HType;
+}
+
+/** `new Promise(executor)`. The executor runs now; a throw rejects the constructed promise. */
+export interface PromiseConstruct extends Node {
+  readonly kind: 'promise-construct';
+  readonly executor: Expression;
   readonly type: HType;
 }
 
@@ -833,6 +851,10 @@ export interface Parameter {
   readonly name: string;
   readonly type: HType;
   readonly span: Span;
+  /** `...rest`. Collects argv[i..] into an array. Callers already pass extras; the callee packs them. */
+  readonly rest?: true;
+  /** `a = expr`. Evaluated when the argument is `undefined` (missing or explicit). */
+  readonly default?: Expression;
 }
 
 /** A call: `f(x)`.
@@ -1207,6 +1229,8 @@ export type Expression =
   | AwaitExpr
   | YieldExpr
   | PromiseStaticCall
+  | PromiseMethodCall
+  | PromiseConstruct
   | ConsoleLogCall
   | IteratorNext;
 
@@ -1235,9 +1259,9 @@ export interface SuperCall extends Node {
   readonly args: readonly Expression[];
 }
 
-/** let or const binding. The initializer is required: an uninitialized `let` would need
- * definite-assignment tracking to know whether a read yields `undefined`, which is Phase 5
- * step 12 work. The gate rejects `let x;` rather than lowering it.
+/** let or const binding. An absent `value` is `let x;` — the slot starts as `undefined`
+ * (docs/VALUE.md). TypeScript's definite-assignment errors still reject a typed read before a
+ * write; the HIR does not track that itself.
  *
  * `var` is not a third declKind. The lowering hoists it to a function-scoped `let` initialized
  * `undefined` and emits an assignment at the original site (plan.md §8 step 3). */
@@ -1245,7 +1269,7 @@ export interface Declaration extends Node {
   readonly kind: 'declaration';
   readonly name: string;
   readonly declKind: 'let' | 'const';
-  readonly value: Expression;
+  readonly value?: Expression;
 }
 
 /** Assignment to an existing binding (no destructuring). */
@@ -1546,6 +1570,8 @@ export interface ReturnStatement extends Node {
 export interface Block extends Node {
   readonly kind: 'block';
   readonly statements: readonly Statement[];
+  /** Desugaring sequence (destructure). Bindings leak to the enclosing statement list. */
+  readonly flatten?: true;
 }
 
 export type Statement =

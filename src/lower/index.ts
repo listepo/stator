@@ -18,6 +18,7 @@ import {
   isGlobalPromise,
   isMatchReceiver,
   isRegExpReceiver,
+  isSimpleBindingPattern,
   isStringReceiver,
   isVarDeclarationList,
   MATH_CONSTANTS,
@@ -64,6 +65,7 @@ import type {
   DateOperation,
   DateStatic,
   Declaration,
+  DynFieldAccess,
   Expression,
   FieldAccess,
   FunctionDeclaration,
@@ -83,6 +85,7 @@ import type {
   ObjectLiteral,
   ObjectStaticMethod,
   Parameter,
+  PromiseInstanceMethod,
   PromiseStaticMethod,
   Provenance,
   RegExpField,
@@ -445,12 +448,39 @@ function lowerStatement(
       if (declared !== undefined && ts.isIdentifier(declared)) {
         catchBinding = declared.text;
         scope.set(catchBinding, hUnknown(false));
+      } else if (declared !== undefined) {
+        catchBinding = CATCH_VALUE;
+        scope.set(CATCH_VALUE, hUnknown(false));
+        bindPatternNames(declared, checker, scope);
       }
       const lowered = lowerBlock(node.catchClause.block, sourceFile, checker, scope, diagnostics);
       if (!lowered) {
         return null;
       }
-      catchBlock = lowered;
+      if (declared !== undefined && !ts.isIdentifier(declared) && catchBinding !== undefined) {
+        const src: Identifier = {
+          kind: 'identifier',
+          type: hUnknown(false),
+          span: makeSpan(declared.getStart(sourceFile), declared.getWidth(sourceFile), sourceFile),
+          name: catchBinding,
+        };
+        const parts = lowerBindingPattern(
+          declared,
+          src,
+          'let',
+          declared,
+          sourceFile,
+          checker,
+          scope,
+          diagnostics,
+        );
+        if (parts === null) {
+          return null;
+        }
+        catchBlock = { ...lowered, statements: [...parts, ...lowered.statements] };
+      } else {
+        catchBlock = lowered;
+      }
     }
     let finallyBlock: Block | undefined;
     if (node.finallyBlock !== undefined) {
@@ -631,6 +661,172 @@ function maybeBoundary(
  * declaration list itself inside a `for` header, where there is no statement wrapping it. Passing
  * it in rather than synthesising a VariableStatement matters: a factory-made node has no source
  * position, and asking one for its start is a hard failure inside the TypeScript API. */
+
+function lowerPatternRead(
+  target: Expression,
+  field: string | number,
+  name: ts.Identifier,
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
+  const type = typeAt(name, checker, bindings);
+  if (typeof field === 'number') {
+    const index: Expression = { kind: 'number-literal', type: H_NUMBER, span, value: field };
+    return { kind: 'index-access', type, span, target, index };
+  }
+  if (target.type.kind === 'unknown') {
+    const access: DynFieldAccess = {
+      kind: 'dyn-field-access',
+      type: hUnknown(false),
+      span,
+      target,
+      field,
+    };
+    return access;
+  }
+  const slot = slotOf(target, field, at, sourceFile, diagnostics);
+  if (slot === null) {
+    return null;
+  }
+  const access: FieldAccess = { kind: 'field-access', type, span, target, field, slot };
+  return access;
+}
+
+function lowerBindingPattern(
+  name: ts.BindingName,
+  rhs: Expression,
+  declKind: 'let' | 'const',
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Statement[] | null {
+  const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
+  const statements: Statement[] = [];
+  let source = rhs;
+  if (rhs.kind !== 'identifier') {
+    const tmp = nextBindTemp();
+    bindings.set(tmp, rhs.type);
+    statements.push({
+      kind: 'declaration',
+      type: rhs.type,
+      span,
+      name: tmp,
+      declKind: 'const',
+      value: rhs,
+    });
+    source = { kind: 'identifier', type: rhs.type, span, name: tmp };
+  }
+  if (ts.isIdentifier(name)) {
+    diagnostics.push(
+      diagnosticFromNode(
+        name,
+        sourceFile,
+        'STA4031',
+        'internal',
+        'ts',
+        'expected a binding pattern',
+      ),
+    );
+    return null;
+  }
+  if (ts.isObjectBindingPattern(name)) {
+    for (const el of name.elements) {
+      if (!ts.isIdentifier(el.name)) {
+        diagnostics.push(
+          diagnosticFromNode(
+            el,
+            sourceFile,
+            'STA4031',
+            'internal',
+            'ts',
+            'unexpected nested pattern',
+          ),
+        );
+        return null;
+      }
+      const field =
+        el.propertyName !== undefined && ts.isIdentifier(el.propertyName)
+          ? el.propertyName.text
+          : el.name.text;
+      const read = lowerPatternRead(
+        source,
+        field,
+        el.name,
+        el,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      if (read === null) {
+        return null;
+      }
+      const type = typeAt(el.name, checker, bindings);
+      bindings.set(el.name.text, type);
+      statements.push({
+        kind: 'declaration',
+        type,
+        span: makeSpan(el.getStart(sourceFile), el.getWidth(sourceFile), sourceFile),
+        name: el.name.text,
+        declKind,
+        value: maybeBoundary(read, type, el, sourceFile),
+      });
+    }
+    return statements;
+  }
+  let index = 0;
+  for (const el of name.elements) {
+    if (ts.isOmittedExpression(el)) {
+      index += 1;
+      continue;
+    }
+    if (!ts.isIdentifier(el.name)) {
+      diagnostics.push(
+        diagnosticFromNode(
+          el,
+          sourceFile,
+          'STA4031',
+          'internal',
+          'ts',
+          'unexpected nested pattern',
+        ),
+      );
+      return null;
+    }
+    const read = lowerPatternRead(
+      source,
+      index,
+      el.name,
+      el,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
+    if (read === null) {
+      return null;
+    }
+    const type = typeAt(el.name, checker, bindings);
+    bindings.set(el.name.text, type);
+    statements.push({
+      kind: 'declaration',
+      type,
+      span: makeSpan(el.getStart(sourceFile), el.getWidth(sourceFile), sourceFile),
+      name: el.name.text,
+      declKind,
+      value: maybeBoundary(read, type, el, sourceFile),
+    });
+    index += 1;
+  }
+  return statements;
+}
+
 function lowerDeclarationList(
   list: ts.VariableDeclarationList,
   at: ts.Node,
@@ -656,31 +852,65 @@ function lowerDeclarationList(
     return fail(at, 'multiple declarations in one statement not supported');
   }
   const decl = list.declarations[0];
-  if (!decl?.initializer) {
-    return fail(decl ?? at, 'declaration without initializer');
+  if (decl === undefined) {
+    return fail(at, 'empty variable declaration list');
+  }
+  const declKind: 'let' | 'const' = list.flags & ts.NodeFlags.Const ? 'const' : 'let';
+  if (!ts.isIdentifier(decl.name)) {
+    if (!isSimpleBindingPattern(decl.name) || decl.initializer === undefined) {
+      return fail(decl, 'destructuring declaration without initializer');
+    }
+    const lowered = lowerExpression(decl.initializer, sourceFile, checker, bindings, diagnostics);
+    if (!lowered) {
+      return null;
+    }
+    const parts = lowerBindingPattern(
+      decl.name,
+      lowered,
+      declKind,
+      at,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
+    if (parts === null) {
+      return null;
+    }
+    const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
+    if (parts.length === 1) {
+      const only = parts[0];
+      return only === undefined
+        ? { kind: 'block', type: H_UNDEFINED, span, statements: [], flatten: true }
+        : only;
+    }
+    return { kind: 'block', type: H_UNDEFINED, span, statements: parts, flatten: true };
   }
 
-  const name = decl.name.getText(sourceFile);
-  const lowered = lowerExpression(decl.initializer, sourceFile, checker, bindings, diagnostics);
-  if (!lowered) {
-    return null;
-  }
-
+  const name = decl.name.text;
   // The BINDING's type, not the initializer's. They differ whenever an annotation is wider than
   // what it was initialized with -- `let x: string | number = 1` binds a union, and taking the
   // initializer's `number` would make the perfectly legal `x = 'a'` an internal error, and would
   // let a later pass unbox a slot that can hold a string.
   const type = typeAt(decl.name, checker, bindings);
   bindings.set(name, type);
-  const value = maybeBoundary(lowered, type, decl.initializer, sourceFile);
+
+  let value: Expression | undefined;
+  if (decl.initializer !== undefined) {
+    const lowered = lowerExpression(decl.initializer, sourceFile, checker, bindings, diagnostics);
+    if (!lowered) {
+      return null;
+    }
+    value = maybeBoundary(lowered, type, decl.initializer, sourceFile);
+  }
 
   const stmt: Declaration = {
     kind: 'declaration',
     type,
     span: makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile),
     name,
-    declKind: list.flags & ts.NodeFlags.Const ? 'const' : 'let',
-    value,
+    declKind,
+    ...(value !== undefined ? { value } : {}),
   };
   return stmt;
 }
@@ -1045,6 +1275,35 @@ function placeName(
  * so it can never collide with a user binding, and it is the SAME key the emitter maps to a frame
  * slot -- `this` is an ordinary identifier from here down (see ClassMethod in src/hir/nodes.ts). */
 const RECEIVER = ' this';
+const CATCH_VALUE = ' catch';
+
+let bindTempId = 0;
+function nextBindTemp(): string {
+  bindTempId += 1;
+  return ` bind${String(bindTempId)}`;
+}
+
+function bindPatternNames(
+  name: ts.BindingName,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+): void {
+  if (ts.isIdentifier(name)) {
+    bindings.set(name.text, typeAt(name, checker, bindings));
+    return;
+  }
+  if (ts.isObjectBindingPattern(name)) {
+    for (const el of name.elements) {
+      bindPatternNames(el.name, checker, bindings);
+    }
+    return;
+  }
+  for (const el of name.elements) {
+    if (!ts.isOmittedExpression(el)) {
+      bindPatternNames(el.name, checker, bindings);
+    }
+  }
+}
 
 /** The binding name a static member gets: `C.count`.
  *
@@ -1983,6 +2242,28 @@ function lowerExpression(
         arg,
       };
     }
+    if (type.kind === 'promise') {
+      const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+      if (args === null) {
+        return null;
+      }
+      const executor = args[0];
+      if (executor === undefined) {
+        diagnostics.push(
+          diagnosticFromNode(
+            node,
+            sourceFile,
+            'STA4031',
+            'internal',
+            'ts',
+            'new Promise without an executor reached lowering',
+          ),
+        );
+        return null;
+      }
+      return { kind: 'promise-construct', type, span, executor };
+    }
     if (type.kind !== 'object') {
       diagnostics.push(
         diagnosticFromNode(
@@ -2283,6 +2564,9 @@ function lowerExpression(
 
   // Call expression (console.log)
   if (ts.isCallExpression(node)) {
+    if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      return lowerImportCall(node, sourceFile, checker, bindings, diagnostics);
+    }
     const expr = node.expression;
 
     // Check if this is a property access (console.log)
@@ -2340,10 +2624,12 @@ function lowerExpression(
         let type: HType;
         if (method === 'keys' || method === 'getOwnPropertyNames') {
           type = { kind: 'array', element: H_STRING };
-        } else if (method === 'hasOwn') {
+        } else if (method === 'hasOwn' || method === 'isFrozen') {
           type = H_BOOLEAN;
         } else if (method === 'fromEntries' || method === 'assign') {
           type = hUnknown(false);
+        } else if (method === 'freeze') {
+          type = args[0]?.type ?? checkerType;
         } else {
           type =
             checkerType.kind === 'array'
@@ -2408,6 +2694,37 @@ function lowerExpression(
           span,
           method: propName as PromiseStaticMethod,
           arg,
+        };
+      }
+
+      const receiverType = typeAt(obj, checker, bindings);
+      if (
+        receiverType.kind === 'promise' &&
+        (propName === 'then' || propName === 'catch' || propName === 'finally')
+      ) {
+        const given = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        if (given === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+        if (target === null) {
+          return null;
+        }
+        const want = propName === 'then' ? 2 : 1;
+        const args = [...given];
+        while (args.length < want) {
+          args.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+        }
+        const checkerType = typeAt(node, checker, bindings);
+        const type = checkerType.kind === 'promise' ? checkerType : hPromise(hUnknown(false));
+        return {
+          kind: 'promise-method',
+          type,
+          span,
+          method: propName as PromiseInstanceMethod,
+          target,
+          args,
         };
       }
 
@@ -2947,6 +3264,66 @@ function lowerVarList(
  * environment structs): what survives the copy is module-level, which the emitter roots for the
  * program's lifetime. Copying also stops a local of this function leaking back into the caller's
  * scope, which a shared map would do. */
+function lowerImportCall(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const spec = node.arguments[0];
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  if (spec === undefined || !ts.isStringLiteral(spec)) {
+    diagnostics.push(
+      diagnosticFromNode(
+        node,
+        sourceFile,
+        'STA4031',
+        'internal',
+        'ts',
+        'unexpected expression kind: ImportKeyword',
+      ),
+    );
+    return null;
+  }
+  const resultType = typeAt(node, checker, bindings);
+  const nsType =
+    resultType.kind === 'promise' && resultType.value.kind === 'object'
+      ? resultType.value
+      : resultType.kind === 'object'
+        ? resultType
+        : undefined;
+  if (nsType === undefined || nsType.namespace !== true) {
+    diagnostics.push(
+      diagnosticFromNode(
+        node,
+        sourceFile,
+        'STA4031',
+        'internal',
+        'ts',
+        `import('${spec.text}') did not resolve to a module namespace`,
+      ),
+    );
+    return null;
+  }
+  const entries = nsType.fields.map((field) => ({
+    name: field.name,
+    value: {
+      kind: 'identifier' as const,
+      name: field.name,
+      type: bindings.get(field.name) ?? field.type,
+      span,
+    },
+  }));
+  return {
+    kind: 'promise-static',
+    type: resultType.kind === 'promise' ? resultType : hPromise(nsType),
+    span,
+    method: 'resolve',
+    arg: { kind: 'object-literal', type: nsType, span, entries },
+  };
+}
+
 function lowerFunction(
   node: FunctionLike,
   sourceFile: ts.SourceFile,
@@ -2967,27 +3344,38 @@ function lowerFunction(
       params.push({ name: RECEIVER, type: receiver, span: at });
       inner.set(RECEIVER, receiver);
     }
+    const destructured: { name: ts.BindingName; tmp: string }[] = [];
     for (const param of node.parameters) {
-      if (!ts.isIdentifier(param.name)) {
-        diagnostics.push(
-          diagnosticFromNode(
-            param,
-            sourceFile,
-            'STA4031',
-            'internal',
-            'ts',
-            'unexpected parameter',
-          ),
-        );
-        return null;
-      }
       const type = typeAt(param, checker, bindings);
+      let defaultExpr: Expression | undefined;
+      if (param.initializer !== undefined) {
+        const lowered = lowerExpression(param.initializer, sourceFile, checker, inner, diagnostics);
+        if (lowered === null) {
+          return null;
+        }
+        defaultExpr = lowered;
+      }
+      if (ts.isIdentifier(param.name)) {
+        inner.set(param.name.text, type);
+        params.push({
+          name: param.name.text,
+          type,
+          span: makeSpan(param.getStart(sourceFile), param.getWidth(sourceFile), sourceFile),
+          ...(param.dotDotDotToken !== undefined ? { rest: true as const } : {}),
+          ...(defaultExpr !== undefined ? { default: defaultExpr } : {}),
+        });
+        continue;
+      }
+      const tmp = nextBindTemp();
+      inner.set(tmp, type);
       params.push({
-        name: param.name.text,
+        name: tmp,
         type,
         span: makeSpan(param.getStart(sourceFile), param.getWidth(sourceFile), sourceFile),
+        ...(defaultExpr !== undefined ? { default: defaultExpr } : {}),
       });
-      inner.set(param.name.text, type);
+      destructured.push({ name: param.name, tmp });
+      bindPatternNames(param.name, checker, inner);
     }
 
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
@@ -2995,6 +3383,31 @@ function lowerFunction(
     if (body === null) {
       return null;
     }
+    const unpacked: Statement[] = [];
+    for (const item of destructured) {
+      const src: Identifier = {
+        kind: 'identifier',
+        type: inner.get(item.tmp) ?? hUnknown(false),
+        span,
+        name: item.tmp,
+      };
+      const parts = lowerBindingPattern(
+        item.name,
+        src,
+        'let',
+        item.name,
+        sourceFile,
+        checker,
+        inner,
+        diagnostics,
+      );
+      if (parts === null) {
+        return null;
+      }
+      unpacked.push(...parts);
+    }
+    const bodyWithParams =
+      unpacked.length === 0 ? body : { ...body, statements: [...unpacked, ...body.statements] };
 
     const info = capturesFor(sourceFile, checker).get(node);
     // Without a receiver the checker's own type is the answer. With one, the emitted function has a
@@ -3019,7 +3432,7 @@ function lowerFunction(
       span,
       ...(name !== undefined && { name }),
       params,
-      body,
+      body: bodyWithParams,
       isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
       isGenerator:
         ts.isFunctionDeclaration(node) ||

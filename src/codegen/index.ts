@@ -35,6 +35,8 @@ import type {
   NewExpr,
   ObjectLiteral,
   ObjectStaticCall,
+  PromiseConstruct,
+  PromiseMethodCall,
   PromiseStaticCall,
   RegExpLiteral,
   RegExpOp,
@@ -191,6 +193,19 @@ interface TryFinallyScope {
 /** The runtime's C naming rule for a JS member: camelCase becomes snake_case, so `charCodeAt`
  * is `char_code_at` and `getOwnPropertyNames` is `get_own_property_names`. Mechanical on purpose
  * -- a runtime function's name is derivable from the member it serves, with no table to drift. */
+function declaredArity(fn: {
+  readonly params: readonly { readonly rest?: true; readonly default?: unknown }[];
+}): number {
+  let n = 0;
+  for (const param of fn.params) {
+    if (param.rest === true || param.default !== undefined) {
+      break;
+    }
+    n++;
+  }
+  return n;
+}
+
 function snakeCase(member: string): string {
   return member.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 }
@@ -246,6 +261,8 @@ class Emitter {
     | NewExpr
     | ObjectLiteral
     | ObjectStaticCall
+    | PromiseConstruct
+    | PromiseMethodCall
     | PromiseStaticCall
     | RegExpLiteral
     | RegExpOp
@@ -398,7 +415,7 @@ class Emitter {
       );
       out.push(
         `static const JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
-          `${unit.fn.params.length}, ${cNameLiteral(unit.name)}, NULL};`,
+          `${declaredArity(unit.fn)}, ${cNameLiteral(unit.name)}, NULL};`,
       );
     }
     if (this.functions.length > 0) {
@@ -647,6 +664,11 @@ class Emitter {
       // lives along with the captured-binding rule.
       this.bindSlot(param.name);
     }
+    for (const param of fn.params) {
+      if (param.default !== undefined) {
+        this.countExpression(param.default);
+      }
+    }
     // The return slot is claimed AFTER counting, and only if the body actually returns a value:
     // it holds the result across JSRT_FRAME_POP(), and a function that never produces one would
     // otherwise root a slot nothing ever writes.
@@ -750,11 +772,11 @@ class Emitter {
       switch (stmt.kind) {
         case 'declaration':
           this.bindSlot(stmt.name);
-          if (stmt.value.kind === 'function') {
+          if (stmt.value !== undefined && stmt.value.kind === 'function') {
             // Node names a function after the binding it is assigned to: `const mul = () => {}`
             // prints as `[Function: mul]`, not `[Function (anonymous)]`.
             this.registerFunction(stmt.value, stmt.name);
-          } else {
+          } else if (stmt.value !== undefined) {
             this.countExpression(stmt.value);
           }
           break;
@@ -1053,6 +1075,19 @@ class Emitter {
         this.slotCount += 1;
         this.countExpression(expr.arg);
         break;
+      case 'promise-construct':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 1;
+        this.countExpression(expr.executor);
+        break;
+      case 'promise-method':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 1 + expr.args.length;
+        this.countExpression(expr.target);
+        for (const arg of expr.args) {
+          this.countExpression(arg);
+        }
+        break;
       // The same reachability promise, one slot per argument: an Object walk allocates its
       // result, and `Object.hasOwn(o, k)` must hold BOTH operands across the call.
       // `Date.UTC(y, m, ...)` sequences for the same reason, even though every operand is an
@@ -1146,8 +1181,10 @@ class Emitter {
   private emitStatement(stmt: Statement): void {
     switch (stmt.kind) {
       case 'declaration': {
-        const value = this.emitExpression(stmt.value);
-        this.appendLine(`${this.slotRef(stmt.name)} = ${value};`, stmt.span);
+        if (stmt.value !== undefined) {
+          const value = this.emitExpression(stmt.value);
+          this.appendLine(`${this.slotRef(stmt.name)} = ${value};`, stmt.span);
+        }
         break;
       }
 
@@ -1482,12 +1519,13 @@ class Emitter {
         this.sequencePart(parts, stmt.value, stmt.span, (v) => `${value} = ${v}`);
         parts.push(`jsrt_object_set(${target}, ${stmt.slot}, ${value})`);
         this.flushParts(parts, stmt.span);
+        this.emitPendingCheck(stmt.span);
         break;
       }
 
       // Same shape as field-assignment; the differences are the slow-path entry point, the KEY
-      // (a string, not a slot -- the shape table resolves it), and the per-site cache. No pending
-      // check follows: jsrt_set_prop runs no user code and cannot throw.
+      // (a string, not a slot -- the shape table resolves it), and the per-site cache. A frozen
+      // object throws, so a pending check follows.
       case 'dyn-field-assignment': {
         const base = this.indexSlots.get(stmt);
         if (base === undefined) {
@@ -1502,6 +1540,7 @@ class Emitter {
           `jsrt_set_prop(${target}, ${cNameLiteral(stmt.field)}, ${value}, &${this.icSite()})`,
         );
         this.flushParts(parts, stmt.span);
+        this.emitPendingCheck(stmt.span);
         break;
       }
 
@@ -2168,6 +2207,11 @@ class Emitter {
       }
 
       case 'field-access': {
+        // A module namespace field is the export's own global slot (docs/VALUE.md §4.14).
+        if (expr.target.type.kind === 'object' && expr.target.type.namespace === true) {
+          this.emitExpression(expr.target);
+          return this.slotRef(expr.field);
+        }
         return `jsrt_object_get(${this.emitExpression(expr.target)}, ${expr.slot})`;
       }
 
@@ -2400,6 +2444,51 @@ class Emitter {
         return opCall;
       }
 
+      case 'promise-construct': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('promise-construct was not registered during counting');
+        }
+        this.usedAsync = true;
+        const parts: string[] = [];
+        this.sequencePart(parts, expr.executor, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
+        parts.push(`${this.slotAt(base)} = jsrt_promise_construct(${this.slotAt(base)})`);
+        this.flushParts(parts, expr.span);
+        this.emitPendingCheck(expr.span);
+        return this.slotAt(base);
+      }
+
+      case 'promise-method': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('promise-method was not registered during counting');
+        }
+        this.usedAsync = true;
+        const parts: string[] = [];
+        this.sequencePart(parts, expr.target, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
+        expr.args.forEach((arg, index) => {
+          this.sequencePart(
+            parts,
+            arg,
+            expr.span,
+            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
+          );
+        });
+        const fn =
+          expr.method === 'then'
+            ? 'jsrt_promise_then'
+            : expr.method === 'catch'
+              ? 'jsrt_promise_catch'
+              : 'jsrt_promise_finally';
+        const operands = [
+          this.slotAt(base),
+          ...expr.args.map((_, index) => this.slotAt(base + 1 + index)),
+        ].join(', ');
+        parts.push(`${this.slotAt(base)} = ${fn}(${operands})`);
+        this.flushParts(parts, expr.span);
+        return this.slotAt(base);
+      }
+
       // One runtime function per operation, receiver and arguments riding in rooted slots. The
       // collection ops name their C function through a table (there is no descriptor to index --
       // these calls are direct in a way even a non-overridden method is not); string and array
@@ -2463,7 +2552,8 @@ class Emitter {
           expr.kind === 'array-op'
             ? arrayOpCallsBack(expr.op)
             : expr.kind === 'collection-op' && expr.op === 'forEach';
-        if (callsBack) {
+        const canThrow = callsBack || (expr.kind === 'date-op' && expr.op === 'toISOString');
+        if (canThrow) {
           parts.push(`${this.slotAt(base)} = ${opCall}`);
           this.flushParts(parts, expr.span);
           this.emitPendingCheck(expr.span);
@@ -2809,7 +2899,23 @@ class Emitter {
     fn.params.forEach((param, index) => {
       // A call site may pass fewer or more arguments than the function declares. `jsrt_arg` makes
       // both a value -- `undefined` and "dropped" -- rather than a read past the end of `argv`.
-      this.appendLine(`${this.slotRef(param.name)} = jsrt_arg(argc, argv, ${index});`, param.span);
+      // A rest parameter packs the extras the call already passed.
+      // A default runs when the argument is undefined, including an explicit `undefined`.
+      this.appendLine(
+        param.rest === true
+          ? `${this.slotRef(param.name)} = jsrt_args_rest(argc, argv, ${index});`
+          : `${this.slotRef(param.name)} = jsrt_arg(argc, argv, ${index});`,
+        param.span,
+      );
+      if (param.default !== undefined) {
+        const slot = this.slotRef(param.name);
+        this.appendLine(`if (jsrt_is(${slot}, JSRT_TAG_UNDEFINED)) {`, param.span);
+        this.indent++;
+        const value = this.emitExpression(param.default);
+        this.appendLine(`${slot} = ${value};`, param.span);
+        this.indent--;
+        this.appendLine('}', param.span);
+      }
     });
   }
 
@@ -3117,7 +3223,7 @@ class Emitter {
       return `jsrt_closure(&_jsrt_closure_${id})`;
     }
     const name = cNameLiteral(fn.name ?? '');
-    return `jsrt_closure_new(_jsrt_fn_${id}, ${fn.params.length}, ${name}, ${this.currentEnv()})`;
+    return `jsrt_closure_new(_jsrt_fn_${id}, ${declaredArity(fn)}, ${name}, ${this.currentEnv()})`;
   }
 
   private appendLine(line: string, span?: Span): void {

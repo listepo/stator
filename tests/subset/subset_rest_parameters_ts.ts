@@ -1,6 +1,5 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Rest parameters ...args
 
 function sum(a: number, ...rest: number[]): number {

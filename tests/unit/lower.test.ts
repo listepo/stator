@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { Declaration, FunctionExpr } from '../../src/hir/nodes.ts';
 import { verifyHir } from '../../src/hir/verify.ts';
-import { hirNodes, lowerSource } from './helpers.ts';
+import { hirNodes, lowerSource, requireInit } from './helpers.ts';
 
 void test('console.log with arithmetic expression and correct precedence', () => {
   const result = lowerSource('console.log(1 + 2 * 3);');
@@ -59,9 +59,10 @@ while (x < 3) {
   if (decl.kind === 'declaration') {
     assert.equal(decl.name, 'x', 'Should declare x');
     assert.equal(decl.declKind, 'let', 'Should be let');
-    assert.equal(decl.value.kind, 'number-literal', 'Initial value should be number literal');
-    if (decl.value.kind === 'number-literal') {
-      assert.equal(decl.value.value, 0, 'Initial value should be 0');
+    const init = requireInit(decl);
+    assert.equal(init.kind, 'number-literal', 'Initial value should be number literal');
+    if (init.kind === 'number-literal') {
+      assert.equal(init.value, 0, 'Initial value should be 0');
     }
   }
 
@@ -297,7 +298,7 @@ test('an annotation wider than the initializer is the binding type', () => {
   // `string | number` has no HType yet, so it is Unknown -- which is the point: Unknown is what
   // makes the slot able to hold either, and `number` would have promised something false.
   assert.equal((decl as Declaration).type.kind, 'unknown');
-  assert.equal((decl as Declaration).value.type.kind, 'number');
+  assert.equal(requireInit(decl as Declaration).type.kind, 'number');
 });
 
 test('assigning any type to an Unknown binding verifies clean', () => {

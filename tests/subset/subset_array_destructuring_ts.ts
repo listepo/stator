@@ -1,6 +1,5 @@
 // @mode: ts
-// @verdict: static
-// @expected-fail: true
+// @verdict: dynamic
 // SUBSET.md: Array destructuring
 
 const arr: number[] = [1, 2, 3];

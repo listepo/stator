@@ -481,12 +481,10 @@ static void write_iso(char *out, size_t n, double t) {
 
 jsrt_value jsrt_date_to_iso_string(jsrt_value v) {
   const double t = as_date(v)->time;
-  /* §21.4.4.36 throws a RangeError here. The runtime cannot raise one until Phase 5 step 11 gives
-   * it a catch around user code (plan-notes 125), so this aborts loudly rather than answering with
-   * a string no Date has -- the STA2005 pattern JSON.stringify already uses for a cycle. */
+  /* §21.4.4.36 throws a RangeError. Generated C checks jsrt_pending() after this op. */
   if (isnan(t)) {
-    jsrt_panic("STA2005: toISOString on an Invalid Date throws a RangeError, which the runtime "
-               "cannot raise yet");
+    jsrt_throw_str("RangeError: Invalid time value");
+    return JSRT_UNDEFINED;
   }
   char text[40];
   write_iso(text, sizeof text, t);

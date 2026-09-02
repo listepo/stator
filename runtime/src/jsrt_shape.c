@@ -222,6 +222,7 @@ static jsrt_value dynobj_new(const JSRTClass *cls) {
   o->shape = &shape_root;
   o->capacity = 0;
   o->slots = NULL;
+  o->frozen = false;
   return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)o);
 }
 
@@ -290,6 +291,10 @@ bool jsrt_has_prop(jsrt_value obj, const char *key) {
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic) {
   if (jsrt_is_nullish(obj)) {
     jsrt_panic("TypeError: Cannot set properties of null or undefined");
+  }
+  if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
+    jsrt_throw_str("TypeError: Cannot assign to read only property");
+    return;
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {

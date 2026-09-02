@@ -247,7 +247,9 @@ function verifyStatement(
   switch (stmt.kind) {
     case 'declaration': {
       const decl = stmt as Declaration;
-      verifyExpression(decl.value, problems, bindings);
+      if (decl.value !== undefined) {
+        verifyExpression(decl.value, problems, bindings);
+      }
       // Register the binding for future reference
       bindings.set(decl.name, { kind: decl.declKind, type: decl.type });
       break;
@@ -395,7 +397,13 @@ function verifyStatement(
 
     case 'block': {
       const block = stmt as Block;
-      verifyBlock(block, problems, bindings, enclosing);
+      if (block.flatten === true) {
+        for (const inner of block.statements) {
+          verifyStatement(inner, problems, bindings, enclosing);
+        }
+      } else {
+        verifyBlock(block, problems, bindings, enclosing);
+      }
       break;
     }
 
@@ -458,7 +466,9 @@ function verifyStatement(
         bindings.set(decl.name, { kind: decl.declKind, type: decl.type });
       }
       for (const decl of stmt.statics) {
-        verifyExpression(decl.value, problems, bindings);
+        if (decl.value !== undefined) {
+          verifyExpression(decl.value, problems, bindings);
+        }
       }
       const members = [...(stmt.ctor === undefined ? [] : [stmt.ctor]), ...stmt.methods];
       for (const member of members) {
@@ -620,6 +630,17 @@ function verifyFunction(
   const inner = new Map(bindings);
   for (const param of fn.params) {
     inner.set(param.name, { kind: 'let', type: param.type });
+    if (param.default !== undefined) {
+      verifyExpression(param.default, problems, inner);
+      if (!hTypeAssignable(param.default.type, param.type)) {
+        problems.push({
+          kind: 'function',
+          span: param.span,
+          code: 'STA4004',
+          message: `default parameter type ${hTypeName(param.type)} does not match value type ${hTypeName(param.default.type)}`,
+        });
+      }
+    }
   }
   verifyBlock(fn.body, problems, inner, [{ isLoop: false, isFunction: true }]);
 }
@@ -1672,6 +1693,42 @@ function verifyExpression(
       break;
     }
 
+    case 'promise-method': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (expr.target.type.kind !== 'promise' && expr.target.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'promise-method',
+          span: expr.span,
+          code: 'STA4094',
+          message: `Promise.prototype.${expr.method} on '${hTypeName(expr.target.type)}', not a promise`,
+        });
+      } else if (expr.type.kind !== 'promise') {
+        problems.push({
+          kind: 'promise-method',
+          span: expr.span,
+          code: 'STA4094',
+          message: `Promise.prototype.${expr.method} results in '${hTypeName(expr.type)}', not a promise`,
+        });
+      }
+      break;
+    }
+
+    case 'promise-construct': {
+      verifyExpression(expr.executor, problems, bindings);
+      if (expr.type.kind !== 'promise') {
+        problems.push({
+          kind: 'promise-construct',
+          span: expr.span,
+          code: 'STA4094',
+          message: `new Promise results in '${hTypeName(expr.type)}', not a promise`,
+        });
+      }
+      break;
+    }
+
     // A match read's receiver is Unknown by construction, and the FIELD is what fixes the result
     // type -- the StringOp rule with a one-entry table per field. A wrong receiver is settled by
     // the runtime (jsrt_get_prop panics on a tag it cannot walk), never silently misread.
@@ -1786,9 +1843,11 @@ const COLLECTION_ARITY: Readonly<Record<'map' | 'set', Readonly<Record<string, n
 const OBJECT_STATIC_SHAPES = {
   assign: { arity: 2, result: 'unknown' },
   entries: { arity: 1, result: 'array' },
+  freeze: { arity: 1, result: 'unknown' },
   fromEntries: { arity: 1, result: 'unknown' },
   getOwnPropertyNames: { arity: 1, result: 'strings' },
   hasOwn: { arity: 2, result: 'boolean' },
+  isFrozen: { arity: 1, result: 'boolean' },
   keys: { arity: 1, result: 'strings' },
   values: { arity: 1, result: 'array' },
 } as const satisfies Record<

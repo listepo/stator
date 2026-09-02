@@ -255,3 +255,114 @@ void jsrt_async_return(JSRTAsync *self, jsrt_value value) {
 void jsrt_async_throw(JSRTAsync *self, jsrt_value reason) {
   jsrt_promise_settle(self->promise, reason, true);
 }
+
+
+/* ------------------------------------------------ Promise.prototype / new Promise */
+
+typedef struct {
+  jsrt_value derived;
+  jsrt_value on_fulfilled;
+  jsrt_value on_rejected;
+} ThenState;
+
+static void then_react(void *state, jsrt_value value, bool rejected) {
+  ThenState *s = (ThenState *)state;
+  jsrt_value handler = rejected ? s->on_rejected : s->on_fulfilled;
+  if (!jsrt_is(handler, JSRT_TAG_CLOSURE)) {
+    jsrt_promise_settle(s->derived, value, rejected);
+    return;
+  }
+  jsrt_value args[1] = {value};
+  JSRTCompletion done = jsrt_call_protected(handler, 1, args);
+  if (done.threw) {
+    jsrt_promise_settle(s->derived, done.value, true);
+    return;
+  }
+  jsrt_promise_settle(s->derived, done.value, false);
+}
+
+jsrt_value jsrt_promise_then(jsrt_value promise, jsrt_value on_fulfilled, jsrt_value on_rejected) {
+  ThenState *s = (ThenState *)jsrt_gc_alloc(sizeof(ThenState), "Promise.then");
+  s->derived = jsrt_promise_new();
+  s->on_fulfilled = on_fulfilled;
+  s->on_rejected = on_rejected;
+  jsrt_promise_subscribe(promise, then_react, s);
+  return s->derived;
+}
+
+jsrt_value jsrt_promise_catch(jsrt_value promise, jsrt_value on_rejected) {
+  return jsrt_promise_then(promise, JSRT_UNDEFINED, on_rejected);
+}
+
+typedef struct {
+  jsrt_value derived;
+  jsrt_value on_finally;
+  jsrt_value value;
+  bool rejected;
+} FinallyState;
+
+static void finally_after(void *state, jsrt_value value, bool rejected) {
+  FinallyState *s = (FinallyState *)state;
+  if (rejected) {
+    jsrt_promise_settle(s->derived, value, true);
+    return;
+  }
+  jsrt_promise_settle(s->derived, s->value, s->rejected);
+}
+
+static void finally_react(void *state, jsrt_value value, bool rejected) {
+  FinallyState *s = (FinallyState *)state;
+  s->value = value;
+  s->rejected = rejected;
+  if (!jsrt_is(s->on_finally, JSRT_TAG_CLOSURE)) {
+    jsrt_promise_settle(s->derived, value, rejected);
+    return;
+  }
+  JSRTCompletion done = jsrt_call_protected(s->on_finally, 0, NULL);
+  if (done.threw) {
+    jsrt_promise_settle(s->derived, done.value, true);
+    return;
+  }
+  if (jsrt_is_promise(done.value)) {
+    jsrt_promise_subscribe(done.value, finally_after, s);
+    return;
+  }
+  jsrt_promise_settle(s->derived, value, rejected);
+}
+
+jsrt_value jsrt_promise_finally(jsrt_value promise, jsrt_value on_finally) {
+  FinallyState *s = (FinallyState *)jsrt_gc_alloc(sizeof(FinallyState), "Promise.finally");
+  s->derived = jsrt_promise_new();
+  s->on_finally = on_finally;
+  s->value = JSRT_UNDEFINED;
+  s->rejected = false;
+  jsrt_promise_subscribe(promise, finally_react, s);
+  return s->derived;
+}
+
+static jsrt_value promise_resolve_fn(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {
+  jsrt_promise_settle(env->slots[0], argc > 0 ? argv[0] : JSRT_UNDEFINED, false);
+  return JSRT_UNDEFINED;
+}
+
+static jsrt_value promise_reject_fn(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {
+  jsrt_promise_settle(env->slots[0], argc > 0 ? argv[0] : JSRT_UNDEFINED, true);
+  return JSRT_UNDEFINED;
+}
+
+jsrt_value jsrt_promise_construct(jsrt_value executor) {
+  jsrt_value promise = jsrt_promise_new();
+  if (!jsrt_is(executor, JSRT_TAG_CLOSURE)) {
+    jsrt_throw_str("TypeError: Promise resolver is not a function");
+    return JSRT_UNDEFINED;
+  }
+  JSRTEnv *env = jsrt_env_new(NULL, 1);
+  env->slots[0] = promise;
+  jsrt_value args[2] = {jsrt_closure_new(promise_resolve_fn, 1, "", env),
+                        jsrt_closure_new(promise_reject_fn, 1, "", env)};
+  JSRTCompletion done = jsrt_call_protected(executor, 2, args);
+  if (done.threw) {
+    jsrt_promise_settle(promise, done.value, true);
+  }
+  return promise;
+}

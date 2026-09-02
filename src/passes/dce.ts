@@ -15,8 +15,14 @@
  * expression it keeps is one the lowering built.
  */
 
-import type { Expression, FunctionDeclaration, Module, Statement } from '../hir/nodes.ts';
-import { rewriteModule, rewriteStatements } from './rewrite.ts';
+import type {
+  Expression,
+  FunctionDeclaration,
+  Module,
+  Parameter,
+  Statement,
+} from '../hir/nodes.ts';
+import { rewriteExpression, rewriteModule, rewriteStatements } from './rewrite.ts';
 
 export function eliminateDeadCode(module: Module): Module {
   return shakeFunctions(rewriteModule(module, { statement: prune, statements: dropUnreachable }));
@@ -126,6 +132,24 @@ function referencedNames(statements: readonly Statement[]): ReadonlySet<string> 
   return names;
 }
 
+function referencedInDefaults(params: readonly Parameter[]): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const param of params) {
+    if (param.default === undefined) {
+      continue;
+    }
+    rewriteExpression(param.default, {
+      expression: (expr) => {
+        if (expr.kind === 'identifier') {
+          names.add(expr.name);
+        }
+        return expr;
+      },
+    });
+  }
+  return names;
+}
+
 /** Drop module-level functions nothing can reach.
  *
  * Reachability starts from the statements that are not function declarations — the code that
@@ -160,6 +184,7 @@ function shakeFunctions(module: Module): Module {
     live.add(name);
     // The body is a Block, which is itself a Statement -- so the same walk serves both levels.
     pending.push(...referencedNames([declaration.fn.body]));
+    pending.push(...referencedInDefaults(declaration.fn.params));
   }
 
   const statements = module.statements.filter(

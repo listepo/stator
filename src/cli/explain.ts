@@ -198,6 +198,7 @@ function statementHasUnknown(stmt: Statement): boolean {
   }
   switch (stmt.kind) {
     case 'declaration':
+      return stmt.value !== undefined && expressionHasUnknown(stmt.value);
     case 'assignment':
       return expressionHasUnknown(stmt.value);
     case 'expression-statement':
@@ -400,6 +401,10 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expressionHasUnknown(expr.value);
     case 'promise-static':
       return expressionHasUnknown(expr.arg);
+    case 'promise-method':
+      return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    case 'promise-construct':
+      return expressionHasUnknown(expr.executor);
     // `typeof` is a string whatever it asked about, so an Unknown OPERAND does not make the result
     // dynamic -- asking an unknown value what it is is exactly how a program stops being dynamic.
     case 'typeof':

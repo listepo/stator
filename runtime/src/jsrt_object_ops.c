@@ -150,3 +150,37 @@ jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   }
   return target;
 }
+
+
+static bool is_fixed_shape_object(jsrt_value v) {
+  if (!jsrt_is(v, JSRT_TAG_OBJECT) || jsrt_is_dynobj(v)) {
+    return false;
+  }
+  const JSRTClass *cls = jsrt_as_object(v)->cls;
+  return cls != &jsrt_class_promise && cls != &jsrt_class_date && cls != &jsrt_class_map &&
+         cls != &jsrt_class_set && cls != &jsrt_class_regexp && cls != &jsrt_class_iterator &&
+         cls != &jsrt_class_generator;
+}
+
+jsrt_value jsrt_object_freeze(jsrt_value v) {
+  if (jsrt_is_dynobj(v)) {
+    ((JSRTDynObject *)jsrt_ptr(v))->frozen = true;
+    return v;
+  }
+  if (is_fixed_shape_object(v)) {
+    jsrt_as_object(v)->frozen = true;
+    return v;
+  }
+  return v;
+}
+
+jsrt_value jsrt_object_is_frozen(jsrt_value v) {
+  if (jsrt_is_dynobj(v)) {
+    return jsrt_bool(((const JSRTDynObject *)jsrt_ptr(v))->frozen);
+  }
+  if (is_fixed_shape_object(v)) {
+    return jsrt_bool(jsrt_as_object(v)->frozen);
+  }
+  /* Primitives are frozen. Builtin objects this landing does not mark are not. */
+  return jsrt_is(v, JSRT_TAG_OBJECT) || jsrt_is(v, JSRT_TAG_ARRAY) ? JSRT_FALSE : JSRT_TRUE;
+}

@@ -1,8 +1,6 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1207
-// @expected-fail: true
-// SUBSET.md: import() dynamic import
+// @verdict: static
+// SUBSET.md: import() dynamic import (literal specifier)
 
-const m = import("./helper_js.js");
-export { m };
+const m = await import("./dynamic_import_helper_js.js");
+console.log(m.n);

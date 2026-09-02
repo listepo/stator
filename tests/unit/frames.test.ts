@@ -148,6 +148,11 @@ void test('a frame is exactly as large as the locals it roots', () => {
 
 void test('the module frame is exactly as large as the globals it roots', () => {
   for (const { name, c } of EMITTED) {
+    // An async module keeps named bindings in the globals array and temps in a heap environment
+    // (Phase 5 step 9). Slot accounting is not "every declared global is written in main".
+    if (c.includes('jsrt_async_start')) {
+      continue;
+    }
     const declared = [...c.matchAll(/JSRT_GLOBALS(?:_ENTER)?\((\d+)\)/g)].map((m) => Number(m[1]));
     // Declared once and entered once, with the same count: two macros, one array.
     assert.equal(declared.length, 2, `${name} declares ${String(declared.length)} globals frames`);

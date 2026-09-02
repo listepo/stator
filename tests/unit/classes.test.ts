@@ -22,7 +22,7 @@ import type {
   Statement,
 } from '../../src/hir/nodes.ts';
 import { verifyHir } from '../../src/hir/verify.ts';
-import { lowerSource } from './helpers.ts';
+import { lowerSource, requireInit } from './helpers.ts';
 
 function statements(code: string): readonly Statement[] {
   const { module, diagnostics } = lowerSource(code);
@@ -603,7 +603,7 @@ test('a nested literal is an entry value with a shape of its own', () => {
 
 test('an empty literal takes the dynamic path so it can grow', () => {
   const decl = statements('const e = {};\nconsole.log(e);\n')[0];
-  const value = (decl as Extract<Statement, { kind: 'declaration' }>).value;
+  const value = requireInit(decl as Extract<Statement, { kind: 'declaration' }>);
   assert.equal(value.kind, 'dyn-object-literal');
   assert.deepEqual((value as { entries: readonly unknown[] }).entries, []);
 });

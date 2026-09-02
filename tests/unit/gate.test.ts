@@ -100,16 +100,11 @@ void test('switch, case, default and do/while are all accepted syntax', () => {
   assert.deepEqual(codesFor('let x: number = 0;\ndo { x++; } while (x < 1);'), []);
 });
 
-void test('try/catch/finally and throw are accepted; destructured catch bindings are not', () => {
+void test('try/catch/finally and throw are accepted, including a destructured catch', () => {
   assert.deepEqual(codesFor("try { throw 'boom'; } catch { console.log('handled'); }"), []);
   assert.deepEqual(codesFor("try { throw 'boom'; } catch (e) { console.log(typeof e); }"), []);
   assert.deepEqual(codesFor('try { console.log(1); } finally { console.log(2); }'), []);
-  // A destructured binding names more than one place for one value, which the HIR's one-name
-  // catch binding cannot carry -- and the caught value is Unknown anyway, so the destructure
-  // would need narrowing first.
-  assert.deepEqual(codesFor('try { throw 1; } catch ({ message }) { console.log(message); }'), [
-    'STA1214',
-  ]);
+  assert.deepEqual(codesFor('try { throw 1; } catch ({ message }) { console.log(1); }'), []);
 });
 
 // `var` is banned in ts mode BY DESIGN (STA1104, a 'never' code, no phase) — function-scoped
@@ -135,11 +130,19 @@ void test('var is a permanent rejection in ts mode and is accepted in js mode', 
   );
 });
 
-// The HIR's Declaration always carries exactly one name and one initializer (docs/HIR.md) — both
-// of these parse as valid TypeScript but have no HIR shape to lower into yet.
-void test('a declaration missing an initializer, or destructuring one, are both deferred', () => {
-  assert.deepEqual(codesFor('let x: number;'), ['STA1214']);
-  assert.deepEqual(codesFor('let [a, b]: [number, number] = [1, 2];'), ['STA1214']);
+// The HIR's Declaration carries exactly one name. Destructuring still has no shape to lower into.
+void test('simple destructuring is accepted; nested and rest stay deferred', () => {
+  assert.deepEqual(
+    codesFor('const p: { x: number; y: number } = { x: 1, y: 2 }; const { x, y } = p;'),
+    [],
+  );
+  assert.deepEqual(codesFor('const arr: number[] = [1, 2]; const [a, b] = arr;'), []);
+  assert.deepEqual(codesFor('function f({ x }: { x: number }): number { return x; }'), []);
+  assert.deepEqual(codesFor('try { throw 1; } catch ({ message }) { console.log(1); }'), []);
+  assert.deepEqual(codesFor('const { a: { b } }: { a: { b: number } } = { a: { b: 1 } };'), [
+    'STA1214',
+  ]);
+  assert.deepEqual(codesFor('const [a, ...rest]: number[] = [1, 2];'), ['STA1214']);
 });
 
 // Mirrors the compound-assignment-to-non-identifier test above, but for plain `=`: HIR Assignment
@@ -1082,6 +1085,47 @@ void test('function* declarations and yield are accepted; methods and yield* are
   assert.deepEqual(codesFor('async function* g(): AsyncGenerator<number> { yield 1; }\n'), [
     'STA1201',
   ]);
+});
+
+void test('a declaration without an initializer is accepted', () => {
+  assert.deepEqual(codesFor('let n: number; n = 1;'), []);
+  assert.deepEqual(codesFor('let n; n = 1;', 'js'), []);
+});
+
+void test('default and optional parameters are accepted', () => {
+  assert.deepEqual(codesFor('function greet(name: string = "world"): string { return name; }'), []);
+  assert.deepEqual(codesFor('function greet(name = "world") { return name; }', 'js'), []);
+  assert.deepEqual(codesFor('function f(x?: number): number { return 0; }'), []);
+});
+
+void test('rest parameters are accepted', () => {
+  assert.deepEqual(
+    codesFor('function sum(a: number, ...rest: number[]): number { return a; }'),
+    [],
+  );
+  assert.deepEqual(codesFor('function sum(a, ...rest) { return a; }', 'js'), []);
+});
+
+void test('Promise.prototype.then/catch/finally and new Promise(executor) are accepted', () => {
+  assert.deepEqual(codesFor('Promise.resolve(1).then((n: number) => n);'), []);
+  assert.deepEqual(codesFor('Promise.reject(1).catch((e: number) => e);'), []);
+  assert.deepEqual(codesFor('Promise.resolve(1).finally(() => undefined);'), []);
+  assert.deepEqual(codesFor('const p = new Promise<number>((resolve) => { resolve(1); });'), []);
+});
+
+void test('Object.freeze and Object.isFrozen are accepted', () => {
+  assert.deepEqual(
+    codesFor(
+      'class C { x: number = 1; }\nconst o = new C();\nObject.freeze(o);\nconsole.log(Object.isFrozen(o));',
+    ),
+    [],
+  );
+});
+
+void test('literal import() is accepted; a computed specifier is STA1207', () => {
+  assert.deepEqual(codesFor('const m = import("./x.ts");\n'), []);
+  assert.deepEqual(codesFor('const m = import("./x.ts");\n', 'js'), []);
+  assert.deepEqual(codesFor('const m = import("x" + ".ts");\n'), ['STA1207']);
 });
 
 void test('top-level await is accepted; await in a non-async function is not', () => {

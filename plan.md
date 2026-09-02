@@ -367,40 +367,13 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
     environment, `main` starts the unit and drains the microtask queue. Init order is Task 3.11's
     topological order, **not** Node's sibling-subgraph interleaving (docs/MODES.md, plan-notes 155).
     `STA1208` is no longer emitted.
-10. **Dynamic `import()`** (**`STA1207`**, moved here from Phase 4 on 2026-09-01). Its old note said
-   it "cannot land before async/await"; async landed and it did not, because the real blocker is a
-   **module namespace object** — an object whose shape is the module's export list. With a LITERAL
-   specifier the target is already in the whole-program graph, so this is shape work plus an
-   already-resolved promise, and it belongs here. With a COMPUTED specifier it needs runtime module
-   resolution the whole-program model does not have: that half is Phase 8, and the split needs owner
-   confirmation before either half is built.
-   In order: (a) the module namespace object — an object whose shape IS the export list, already
-   whole-program-known, sealed, reads flowing through the live bindings; (b) literal-specifier
-   `import()` answers an already-resolved promise of that namespace (consuming it with `await`
-   works the day this lands; consuming it with `.then` waits on step 11); (c) the computed half
-   stays split for Phase 8, unchanged, pending owner confirmation.
-11. **`Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)`** (**`STA1216`**,
-   already assigned here). Both wait on the same thing: a handler's throw must become a rejection,
-   which needs a runtime-level catch around user code.
-   In order: (a) the MECHANISM first, and in `docs/VALUE.md` before any member — but as an
-   EXTENSION of §4.9's existing pending-cell protocol, not a new one beside it. §4.9 already has
-   `jsrt_throw` / `jsrt_pending` / `jsrt_take_exception`; what it gives to GENERATED code (check
-   the flag after every call that can run user code, jump to the nearest landing pad) is exactly
-   what a builtin cannot do today, which is `STA1216`'s recorded blocker in `docs/DIAGNOSTICS.md`
-   ("the pending-exception protocol gives that catch to generated code, not to a builtin"). So the
-   doc gains a subsection: a runtime-side call that invokes a user closure, checks `jsrt_pending()`
-   on return, takes the exception, and yields it as a COMPLETION VALUE to the builtin — which then
-   settles a promise with it instead of unwinding into library C. Reuse the vocabulary §4.9 already
-   defines; a second name for one mailbox is how two protocols get built by accident;
-   (b) `then`/`catch`/`finally` on Task 4.6's
-   microtask machinery, handler throws becoming rejections via (a); (c) `new Promise(executor)`,
-   the executor running protected the same way; (d) the unlock sweep in the same change:
-   `Object.freeze`/`isFrozen` (the exit criterion moved them here), `toISOString` on an Invalid
-   Date, and every `SUBSET.md` row reading "the spec throws, which builtins cannot raise yet" —
-   those rows are IOUs written against exactly this step, so grep for them and close or re-date
-   them; (e) `STA1216` clears; then enumerate the `Promise` combinator residue
-   (`allSettled`/`any`/`race`/`withResolvers`/`try`) and name each member's owner — most need
-   only (a); iterating a non-array argument also needs step 8.
+10. ~~Dynamic `import()` (`STA1207`).~~ ✅ **landed** (2026-09-02) — a module namespace is an
+    `HObject` with `namespace: true`; field reads compile to the export's global slot (live
+    bindings). Literal-specifier `import()` is `Promise.resolve` of that dummy object, and the
+    specifier is a value-import edge so the target's top-level has already run. Computed specifier
+    stays `STA1207` (Phase 8). `import * as ns` is still `STA1214` (step 12).
+11. ~~`Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)` (`STA1216`).~~ ✅ **landed** (2026-09-02) — `jsrt_call_protected` extends §4.9's pending cell into a completion value; then/catch/finally/new Promise consume it. `Object.freeze`/`isFrozen` and `toISOString` on an Invalid Date raise through the same mailbox. Combinator residue (`allSettled`/`any`/`race`/`withResolvers`/`try`) stays not-yet (`Promise.${name}`). JSON/RegExp/string STA2005 panics are re-dated: the mechanism exists, converting each abort is follow-up. `STA1216` remains allocated for other Promise.prototype members and a non-arity-1 constructor.
+
 12. **The lowering ladder's residue — `ts`-mode static language surface** (added 2026-09-01,
     plan-notes 136). Phase 3's rungs each landed a core and deferred its surface under
     `notYet(…, 3)` while Phase 3 was open; Phase 3 closed on 2026-08-30 having passed a Check about
@@ -410,9 +383,7 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
     TypeScript with a statically known shape, which §1.1 promises will "eventually compile", in the
     product's DEFAULT mode. Land by family, each family flipping its `tests/subset/` rows out of
     expected-fail in the commit that lands it, never in bulk:
-    (a) **Parameter and binding forms** first, because every later family calls functions: rest,
-    default, optional and destructuring parameters; destructuring declarations; a declaration
-    without an initializer; destructuring a caught value.
+    (a) **Parameter and binding forms** first, because every later family calls functions: rest, default, optional, uninitialized `let`, and shallow destructuring of parameters/declarations/catch (**landed** 2026-09-02, plan-notes 158–161). Nested/rest/default-in-pattern residue stays not-yet in this family.
     (b) **Expression-position residue** next — cheap, and it unblocks the decision corpus: labels
     on anything but a loop or switch, capturing a variable declared inside a loop, `instanceof`
     against anything but a class name, assignment and compound assignment to a non-variable,

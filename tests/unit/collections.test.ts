@@ -11,15 +11,15 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { tsTypeToHType } from '../../src/frontend/types.ts';
-import type { CollectionNew, CollectionOp, Declaration } from '../../src/hir/nodes.ts';
+import type { CollectionNew, CollectionOp, Declaration, Expression } from '../../src/hir/nodes.ts';
 import { hTypeName } from '../../src/hir/types.ts';
-import { createProgram, gateCodes, loweredStatements } from './helpers.ts';
+import { createProgram, gateCodes, loweredStatements, requireInit } from './helpers.ts';
 
 /** The expression a `const` binds, for the sources below that declare one collection and use it. */
-function declaredValue(code: string): Declaration['value'] {
+function declaredValue(code: string): Expression {
   const [decl] = loweredStatements(code);
   assert.equal(decl?.kind, 'declaration');
-  return (decl as Declaration).value;
+  return requireInit(decl as Declaration);
 }
 
 /** The operation in the LAST statement, whether that statement discards its value or prints it. */

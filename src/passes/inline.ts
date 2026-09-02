@@ -122,6 +122,10 @@ function candidateOf(declaration: FunctionDeclaration): Candidate | null {
   if (fn.needsEnv || fn.captures.length > 0 || fn.envVars.length > 0) {
     return null;
   }
+  // A rest or default is applied at the callee. Substituting the body would drop both.
+  if (fn.params.some((param) => param.rest === true || param.default !== undefined)) {
+    return null;
+  }
   const [only, ...rest] = fn.body.statements;
   if (rest.length > 0 || only === undefined || only.kind !== 'return-statement') {
     return null;

@@ -128,6 +128,11 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
     return hUnknown(false);
   }
 
+  const moduleNs = moduleNamespaceToHType(type, checker, depth);
+  if (moduleNs !== null) {
+    return moduleNs;
+  }
+
   const shape = shapeTypeToHType(type, checker, depth);
   if (shape !== null) {
     return shape;
@@ -264,6 +269,49 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
  * would let a class instance be read through the wrong one. Anything with a call signature, a
  * construct signature, an index signature, a method or an optional property is excluded too --
  * each needs something a fixed slot list cannot hold. */
+/** `typeof import("x")` / a source-file module type. Field reads are live bindings onto the
+ * merged globals (docs/VALUE.md §4.14). */
+function moduleNamespaceToHType(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  depth: number,
+): HType | null {
+  if (depth >= MAX_SIGNATURE_DEPTH) {
+    return null;
+  }
+  const symbol = type.getSymbol();
+  // TypeScript puts Module bits on a fresh `let o = {}` binding (ValueModule|NamespaceModule
+  // plus BlockScopedVariable). A namespace is a SourceFile / module declaration, never a value
+  // binding: matching those would mark `{ x: number }` as `namespace: true` and compile `o.x`
+  // to a global slot.
+  if (
+    symbol === undefined ||
+    (symbol.flags & ts.SymbolFlags.Module) === 0 ||
+    (symbol.flags & ts.SymbolFlags.Variable) !== 0
+  ) {
+    return null;
+  }
+  const decl = symbol.valueDeclaration ?? symbol.declarations?.[0];
+  if (decl === undefined || !(ts.isSourceFile(decl) || ts.isModuleDeclaration(decl))) {
+    return null;
+  }
+  const fields: HField[] = [];
+  for (const property of checker.getPropertiesOfType(type)) {
+    const atDecl = property.valueDeclaration ?? property.declarations?.[0];
+    if (atDecl === undefined || (property.flags & ts.SymbolFlags.Method) !== 0) {
+      continue;
+    }
+    fields.push({
+      name: property.name,
+      type: tsTypeToHType(checker.getTypeOfSymbolAtLocation(property, atDecl), checker, depth + 1),
+    });
+  }
+  if (fields.length === 0) {
+    return null;
+  }
+  return hObject(shapeName(fields), fields, [], [], true);
+}
+
 function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number): HType | null {
   if (depth >= MAX_SIGNATURE_DEPTH) {
     return null;
@@ -765,6 +813,17 @@ export function isImplicitAny(node: ts.Node, typeChecker: ts.TypeChecker): boole
   // the child is the only diagnostic (plan.md §8 step 2).
   if (initializerIsExplicitAny(node)) {
     return false;
+  }
+  // A destructuring declaration's own node is often `any` even when every binding is typed
+  // (`const { x } = p` with `p: Point`). Ask the initializer, which is the value being split.
+  // A catch pattern has no initializer; the binding is Unknown by decree, not implicit any.
+  if (ts.isVariableDeclaration(node) && !ts.isIdentifier(node.name)) {
+    if (ts.isCatchClause(node.parent)) {
+      return false;
+    }
+    if (node.initializer !== undefined) {
+      return (typeChecker.getTypeAtLocation(node.initializer).flags & ts.TypeFlags.Any) !== 0;
+    }
   }
   return (typeChecker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) !== 0;
 }

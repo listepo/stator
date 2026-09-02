@@ -115,6 +115,7 @@ jsrt_value jsrt_object_new(const JSRTClass *cls) {
   const size_t bytes = sizeof(JSRTObject) + (size_t)cls->field_count * sizeof(jsrt_value);
   JSRTObject *object = (JSRTObject *)jsrt_gc_alloc(bytes, "object");
   object->cls = cls;
+  object->frozen = false;
   /* Every slot starts `undefined` -- both because that is what an unassigned field reads as, and
    * because a conservative collector scans these words before the constructor has written them. */
   for (uint32_t i = 0; i < cls->field_count; i++) {
@@ -260,4 +261,20 @@ jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *ar
   c->name = name;
   c->env = env;
   return jsrt_closure(c);
+}
+
+void jsrt_object_set(jsrt_value obj, uint32_t slot, jsrt_value v) {
+  JSRTObject *object = jsrt_as_object(obj);
+  if (object->frozen) {
+    jsrt_throw_str("TypeError: Cannot assign to read only property");
+    return;
+  }
+  object->fields[slot] = v;
+}
+
+jsrt_value jsrt_args_rest(uint32_t argc, const jsrt_value *argv, uint32_t from) {
+  if (from >= argc) {
+    return jsrt_array_new(0, NULL);
+  }
+  return jsrt_array_new(argc - from, argv + from);
 }

@@ -36,6 +36,14 @@ import { H_BOOLEAN, H_NUMBER, H_STRING, H_UNDEFINED } from '../../src/hir/types.
 import { lowerSourceFile } from '../../src/lower/index.ts';
 import type { Diagnostic } from '../../src/support/diagnostics.ts';
 
+/** The initializer of a declaration that is supposed to have one. */
+export function requireInit(decl: Declaration): Expression {
+  if (decl.value === undefined) {
+    throw new Error(`declaration '${decl.name}' has no initializer`);
+  }
+  return decl.value;
+}
+
 /** Create a TypeScript compiler program from source code.
  * Returns both the program and resolved source file.
  * `fileName`'s extension matters to the gate (`.js` is rejected outright in ts mode), which is

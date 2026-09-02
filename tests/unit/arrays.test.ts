@@ -12,7 +12,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { Block, Declaration, IndexAssignment, Statement } from '../../src/hir/nodes.ts';
-import { lowerSource } from './helpers.ts';
+import { lowerSource, requireInit } from './helpers.ts';
 
 function statements(code: string): readonly Statement[] {
   const { module, diagnostics } = lowerSource(code);
@@ -61,7 +61,11 @@ test('a side-effecting index is evaluated once, not once per half', () => {
   // hoisting it would be a slot spent for nothing.
   assert.equal(temps.length, 1);
   const [temp] = temps;
-  assert.equal(temp?.value.kind, 'call', 'the hoisted expression is the call itself');
+  assert.equal(
+    temp === undefined ? undefined : requireInit(temp).kind,
+    'call',
+    'the hoisted expression is the call itself',
+  );
 
   // Both the read and the write must name that ONE temporary.
   assert.equal(write.index.kind, 'identifier');
@@ -87,7 +91,7 @@ test('a hoisted temporary cannot be named in source', () => {
 test('a side-effecting target is hoisted too', () => {
   const { temps, write } = readModifyWrite('function f(): number[] { return [1]; } f()[0] += 5;');
   assert.equal(temps.length, 1, 'the target is hoisted; the literal index is not');
-  assert.equal(temps[0]?.value.kind, 'call');
+  assert.equal(temps[0] === undefined ? undefined : requireInit(temps[0]).kind, 'call');
   assert.equal(write.target.kind, 'identifier');
   assert.equal(write.index.kind, 'number-literal');
 });
@@ -99,7 +103,7 @@ test('both halves are hoisted when both can have a side effect, target first', (
   assert.equal(temps.length, 2);
   // Order is the language's evaluation order: the target expression runs before the index.
   assert.deepEqual(
-    temps.map((t) => t.value.kind),
+    temps.map((t) => requireInit(t).kind),
     ['call', 'call'],
   );
   assert.notEqual(temps[0]?.name, temps[1]?.name, 'each hoist gets its own slot');
@@ -132,7 +136,7 @@ test('for-of binds the element type, not the indexed-read type', () => {
 test('an array literal takes its type from the checker, not from its elements', () => {
   const [decl] = statements('const a: unknown[] = [1, 2];');
   assert.equal(decl?.kind, 'declaration');
-  const value = (decl as Declaration).value;
+  const value = requireInit(decl as Declaration);
   assert.equal(value.kind, 'array-literal');
   // Two different types, both correct and both from the checker: the BINDING is `unknown[]`,
   // because that is the annotation, while the LITERAL is `number[]`, because that is what those

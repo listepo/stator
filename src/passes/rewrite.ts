@@ -80,7 +80,14 @@ function rewriteOptional<T>(value: T | undefined, f: (v: T) => T): T | undefined
 
 function rewriteFunction(fn: FunctionExpr, rewriter: Rewriter): FunctionExpr {
   const body = rewriteBlock(fn.body, rewriter);
-  return body === fn.body ? fn : { ...fn, body };
+  const params = rewriteEach(fn.params, (param) => {
+    if (param.default === undefined) {
+      return param;
+    }
+    const next = rewriteExpression(param.default, rewriter);
+    return next === param.default ? param : { ...param, default: next };
+  });
+  return body === fn.body && params === fn.params ? fn : { ...fn, body, params };
 }
 
 function rewriteMethod(method: ClassMethod, rewriter: Rewriter): ClassMethod {
@@ -109,7 +116,13 @@ function rebuildStatement(stmt: Statement, rewriter: Rewriter): Statement {
   const block = (b: Block): Block => rewriteBlock(b, rewriter);
 
   switch (stmt.kind) {
-    case 'declaration':
+    case 'declaration': {
+      if (stmt.value === undefined) {
+        return stmt;
+      }
+      const value = expr(stmt.value);
+      return value === stmt.value ? stmt : { ...stmt, value };
+    }
     case 'assignment': {
       const value = expr(stmt.value);
       return value === stmt.value ? stmt : { ...stmt, value };
@@ -139,6 +152,9 @@ function rebuildStatement(stmt: Statement, rewriter: Rewriter): Statement {
       const ctor = rewriteOptional(stmt.ctor, (c) => rewriteMethod(c, rewriter));
       const methods = rewriteEach(stmt.methods, (m) => rewriteMethod(m, rewriter));
       const statics = rewriteEach(stmt.statics, (s) => {
+        if (s.value === undefined) {
+          return s;
+        }
         const value = expr(s.value);
         return value === s.value ? s : { ...s, value };
       });
@@ -359,6 +375,15 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'promise-static': {
       const arg = sub(expr.arg);
       return arg === expr.arg ? expr : { ...expr, arg };
+    }
+    case 'promise-method': {
+      const target = sub(expr.target);
+      const args = rewriteEach(expr.args, sub);
+      return target === expr.target && args === expr.args ? expr : { ...expr, target, args };
+    }
+    case 'promise-construct': {
+      const executor = sub(expr.executor);
+      return executor === expr.executor ? expr : { ...expr, executor };
     }
     case 'await':
     case 'yield': {

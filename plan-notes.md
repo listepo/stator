@@ -4083,3 +4083,87 @@ allocated). Await in a non-async function remains `STA1214`.
 Check: `tests/golden/{ts,js}/top_level_await.ts` match Node (`before / 42 / after`); decision
 tests `subset_top_level_await_{ts,js}` are `static`; gate unit test admits top-level await and
 still refuses `await` in a non-async function.
+
+## 156. Literal `import()` is a namespace object plus `Promise.resolve` (2026-09-02)
+
+Phase 5 step 10. A module namespace is not a new NaN-box tag: it is an `HObject` with
+`namespace: true` whose fields ARE the target file's export list. Field reads compile to the
+export's global slot, so `ns.x` and the binding are the same cell. The object value is a dummy
+literal of those identifiers, enough for `import()` to put something in a Promise; identity,
+printing, and `Object.keys` are not the spec's Module exotic object.
+
+Literal `import("./m.ts")` is accepted by the gate, recorded as a value-import edge (so `m`'s
+top-level has already run in Task 3.11 order), and lowers to `Promise.resolve` of that dummy.
+`typeof import("m")` maps through `moduleNamespaceToHType` so `m.n` is a FieldAccess, not a
+dynamic get. A computed specifier stays `STA1207` (Phase 8). `STA1207` remains allocated.
+
+TypeScript puts Module bits on a fresh `let o = {}` binding (ValueModule|NamespaceModule plus BlockScopedVariable). `moduleNamespaceToHType` therefore also requires that the symbol is not a Variable and that its declaration is a SourceFile or module declaration; without that, `{ x: number }` was marked `namespace: true` and `o.x = 1` was STA1214.
+
+A live-binding golden that mutates an export through `m.setK(2)` needs calling an exported
+function as a namespace method; this landing proves `m.n` and the init-edge, not that call shape.
+
+Check: `tests/golden/{ts,js}/dynamic_import/main.ts` match Node (`42`); decision tests
+`subset_dynamic_import_{ts,js}` are `static`; `subset_dynamic_import_computed_{ts,js}` stay
+`STA1207`; gate unit admits a literal specifier and refuses a computed one.
+
+## 157. `jsrt_call_protected` is the §4.9 mailbox used by a builtin (2026-09-02)
+
+Phase 5 step 11. The missing piece `STA1216` named was never a second exception protocol: generated
+C already checks `jsrt_pending()` after `jsrt_call` and jumps to a landing pad. A builtin cannot
+jump to a pad it does not have. `jsrt_call_protected` is that same call plus take-on-pending, and
+yields a `JSRTCompletion { value, threw }` so `then`/`catch`/`finally` and `new Promise(executor)`
+can settle a promise with a handler throw instead of unwinding into library C. Documented as a
+subsection of `docs/VALUE.md` §4.9.
+
+Unlock in the same change: `Object.freeze`/`isFrozen` (a frozen bit; writes throw TypeError;
+generated C checks pending after `jsrt_object_set` / `jsrt_set_prop`) and `toISOString` on an
+Invalid Date (RangeError, pending check after the date-op). JSON/RegExp/string STA2005 panics are
+re-dated rather than converted: the mechanism exists, each abort is its own golden-churn follow-up.
+`seal`/`isSealed` still need a distinct [[Sealed]] bit.
+
+Combinator residue: `allSettled`/`any`/`race`/`withResolvers`/`try` stay not-yet (`Promise.${name}`
+from the static table miss). They need only this mechanism plus, for a non-array argument, step 8.
+
+Check: `tests/golden/{ts,js}/promise_then.ts` match Node (`2 / x / f / 2 / 3 / boom / nope`);
+`object_freeze.ts` and `date_invalid_iso.ts` match; decision tests `subset_promise_then_*` and
+`subset_object_freeze_*` are `static`; gate unit admits then/catch/finally, `new Promise`, freeze.
+
+## 158. Rest parameters are packed at the callee (2026-09-02)
+
+Phase 5 step 12 family (a), first member. Call sites already pass extra arguments through
+`jsrt_call`; a rest parameter is the callee packing `argv[from..]` into an array
+(`jsrt_args_rest`). An empty rest is a fresh empty array, not `undefined`. Closure arity
+(`Function.length`) excludes the rest parameter. Destructuring rest, defaults, optional
+parameters, and destructuring declarations remain open in the same family.
+
+Check: `tests/golden/{ts,js}/rest_params.ts` match Node (`6` / `10`); decision tests
+`subset_rest_parameters_{ts,js}` out of expected-fail (static / dynamic).
+
+## 159. Default and optional parameters (2026-09-02)
+
+Phase 5 step 12 family (a), after rest. A default is an expression on the HIR `Parameter`; codegen
+loads `jsrt_arg` and, when the value is `undefined`, evaluates the default into the same slot.
+Optional `x?` is a missing argument with no initializer — `jsrt_arg` already yields `undefined`.
+`Function.length` (`declaredArity`) stops at the first rest or default and still counts a bare
+optional. Destructuring parameters, destructuring declarations, uninitialized `let`, and catch
+destructuring remain open in the same family.
+
+Check: `tests/golden/{ts,js}/default_params.*` and `optional_params.*` match Node; decision tests
+`subset_default_parameters_{ts,js}` and `subset_optional_parameters_{ts,js}` (no expected-fail).
+
+## 160. Uninitialized `let x;` is a slot that starts undefined (2026-09-02)
+
+Phase 5 step 12 family (a). `Declaration.value` is optional; codegen writes nothing and the frame
+slot is already `undefined`. TypeScript still rejects a typed read before a write (`STA0012`).
+
+## 161. Shallow destructuring desugars to field and index reads (2026-09-02)
+
+Phase 5 step 12 family (a). `const { x, y } = p` and `const [a, b] = arr` become one declaration
+per name, plus an unspellable temporary when the RHS is not already an identifier. A `flatten`
+block leaks those bindings to the enclosing statement list (a nested Block is a scope). Parameters
+and `catch ({ message })` unpack the same way after a synthetic slot. Nested patterns, rest in a
+pattern, and pattern defaults stay not-yet. A typed `catch ({ message })` is a TypeScript error
+(`unknown` has no properties); js-mode catch destructure matches Node.
+
+Check: `tests/golden/{ts,js}/destructure.*` match Node; object/array destructuring decision tests
+out of expected-fail.

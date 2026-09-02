@@ -7,7 +7,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { verifyHir } from '../../src/hir/verify.ts';
-import { lowerSource } from './helpers.ts';
+import { lowerSource, requireInit } from './helpers.ts';
 
 void test('var at module level hoists a let initialized undefined, then assigns', () => {
   const { module, diagnostics } = lowerSource('console.log(x);\nvar x = 1;\n', '/test.js');
@@ -23,7 +23,7 @@ void test('var at module level hoists a let initialized undefined, then assigns'
   if (decl?.kind === 'declaration') {
     assert.equal(decl.name, 'x');
     assert.equal(decl.declKind, 'let');
-    assert.equal(decl.value.kind, 'undefined-literal');
+    assert.equal(requireInit(decl).kind, 'undefined-literal');
   }
   const assign = module.statements[2];
   assert.equal(assign?.kind, 'assignment');
@@ -62,7 +62,7 @@ void test('var inside a block is visible after it', () => {
   assert.equal(decl?.kind, 'declaration');
   if (decl?.kind === 'declaration') {
     assert.equal(decl.name, 'y');
-    assert.equal(decl.value.kind, 'undefined-literal');
+    assert.equal(requireInit(decl).kind, 'undefined-literal');
   }
   assert.deepEqual(verifyHir(module), []);
 });

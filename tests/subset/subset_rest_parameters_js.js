@@ -1,6 +1,5 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Rest parameters ...args
 
 function sum(a, ...rest) {

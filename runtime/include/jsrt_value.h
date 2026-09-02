@@ -276,6 +276,7 @@ struct JSRTClosure;
  * header's address stops being stable and every boxed reference to it becomes wrong. */
 typedef struct JSRTObject {
   const JSRTClass *cls;
+  bool frozen; /* Object.freeze: writes throw TypeError (Phase 5 step 11) */
   jsrt_value fields[];
 } JSRTObject;
 
@@ -319,6 +320,7 @@ typedef struct JSRTDynObject {
   JSRTShape *shape;
   uint32_t capacity;    /* slots allocated; the shape says how many are live */
   jsrt_value *slots;
+  bool frozen; /* Object.freeze: writes throw TypeError (Phase 5 step 11) */
 } JSRTDynObject;
 
 /* One per property-access SITE, emitted `static` in generated C so it persists across executions
@@ -517,6 +519,8 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs);
 /* Object.assign, two-argument form. The TARGET must be a dynamic-shape object: a fixed shape's
  * reads are slot indices fixed at build time, so a target that can grow is the only sound one. */
 jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source);
+jsrt_value jsrt_object_freeze(jsrt_value v);
+jsrt_value jsrt_object_is_frozen(jsrt_value v);
 
 /* JSON.stringify (§25.5.2), single-argument form — runtime/src/jsrt_print.c, with the rest of
  * stringification. Non-finite numbers and -0 serialize per spec ("null", "0"); a cycle or a
@@ -552,9 +556,8 @@ static inline jsrt_value jsrt_object_get(jsrt_value obj, uint32_t slot) {
   return jsrt_as_object(obj)->fields[slot];
 }
 
-static inline void jsrt_object_set(jsrt_value obj, uint32_t slot, jsrt_value v) {
-  jsrt_as_object(obj)->fields[slot] = v;
-}
+/* May throw (frozen object). Generated C checks jsrt_pending() after every write. */
+void jsrt_object_set(jsrt_value obj, uint32_t slot, jsrt_value v);
 
 /* `x instanceof C`. There is exactly one `JSRTClass` per class in the program, so class identity is
  * descriptor identity and each link of the walk is a pointer comparison -- no string compare, no
@@ -1024,6 +1027,9 @@ static inline jsrt_value jsrt_arg(uint32_t argc, const jsrt_value *argv, uint32_
   return i < argc ? argv[i] : JSRT_UNDEFINED;
 }
 
+/* `...rest` from argv[from] onward. An empty rest is a fresh empty array, not undefined. */
+jsrt_value jsrt_args_rest(uint32_t argc, const jsrt_value *argv, uint32_t from);
+
 /* Calling a non-function is a TypeError. Until Phase 5 step 11 gives the runtime a catch around
  * user code, it is fatal -- loud and located, rather than a jump through a garbage pointer.
  * (Phase 6 until 2026-09-01: the phase restructuring of plan-notes 116 moved the mechanism, and
@@ -1097,6 +1103,10 @@ jsrt_value jsrt_promise_resolve(jsrt_value v);      /* Promise.resolve: passes a
 jsrt_value jsrt_promise_reject(jsrt_value reason);  /* Promise.reject */
 jsrt_value jsrt_promise_all(jsrt_value array);      /* Promise.all over an ARRAY, the only iterable
                                                      * the subset can hand it */
+jsrt_value jsrt_promise_then(jsrt_value promise, jsrt_value on_fulfilled, jsrt_value on_rejected);
+jsrt_value jsrt_promise_catch(jsrt_value promise, jsrt_value on_rejected);
+jsrt_value jsrt_promise_finally(jsrt_value promise, jsrt_value on_finally);
+jsrt_value jsrt_promise_construct(jsrt_value executor); /* new Promise(executor) */
 
 /* The event loop, such as it is: drain the microtask queue until it is empty. Generated `main`
  * calls it once, after the module body, and that is the whole loop until timers or I/O exist to
@@ -1259,9 +1269,18 @@ jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
  * more than it can read one out of the heap (plan-notes 108). `jsrt_pending_slot` is how the
  * collector reaches it; nothing else may call it. */
 void jsrt_throw(jsrt_value v);
+void jsrt_throw_str(const char *msg);
 bool jsrt_pending(void);
 jsrt_value jsrt_take_exception(void);
 jsrt_value *jsrt_pending_slot(void);
+
+/* A runtime-side invoke that turns a pending throw into a completion value so a builtin can
+ * settle a promise (or otherwise handle it) instead of unwinding into library C. docs/VALUE.md §4.9. */
+typedef struct JSRTCompletion {
+  jsrt_value value;
+  bool threw;
+} JSRTCompletion;
+JSRTCompletion jsrt_call_protected(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
 
 /* The pad of last resort: main's. Prints the value to STDERR and exits 1 -- stdout stays clean,
  * which is what the golden runner compares, and the exit code is what Node observably does with
