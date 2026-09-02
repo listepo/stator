@@ -3,7 +3,7 @@ import test from 'node:test';
 import { generateProgram, XorShift32 } from '../differential/generate.ts';
 import { minimizeProgram } from '../differential/minimize.ts';
 import { featureStatus } from '../test262/features.ts';
-import { parseFrontmatter } from '../test262/run.ts';
+import { parseFrontmatter, scheduleSkipCode } from '../test262/run.ts';
 
 test('differential generation is deterministic and mode-specific', () => {
   assert.equal(generateProgram(42, 'ts'), generateProgram(42, 'ts'));
@@ -53,6 +53,19 @@ test('Test262 frontmatter accepts standard headers after license comments and re
     () => parseFrontmatter('/*---\nunknown: true\n---*/', 'bad.js'),
     /unknown frontmatter key/,
   );
+});
+
+test('Test262 counts a not-yet build as schedule, and anything else as a failure', () => {
+  // §1.3 keeps the never and not-yet ranges disjoint so a test can tell intent from schedule; a
+  // build the compiler declines to do YET is a skip attributed to that code, exactly as step 4
+  // already treats a not-yet on a negative test.
+  assert.equal(scheduleSkipCode('a.js:1:1 STA1214 [js] not yet'), 'STA1214');
+  assert.equal(scheduleSkipCode('a.js:1:1 STA1216 x\na.js:2:1 STA1207 y'), 'STA1207');
+  // One non-schedule code anywhere in the build makes the whole build a real refusal: the skip
+  // bucket must not be able to swallow a checker error or a never diagnostic.
+  assert.equal(scheduleSkipCode('a.js:1:1 STA1214 x\na.js:2:1 STA0012 y'), undefined);
+  assert.equal(scheduleSkipCode('a.js:1:1 STA1101 [ts] eval is never supported'), undefined);
+  assert.equal(scheduleSkipCode('clang: error: no such file'), undefined);
 });
 
 test('Test262 feature mapping is explicit', () => {

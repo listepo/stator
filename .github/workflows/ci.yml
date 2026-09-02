@@ -37,6 +37,10 @@ jobs:
   test262:
     name: test262 conformance
     runs-on: ubuntu-24.04
+    # The full pinned corpus is ~54k tests. The runner pools over every core, but this job is still
+    # the long pole by an order of magnitude, so give it a ceiling of its own rather than letting it
+    # inherit the 6-hour default and look hung.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
@@ -47,7 +51,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test262:fetch
       - name: Run Test262
-        run: pnpm run test262 2>&1 | tee test262.log
+        # `pipefail` is NOT the default for a `run:` step, and without it `tee` decides this job's
+        # exit status -- the ratchet could fail and the job would still be green, which is the
+        # dishonest version of a conformance heartbeat (§9's opening paragraph).
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm run test262 2>&1 | tee test262.log
       - name: Publish conformance summary
         if: always()
         run: grep '^test262:' test262.log >> "$GITHUB_STEP_SUMMARY" || true

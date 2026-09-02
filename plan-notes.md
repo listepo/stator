@@ -4371,3 +4371,99 @@ generic `STA1214` list for every such tag, cited by a new `SUBSET.md` Test262 co
 of treating it as supported because *some* related operation landed. The runner still errors on a
 future unknown tag, retaining the corpus-bump tripwire. The map also uses own-property checks:
 Test262's `__proto__` tag otherwise inherited `Object.prototype` and silently appeared supported.
+
+## 175. The Test262 harness found two js-mode checks that reject valid JavaScript (2026-09-03)
+
+Running the pinned corpus for the first time produced 98 failures in a 113-test slice, and every
+one of them was the runner or the gate refusing the HARNESS, not the test:
+
+1. **`tests/test262/harness/sta.js` shadowed the corpus file of that name.** Step 3 says a test is
+   `harness/assert.js` + `harness/sta.js` + `includes:`. Those are corpus files; the corpus's
+   `sta.js` is what defines `Test262Error` and `$DONOTEVALUATE`. Stator's adapter took the same
+   name and defined only `$DONE`, so `assert()` threw a `Test262Error` that no longer existed and
+   every harnessed test died on `Cannot find name 'Test262Error'`. The adapter is now
+   `harness/done.js`, holds `$DONE` alone, and is concatenated *after* both corpus files. The name
+   was the whole bug: a file named for a corpus file reads as that corpus file.
+2. **`noFallthroughCasesInSwitch` and `useUnknownInCatchVariables` were on in js mode.** Both
+   refuse *valid* JavaScript rather than *untyped* JavaScript, which is the line §1.2 draws
+   ("untyped means dynamic, not rejected"). `formatIdentityFreeValue` in `assert.js` falls through
+   on purpose, and `formatSimpleValue` reads `err.name` off a catch binding — the two most ordinary
+   ES5 idioms there are. They now follow the `noImplicitAny`/`noImplicitOverride` precedent already
+   in `program.ts` and are `mode === 'ts'`. ts mode keeps both: there a fallthrough is nearly always
+   a missing `break`, and an `unknown` catch is §0.2's boundary rule.
+
+This is Phase 5 step 2's residue, not new work — step 2 switched the *diagnostic table* by mode and
+did not audit the *compilerOptions* for the same contract. The evidence is why the plan wants a
+conformance suite: no decision fixture had asked either question, because both constructs are ones
+nobody writes deliberately in TypeScript.
+
+Two further runner changes came out of the same run:
+
+- **A not-yet diagnostic on a positive test is a skip, not a failure.** §1.3 makes the never and
+  not-yet ranges disjoint precisely so a test can tell intent from schedule, and step 4 already
+  applies that rule to negative tests. A build that raised *nothing but* `STA12xx` is now a skip
+  attributed to the lowest such code; a build that also raised anything else stays a failure, so
+  the skip bucket cannot swallow a real refusal.
+- **Unexplained failures are reported, not fatal.** At 53,874 tests a per-test `expected-fail.txt`
+  cannot be the gate without becoming a file nobody reads, and an unreadable list explains nothing.
+  The ratchet is the gate — that is what step 7's "monotonically tracked" means — and the runner
+  prints a bounded sample plus the total so the failures stay visible.
+
+Finally, the runner is now a pool over `availableParallelism()` (6.3× on this host: a 113-test
+slice went 37 s → 5.9 s). That is not an optimization: a serial pass is ~5 hours, and step 8 asks
+for a per-commit CI job. Temp filenames gained the pool slot — keyed by pid alone, two workers
+would have compiled each other's source and reported the answer to the wrong test.
+
+And the CI job the whole task exists to feed was reporting nothing. `pnpm run test262 2>&1 | tee
+test262.log` makes `tee` the step's exit status, because `pipefail` is not on for a `run:` step —
+so the ratchet could fail, the summary line could say anything, and the job would still be green.
+That is precisely the failure mode §9's opening paragraph names, sitting in §9's own workflow.
+Fixed with an explicit `shell: bash` + `set -o pipefail`, plus a `timeout-minutes` of its own so a
+hung corpus pass looks hung instead of inheriting the six-hour default.
+
+## 176. The first Test262 number, and the two skips that were not tests (2026-09-03)
+
+The first full pass over the pinned corpus (53,874 files) read **1405 passed, 8212 failed, 44,257
+skipped — 14.6%**. Two entries in that skip column were not conformance facts about Stator:
+
+- **17,003 tests skipped on `flags: [generated]`.** INTERPRETING.md §"generated" says only that the
+  file "was created procedurally using the project's [tooling]" — it is provenance, not a host
+  capability, and it changes nothing about how the file is built or run. The adapter's
+  `ALLOWED_FLAGS` did not list it, so the "flags the adapter does not implement are a SKIP" rule
+  (step 3) silently retired **a third of Test262**. Step 3's rule is right; the flag was misfiled.
+- **294 `_FIXTURE.js` files counted as skipped tests.** INTERPRETING.md: files bearing `_FIXTURE`
+  "MUST NOT be interpreted as standalone tests" — they are imported *by* module tests. They have no
+  frontmatter, so they landed in the `missing frontmatter` bucket, which is the bucket that is
+  supposed to mean "a real test whose header we could not read". They are now excluded from
+  enumeration; the one genuine headerless test
+  (`Function/prototype/toString/line-terminator-normalisation-CR.js`) still reports as a skip.
+
+Both are the same shape as the harness bug in note 175: **the skip column is where a runner's own
+defects go to hide**, because a skip looks deliberate. Everything in it has to name a rule, and the
+rule has to be about the compiler.
+
+**What the failure column actually says.** 8212 failures, and `STA0012` — a TypeScript checker
+refusal, not a Stator gate decision — is essentially all of them. The top buckets:
+
+| count | diagnostic |
+|---|---|
+| 2861 | `'x' is possibly 'null'/'undefined'` |
+| 805 | argument type not assignable to parameter type |
+| 456 | cannot find name |
+| 419 | object is possibly 'undefined' |
+| 407 | implicitly has an 'any' type |
+| 326 | type not assignable to type |
+
+The largest bucket is one finding, and it is note 175's finding again at scale: **`strictNullChecks`
+refuses ordinary JavaScript in js mode.** ~3400 of the 8212 are the possibly-null family. The fix is
+NOT `strictNullChecks: false` — compilerOptions are program-wide, so that would also strip null
+safety from the `.ts` half of a mixed graph and quietly delete the boundary checks §0.4 requires.
+It is to suppress the possibly-null *diagnostic codes* in js mode the way 2339/2551/2353/2349
+already are, leaving `T | undefined` in the type so the union still lowers to the dynamic path and
+the check still happens — at run time, which is where a dynamic value's check belongs.
+
+That is Phase 5 step 2 work, not Task 6.1 work, and it is recorded as such rather than folded in
+here: this task's job is to publish an honest number and a ratchet, and it now has both plus a
+measured, ordered backlog for the phase that owns the surface. Which is what §9 says the phase is
+for — it produces evidence, not features.
+

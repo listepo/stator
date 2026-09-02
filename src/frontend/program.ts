@@ -30,7 +30,14 @@ export function createProgram(
     // annotation. ts mode keeps it -- there the modifier is real syntax, and an accidental override
     // is exactly the mistake a vtable makes silent.
     noImplicitOverride: mode === 'ts',
-    noFallthroughCasesInSwitch: true,
+    // Same contract again, for two checks that reject VALID JavaScript rather than untyped
+    // JavaScript. Deliberate switch fallthrough is a JS idiom, and `catch (e) { e.name }` reads a
+    // property off a value the language hands you untyped; in js mode the catch variable is a
+    // dynamic value like any other and the read is settled at run time. ts mode keeps both -- there
+    // a fallthrough is almost always a missing `break`, and an `unknown` catch is the boundary rule
+    // of §0.2. Found by the Test262 harness, which is ordinary ES5 and used both (plan-notes 175).
+    noFallthroughCasesInSwitch: mode === 'ts',
+    useUnknownInCatchVariables: mode === 'ts',
     // Deliberately NOT noUnusedLocals/noUnusedParameters. Those are style checks: they change
     // nothing about what a type means, so nothing downstream depends on them, and switching them
     // on would make Stator reject correct programs -- `function f(a, b) { return a; }` is valid

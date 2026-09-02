@@ -316,6 +316,27 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
    does not drop the file and answer `STA0012`; (d) `eval`/`new Function`/`Function(...)` emit
    `STA1101`/`STA1103` never in ts and `STA1206` not-yet Phase 8 in js. Three findings, plan-notes
    141.
+2a. **Step 2's other half: the `compilerOptions`, not just the diagnostic table** (added 2026-09-03
+   from Task 6.1's first corpus pass; plan-notes 175–176). Step 2 switched *which diagnostics the
+   gate emits* by mode and never audited *what Stator asks the checker to enforce* against the same
+   contract. §1.2 is one sentence — untyped code is never rejected — and several Stator-owned
+   checker settings break it by refusing code that is not untyped at all, just not TypeScript.
+   `noFallthroughCasesInSwitch` and `useUnknownInCatchVariables` are already fixed (they are now
+   `mode === 'ts'`); Test262 found them because no decision fixture had asked, both being things
+   nobody writes deliberately in TypeScript. What is left, in measured order:
+   (a) **The possibly-null family** — `'x' is possibly 'null'/'undefined'`, `Object is possibly
+   'undefined'`, `Cannot invoke an object which is possibly 'undefined'` — is ~3400 of the 8212
+   Test262 failures, the single largest bucket by a factor of three. Suppress the CODES in js mode
+   as `program.ts` already does for 2339/2551/2353/2349; do **not** set `strictNullChecks: false`,
+   because compilerOptions are program-wide and that would strip null safety from the `.ts` half of
+   a mixed graph and delete the boundary checks §0.4 requires. Leaving `T | undefined` in the type
+   is the point: the union lowers to the dynamic path and the check still happens, at run time.
+   (b) The rest of the `STA0012` buckets, re-measured after (a) — assignability, arity, and
+   `implicitly has an 'any' type` — each judged individually against §1.2 rather than as a group.
+   Some are real refusals Stator should keep.
+   **Check:** each suppression lands with a both-modes decision fixture (the same source, `error` in
+   ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer, and the
+   Test262 ratchet moves in the commit that lands it.
 3. ~~Lower `var`: function-scoped binding, hoisting to the enclosing function (or module) scope,
    `undefined` init before the first statement runs, legal redeclaration folding to one slot.~~
    ✅ **landed** (2026-09-02) — desugars to a function-scoped `let` initialized `undefined` plus
@@ -429,62 +450,23 @@ prevent.
 The three tasks are independent and can be built in any order (6.2 can start right after Phase 3;
 6.1 needs Phase 5 because Test262 is `.js`). The phase's Check has one clause per task.
 
-**Task 6.1 — Test262 runner** (`js` mode — Test262 files are `.js`; `ts`-mode conformance is carried by decision/golden suites). The runner reads each test's `features:` frontmatter and skips any feature not in the subset matrix; skipped tests are **counted and reported by feature** (`450 passed, 120 skipped (async: 80, proxy: 40), 5 failed`), never silently dropped. The % is CI-visible on every commit (Porffor's model — conformance as the public heartbeat).
+~~**Task 6.1 — Test262 runner.**~~ ✅ **landed 2026-09-03** — evidence in [done.md](done.md) → Phase 6.
+First pinned number: **2379 passed, 10,513 failed, 40,688 skipped — 18.5%** over `passed + failed`,
+ratcheted in `tests/test262/ratchet.json`. Three rules from it survive here because they are rules,
+not history:
 
-Steps (detailed 2026-09-01; plan-notes 131):
-1. **Corpus acquisition, under the no-network constraint.** `tc39/test262` is ~50k files — too
-   large to vendor, and this environment cannot fetch it (plan-notes 28, the same constraint that
-   deferred Ryū). So the repo holds the RUNNER, not the corpus: `tests/test262/` gets `run.ts`,
-   `features.ts`, `pin.json` (the corpus commit SHA — a conformance % against an unpinned corpus is
-   not a tracked number), and a `fetch.ts` that shallow-clones the pinned SHA into a git-ignored
-   `tests/test262/corpus/`. Resolution order for the corpus path: `$STATOR_TEST262`, then the
-   git-ignored default. **Missing corpus SKIPS with a message naming the fetch command — never
-   fails** — so `pnpm run ci` stays runnable offline; the skip must be visible in the output, since
-   a silently-skipped conformance suite is the dishonest version of this whole task.
-2. **Frontmatter parser** (~50 lines, no dependency): locate the `/*---` … `---*/` block after any
-   copyright header. Extract the execution keys `esid`, `features`, `includes`, `flags`, `negative`,
-   and `locale`; recognize Test262's standard descriptive keys (`es5id`, `es6id`, `description`,
-   `info`, `author`) without interpreting them. **Hard-error on any other top-level key** rather
-   than ignoring it; an unrecognized key is how a corpus bump silently changes the meaning of a
-   test. Tests without a frontmatter block are explicitly skipped and reported as `missing
-   frontmatter`, never silently excluded.
-3. **Harness adapter.** Each test is `harness/assert.js` + `harness/sta.js` + every file named in
-   `includes:` (`compareArray.js`, `propertyHelper.js`, …), concatenated ahead of the test body,
-   then compiled as one `js`-mode unit. `flags: [raw]` means no harness and no strict wrapper;
-   `onlyStrict`/`noStrict`/`module`/`async` each change how the file is built and run
-   (`async` tests print `Test262:AsyncTestComplete` and need Task 4.6's microtask drain). Flags
-   the adapter does not implement are a SKIP with the flag as the reason, counted like any other.
-4. **Negative tests.** `negative: {phase, type}` inverts the verdict: for `phase: parse` or
-   `resolution`, a Stator **compile-time diagnostic** is the pass — but only if it is the right
-   error, so one table maps `STA` codes to spec error classes (`SyntaxError`, `ReferenceError`,
-   `TypeError`), and a diagnostic outside the table fails the test rather than passing it by
-   accident. A `not-yet` (`STA12xx`) diagnostic on a negative test is **not** a pass: it is a skip
-   attributed to that code. For `phase: runtime`, the built binary must exit nonzero naming that
-   error class.
-5. **Feature → subset mapping** (`features.ts`): each Test262 feature tag maps to
-   `supported | not-yet(STAxxxx) | never(row in docs/SUBSET.md)`. **An unmapped tag is a runner
-   error, not a skip** — that is the tripwire that makes a corpus bump introduce new tags visibly
-   instead of quietly inflating the skip bucket. Rows must cite `SUBSET.md`, which stays the
-   authority (§15.6): the mapping table points at rows, it does not invent them.
-6. **Reporting.** Human line exactly as the task states, plus machine-readable
-   `tests/test262/results.json` (per-feature counts, per-test verdicts). Print **both** the
-   pass rate over `passed + failed` and the raw skip count on the same line: a percentage computed
-   with skips excluded is meaningful only when the skip count is next to it, and quoting one
-   without the other is how conformance numbers become marketing.
-7. **Ratchet, which is what "monotonically tracked" means.** `tests/test262/ratchet.json` records
-   `{passed, failed, skipped}` at the pinned SHA; the runner fails if `passed` drops or `failed`
-   rises. Known failures live in `tests/test262/expected-fail.txt` as `path # reason` where the
-   reason is an `STA` code or a `SUBSET.md` row — and **an unexpected PASS in that list also
-   fails**, because a stale expectation list is the same drift as a stale plan (§15.3). Updating
-   the ratchet is a deliberate commit, never a side effect of a test run.
-8. **CI heartbeat.** A `test262` job in `.github/workflows/ci.yml`, one platform only
-   (`ubuntu-24.04`) — conformance is host-independent, and the existing matrix already proves
-   portability. Cache the corpus keyed by `pin.json`'s SHA. The summary line goes to
-   `$GITHUB_STEP_SUMMARY` so the number is visible without opening logs. `pnpm run test262` is NOT
-   added to `pnpm run ci` (that chain must stay offline-runnable, per step 1); the CI job is what
-   makes it per-commit.
-
-Satisfies the Check's first clause (% visible and monotonically tracked) via steps 6–8.
+- A build that raised **nothing but** `STA12xx` is a **skip attributed to that code**, never a
+  failure. §1.3 keeps the never and not-yet ranges disjoint so a test can tell intent from schedule;
+  step 4 already said this for negative tests, and it is no less true for positive ones. A build
+  that raised anything else stays a failure, so the skip bucket cannot swallow a real refusal.
+- The **ratchet is the gate**, not `expected-fail.txt`. At 53,580 tests a per-test expectation file
+  becomes an artifact nobody reads, and an unreadable list explains nothing. Unexplained failures
+  are printed as a bounded sample plus a total; `passed` may not drop and `failed` may not rise.
+- **Everything in the skip column must name a rule about the compiler.** A skip looks deliberate,
+  which is exactly why a runner's own defects go there to hide: the first pass skipped 17,003 tests
+  on `flags: [generated]` (a provenance note with no execution meaning) and reported 294
+  `_FIXTURE.js` files — which INTERPRETING.md says are not tests — as tests with unreadable headers
+  (plan-notes 176).
 
 **Task 6.2 — Differential fuzzing.** Generate random programs within the subset (grammar-based generator first, coverage-guided later) — typed programs for `ts` mode (can start right after Phase 3), untyped for `js` mode; run compiled vs pinned Node, diff outputs. Every divergence becomes a golden test.
 

@@ -936,3 +936,113 @@ differed only in `fromImplicitAny`. `hTypeAssignable` now recurses into arrays.
 Tests: the twelve subset flips, `tests/golden/js/capstone.js`, `tests/unit/types.test.ts`.
 plan-notes 146.
 
+### Step 8 — the iterator protocol, and generators with it
+
+**Step 8 landed (2026-09-02).** Specialized `for-of` (array/string/Map/Set), `keys`/`values`/
+`entries`, `matchAll`, `function*`, and generator `.return()`/`.throw()`. User-iterable `for-of` is
+a compile-time MethodCall of a class `[Symbol.iterator]()` whose return type is already HIR
+`iterator`, driven by the existing boxed-iterator walk — TypeScript unique-ifies the well-known as
+`__@iterator@<id>` and HIR canonicalizes it to `__@iterator` so the MethodCall slot matches
+`instanceMethodName`. `Symbol.iterator` as a stored value, `Symbol()`, and `Symbol.for` stay
+`STA1212`; generator methods, async generators, and `for await` stay `STA1201`; `yield*` and a
+custom `{next()}` object stay `STA1214`. plan-notes 147–154.
+
+### Step 9 — top-level await
+
+**Step 9 landed (2026-09-02).** The merged module body is an async unit on Task 4.6's resume points:
+named bindings stay globals, temps live in a heap environment, and `main` starts the unit then
+drains the microtask queue. Init order is Task 3.11's topological order, **not** Node's
+sibling-subgraph interleaving — a deliberate, documented divergence (docs/MODES.md). `STA1208` is
+no longer emitted. plan-notes 155.
+
+### Step 10 — dynamic `import()`
+
+**Step 10 landed (2026-09-02).** A module namespace is an `HObject` with `namespace: true`; field
+reads compile to the export's global slot, so bindings stay live. A literal-specifier `import()` is
+`Promise.resolve` of that object, and the specifier is a value-import edge, so the target's
+top-level has already run by the time the promise settles. Computed specifier stays `STA1207`
+(Phase 8); `import * as ns` stays `STA1214` (step 12). plan-notes 156.
+
+### Step 11 — `Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)`
+
+**Step 11 landed (2026-09-02).** `jsrt_call_protected` extends §4.9's pending cell into a completion
+value, so a handler's throw rejects the derived promise instead of unwinding into library C;
+then/catch/finally and `new Promise` are its clients. `Object.freeze`/`isFrozen` and `toISOString`
+on an Invalid Date raise through the same mailbox. Combinator residue
+(`allSettled`/`any`/`race`/`withResolvers`/`try`) stays not-yet, and `STA1216` remains allocated for
+the other `Promise.prototype` members and a non-arity-1 constructor. plan-notes 157.
+
+### Step 12a — parameter and binding forms
+
+**Landed (2026-09-02).** Rest, default, and optional parameters; uninitialized `let`; and shallow
+destructuring of parameters, declarations, and catch. Rest parameters are packed at the callee.
+Nested patterns, rest-in-pattern, and default-in-pattern stay not-yet in this family.
+plan-notes 158–161.
+
+### Step 12b — expression-position residue
+
+**Landed (2026-09-02).** Labels on anything but a loop or switch, capturing a variable declared
+inside a loop, `instanceof` against anything but a class name, assignment and compound assignment
+to a non-variable, `++`/`--` on a non-variable and in value position, and the binary/unary/statement
+catch-alls (`describeKind`) — one family of HIR nodes, not a second lowering. Accessor compound and
+`#n in o` stay not-yet (families d / private). plan-notes 164.
+
+---
+
+## Phase 6 — Conformance and differential fuzzing (in progress)
+
+### Task 6.1 — Test262 runner ✅ (2026-09-03)
+
+**Check clause:** *Test262 % visible and monotonically tracked.* Met.
+
+```
+$ pnpm run test262
+test262: 2379 passed, 40688 skipped (BigInt: 1193, STA1214: 34932, Symbol: 2663, …), 10513 failed
+         — pass rate 18.5%
+```
+
+Pinned corpus `771005236e88a909635104e03ba12559688c0172`, 53,580 tests after `_FIXTURE.js` exclusion.
+`tests/test262/ratchet.json` now holds `{2379, 10513, 40688}`: `passed` may not drop and `failed`
+may not rise. The number is CI-visible per commit via the `test262` job's
+`$GITHUB_STEP_SUMMARY` line.
+
+**Steps 1–8 as built.** Corpus fetched by SHA into a git-ignored directory, resolution order
+`$STATOR_TEST262` → default, missing corpus a visible skip so `pnpm run ci` stays offline-runnable;
+a ~50-line frontmatter parser that hard-errors on an unrecognized top-level key; a harness adapter
+concatenating `assert.js` + `sta.js` + `includes:` ahead of the body; negative tests inverted
+through an `STA`→spec-error-class table; a feature map where an unmapped tag is a runner error, not
+a skip; `results.json` plus the human line carrying the rate and the raw skip count together; the
+ratchet; and a `test262` CI job on `ubuntu-24.04` alone.
+
+**What the first pass cost, and what it changed** (plan-notes 175–176). Every one of the 98 failures
+in the first 113-test slice was the runner or the gate refusing the HARNESS, not the test:
+
+| defect | effect |
+|---|---|
+| `harness/sta.js` shadowed the corpus file of that name, defining only `$DONE` | `Test262Error` did not exist; every harnessed test died on `Cannot find name`. Now `harness/done.js`, `$DONE` alone, concatenated after both corpus files |
+| `noFallthroughCasesInSwitch` on in js mode | refuses valid JS (`assert.js` falls through on purpose). Now `mode === 'ts'` |
+| `useUnknownInCatchVariables` on in js mode | refuses `catch (e) { e.name }`. Now `mode === 'ts'` |
+| `flags: [generated]` not in `ALLOWED_FLAGS` | 17,003 tests — a third of Test262 — skipped for a provenance note with no execution meaning |
+| `_FIXTURE.js` files enumerated as tests | 294 non-tests reported as `missing frontmatter`, the bucket that means "a real test we could not read" |
+| a not-yet build counted as a failure | `STA12xx` is schedule, not conformance (§1.3); now a skip attributed to that code, unless the build raised something else too |
+| CI's `pnpm run test262 \| tee` without `pipefail` | `tee` decided the job's exit status: the ratchet could fail and the job stay green |
+
+The lesson worth keeping: **the skip column is where a runner's own defects hide**, because a skip
+looks deliberate. Everything in it has to name a rule, and the rule has to be about the compiler.
+
+The runner is also a pool over `availableParallelism()` — 37 s → 5.9 s on a 113-test slice, 6.3× on
+this host. Not an optimization: a serial pass is ~5 hours, which step 8's per-commit job cannot
+afford. Temp filenames carry the pool slot; keyed by pid alone, two workers would have compiled each
+other's source and reported the answer to the wrong test.
+
+**What the 10,513 failures say.** `STA0012` — a TypeScript checker refusal, not a Stator gate
+decision — is essentially all of them, and the largest bucket (3127, `'x' is possibly
+'null'/'undefined'`) is the same finding as the two harness fixes at scale: `strictNullChecks`
+refuses ordinary JavaScript in js mode. That is Phase 5 step 2's residue, not this task's, and it is
+filed as **plan.md §8 step 2a** with a measured ordering rather than folded in here. Phase 6 produces
+evidence, not features; this is the evidence.
+
+Tests: `tests/unit/phase6.test.ts` (frontmatter, feature map, `scheduleSkipCode`),
+`tests/subset/subset_switch_fallthrough_{js,ts}`, `tests/subset/subset_catch_binding_property_{js,ts}`,
+`tests/golden/js/mode_policy_es5.js`.
+
