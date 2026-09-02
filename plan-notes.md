@@ -4361,3 +4361,13 @@ Biome has an explicit include allowlist, so it needs the matching `!tests/test26
 as well; `.gitignore` alone does not override that list. The runner's ignored `results.json` and
 temporary directory need the equivalent exclusions too: a result is generated on every conformance
 run and formatting it would make `pnpm run ci` fail after a successful offline/mini-corpus run.
+
+## 174. Test262 feature tags map conservatively by full semantic surface (2026-09-02)
+
+The pinned corpus exposes 198 distinct `features:` tags. Those tags are not one-to-one with
+Stator's landed slices: for example, a tagged test may exercise typed-array, class-field, or
+iterator semantics far beyond the subset's small, implemented form. `features.ts` now has a closed
+generic `STA1214` list for every such tag, cited by a new `SUBSET.md` Test262 coverage row, instead
+of treating it as supported because *some* related operation landed. The runner still errors on a
+future unknown tag, retaining the corpus-bump tripwire. The map also uses own-property checks:
+Test262's `__proto__` tag otherwise inherited `Object.prototype` and silently appeared supported.

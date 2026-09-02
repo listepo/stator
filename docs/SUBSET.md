@@ -13,6 +13,12 @@ Each row becomes ≥1 decision test (§4 Task 1.4 in plan.md) per mode, executab
 
 This matrix operationalizes plan.md §1 (product spec). Rows must not contradict the starting matrix in plan.md §4 Task 1.1. Rows marked **[proposed]** represent language features not listed there but that implementers will encounter early (e.g., `for`-`of`, template literals, destructuring, exceptions); each is documented in the "Codes allocated by this document" section with a defensible verdict consistent with the plan's philosophy.
 
+### Test262 feature-tag coverage
+
+| Feature | `ts` mode | `js` mode | Notes |
+|---|---|---|---|
+| A pinned Test262 `features:` tag listed as generic not-yet in `tests/test262/features.ts` | not-yet(STA1214) | not-yet(STA1214) | Test262 tags identify broad semantic surfaces, often much wider than a landed Stator slice (for example, a tag for all typed-array or class-field semantics). The conformance runner therefore skips the whole tagged test until this matrix promises that full surface. The list is deliberately closed and regenerated only after reviewing a pinned corpus bump; an unknown tag is a runner error, never an implicit skip. |
+
 ### Mode semantics
 
 `ts` mode rejects untyped code entirely; `js` mode accepts both `.ts` and `.js` files, treating untyped code as `Unknown` and lowering to the dynamic path (shape tables, inline caches, tagged values). One pipeline, two policy layers: file acceptance, diagnostic table, and typing of unresolved constructs.

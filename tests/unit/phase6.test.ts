@@ -57,6 +57,13 @@ test('Test262 frontmatter accepts standard headers after license comments and re
 
 test('Test262 feature mapping is explicit', () => {
   assert.equal(featureStatus('Array')?.kind, 'supported');
-  assert.equal(featureStatus('BigInt')?.kind, 'not-yet');
+  const bigInt = featureStatus('BigInt');
+  assert.equal(bigInt?.kind, 'not-yet');
+  assert.equal(bigInt?.kind === 'not-yet' ? bigInt.code : undefined, 'STA1213');
+  assert.equal(featureStatus('ArrayBuffer')?.kind, 'not-yet');
+  assert.equal(featureStatus('__proto__')?.kind, 'not-yet');
+  const proxy = featureStatus('Proxy');
+  assert.equal(proxy?.kind, 'not-yet');
+  assert.equal(proxy?.kind === 'not-yet' ? proxy.code : undefined, 'STA1203');
   assert.equal(featureStatus('made-up-tag'), undefined);
 });
