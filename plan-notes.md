@@ -3924,3 +3924,19 @@ loop calls `jsrt_string_iter_next`, which advances the UTF-16 cursor by 1 or 2. 
 iterables, `keys`/`values`/`entries`, `matchAll`, and `function*` are still open under this step.
 
 The gate test that used `for (const c of 'ab')` as the non-array STA1214 witness now uses a `Map`.
+
+## 148. `for-of` over Map and Set is a live insertion-order walk (2026-09-02)
+
+Phase 5 step 8, after string for-of. No protocol object: the emitter writes `jsrt_map_iter_begin` /
+`jsrt_map_iter_next` / `jsrt_map_iter_end` (Set shares the table and has `jsrt_set_iter_next`).
+The walk re-reads `used` so a body that `set`/`add`s is visited, and skips `!live` so a deletion
+of a not-yet-reached entry is not. `iterating` is the same compaction-suppression counter
+`forEach` uses; a throw or return from the body runs `iter_end` through a codegen finally so
+the count cannot leak.
+
+A Map yields a two-element array. The HIR has no tuple, so the binding is Unknown and a ts-mode
+file that uses the pair is dynamic even when K and V are typed. A Set yields the element type,
+so a typed Set for-of stays static.
+
+Remaining under this step: the nine `keys`/`values`/`entries` members, `matchAll`, `function*`,
+and `for-of` over a user iterable.

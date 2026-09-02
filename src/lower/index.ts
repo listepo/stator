@@ -675,9 +675,10 @@ function lowerDeclarationList(
  * literal `true` so the emitter can drop the test entirely. */
 /** `for (const x of a)`.
  *
- * The binding's type comes from the checker at the binding site, which is the ELEMENT type with no
- * `| undefined` — the loop visits only indices that exist, so unlike `a[i]` this read cannot miss.
- * That is what keeps a typed for-of on the static path where an indexed loop is not. */
+ * The binding's type comes from the checker at the binding site. For an array or a Set that is the
+ * ELEMENT type with no `| undefined` — the loop visits only members that exist, so unlike `a[i]`
+ * this read cannot miss. A Map yields a `[key, value]` tuple the HIR has no member for, so that
+ * binding is Unknown. */
 function lowerForOf(
   node: ts.ForOfStatement,
   sourceFile: ts.SourceFile,

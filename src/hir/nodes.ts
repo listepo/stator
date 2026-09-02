@@ -1379,14 +1379,16 @@ export interface ForStatement extends Node, Labelled {
   readonly body: Block;
 }
 
-/** `for (const x of a)` over an array.
+/** `for (const x of a)` over an array, a string, a Map or a Set.
  *
- * Not sugar for a counting `for`, even though it lowers to one: the binding is fresh per iteration,
- * and — unlike `a[i]` — its type is the element type with no `| undefined`, because the loop only
- * ever visits indices that exist. That is what keeps a typed iteration on the static path.
+ * Not sugar for a counting `for`, even though an array/string lowers to one: the binding is fresh
+ * per iteration, and — unlike `a[i]` — its type is the element type with no `| undefined`, because
+ * the loop only ever visits indices that exist. That is what keeps a typed iteration on the static
+ * path.
  *
- * `iterable` is an array or a string. Both compile to counted loops (docs/VALUE.md §4.13); Map/Set
- * and user iterables still wait on the protocol object. */
+ * `iterable` is an array, a string, a Map or a Set. All four compile to specialized loops
+ * (docs/VALUE.md §4.13); a user iterable still waits on the protocol object. A Map yields a
+ * `[key, value]` pair, which the HIR has no tuple for, so that binding is Unknown. */
 export interface ForOfStatement extends Node, Labelled {
   readonly kind: 'for-of-statement';
   readonly binding: string;

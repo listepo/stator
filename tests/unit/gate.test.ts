@@ -54,12 +54,18 @@ void test('a label on a loop or switch is accepted; a label on anything else is 
 
 // `for`, `for-of`, `for-in` all parse as loops, but they are three different things and their
 // diagnostics have to say so. Conflating them ("for loops is not yet supported") would misname
-// what is actually missing (plan-notes 44). for-of over an ARRAY landed with rung 5 and over a
-// STRING with Phase 5 step 8; Map/Set still wait on the protocol, and for-in needs the object model.
+// what is actually missing (plan-notes 44). for-of over an ARRAY landed with rung 5, over a
+// STRING/Map/Set with Phase 5 step 8; a user iterable still needs the protocol object, and for-in
+// needs the object model.
 void test('for-of and for-in report distinctly from the for loop they are not', () => {
   assert.deepEqual(codesFor('for (const x of [1, 2]) { }'), []);
   assert.deepEqual(codesFor("for (const c of 'ab') { }"), []);
-  assert.deepEqual(codesFor('const m: Map<number, number> = new Map();\nfor (const e of m) { }'), [
+  assert.deepEqual(
+    codesFor('const m: Map<number, number> = new Map();\nfor (const e of m) { }'),
+    [],
+  );
+  assert.deepEqual(codesFor('const s: Set<number> = new Set();\nfor (const e of s) { }'), []);
+  assert.deepEqual(codesFor('const xs: Iterable<number> = [1];\nfor (const e of xs) { }'), [
     'STA1214',
   ]);
   assert.deepEqual(codesFor('for (const x in {}) { }'), ['STA1214']);
@@ -1016,4 +1022,28 @@ void test('a .js file under ts mode is STA1002 with a --mode=js hint', () => {
 void test('for-of over a string is accepted', () => {
   assert.deepEqual(codesFor('for (const c of "ab") { console.log(c); }\n'), []);
   assert.deepEqual(codesFor('for (const c of "ab") { console.log(c); }\n', 'js'), []);
+});
+
+void test('for-of over a Map or a Set is accepted', () => {
+  assert.deepEqual(
+    codesFor(
+      'const m = new Map<string, number>();\nm.set("a", 1);\nfor (const e of m) { console.log(e); }\n',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('const s = new Set<string>();\ns.add("a");\nfor (const e of s) { console.log(e); }\n'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      'const m = new Map();\nm.set("a", 1);\nfor (const e of m) { console.log(e); }\n',
+      'js',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('const s = new Set();\ns.add("a");\nfor (const e of s) { console.log(e); }\n', 'js'),
+    [],
+  );
 });

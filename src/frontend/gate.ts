@@ -2503,11 +2503,12 @@ function gateElementAccess(
   return { kind: 'accept' };
 }
 
-/** `for (const x of a)`, admitted only over an array.
+/** `for (const x of a)`, admitted over an array, a string, a Map, or a Set.
  *
- * A string, a Map, a Set, or any user iterable is the same syntax driving the iterator protocol,
- * which needs the object model. The binding must be a plain `let`/`const` name: `for (x of a)`
- * assigns to an existing binding, and destructuring needs a pattern the subset cannot lower. */
+ * Those four compile to specialized loops (docs/VALUE.md §4.13). A user iterable still drives the
+ * iterator protocol object, which this step has not built. The binding must be a plain `let`/`const`
+ * name: `for (x of a)` assigns to an existing binding, and destructuring needs a pattern the subset
+ * cannot lower. */
 function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateResult {
   if (statement.awaitModifier !== undefined) {
     // `for await` drives the ASYNC iterator protocol, which is the generator machinery under
@@ -2515,8 +2516,14 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
     return generatorNotYet();
   }
   const iterableType = checker.getTypeAtLocation(statement.expression);
-  if (!checker.isArrayType(iterableType) && (iterableType.flags & ts.TypeFlags.StringLike) === 0) {
-    return notYet('for-of over a non-array is not yet supported', 5);
+  const hir = tsTypeToHType(iterableType, checker);
+  if (
+    !checker.isArrayType(iterableType) &&
+    (iterableType.flags & ts.TypeFlags.StringLike) === 0 &&
+    hir.kind !== 'map' &&
+    hir.kind !== 'set'
+  ) {
+    return notYet('for-of over a user iterable is not yet supported', 5);
   }
   const initializer = statement.initializer;
   if (!ts.isVariableDeclarationList(initializer)) {

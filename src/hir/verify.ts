@@ -182,18 +182,21 @@ function checkField(
 }
 
 /** Separate from checkIndexable because the emitted loop is different, not just the message: a
- * for-of over an array or a string compiles to a counted loop (docs/VALUE.md §4.13). */
+ * for-of over an array, a string, a Map or a Set compiles to a specialized loop (docs/VALUE.md
+ * §4.13). */
 function checkIterable(iterable: Expression, problems: VerifyProblem[]): void {
   if (
     iterable.type.kind !== 'array' &&
     iterable.type.kind !== 'string' &&
+    iterable.type.kind !== 'map' &&
+    iterable.type.kind !== 'set' &&
     iterable.type.kind !== 'unknown'
   ) {
     problems.push({
       kind: 'for-of-statement',
       span: iterable.span,
       code: 'STA4045',
-      message: `for-of iterable has type '${hTypeName(iterable.type)}', which is not an array or string`,
+      message: `for-of iterable has type '${hTypeName(iterable.type)}', which is not an array, string, Map or Set`,
     });
   }
 }
@@ -405,7 +408,9 @@ function verifyStatement(
             ? stmt.iterable.type.element
             : stmt.iterable.type.kind === 'string'
               ? H_STRING
-              : hUnknown(false),
+              : stmt.iterable.type.kind === 'set'
+                ? stmt.iterable.type.element
+                : hUnknown(false),
       });
       verifyBlock(stmt.body, problems, scope, inner);
       break;

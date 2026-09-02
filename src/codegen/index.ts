@@ -1235,6 +1235,10 @@ class Emitter {
         const iterable = this.slotAt(slot);
         this.appendLine(`${iterable} = ${this.emitExpression(stmt.iterable)};`, stmt.span);
         const id = this.enterLoop(stmt.label);
+        if (stmt.iterable.type.kind === 'map' || stmt.iterable.type.kind === 'set') {
+          this.emitMapSetForOf(stmt, iterable, id);
+          break;
+        }
         const cursor = `jsrt_iter_${id}`;
         if (stmt.iterable.type.kind === 'string') {
           // Strings are immutable, so bounding on length is safe. The cursor advances 1 or 2
@@ -1408,6 +1412,79 @@ class Emitter {
         );
       }
     }
+  }
+
+  /* Map/Set for-of holds `iterating` for the walk so compaction cannot renumber the cursor.
+   * Return, throw, and a break out of THIS loop must drop that count; continue must not.
+   *
+   * The cleanup is a try/finally with no catch: throw jumps to a pad that ends the walk and
+   * re-enters the enclosing pad with the exception still pending, and return/outer-break route
+   * through `fin` the way a real finally does. `enclosingDepth` is the parent of this loop, so
+   * continue (and a break that lands on `brk` just before `fin`) stay inside. */
+  private emitMapSetForOf(stmt: ForOfStatement, iterable: string, id: number): void {
+    const span = stmt.span;
+    const nextFn = stmt.iterable.type.kind === 'map' ? 'jsrt_map_iter_next' : 'jsrt_set_iter_next';
+    const cursor = `jsrt_iter_${id}`;
+    const item = `_jsrt_item_${id}`;
+    const coll = `_jsrt_coll_${id}`;
+    // A bare `return` through this cleanup parks `undefined` in `returnSlot`, which is slot 0 when
+    // the function never returns a value — the same index as the iterable. Hold the collection in
+    // a C local so `iter_end` cannot decrement through that overwrite.
+    this.appendLine(`jsrt_value ${coll} = ${iterable};`, span);
+    this.appendLine(`jsrt_map_iter_begin(${coll});`, span);
+
+    const tryId = this.tryCount++;
+    const comp = `_jsrt_mapcomp_${tryId}`;
+    const fin = `_jsrt_mapfin_${tryId}`;
+    const finThr = `_jsrt_mapfinthr_${tryId}`;
+    this.appendLine('{', span);
+    this.indent++;
+    this.appendLine(`int ${comp} = 0;`, span);
+    const scope: TryFinallyScope = {
+      compVar: comp,
+      finLabel: fin,
+      enclosingDepth: this.enclosing.length - 1,
+      routes: new Map(),
+    };
+    this.tryFinallyStack.push(scope);
+    this.padStack.push(finThr);
+
+    this.appendLine(`jsrt_value ${item};`, span);
+    this.appendLine(
+      `for (uint32_t ${cursor} = 0; ${nextFn}(${coll}, &${cursor}, &${item}); ) {`,
+      span,
+    );
+    this.indent++;
+    this.appendLine(`${this.slotRef(stmt.binding)} = ${item};`, span);
+    for (const s of stmt.body.statements) {
+      this.emitStatement(s);
+    }
+    this.emitJumpTarget(`cont_${id}`, span);
+    this.indent--;
+    this.appendLine('}', span);
+
+    this.padStack.pop();
+    this.usedLabels.add(fin);
+    this.appendLine(`goto ${fin};`, span);
+    if (this.usedLabels.has(finThr)) {
+      this.appendLine(`${finThr}: ;`, span);
+      this.appendLine(`jsrt_map_iter_end(${coll});`, span);
+      this.appendLine(`goto ${this.currentPad()};`, span);
+    }
+    this.emitJumpTarget(`brk_${id}`, span);
+    this.tryFinallyStack.pop();
+    this.appendLine(`${fin}: ;`, span);
+    this.appendLine(`jsrt_map_iter_end(${coll});`, span);
+    for (const route of scope.routes.values()) {
+      this.appendLine(`if (${comp} == ${route.code}) {`, span);
+      this.indent++;
+      route.action();
+      this.indent--;
+      this.appendLine('}', span);
+    }
+    this.indent--;
+    this.appendLine('}', span);
+    this.enclosing.pop();
   }
 
   private enterLoop(label?: string): number {

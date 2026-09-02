@@ -99,12 +99,25 @@ void test('a user class named Map is a class, not a collection', () => {
 });
 
 void test('a method the runtime does not implement is refused, not accepted silently', () => {
-  // Iteration is the Symbol.iterator protocol, which this rung does not model. Accepting it here
-  // would reach the lowering with no node to lower it to.
+  // `keys`/`values`/`entries` as VALUES still allocate a JSRTIterator this step has not boxed.
+  // for-of over the collection itself is a specialized loop and is accepted separately.
   assert.deepEqual(gateCodes('const m = new Map<string, number>();\nconsole.log(m.entries());'), [
     'STA1214',
   ]);
   assert.deepEqual(gateCodes('const s = new Set<string>();\nconsole.log(s.forEach);'), ['STA1214']);
+});
+
+void test('for-of over a Map or Set lowers to a for-of-statement', () => {
+  assert.deepEqual(
+    gateCodes('const m = new Map<string, number>();\nfor (const e of m) { console.log(e); }'),
+    [],
+  );
+  const stmts = loweredStatements(
+    'const m = new Map<string, number>();\nm.set("a", 1);\nfor (const e of m) { console.log(e); }',
+  );
+  const loop = stmts.at(-1);
+  assert.equal(loop?.kind, 'for-of-statement');
+  assert.equal((loop as { iterable: { type: { kind: string } } }).iterable.type.kind, 'map');
 });
 
 void test('a wrong argument count is refused: there is no argv to pad', () => {

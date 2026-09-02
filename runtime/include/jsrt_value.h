@@ -645,6 +645,15 @@ jsrt_value jsrt_map_get(jsrt_value map, jsrt_value key);
 jsrt_value jsrt_map_for_each(jsrt_value map, jsrt_value cb);
 jsrt_value jsrt_set_for_each(jsrt_value set, jsrt_value cb);
 
+/* Specialized for-of (docs/VALUE.md §4.13): a live walk of the insertion-order chain, no iterator
+ * object. `begin` bumps `iterating` so compaction cannot renumber the cursor; `end` must run on
+ * every exit, including throw and return. `next` advances `*index` to the next live entry and
+ * writes the yield — a two-element array for Map, the element for Set. */
+void jsrt_map_iter_begin(jsrt_value map);
+void jsrt_map_iter_end(jsrt_value map);
+bool jsrt_map_iter_next(jsrt_value map, uint32_t *index, jsrt_value *out);
+bool jsrt_set_iter_next(jsrt_value set, uint32_t *index, jsrt_value *out);
+
 /* `m.set(k, v)` and `s.add(v)` both RETURN THE COLLECTION, which is what makes them chainable. */
 jsrt_value jsrt_map_set(jsrt_value map, jsrt_value key, jsrt_value value);
 jsrt_value jsrt_set_add(jsrt_value set, jsrt_value key);

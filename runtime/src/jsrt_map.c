@@ -278,6 +278,40 @@ jsrt_value jsrt_map_for_each(jsrt_value map, jsrt_value cb) { return for_each(ma
 
 jsrt_value jsrt_set_for_each(jsrt_value set, jsrt_value cb) { return for_each(set, cb, false); }
 
+void jsrt_map_iter_begin(jsrt_value map) { jsrt_as_map(map)->iterating++; }
+
+void jsrt_map_iter_end(jsrt_value map) { jsrt_as_map(map)->iterating--; }
+
+/* Shared by Map and Set for-of. `used` is re-read every call because the body may append, and the
+ * entry is re-read through the map because an append can reallocate `entries`. Indices stay valid
+ * across that reallocation only because `begin` suppressed compaction. */
+static bool collection_iter_next(
+    jsrt_value collection, uint32_t *index, jsrt_value *out, bool pairs) {
+  JSRTMap *m = jsrt_as_map(collection);
+  while (*index < m->used) {
+    const uint32_t i = (*index)++;
+    if (!m->entries[i].live) {
+      continue; /* deleted before it was reached: the spec does not visit it */
+    }
+    if (pairs) {
+      jsrt_value items[2] = {m->entries[i].key, m->entries[i].value};
+      *out = jsrt_array_new(2, items);
+    } else {
+      *out = m->entries[i].key;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool jsrt_map_iter_next(jsrt_value map, uint32_t *index, jsrt_value *out) {
+  return collection_iter_next(map, index, out, true);
+}
+
+bool jsrt_set_iter_next(jsrt_value set, uint32_t *index, jsrt_value *out) {
+  return collection_iter_next(set, index, out, false);
+}
+
 bool jsrt_map_delete(jsrt_value map, jsrt_value key) {
   JSRTMap *m = jsrt_as_map(map);
   uint32_t slot;
