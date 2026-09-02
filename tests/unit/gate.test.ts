@@ -16,26 +16,24 @@ function codesFor(source: string, mode: 'ts' | 'js' = 'ts', fileName?: string): 
   return gateProgram(program, mode).map((d) => d.code);
 }
 
-// `x++`, `--x`, `x += e` all read-then-write-then-produce-a-value. Where the value is used they
-// need a temporary the fold cannot give them (plan-notes 43); where it is discarded they collapse
-// to a plain Assignment. The gate is the layer that decides which case a program is in.
+// `x++`, `--x`, `x += e` all read-then-write-then-produce-a-value. Statement position still
+// folds to Assignment; value position is an UpdateExpr.
 void test('++ and -- are accepted where their value is discarded', () => {
   assert.deepEqual(codesFor('let x: number = 0;\nx++;'), []);
   assert.deepEqual(codesFor('let x: number = 0;\n--x;'), []);
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i++) { }'), []);
 });
 
-void test('++ and -- are refused where their value is USED', () => {
-  // Both read the value `x` had (postfix) or has (prefix) and bind it — exactly the shape the HIR
-  // has no node for. A silent accept here would reach the lowering with nothing to lower it to.
-  assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = x++;'), ['STA1214']);
-  assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = --x;'), ['STA1214']);
+void test('++ and -- are accepted where their value is USED', () => {
+  assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = x++;'), []);
+  assert.deepEqual(codesFor('let n: number = 0;\nlet y: number = (n = 1);'), []);
+  assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = --x;'), []);
 });
 
-void test('compound assignment is accepted where its value is discarded, refused where used', () => {
+void test('compound assignment is accepted in statement and value position', () => {
   assert.deepEqual(codesFor('let x: number = 0;\nx += 1;'), []);
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i += 1) { }'), []);
-  assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = (x += 1);'), ['STA1214']);
+  assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = (x += 1);'), []);
 });
 
 void test('compound assignment to anything but a bare identifier is deferred, not accepted', () => {
@@ -44,19 +42,18 @@ void test('compound assignment to anything but a bare identifier is deferred, no
   assert.deepEqual(codesFor('let s: string = "x";\ns.length += 1;'), ['STA1214']);
 });
 
-// A label exists only to be named by `break`/`continue`, and only a loop or a switch is modelled
-// with somewhere to put one (docs/HIR.md). `foo: { }` is legal JavaScript with nothing to bind to.
-void test('a label on a loop or switch is accepted; a label on anything else is deferred', () => {
+// A label exists only to be named by `break`/`continue`. Loops, switches, and blocks carry one.
+void test('a label on a loop, switch, or block is accepted', () => {
   assert.deepEqual(codesFor('outer: while (false) { break outer; }'), []);
   assert.deepEqual(codesFor('let x: number = 0;\nouter: switch (x) { }'), []);
-  assert.deepEqual(codesFor('outer: { }'), ['STA1214']);
+  assert.deepEqual(codesFor('outer: { }'), []);
 });
 
 // `for`, `for-of`, `for-in` all parse as loops, but they are three different things and their
 // diagnostics have to say so. Conflating them ("for loops is not yet supported") would misname
 // what is actually missing (plan-notes 44). for-of over an ARRAY landed with rung 5, over a
 // STRING/Map/Set with Phase 5 step 8; a class with `[Symbol.iterator]()` is a user iterable; for-in
-// needs the object model.
+// desugars to Object.keys plus a counting for.
 void test('for-of and for-in report distinctly from the for loop they are not', () => {
   assert.deepEqual(codesFor('for (const x of [1, 2]) { }'), []);
   assert.deepEqual(codesFor("for (const c of 'ab') { }"), []);
@@ -77,7 +74,7 @@ void test('for-of and for-in report distinctly from the for loop they are not', 
     [],
   );
   assert.deepEqual(codesFor('const s = Symbol("id");'), ['STA1212']);
-  assert.deepEqual(codesFor('for (const x in {}) { }'), ['STA1214']);
+  assert.deepEqual(codesFor('for (const x in {}) { }'), []);
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i++) { }'), []);
 });
 
@@ -126,7 +123,7 @@ void test('var is a permanent rejection in ts mode and is accepted in js mode', 
       'function f() { for (let i = 0; i < 2; i++) { const g = function () { return i; }; console.log(g()); } }',
       'js',
     ),
-    ['STA1214'],
+    [],
   );
 });
 
@@ -407,11 +404,10 @@ void test('reads and plain writes through a dynamic shape are accepted', () => {
   assert.deepEqual(codesFor(source), []);
 });
 
-void test('compound assignment through a dynamic shape stays deferred', () => {
-  // The fold reads the place, and the read-once machinery hoists SLOTS — a shape-table entry is
-  // not one, so `o.x += 1` must be refused rather than fold to a double resolution.
+void test('compound assignment through a dynamic shape is accepted', () => {
+  // UpdateExpr evaluates the receiver once, so a shape-table entry is a legal place.
   const source = 'const o: { x?: number } = { x: 1 };\no.x += 1;';
-  assert.deepEqual(codesFor(source), ['STA1214']);
+  assert.deepEqual(codesFor(source), []);
 });
 
 void test('a method MEMBER still refuses the literal; a function-valued property is a get then a call', () => {

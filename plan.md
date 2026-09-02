@@ -388,7 +388,8 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
     on anything but a loop or switch, capturing a variable declared inside a loop, `instanceof`
     against anything but a class name, assignment and compound assignment to a non-variable,
     `++`/`--` on a non-variable and in value position, and the binary/unary/statement catch-alls
-    (`describeKind`).
+    (`describeKind`) (**landed** 2026-09-02, plan-notes 164). Accessor compound and `#n in o` stay
+    not-yet (families (d) / private).
     (c) **Object literal forms**: shorthand, spread, method and accessor members; keys that are not
     identifiers.
     (d) **The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:

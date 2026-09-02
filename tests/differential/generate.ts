@@ -1,0 +1,162 @@
+/* Deterministic, type-directed differential-fuzzer input generator (plan.md §9 Task 6.2). */
+
+export type DifferentialMode = 'ts' | 'js';
+
+import { pathToFileURL } from 'node:url';
+
+type ValueType = 'number' | 'string' | 'boolean';
+
+/** Xorshift32 is deliberately the only entropy source in this directory. */
+export class XorShift32 {
+  private state: number;
+
+  constructor(seed: number) {
+    this.state = seed >>> 0 || 0x6d2b79f5;
+  }
+
+  next(): number {
+    let value = this.state;
+    value ^= value << 13;
+    value ^= value >>> 17;
+    value ^= value << 5;
+    this.state = value >>> 0;
+    return this.state;
+  }
+
+  int(maxExclusive: number): number {
+    return this.next() % maxExclusive;
+  }
+}
+
+const NUMBER_EDGES = [
+  -2147483648,
+  -2147483647,
+  -1,
+  0,
+  1,
+  2147483646,
+  2147483647,
+  9007199254740991,
+  0.1,
+  1.5,
+  Number.MIN_VALUE,
+  Number.MAX_VALUE,
+] as const;
+
+const STRINGS = ['', 'a', 'hello', '\ud800', '\ud83d\udc4d', 'left\tright', '𝄞'];
+
+function numberLiteral(value: number): string {
+  return Object.is(value, -0) ? '-0' : String(value);
+}
+
+function chooseType(random: XorShift32): ValueType {
+  const pick = random.int(10);
+  return pick < 6 ? 'number' : pick < 8 ? 'string' : 'boolean';
+}
+
+function expression(type: ValueType, random: XorShift32, depth: number): string {
+  if (depth === 0) {
+    if (type === 'number') {
+      return numberLiteral(NUMBER_EDGES[random.int(NUMBER_EDGES.length)] ?? 0);
+    }
+    if (type === 'string') {
+      return JSON.stringify(STRINGS[random.int(STRINGS.length)] ?? '');
+    }
+    return random.int(2) === 0 ? 'false' : 'true';
+  }
+
+  if (type === 'number') {
+    const choice = random.int(6);
+    if (choice === 0) {
+      return `(${expression('number', random, depth - 1)} + ${expression('number', random, depth - 1)})`;
+    }
+    if (choice === 1) {
+      return `(${expression('number', random, depth - 1)} * ${expression('number', random, depth - 1)})`;
+    }
+    if (choice === 2) {
+      return `Math.trunc(${expression('number', random, depth - 1)})`;
+    }
+    if (choice === 3) {
+      return `Math.abs(${expression('number', random, depth - 1)})`;
+    }
+    if (choice === 4) {
+      return `(${expression('number', random, depth - 1)} % ${expression('number', random, 0)})`;
+    }
+    return numberLiteral(NUMBER_EDGES[random.int(NUMBER_EDGES.length)] ?? 0);
+  }
+  if (type === 'string') {
+    if (random.int(3) === 0) {
+      return `(${expression('string', random, depth - 1)} + ${expression('string', random, depth - 1)})`;
+    }
+    return JSON.stringify(STRINGS[random.int(STRINGS.length)] ?? '');
+  }
+  if (random.int(2) === 0) {
+    return `(Math.trunc(${expression('number', random, depth - 1)}) === Math.trunc(${expression('number', random, depth - 1)}))`;
+  }
+  return random.int(2) === 0 ? 'false' : 'true';
+}
+
+function typedProgram(random: XorShift32): string {
+  const lines: string[] = [];
+  const first = chooseType(random);
+  const second = chooseType(random);
+  lines.push(`const a: ${first} = ${expression(first, random, 2)};`);
+  lines.push(`let b: ${second} = ${expression(second, random, 2)};`);
+  lines.push(`b = ${expression(second, random, 1)};`);
+  lines.push(`const values: number[] = [${expression('number', random, 1)}, ${expression('number', random, 1)}];`);
+  lines.push('let total: number = 0;');
+  lines.push('for (const value of values) { total += value; }');
+  lines.push('console.log(a);');
+  lines.push('console.log(b);');
+  lines.push('console.log(total);');
+  lines.push('console.log(values.length);');
+  return `${lines.join('\n')}\n`;
+}
+
+function dynamicProgram(random: XorShift32): string {
+  const number = expression('number', random, 2);
+  const string = expression('string', random, 1);
+  const key = random.int(2) === 0 ? '"value"' : '"other"';
+  return [
+    `var n = ${number};`,
+    `const text = ${string};`,
+    'const object = {};',
+    `object[${key}] = n;`,
+    'let total = 0;',
+    'for (var i = 0; i < 2; i += 1) { total += i; }',
+    'console.log(object.value ?? object.other);',
+    'console.log(text);',
+    'console.log(n == total);',
+    '',
+  ].join('\n');
+}
+
+export function generateProgram(seed: number, mode: DifferentialMode): string {
+  const random = new XorShift32(seed);
+  return mode === 'ts' ? typedProgram(random) : dynamicProgram(random);
+}
+
+function parseSeed(raw: string | undefined): number {
+  if (raw === undefined || !/^\d+$/.test(raw)) {
+    throw new Error('--seed=N is required and N must be a non-negative integer');
+  }
+  const seed = Number(raw);
+  if (!Number.isSafeInteger(seed)) {
+    throw new Error('--seed=N must be a safe integer');
+  }
+  return seed;
+}
+
+function main(): void {
+  const seedArg = process.argv.find((arg) => arg.startsWith('--seed='))?.slice('--seed='.length);
+  const modeArg = process.argv.find((arg) => arg.startsWith('--mode='))?.slice('--mode='.length) ?? 'ts';
+  const seed = parseSeed(seedArg);
+  if (modeArg !== 'ts' && modeArg !== 'js') {
+    throw new Error('--mode must be ts or js');
+  }
+  process.stdout.write(`seed: ${String(seed)}\n${generateProgram(seed, modeArg)}`);
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

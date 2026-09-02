@@ -1,0 +1,1 @@
+# Known Test262 failures are added with the fix that explains them.

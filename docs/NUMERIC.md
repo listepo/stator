@@ -110,6 +110,7 @@ For operands both of HType `number` (the static path):
 |---|---|---|
 | `+` `-` `*` | `i32` with overflow check (§2.3); promote on overflow | `f64` |
 | `/` | **always `f64`** | `f64` |
+| `**` | **always `f64`** (`jsrt_math_pow`, never C `pow`) | `f64` |
 | `%` | `i32` when both operands are `i32` **and** the right operand is not `0` | `f64` |
 | unary `-` | **always `f64`** unless the operand is a non-zero `i32` | `f64` |
 

@@ -1,6 +1,5 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: for...in loop
 
 const obj = { a: 1, b: 2 };

@@ -32,12 +32,13 @@ If `src/` does not exist yet, the project is pre-Phase-1: the only files may be 
 ## Repo map
 
 ```
+README.md          project landing page
 plan.md            roadmap + spec (the authority) — OPEN work only
 done.md            completion record for finished tasks (archive; not normative)
 AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
-docs/              ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
+docs/              README.md (index) ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
 src/cli/           argument parsing, build/explain drivers
 src/frontend/      ts.Program loading, mode policy gate, ts.Type → HType (only place ts.Type may appear)
 src/hir/           typed HIR definitions, HType model, verifier
@@ -52,6 +53,7 @@ tests/unit/        node:test unit tests (*.test.ts)
 tests/subset/      decision tests (feature × mode matrix)
 tests/golden/ts|js machine-checked vs Node, byte-for-byte
 tests/differential/ fuzzer corpus    tests/bench/ baselines + results
+tests/test262/     runner + pin (corpus fetched, not vendored)
 tests/leak/        GC hygiene: a 10M-object loop whose RSS must plateau
 ```
 
@@ -92,6 +94,8 @@ pnpm run test:golden            # compile + run vs Node, byte-for-byte
 pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-for-byte
 pnpm run test:asan              # golden fixtures with runtime + generated C under ASan/UBSan
 pnpm run test:leak              # 10M-object loop; RSS must plateau (skips without Boehm)
+pnpm run test262                # Test262 slice against tests/test262/pin.json (not part of `ci`)
+pnpm run differential           # fuzzer vs Node (failures land in tests/differential/failures/)
 pnpm run bench:record           # refresh tests/bench/baseline.json (valid for this machine only)
 just runtime                    # build libjsrt.a (clang, -Wall -Wextra -Werror)
 just runtime-asan               # ASan/UBSan runtime build (golden tests must also pass on this)

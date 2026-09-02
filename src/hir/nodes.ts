@@ -103,7 +103,14 @@ export type BinaryOperator =
   | '^'
   | '<<'
   | '>>'
-  | '>>>';
+  | '>>>'
+  // Exponentiation. Same helper as `Math.pow` (docs/NUMERIC.md §3): C `pow` is wrong on
+  // `±1 ** ±Infinity` and `1 ** NaN`.
+  | '**'
+  // Comma: evaluate left for effects, yield right.
+  | ','
+  // `prop in obj`. The left operand is ToString'd; the right must be an object.
+  | 'in';
 
 export interface BinaryOp extends Node {
   readonly kind: 'binary-op';
@@ -120,7 +127,7 @@ export interface BinaryOp extends Node {
  * never be optimized away as identity. */
 export interface UnaryOp extends Node {
   readonly kind: 'unary-op';
-  readonly operator: '-' | '+' | '!' | '~';
+  readonly operator: '-' | '+' | '!' | '~' | 'void';
   readonly operand: Expression;
 }
 
@@ -259,13 +266,13 @@ export interface NewExpr extends Node {
  * error, so nothing about this node requires the target to be an object. The node's `type` is
  * always `boolean`.
  *
- * There is no prototype CHAIN to walk while `extends` is deferred, so identity is the whole test.
- * When inheritance lands this node does not change shape -- the runtime helper it lowers to grows
- * a parent link to follow, which is exactly why the emitter names the class and never the offset. */
+ * Built-in constructors (`Array`, `Object`, `Function`, …) set `builtin` and name the constructor
+ * rather than a `JSRTClass` descriptor — those objects have tags, not descriptors. */
 export interface InstanceOf extends Node {
   readonly kind: 'instanceof';
   readonly target: Expression;
   readonly className: string;
+  readonly builtin?: true;
 }
 
 /** `o.x` as a READ.
@@ -1184,6 +1191,26 @@ export interface RegExpOp extends Node {
   readonly args: readonly Expression[];
 }
 
+/** `c ? t : f`. Both branches are expressions; the condition is ToBoolean. */
+export interface ConditionalExpr extends Node {
+  readonly kind: 'conditional';
+  readonly condition: Expression;
+  readonly consequent: Expression;
+  readonly alternate: Expression;
+}
+
+/** A place `++`/`--`/`+=`/`=` may read and write in expression position. */
+export type UpdatePlace = Identifier | IndexAccess | FieldAccess | DynFieldAccess;
+
+/** `++x`, `x++`, `x += e`, and `x = e` as expressions. Statement position still folds to Assignment. */
+export interface UpdateExpr extends Node {
+  readonly kind: 'update';
+  readonly operator: '++' | '--' | '=' | BinaryOperator | LogicalOp['operator'];
+  readonly prefix: boolean;
+  readonly target: UpdatePlace;
+  readonly value?: Expression;
+}
+
 export type Expression =
   | MatchRead
   | RegExpFieldRead
@@ -1200,6 +1227,8 @@ export type Expression =
   | BinaryOp
   | UnaryOp
   | TypeOf
+  | ConditionalExpr
+  | UpdateExpr
   | BoundaryCheck
   | LogicalOp
   | TemplateLiteral
@@ -1394,14 +1423,14 @@ export interface IfStatement extends Node {
  * The label is carried ON the loop rather than in a wrapping LabeledStatement node. A label in
  * JavaScript exists only to be named by `break`/`continue`, and `continue` can only name a loop —
  * so the label is a property of the loop, and a wrapper node would sit between `break outer` and
- * the loop it has to leave for no gain. Labels on non-loop statements (`foo: { … break foo; }`)
- * are legal and vanishingly rare; the gate defers them.
+ * the loop it has to leave for no gain. Labels on other statements become a labelled Block
+ * (`foo: { … break foo; }`); `continue` still names only a loop.
  *
  * INVARIANT: every label named by a BreakStatement or ContinueStatement is the label of an
- * enclosing loop (or, for `break`, an enclosing switch). The verifier checks it, because a label
+ * enclosing loop (or, for `break`, an enclosing switch or labelled block). The verifier checks it, because a label
  * that resolves to nothing becomes a `goto` to a C label that was never emitted — a failure that
  * would surface as a clang error against generated code rather than as a diagnostic. */
-type Labelled = { readonly label?: string };
+type Labelled = { readonly label?: string; readonly perIterationEnv?: true };
 
 /** while statement. */
 export interface WhileStatement extends Node, Labelled {
@@ -1572,6 +1601,8 @@ export interface Block extends Node {
   readonly statements: readonly Statement[];
   /** Desugaring sequence (destructure). Bindings leak to the enclosing statement list. */
   readonly flatten?: true;
+  /** `foo: { … break foo; }`. `continue` cannot target this. */
+  readonly label?: string;
 }
 
 export type Statement =

@@ -363,6 +363,8 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic);
  * outlive the program (generated C passes string literals); the shape table stores the pointer. */
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic);
 bool jsrt_has_prop(jsrt_value obj, const char *key);
+/* `key in obj`. Throws on null/undefined; arrays answer for `length` and live indices. */
+bool jsrt_in(jsrt_value key, jsrt_value obj);
 /* Computed-key get/set for an Unknown receiver: arrays go through the dense element path,
  * everything else through the property table with ToString(index) as the key. */
 jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic);
@@ -983,6 +985,12 @@ typedef struct JSRTEnv {
 /* Slots start as `undefined`, so a collection between allocation and the first store never scans
  * uninitialized memory -- the same discipline JSRT_FRAME follows. */
 JSRTEnv *jsrt_env_new(JSRTEnv *parent, uint32_t count);
+/* A fresh environment with the same parent and slot values. Closures created in a loop
+ * iteration hold this copy, so a later increment of the loop binding is not visible to them. */
+JSRTEnv *jsrt_env_clone(JSRTEnv *env);
+/* Copy `src`'s slots into `dst` (same layout). Used to commit a per-iteration clone so the
+ * next clone starts from the updated bindings. */
+void jsrt_env_copy_slots(JSRTEnv *dst, const JSRTEnv *src);
 
 /* A callable.
  *
@@ -1082,6 +1090,39 @@ static inline JSRTPromise *jsrt_as_promise(jsrt_value v) { return (JSRTPromise *
 
 static inline bool jsrt_is_promise(jsrt_value v) {
   return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_promise;
+}
+
+
+/* `x instanceof Array` / `Object` / `Function` / `Date` / `Map` / `Set` / `RegExp` /
+ * `Promise`. Built-ins have tags (or a well-known `JSRTClass` pointer), not a user descriptor.
+ * `Error` / boxed `Boolean`/`Number`/`String` have no representation yet and answer false. */
+static inline bool jsrt_instanceof_builtin(jsrt_value v, const char *name) {
+  if (strcmp(name, "Array") == 0) {
+    return jsrt_is(v, JSRT_TAG_ARRAY);
+  }
+  if (strcmp(name, "Function") == 0) {
+    return jsrt_is(v, JSRT_TAG_CLOSURE);
+  }
+  if (strcmp(name, "Object") == 0) {
+    return jsrt_is_object(v);
+  }
+  if (strcmp(name, "Date") == 0) {
+    return jsrt_is_date(v);
+  }
+  if (strcmp(name, "RegExp") == 0) {
+    return jsrt_is_regexp(v);
+  }
+  if (strcmp(name, "Promise") == 0) {
+    return jsrt_is_promise(v);
+  }
+  if (strcmp(name, "Map") == 0 || strcmp(name, "Set") == 0) {
+    if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
+      return false;
+    }
+    const JSRTClass *cls = jsrt_as_object(v)->cls;
+    return strcmp(name, "Map") == 0 ? cls == &jsrt_class_map : cls == &jsrt_class_set;
+  }
+  return false;
 }
 
 jsrt_value jsrt_promise_new(void);

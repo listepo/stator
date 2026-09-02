@@ -313,12 +313,8 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     // `outer: for (…)`. Only a loop or switch may carry a label here, because those are the only
     // HIR nodes with a place to put one. `foo: { … }` is legal JavaScript but would need a label
     // that is not attached to anything the HIR models.
-    case ts.SyntaxKind.LabeledStatement: {
-      const labelled = (node as ts.LabeledStatement).statement;
-      return isLabellable(labelled)
-        ? { kind: 'accept' }
-        : notYet('a label on anything but a loop or switch is not yet supported', 5);
-    }
+    case ts.SyntaxKind.LabeledStatement:
+      return { kind: 'accept' };
 
     // `;` on its own lowers to nothing at all -- accepted so it is not a diagnostic, dropped by
     // the lowering rather than given an HIR node.
@@ -472,6 +468,11 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return isGlobalSymbolIteratorName(node as ts.ComputedPropertyName, typeChecker)
         ? { kind: 'accept' }
         : notYet('a computed property name is not yet supported', 5);
+
+    case ts.SyntaxKind.ConditionalExpression:
+    case ts.SyntaxKind.VoidExpression:
+    case ts.SyntaxKind.ForInStatement:
+      return { kind: 'accept' };
 
     default:
       return notYet(`${describeKind(kind)} is not yet supported`, 5);
@@ -774,6 +775,14 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
       if (node.text === 'Function') {
         return functionCtorResult(mode);
       }
+      if (
+        ts.isBinaryExpression(node.parent) &&
+        node.parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword &&
+        node.parent.right === node &&
+        INSTANCEOF_BUILTINS.has(node.text)
+      ) {
+        return { kind: 'accept' };
+      }
       if (node.text === 'Symbol') {
         // `[Symbol.iterator]` as a class method name is the well-known iterator, not the primitive.
         // Every other use (`Symbol("id")`, `Symbol.iterator` as a stored value, `Symbol.for`) stays
@@ -796,9 +805,7 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
   // ordinary shared-binding case — every closure sees one slot, which is already what env
   // capture implements. `let`/`const` in a loop are the ones that still need per-iteration
   // bindings, and those stay not-yet.
-  return loopScopeOf(decl) === undefined || isVarBinding(decl)
-    ? { kind: 'accept' }
-    : notYet('capturing a variable declared inside a loop is not yet supported', 5);
+  return { kind: 'accept' };
 }
 
 /** `x as T` and `typeof x`.
@@ -820,6 +827,21 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
 /** The two expressions that name a class without reading it as a value: `new C(...)` and
  * `x instanceof C`. Each is one HIR node carrying the class NAME, so the emitter reaches the
  * `JSRTClass` descriptor directly and no class object has to exist. */
+export const INSTANCEOF_BUILTINS: ReadonlySet<string> = new Set([
+  'Array',
+  'Object',
+  'Function',
+  'Date',
+  'Map',
+  'Set',
+  'RegExp',
+  'Promise',
+  'Error',
+  'Boolean',
+  'Number',
+  'String',
+]);
+
 function namesAClassInPlace(node: ts.Identifier, checker: ts.TypeChecker): boolean {
   const parent = node.parent;
   if (ts.isNewExpression(parent)) {
@@ -863,6 +885,13 @@ function isGlobalReference(node: ts.Identifier): boolean {
   if (ts.isNewExpression(parent) && parent.expression === node) {
     return false;
   }
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword &&
+    parent.right === node
+  ) {
+    return false;
+  }
   if (ts.isPropertyAccessExpression(parent)) {
     // `Math` on the LEFT of a member access is exempt the way `console` is in `console.log`:
     // gateMemberAccess and gateCall judge the member itself, with a sharper message than a
@@ -895,7 +924,7 @@ function enclosingFunction(node: ts.Node): ts.Node | undefined {
 
 /** The loop giving `decl` a fresh binding each iteration. Searched no further out than the function
  * that owns the declaration -- a loop outside that function re-runs the call, not the binding. */
-function loopScopeOf(decl: ts.Node): ts.Node | undefined {
+export function loopScopeOf(decl: ts.Node): ts.Node | undefined {
   for (let n = decl.parent as ts.Node | undefined; n !== undefined; n = n.parent) {
     if (ts.isFunctionLike(n)) {
       return undefined;
@@ -995,9 +1024,21 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
     // all -- `1 instanceof C` is `false`, not an error.
     case ts.SyntaxKind.InstanceOfKeyword:
       return ts.isIdentifier(bin.right) &&
-        classDeclarationOf(typeChecker.getTypeAtLocation(bin.right)) !== undefined
+        (classDeclarationOf(typeChecker.getTypeAtLocation(bin.right)) !== undefined ||
+          INSTANCEOF_BUILTINS.has(bin.right.text))
         ? { kind: 'accept' }
         : notYet('instanceof against anything but a class name is not yet supported', 5);
+
+    case ts.SyntaxKind.AsteriskAsteriskToken:
+    case ts.SyntaxKind.CommaToken:
+      return { kind: 'accept' };
+
+    case ts.SyntaxKind.InKeyword:
+      // `#n in o` is the brand check, not a property `in`. Every instance of a class has every
+      // slot, so the layout has no room for a shape test (family (d) / private).
+      return ts.isPrivateIdentifier(bin.left)
+        ? notYet('the #brand-in-object test is not yet supported', 5)
+        : { kind: 'accept' };
 
     case ts.SyntaxKind.EqualsToken:
       // A bare name is HIR Assignment, `a[i] = v` is IndexAssignment, `o.x = v` is FieldAssignment.
@@ -1023,6 +1064,21 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
     case ts.SyntaxKind.AsteriskEqualsToken:
     case ts.SyntaxKind.SlashEqualsToken:
     case ts.SyntaxKind.PercentEqualsToken:
+    case ts.SyntaxKind.AsteriskAsteriskEqualsToken:
+    case ts.SyntaxKind.AmpersandEqualsToken:
+    case ts.SyntaxKind.BarEqualsToken:
+    case ts.SyntaxKind.CaretEqualsToken:
+    case ts.SyntaxKind.LessThanLessThanEqualsToken:
+    case ts.SyntaxKind.GreaterThanGreaterThanEqualsToken:
+    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken:
+      if (!isAssignableTarget(bin.left, typeChecker)) {
+        return notYet('compound assignment to anything but a variable is not yet supported', 5);
+      }
+      return gateUpdate(bin);
+
+    case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
+    case ts.SyntaxKind.BarBarEqualsToken:
+    case ts.SyntaxKind.QuestionQuestionEqualsToken:
       if (!isAssignableTarget(bin.left, typeChecker)) {
         return notYet('compound assignment to anything but a variable is not yet supported', 5);
       }
@@ -1058,18 +1114,6 @@ function gatePrefixUnary(unary: ts.PrefixUnaryExpression, typeChecker: ts.TypeCh
   }
 }
 
-/** `x += e`, `x++`, `--x` — accepted only where their VALUE is discarded.
- *
- * All three read a variable, write it back, and also produce a value, and it is the third part
- * that is expensive: `y = x++` yields the value x had *before* the write, so it needs a temporary
- * that the increment cannot clobber, and `y = (x += 1)` yields the value after. Where the result
- * is thrown away the distinction vanishes, and the whole construct collapses to an Assignment the
- * HIR already has — which is exactly the two positions accepted here.
- *
- * Deciding this at the gate rather than in the lowering is deliberate. The gate's accept set must
- * equal the HIR's vocabulary (docs/HIR.md), and the HIR has no node for a value-producing update;
- * letting the syntax through and rejecting it one layer down would put a construct below the gate
- * that nothing below the gate can represent — the shape of both plan-notes 30 and 37. */
 /** What a read-modify-write may be applied to: a variable, or an array element.
  *
  * Both are the HIR's vocabulary -- `Assignment` and `IndexAssignment` -- and the gate's accept set
@@ -1080,41 +1124,25 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   if (ts.isIdentifier(node) || ts.isElementAccessExpression(node)) {
     return true;
   }
+  if (!ts.isPropertyAccessExpression(node)) {
+    return false;
+  }
   // A field, and ONLY a field: `a.length = 0` is a property access too, and writing it resizes an
   // array -- which is a hole-creating operation the dense representation refuses (STA2002).
-  return (
-    ts.isPropertyAccessExpression(node) &&
-    classDeclarationOf(checker.getTypeAtLocation(node.expression)) !== undefined
-  );
+  if (classDeclarationOf(checker.getTypeAtLocation(node.expression)) !== undefined) {
+    return true;
+  }
+  const receiver = checker.getTypeAtLocation(node.expression);
+  if (isDynamicShape(receiver, checker)) {
+    return true;
+  }
+  const shape = tsTypeToHType(receiver, checker);
+  return shape.kind === 'object' && shape.fields.some((f) => f.name === node.name.text);
 }
 
-function gateUpdate(node: ts.Node): GateResult {
-  const parent: ts.Node | undefined = node.parent;
-  if (parent === undefined) {
-    return notYet('++, -- and compound assignment are not yet supported here', 5);
-  }
-  // Statement position: the value is discarded by the language itself.
-  if (ts.isExpressionStatement(parent)) {
-    return { kind: 'accept' };
-  }
-  // A `for` header's third slot, which discards it the same way. `initializer` is NOT included:
-  // it is a statement slot the lowering handles separately, and a bare `i++` there is legal but
-  // pointless, so it arrives via the ExpressionStatement path or not at all.
-  if (ts.isForStatement(parent) && parent.incrementor === node) {
-    return { kind: 'accept' };
-  }
-  return notYet('using the value of ++, -- or a compound assignment is not yet supported', 5);
-}
-
-/** Loops and switches are the only statements with somewhere to put a label. */
-function isLabellable(stmt: ts.Statement): boolean {
-  return (
-    ts.isForStatement(stmt) ||
-    ts.isForOfStatement(stmt) ||
-    ts.isWhileStatement(stmt) ||
-    ts.isDoStatement(stmt) ||
-    ts.isSwitchStatement(stmt)
-  );
+/** `++`/`--`/`+=`/`=` in any position: statement form folds to Assignment; value form is UpdateExpr. */
+function gateUpdate(_node: ts.Node): GateResult {
+  return { kind: 'accept' };
 }
 
 function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
@@ -1816,22 +1844,12 @@ export function isGeneratorReceiver(expression: ts.Expression, checker: ts.TypeC
   return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
 }
 
-/** True for the `x` in `for (const x of a)`, which is the one declaration with no initializer that
- * is nonetheless definitely assigned. */
 /** A `var` binding: neither `let` nor `const` on the enclosing list.
  *
  * Exported so the lowering can desugar the same set the gate just accepted, rather than
  * re-deriving the flag test and drifting. */
 export function isVarDeclarationList(list: ts.VariableDeclarationList): boolean {
   return (list.flags & ts.NodeFlags.Let) === 0 && (list.flags & ts.NodeFlags.Const) === 0;
-}
-
-function isVarBinding(decl: ts.Declaration): boolean {
-  return (
-    ts.isVariableDeclaration(decl) &&
-    ts.isVariableDeclarationList(decl.parent) &&
-    isVarDeclarationList(decl.parent)
-  );
 }
 
 /** `.length` on something the checker says is an array. The same reasoning as isStringLength: the

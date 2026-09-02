@@ -1,0 +1,365 @@
+/* Test262 conformance runner (plan.md §9 Task 6.1). */
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { featureStatus } from './features.ts';
+
+export interface Test262Frontmatter {
+  readonly esid?: string;
+  readonly features: readonly string[];
+  readonly includes: readonly string[];
+  readonly flags: readonly string[];
+  readonly negative?: { readonly phase: string; readonly type: string };
+  readonly locale?: string;
+}
+
+export interface Test262Result {
+  readonly path: string;
+  readonly verdict: 'passed' | 'failed' | 'skipped';
+  readonly reason?: string;
+  readonly features: readonly string[];
+}
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = join(HERE, '..', '..');
+const DEFAULT_CORPUS = join(HERE, 'corpus');
+const CLI = join(REPO, 'src', 'cli', 'main.ts');
+const RESULTS = join(HERE, 'results.json');
+const ALLOWED_KEYS = new Set(['esid', 'features', 'includes', 'flags', 'negative', 'locale']);
+const ALLOWED_FLAGS = new Set(['raw', 'onlyStrict', 'noStrict', 'module', 'async']);
+
+function listValue(raw: string): string[] {
+  const value = raw.trim();
+  if (value === '' || value === '[]') {
+    return [];
+  }
+  if (!value.startsWith('[') || !value.endsWith(']')) {
+    throw new Error(`expected a bracketed list, got ${raw}`);
+  }
+  return value
+    .slice(1, -1)
+    .split(',')
+    .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
+    .filter((item) => item !== '');
+}
+
+function scalar(raw: string): string {
+  return raw.trim().replace(/^['"]|['"]$/g, '');
+}
+
+/** Parse only Test262's deliberately small frontmatter vocabulary. Unknown keys are errors. */
+export function parseFrontmatter(source: string, file = '<source>'): Test262Frontmatter {
+  const lines = source.split(/\r?\n/);
+  if (lines[0]?.trim() !== '/*---') {
+    throw new Error(`${file}: missing /*--- frontmatter`);
+  }
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---*/');
+  if (end < 0) {
+    throw new Error(`${file}: unterminated frontmatter`);
+  }
+  const features: string[] = [];
+  const includes: string[] = [];
+  const flags: string[] = [];
+  let esid: string | undefined;
+  let locale: string | undefined;
+  let negative: { phase?: string; type?: string } | undefined;
+  let pendingList: string[] | undefined;
+  for (let i = 1; i < end; i += 1) {
+    const line = lines[i] ?? '';
+    const listItem = /^\s*-\s*(.+)$/.exec(line);
+    if (listItem !== null) {
+      if (pendingList === undefined) throw new Error(`${file}: list item without a list key`);
+      pendingList.push(scalar(listItem[1] ?? ''));
+      continue;
+    }
+    const match = /^(\s*)([A-Za-z][\w-]*):(?:\s*(.*))?$/.exec(line);
+    if (match === null) {
+      if (line.trim() === '') continue;
+      throw new Error(`${file}: invalid frontmatter line ${line}`);
+    }
+    const indent = match[1]?.length ?? 0;
+    const key = match[2] ?? '';
+    const value = match[3] ?? '';
+    if (indent > 0) {
+      if (negative === undefined || (key !== 'phase' && key !== 'type') || indent < 2) {
+        throw new Error(`${file}: unknown nested frontmatter key "${key}"`);
+      }
+      negative[key] = scalar(value);
+      continue;
+    }
+    pendingList = undefined;
+    if (!ALLOWED_KEYS.has(key)) {
+      throw new Error(`${file}: unknown frontmatter key "${key}"`);
+    }
+    if (key === 'negative') {
+      negative = {};
+    } else if (key === 'features' || key === 'includes' || key === 'flags') {
+      const target = key === 'features' ? features : key === 'includes' ? includes : flags;
+      target.push(...listValue(value));
+      if (value.trim() === '') pendingList = target;
+    } else if (key === 'esid') {
+      esid = scalar(value);
+    } else if (key === 'locale') {
+      locale = scalar(value);
+    }
+  }
+  const parsedNegative =
+    negative === undefined ? undefined : { phase: negative.phase, type: negative.type };
+  if (
+    parsedNegative !== undefined &&
+    (parsedNegative.phase === undefined || parsedNegative.type === undefined)
+  ) {
+    throw new Error(`${file}: negative requires phase and type`);
+  }
+  return parsedNegative === undefined
+    ? {
+        ...(esid === undefined ? {} : { esid }),
+        features,
+        includes,
+        flags,
+        ...(locale === undefined ? {} : { locale }),
+      }
+    : {
+        ...(esid === undefined ? {} : { esid }),
+        features,
+        includes,
+        flags,
+        negative: { phase: parsedNegative.phase ?? '', type: parsedNegative.type ?? '' },
+        ...(locale === undefined ? {} : { locale }),
+      };
+}
+
+function corpusRoot(): string {
+  const configured = process.env['STATOR_TEST262'];
+  const root = configured ?? DEFAULT_CORPUS;
+  return root;
+}
+
+function testFiles(root: string): string[] {
+  const result: string[] = [];
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, name.name);
+      if (name.isDirectory()) visit(path);
+      else if (name.isFile() && name.name.endsWith('.js')) result.push(path);
+    }
+  };
+  visit(join(root, 'test'));
+  return result.sort((left, right) => left.localeCompare(right));
+}
+
+function diagnosticCode(stderr: string): string | undefined {
+  return /\b(STA\d{4})\b/.exec(stderr)?.[1];
+}
+
+function errorClassMatches(stderr: string, type: string): boolean {
+  return new RegExp(`\\b${type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(stderr);
+}
+
+function harnessSource(root: string, path: string, metadata: Test262Frontmatter): string {
+  const body = readFileSync(path, 'utf8');
+  if (metadata.flags.includes('raw')) return body;
+  const files = [
+    join(root, 'harness', 'assert.js'),
+    join(HERE, 'harness', 'sta.js'),
+    ...metadata.includes.map((name) => join(root, 'harness', name)),
+  ];
+  const missing = files.find((file) => !existsSync(file));
+  if (missing !== undefined) throw new Error(`missing harness file ${missing}`);
+  const strict = metadata.flags.includes('onlyStrict') ? `'use strict';\n` : '';
+  return `${strict}${files.map((file) => readFileSync(file, 'utf8')).join('\n')}\n${body}`;
+}
+
+function execute(path: string, root: string, metadata: Test262Frontmatter): Test262Result {
+  const rel = relative(root, path);
+  const unsupportedFlag = metadata.flags.find((flag) => !ALLOWED_FLAGS.has(flag));
+  if (unsupportedFlag !== undefined)
+    return {
+      path: rel,
+      verdict: 'skipped',
+      reason: `flag ${unsupportedFlag}`,
+      features: metadata.features,
+    };
+  const unsupported = metadata.features
+    .map((feature) => [feature, featureStatus(feature)] as const)
+    .find(([, status]) => status === undefined || status.kind !== 'supported');
+  if (unsupported !== undefined) {
+    const [feature, status] = unsupported;
+    if (status === undefined) throw new Error(`unmapped feature ${feature}`);
+    return {
+      path: rel,
+      verdict: 'skipped',
+      reason: status.kind === 'not-yet' ? `${status.code} (${feature})` : `never (${feature})`,
+      features: metadata.features,
+    };
+  }
+  const work = join(HERE, '.tmp');
+  mkdirSync(work, { recursive: true });
+  const input = join(work, `test-${process.pid}.js`);
+  const output = join(work, `test-${process.pid}.out`);
+  writeFileSync(input, harnessSource(root, path, metadata), 'utf8');
+  const build = spawnSync(process.execPath, [CLI, 'build', input, '-o', output, '--mode=js'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  try {
+    if (metadata.negative?.phase === 'parse' || metadata.negative?.phase === 'resolution') {
+      if (build.status === 0)
+        return {
+          path: rel,
+          verdict: 'failed',
+          reason: 'negative test compiled successfully',
+          features: metadata.features,
+        };
+      const code = diagnosticCode(build.stderr);
+      if (code?.startsWith('STA12') === true)
+        return { path: rel, verdict: 'skipped', reason: code, features: metadata.features };
+      return {
+        path: rel,
+        verdict: errorClassMatches(build.stderr, metadata.negative.type) ? 'passed' : 'failed',
+        reason: code ?? build.stderr.trim(),
+        features: metadata.features,
+      };
+    }
+    if (build.status !== 0)
+      return {
+        path: rel,
+        verdict: 'failed',
+        reason: build.stderr.trim(),
+        features: metadata.features,
+      };
+    const execution = spawnSync(output, [], { encoding: 'utf8', timeout: 10_000 });
+    if (metadata.negative?.phase === 'runtime') {
+      return {
+        path: rel,
+        verdict:
+          execution.status !== 0 && errorClassMatches(execution.stderr, metadata.negative.type)
+            ? 'passed'
+            : 'failed',
+        reason: execution.stderr.trim(),
+        features: metadata.features,
+      };
+    }
+    return {
+      path: rel,
+      verdict: execution.status === 0 && execution.error === undefined ? 'passed' : 'failed',
+      reason: execution.stderr.trim(),
+      features: metadata.features,
+    };
+  } finally {
+    for (const file of [input, output]) {
+      try {
+        rmSync(file, { force: true });
+      } catch {
+        /* best-effort temp cleanup */
+      }
+    }
+  }
+}
+
+function expectedFailures(): Map<string, string> {
+  const path = join(HERE, 'expected-fail.txt');
+  const entries = new Map<string, string>();
+  for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const match = /^\s*([^#\s]+)\s*#\s*(.+?)\s*$/.exec(line);
+    if (match !== null) entries.set(match[1] ?? '', match[2] ?? '');
+  }
+  return entries;
+}
+
+function ratchetCheck(passed: number, failed: number): string[] {
+  const parsed: unknown = JSON.parse(readFileSync(join(HERE, 'ratchet.json'), 'utf8'));
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('passed' in parsed) ||
+    !('failed' in parsed) ||
+    !('skipped' in parsed) ||
+    typeof parsed.passed !== 'number' ||
+    typeof parsed.failed !== 'number' ||
+    typeof parsed.skipped !== 'number'
+  ) {
+    throw new Error('ratchet.json must contain numeric passed, failed, and skipped fields');
+  }
+  const failures: string[] = [];
+  if (passed < parsed.passed)
+    failures.push(`ratchet: passed dropped from ${String(parsed.passed)} to ${String(passed)}`);
+  if (failed > parsed.failed)
+    failures.push(`ratchet: failed rose from ${String(parsed.failed)} to ${String(failed)}`);
+  return failures;
+}
+
+function main(): void {
+  const root = corpusRoot();
+  if (!existsSync(join(root, 'test'))) {
+    process.stdout.write('test262: corpus missing — fetch with `pnpm run test262:fetch`\n');
+    writeFileSync(
+      RESULTS,
+      `${JSON.stringify({ corpus: null, passed: 0, failed: 0, skipped: 0, results: [] }, null, 2)}\n`,
+      'utf8',
+    );
+    process.stdout.write(
+      'test262: 0 passed, 0 skipped (corpus missing), 0 failed — pass rate 0.0%\n',
+    );
+    return;
+  }
+  const results: Test262Result[] = [];
+  for (const path of testFiles(root)) {
+    try {
+      const metadata = parseFrontmatter(readFileSync(path, 'utf8'), path);
+      results.push(execute(path, root, metadata));
+    } catch (error) {
+      results.push({
+        path: relative(root, path),
+        verdict: 'failed',
+        reason: error instanceof Error ? error.message : String(error),
+        features: [],
+      });
+    }
+  }
+  const passed = results.filter((result) => result.verdict === 'passed').length;
+  const failed = results.filter((result) => result.verdict === 'failed').length;
+  const skipped = results.filter((result) => result.verdict === 'skipped').length;
+  writeFileSync(
+    RESULTS,
+    `${JSON.stringify({ corpus: root, passed, failed, skipped, results }, null, 2)}\n`,
+    'utf8',
+  );
+  const featureCounts = new Map<string, number>();
+  for (const result of results.filter((item) => item.verdict === 'skipped'))
+    for (const feature of result.features)
+      featureCounts.set(feature, (featureCounts.get(feature) ?? 0) + 1);
+  const details = [...featureCounts.entries()]
+    .sort()
+    .map(([feature, count]) => `${feature}: ${String(count)}`)
+    .join(', ');
+  const rate = passed + failed === 0 ? 0 : (passed / (passed + failed)) * 100;
+  process.stdout.write(
+    `test262: ${String(passed)} passed, ${String(skipped)} skipped${details === '' ? '' : ` (${details})`}, ${String(failed)} failed — pass rate ${rate.toFixed(1)}%\n`,
+  );
+  const known = expectedFailures();
+  const failures = results.filter((result) => result.verdict === 'failed');
+  for (const result of failures) {
+    if (!known.has(result.path)) process.stderr.write(`FAIL ${result.path}: unexplained failure\n`);
+  }
+  for (const path of known.keys()) {
+    const result = results.find((item) => item.path === path);
+    if (result?.verdict === 'passed')
+      process.stderr.write(`FAIL ${path}: unexpected PASS; remove it from expected-fail.txt\n`);
+  }
+  const ratchetFailures = ratchetCheck(passed, failed);
+  for (const failure of ratchetFailures) process.stderr.write(`FAIL ${failure}\n`);
+  if (
+    failed > 0 ||
+    failures.some((result) => !known.has(result.path)) ||
+    ratchetFailures.length > 0 ||
+    [...known.keys()].some(
+      (path) => results.find((item) => item.path === path)?.verdict === 'passed',
+    )
+  )
+    process.exitCode = 1;
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href)
+  main();

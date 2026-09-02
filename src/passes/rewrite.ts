@@ -317,6 +317,31 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       const operand = sub(expr.operand);
       return operand === expr.operand ? expr : { ...expr, operand };
     }
+    case 'conditional': {
+      const condition = sub(expr.condition);
+      const consequent = sub(expr.consequent);
+      const alternate = sub(expr.alternate);
+      return condition === expr.condition &&
+        consequent === expr.consequent &&
+        alternate === expr.alternate
+        ? expr
+        : { ...expr, condition, consequent, alternate };
+    }
+    case 'update': {
+      const target = sub(expr.target);
+      if (
+        target.kind !== 'identifier' &&
+        target.kind !== 'index-access' &&
+        target.kind !== 'field-access' &&
+        target.kind !== 'dyn-field-access'
+      ) {
+        throw new Error(`rewriteExpression: update target became ${target.kind}`);
+      }
+      const value = expr.value !== undefined ? sub(expr.value) : undefined;
+      return target === expr.target && value === expr.value
+        ? expr
+        : { ...expr, target, ...(value !== undefined ? { value } : {}) };
+    }
     case 'boundary-check': {
       const value = sub(expr.value);
       return value === expr.value ? expr : { ...expr, value };

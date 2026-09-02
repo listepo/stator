@@ -13,6 +13,11 @@
  *     collected allocation in the runtime comes from jsrt_gc_alloc, so the kind covers all of it.
  *   - the roots, via GC_set_push_other_roots over the JSRT_FRAME shadow stack. This is what the
  *     rooting discipline was always for; until now the frames were bookkeeping nothing read.
+ *     The hook CHAINS to the one it replaces: in a threads-enabled Boehm (every packaged one)
+ *     that default is GC_push_all_stacks, i.e. the C stack and registers themselves. Replacing it
+ *     outright meant a raw pointer in a runtime local was no root at all, and a function that
+ *     allocates twice -- a Map's entries then its index, an array's header then its elements --
+ *     lost the first block to the second allocation's collection (plan-notes 163).
  *
  * Masking is safe for BOTH word shapes the runtime stores: a boxed value's payload is its low 48
  * bits, and a raw pointer's top 16 bits are zero (jsrt_init asserts exactly that against a real
@@ -72,7 +77,16 @@ static struct GC_ms_entry *jsrt_mark(GC_word *addr, struct GC_ms_entry *msp,
  * the range for later. */
 #define ROOT_CHUNK 128
 
+/* The hook that was installed before ours: the C stack and registers of every thread in a
+ * threads-enabled Boehm, NULL in a single-threaded one (which scans its stack without a hook). */
+static GC_push_other_roots_proc default_push_other_roots;
+
 static void GC_CALLBACK jsrt_push_roots(void) {
+  /* First the C stack, conservatively, as if we had never been installed: every raw pointer a
+   * runtime function holds in a local across an allocation depends on this. Then the frames. */
+  if (default_push_other_roots != NULL) {
+    default_push_other_roots();
+  }
   void *raw[ROOT_CHUNK];
   size_t n = 0;
   for (const JSRTFrame *f = jsrt_frame_top; f != NULL; f = f->prev) {
@@ -105,6 +119,7 @@ static void GC_CALLBACK jsrt_push_roots(void) {
 void jsrt_gc_init(void) {
   GC_INIT();
   jsrt_kind = (int)GC_new_kind(GC_new_free_list(), GC_MAKE_PROC(GC_new_proc(jsrt_mark), 0), 0, 1);
+  default_push_other_roots = GC_get_push_other_roots();
   GC_set_push_other_roots(jsrt_push_roots);
 }
 

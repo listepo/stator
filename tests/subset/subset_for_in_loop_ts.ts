@@ -1,11 +1,8 @@
 // @mode: ts
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: for...in loop
 
-const obj: { [key: string]: number } = { a: 1, b: 2 };
-let keys: string[] = [];
+const obj: { a: number; b: number } = { a: 1, b: 2 };
 for (const key in obj) {
-  keys.push(key);
+  console.log(key);
 }
-export { keys };

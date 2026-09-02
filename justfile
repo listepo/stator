@@ -78,16 +78,42 @@ _runtime flavor:
     fi
     SYS_LIBS='-lm'
 
+    # LTO: the archive's objects are LLVM bitcode, so the final link sees the runtime and the
+    # generated C as one module and inlines across that boundary (plan-notes 162). Probed, not
+    # assumed: a bitcode archive links only where the linker can read one (ld64 and lld can, GNU
+    # ld needs the LLVMgold plugin), and a wrong guess is an unreadable archive at the end of every
+    # compile. The flag travels in link-flags.txt so the link is made the way the objects were.
+    LTO=''
+    LTO_STATUS='no LTO (the linker cannot read bitcode archives)'
+    probe="$(mktemp -d)"
+    printf 'int f(void){return 0;}\n' > "${probe}/f.c"
+    printf 'int f(void);int main(void){return f();}\n' > "${probe}/m.c"
+    # conda-clang's Darwin linker can pass this toy archive probe but abort later when the real
+    # runtime archive contains stack-probing metadata. Do not turn a false-positive probe into a
+    # broken archive: on Darwin the runtime stays plain until a real archive/link probe exists.
+    if [[ "$(uname -s)" != 'Darwin' ]] \
+       && ${CC} -O2 -flto=thin -c "${probe}/f.c" -o "${probe}/f.o" 2>/dev/null \
+       && ${AR} rcs "${probe}/libf.a" "${probe}/f.o" 2>/dev/null \
+       && ${CC} -O2 -flto=thin "${probe}/m.c" -L"${probe}" -lf -o "${probe}/m" 2>/dev/null; then
+      LTO='-flto=thin'
+      LTO_STATUS='thin LTO'
+    fi
+    rm -rf "${probe}"
+
     case "${FLAVOR}" in
       rel)
         DIR=build
-        CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O2"
-        VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O2"
+        CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O2 ${LTO}"
+        VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O2 ${LTO}"
         EXTRA_LIBS="${GC_LIBS} ${SYS_LIBS}"
         LABEL='Runtime built with'
         ;;
       asan)
+        # Sanitized builds stay plain objects: the sanitizer run exists to point at a line, and
+        # cross-module inlining is exactly what makes that pointer vague.
         DIR=build-asan
+        LTO=''
+        LTO_STATUS='no LTO (sanitized build)'
         CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O1 -g -fsanitize=address,undefined"
         VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O1 -g -fsanitize=address,undefined"
         EXTRA_LIBS="${GC_LIBS} ${SYS_LIBS}"
@@ -105,8 +131,8 @@ _runtime flavor:
         DIR=build-intl
         # -DUCHAR_TYPE=uint16_t is ICU's own supported way to say UChar is the embedder's 16-bit
         # unit: JSString already holds uint16_t*, so the strings pass through without a copy.
-        CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O2 -DJSRT_HAVE_ICU -DUCHAR_TYPE=uint16_t ${ICU_CFLAGS}"
-        VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O2"
+        CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O2 ${LTO} -DJSRT_HAVE_ICU -DUCHAR_TYPE=uint16_t ${ICU_CFLAGS}"
+        VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O2 ${LTO}"
         EXTRA_LIBS="${GC_LIBS} ${ICU_LIBS} ${SYS_LIBS}"
         LABEL='Runtime (Intl/ICU) built with'
         ;;
@@ -117,6 +143,13 @@ _runtime flavor:
     esac
 
     mkdir -p "${DIR}"
+    # A flag change (the LTO probe flipping, Boehm appearing) must rebuild every object: the
+    # timestamp walk cannot see it, and a mixed archive links fine while silently lacking what the
+    # flag was for.
+    if [[ "$(cat "${DIR}/cflags.txt" 2>/dev/null || true)" != "${CFLAGS} ${VFLAGS}" ]]; then
+      rm -f "${DIR}"/*.o "${DIR}"/*.d
+      printf '%s\n' "${CFLAGS} ${VFLAGS}" > "${DIR}/cflags.txt"
+    fi
 
     stale() {
       local obj=$1 src=$2
@@ -161,8 +194,8 @@ _runtime flavor:
     # Recorded on the PHONY-equivalent recipe rather than the archive: installing bdw-gc changes
     # the answer without changing a .c file, and an archive compiled WITH Boehm linked WITHOUT
     # -lgc is an undefined-symbol error at the end of every compile (plan-notes 106).
-    printf '%s\n' "${EXTRA_LIBS}" > "${DIR}/link-flags.txt"
-    echo "${LABEL}: ${GC_STATUS}"
+    printf '%s\n' "${LTO} ${EXTRA_LIBS}" > "${DIR}/link-flags.txt"
+    echo "${LABEL}: ${GC_STATUS}, ${LTO_STATUS}"
 
 [private]
 _runtime-test flavor:
@@ -174,27 +207,21 @@ _runtime-test flavor:
     FLAVOR='{{flavor}}'
     CORPORA=(print_numbers print_arrays print_objects print_maps print_shapes print_typeof print_regexp print_promise print_dates)
 
+    VENDOR_POSIX='{{vendor_posix}}'
     VENDOR_INC='-Ivendor/quickjs-ng -Ivendor/fdlibm'
-    CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror ${VENDOR_POSIX} -Iinclude ${VENDOR_INC} -ffunction-sections -fdata-sections"
-    BDW_CFLAGS="$(pkg-config --cflags bdw-gc 2>/dev/null || true)"
-    BDW_LIBS="$(pkg-config --libs bdw-gc 2>/dev/null || true)"
-    if [[ -n "${BDW_LIBS// }" ]]; then
-      CFLAGS_COMMON="${CFLAGS_COMMON} -DJSRT_HAVE_BOEHM ${BDW_CFLAGS}"
-      GC_LIBS="${BDW_LIBS}"
-    else
-      GC_LIBS=''
-    fi
-    SYS_LIBS='-lm'
-    DEPFLAGS='-MMD -MP'
+    CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror ${VENDOR_POSIX} -Iinclude ${VENDOR_INC}"
 
     case "${FLAVOR}" in
-      rel) DIR=build; CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O2"; TAG='runtime: print corpus matches Node' ;;
-      asan) DIR=build-asan; CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O1 -g -fsanitize=address,undefined"; TAG='runtime: print corpus matches Node (ASan/UBSan)' ;;
+      rel) DIR=build; CFLAGS="${CFLAGS_COMMON} -O2"; TAG='runtime: print corpus matches Node' ;;
+      asan) DIR=build-asan; CFLAGS="${CFLAGS_COMMON} -O1 -g -fsanitize=address,undefined"; TAG='runtime: print corpus matches Node (ASan/UBSan)' ;;
       *) echo "unknown test flavor: ${FLAVOR}" >&2; exit 1 ;;
     esac
+    # The archive says how it must be linked (-lgc, -flto); the corpus links it the same way the
+    # CLI does rather than rediscovering the answer here.
+    LINK_FLAGS="$(cat "${DIR}/link-flags.txt")"
 
     for corpus in "${CORPORA[@]}"; do
-      ${CC} ${CFLAGS} "tests/${corpus}.c" -L"${DIR}" -ljsrt ${GC_LIBS} ${SYS_LIBS} -o "${DIR}/${corpus}"
+      ${CC} ${CFLAGS} "tests/${corpus}.c" -L"${DIR}" -ljsrt ${LINK_FLAGS} -o "${DIR}/${corpus}"
       ${NODE} "tests/${corpus}.mjs" > "${DIR}/${corpus}.expected.txt"
       "./${DIR}/${corpus}" > "${DIR}/${corpus}.actual.txt"
       diff -u "${DIR}/${corpus}.expected.txt" "${DIR}/${corpus}.actual.txt"

@@ -1,5 +1,7 @@
 # ARCHITECTURE.md — how Stator works (diagrams)
 
+Getting started is the [project README](../README.md). This file is the diagram gallery.
+
 UML-style views of the pipeline defined in `plan.md` §2. That section is the authority; these
 diagrams visualize it and may not contradict it.
 

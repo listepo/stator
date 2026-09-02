@@ -389,7 +389,7 @@ function verifyStatement(
           kind: stmt.kind,
           span: stmt.span,
           code: 'STA4029',
-          message: `${stmt.kind === 'break-statement' ? 'break' : 'continue'} has no ${what} ${wantsLoop ? 'loop' : 'loop or switch'} to jump out of`,
+          message: `${stmt.kind === 'break-statement' ? 'break' : 'continue'} has no ${what} ${wantsLoop ? 'loop' : 'loop, switch, or labelled block'} to jump out of`,
         });
       }
       break;
@@ -397,12 +397,16 @@ function verifyStatement(
 
     case 'block': {
       const block = stmt as Block;
+      const inner =
+        block.label !== undefined
+          ? [...enclosing, { isLoop: false, label: block.label }]
+          : enclosing;
       if (block.flatten === true) {
-        for (const inner of block.statements) {
-          verifyStatement(inner, problems, bindings, enclosing);
+        for (const child of block.statements) {
+          verifyStatement(child, problems, bindings, inner);
         }
       } else {
-        verifyBlock(block, problems, bindings, enclosing);
+        verifyBlock(block, problems, bindings, inner);
       }
       break;
     }
@@ -776,7 +780,7 @@ function verifyExpression(
       // `+` is deliberately absent. It is the one operator here that is not arithmetic: given a
       // string operand it concatenates, so neither "operands are numbers" nor "the result is a
       // number" holds for it. `"a" + "b"` is well-formed IR of type string.
-      if (op === '-' || op === '*' || op === '/' || op === '%') {
+      if (op === '-' || op === '*' || op === '/' || op === '%' || op === '**') {
         // Operands must be number, or `unknown` -- a value whose type is not known until it exists.
         // The emitter wraps every arithmetic operand in `jsrt_to_number`, which is ToNumber, which
         // is defined on every value there is: an object converts through ToPrimitive, a string
@@ -864,6 +868,28 @@ function verifyExpression(
         }
       }
 
+      if (op === 'in') {
+        if (!hTypeEquals(expr.type, H_BOOLEAN)) {
+          problems.push({
+            kind: 'binary-op',
+            span: expr.span,
+            code: 'STA4018',
+            message: `'in' result must be boolean, got ${hTypeName(expr.type)}`,
+          });
+        }
+      }
+
+      if (op === ',') {
+        if (!hTypeEquals(expr.type, binOp.right.type)) {
+          problems.push({
+            kind: 'binary-op',
+            span: expr.span,
+            code: 'STA4013',
+            message: `comma operator result must match the right operand, got ${hTypeName(expr.type)}`,
+          });
+        }
+      }
+
       break;
     }
 
@@ -871,7 +897,8 @@ function verifyExpression(
       verifyExpression(expr.operand, problems, bindings);
       // No operand constraint: ToNumber and ToBoolean are total on primitives. The result type,
       // however, is fixed by the operator and nothing else.
-      const wanted = expr.operator === '!' ? H_BOOLEAN : H_NUMBER;
+      const wanted =
+        expr.operator === '!' ? H_BOOLEAN : expr.operator === 'void' ? H_UNDEFINED : H_NUMBER;
       if (!hTypeEquals(expr.type, wanted)) {
         problems.push({
           kind: 'unary-op',
@@ -1786,6 +1813,29 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4045',
           message: `${expr.op}() on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+      }
+      break;
+    }
+
+    case 'conditional': {
+      verifyExpression(expr.condition, problems, bindings);
+      verifyExpression(expr.consequent, problems, bindings);
+      verifyExpression(expr.alternate, problems, bindings);
+      break;
+    }
+
+    case 'update': {
+      verifyExpression(expr.target, problems, bindings);
+      if (expr.value !== undefined) {
+        verifyExpression(expr.value, problems, bindings);
+      }
+      if ((expr.operator === '++' || expr.operator === '--') && !hTypeEquals(expr.type, H_NUMBER)) {
+        problems.push({
+          kind: 'update',
+          span: expr.span,
+          code: 'STA4013',
+          message: `update result must be number, got ${hTypeName(expr.type)}`,
         });
       }
       break;

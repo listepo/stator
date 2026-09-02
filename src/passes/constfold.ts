@@ -133,6 +133,13 @@ function applyBinary(operator: BinaryOperator, left: Literal, right: Literal): L
     // every bitwise result `number` rather than growing an integer type (docs/NUMERIC.md §4).
     case '>>>':
       return n(left) >>> n(right);
+    case '**':
+      return n(left) ** n(right);
+    case ',':
+      return right;
+    case 'in':
+      // Membership is a property of an object, not of two literals.
+      return false;
   }
 }
 
@@ -148,6 +155,8 @@ function applyUnary(operator: UnaryOp['operator'], operand: Literal): Literal {
       return !operand;
     case '~':
       return ~n(operand);
+    case 'void':
+      return undefined;
   }
 }
 

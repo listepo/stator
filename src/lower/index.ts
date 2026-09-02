@@ -8,6 +8,7 @@
 
 import * as ts from 'typescript';
 import {
+  INSTANCEOF_BUILTINS,
   isArrayReceiver,
   isDateReceiver,
   isGeneratorReceiver,
@@ -21,6 +22,7 @@ import {
   isSimpleBindingPattern,
   isStringReceiver,
   isVarDeclarationList,
+  loopScopeOf,
   MATH_CONSTANTS,
   MATH_METHODS,
   OBJECT_STATICS,
@@ -99,6 +101,8 @@ import type {
   SwitchClause,
   TemplateLiteral,
   UnaryOp,
+  UpdateExpr,
+  UpdatePlace,
 } from '../hir/nodes.ts';
 import {
   ARRAY_OPS,
@@ -119,6 +123,7 @@ import {
   H_NUMBER,
   H_STRING,
   H_UNDEFINED,
+  hArray,
   hasTypeParam,
   hFunction,
   hIterator,
@@ -155,6 +160,9 @@ const BINARY_OPERATORS = new Map<ts.SyntaxKind, BinaryOperator>([
   [ts.SyntaxKind.LessThanLessThanToken, '<<'],
   [ts.SyntaxKind.GreaterThanGreaterThanToken, '>>'],
   [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken, '>>>'],
+  [ts.SyntaxKind.AsteriskAsteriskToken, '**'],
+  [ts.SyntaxKind.CommaToken, ','],
+  [ts.SyntaxKind.InKeyword, 'in'],
 ]);
 
 const LOGICAL_OPERATORS = new Map<ts.SyntaxKind, LogicalOp['operator']>([
@@ -168,6 +176,7 @@ const UNARY_OPERATORS = new Map<ts.SyntaxKind, UnaryOp['operator']>([
   [ts.SyntaxKind.PlusToken, '+'],
   [ts.SyntaxKind.ExclamationToken, '!'],
   [ts.SyntaxKind.TildeToken, '~'],
+  [ts.SyntaxKind.VoidKeyword, 'void'],
 ]);
 
 export function lowerSourceFile(
@@ -399,6 +408,7 @@ function lowerStatement(
       condition,
       body,
       ...(label && { label }),
+      ...(loopNeedsPerIterationEnv(node, checker) && { perIterationEnv: true as const }),
     };
   }
 
@@ -408,6 +418,10 @@ function lowerStatement(
 
   if (ts.isForOfStatement(node)) {
     return lowerForOf(node, sourceFile, checker, bindings, diagnostics, label);
+  }
+
+  if (ts.isForInStatement(node)) {
+    return lowerForIn(node, sourceFile, checker, bindings, diagnostics, label);
   }
 
   if (ts.isSwitchStatement(node)) {
@@ -511,18 +525,35 @@ function lowerStatement(
     };
   }
 
-  // `outer: for (…)`. The label is handed to the loop rather than wrapped around it, so this
-  // re-enters with the label in hand. The gate has already established the inner statement is
-  // something that can carry one.
+  // A label on a loop or switch is handed to that node. Anything else becomes a labelled block
+  // so `break foo` has somewhere to land (plan.md §8 step 12 family b).
   if (ts.isLabeledStatement(node)) {
-    return lowerStatement(
-      node.statement,
-      sourceFile,
-      checker,
-      bindings,
-      diagnostics,
-      node.label.text,
-    );
+    const inner = node.statement;
+    const loopOrSwitch =
+      ts.isForStatement(inner) ||
+      ts.isForOfStatement(inner) ||
+      ts.isForInStatement(inner) ||
+      ts.isWhileStatement(inner) ||
+      ts.isDoStatement(inner) ||
+      ts.isSwitchStatement(inner);
+    if (loopOrSwitch) {
+      return lowerStatement(inner, sourceFile, checker, bindings, diagnostics, node.label.text);
+    }
+    const lowered = lowerStatement(inner, sourceFile, checker, bindings, diagnostics);
+    if (lowered === null) {
+      return null;
+    }
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    if (lowered.kind === 'block' && lowered.label === undefined) {
+      return { ...lowered, label: node.label.text };
+    }
+    return {
+      kind: 'block',
+      type: H_UNDEFINED,
+      span,
+      label: node.label.text,
+      statements: [lowered],
+    };
   }
 
   // Block
@@ -696,6 +727,49 @@ function lowerPatternRead(
   return access;
 }
 
+function bindPatternElement(
+  source: Expression,
+  key: string | number,
+  el: ts.BindingElement,
+  declKind: 'let' | 'const',
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+  statements: Statement[],
+): boolean {
+  if (!ts.isIdentifier(el.name)) {
+    diagnostics.push(
+      diagnosticFromNode(el, sourceFile, 'STA4031', 'internal', 'ts', 'unexpected nested pattern'),
+    );
+    return false;
+  }
+  const read = lowerPatternRead(
+    source,
+    key,
+    el.name,
+    el,
+    sourceFile,
+    checker,
+    bindings,
+    diagnostics,
+  );
+  if (read === null) {
+    return false;
+  }
+  const type = typeAt(el.name, checker, bindings);
+  bindings.set(el.name.text, type);
+  statements.push({
+    kind: 'declaration',
+    type,
+    span: makeSpan(el.getStart(sourceFile), el.getWidth(sourceFile), sourceFile),
+    name: el.name.text,
+    declKind,
+    value: maybeBoundary(read, type, el, sourceFile),
+  });
+  return true;
+}
+
 function lowerBindingPattern(
   name: ts.BindingName,
   rhs: Expression,
@@ -737,46 +811,27 @@ function lowerBindingPattern(
   }
   if (ts.isObjectBindingPattern(name)) {
     for (const el of name.elements) {
-      if (!ts.isIdentifier(el.name)) {
-        diagnostics.push(
-          diagnosticFromNode(
-            el,
-            sourceFile,
-            'STA4031',
-            'internal',
-            'ts',
-            'unexpected nested pattern',
-          ),
-        );
-        return null;
-      }
       const field =
         el.propertyName !== undefined && ts.isIdentifier(el.propertyName)
           ? el.propertyName.text
-          : el.name.text;
-      const read = lowerPatternRead(
-        source,
-        field,
-        el.name,
-        el,
-        sourceFile,
-        checker,
-        bindings,
-        diagnostics,
-      );
-      if (read === null) {
+          : ts.isIdentifier(el.name)
+            ? el.name.text
+            : '';
+      if (
+        !bindPatternElement(
+          source,
+          field,
+          el,
+          declKind,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+          statements,
+        )
+      ) {
         return null;
       }
-      const type = typeAt(el.name, checker, bindings);
-      bindings.set(el.name.text, type);
-      statements.push({
-        kind: 'declaration',
-        type,
-        span: makeSpan(el.getStart(sourceFile), el.getWidth(sourceFile), sourceFile),
-        name: el.name.text,
-        declKind,
-        value: maybeBoundary(read, type, el, sourceFile),
-      });
     }
     return statements;
   }
@@ -786,42 +841,21 @@ function lowerBindingPattern(
       index += 1;
       continue;
     }
-    if (!ts.isIdentifier(el.name)) {
-      diagnostics.push(
-        diagnosticFromNode(
-          el,
-          sourceFile,
-          'STA4031',
-          'internal',
-          'ts',
-          'unexpected nested pattern',
-        ),
-      );
+    if (
+      !bindPatternElement(
+        source,
+        index,
+        el,
+        declKind,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+        statements,
+      )
+    ) {
       return null;
     }
-    const read = lowerPatternRead(
-      source,
-      index,
-      el.name,
-      el,
-      sourceFile,
-      checker,
-      bindings,
-      diagnostics,
-    );
-    if (read === null) {
-      return null;
-    }
-    const type = typeAt(el.name, checker, bindings);
-    bindings.set(el.name.text, type);
-    statements.push({
-      kind: 'declaration',
-      type,
-      span: makeSpan(el.getStart(sourceFile), el.getWidth(sourceFile), sourceFile),
-      name: el.name.text,
-      declKind,
-      value: maybeBoundary(read, type, el, sourceFile),
-    });
     index += 1;
   }
   return statements;
@@ -983,6 +1017,7 @@ function lowerForOf(
     view: peeled === undefined ? 'identity' : peeled.view,
     body,
     ...(label !== undefined && { label }),
+    ...(loopNeedsPerIterationEnv(node, checker) && { perIterationEnv: true as const }),
   };
 }
 
@@ -1146,6 +1181,7 @@ function lowerFor(
     ...(update && { update }),
     body,
     ...(label && { label }),
+    ...(loopNeedsPerIterationEnv(node, checker) && { perIterationEnv: true as const }),
   };
 }
 
@@ -1209,6 +1245,19 @@ const COMPOUND_OPERATORS = new Map<ts.SyntaxKind, BinaryOperator>([
   [ts.SyntaxKind.AsteriskEqualsToken, '*'],
   [ts.SyntaxKind.SlashEqualsToken, '/'],
   [ts.SyntaxKind.PercentEqualsToken, '%'],
+  [ts.SyntaxKind.AsteriskAsteriskEqualsToken, '**'],
+  [ts.SyntaxKind.AmpersandEqualsToken, '&'],
+  [ts.SyntaxKind.BarEqualsToken, '|'],
+  [ts.SyntaxKind.CaretEqualsToken, '^'],
+  [ts.SyntaxKind.LessThanLessThanEqualsToken, '<<'],
+  [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken, '>>'],
+  [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken, '>>>'],
+]);
+
+const LOGICAL_ASSIGN_OPERATORS = new Map<ts.SyntaxKind, LogicalOp['operator']>([
+  [ts.SyntaxKind.AmpersandAmpersandEqualsToken, '&&'],
+  [ts.SyntaxKind.BarBarEqualsToken, '||'],
+  [ts.SyntaxKind.QuestionQuestionEqualsToken, '??'],
 ]);
 
 /** An expression used for its effect and not its value: the whole of an expression statement, or
@@ -1432,6 +1481,23 @@ function assignmentParts(
         };
       });
     }
+    const logicalAssign = LOGICAL_ASSIGN_OPERATORS.get(expr.operatorToken.kind);
+    if (logicalAssign !== undefined) {
+      return build(expr.left, (current) => {
+        const right = lowerExpression(expr.right, sourceFile, checker, bindings, diagnostics);
+        if (right === null) {
+          return null;
+        }
+        return {
+          kind: 'logical-op',
+          type: typeAt(expr, checker, bindings),
+          span: current.span,
+          operator: logicalAssign,
+          left: current,
+          right,
+        };
+      });
+    }
     return undefined;
   }
 
@@ -1490,6 +1556,9 @@ function memberAssignment(
     ts.isBinaryExpression(expr) && expr.operatorToken.kind !== ts.SyntaxKind.EqualsToken
       ? COMPOUND_OPERATORS.get(expr.operatorToken.kind)
       : undefined;
+  const logicalAssign = ts.isBinaryExpression(expr)
+    ? LOGICAL_ASSIGN_OPERATORS.get(expr.operatorToken.kind)
+    : undefined;
   const update = updateOperator(expr);
   const plain =
     ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.EqualsToken;
@@ -1505,7 +1574,7 @@ function memberAssignment(
   ) {
     return undefined;
   }
-  if (!plain && compound === undefined && update === undefined) {
+  if (!plain && compound === undefined && logicalAssign === undefined && update === undefined) {
     return undefined; // a binary operator that is not an assignment at all
   }
   // `C.count = …` looks like a member write and is not one: a static is a plain binding, so it
@@ -1665,6 +1734,19 @@ function memberAssignment(
             left: current,
             right,
           };
+  } else if (logicalAssign !== undefined) {
+    const right = lowerExpression(expr.right, sourceFile, checker, bindings, diagnostics);
+    value =
+      right === null
+        ? null
+        : {
+            kind: 'logical-op',
+            type: typeAt(expr, checker, bindings),
+            span,
+            operator: logicalAssign,
+            left: current,
+            right,
+          };
   } else {
     value = lowerExpression(expr.right, sourceFile, checker, bindings, diagnostics);
   }
@@ -1730,6 +1812,269 @@ function updateOperator(
     return { operand: expr.operand, operator: '-' };
   }
   return undefined;
+}
+
+function loopNeedsPerIterationEnv(loop: ts.IterationStatement, checker: ts.TypeChecker): boolean {
+  let captured = false;
+  const visit = (node: ts.Node, nested: boolean): void => {
+    if (captured) {
+      return;
+    }
+    if (isFunctionLike(node)) {
+      ts.forEachChild(node, (child) => visit(child, true));
+      return;
+    }
+    if (nested && ts.isIdentifier(node)) {
+      const decl = checker.getSymbolAtLocation(node)?.valueDeclaration;
+      if (
+        decl !== undefined &&
+        loopScopeOf(decl) === loop &&
+        !(
+          ts.isVariableDeclaration(decl) &&
+          ts.isVariableDeclarationList(decl.parent) &&
+          isVarDeclarationList(decl.parent)
+        )
+      ) {
+        captured = true;
+      }
+    }
+    ts.forEachChild(node, (child) => visit(child, nested));
+  };
+  visit(loop, false);
+  return captured;
+}
+
+function lowerUpdateExpression(
+  node: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Expression | null | undefined {
+  const parent = node.parent;
+  if (
+    ts.isExpressionStatement(parent) ||
+    (ts.isForStatement(parent) && parent.incrementor === node)
+  ) {
+    return undefined;
+  }
+  const update = updateOperator(node);
+  const plain =
+    ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+  const compound =
+    ts.isBinaryExpression(node) && node.operatorToken.kind !== ts.SyntaxKind.EqualsToken
+      ? COMPOUND_OPERATORS.get(node.operatorToken.kind)
+      : undefined;
+  const logical = ts.isBinaryExpression(node)
+    ? LOGICAL_ASSIGN_OPERATORS.get(node.operatorToken.kind)
+    : undefined;
+  if (update === undefined && compound === undefined && logical === undefined && !plain) {
+    return undefined;
+  }
+  const targetNode =
+    update !== undefined ? update.operand : ts.isBinaryExpression(node) ? node.left : undefined;
+  if (targetNode === undefined) {
+    return undefined;
+  }
+  const target = lowerUpdatePlace(targetNode, sourceFile, checker, bindings, diagnostics);
+  if (target === null) {
+    return null;
+  }
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  if (update !== undefined) {
+    const prefix = ts.isPrefixUnaryExpression(node);
+    return {
+      kind: 'update',
+      type: H_NUMBER,
+      span,
+      operator: update.operator === '+' ? '++' : '--',
+      prefix,
+      target,
+    };
+  }
+  const assignOp: UpdateExpr['operator'] | undefined =
+    compound ?? logical ?? (plain ? '=' : undefined);
+  if (assignOp !== undefined && ts.isBinaryExpression(node)) {
+    const value = lowerExpression(node.right, sourceFile, checker, bindings, diagnostics);
+    if (value === null) {
+      return null;
+    }
+    return {
+      kind: 'update',
+      type: typeAt(node, checker, bindings),
+      span,
+      operator: assignOp,
+      prefix: true,
+      target,
+      value,
+    };
+  }
+  return undefined;
+}
+
+function lowerUpdatePlace(
+  node: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): UpdatePlace | null {
+  const expr = lowerExpression(node, sourceFile, checker, bindings, diagnostics);
+  if (expr === null) {
+    return null;
+  }
+  if (
+    expr.kind === 'identifier' ||
+    expr.kind === 'index-access' ||
+    expr.kind === 'field-access' ||
+    expr.kind === 'dyn-field-access'
+  ) {
+    return expr;
+  }
+  diagnostics.push(
+    diagnosticFromNode(
+      node,
+      sourceFile,
+      'STA4033',
+      'internal',
+      'ts',
+      'update target must be a variable or member',
+    ),
+  );
+  return null;
+}
+
+function lowerForIn(
+  node: ts.ForInStatement,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+  label?: string,
+): Statement | null {
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const source = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+  if (source === null) {
+    return null;
+  }
+  const keysName = nextBindTemp();
+  const indexName = nextBindTemp();
+  const keysType = hArray(H_STRING);
+  bindings.set(keysName, keysType);
+  bindings.set(indexName, H_NUMBER);
+  let binding: string;
+  let declKind: 'let' | 'const' = 'let';
+  if (ts.isVariableDeclarationList(node.initializer)) {
+    const decl = node.initializer.declarations[0];
+    if (decl === undefined || !ts.isIdentifier(decl.name)) {
+      diagnostics.push(
+        diagnosticFromNode(
+          node.initializer,
+          sourceFile,
+          'STA4031',
+          'internal',
+          'ts',
+          'for-in binding must be a name',
+        ),
+      );
+      return null;
+    }
+    binding = decl.name.text;
+    declKind = (node.initializer.flags & ts.NodeFlags.Const) !== 0 ? 'const' : 'let';
+    bindings.set(binding, H_STRING);
+  } else if (ts.isIdentifier(node.initializer)) {
+    binding = node.initializer.text;
+  } else {
+    diagnostics.push(
+      diagnosticFromNode(
+        node.initializer,
+        sourceFile,
+        'STA4031',
+        'internal',
+        'ts',
+        'for-in binding must be a name',
+      ),
+    );
+    return null;
+  }
+  const body = lowerBody(node.statement, sourceFile, checker, bindings, diagnostics);
+  if (body === null) {
+    return null;
+  }
+  const keysId: Identifier = { kind: 'identifier', type: keysType, span, name: keysName };
+  const indexId: Identifier = { kind: 'identifier', type: H_NUMBER, span, name: indexName };
+  const keysDecl: Statement = {
+    kind: 'declaration',
+    type: keysType,
+    span,
+    name: keysName,
+    declKind: 'const',
+    value: { kind: 'object-static', type: keysType, span, method: 'keys', args: [source] },
+  };
+  const indexDecl: Statement = {
+    kind: 'declaration',
+    type: H_NUMBER,
+    span,
+    name: indexName,
+    declKind: 'let',
+    value: { kind: 'number-literal', type: H_NUMBER, span, value: 0 },
+  };
+  const length: Expression = { kind: 'array-length', type: H_NUMBER, span, operand: keysId };
+  const cond: Expression = {
+    kind: 'binary-op',
+    type: H_BOOLEAN,
+    span,
+    operator: '<',
+    left: indexId,
+    right: length,
+  };
+  const inc: Statement = {
+    kind: 'assignment',
+    type: H_NUMBER,
+    span,
+    target: indexName,
+    value: {
+      kind: 'binary-op',
+      type: H_NUMBER,
+      span,
+      operator: '+',
+      left: indexId,
+      right: { kind: 'number-literal', type: H_NUMBER, span, value: 1 },
+    },
+  };
+  const keyRead: Expression = {
+    kind: 'index-access',
+    type: H_STRING,
+    span,
+    target: keysId,
+    index: indexId,
+  };
+  const bindStmt: Statement = {
+    kind: 'declaration',
+    type: H_STRING,
+    span,
+    name: binding,
+    declKind,
+    value: keyRead,
+  };
+  const loopBody: Block = {
+    kind: 'block',
+    type: H_UNDEFINED,
+    span,
+    statements: [bindStmt, ...body.statements],
+  };
+  const loop: Statement = {
+    kind: 'for-statement',
+    type: H_UNDEFINED,
+    span,
+    init: indexDecl,
+    condition: cond,
+    update: inc,
+    body: loopBody,
+    ...(label !== undefined && { label }),
+    ...(loopNeedsPerIterationEnv(node, checker) && { perIterationEnv: true as const }),
+  };
+  return { kind: 'block', type: H_UNDEFINED, span, statements: [keysDecl, loop] };
 }
 
 /** The body of an `if`, loop, or labelled statement, as a Block.
@@ -1798,6 +2143,42 @@ function lowerExpression(
   // every other case, since a parenthesized anything can appear wherever an expression can.
   if (ts.isParenthesizedExpression(node)) {
     return lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+  }
+
+  if (ts.isVoidExpression(node)) {
+    const operand = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (operand === null) {
+      return null;
+    }
+    return {
+      kind: 'unary-op',
+      type: H_UNDEFINED,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      operator: 'void',
+      operand,
+    };
+  }
+
+  if (ts.isConditionalExpression(node)) {
+    const condition = lowerExpression(node.condition, sourceFile, checker, bindings, diagnostics);
+    const consequent = lowerExpression(node.whenTrue, sourceFile, checker, bindings, diagnostics);
+    const alternate = lowerExpression(node.whenFalse, sourceFile, checker, bindings, diagnostics);
+    if (condition === null || consequent === null || alternate === null) {
+      return null;
+    }
+    return {
+      kind: 'conditional',
+      type: typeAt(node, checker, bindings),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      condition,
+      consequent,
+      alternate,
+    };
+  }
+
+  const asUpdate = lowerUpdateExpression(node, sourceFile, checker, bindings, diagnostics);
+  if (asUpdate !== undefined) {
+    return asUpdate;
   }
 
   // `-1` parses as a prefix minus applied to the literal 1, but it is one negative number to a
@@ -2442,6 +2823,22 @@ function lowerExpression(
     // The right operand is a class NAME, and the name is taken from the DECLARATION rather than
     // from the reference: `import { C as D }` would spell the reference `D`, and the emitter's
     // descriptor is keyed by what the class calls itself.
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    const target = lowerExpression(node.left, sourceFile, checker, bindings, diagnostics);
+    if (target === null) {
+      return null;
+    }
+    if (ts.isIdentifier(node.right) && INSTANCEOF_BUILTINS.has(node.right.text)) {
+      const test: InstanceOf = {
+        kind: 'instanceof',
+        type: H_BOOLEAN,
+        span,
+        target,
+        className: node.right.text,
+        builtin: true,
+      };
+      return test;
+    }
     const declaration = checker.getSymbolAtLocation(node.right)?.valueDeclaration;
     if (
       declaration === undefined ||
@@ -2460,15 +2857,11 @@ function lowerExpression(
       );
       return null;
     }
-    const target = lowerExpression(node.left, sourceFile, checker, bindings, diagnostics);
-    if (target === null) {
-      return null;
-    }
     const test: InstanceOf = {
       kind: 'instanceof',
       // Always boolean, whatever the checker narrowed the expression to at this position.
       type: H_BOOLEAN,
-      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      span,
       target,
       className: declaration.name.text,
     };

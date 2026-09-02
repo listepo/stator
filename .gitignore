@@ -9,3 +9,7 @@ runtime/build-intl/
 .DS_Store
 /.serena
 reasonix.toml
+tests/differential/failures/
+tests/bench/results/
+tests/test262/results.json
+tests/test262/.tmp/

@@ -4167,3 +4167,122 @@ pattern, and pattern defaults stay not-yet. A typed `catch ({ message })` is a T
 
 Check: `tests/golden/{ts,js}/destructure.*` match Node; object/array destructuring decision tests
 out of expected-fail.
+
+## 162. Release archives are thin-LTO bitcode when the linker can read them (2026-09-02)
+
+The runtime's NaN-box accessors are `static inline` in `jsrt_value.h` and already inline into the
+generated C, but every builtin call (`jsrt_array_push`, `jsrt_map_get`, string concat, shape
+lookups) crossed the archive boundary as an out-of-line call. `just runtime` now probes
+`-flto=thin` end to end (compile → `$AR` → link a bitcode archive) and, where it works, compiles
+`build/` and `build-intl/` as bitcode and records the flag in `link-flags.txt`; `src/cli/build.ts`
+reads it back, so its one clang call compiles the generated C to bitcode too and the link is one
+module. The probe, not a guess, decides: ld64 and lld read bitcode archives, GNU ld only with the
+LLVMgold plugin, and a wrong assumption is an unreadable archive on every compile. `build-asan/`
+never uses LTO (sanitizer reports should name a line, and cross-module inlining blurs them). A
+changed probe result or Boehm status now rebuilds every object (`build*/cflags.txt`): the timestamp
+walk cannot see a flag change, and a mixed archive links fine while silently lacking what the flag
+was for. `just runtime-test` links the print corpus from `link-flags.txt` instead of rediscovering
+`-lgc` itself, which also removes a duplicate of the Boehm probe.
+
+Measured here (Apple clang 21.0.0, arm64 macOS, Boehm 8.2.12, a 200k-element array/Map/string/
+class loop ×20, best of 6, `GC_DONT_GC=1` so collection timing does not enter): 1262 ms → 1203 ms
+(−4.7%); binary 72,536 → 88,024 bytes; the CLI's compile+link step 81 ms → 330 ms. Modest, and the
+compile-time cost lands on every golden fixture; `tests/bench/baseline.json` compile times will
+read high against this until re-recorded.
+
+**Found while measuring, not fixed here:** the same program is nondeterministic and sometimes
+segfaults with the collector on, in both the LTO and the plain build, and is deterministic and
+matches Node with `GC_DONT_GC=1` — a live object is being collected. Each of the four loops alone
+(array push/for-of, Map set/get, string `+=`, class instances in an array) runs clean; the
+combination does not. Tracked as its own task; it predates this note.
+
+Check: `just runtime` prints `thin LTO`, `file runtime/build/jsrt_ops.o` says `LLVM bitcode`,
+`link-flags.txt` starts with `-flto=thin`; `pnpm run test:golden` and `just runtime-test` pass on
+the bitcode archive; `just runtime-asan` reports `no LTO (sanitized build)`.
+
+## 163. The roots hook replaced Boehm's stack scan instead of extending it (2026-09-02)
+
+The nondeterminism note 162 found. Minimal failing pair: a Map filled with 200k `set`s over 5000
+keys, then 20k string concatenations, twenty rounds — each loop alone was clean 8/8, the pair
+failed 10/10, and always the same way: at the grow from 4096 to 8192 entries the map's `used`
+collapsed to the inserts since the previous grow while `size` kept counting, so every key placed
+before it was unfindable and got re-inserted (`size` 5008, 7048, 9096 in the golden runs; the
+"+8" totals were `m.size` overshooting). A C harness that mirrors the pair and checks
+`GC_base(m->entries)` after every insert caught the moment: inside `grow`, the freshly allocated
+entries block — held only in the C local `entries` while the index was allocated — was on Boehm's
+free list by the time the index allocation returned, and the next large allocation (a 40 KB
+string, or the next grow) was carved out of it and zero-filled. `GC_is_marked` at every mark end
+said the header, the old entries and the old index were marked: hook 1 and the frame roots were
+doing their job. What was missing was the C stack.
+
+Root cause: `GC_set_push_other_roots(jsrt_push_roots)` *replaces* the hook. In a threads-enabled
+Boehm — every packaged one, Homebrew's and Debian's — the hook it replaces is `GC_push_all_stacks`,
+which is the conservative scan of the C stack and registers (`mark_rts.c`: "in the threads case,
+this also pushes thread stacks"). So since note 108 no raw pointer in a runtime local has been a
+root. Everything reachable from a frame slot survived, which is why the corpus, the goldens and
+the leak test stayed green; only a function that allocates twice and holds the first block in a
+local across the second could lose it — `grow` (entries, then index), `jsrt_array_new` (header,
+then elements), the iterator and promise constructors — and only when a collection landed between
+the two, which took the string churn to provoke.
+
+Fix: `jsrt_gc_init` saves `GC_get_push_other_roots()` and `jsrt_push_roots` calls it first, then
+walks the frames. One static and three lines; the design in §4.12 is unchanged, it simply now
+holds. The harness runs clean 20/20 rounds with the fix and fails within three rounds without it.
+Not a rooting bug in generated code: the emitter already keeps every temporary in a slot, and
+`--keep-c` on the reproducer confirms it.
+
+Check: `tests/golden/ts/gc_roots.ts` (the four loops, twenty rounds, plus a per-key count check)
+matches Node; before the fix it printed varying totals and died with SIGSEGV/SIGBUS about one run
+in three. `pnpm run test:leak` still plateaus.
+
+
+## 164. Expression-position residue is one family of HIR nodes, not a second lowering (2026-09-02)
+
+Family (b) of Phase 5 step 12. The gate's leftover `describeKind` catch-alls were labels on a
+block, value-position `++`/`+=`/`=`, `**` / `void` / comma / ternary / `in`, for-in, builtin
+`instanceof`, and capturing a loop `let`. Each is now a node the HIR already had or a small
+addition (`UpdateExpr`, `ConditionalExpr`, `Block.label`, `perIterationEnv`), not a mode-aware
+special case below the gate.
+
+Decisions that need a note rather than a comment:
+
+- **Value-position assignment is `UpdateExpr` with `operator: '='`.** Statement position still
+  folds to `Assignment`. The comma fixture `(n = 1, n + 1)` is why `=` cannot stay
+  statement-only.
+- **`instanceof Function` names a tag, not the constructor.** `Function` as a value is still
+  STA1103/STA1206; the right operand of `instanceof` is not a global read (`isGlobalReference`).
+- **Per-iteration environments skip `var`.** `for (var i)` is one function-scoped binding;
+  cloning it made `tests/golden/js/var_hoist.js` disagree with Node (1\n2 vs 2\n2).
+- **A `for` incrementor runs on the control env after the clone is committed.** Incrementing the
+  clone itself left `() => i` seeing 1, 2, 3 after the loop. Node's 0, 1, 2 is the body snapshot.
+- **The clone is the whole `JSRTEnv`.** Mixed shared+per-iter slots in one function env are an
+  approximation; goldens keep the classic "only `i` is captured" shape, inside a function (a
+  module-level `let` is a global, not an env slot).
+- **A simple ternary still writes its frame slot.** Eliding the store for `c ? 1 : 2` left
+  `JSRT_GLOBALS` larger than any `JSRT_GLOBAL(i)` write (`frames.test.ts`).
+
+Not in this family: accessor compound (`o.x += 1` on a getter) stays (d); `#n in o` stays
+not-yet; boxed `Error`/`Boolean`/`Number`/`String` have no representation, so `instanceof` them
+answers false.
+
+Check: `tests/golden/{ts,js}/expr_residue.*` match Node; subset family-(b) rows are out of
+`@expected-fail`; `pnpm run test:subset` 322 fixtures, 0 failed.
+
+## 165. Phase 6 evidence harnesses are offline-safe and pinned (2026-09-02)
+
+Phase 6's runner surfaces are now present without adding a dependency: Test262 stores only its
+corpus SHA and fetches into an ignored directory, the differential fuzzer uses xorshift32 seeds,
+and the benchmark recorder retains the Phase 2 baseline while adding runtime/RSS/engine results.
+The Test262 runner deliberately reports a visible skip when the corpus is absent, and treats an
+unmapped feature tag as a failure. The nightly workflow derives its fuzzer seed from
+`github.run_number`; it uploads findings and benchmark results rather than committing from CI.
+
+The thin-LTO toy probe was a false positive on this host's pinned conda-clang 21.1.8/Darwin
+linker: it accepted the toy archive but the real runtime archive aborted with `LLVM ERROR:
+Unsupported stack probing method`. `justfile` therefore disables LTO on Darwin until a real
+runtime/archive probe exists; Linux retains the probe. This is a compatibility guard, not a
+semantics change to the runtime.
+
+The owner policy for weekly results is **no CI write-back to `main`**: CI uploads the immutable
+JSON artifact and the generated page; a deliberate owner-side commit is required for a result to
+enter history. This avoids a bot commit racing feature work while preserving every measurement.

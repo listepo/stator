@@ -252,6 +252,27 @@ JSRTEnv *jsrt_env_new(JSRTEnv *parent, uint32_t count) {
   return env;
 }
 
+JSRTEnv *jsrt_env_clone(JSRTEnv *env) {
+  if (env == NULL) {
+    return NULL;
+  }
+  JSRTEnv *copy = jsrt_env_new(env->parent, env->count);
+  for (uint32_t i = 0; i < env->count; i++) {
+    copy->slots[i] = env->slots[i];
+  }
+  return copy;
+}
+
+void jsrt_env_copy_slots(JSRTEnv *dst, const JSRTEnv *src) {
+  if (dst == NULL || src == NULL) {
+    return;
+  }
+  const uint32_t n = dst->count < src->count ? dst->count : src->count;
+  for (uint32_t i = 0; i < n; i++) {
+    dst->slots[i] = src->slots[i];
+  }
+}
+
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
                             uint32_t arity, const char *name, JSRTEnv *env) {
   JSRTClosure *c = (JSRTClosure *)jsrt_gc_alloc(sizeof(JSRTClosure), "closure");

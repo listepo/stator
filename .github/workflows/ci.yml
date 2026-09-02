@@ -32,6 +32,26 @@ concurrency:
 # default, plan.md Task 4.4) and therefore had no coverage at all until this job existed.
 
 jobs:
+  # Test262 is intentionally separate from pnpm run ci: a missing corpus must not make the local
+  # offline gate lie, while this job makes the pinned conformance number visible on every commit.
+  test262:
+    name: test262 conformance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: actions/cache@v4
+        with:
+          path: tests/test262/corpus
+          key: test262-${{ hashFiles('tests/test262/pin.json') }}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test262:fetch
+      - name: Run Test262
+        run: pnpm run test262 2>&1 | tee test262.log
+      - name: Publish conformance summary
+        if: always()
+        run: grep '^test262:' test262.log >> "$GITHUB_STEP_SUMMARY" || true
+
   # Host-independent by construction: no native code, no filesystem semantics, no clang. Running
   # these six times would prove the same thing six times.
   static:
@@ -39,11 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
+      - uses: ./.github/actions/setup
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run lint
@@ -71,11 +87,7 @@ jobs:
         if: runner.os != 'Windows'
         with:
           just-version: '1.58.0'
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
+      - uses: ./.github/actions/setup
       - name: Record toolchain
         shell: bash
         run: |
@@ -126,11 +138,7 @@ jobs:
       - uses: extractions/setup-just@v3
         with:
           just-version: '1.58.0'
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
+      - uses: ./.github/actions/setup
       # Without bdw-gc the justfile silently falls back to malloc and `test:leak` SKIPS -- a green
       # run that proved nothing about GC hygiene (plan.md Task 4.5). Installing it is what makes
       # the leak job's plateau assertion a real assertion.
@@ -173,11 +181,7 @@ jobs:
       - uses: extractions/setup-just@v3
         with:
           just-version: '1.58.0'
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
+      - uses: ./.github/actions/setup
       - name: Install Boehm GC
         shell: bash
         run: |
@@ -207,11 +211,7 @@ jobs:
       - uses: extractions/setup-just@v3
         with:
           just-version: '1.58.0'
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
+      - uses: ./.github/actions/setup
       # icu4c is keg-only on Homebrew, so its .pc files are not on the default search path and
       # `just runtime-intl` would report ICU missing on a machine that has it.
       - name: Install ICU and Boehm GC

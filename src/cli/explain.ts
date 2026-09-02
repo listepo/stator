@@ -306,6 +306,17 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'string-length':
     case 'array-length':
       return expressionHasUnknown(expr.operand);
+    case 'conditional':
+      return (
+        expressionHasUnknown(expr.condition) ||
+        expressionHasUnknown(expr.consequent) ||
+        expressionHasUnknown(expr.alternate)
+      );
+    case 'update':
+      return (
+        expressionHasUnknown(expr.target) ||
+        (expr.value !== undefined && expressionHasUnknown(expr.value))
+      );
     // The literal's own type came from the checker, so a `number[]` stays static even though each
     // element is inspected here -- what this catches is an element whose *subexpression* is
     // dynamic, e.g. `[f()]` where `f` returns `any`.

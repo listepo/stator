@@ -1,6 +1,5 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Exponentiation operator **
 
 const a: number = 2;

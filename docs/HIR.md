@@ -282,9 +282,9 @@ Two decisions there are load-bearing:
   distinct jump) dispatched after the finally body. Encoding that routing in the HIR would force
   every pass to preserve a control structure none of them can improve.
 
-Future phases add: `for-in`, general property access, and the rest.
+A loop or switch carries its own optional `label`; a labelled block stores `Block.label`. There is no LabeledStatement wrapper. A label exists only to be named by `break`/`continue`, so it belongs to the thing being jumped out of. `continue` cannot target a block.
 
-A loop or switch carries its own optional `label`; there is no LabeledStatement wrapper. A label exists only to be named by `break`/`continue`, so it belongs to the thing being jumped out of, and a wrapper would sit between the jump and its target for no gain.
+`for-in` desugars in lowering to `Object.keys` plus a counting `for`. Value-position `++`/`--`/`+=`/`=` is `UpdateExpr`; `c ? t : f` is `ConditionalExpr`. Loops that capture a binding they declare set `perIterationEnv`, and the emitter clones the heap environment each iteration.
 
 Three shapes here exist to stop the emitter from being clever:
 

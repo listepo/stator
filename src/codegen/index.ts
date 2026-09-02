@@ -12,6 +12,7 @@ import type {
   ClassMethod,
   CollectionOp,
   CollectionOperation,
+  ConditionalExpr,
   DateComponents,
   DateNew,
   DateOp,
@@ -48,6 +49,7 @@ import type {
   TemplateLiteral,
   TryStatement,
   UnaryOp,
+  UpdateExpr,
   VtableEntry,
   YieldExpr,
 } from '../hir/nodes.ts';
@@ -98,6 +100,9 @@ const BINARY_EMITTERS: Readonly<Record<BinaryOp['operator'], (l: string, r: stri
   '<<': (l, r) => `jsrt_op_shl(${l}, ${r})`,
   '>>': (l, r) => `jsrt_op_shr(${l}, ${r})`,
   '>>>': (l, r) => `jsrt_op_ushr(${l}, ${r})`,
+  '**': (l, r) => `jsrt_math_pow(${l}, ${r})`,
+  ',': (_l, r) => r,
+  in: (l, r) => `jsrt_bool(jsrt_in(${l}, ${r}))`,
 };
 
 /** C fragment for each unary operator.
@@ -121,6 +126,7 @@ const UNARY_EMITTERS: Readonly<Record<UnaryOp['operator'], (operand: string) => 
   '+': (x) => `jsrt_number(jsrt_to_number(${x}))`,
   '!': (x) => `jsrt_bool(!jsrt_truthy(${x}))`,
   '~': (x) => `jsrt_op_bitnot(${x})`,
+  void: (x) => `(${x}, JSRT_UNDEFINED)`,
 };
 
 /** Render a JS number as a C literal that parses back to the SAME double.
@@ -229,7 +235,8 @@ class Emitter {
   /** Frame slot holding each short-circuit operator's left operand. Keyed by node identity, since
    * two `&&`s in one expression must not share a slot: the outer one's value stays live while the
    * inner one is being evaluated. */
-  private tempSlots: Map<AwaitExpr | LogicalOp | YieldExpr, number> = new Map();
+  private tempSlots: Map<AwaitExpr | LogicalOp | YieldExpr | ConditionalExpr | UpdateExpr, number> =
+    new Map();
   /* C does not specify which operand of an operator or function call it evaluates first. Every
    * BinaryOp therefore gets two rooted slots: emitting `left` into the first before `right` into
    * the second makes the JavaScript left-to-right rule explicit, and preserves the left value if
@@ -290,7 +297,7 @@ class Emitter {
    * Same unspecified-order argument as binarySlots: `jsrt_array_get(a(), i())` would let C run
    * `i()` first, and a collection during `i()` could free the array `a()` just produced. */
   private indexSlots: Map<
-    DynFieldAssignment | FieldAssignment | IndexAccess | IndexAssignment,
+    DynFieldAssignment | FieldAssignment | IndexAccess | IndexAssignment | UpdateExpr,
     number
   > = new Map();
   /* The for-of iterable's slot. Evaluated ONCE -- `for (const x of f())` calls `f` once -- and the
@@ -342,7 +349,7 @@ class Emitter {
 
   /* Loops and switches currently open, innermost last -- the emitter's mirror of the verifier's
    * Enclosing stack, carrying the id that names this construct's C labels. */
-  private enclosing: { id: number; label?: string; isLoop: boolean }[] = [];
+  private enclosing: { id: number; label?: string; isLoop: boolean; iterEnv?: boolean }[] = [];
   private loopCount: number = 0;
   /* Labels a `goto` actually targets. C warns on a label nothing jumps to, and the runtime builds
    * with -Wall -Wextra -Werror, so an unconditional `brk_N:` after every loop would turn a plain
@@ -953,6 +960,30 @@ class Emitter {
       case 'array-length':
         this.countExpression(expr.operand);
         break;
+      case 'conditional':
+        this.tempSlots.set(expr, this.slotCount);
+        this.slotCount++;
+        this.countExpression(expr.condition);
+        this.countExpression(expr.consequent);
+        this.countExpression(expr.alternate);
+        break;
+      case 'update':
+        this.tempSlots.set(expr, this.slotCount);
+        this.slotCount++;
+        if (expr.target.kind === 'index-access') {
+          this.indexSlots.set(expr, this.slotCount);
+          this.slotCount += 2;
+          this.countExpression(expr.target.target);
+          this.countExpression(expr.target.index);
+        } else if (expr.target.kind === 'field-access' || expr.target.kind === 'dyn-field-access') {
+          this.indexSlots.set(expr, this.slotCount);
+          this.slotCount++;
+          this.countExpression(expr.target.target);
+        }
+        if (expr.value !== undefined) {
+          this.countExpression(expr.value);
+        }
+        break;
       // A check allocates nothing on the passing path and does not return on the failing one, so
       // the value it guards needs no slot beyond whatever building it already claimed.
       case 'boundary-check':
@@ -1228,7 +1259,8 @@ class Emitter {
       }
 
       case 'while-statement': {
-        const id = this.enterLoop(stmt.label);
+        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        this.emitIterEnvOpen(id, stmt.span);
         // The condition is captured, not emitted in place: it re-runs every iteration, so any
         // statements it needs (a call and its pending check) must land INSIDE the loop, and a
         // statement cannot sit inside `while (...)`. With none, the compact form survives.
@@ -1245,27 +1277,33 @@ class Emitter {
           this.usedLabels.add(`brk_${id}`);
           this.appendLine(`if (!jsrt_truthy(${cond.value})) { goto brk_${id}; }`, stmt.span);
         }
+        this.emitIterEnvEnter(id, stmt.span);
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
         }
         this.emitJumpTarget(`cont_${id}`, stmt.span);
+        this.emitIterEnvCommit(id, stmt.span);
         this.indent--;
         this.appendLine('}', stmt.span);
         this.emitJumpTarget(`brk_${id}`, stmt.span);
+        this.emitIterEnvClose(id, stmt.span);
         this.enclosing.pop();
         break;
       }
 
       case 'do-while-statement': {
-        const id = this.enterLoop(stmt.label);
+        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        this.emitIterEnvOpen(id, stmt.span);
         this.appendLine('do {', stmt.span);
         this.indent++;
+        this.emitIterEnvEnter(id, stmt.span);
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
         }
         // `continue` in a do/while jumps to the TEST, not past it -- the loop still gets to decide
         // whether to run again. Placing the target at the end of the body is what achieves that.
         this.emitJumpTarget(`cont_${id}`, stmt.span);
+        this.emitIterEnvCommit(id, stmt.span);
         const cond = this.capture(() => this.emitExpression(stmt.condition));
         if (cond.lines.length === 0) {
           this.indent--;
@@ -1280,15 +1318,17 @@ class Emitter {
           this.appendLine('} while (1);', stmt.span);
         }
         this.emitJumpTarget(`brk_${id}`, stmt.span);
+        this.emitIterEnvClose(id, stmt.span);
         this.enclosing.pop();
         break;
       }
 
       case 'for-statement': {
-        const id = this.enterLoop(stmt.label);
         if (stmt.init) {
           this.emitStatement(stmt.init);
         }
+        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        this.emitIterEnvOpen(id, stmt.span);
         // An absent condition is an infinite loop, not a false one. `while (1)` rather than
         // synthesising a `true` literal, so nothing downstream has to evaluate a fake node. A
         // present one is captured like while's: its statements must re-run every iteration.
@@ -1310,6 +1350,7 @@ class Emitter {
           this.usedLabels.add(`brk_${id}`);
           this.appendLine(`if (!jsrt_truthy(${cond.value})) { goto brk_${id}; }`, stmt.span);
         }
+        this.emitIterEnvEnter(id, stmt.span);
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
         }
@@ -1317,12 +1358,16 @@ class Emitter {
         // it is lowered naively: `continue` skips the rest of the body but must still run `i++`,
         // or the loop never terminates.
         this.emitJumpTarget(`cont_${id}`, stmt.span);
+        // Commit before the update so `i++` mutates the CONTROL env, not the clone the body
+        // captured — otherwise `() => i` would see the post-increment value (1, 2, 3).
+        this.emitIterEnvCommit(id, stmt.span);
         if (stmt.update) {
           this.emitStatement(stmt.update);
         }
         this.indent--;
         this.appendLine('}', stmt.span);
         this.emitJumpTarget(`brk_${id}`, stmt.span);
+        this.emitIterEnvClose(id, stmt.span);
         this.enclosing.pop();
         break;
       }
@@ -1353,6 +1398,15 @@ class Emitter {
       }
 
       case 'block': {
+        if (stmt.label !== undefined) {
+          const id = this.enterBreakable(stmt.label);
+          for (const s of stmt.statements) {
+            this.emitStatement(s);
+          }
+          this.emitJumpTarget(`brk_${id}`, stmt.span);
+          this.enclosing.pop();
+          break;
+        }
         for (const s of stmt.statements) {
           this.emitStatement(s);
         }
@@ -1392,7 +1446,8 @@ class Emitter {
         }
         const iterable = this.slotAt(slot);
         this.appendLine(`${iterable} = ${this.emitExpression(stmt.iterable)};`, stmt.span);
-        const id = this.enterLoop(stmt.label);
+        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        this.emitIterEnvOpen(id, stmt.span);
         if (stmt.iterable.type.kind === 'iterator') {
           this.emitBoxedIteratorForOf(stmt, iterable, id);
           break;
@@ -1448,13 +1503,16 @@ class Emitter {
           this.indent++;
           this.emitArrayForOfYield(stmt, iterable, cursor);
         }
+        this.emitIterEnvEnter(id, stmt.span);
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
         }
         this.emitJumpTarget(`cont_${id}`, stmt.span);
+        this.emitIterEnvCommit(id, stmt.span);
         this.indent--;
         this.appendLine('}', stmt.span);
         this.emitJumpTarget(`brk_${id}`, stmt.span);
+        this.emitIterEnvClose(id, stmt.span);
         this.enclosing.pop();
         break;
       }
@@ -1508,18 +1566,11 @@ class Emitter {
       }
 
       case 'field-assignment': {
-        const base = this.indexSlots.get(stmt);
-        if (base === undefined) {
-          throw new Error('field assignment was not registered during counting');
-        }
-        const target = this.slotAt(base);
-        const value = this.slotAt(base + 1);
-        const parts: string[] = [];
-        this.sequencePart(parts, stmt.target, stmt.span, (v) => `${target} = ${v}`);
-        this.sequencePart(parts, stmt.value, stmt.span, (v) => `${value} = ${v}`);
-        parts.push(`jsrt_object_set(${target}, ${stmt.slot}, ${value})`);
-        this.flushParts(parts, stmt.span);
-        this.emitPendingCheck(stmt.span);
+        this.emitFieldWrite(
+          stmt,
+          (target, value) => `jsrt_object_set(${target}, ${stmt.slot}, ${value})`,
+          'field assignment was not registered during counting',
+        );
         break;
       }
 
@@ -1527,20 +1578,12 @@ class Emitter {
       // (a string, not a slot -- the shape table resolves it), and the per-site cache. A frozen
       // object throws, so a pending check follows.
       case 'dyn-field-assignment': {
-        const base = this.indexSlots.get(stmt);
-        if (base === undefined) {
-          throw new Error('dynamic field assignment was not registered during counting');
-        }
-        const target = this.slotAt(base);
-        const value = this.slotAt(base + 1);
-        const parts: string[] = [];
-        this.sequencePart(parts, stmt.target, stmt.span, (v) => `${target} = ${v}`);
-        this.sequencePart(parts, stmt.value, stmt.span, (v) => `${value} = ${v}`);
-        parts.push(
-          `jsrt_set_prop(${target}, ${cNameLiteral(stmt.field)}, ${value}, &${this.icSite()})`,
+        this.emitFieldWrite(
+          stmt,
+          (target, value) =>
+            `jsrt_set_prop(${target}, ${cNameLiteral(stmt.field)}, ${value}, &${this.icSite()})`,
+          'dynamic field assignment was not registered during counting',
         );
-        this.flushParts(parts, stmt.span);
-        this.emitPendingCheck(stmt.span);
         break;
       }
 
@@ -1651,10 +1694,12 @@ class Emitter {
     );
     this.indent++;
     this.emitMapSetForOfYield(stmt, key, val);
+    this.emitIterEnvEnter(id, span);
     for (const s of stmt.body.statements) {
       this.emitStatement(s);
     }
     this.emitJumpTarget(`cont_${id}`, span);
+    this.emitIterEnvCommit(id, span);
     this.indent--;
     this.appendLine('}', span);
 
@@ -1679,6 +1724,7 @@ class Emitter {
     }
     this.indent--;
     this.appendLine('}', span);
+    this.emitIterEnvClose(id, span);
     this.enclosing.pop();
   }
 
@@ -1732,20 +1778,92 @@ class Emitter {
     this.indent--;
     this.appendLine('}', span);
     this.appendLine(`${this.slotRef(stmt.binding)} = ${item};`, span);
+    this.emitIterEnvEnter(id, span);
     for (const s of stmt.body.statements) {
       this.emitStatement(s);
     }
     this.emitJumpTarget(`cont_${id}`, span);
+    this.emitIterEnvCommit(id, span);
     this.indent--;
     this.appendLine('}', span);
     this.emitJumpTarget(`brk_${id}`, span);
+    this.emitIterEnvClose(id, span);
     this.enclosing.pop();
   }
 
-  private enterLoop(label?: string): number {
+  private enterLoop(label?: string, perIterationEnv?: true): number {
     const id = this.loopCount++;
-    this.enclosing.push({ id, isLoop: true, ...(label !== undefined && { label }) });
+    const iterEnv = perIterationEnv === true && this.envMap.size > 0;
+    this.enclosing.push({
+      id,
+      isLoop: true,
+      ...(label !== undefined && { label }),
+      ...(iterEnv && { iterEnv: true }),
+    });
     return id;
+  }
+
+  private enterBreakable(label: string): number {
+    const id = this.loopCount++;
+    this.enclosing.push({ id, isLoop: false, label });
+    return id;
+  }
+
+  private iterEnvOf(id: number): boolean {
+    return this.enclosing.some((e) => e.id === id && e.iterEnv === true);
+  }
+
+  private emitIterEnvOpen(id: number, span: Span): void {
+    if (!this.iterEnvOf(id)) {
+      return;
+    }
+    this.appendLine('{', span);
+    this.indent++;
+    this.appendLine(`JSRTEnv *_jsrt_saved_env_${id} = _jsrt_env;`, span);
+    this.appendLine(`JSRTEnv *_jsrt_iter_env_${id} = NULL;`, span);
+  }
+
+  private emitIterEnvEnter(id: number, span: Span): void {
+    if (!this.iterEnvOf(id)) {
+      return;
+    }
+    this.appendLine(`if (_jsrt_saved_env_${id} != NULL) {`, span);
+    this.indent++;
+    this.appendLine(`_jsrt_iter_env_${id} = jsrt_env_clone(_jsrt_saved_env_${id});`, span);
+    this.appendLine(`_jsrt_env = _jsrt_iter_env_${id};`, span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', span);
+    this.indent--;
+    this.appendLine('}', span);
+  }
+
+  private emitIterEnvCommit(id: number, span: Span): void {
+    if (!this.iterEnvOf(id)) {
+      return;
+    }
+    this.appendLine(`if (_jsrt_iter_env_${id} != NULL) {`, span);
+    this.indent++;
+    this.appendLine(`jsrt_env_copy_slots(_jsrt_saved_env_${id}, _jsrt_iter_env_${id});`, span);
+    this.appendLine(`_jsrt_env = _jsrt_saved_env_${id};`, span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', span);
+    this.indent--;
+    this.appendLine('}', span);
+  }
+
+  private emitIterEnvClose(id: number, span: Span): void {
+    if (!this.iterEnvOf(id)) {
+      return;
+    }
+    this.indent--;
+    this.appendLine('}', span);
+  }
+
+  private commitIterEnvs(fromIndexInclusive: number, span: Span): void {
+    for (let i = this.enclosing.length - 1; i >= fromIndexInclusive; i--) {
+      const e = this.enclosing[i];
+      if (e !== undefined && e.iterEnv === true) {
+        this.emitIterEnvCommit(e.id, span);
+      }
+    }
   }
 
   /* A `label: ;` line, written only if something jumps to it. The trailing `;` is not cosmetic:
@@ -1773,6 +1891,25 @@ class Emitter {
    * STATEMENTS -- never inside a consumer's expression -- precisely so this line can sit between
    * the operation and whatever consumes its result: a callee that threw left `undefined` behind,
    * and nothing may observe it. */
+  private emitFieldWrite(
+    stmt: FieldAssignment | DynFieldAssignment,
+    write: (target: string, value: string) => string,
+    missing: string,
+  ): void {
+    const base = this.indexSlots.get(stmt);
+    if (base === undefined) {
+      throw new Error(missing);
+    }
+    const target = this.slotAt(base);
+    const value = this.slotAt(base + 1);
+    const parts: string[] = [];
+    this.sequencePart(parts, stmt.target, stmt.span, (v) => `${target} = ${v}`);
+    this.sequencePart(parts, stmt.value, stmt.span, (v) => `${value} = ${v}`);
+    parts.push(write(target, value));
+    this.flushParts(parts, stmt.span);
+    this.emitPendingCheck(stmt.span);
+  }
+
   private emitPendingCheck(span: Span): void {
     this.appendLine(`if (jsrt_pending()) { goto ${this.currentPad()}; }`, span);
   }
@@ -1830,6 +1967,8 @@ class Emitter {
       this.routeJump(scope, name, span, () => this.emitLoopJump(name, targetIndex, span));
       return;
     }
+    const continuing = name.startsWith('cont_');
+    this.commitIterEnvs(continuing ? targetIndex + 1 : targetIndex, span);
     this.usedLabels.add(name);
     this.appendLine(`goto ${name};`, span);
   }
@@ -1839,6 +1978,7 @@ class Emitter {
   private emitReturnJump(span: Span): void {
     const scope = this.tryFinallyStack.at(-1);
     if (scope === undefined) {
+      this.commitIterEnvs(0, span);
       const slot = this.slotAt(this.returnSlot);
       if (this.inAsync) {
         this.emitAsyncSettle('jsrt_async_return', slot, span);
@@ -2096,6 +2236,14 @@ class Emitter {
 
       case 'logical-op': {
         return this.emitLogicalOp(expr);
+      }
+
+      case 'conditional': {
+        return this.emitConditional(expr);
+      }
+
+      case 'update': {
+        return this.emitUpdate(expr);
       }
 
       case 'template-literal': {
@@ -2672,6 +2820,9 @@ class Emitter {
       // identity and the test is a pointer comparison. `classAt` is called for its check alone:
       // it throws if counting and emission disagree about which classes exist.
       case 'instanceof': {
+        if (expr.builtin === true) {
+          return `jsrt_bool(jsrt_instanceof_builtin(${this.emitExpression(expr.target)}, ${cNameLiteral(expr.className)}))`;
+        }
         this.classAt(expr.className);
         const id = String(this.classIds.get(expr.className));
         return `jsrt_bool(jsrt_instanceof(${this.emitExpression(expr.target)}, &_jsrt_class_${id}))`;
@@ -3138,6 +3289,151 @@ class Emitter {
     this.indent--;
     this.appendLine('}', expr.span);
     return temp;
+  }
+
+  private emitConditional(expr: ConditionalExpr): string {
+    const slot = this.tempSlots.get(expr);
+    if (slot === undefined) {
+      throw new Error('conditional has no frame slot; countExpression missed a node');
+    }
+    const temp = this.slotAt(slot);
+    const cond = this.emitExpression(expr.condition);
+    this.indent++;
+    const thenCap = this.capture(() => this.emitExpression(expr.consequent));
+    const elseCap = this.capture(() => this.emitExpression(expr.alternate));
+    this.indent--;
+    if (thenCap.lines.length === 0 && elseCap.lines.length === 0) {
+      this.appendLine(
+        `${temp} = jsrt_truthy(${cond}) ? (${thenCap.value}) : (${elseCap.value});`,
+        expr.span,
+      );
+      return temp;
+    }
+    this.appendLine(`if (jsrt_truthy(${cond})) {`, expr.span);
+    this.indent++;
+    this.lines.push(...thenCap.lines);
+    this.appendLine(`${temp} = ${thenCap.value};`, expr.span);
+    this.indent--;
+    this.appendLine('} else {', expr.span);
+    this.indent++;
+    this.lines.push(...elseCap.lines);
+    this.appendLine(`${temp} = ${elseCap.value};`, expr.span);
+    this.indent--;
+    this.appendLine('}', expr.span);
+    return temp;
+  }
+
+  private emitUpdate(expr: UpdateExpr): string {
+    const slot = this.tempSlots.get(expr);
+    if (slot === undefined) {
+      throw new Error('update has no frame slot; countExpression missed a node');
+    }
+    const result = this.slotAt(slot);
+    const place = expr.target;
+    let read: string;
+    let write: (value: string) => string;
+    switch (place.kind) {
+      case 'identifier': {
+        const ref = this.slotRef(place.name);
+        read = ref;
+        write = (value: string) => `${ref} = ${value}`;
+        break;
+      }
+      case 'index-access': {
+        const base = this.indexSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('update index place was not registered during counting');
+        }
+        const target = this.slotAt(base);
+        const index = this.slotAt(base + 1);
+        this.appendLine(`${target} = ${this.emitExpression(place.target)};`, expr.span);
+        this.appendLine(`${index} = ${this.emitExpression(place.index)};`, expr.span);
+        const dyn = place.target.type.kind === 'unknown';
+        read = dyn
+          ? `jsrt_dyn_index_get(${target}, ${index}, NULL)`
+          : `jsrt_array_get(${target}, ${index})`;
+        write = (value: string) =>
+          dyn
+            ? `jsrt_dyn_index_set(${target}, ${index}, ${value}, NULL)`
+            : `jsrt_array_set(${target}, ${index}, ${value})`;
+        break;
+      }
+      case 'field-access': {
+        const base = this.indexSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('update field place was not registered during counting');
+        }
+        const target = this.slotAt(base);
+        this.appendLine(`${target} = ${this.emitExpression(place.target)};`, expr.span);
+        read = `jsrt_object_get(${target}, ${place.slot})`;
+        write = (value: string) => `jsrt_object_set(${target}, ${place.slot}, ${value})`;
+        break;
+      }
+      case 'dyn-field-access': {
+        const base = this.indexSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('update dynamic field place was not registered during counting');
+        }
+        const target = this.slotAt(base);
+        this.appendLine(`${target} = ${this.emitExpression(place.target)};`, expr.span);
+        const ic = this.icSite();
+        read = `jsrt_get_prop(${target}, ${cNameLiteral(place.field)}, &${ic})`;
+        write = (value: string) =>
+          `jsrt_set_prop(${target}, ${cNameLiteral(place.field)}, ${value}, &${ic})`;
+        break;
+      }
+    }
+    const op = expr.operator;
+    if (op === '=') {
+      const value = expr.value;
+      if (value === undefined) {
+        throw new Error('assignment update is missing its right-hand side');
+      }
+      const rhs = this.emitExpression(value);
+      this.appendLine(`${result} = ${rhs};`, expr.span);
+      this.appendLine(`${write(result)};`, expr.span);
+    } else {
+      this.appendLine(`${result} = ${read};`, expr.span);
+      if (op === '++' || op === '--') {
+        const next = `jsrt_number(jsrt_to_number(${result}) ${op === '++' ? '+' : '-'} 1.0)`;
+        if (expr.prefix) {
+          this.appendLine(`${result} = ${next};`, expr.span);
+          this.appendLine(`${write(result)};`, expr.span);
+        } else {
+          this.appendLine(`${write(next)};`, expr.span);
+        }
+      } else if (op === '&&' || op === '||' || op === '??') {
+        const value = expr.value;
+        if (value === undefined) {
+          throw new Error('logical update is missing its right-hand side');
+        }
+        const takeRight =
+          op === '||'
+            ? `!jsrt_truthy(${result})`
+            : op === '&&'
+              ? `jsrt_truthy(${result})`
+              : `jsrt_is_nullish(${result})`;
+        this.appendLine(`if (${takeRight}) {`, expr.span);
+        this.indent++;
+        const rhs = this.emitExpression(value);
+        this.appendLine(`${result} = ${rhs};`, expr.span);
+        this.appendLine(`${write(result)};`, expr.span);
+        this.indent--;
+        this.appendLine('}', expr.span);
+      } else {
+        const value = expr.value;
+        if (value === undefined) {
+          throw new Error('compound update is missing its right-hand side');
+        }
+        const rhs = this.emitExpression(value);
+        this.appendLine(`${result} = ${BINARY_EMITTERS[op](result, rhs)};`, expr.span);
+        this.appendLine(`${write(result)};`, expr.span);
+      }
+    }
+    if (place.kind !== 'identifier') {
+      this.emitPendingCheck(expr.span);
+    }
+    return result;
   }
 
   private escapeString(s: string): string {

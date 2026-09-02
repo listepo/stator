@@ -1,5 +1,5 @@
 // @mode: js
-// @verdict: dynamic
+// @verdict: static
 // SUBSET.md: Object destructuring
 
 const p = { x: 1, y: 2 };

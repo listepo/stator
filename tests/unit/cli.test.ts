@@ -87,7 +87,8 @@ void test(
       // The symbol table's strings live in the file, so a byte search is a portable stand-in for
       // `nm`: a dead-stripped builtin's name is gone, a referenced one's remains.
       const binary = readFileSync(out).toString('latin1');
-      assert.ok(binary.includes('jsrt_print'), 'the referenced builtin must survive the link');
+      // Thin LTO inlines small builtins (`jsrt_print`); the generated main still calls `jsrt_init`.
+      assert.ok(binary.includes('jsrt_init'), 'the referenced builtin must survive the link');
       assert.ok(
         !binary.includes('jsrt_map_new'),
         'an unreferenced builtin must be dead-stripped, not dragged in with its object file',

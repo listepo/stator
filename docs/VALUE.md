@@ -755,7 +755,10 @@ into a 128-pointer buffer and hands that buffer to `GC_push_all_eager`. The eage
 memory range *conservatively*, which is exactly what fails on a boxed word — unboxing into a plain
 array of raw pointers first is what makes the range scannable. The walk also pushes each frame's
 `env` (§4.3, the mark procedure then covers its slots and parent chain) and the pending-exception
-cell (§4.9).
+cell (§4.9). It runs *after* the hook it replaced (`GC_get_push_other_roots`), because in a
+threads-enabled Boehm that default is the C stack and register scan itself: a raw pointer in a
+runtime local is a root only through it, and the runtime relies on that whenever a function
+allocates twice (plan-notes 163).
 
 **Why masking is safe.** Only two word shapes reach it: a boxed value, whose payload is its low 48
 bits, and a raw pointer, whose top 16 bits are zero — `jsrt_init` asserts that against a real

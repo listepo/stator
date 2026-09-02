@@ -42,14 +42,21 @@ CI must run at least ubuntu-latest and macos-latest (plan.md §4 Task 1.0 step 1
 
 ```
 pnpm install --frozen-lockfile   # install exactly the pinned tree
-pnpm run ci                      # typecheck -> lint -> dupes -> unit+coverage -> runtime -> subset -> golden
+pnpm run ci                      # typecheck -> lint -> dupes -> unit+coverage -> runtime -> subset -> golden -> leak -> asan
+pnpm run test                    # unit tests
 pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info
-just runtime          # runtime/build/libjsrt.a          (clang -O2, -Werror)
+pnpm run test:subset             # feature × mode decision matrix
+pnpm run test:golden             # compile + run vs the pinned Node, byte-for-byte
+pnpm run test262                 # Test262 slice against the pin in tests/test262/pin.json
+pnpm run differential            # fuzzer vs Node (failures land in tests/differential/failures/)
+pnpm run bench:record            # refresh tests/bench/baseline.json (this machine only)
+just runtime          # runtime/build/libjsrt.a          (clang -O2, -Werror; thin LTO where the linker allows)
 just runtime-asan     # runtime/build-asan/libjsrt.a     (-fsanitize=address,undefined -O1 -g)
 just runtime-intl     # runtime/build-intl/libjsrt.a     (ICU feature build)
 just runtime-test     # print corpus vs Node
 just runtime-clean
-./ci.sh               # what CI runs, locally
+node src/cli/main.ts build file.ts -o app [--mode=ts|js]
+node src/cli/main.ts explain file.ts --json
 ```
 
 Release and sanitized runtime archives build into **separate** directories (`build/` and
@@ -60,6 +67,14 @@ Release links dead-strip (Task 3.12): builtins live in `libjsrt.a` compiled with
 `-Wl,--gc-sections` (ELF), so a builtin the program never references is not in the binary —
 function granularity, not the archive's .o granularity. Sanitized builds skip the stripping:
 ASan's global-registration sections are exactly what `--gc-sections` is documented to drop.
+
+Release archives are thin-LTO bitcode where the toolchain can link one (plan-notes 162): `just
+runtime` probes `-flto=thin` through `$CC`/`$AR` and records the flag in `build/link-flags.txt`, so
+the CLI's single clang call compiles the generated C to bitcode too and the runtime's accessors and
+builtins inline across the archive boundary. ld64 and lld read bitcode archives; GNU ld needs the
+LLVMgold plugin, and without it the probe fails and the archive is plain objects, reported on the
+recipe's status line. Sanitized builds never use LTO. A probe result or Boehm status that differs
+from the last build rebuilds every object (`build*/cflags.txt`).
 
 ## Native libraries
 
@@ -108,4 +123,4 @@ not a crash.
 These arrive with the phase that needs them; do not add them to CI before that:
 
 - **Ryū** — **NOT vendored.** Planned by Phase 2 Task 2.5 for `runtime/vendor/ryu/`; it was never fetched (no network access), and `shortest_digits()` in `runtime/src/jsrt_print.c` stands in for it with a round-trip search over `%.*e`. Correct, and slow: up to 18 `snprintf`+`strtod` pairs per number printed. See plan-notes 28 — this line claimed it was vendored until 2026-09-01.
-- **Test262 checkout** — Phase 6.
+- **Test262 corpus** — fetched on demand (`pnpm run test262:fetch`) into `tests/test262/corpus/` or `$STATOR_TEST262`. The runner, pin, and ratchet are in-tree; `pnpm run test262` is a CI heartbeat, not part of `pnpm run ci`.

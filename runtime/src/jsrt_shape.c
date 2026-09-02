@@ -288,6 +288,25 @@ bool jsrt_has_prop(jsrt_value obj, const char *key) {
   return shape_find(*o.shape, key) != NULL;
 }
 
+bool jsrt_in(jsrt_value key, jsrt_value obj) {
+  if (jsrt_is_nullish(obj)) {
+    jsrt_throw_str("TypeError: Cannot use 'in' operator to search for a value in null or undefined");
+    return false;
+  }
+  const char *k = jsrt_shape_key(jsrt_to_string(key));
+  if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
+    if (strcmp(k, "length") == 0) {
+      return true;
+    }
+    char *end = NULL;
+    const unsigned long idx = strtoul(k, &end, 10);
+    if (end != k && end != NULL && *end == '\0' && idx < (unsigned long)jsrt_as_array(obj)->length) {
+      return true;
+    }
+  }
+  return jsrt_has_prop(obj, k);
+}
+
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic) {
   if (jsrt_is_nullish(obj)) {
     jsrt_panic("TypeError: Cannot set properties of null or undefined");
