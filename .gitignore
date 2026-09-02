@@ -8,3 +8,4 @@ runtime/build-intl/
 *.a
 .DS_Store
 /.serena
+reasonix.toml
