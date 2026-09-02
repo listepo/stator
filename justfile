@@ -55,7 +55,11 @@ _runtime flavor:
     FLAVOR='{{flavor}}'
     VENDOR_POSIX='{{vendor_posix}}'
     VENDOR_INC='-Ivendor/quickjs-ng -Ivendor/fdlibm'
-    CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror -Iinclude ${VENDOR_INC} -ffunction-sections -fdata-sections"
+    # The runtime sources use POSIX clock/time APIs too; glibc hides them under strict C11
+    # unless the feature revision is requested before any system header (the vendor sources
+    # need the same flag). Apple's SDK does not need it and selects different declarations when
+    # it is present, so vendor_posix is empty on macOS.
+    CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror ${VENDOR_POSIX} -Iinclude ${VENDOR_INC} -ffunction-sections -fdata-sections"
     CFLAGS_VENDOR="-std=c11 -Wall ${VENDOR_POSIX} -Iinclude ${VENDOR_INC} -ffunction-sections -fdata-sections"
     DEPFLAGS='-MMD -MP'
 
@@ -171,7 +175,7 @@ _runtime-test flavor:
     CORPORA=(print_numbers print_arrays print_objects print_maps print_shapes print_typeof print_regexp print_promise print_dates)
 
     VENDOR_INC='-Ivendor/quickjs-ng -Ivendor/fdlibm'
-    CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror -Iinclude ${VENDOR_INC} -ffunction-sections -fdata-sections"
+    CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror ${VENDOR_POSIX} -Iinclude ${VENDOR_INC} -ffunction-sections -fdata-sections"
     BDW_CFLAGS="$(pkg-config --cflags bdw-gc 2>/dev/null || true)"
     BDW_LIBS="$(pkg-config --libs bdw-gc 2>/dev/null || true)"
     if [[ -n "${BDW_LIBS// }" ]]; then
