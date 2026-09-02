@@ -3993,3 +3993,45 @@ later `next()` does not re-enter.
 `yield*` is STA1214. `.return()` / `.throw()` on the generator object stay not-yet.
 
 Remaining under this step: `for-of` over a user iterable (needs `Symbol` as a value).
+
+## 153. Generator `.return()` / `.throw()`, and the suspension-state fix they exposed (2026-09-02)
+
+Phase 5 step 8. The closing pair lands as an INJECTION, not a value: `jsrt_generator_close` /
+`jsrt_generator_throw` set `inject` on the `JSRTGenerator` and resume the parked label, where the
+generated prologue reads and clears the mode. THROW rethrows at the yield's own landing pad (the
+body's `try`/`catch` cannot tell it from a `yield` that threw); RETURN parks the value in the
+return slot and runs the ordinary return routing, so every enclosing `finally` runs and a finally
+that yields suspends again with the completion value already parked. Unstarted and completed
+generators share GeneratorResumeAbrupt's (ECMA-262 27.5.1.3) one answer without entering the
+body: `return(v)` answers `{ value: v, done: true }` — the NEW value, which the in-flight draft
+got wrong on the completed branch — and `throw(e)` rethrows to the caller.
+
+The gate admits the two only on a receiver the checker types as the declaration-file `Generator`
+(`isGeneratorReceiver`): a boxed specialized iterator's `IterableIterator` type SPELLS the names
+the object does not carry, and Node answers a TypeError there the runtime cannot raise yet —
+that case stays not-yet (`Iterator.return on a specialized iterator`, Phase 5). The lowering's
+defensive branch and the runtime's class guard share the new internal **STA4071**.
+
+The finally-yield golden exposed a pre-existing hole: NO compiler-introduced C local survives a
+suspension, because the resume `goto` jumps over its initializer and the frame it sat in was
+popped. `yield` inside a `for (const x of arr)` looped forever on main; `return` through a
+finally that itself awaits/yields read an indeterminate completion code. Two fixes, one rule
+(the invariant the await emitter already stated: every local lives in the environment):
+
+- The try/finally completion code is now a counted SLOT, boxed with `jsrt_number` — sync units
+  get a `JSRT_LOCAL`, suspendable units an env slot, one code path for both. The exception stash
+  was already a slot for the same reason; counting now claims the pair adjacently.
+- A suspendable unit boxes EVERY specialized for-of (array, string, Map, Set) into a heap
+  `JSRTIterator` — the same object a stored `arr.values()` drives — so the cursor survives.
+  Strings gained `JSRT_ITER_STRING` (10) for this; the `JSRT_ITER_*` numbering is now named once
+  in `ITER_KINDS` (src/codegen/index.ts) instead of twice as arithmetic. Sync units keep the
+  zero-alloc inlined loops and the raw-int map cleanup completion.
+
+Goldens: `tests/golden/{ts,js}/generator_close.*` (the eight-case edge matrix, byte-for-byte vs
+Node), `tests/golden/ts/generator_loops.ts` (yield inside every specialized for-of, break/return
+routing), and a `finAwait` case in `tests/golden/ts/async_await.ts`. Decision fixtures
+`tests/subset/subset_generator_close_{ts,js}` pin the verdicts — dynamic in both modes, because
+IteratorResult is an interface the HIR does not layout, which is also why no static fixture
+calls `.next()`.
+
+Remaining under step 8: `for-of` over a user iterable (needs `Symbol` as a value, STA1212).

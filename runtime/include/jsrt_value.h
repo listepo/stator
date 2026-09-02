@@ -670,6 +670,9 @@ bool jsrt_map_iter_step(jsrt_value map, uint32_t *index, jsrt_value *key, jsrt_v
 #define JSRT_ITER_SET_VALUES 7
 #define JSRT_ITER_SET_ENTRIES 8
 #define JSRT_ITER_MATCH_ALL 9
+/* The string code-point walk, boxed. Never a stored member result -- only the suspendable-unit
+ * for-of boxes it, because a cursor on the C frame would not survive a yield/await. */
+#define JSRT_ITER_STRING 10
 
 typedef struct JSRTIterator {
   const JSRTClass *cls; /* &jsrt_class_iterator -- prefix-shared with JSRTObject */
@@ -1133,8 +1136,19 @@ void jsrt_async_throw(JSRTAsync *self, jsrt_value reason);
  *
  * A generator is an iterator whose cursor is a resume point, not an index. Calling the function
  * ALLOCATES the object and does not run the body -- the first `next()` does. `sent` is what a
- * subsequent `next(v)` injects as the value of the `yield` that suspended. `return`/`throw` on
- * the generator object are out of scope for this landing. */
+ * subsequent `next(v)` injects as the value of the `yield` that suspended.
+ *
+ * `return(v)`/`throw(e)` re-enter the suspended body with an INJECTION rather than a value:
+ * `inject` tells the generated resume prologue, at the label the suspension parked on, to route
+ * a synthetic `return v` (through any finally blocks, exactly as a real return would) or to
+ * rethrow `e` at the yield's own landing pad. The resume prologue clears the mode before the
+ * body runs again, so a yield from inside a finally of an injected return resumes ordinarily.
+ * State 0 is "never started": `return` closes it without running the body and `throw` rethrows
+ * the value to its caller (ECMA-262 27.5.1.4), both without a resume call. */
+#define JSRT_GEN_INJECT_NONE 0
+#define JSRT_GEN_INJECT_RETURN 1
+#define JSRT_GEN_INJECT_THROW 2
+
 typedef struct JSRTGenerator JSRTGenerator;
 typedef void (*JSRTGenResume)(JSRTGenerator *self, jsrt_value sent);
 
@@ -1145,13 +1159,21 @@ struct JSRTGenerator {
   uint32_t state;
   jsrt_value yielded;
   bool done;
+  uint8_t inject; /* JSRT_GEN_INJECT_*; read and cleared by the resume prologue */
 };
 
 extern const JSRTClass jsrt_class_generator;
 
 jsrt_value jsrt_generator_new(JSRTEnv *env, JSRTGenResume resume);
 void jsrt_generator_yield(JSRTGenerator *self, jsrt_value value);
+/* Body-side settle: the body ran off its end or executed `return`. NOT the `gen.return()` method
+ * -- that is jsrt_generator_close below, and the two must never share a name. */
 void jsrt_generator_return(JSRTGenerator *self, jsrt_value value);
+/* `gen.return(v)` / `gen.throw(e)` — Generator.prototype's two closing methods. Answer
+ * `{ value, done }`; a thrown value that the body does not catch stays pending for the call site,
+ * which is the generated-code convention for a user call that throws. */
+jsrt_value jsrt_generator_close(jsrt_value gen, jsrt_value value);
+jsrt_value jsrt_generator_throw(jsrt_value gen, jsrt_value value);
 static inline bool jsrt_is_generator(jsrt_value v) {
   return jsrt_is(v, JSRT_TAG_OBJECT) && jsrt_as_object(v)->cls == &jsrt_class_generator;
 }

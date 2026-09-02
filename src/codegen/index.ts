@@ -173,6 +173,11 @@ interface FunctionUnit {
  * popped, so a jump crossing two finallys routes through both, innermost first. */
 interface TryFinallyScope {
   readonly compVar: string;
+  /** A try's completion code lives in a counted slot, boxed as a number, so it survives a
+   * suspension between the route and the dispatch; the Map/Set for-of cleanup's comp is a raw
+   * C int, which is safe only because that loop never suspends (the suspendable units box the
+   * walk into a heap iterator instead). */
+  readonly compBoxed: boolean;
   readonly finLabel: string;
   /** `this.enclosing.length` when the try opened: a break/continue leaves the try exactly when
    * its target construct's index in `enclosing` is below this depth. */
@@ -785,14 +790,17 @@ class Emitter {
           this.countExpression(stmt.value);
           break;
         case 'try-statement':
-          // A try with a finally claims a slot of its own: where the dispatch stashes a caught
-          // exception while the finally body (which may allocate) runs.
+          // A try with a finally claims TWO slots of its own: where the dispatch stashes a
+          // caught exception while the finally body (which may allocate) runs, and the
+          // completion code as a boxed number. Both must outlive a suspension: a yield/await
+          // inside the try or the finally pops the C frame, and the resume's goto jumps over
+          // whatever initializer a local would have had (plan-notes 153).
           if (stmt.catchBinding !== undefined) {
             this.bindSlot(stmt.catchBinding);
           }
           if (stmt.finallyBlock !== undefined) {
             this.trySlots.set(stmt, this.slotCount);
-            this.slotCount++;
+            this.slotCount += 2;
           }
           this.countBindings(stmt.tryBlock.statements);
           if (stmt.catchBlock !== undefined) {
@@ -1261,6 +1269,29 @@ class Emitter {
           this.emitBoxedIteratorForOf(stmt, iterable, id);
           break;
         }
+        // A suspendable unit cannot hold loop state in its C frame: a yield/await in the body
+        // pops the frame and the resume's goto jumps over the initializer, so a C-local cursor
+        // reads back as garbage. Box the walk instead — the cursor then lives in the heap
+        // iterator, the same object a stored `arr.values()` already drives (plan-notes 153).
+        if (this.inAsync || this.inGenerator) {
+          const kind = stmt.iterable.type.kind;
+          if (kind === 'map' || kind === 'set' || kind === 'array' || kind === 'string') {
+            const box =
+              kind === 'map'
+                ? ITER_KINDS.map.entries
+                : kind === 'set'
+                  ? ITER_KINDS.set.values
+                  : kind === 'string'
+                    ? ITER_KINDS.string
+                    : ITER_KINDS.array.values;
+            this.appendLine(
+              `${iterable} = jsrt_iterator_new(${iterable}, ${String(box)});`,
+              stmt.span,
+            );
+            this.emitBoxedIteratorForOf(stmt, iterable, id);
+            break;
+          }
+        }
         if (stmt.iterable.type.kind === 'map' || stmt.iterable.type.kind === 'set') {
           this.emitMapSetForOf(stmt, iterable, id);
           break;
@@ -1474,6 +1505,7 @@ class Emitter {
     this.appendLine(`int ${comp} = 0;`, span);
     const scope: TryFinallyScope = {
       compVar: comp,
+      compBoxed: false,
       finLabel: fin,
       enclosingDepth: this.enclosing.length - 1,
       routes: new Map(),
@@ -1701,7 +1733,12 @@ class Emitter {
       route = { code: 2 + scope.routes.size, action };
       scope.routes.set(key, route);
     }
-    this.appendLine(`${scope.compVar} = ${route.code};`, span);
+    this.appendLine(
+      scope.compBoxed
+        ? `${scope.compVar} = jsrt_number(${String(route.code)});`
+        : `${scope.compVar} = ${String(route.code)};`,
+      span,
+    );
     this.appendLine(`goto ${scope.finLabel};`, span);
   }
 
@@ -1743,7 +1780,6 @@ class Emitter {
    * body, so a finally that itself throws or jumps never reaches it -- which is the language
    * rule: the finally's own completion replaces the one on the way through. */
   private emitTryFinally(stmt: TryStatement, finallyBlock: Block, id: number): void {
-    const comp = `_jsrt_comp_${id}`;
     const finThr = `_jsrt_finthr_${id}`;
     const fin = `_jsrt_fin_${id}`;
     const excIndex = this.trySlots.get(stmt);
@@ -1751,11 +1787,16 @@ class Emitter {
       throw new Error('try/finally has no exception slot; countBindings missed a node');
     }
     const exc = this.slotAt(excIndex);
+    // The completion code is a counted slot, boxed as a number: a suspension between the route
+    // and the dispatch pops the C frame, and only a slot survives that (countBindings claims the
+    // pair -- exc, then comp -- so they sit adjacently).
+    const comp = this.slotAt(excIndex + 1);
     this.appendLine('{', stmt.span);
     this.indent++;
-    this.appendLine(`int ${comp} = 0;`, stmt.span);
+    this.appendLine(`${comp} = jsrt_number(0);`, stmt.span);
     const scope: TryFinallyScope = {
       compVar: comp,
+      compBoxed: true,
       finLabel: fin,
       enclosingDepth: this.enclosing.length,
       routes: new Map(),
@@ -1781,7 +1822,7 @@ class Emitter {
     this.tryFinallyStack.pop();
     if (this.usedLabels.has(finThr)) {
       this.appendLine(`${finThr}: ;`, stmt.span);
-      this.appendLine(`${comp} = 1;`, stmt.span);
+      this.appendLine(`${comp} = jsrt_number(1);`, stmt.span);
       // Take BEFORE the finally body runs: the body may itself throw, and its exception must
       // find the cell empty to overwrite, while this one waits in a rooted slot.
       this.appendLine(`${exc} = jsrt_take_exception();`, stmt.span);
@@ -1790,12 +1831,12 @@ class Emitter {
     this.emitStatement(finallyBlock);
     if (this.usedLabels.has(finThr)) {
       this.appendLine(
-        `if (${comp} == 1) { jsrt_throw(${exc}); goto ${this.currentPad()}; }`,
+        `if (jsrt_number_value(${comp}) == 1) { jsrt_throw(${exc}); goto ${this.currentPad()}; }`,
         stmt.span,
       );
     }
     for (const route of scope.routes.values()) {
-      this.appendLine(`if (${comp} == ${route.code}) {`, stmt.span);
+      this.appendLine(`if (jsrt_number_value(${comp}) == ${String(route.code)}) {`, stmt.span);
       this.indent++;
       route.action();
       this.indent--;
@@ -2049,9 +2090,17 @@ class Emitter {
         this.sequencePart(parts, expr.sent, expr.span, (v) => `${this.slotAt(base + 1)} = ${v}`);
         this.flushParts(parts, expr.span);
         // A generator's next() can throw: the resume left the exception pending. Specialized
-        // iterators never do, and the same check is then a no-op.
+        // iterators never do, and the same check is then a no-op. `return`/`throw` reach only a
+        // generator (the gate refuses them on a boxed specialized iterator), and their uncaught
+        // throw takes the same pending path.
+        const step =
+          expr.op === 'next'
+            ? 'jsrt_iterator_next'
+            : expr.op === 'return'
+              ? 'jsrt_generator_close'
+              : 'jsrt_generator_throw';
         this.appendLine(
-          `${this.slotAt(base)} = jsrt_iterator_next(${this.slotAt(base)}, ${this.slotAt(base + 1)});`,
+          `${this.slotAt(base)} = ${step}(${this.slotAt(base)}, ${this.slotAt(base + 1)});`,
           expr.span,
         );
         this.emitPendingCheck(expr.span);
@@ -2405,6 +2454,13 @@ class Emitter {
       // Same suspension as await, answering the caller rather than the scheduler: park the
       // resume state, write the yielded value, pop the frame and leave. The next `next(v)`
       // re-enters at the label and the yield expression becomes `v`.
+      //
+      // A closing `gen.return(v)` / `gen.throw(e)` resumes the SAME label with an injection
+      // instead of a value. THROW rethrows at the yield's own landing pad — the enclosing
+      // catch/finally sees it exactly as if the yield threw. RETURN parks the value in the
+      // return slot and runs emitReturnJump, which routes through every enclosing finally the
+      // way a real `return` statement at this point would — so a finally that yields suspends
+      // again, and the later resume finds the injection already cleared and just continues.
       case 'yield': {
         if (!this.inGenerator) {
           throw new Error('yield outside a generator; the gate should have caught it');
@@ -2413,6 +2469,20 @@ class Emitter {
           expr,
           `jsrt_generator_yield(_jsrt_self, ${this.suspendSlot(expr)});`,
         );
+        this.appendLine(`if (_jsrt_self->inject == JSRT_GEN_INJECT_THROW) {`, expr.span);
+        this.indent++;
+        this.appendLine('_jsrt_self->inject = JSRT_GEN_INJECT_NONE;', expr.span);
+        this.appendLine('jsrt_throw(_jsrt_v);', expr.span);
+        this.appendLine(`goto ${this.currentPad()};`, expr.span);
+        this.indent--;
+        this.appendLine('}', expr.span);
+        this.appendLine(`if (_jsrt_self->inject == JSRT_GEN_INJECT_RETURN) {`, expr.span);
+        this.indent++;
+        this.appendLine('_jsrt_self->inject = JSRT_GEN_INJECT_NONE;', expr.span);
+        this.appendLine(`${this.slotAt(this.returnSlot)} = _jsrt_v;`, expr.span);
+        this.emitReturnJump(expr.span);
+        this.indent--;
+        this.appendLine('}', expr.span);
         this.appendLine(`${at} = _jsrt_v;`, expr.span);
         return at;
       }
@@ -2987,15 +3057,24 @@ export function emitC(module: Module): string {
  * A Set shares the Map's functions rather than having its own: the structure IS the same one, and
  * `add` differs from `set` only in passing no value. The two that return a C `bool` are boxed here,
  * and `clear`, which returns nothing, yields `undefined` -- the value JavaScript gives it. */
+/** The `JSRT_ITER_*` kinds (runtime/include/jsrt_value.h), numbered here because generated C
+ * spells them as numbers: three per source, array then map then set; `matchAll` sits at 9 and
+ * the string code-point walk at 10. */
+const ITER_KINDS = {
+  array: { keys: 0, values: 1, entries: 2 },
+  map: { keys: 3, values: 4, entries: 5 },
+  set: { keys: 6, values: 7, entries: 8 },
+  matchAll: 9,
+  string: 10,
+} as const;
+
 function iteratorBoxCall(expr: ArrayOp | CollectionOp, operands: string): string | undefined {
   if (expr.op !== 'keys' && expr.op !== 'values' && expr.op !== 'entries') {
     return undefined;
   }
   const source: 'array' | 'map' | 'set' =
     expr.kind === 'array-op' ? 'array' : expr.collection === 'set' ? 'set' : 'map';
-  const base = source === 'array' ? 0 : source === 'map' ? 3 : 6;
-  const off = expr.op === 'keys' ? 0 : expr.op === 'values' ? 1 : 2;
-  return `jsrt_iterator_new(${operands}, ${String(base + off)})`;
+  return `jsrt_iterator_new(${operands}, ${String(ITER_KINDS[source][expr.op])})`;
 }
 
 function collectionCall(

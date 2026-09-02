@@ -353,16 +353,20 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
    …), never bulk-flipped. Capstone `tests/golden/js/capstone.js` is an untyped catalog (~200
    lines) matching Node. `var xs = []` taught `hTypeAssignable` to recurse into arrays (plan-notes
    146).
-8. **The iterator protocol, and generators with it** — in progress: `docs/VALUE.md` §4.13 is written; `for-of` over a string is a specialized code-point loop (plan-notes 147) and `for-of` over a Map or Set is a live insertion-order walk (plan-notes 148). The nine `keys`/`values`/`entries` members landed (plan-notes 150); `matchAll` landed (plan-notes 151); `function*` landed (plan-notes 152). Remaining: `for-of` over a user iterable (**`STA1214`**, needs `Symbol` as a value) and `.return()`/`.throw()` on the generator object. (inherited from Task 4.6, which delivered `async`/`await` and deferred the rest — see plan-notes 112). One blocker, **four** surfaces: `for`-`of` over a user iterable (string/`Map`/`Set` already specialized — **`STA1214`** now names only the protocol-object case, not the specialized loops), the `keys`/`values`/`entries` triple (landed), `String.prototype.matchAll` (landed — a boxed iterator of match arrays), and `function*` (landed — **`STA1201`** now names generator methods, async generators, and `for await`). A `yield` differs from an `await` in who it answers (its caller, not a scheduler), not in how it suspends.
+8. **The iterator protocol, and generators with it** — in progress: `docs/VALUE.md` §4.13 is written; `for-of` over a string is a specialized code-point loop (plan-notes 147) and `for-of` over a Map or Set is a live insertion-order walk (plan-notes 148). The nine `keys`/`values`/`entries` members landed (plan-notes 150); `matchAll` landed (plan-notes 151); `function*` landed (plan-notes 152); `.return()`/`.throw()` on the generator object landed (plan-notes 153). Remaining: `for-of` over a user iterable (**`STA1214`**, needs `Symbol` as a value). (inherited from Task 4.6, which delivered `async`/`await` and deferred the rest — see plan-notes 112). One blocker, **four** surfaces: `for`-`of` over a user iterable (string/`Map`/`Set` already specialized — **`STA1214`** now names only the protocol-object case, not the specialized loops), the `keys`/`values`/`entries` triple (landed), `String.prototype.matchAll` (landed — a boxed iterator of match arrays), and `function*` (landed — **`STA1201`** now names generator methods, async generators, and `for await`). A `yield` differs from an `await` in who it answers (its caller, not a scheduler), not in how it suspends.
    In order: (a) the representation decision FIRST, in `docs/VALUE.md` — compile-time-known
    iterables (string, array, `Map`, `Set`) lower to SPECIALIZED loops with no protocol object
    allocated (the AOT-friendly path); only a user iterable (a `[Symbol.iterator]` the checker can
    see) gets a real protocol object, and its struct shape is written down before any code;
    (b) the nine `keys`/`values`/`entries` members (Array/Map/Set × 3) landed on that representation
    and flipped their dashboard triples; (c) `for`-`of` over string/`Map`/`Set` is done, user iterables
-   still narrow `STA1214`; (d) `matchAll` landed (plan-notes 151); (e) `function*` landed on Task 4.6's
+   still narrow `STA1214`;    (d) `matchAll` landed (plan-notes 151); (e) `function*` landed on Task 4.6's
    suspension state machine with caller-driven resume (plan-notes 152): `next(v)` injects into `yield`;
-   `return`/`throw` on the generator object stay not-yet. User-iterable `for-of` still needs `Symbol`.
+   (f) `.return(v)`/`.throw(e)` landed as an injection the resume prologue reads at the parked
+   label (plan-notes 153) — and landing them exposed that NO compiler-introduced C local survives
+   a suspension, so the try/finally completion code became a counted slot and suspendable units
+   box every specialized for-of into the heap iterator. User-iterable `for-of` still needs
+   `Symbol`.
 9. **Top-level await** (**`STA1208`**, moved here from Phase 4 on 2026-09-01). The gate's message
    already names the blocker exactly — "a module body has no resume point to suspend into" — and
    Task 4.6 built resume points for functions. This step makes the module init function an async

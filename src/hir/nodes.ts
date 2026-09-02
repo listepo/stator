@@ -1413,9 +1413,9 @@ export interface ForStatement extends Node, Labelled {
  * the loop only ever visits indices that exist. That is what keeps a typed iteration on the static
  * path.
  *
- * `iterable` is an array, a string, a Map or a Set. All four compile to specialized loops
- * (docs/VALUE.md §4.13); a user iterable still waits on the protocol object. A Map yields a
- * `[key, value]` pair, which the HIR has no tuple for, so that binding is Unknown. */
+ * `iterable` is an array, a string, a Map, a Set, a boxed iterator, or a MethodCall of a user
+ * class's `[Symbol.iterator]()` (docs/VALUE.md §4.13). A Map yields a `[key, value]` pair, which
+ * the HIR has no tuple for, so that binding is Unknown. */
 /** Which specialized walk a for-of uses. `identity` is the collection itself; the other three
  * are the `keys`/`values`/`entries` views inlined when the call is the loop operand. */
 export type IteratorView = 'identity' | 'keys' | 'values' | 'entries';
@@ -1429,13 +1429,20 @@ export interface ForOfStatement extends Node, Labelled {
   readonly body: Block;
 }
 
-/** `it.next()` on a boxed specialized iterator. Answers `{ value, done }` — an ordinary two-field
- * dynamic object, typed Unknown because IteratorResult is an interface this model does not layout. */
+/** `it.next()` / `it.return(v)` / `it.throw(e)` on an iterator VALUE.
+ *
+ * `next` is the ordinary step; it exists for boxed specialized iterators (`arr.keys()`) and for
+ * generators alike. `return`/`throw` are the generator-closing pair (Phase 5 step 8): they are
+ * admitted by the gate only when the receiver is a generator, and the runtime answers
+ * `{ value, done }` exactly as `next` does. All three answer an ordinary two-field dynamic
+ * object, typed Unknown because IteratorResult is an interface this model does not layout. */
 export interface IteratorNext extends Node {
   readonly kind: 'iterator-next';
   readonly target: Expression;
-  /** What `next(v)` sends into a waiting `yield`. Absent `next()` pads `undefined`. Specialized
-   * iterators ignore it; generators inject it as the yield's value. */
+  readonly op: 'next' | 'return' | 'throw';
+  /** The value sent into a waiting `yield` (`next(v)`), the completion value (`return(v)`), or
+   * the injected exception (`throw(e)`). An absent argument pads `undefined`. Specialized
+   * iterators ignore it; generators use it as the resume value. */
   readonly sent: Expression;
 }
 

@@ -20,13 +20,17 @@ import {
   baseClassOf,
   classDeclarationOf,
   hasExplicitAny,
+  instanceMethodName,
   isDynamicShape,
+  isGlobalSymbolIteratorName,
   isImplicitAny,
   isStaticMember,
+  ITERATOR_METHOD_NAME,
   methodDeclaringClass,
   objectLiteralIsDynamic,
   staticMemberOf,
   tsTypeToHType,
+  userIteratorMethod,
 } from './types.ts';
 
 type Mode = 'ts' | 'js';
@@ -456,6 +460,13 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.YieldExpression:
       return gateYield(node);
 
+    // `[Symbol.iterator]` on a class method. gateClass admits that one computed name; this node
+    // is its child, reached on the way down. Any other computed name stays not-yet.
+    case ts.SyntaxKind.ComputedPropertyName:
+      return isGlobalSymbolIteratorName(node as ts.ComputedPropertyName, typeChecker)
+        ? { kind: 'accept' }
+        : notYet('a computed property name is not yet supported', 5);
+
     default:
       return notYet(`${describeKind(kind)} is not yet supported`, 5);
   }
@@ -522,6 +533,26 @@ function notYet(message: string, phase: number): GateResult {
     message: `${message}; planned for Phase ${phase}`,
     phase,
   };
+}
+
+function symbolNotYet(): GateResult {
+  return {
+    kind: 'not-yet',
+    code: 'STA1212',
+    message: 'Symbol is not yet supported; planned for Phase 5',
+    phase: 5,
+  };
+}
+
+/** `Symbol` as the base of a `[Symbol.iterator]` computed class-method name. */
+function isSymbolIteratorComputedBase(node: ts.Identifier, checker: ts.TypeChecker): boolean {
+  const parent = node.parent;
+  return (
+    ts.isPropertyAccessExpression(parent) &&
+    parent.expression === node &&
+    ts.isComputedPropertyName(parent.parent) &&
+    isGlobalSymbolIteratorName(parent.parent, checker)
+  );
 }
 
 /** One not-yet for both dynamic-code-generation constructs — they land together in Phase 8. */
@@ -711,6 +742,14 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
       }
       if (node.text === 'Function') {
         return functionCtorResult(mode);
+      }
+      if (node.text === 'Symbol') {
+        // `[Symbol.iterator]` as a class method name is the well-known iterator, not the primitive.
+        // Every other use (`Symbol("id")`, `Symbol.iterator` as a stored value, `Symbol.for`) stays
+        // STA1212 until the primitive lands.
+        return isSymbolIteratorComputedBase(node, typeChecker)
+          ? { kind: 'accept' }
+          : symbolNotYet();
       }
       // A catch-all keeps the phase that owns MOST of what it refuses (plan §7 Task 4.7 step 5).
       // What is left of the global surface is `Symbol` and the iterator protocol around it, which
@@ -1448,12 +1487,31 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     if (staticMemberOf(callee, typeChecker, true) !== undefined) {
       return { kind: 'accept' };
     }
-    if (callee.name.text === 'next') {
+    if (
+      callee.name.text === 'next' ||
+      callee.name.text === 'return' ||
+      callee.name.text === 'throw'
+    ) {
       const receiver = tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
       if (receiver.kind === 'iterator') {
+        // `next` steps any iterator. `return`/`throw` are Generator.prototype's closing pair: a
+        // boxed specialized iterator (`arr.keys()`) carries the names in its IterableIterator
+        // TYPE but not on the object, where Node throws a TypeError the runtime cannot raise
+        // yet -- so only a generator receiver is admitted (Phase 5 step 8).
+        // TODO: not supported — `return`/`throw` on a specialized iterator (needs a raisable
+        // TypeError; jsrt_throw feeds generated code only).
+        if (callee.name.text !== 'next' && !isGeneratorReceiver(callee.expression, typeChecker)) {
+          return notYet(
+            `Iterator.${callee.name.text} on a specialized iterator is not yet supported`,
+            5,
+          );
+        }
         return call.arguments.length <= 1
           ? { kind: 'accept' }
-          : notYet('Iterator.next with more than one argument is not yet supported', 5);
+          : notYet(
+              `Iterator.${callee.name.text} with more than one argument is not yet supported`,
+              5,
+            );
       }
     }
     const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(callee.expression));
@@ -1707,6 +1765,21 @@ export function isMatchReceiver(expression: ts.Expression, checker: ts.TypeCheck
   return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
 }
 
+/** The checker says the receiver is the lib `Generator` interface — the object `function*`
+ * answers. This is what separates it from a boxed specialized iterator (`arr.keys()`), whose
+ * IterableIterator type SPELLS `return`/`throw` that the object itself does not carry, so the
+ * closing pair is admitted only here (Phase 5 step 8). A user-declared `Generator` shape in the
+ * program's own sources is not the declaration-file interface and answers false — the
+ * isMatchReceiver test. */
+export function isGeneratorReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  const symbol = checker.getTypeAtLocation(expression).getSymbol();
+  if (symbol?.getName() !== 'Generator') {
+    return false;
+  }
+  const declarations = symbol.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
 /** True for the `x` in `for (const x of a)`, which is the one declaration with no initializer that
  * is nonetheless definitely assigned. */
 function isForOfBinding(decl: ts.VariableDeclaration): boolean {
@@ -1865,7 +1938,16 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       !ts.isIdentifier(member.name) &&
       !ts.isPrivateIdentifier(member.name)
     ) {
-      return notYet('a computed class member name is not yet supported', 5);
+      // `[Symbol.iterator]()` is the one computed name that is a name: the well-known iterator
+      // method, stored under TypeScript's `__@iterator`. A field, a static, or any other computed
+      // spelling still needs a shape table.
+      if (
+        !(ts.isMethodDeclaration(member) &&
+          !isStaticMember(member) &&
+          isGlobalSymbolIteratorName(member.name, checker))
+      ) {
+        return notYet('a computed class member name is not yet supported', 5);
+      }
     }
     // Two `#x` in one chain are TWO fields in JavaScript -- a private name is scoped to the class
     // body that writes it, so a subclass's `#x` does not override its base's, and an instance
@@ -1908,22 +1990,19 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
     // for it in an order the layout does not express. A static over a static is refused for a
     // parallel reason: `D.count` and `C.count` must name ONE binding, and two declarations of the
     // name would need two.
+    const inheritedName = instanceMethodName(member);
     if (
-      member.name !== undefined &&
-      ts.isIdentifier(member.name) &&
-      (isStaticMember(member) ? inheritedStatic : inheritedInstance).has(member.name.text)
+      inheritedName !== undefined &&
+      (isStaticMember(member) ? inheritedStatic : inheritedInstance).has(inheritedName)
     ) {
       const base = baseClassOf(declaration, checker);
       const overridesMethod =
         !isStaticMember(member) &&
         ts.isMethodDeclaration(member) &&
         base !== undefined &&
-        methodDeclaringClass(base, member.name.text, checker) !== undefined;
+        methodDeclaringClass(base, inheritedName, checker) !== undefined;
       if (!overridesMethod) {
-        return notYet(
-          `overriding the inherited member '${member.name.text}' is not yet supported`,
-          5,
-        );
+        return notYet(`overriding the inherited member '${inheritedName}' is not yet supported`, 5);
       }
       // A method table is one file-scope constant per class, so no method in an overriding family
       // may capture. A class at module scope has nothing to capture; a class inside a function may,
@@ -2013,6 +2092,13 @@ function ancestorMembers(
         isStaticMember(member) === wantStatic
       ) {
         names.add(member.name.text);
+      } else if (
+        !wantStatic &&
+        ts.isMethodDeclaration(member) &&
+        !isStaticMember(member) &&
+        instanceMethodName(member) === ITERATOR_METHOD_NAME
+      ) {
+        names.add(ITERATOR_METHOD_NAME);
       }
     }
   }
@@ -2259,6 +2345,14 @@ function gateMemberAccess(
   access: ts.PropertyAccessExpression,
   checker: ts.TypeChecker,
 ): GateResult {
+  // `Symbol.iterator` as a computed class-method name is the well-known iterator, not a stored
+  // symbol value. Any other property of `Symbol` (and `Symbol.iterator` as a value) is STA1212.
+  if (ts.isIdentifier(access.expression) && access.expression.text === 'Symbol') {
+    return ts.isComputedPropertyName(access.parent) &&
+      isGlobalSymbolIteratorName(access.parent, checker)
+      ? { kind: 'accept' }
+      : symbolNotYet();
+  }
   // `super.m` is only ever a callee: it names the base's function, and reading it as a value would
   // need a bound method object, which nothing here builds. `super.x` on a FIELD is refused for a
   // sharper reason -- a field has one slot per name, so `super.x` and `this.x` are the same slot
@@ -2436,9 +2530,14 @@ function gateMemberAccess(
   // not -- `const f = m.get` needs a bound closure nothing here builds.
   const iterator = tsTypeToHType(checker.getTypeAtLocation(access.expression), checker);
   if (iterator.kind === 'iterator') {
+    // As a call's callee the gateCall arm decides (it is where generator-vs-specialized is
+    // answered); everything else is a VALUE position (`const f = it.next`), which is the
+    // bound-closure work of step 12(e).
+    // TODO: not supported — iterator methods as values (needs a bound-closure representation,
+    // plan.md §8 step 12(e)).
     return ts.isCallExpression(access.parent) &&
       access.parent.expression === access &&
-      access.name.text === 'next'
+      (access.name.text === 'next' || access.name.text === 'return' || access.name.text === 'throw')
       ? { kind: 'accept' }
       : notYet(`Iterator.${access.name.text} as a value is not yet supported`, 5);
   }
@@ -2554,12 +2653,13 @@ function gateElementAccess(
   return { kind: 'accept' };
 }
 
-/** `for (const x of a)`, admitted over an array, a string, a Map, or a Set.
+/** `for (const x of a)`, admitted over an array, a string, a Map, a Set, a boxed iterator, or a
+ * user class whose `[Symbol.iterator]()` returns an iterator.
  *
- * Those four compile to specialized loops (docs/VALUE.md §4.13). A user iterable still drives the
- * iterator protocol object, which this step has not built. The binding must be a plain `let`/`const`
- * name: `for (x of a)` assigns to an existing binding, and destructuring needs a pattern the subset
- * cannot lower. */
+ * The four collections compile to specialized loops (docs/VALUE.md §4.13). A user iterable calls
+ * the compile-time-known method and then drives the returned iterator with the existing walk. The
+ * binding must be a plain `let`/`const` name: `for (x of a)` assigns to an existing binding, and
+ * destructuring needs a pattern the subset cannot lower. */
 function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateResult {
   if (statement.awaitModifier !== undefined) {
     // `for await` drives the ASYNC iterator protocol, which is the generator machinery under
@@ -2573,7 +2673,8 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
     (iterableType.flags & ts.TypeFlags.StringLike) === 0 &&
     hir.kind !== 'map' &&
     hir.kind !== 'set' &&
-    hir.kind !== 'iterator'
+    hir.kind !== 'iterator' &&
+    userIteratorMethod(hir) === undefined
   ) {
     return notYet('for-of over a user iterable is not yet supported', 5);
   }

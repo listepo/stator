@@ -10,6 +10,7 @@ import * as ts from 'typescript';
 import {
   isArrayReceiver,
   isDateReceiver,
+  isGeneratorReceiver,
   isGlobalDate,
   isGlobalJson,
   isGlobalMath,
@@ -35,12 +36,15 @@ import {
   ancestry,
   baseClassOf,
   classDeclarationOf,
+  instanceMethodName,
   isDynamicShape,
   isStaticMember,
+  ITERATOR_METHOD_NAME,
   methodDeclaringClass,
   objectLiteralIsDynamic,
   staticMemberOf,
   tsTypeToHType,
+  userIteratorMethod,
 } from '../frontend/types.ts';
 import type {
   ArrayLength,
@@ -690,13 +694,15 @@ function lowerForOf(
   label?: string,
 ): Statement | null {
   const peeled = peelIteratorView(node.expression, checker, bindings);
-  const iterable = lowerExpression(
-    peeled === undefined ? node.expression : peeled.inner,
-    sourceFile,
-    checker,
-    bindings,
-    diagnostics,
-  );
+  const iterableExpr = peeled === undefined ? node.expression : peeled.inner;
+  const lowered = lowerExpression(iterableExpr, sourceFile, checker, bindings, diagnostics);
+  if (!lowered) {
+    return null;
+  }
+  const iterable =
+    peeled === undefined
+      ? wrapUserIterator(lowered, iterableExpr, node, sourceFile, checker, diagnostics)
+      : lowered;
   if (!iterable) {
     return null;
   }
@@ -739,6 +745,66 @@ function lowerForOf(
     body,
     ...(label !== undefined && { label }),
   };
+}
+
+/** `for (const x of user)` where `user` declares `[Symbol.iterator]()`: call that method and let
+ * the existing iterator walk drive what it returns. Specialized collections never reach here. */
+function wrapUserIterator(
+  iterable: Expression,
+  receiver: ts.Expression,
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const method = userIteratorMethod(iterable.type);
+  if (method === undefined || method.type.kind !== 'fn') {
+    return iterable;
+  }
+  const owner = declaringClassName(receiver, ITERATOR_METHOD_NAME, checker);
+  if (owner === null) {
+    diagnostics.push(
+      diagnosticFromNode(
+        at,
+        sourceFile,
+        'STA4065',
+        'internal',
+        'ts',
+        `no class in the receiver's ancestry declares method '${ITERATOR_METHOD_NAME}'`,
+      ),
+    );
+    return null;
+  }
+  const slot = iterable.type.kind === 'object' ? iterable.type.methods.findIndex((m) => m.name === ITERATOR_METHOD_NAME) : -1;
+  if (slot < 0) {
+    diagnostics.push(
+      diagnosticFromNode(
+        at,
+        sourceFile,
+        'STA4067',
+        'internal',
+        'ts',
+        `method '${ITERATOR_METHOD_NAME}' has no slot in the layout of ${hTypeName(iterable.type)}`,
+      ),
+    );
+    return null;
+  }
+  const call: MethodCall = {
+    kind: 'method-call',
+    type: method.type.ret,
+    span: iterable.span,
+    target: iterable,
+    className: owner,
+    method: ITERATOR_METHOD_NAME,
+    slot,
+    dispatch:
+      iterable.type.kind === 'object' &&
+      isOverridden(iterable.type.name, ITERATOR_METHOD_NAME, sourceFile, checker)
+        ? 'virtual'
+        : 'direct',
+    args: [],
+  };
+  return call;
 }
 
 function peelIteratorView(
@@ -2468,7 +2534,26 @@ function lowerExpression(
         return { kind: 'string-op', type, span, op, target, args: padded };
       }
 
-      if (propName === 'next' && typeAt(obj, checker, bindings).kind === 'iterator') {
+      const iteratorMethod =
+        propName === 'next' || propName === 'return' || propName === 'throw' ? propName : null;
+      if (iteratorMethod !== null && typeAt(obj, checker, bindings).kind === 'iterator') {
+        // `return`/`throw` exist on Generator.prototype and land here as generator closing calls.
+        // A boxed specialized iterator (`arr.keys()`) also has the names in its TypeScript
+        // interface, but the runtime has no closing semantic for it yet, so the gate refuses the
+        // two there and the lowering only ever sees them on a Generator.
+        if (iteratorMethod !== 'next' && !isGeneratorReceiver(obj, checker)) {
+          diagnostics.push(
+            diagnosticFromNode(
+              expr,
+              sourceFile,
+              'STA4071',
+              'internal',
+              'ts',
+              `Iterator.${iteratorMethod} reached the lowering on a non-generator receiver`,
+            ),
+          );
+          return null;
+        }
         const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
         if (target === null) {
           return null;
@@ -2487,6 +2572,7 @@ function lowerExpression(
           type: typeAt(node, checker, bindings),
           span,
           target,
+          op: iteratorMethod,
           sent,
         };
       }
@@ -3003,11 +3089,7 @@ function classesIn(sourceFile: ts.SourceFile): ts.ClassDeclaration[] {
 
 function declaresMethod(declaration: ts.ClassDeclaration, name: string): boolean {
   return declaration.members.some(
-    (m) =>
-      ts.isMethodDeclaration(m) &&
-      !isStaticMember(m) &&
-      (ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) &&
-      m.name.text === name,
+    (m) => ts.isMethodDeclaration(m) && !isStaticMember(m) && instanceMethodName(m) === name,
   );
 }
 
@@ -3112,7 +3194,8 @@ function memberFunctionName(
   member: ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
   sourceFile: ts.SourceFile,
 ): string {
-  const spelled = member.name.getText(sourceFile);
+  const method = instanceMethodName(member);
+  const spelled = method ?? member.name.getText(sourceFile);
   if (ts.isGetAccessorDeclaration(member)) {
     return accessorName('get', spelled);
   }

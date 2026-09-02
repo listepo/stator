@@ -434,6 +434,73 @@ export function isStaticMember(member: ts.ClassElement): boolean {
   );
 }
 
+/** TypeScript's name for a class's `[Symbol.iterator]()` method — `getPropertiesOfType` spells
+ * well-known symbols as `__@` plus the spec name, and HObject.methods has to match that so a
+ * MethodCall slot and a vtable entry name the same row. */
+export const ITERATOR_METHOD_NAME = '__@iterator';
+
+/** `[Symbol.iterator]` as a computed name. Does not ask whether `Symbol` is the global — the
+ * caller that admits the spelling as the well-known method does. */
+export function symbolIteratorAccess(
+  name: ts.PropertyName,
+): ts.PropertyAccessExpression | undefined {
+  if (!ts.isComputedPropertyName(name)) {
+    return undefined;
+  }
+  const expr = name.expression;
+  if (
+    !ts.isPropertyAccessExpression(expr) ||
+    expr.questionDotToken !== undefined ||
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== 'Symbol' ||
+    !ts.isIdentifier(expr.name) ||
+    expr.name.text !== 'iterator'
+  ) {
+    return undefined;
+  }
+  return expr;
+}
+
+/** The HIR method name a class member goes under. `[Symbol.iterator]` is the one computed name
+ * that is a name: it is the well-known iterator method, stored under `ITERATOR_METHOD_NAME`. */
+export function instanceMethodName(member: ts.NamedDeclaration): string | undefined {
+  if (member.name === undefined) {
+    return undefined;
+  }
+  if (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)) {
+    return member.name.text;
+  }
+  return symbolIteratorAccess(member.name) === undefined ? undefined : ITERATOR_METHOD_NAME;
+}
+
+/** True when `name` is a global `[Symbol.iterator]` computed name — the well-known method, not a
+ * shadowed `const Symbol`. */
+export function isGlobalSymbolIteratorName(
+  name: ts.PropertyName,
+  checker: ts.TypeChecker,
+): boolean {
+  const access = symbolIteratorAccess(name);
+  if (access === undefined) {
+    return false;
+  }
+  const symbol = checker.getSymbolAtLocation(access.expression);
+  const declarations = symbol?.declarations ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/** An object type whose `[Symbol.iterator]()` returns an iterator (a Generator, or a boxed
+ * specialized iterator). That is the user-iterable case docs/VALUE.md §4.13 admits: the frontend
+ * can see the method, and the existing iterator for-of drives what it returns. */
+export function userIteratorMethod(type: HType): HField | undefined {
+  if (type.kind !== 'object') {
+    return undefined;
+  }
+  const method = type.methods.find((m) => m.name === ITERATOR_METHOD_NAME);
+  return method !== undefined && method.type.kind === 'fn' && method.type.ret.kind === 'iterator'
+    ? method
+    : undefined;
+}
+
 /** The static member `C.name` names, walking the chain -- statics are inherited in JavaScript, so
  * `D.count` on `class D extends C` reads the ONE binding `C` declared. `wantMethod` narrows to a
  * method (`true`), a field (`false`), or either (`undefined`).
@@ -490,14 +557,7 @@ export function methodDeclaringClass(
   checker: ts.TypeChecker,
 ): ts.ClassDeclaration | undefined {
   for (const current of ancestry(declaration, checker).toReversed()) {
-    if (
-      current.members.some(
-        (m) =>
-          ts.isMethodDeclaration(m) &&
-          (ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) &&
-          m.name.text === name,
-      )
-    ) {
+    if (current.members.some((m) => ts.isMethodDeclaration(m) && instanceMethodName(m) === name)) {
       return current;
     }
   }

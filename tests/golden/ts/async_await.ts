@@ -88,6 +88,20 @@ async function main(): Promise<void> {
   } catch (e) {
     console.log('all rejected ' + e);
   }
+
+  // A return pending through a finally that ITSELF awaits: the completion code lives in a
+  // counted slot, not the C frame the await pops (plan-notes 153).
+  console.log(await finAwait());
+}
+
+async function finAwait(): Promise<string> {
+  try {
+    await Promise.resolve(0);
+    return 'ret';
+  } finally {
+    await Promise.resolve(1);
+    console.log('fin ran');
+  }
 }
 
 main();

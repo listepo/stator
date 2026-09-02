@@ -1728,7 +1728,7 @@ function verifyExpression(
           kind: 'iterator-next',
           span: expr.span,
           code: 'STA4045',
-          message: `next() on a receiver of type '${hTypeName(expr.target.type)}'`,
+          message: `${expr.op}() on a receiver of type '${hTypeName(expr.target.type)}'`,
         });
       }
       break;

@@ -109,6 +109,16 @@ static bool map_step(JSRTIterator *it, jsrt_value *out) {
   }
 }
 
+/* The string code-point walk, boxed: `index` is the code-unit cursor jsrt_string_iter_next
+ * advances by 1 or 2, exactly the loop the sync emitter inlines. */
+static bool string_step(JSRTIterator *it, jsrt_value *out) {
+  if (it->index >= jsrt_string_length(it->target)) {
+    return false;
+  }
+  *out = jsrt_string_iter_next(it->target, &it->index);
+  return true;
+}
+
 const JSRTClass jsrt_class_generator = {"Generator", 0, NULL, NULL, 0, NULL};
 
 jsrt_value jsrt_generator_new(JSRTEnv *env, JSRTGenResume resume) {
@@ -119,6 +129,7 @@ jsrt_value jsrt_generator_new(JSRTEnv *env, JSRTGenResume resume) {
   g->state = 0;
   g->yielded = JSRT_UNDEFINED;
   g->done = false;
+  g->inject = JSRT_GEN_INJECT_NONE;
   return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)g);
 }
 
@@ -130,6 +141,44 @@ void jsrt_generator_return(JSRTGenerator *self, jsrt_value value) {
 }
 
 static JSRTGenerator *as_gen(jsrt_value v) { return (JSRTGenerator *)jsrt_ptr(v); }
+
+/* Shared by Generator.prototype.return/throw. `inject` is what the generated resume prologue
+ * reads at the parked label: RETURN becomes a synthetic `return value` routed through the
+ * finally blocks, THROW rethrows `value` at the yield's own landing pad. A throw the body does
+ * not catch leaves the exception pending and the generator done, so the call site unwinds and a
+ * later `next()` answers done. */
+static jsrt_value generator_inject(jsrt_value gen, jsrt_value value, uint8_t inject) {
+  if (!jsrt_is_generator(gen)) {
+    jsrt_panic("STA4071: generator close on a value that is not a generator");
+  }
+  JSRTGenerator *g = as_gen(gen);
+  /* GeneratorResumeAbrupt (ECMA-262 27.5.1.3): suspendedStart and completed share one answer,
+   * and neither enters the body -- `return(v)` answers `{ value: v, done: true }` and `throw(e)`
+   * rethrows `e` to the caller. A completed generator's `return` answers the NEW value, not the
+   * one it completed with. */
+  if (g->done || g->state == 0) {
+    g->done = true;
+    if (inject == JSRT_GEN_INJECT_RETURN) {
+      return iterator_result(value, true);
+    }
+    jsrt_throw(value);
+    return JSRT_UNDEFINED;
+  }
+  g->inject = inject;
+  g->resume(g, value);
+  if (jsrt_pending()) {
+    return JSRT_UNDEFINED;
+  }
+  return iterator_result(g->yielded, g->done);
+}
+
+jsrt_value jsrt_generator_close(jsrt_value gen, jsrt_value value) {
+  return generator_inject(gen, value, JSRT_GEN_INJECT_RETURN);
+}
+
+jsrt_value jsrt_generator_throw(jsrt_value gen, jsrt_value value) {
+  return generator_inject(gen, value, JSRT_GEN_INJECT_THROW);
+}
 
 static jsrt_value generator_next(jsrt_value gen, jsrt_value sent) {
   JSRTGenerator *g = as_gen(gen);
@@ -170,6 +219,8 @@ bool jsrt_iterator_step(jsrt_value itv, jsrt_value *out) {
   bool more;
   if (it->kind == JSRT_ITER_MATCH_ALL) {
     more = jsrt_regexp_match_all_step(it->extra, it->target, out);
+  } else if (it->kind == JSRT_ITER_STRING) {
+    more = string_step(it, out);
   } else {
     more = is_map_kind(it->kind) ? map_step(it, out) : array_step(it, out);
   }

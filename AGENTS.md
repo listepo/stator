@@ -146,4 +146,5 @@ node src/cli/main.ts explain file.ts --json     # per-construct verdicts (decisi
 - Don't quote competitor benchmark numbers as measurements — measure locally, record version/flags/hardware.
 - Don't "fix" a golden-test mismatch by changing the expected output without proving Node produces it.
 - Don't let mode logic leak below the frontend gate — if a pass or the emitter needs to know the mode, the design is wrong (plan §0.8).
+- Don't duplicate code or logic — find the existing helper and reuse it, or extract one shared helper at the responsible layer. `pnpm run dupes` fails above 1% copy/paste duplication; a clone you write today is a CI failure tomorrow.
 - Don't draw the compiler pipeline in Mermaid or a new ASCII sketch — D2 in `docs/architecture/` is the diagram language.

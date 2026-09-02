@@ -806,9 +806,11 @@ which specialized loop it is, not a user-callable `next` closure.
 
 ### User iterables — one protocol object
 
-Only a value whose checker type has a `[Symbol.iterator]()` the frontend can see (a user class
-that declares the method) allocates a protocol object. That case is still not-yet (`STA1214`):
-it needs `Symbol` as a value. Specialized iterators and generators do not go through it.
+A value whose checker type has a `[Symbol.iterator]()` the frontend can see (a user class that
+declares the method, returning a Generator or a boxed specialized iterator) does **not** allocate a
+third object. The lowering emits a MethodCall of that method and the existing iterator walk drives
+what it returns. `Symbol.iterator` as a *stored value* stays `STA1212`; only the computed method
+name is admitted, so there is still no Symbol primitive and no symbol-keyed shape table.
 
 ```c
 typedef struct JSRTIterator {
@@ -821,8 +823,16 @@ typedef struct JSRTIterator {
 ```
 
 `next()` on this object answers `{ value, done }` — an ordinary two-field shape, not a new HIR
-type. `return`/`throw` on the iterator object are out of scope for the first landing; they get
-their own not-yet rather than a silent no-op.
+type. `return`/`throw` on a specialized iterator are out of scope: the object does not carry
+them (Node answers a TypeError from their absence), so the gate refuses the calls with their own
+not-yet rather than a silent no-op.
+
+One more boxed kind never comes from a member call: `JSRT_ITER_STRING`, the string code-point
+walk. A **suspendable unit** (async or generator) boxes EVERY specialized for-of — array, string,
+Map, Set — because the loop's cursor cannot live on a C frame that a `yield`/`await` pops: the
+resume's `goto` jumps over the initializer and the local reads back as garbage. The boxed walk
+keeps the cursor in the heap object, which is what a stored `arr.values()` already does; the
+zero-alloc inlined loops stay the sync-unit form.
 
 ### Generators
 
@@ -837,16 +847,26 @@ typedef struct JSRTGenerator {
   uint32_t state;
   jsrt_value yielded;
   bool done;
+  uint8_t inject;     /* JSRT_GEN_INJECT_*; read and cleared by the resume prologue */
 } JSRTGenerator;
 ```
 
 `function*` is Task 4.6's resume machine driven by the caller: `gen()` only allocates, the body
 runs on the first `next()`, and `yield e` parks `e` then pops the C frame. A later `next(v)` is
-the value of that `yield`. `return`/`throw` on the generator object may defer.
+the value of that `yield`.
 
-`Symbol.iterator` as a *value* stays `STA1212` until the Symbol primitive lands; the specialized
-loops and the `JSRTIterator` tag do not need the symbol as a first-class value, which is why
-`for-of` over an array already compiled without it.
+`.return(v)`/`.throw(e)` resume the SAME parked label with an injection instead of a value
+(ECMA-262 27.5.1.3, GeneratorResumeAbrupt): the resume prologue reads and clears `inject`, then
+`throw` rethrows `e` at the yield's own landing pad — the body's `try`/`catch` cannot tell it
+from a `yield` that threw — while `return` parks `v` in the return slot and routes through every
+enclosing `finally` exactly as a real `return` at that point would, so a `finally` that yields
+suspends again and the completion value arrives on the next `next()`. On an unstarted or
+completed generator neither enters the body: `return(v)` answers `{ value: v, done: true }` (the
+NEW value, not the one it completed with) and `throw(e)` rethrows to the caller.
+
+`Symbol.iterator` as a *stored value* stays `STA1212` until the Symbol primitive lands. A class
+method named `[Symbol.iterator]` is not that value: it is a compile-time-known method stored under
+TypeScript's `__@iterator`, which is why user-iterable `for-of` compiled without a Symbol tag.
 
 ## 5. What Phase 2 actually implements
 
