@@ -66,8 +66,12 @@ export function createProgram(
     // No emit — we generate our own C
     noEmit: true,
 
-    // For js mode, allow untyped JS
-    allowJs: mode === 'js',
+    // `allowJs` is on in BOTH modes so a `.js` file actually enters the program. ts mode still
+    // rejects every one at the gate (`STA1002`); without this, tsc DROPS the file and answers
+    // `STA0012` "enable the 'allowJs' option", which is the wrong code and the wrong hint — the
+    // user does not want a compiler flag, they want `--mode=js` (plan.md §8 step 2). `checkJs`
+    // stays js-mode-only: ts mode must not type-check a file it is about to refuse.
+    allowJs: true,
     checkJs: mode === 'js',
 
     // Utility options

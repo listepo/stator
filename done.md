@@ -827,3 +827,36 @@ ASan/UBSan           print corpus matches Node; golden 93 fixtures — 93 passed
 ```
 
 **Next:** Phase 5 (§8) -- `js` mode, and the language surface Phases 3 and 4 deferred.
+
+---
+
+## Phase 5 — `js` mode, and the language surface Phases 3 and 4 deferred (in progress)
+
+### Step 1 — provenance grades what the author wrote
+
+Landed in `cf61473` (2026-09-01). The `inferred` grade was already in the tree; the step's remaining
+work was the `explain --json` matrix and a spec correction: the grade answers what the author wrote,
+not which file it lives in (plan-notes 140).
+
+### Step 2 — Gate switches the diagnostic table by mode
+
+**Step 2 landed (2026-09-02).** The same source now flips verdict by mode:
+
+| construct | ts | js |
+|---|---|---|
+| `const x: any = 42` / `1 as any` | `STA1001` never | accepted, lowers to Unknown (`dynamic`) |
+| `var x = 1` | `STA1104` never (untouched) | `STA1214` not-yet (lowering is step 3) |
+| `.js` entry | `STA1002` never, message names `--mode=js` | accepted (already) |
+| `eval(...)` / `globalThis.eval` / `const e = eval` | `STA1101` never | `STA1206` not-yet Phase 8 |
+| `new Function` / `Function(...)` | `STA1103` never | `STA1206` not-yet Phase 8 |
+
+Three codes that looked implemented were dead (plan-notes 141): `STA1002` because `allowJs` was
+ts-off and tsc dropped the file as `STA0012`; `STA1101`/`STA1103`/`STA1206` because the eval check
+required a missing symbol and eval has a lib declaration; `1 as any` because the un-annotated
+binding fired `STA1003` first. `allowJs` is now on in both modes (`checkJs` stays js-only).
+Indirect eval `(0, eval)("x")` is still the arbitrary-callee not-yet.
+
+Tests: `tests/unit/gate.test.ts` (same-source any, as-any vs STA1003, eval/Function matrix,
+STA1002 message), `tests/unit/cli.test.ts` (real `.js` file through `program.ts`, not the
+in-memory host), subset fixtures `subset_eval_call_*`, `subset_new_function_*` (expected-fail
+removed), `subset_js_file_ts.js`, `subset_as_any_*`.

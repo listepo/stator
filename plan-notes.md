@@ -3659,3 +3659,42 @@ provenance was never the right key for boundary insertion.
 
 **Not fixed here:** `MODES.md` §4's other two examples describe boundary checks that are step 5's
 to make true; they are not wrong in the way Example 1 was, so they stay as written.
+
+## 141. Three mode-table codes were allocated and dead, for three different reasons (2026-09-02)
+
+**Context.** Phase 5 step 2: switch the diagnostic table by mode. (a) `any`/`as any` in js mode
+stops being `STA1001`; (b) `var` legal in js only; (c) a `.js` entry under ts is `STA1002` with
+"use `--mode=js`"; (d) `eval`/`new Function` in js emit **`STA1206`**, which DIAGNOSTICS.md had
+allocated and src/ emitted nowhere.
+
+**Finding 1: `STA1002` could not fire.** `src/frontend/program.ts` set `allowJs: mode === 'js'`.
+Under ts mode, tsc **drops** a `.js` root file; `getSourceFiles()` never contains it, so the
+gate's `fileName.endsWith('.js')` arm is unreachable. `build` reports `programDiagnostics`
+before the gate, so the user saw `STA0012` "enable the 'allowJs' option" — the wrong code and
+the wrong flag. `allowJs` is now on in both modes; `checkJs` stays js-only. The gate is what
+refuses the file.
+
+**Finding 2: the eval check was dead for the opposite reason.** It fired only when
+`getSymbolAtLocation(eval) === undefined`. `eval` has a lib.es5 declaration, so the check
+accepted and `gateIdentifier`'s global catch-all reported `STA1214` "the global 'eval'",
+Phase 5. Same for `new Function` ("new on this type") and `Function(...)`. Dedicated codes
+`STA1101`/`STA1103`/`STA1206` existed and were unreachable. The identifier is now recognized
+the way `Date` is (declaration-file test), including `globalThis.eval` and aliasing
+(`const e = eval`).
+
+**Finding 3: `as any` was classified as implicit.** `const x = 1 as any` has no annotation on
+the BINDING, so `isImplicitAny` fired `STA1003` first; the AsExpression child also fired
+`STA1001`; `classify` picks the first never. The author wrote `any`. `isImplicitAny` now skips
+an initializer that is `as any` / `<any>x`.
+
+**(b) was already true.** `var` is `STA1104` never in ts and `STA1214` not-yet in js. Step 2
+asked only that the split exist; the lowering is step 3, and `subset_var_declarations_js.js`
+stays expected-fail at `@verdict: static`.
+
+**Out of scope, recorded so it is not "fixed" by accident.** Indirect eval `(0, eval)("x")`
+is still "calling an arbitrary expression" (`STA1214`). A comma-expression callee is not the
+identifier `eval`, and teaching the gate to see through it is a different check than the
+mode table.
+
+**plan.md edited:** yes, §8 step 2 struck through; Phase 8 item 5 no longer claims `STA1206`
+has never been emitted.

@@ -320,7 +320,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return { kind: 'accept' };
 
     case ts.SyntaxKind.Identifier:
-      return gateIdentifier(node as ts.Identifier, typeChecker);
+      return gateIdentifier(node as ts.Identifier, typeChecker, mode);
 
     case ts.SyntaxKind.VariableDeclarationList:
       return gateDeclarationList(node as ts.VariableDeclarationList, mode);
@@ -344,7 +344,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return { kind: 'accept' };
 
     case ts.SyntaxKind.CallExpression:
-      return gateCall(node as ts.CallExpression, typeChecker);
+      return gateCall(node as ts.CallExpression, typeChecker, mode);
 
     // `super` never denotes a value: it is a marker on the two forms that mention it. `super(...)`
     // is the base constructor run against this constructor's own receiver, and `super.m()` is a
@@ -376,6 +376,16 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     // call, and this node is its child), and `.length` on a string or an array.
     case ts.SyntaxKind.PropertyAccessExpression: {
       const access = node as ts.PropertyAccessExpression;
+      // `globalThis.eval` / `globalThis.Function` as VALUES — the call/`new` forms are decided
+      // on those nodes, but aliasing (`const e = globalThis.eval`) is the same construct and
+      // must not fall through to "property access is not yet supported".
+      const dynamic = dynamicCodeGeneration(access, typeChecker);
+      if (dynamic === 'eval') {
+        return evalResult(mode);
+      }
+      if (dynamic === 'function') {
+        return functionCtorResult(mode);
+      }
       if (
         isConsoleLog(access) ||
         isStringLength(access, typeChecker) ||
@@ -426,7 +436,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return { kind: 'accept' };
 
     case ts.SyntaxKind.NewExpression:
-      return gateNew(node as ts.NewExpression, typeChecker);
+      return gateNew(node as ts.NewExpression, typeChecker, mode);
 
     case ts.SyntaxKind.ThisKeyword:
       return gateThis(node);
@@ -513,6 +523,71 @@ function notYet(message: string, phase: number): GateResult {
   };
 }
 
+/** One not-yet for both dynamic-code-generation constructs — they land together in Phase 8. */
+function jsDynamicCode(): GateResult {
+  return {
+    kind: 'not-yet',
+    code: 'STA1206',
+    message:
+      'eval() and new Function() are not yet supported in js mode; planned for Phase 8 (dynamic tier)',
+    phase: 8,
+  };
+}
+
+/** `eval` in ts mode is a permanent never; in js mode it waits on Phase 8's interpreter tier. */
+function evalResult(mode: Mode): GateResult {
+  return mode === 'ts'
+    ? {
+        kind: 'never',
+        code: 'STA1101',
+        message:
+          'eval() is not allowed in ts mode — it prevents static analysis and is a permanent design choice',
+      }
+    : jsDynamicCode();
+}
+
+/** `new Function` / `Function(...)` — same split, different ts-mode code. */
+function functionCtorResult(mode: Mode): GateResult {
+  return mode === 'ts'
+    ? {
+        kind: 'never',
+        code: 'STA1103',
+        message: 'new Function() is not allowed in ts mode — code generation is not supported',
+      }
+    : jsDynamicCode();
+}
+
+/** The two spellings of dynamic code generation: a bare/`globalThis` `eval`, or the `Function` ctor.
+ *
+ * `Function` is identified through the same declaration-file test `Date` uses, so a user
+ * `class Function` stays on the ordinary class path. `eval` is the same test; it is also recognized
+ * as `globalThis.eval`, which is the other form DIAGNOSTICS.md names. A user method named `eval`
+ * is not this — only `globalThis` as the receiver. */
+function dynamicCodeGeneration(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+): 'eval' | 'function' | undefined {
+  if (isGlobalNamed(expression, checker, 'eval')) {
+    return 'eval';
+  }
+  if (isGlobalNamed(expression, checker, 'Function')) {
+    return 'function';
+  }
+  if (
+    ts.isPropertyAccessExpression(expression) &&
+    ts.isIdentifier(expression.expression) &&
+    expression.expression.text === 'globalThis'
+  ) {
+    if (expression.name.text === 'eval') {
+      return 'eval';
+    }
+    if (expression.name.text === 'Function') {
+      return 'function';
+    }
+  }
+  return undefined;
+}
+
 /** `Date`'s residue code, as `STA1211` is `RegExp`'s: a Date member outside the landed tables is
  * refused under its own number rather than the generic `STA1214`, so a program can tell "this
  * builtin is partly here" from "this construct is not".
@@ -573,7 +648,7 @@ function describeKind(kind: ts.SyntaxKind): string {
  * The one shape held back: a binding declared inside a loop is a FRESH binding per iteration, and
  * rung 4b gives a function one environment per call, so every iteration's closure would share the
  * one slot and read the last iteration's value. Reject the capture rather than emit that program. */
-function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker): GateResult {
+function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
   const symbol = typeChecker.getSymbolAtLocation(node);
   const decl = symbol?.valueDeclaration;
   // A class NAME is not a value here. Five spellings are not uses of the value and must pass: the
@@ -628,6 +703,14 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker): GateR
     // user binding, whatever else merges into it.
     const declarations = symbol.declarations ?? [];
     if (declarations.every((d) => d.getSourceFile().isDeclarationFile)) {
+      // `eval` and `Function` as VALUES are the same constructs as the call/`new` forms — aliasing
+      // them (`const e = eval`) is how a program hides a dynamic-code site from a callee check.
+      if (node.text === 'eval') {
+        return evalResult(mode);
+      }
+      if (node.text === 'Function') {
+        return functionCtorResult(mode);
+      }
       // A catch-all keeps the phase that owns MOST of what it refuses (plan §7 Task 4.7 step 5).
       // What is left of the global surface is `Symbol` and the iterator protocol around it, which
       // is Phase 5 step 8; `globalThis` and `Reflect` are Phase 8's, and `Proxy` is a `never` the
@@ -939,7 +1022,16 @@ function isLabellable(stmt: ts.Statement): boolean {
   );
 }
 
-function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateResult {
+function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
+  // Dynamic code generation — `eval(...)` and `Function(...)` — own dedicated codes that split by
+  // mode (STA1101/STA1103 never in ts, STA1206 not-yet Phase 8 in js). Asked before anything else
+  // because the identifier `eval` is also a GLOBAL, and the global catch-all would otherwise
+  // swallow it as STA1214 "the global 'eval'" (plan.md §8 step 2, plan-notes 141).
+  const dynamicCode = dynamicCodeGeneration(call.expression, typeChecker);
+  if (dynamicCode !== undefined) {
+    return dynamicCode === 'eval' ? evalResult(mode) : functionCtorResult(mode);
+  }
+
   // Asked first, because it is what decides whether the type arguments below are a feature or a
   // refusal: `box<string>('a')` and `box('a')` name the same specialization, and the difference
   // between them is a spelling the checker has already erased by the time it answers.
@@ -1353,9 +1445,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateRes
   // drops extras and fills missing ones with `undefined`, and the calling convention does that
   // at runtime rather than making it a gate decision.
   if (ts.isIdentifier(callee)) {
-    return callee.text === 'eval' && typeChecker.getSymbolAtLocation(callee) === undefined
-      ? notYet('eval is not yet supported', 8)
-      : { kind: 'accept' };
+    return { kind: 'accept' };
   }
   if (ts.isFunctionExpression(callee) || ts.isArrowFunction(callee)) {
     return { kind: 'accept' };
@@ -1988,7 +2078,10 @@ function gateCollectionCall(
   return { kind: 'accept' };
 }
 
-function gateNew(node: ts.NewExpression, checker: ts.TypeChecker): GateResult {
+function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): GateResult {
+  if (dynamicCodeGeneration(node.expression, checker) === 'function') {
+    return functionCtorResult(mode);
+  }
   // Checked before the type-argument rejection below, because `new Map<string, number>()` is how a
   // typed Map is spelled: the arguments fill K and V, which the checker resolves and the HType
   // carries, rather than asking for the generic instantiation the rejection is about.

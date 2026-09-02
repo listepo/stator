@@ -941,3 +941,46 @@ void test('the regexp forms of the pattern-taking string methods are accepted', 
   // the whole reason the two split.
   assert.deepEqual(codesFor("console.log('a1b'.matchAll(/\\d/g));"), ['STA1214']);
 });
+
+// Phase 5 step 2: the diagnostic table is a function of mode. The same source that is a never in
+// ts mode is either a dynamic value or a not-yet in js mode — never the other mode's code.
+void test('explicit any is STA1001 in ts mode and accepted in js mode', () => {
+  // Type annotations are TypeScript syntax, so the js-mode case has to live in a .ts file; a .js
+  // file would be a parse error rather than a mode decision.
+  assert.deepEqual(codesFor('const x: any = 42;'), ['STA1001']);
+  assert.deepEqual(codesFor('const x: any = 42;', 'js', '/test.ts'), []);
+});
+
+void test('as any is explicit STA1001, not implicit STA1003', () => {
+  // `const x = 1 as any` has no annotation on the BINDING. Before this step the binding fired
+  // STA1003 (implicit) and the AsExpression fired STA1001, and classify picked the first never.
+  assert.deepEqual(codesFor('const x = 1 as any;'), ['STA1001']);
+  assert.deepEqual(codesFor('const x = 1 as any;', 'js', '/test.ts'), []);
+});
+
+void test('eval is STA1101 never in ts mode and STA1206 not-yet in js mode', () => {
+  assert.deepEqual(codesFor('eval("1 + 1");'), ['STA1101']);
+  assert.deepEqual(codesFor('eval("1 + 1");', 'js'), ['STA1206']);
+  assert.deepEqual(codesFor('globalThis.eval("1");'), ['STA1101']);
+  assert.deepEqual(codesFor('globalThis.eval("1");', 'js'), ['STA1206']);
+  // Aliasing is the same construct: a callee check that only looked at the call site would miss it.
+  assert.deepEqual(codesFor('const e = eval;'), ['STA1101']);
+  assert.deepEqual(codesFor('const e = eval;', 'js'), ['STA1206']);
+});
+
+void test('Function and new Function are STA1103 in ts mode and STA1206 in js mode', () => {
+  assert.deepEqual(codesFor('const f = new Function("return 42");'), ['STA1103']);
+  assert.deepEqual(codesFor('const f = new Function("return 42");', 'js'), ['STA1206']);
+  assert.deepEqual(codesFor('const f = Function("return 42");'), ['STA1103']);
+  assert.deepEqual(codesFor('const f = Function("return 42");', 'js'), ['STA1206']);
+});
+
+void test('a .js file under ts mode is STA1002 with a --mode=js hint', () => {
+  const { program } = createProgram('console.log(1);', '/test.js');
+  const diags = gateProgram(program, 'ts');
+  assert.deepEqual(
+    diags.map((d) => d.code),
+    ['STA1002'],
+  );
+  assert.match(diags[0]?.message ?? '', /`--mode=js`/);
+});

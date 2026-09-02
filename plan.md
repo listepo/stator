@@ -300,14 +300,22 @@ plan-notes 131):
    previously graded a fully JSDoc'd `.js` function `inferred`; that reading collapses the
    annotated/un-annotated split INSIDE `.js`, which is the only split js mode trades on, and the
    `.ts`/`.js` distinction it was reaching for is already in the report's own file path.
-2. Gate: switch the diagnostic table by mode. Concretely: (a) `any`/`as any` in `js` mode stops
+2. ~~Gate: switch the diagnostic table by mode. Concretely: (a) `any`/`as any` in `js` mode stops
    being `STA1001` and lowers to `Unknown` (the dynamic path) — decision tests asserting the SAME
    source flips verdict by mode; (b) `var` becomes legal in `js` mode only (its `ts`-mode "never"
    code is untouched); (c) `.js` acceptance is already real (the `js` golden fixtures compile
    today) — pin the other direction with a decision test that a `.js` entry under `ts` mode stays
    `STA1002` with the "use `--mode=js`" hint; (d) `eval`/`new Function` in `js` mode emit
    **`STA1206`** — allocated in DIAGNOSTICS.md but emitted NOWHERE in src/ today — as not-yet
-   naming Phase 8; `ts` mode keeps `STA1101`/`STA1103` never.
+   naming Phase 8; `ts` mode keeps `STA1101`/`STA1103` never.~~ ✅ **landed** (2026-09-02) —
+   (a) the same source (`const x: any = 42`, `const x = 1 as any`) is `STA1001` in ts and
+   `dynamic` in js (`subset_explicit_any_*`, `subset_as_any_*`); `as any` is explicit, not
+   implicit `STA1003`; (b) `var` was already split (`STA1104` never / `STA1214` not-yet) — the
+   lowering is step 3; (c) a `.js` entry under ts is `STA1002` with the `--mode=js` hint
+   (`subset_js_file_ts.js`, `tests/unit/cli.test.ts`) — `allowJs` is now on in both modes so tsc
+   does not drop the file and answer `STA0012`; (d) `eval`/`new Function`/`Function(...)` emit
+   `STA1101`/`STA1103` never in ts and `STA1206` not-yet Phase 8 in js. Three findings, plan-notes
+   141.
 3. Lower `var`: function-scoped binding, hoisting to the enclosing function (or module) scope,
    `undefined` init before the first statement runs, legal redeclaration folding to one slot.
    Decision + golden tests: read-before-write answers `undefined` (not a TDZ trap), the classic
@@ -854,8 +862,8 @@ two things that must exist before implementation is allowed to start:
    separate archive into its own build directory, exactly as `make intl` does, and gets its own CI
    job like `intl` has. The default archive must not gain a byte — which is what the flag is FOR,
    and step 8 is how that claim is checked instead of asserted.
-5. **`eval` and `new Function` in `js` mode:** `STA1206` was allocated for this and has never been
-   emitted; it becomes deliverable here. Compile the string at runtime through the interpreter,
+5. **`eval` and `new Function` in `js` mode:** `STA1206` is now emitted as not-yet (Phase 5 step 2);
+   the interpreter that retires it lands here. Compile the string at runtime through the interpreter,
    marshal the result back, and give the interpreted scope access to the compiled module's bindings
    through the handle table (the scope bridge, not just the value bridge — a decision the step-2 doc
    has to settle, since a design where `eval` cannot see the enclosing scope is a different feature
@@ -1072,3 +1080,4 @@ Standing practices:
 - **v2.9** (2026-09-01): **the not-yet audit's own inventory was audited, and it was 2.6× short** (plan-notes 136). Task 4.7's step 1 says to re-derive the site list at execution HEAD; parsing `gate.ts` with the `typescript` API instead of grepping it finds **165** `notYet`/`dateNotYet` sites, not 63 — and 70 of them name **Phase 3, complete since 2026-08-30**, so `rest parameters are not yet supported; planned for Phase 3` is what the compiler prints today. The audit missed them because it asked "which sites name phase 4?" — a question about the phase that happened to be open — while the rule the task itself establishes implies the general one, "does any site name a completed phase?". Task 4.7's inventory paragraph is replaced by the parsed table, step 1 now carries the general question, and step 6 gains two groups (the 70-site ladder residue; the 10 `dateNotYet` sites, whose blocker is the intl feature BUILD and so is step 3's `STA1215` question again, not a phase). §8 Phase 5 gains **step 12**, which owns the residue — six construct families in landing order with their own Check — because it is `ts`-mode static surface §1.1 promises will compile and no phase owned it; deliberately not a new phase, since §15.3 forbids the renumbering that would break `plan.md §N` citations. Phase 5's title gained "3 and", and its bucket warning — previously a feeling — became a named split trigger.
 - **v3.0** (2026-09-01): **Phase 4 closed.** Task 4.7 was its last open task, and closing it is what made the phase closable honestly -- 165 not-yet sites re-derived, every one now naming the phase that owns its blocker, and `tests/unit/phases.test.ts` failing the build if that stops being true. §7 compresses to a completed-phase stub on §6's model (task numbers and titles stay, so `§7 Task 4.N` citations resolve); `done.md` gains the exit criterion answered bullet by bullet with the dashboard beside it, and its Phase 4 heading now reads ✅ COMPLETE, which `src/support/phases.ts` mirrors in the same change because the test pins the two together. Three of the five exit bullets sit below 100% on the dashboard and the phase still exits: the dashboard counts MEMBERS, not blockers, and every residue names an owner (plan-notes 125). Phase 5 is now the open phase.
 - **v3.1** (2026-09-01): **Phase 5 step 1 was already landed, and its own wording was the thing that needed fixing** (plan-notes 140). The `inferred` grade shipped in `5e9f2b4` the day before v2.7 wrote it up as remaining; what was actually missing was the `explain --json` test, now in `tests/unit/cli.test.ts` and proved able to fail. The step's spec half was worse than stale: it graded a fully JSDoc'd `.js` function `inferred` while the tree grades it `typed`, and step 5 was about to key boundary insertion on a field whose two readings put the trust axis in OPPOSITE directions. A measurement settled it — `checkJs` plus `program.ts`'s fatal `STA0012` means a lying JSDoc is a compile error, not a runtime trap, so what needs checking is a dynamic argument reaching an annotated signature, which is a property of the EDGE and not of any per-function grade. Steps 1, 5 and 6 edited accordingly; `docs/MODES.md` §4 Example 1 (which asserted a runtime check for a call `tsc` rejects statically) and `docs/HIR.md`'s undocumented `provenance` field fixed in the same change.
+- **v3.2** (2026-09-02): **Phase 5 step 2 landed** — the diagnostic table now switches by mode (plan-notes 141). Three things that looked implemented were dead: `STA1002` never fired because `allowJs` was ts-off and tsc dropped the `.js` file as `STA0012`; the eval check required `getSymbolAtLocation === undefined` and eval has a lib symbol, so the global catch-all swallowed it as `STA1214`; `1 as any` fired `STA1003` on the binding first. `STA1206` is now emitted. Indirect eval `(0, eval)("x")` is still the arbitrary-callee not-yet.

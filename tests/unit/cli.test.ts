@@ -211,3 +211,28 @@ void test('explain --json grades every function typed, inferred or dynamic', () 
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+void test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not tsc's allowJs error", () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-js-under-ts-'));
+  try {
+    const entry = join(work, 'entry.js');
+    writeFileSync(entry, 'console.log(1);\n');
+
+    const explained = stator('explain', entry, '--json');
+    assert.equal(explained.status, 0, explained.stderr);
+    assert.deepEqual(JSON.parse(explained.stdout), { verdict: 'error', code: 'STA1002' });
+
+    // The hint has to come from the CLI path, not the in-memory host: tsc used to DROP the .js
+    // file and answer STA0012 "enable the allowJs option", which is the wrong code and the wrong
+    // flag. `build` reports programDiagnostics before the gate, so this is the path that used to
+    // lose.
+    const built = stator('build', entry, '-o', join(work, 'out'));
+    assert.notEqual(built.status, 0);
+    assert.match(built.stderr, /STA1002/);
+    assert.match(built.stderr, /`--mode=js`/);
+    assert.doesNotMatch(built.stderr, /STA0012/);
+    assert.doesNotMatch(built.stderr, /allowJs/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

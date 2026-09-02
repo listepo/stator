@@ -631,7 +631,32 @@ export function isImplicitAny(node: ts.Node, typeChecker: ts.TypeChecker): boole
   if (annotation === null || annotation !== undefined) {
     return false; // not an annotation site, or annotated explicitly
   }
+  // `const x = 1 as any` has no annotation on the BINDING — the `any` is on the initializer —
+  // so this would otherwise fire STA1003 (implicit) while the AsExpression child also fires
+  // STA1001 (explicit). The explicit one is the truth: the author wrote `any`. Skip here so
+  // the child is the only diagnostic (plan.md §8 step 2).
+  if (initializerIsExplicitAny(node)) {
+    return false;
+  }
   return (typeChecker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) !== 0;
+}
+
+function initializerIsExplicitAny(node: ts.Node): boolean {
+  if (!ts.isVariableDeclaration(node) && !ts.isParameter(node) && !ts.isPropertyDeclaration(node)) {
+    return false;
+  }
+  const initializer = node.initializer;
+  if (initializer === undefined) {
+    return false;
+  }
+  return (
+    (ts.isAsExpression(initializer) || ts.isTypeAssertionExpression(initializer)) &&
+    isAnyKeyword(initializer.type)
+  );
+}
+
+function isAnyKeyword(typeNode: ts.TypeNode): boolean {
+  return ts.isToken(typeNode) && typeNode.kind === ts.SyntaxKind.AnyKeyword;
 }
 
 /** `null` = this node is not a place an annotation can go. `undefined` = it is, and there is none.
@@ -659,23 +684,20 @@ function annotationSiteOf(node: ts.Node): ts.TypeNode | null | undefined {
 export function hasExplicitAny(node: ts.Node): boolean {
   if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
     const typeNode = (node as ts.VariableDeclaration | ts.ParameterDeclaration).type;
-    if (typeNode && ts.isToken(typeNode) && typeNode.kind === ts.SyntaxKind.AnyKeyword) {
+    if (typeNode && isAnyKeyword(typeNode)) {
       return true;
     }
   }
   if (ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
     const typeNode = (node as ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression)
       .type;
-    if (typeNode && ts.isToken(typeNode) && typeNode.kind === ts.SyntaxKind.AnyKeyword) {
+    if (typeNode && isAnyKeyword(typeNode)) {
       return true;
     }
   }
-  // Check for `as any` casts
-  if (ts.isAsExpression(node)) {
-    const typeNode = node.type;
-    if (ts.isToken(typeNode) && typeNode.kind === ts.SyntaxKind.AnyKeyword) {
-      return true;
-    }
+  // `as any` and `<any>x` — the latter is the same claim in the angle-bracket spelling.
+  if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
+    return isAnyKeyword(node.type);
   }
   return false;
 }
