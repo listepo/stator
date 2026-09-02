@@ -11,6 +11,7 @@ import {
   H_UNDEFINED,
   hArray,
   hFunction,
+  hIterator,
   hMap,
   hObject,
   hPromise,
@@ -91,6 +92,11 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
   const collection = collectionTypeToHType(type, checker, depth);
   if (collection !== null) {
     return collection;
+  }
+
+  const iterator = iteratorTypeToHType(type, checker, depth);
+  if (iterator !== null) {
+    return iterator;
   }
 
   if (isLibInterface(type, 'RegExp')) {
@@ -583,6 +589,26 @@ function isLibInterface(type: ts.Type, name: string): boolean {
   }
   const declarations = symbol.getDeclarations() ?? [];
   return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+function iteratorTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number): HType | null {
+  const name = type.getSymbol()?.getName();
+  if (
+    name !== 'ArrayIterator' &&
+    name !== 'MapIterator' &&
+    name !== 'SetIterator' &&
+    name !== 'RegExpStringIterator' &&
+    name !== 'Generator'
+  ) {
+    return null;
+  }
+  if (!isLibInterface(type, name)) {
+    return null;
+  }
+  const [element] = checker.getTypeArguments(type as ts.TypeReference);
+  return hIterator(
+    element !== undefined ? tsTypeToHType(element, checker, depth + 1) : hUnknown(false),
+  );
 }
 
 function collectionTypeToHType(

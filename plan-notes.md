@@ -3940,3 +3940,56 @@ so a typed Set for-of stays static.
 
 Remaining under this step: the nine `keys`/`values`/`entries` members, `matchAll`, `function*`,
 and `for-of` over a user iterable.
+
+## 149. Runtime build is a justfile, not a Makefile (2026-09-02)
+
+`runtime/Makefile` is gone. The recipes live in a repo-root `justfile`: `just runtime`,
+`just runtime-asan`, `just runtime-intl`, `just runtime-test`, `just runtime-test-asan`,
+`just runtime-clean`. Incrementality is a timestamp walk of each `.c` and the `-MMD` sidecar
+the compiler writes, so a header change still rebuilds (plan-notes 66). `CC` from the
+environment still wins; unset, it is clang.
+
+`just` is pinned at 1.58.0 in `mise.toml`. CI installs it via `extractions/setup-just@v3`
+on every job that builds the archive (frontend Unix, runtime, asan, intl). Windows frontend
+never builds the runtime.
+
+Live diagnostics (STA0011, STA1210, STA1215) and live comments name the recipes. Historical
+`plan-notes.md` / `done.md` evidence of `make -C runtime` stays as written.
+
+## 150. Array/Map/Set `keys`/`values`/`entries` (2026-09-02)
+
+Phase 5 step 8. When the call is the operand of a `for-of`, the emitter inlines the specialized
+walk (`view` on the for-of node) and allocates nothing. When the call is stored
+(`const it = arr.keys()`), the runtime boxes a `JSRTIterator` — a cursor plus a kind tag, not a
+`next` closure — and `it.next()` is `jsrt_iterator_next`, answering `{ value, done }` as a nameless
+dynamic object. for-of over a stored iterator is `jsrt_iterator_step`.
+
+Map `for-of` / `entries()` still yield a two-element array, so a ts-mode file that uses the pair
+is dynamic (no tuple). Array `keys()` yields numbers and stays static; Set `keys()`/`values()`
+yield the element.
+
+User iterables and `matchAll` / `function*` remain open under this step.
+
+## 151. `String.prototype.matchAll` (2026-09-02)
+
+Phase 5 step 8. `matchAll` is a boxed specialized iterator (`JSRT_ITER_MATCH_ALL`): the
+runtime clones the `/g` regexp so walking cannot mutate the original `lastIndex`, each
+`next()`/`for-of` step is `RegExpBuiltinExec` yielding a match array, and an empty match
+still AdvanceStringIndex so the walk cannot spin. A non-global pattern is STA2005 (the
+spec's TypeError); a non-regexp argument stays `STA1214` (RegExpCreate).
+
+Remaining under this step: `function*`, and `for-of` over a user iterable.
+
+## 152. `function*` / `yield` (2026-09-02)
+
+Phase 5 step 8. A generator is a `JSRTGenerator`, not a tagged `JSRTIterator`: the cursor is a
+resume point and the locals live in a heap environment. `gen()` only allocates; the body runs
+on the first `next()`. `yield e` parks `e` and pops the C frame; a later `next(v)` is the
+value of that yield. `for-of` uses `jsrt_iterator_step` and discards the completion value.
+Uncaught throws stay pending for the call site of `next()`; the object is marked done so a
+later `next()` does not re-enter.
+
+`next(v)` lands. Generator methods, async generators, and `for await` stay **STA1201**.
+`yield*` is STA1214. `.return()` / `.throw()` on the generator object stay not-yet.
+
+Remaining under this step: `for-of` over a user iterable (needs `Symbol` as a value).

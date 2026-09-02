@@ -90,7 +90,7 @@ value-flow views) sourced from `docs/architecture/*.d2`. It is a visualization o
 plan.md AGENTS.md plan-notes.md NICHE.md          # root
 docs/    ARCHITECTURE.md architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
 src/     cli/  frontend/  hir/  lower/  passes/  codegen/  support/
-runtime/ include/jsrt_value.h  src/  vendor/  Makefile     → runtime/build/libjsrt.a
+runtime/ include/jsrt_value.h  src/  vendor/  (justfile)   → runtime/build/libjsrt.a
 tests/   unit/  subset/  golden/ts/  golden/js/  differential/  bench/
 ```
 
@@ -190,7 +190,7 @@ The **locked `tsconfig.json`** this phase produced is normative and lives here, 
    ```
    (`erasableSyntaxOnly` bans `enum`/`namespace`/parameter properties in our own source — required for Node's type stripping and house style anyway: use `const` objects + union types. The two `*ImportExtensions` flags are what let one source tree both run under Node's type stripping in dev — where relative imports must name the real `.ts` file — and emit runnable JS into `dist/`; see `plan-notes.md` 2026-08-29 #3.)
    A second project, `tests/tsconfig.json`, extends this one (`noEmit`, `rootDir: "."`) to cover `tests/**/*.ts`, excluding the deliberately-invalid fixture directories (`subset/subset_*`, `golden/ts`, `golden/js`, `differential`). It exists because the locked config above is `src`-only, which leaves test sources unchecked. It adds no leniency.
-   The Biome config (`biome.json` — format checking folded into `lint`, warnings escalated), the `src/` skeleton (whose `build`/`explain` report honest not-implemented diagnostics), the runtime Makefile, the npm scripts, `.github/workflows/ci.yml`, and `./ci.sh` (the CI until a remote exists) are all in place — the files themselves are now the reference; AGENTS.md carries the command list.
+   The Biome config (`biome.json` — format checking folded into `lint`, warnings escalated), the `src/` skeleton (whose `build`/`explain` report honest not-implemented diagnostics), the justfile, the npm scripts, `.github/workflows/ci.yml`, and `./ci.sh` (the CI until a remote exists) are all in place — the files themselves are now the reference; AGENTS.md carries the command list.
 
 ---
 
@@ -246,7 +246,7 @@ byte-for-byte against the pinned Node under both the release and the ASan/UBSan 
   `console.time`/`timeEnd`/`trace`), which prove by shape assertion in `tests/unit/` instead.
 - ~~**Task 4.3** — RegExp.~~ ✅ — QuickJS-NG `libregexp` vendored; `libunicode` paid `toUpperCase`/
   `toLowerCase`/`normalize`'s debt with it.
-- ~~**Task 4.4** — Intl/ICU.~~ ✅ — a feature build (`make -C runtime intl`), off by default.
+- ~~**Task 4.4** — Intl/ICU.~~ ✅ — a feature build (`just runtime-intl`), off by default.
 - ~~**Task 4.5** — GC hygiene tests.~~ ✅
 - ~~**Task 4.6** — `async`/`await`.~~ ✅ — generators split off to Phase 5 step 8, which owns the
   iterator protocol they actually wait on.
@@ -353,18 +353,16 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
    …), never bulk-flipped. Capstone `tests/golden/js/capstone.js` is an untyped catalog (~200
    lines) matching Node. `var xs = []` taught `hTypeAssignable` to recurse into arrays (plan-notes
    146).
-8. **The iterator protocol, and generators with it** — in progress: `docs/VALUE.md` §4.13 is written; `for-of` over a string is a specialized code-point loop (plan-notes 147) and `for-of` over a Map or Set is a live insertion-order walk (plan-notes 148). Remaining: the nine `keys`/`values`/`entries` members, `matchAll`, `function*`. (inherited from Task 4.6, which delivered `async`/`await` and deferred the rest — see plan-notes 112). One blocker, **four** surfaces: `for`-`of` over a user iterable (string/`Map`/`Set` already specialized — **`STA1214`** now names only the protocol-object case, not the specialized loops), the `keys`/`values`/`entries` triple that `Array.prototype`, `Map.prototype` and `Set.prototype` are each missing, `String.prototype.matchAll` (it answers an iterator, which is what splits it from `match` — `match` stays Phase 4), and `function*` (**`STA1201`**). Generators are last because they are the only one that also needs a state machine, and Task 4.6 already built that half — a `yield` differs from an `await` in who it answers (its caller, not a scheduler), not in how it suspends. `STA1201` names this phase.
+8. **The iterator protocol, and generators with it** — in progress: `docs/VALUE.md` §4.13 is written; `for-of` over a string is a specialized code-point loop (plan-notes 147) and `for-of` over a Map or Set is a live insertion-order walk (plan-notes 148). The nine `keys`/`values`/`entries` members landed (plan-notes 150); `matchAll` landed (plan-notes 151); `function*` landed (plan-notes 152). Remaining: `for-of` over a user iterable (**`STA1214`**, needs `Symbol` as a value) and `.return()`/`.throw()` on the generator object. (inherited from Task 4.6, which delivered `async`/`await` and deferred the rest — see plan-notes 112). One blocker, **four** surfaces: `for`-`of` over a user iterable (string/`Map`/`Set` already specialized — **`STA1214`** now names only the protocol-object case, not the specialized loops), the `keys`/`values`/`entries` triple (landed), `String.prototype.matchAll` (landed — a boxed iterator of match arrays), and `function*` (landed — **`STA1201`** now names generator methods, async generators, and `for await`). A `yield` differs from an `await` in who it answers (its caller, not a scheduler), not in how it suspends.
    In order: (a) the representation decision FIRST, in `docs/VALUE.md` — compile-time-known
    iterables (string, array, `Map`, `Set`) lower to SPECIALIZED loops with no protocol object
    allocated (the AOT-friendly path); only a user iterable (a `[Symbol.iterator]` the checker can
    see) gets a real protocol object, and its struct shape is written down before any code;
-   (b) the nine `keys`/`values`/`entries` members (Array/Map/Set × 3) land on that representation
-   and flip their dashboard triples; (c) `for`-`of` over string/`Map`/`Set` is done, user iterables
-   still narrow `STA1214`; (d) `matchAll` (the RegExp machinery exists —
-   only the iterator-shaped answer is new); (e) `function*` last, on Task 4.6's suspension state
-   machine with caller-driven resume — and a recorded scope decision before building: `next(v)`
-   lands; `return`/`throw` on the generator object may defer under their own named not-yet if
-   they fight the state machine. Decide, don't drift.
+   (b) the nine `keys`/`values`/`entries` members (Array/Map/Set × 3) landed on that representation
+   and flipped their dashboard triples; (c) `for`-`of` over string/`Map`/`Set` is done, user iterables
+   still narrow `STA1214`; (d) `matchAll` landed (plan-notes 151); (e) `function*` landed on Task 4.6's
+   suspension state machine with caller-driven resume (plan-notes 152): `next(v)` injects into `yield`;
+   `return`/`throw` on the generator object stay not-yet. User-iterable `for-of` still needs `Symbol`.
 9. **Top-level await** (**`STA1208`**, moved here from Phase 4 on 2026-09-01). The gate's message
    already names the blocker exactly — "a module body has no resume point to suspend into" — and
    Task 4.6 built resume points for functions. This step makes the module init function an async
@@ -825,7 +823,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 Gate: real users blocked on untyped npm dependencies or `eval`. Do not build speculatively.
 
 - Embed **QuickJS-NG** in the runtime (scriptc `--dynamic` / Perry-eval model): `eval`, `new Function`, `Proxy`, and stubborn untyped modules run interpreted; a marshaling layer converts `jsrt_value` ↔ `JSValue` at the boundary (objects proxied by handle, not deep-copied).
-- Makefile feature flag so pure-static builds are unchanged. **`ts` mode is untouched: `eval` stays `STA1101`, permanently.**
+- justfile feature flag so pure-static builds are unchanged. **`ts` mode is untouched: `eval` stays `STA1101`, permanently.**
 
 Steps (detailed 2026-09-01; plan-notes 131). Steps 1 and 2 are not implementation — they are the
 two things that must exist before implementation is allowed to start:
@@ -853,8 +851,8 @@ two things that must exist before implementation is allowed to start:
    supplies the `lre_*` embedder callbacks once both halves are present. Acquisition is also
    constrained: this environment has no network (plan-notes 28), so the source has to arrive by the
    same route the existing vendor drop did.
-4. **Feature flag on the Task 4.4 model, which already works.** `make -C runtime dynamic` builds a
-   separate archive into its own build directory, exactly as `make intl` does, and gets its own CI
+4. **Feature flag on the Task 4.4 model, which already works.** `just runtime-dynamic` builds a
+   separate archive into its own build directory, exactly as `just runtime-intl` does, and gets its own CI
    job like `intl` has. The default archive must not gain a byte — which is what the flag is FOR,
    and step 8 is how that claim is checked instead of asserted.
 5. **`eval` and `new Function` in `js` mode:** `STA1206` is now emitted as not-yet (Phase 5 step 2);
@@ -914,7 +912,7 @@ a phase, with Steps and a Check like any other — this table is an ordering, no
 - **Semantics are not a variable.** Golden suites stay byte-for-byte, ASan/UBSan and `test:leak` stay
   green, and both GC configurations still build. An optimization that changes output is a semantics
   bug wearing a speedup's clothes.
-- **Anything that adds a dependency or a build mode is feature-flagged** on the `make intl` model
+- **Anything that adds a dependency or a build mode is feature-flagged** on the `just runtime-intl` model
   (Task 4.4): its own build directory, its own CI job, default archive unchanged.
 
 **1 — Allocator.** Check the premise before spending the days: Boa's 5–15% is an *object*-allocator
@@ -950,7 +948,7 @@ adopting it reopens a settled decision and needs measured evidence in `plan-note
 preference; (b) a **moving** collector invalidates any NaN-boxed reference a C local holds across a
 safepoint, so "a reference that crosses an allocation lives in a frame slot" must become an enforced
 codegen invariant *before* anything moves. The second win is easy to miss: the no-Boehm build never
-collects at all today (`runtime/Makefile`: "plain malloc (no collection)"), so this rung is also what
+collects at all today (justfile: "plain malloc (no collection)"), so this rung is also what
 makes `pnpm run test:leak` meaningful on a machine without bdw-gc instead of skipping.
 
 **4 — Hot/cold split and IC counters.** Cheap because both mechanisms exist already

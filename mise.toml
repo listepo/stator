@@ -1,9 +1,10 @@
 # Toolchain for statorc. `mise install` then `pnpm install`.
 # clang/llvm are conda prebuilts (the asdf llvm plugin compiles from source — do not use it).
 # Unix only: Windows CI never links the runtime, and the asdf/conda clang backends are not a
-# Windows story. make/ar/pkg-config/diff stay the system ones (Xcode CLT / apt).
+# Windows story. ar/pkg-config/diff stay the system ones (Xcode CLT / apt); just is pinned here.
 [tools]
 node = "26"
 "npm:pnpm" = "11.20.0"
+just = "1.58.0"
 "conda:llvm" = { version = "21.1.8", os = ["linux", "macos"] }
 "conda:clang" = { version = "21.1.8", os = ["linux", "macos"] }

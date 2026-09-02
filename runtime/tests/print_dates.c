@@ -1,7 +1,7 @@
 /* print_dates.c — the Date calendar arithmetic and its printing, checked against Node.
  *
  * Ground truth is Node, not a table written here: runtime/tests/print_dates.mjs builds the SAME
- * dates in the same order and prints the same answers with console.log; `make -C runtime test`
+ * dates in the same order and prints the same answers with console.log; `just runtime-test`
  * diffs the two byte-for-byte. Keep the two corpora in the same order or the diff means nothing.
  *
  * What is under test is the ARITHMETIC, which is the part of Date that can be wrong in ways a

@@ -2,7 +2,7 @@
 // @verdict: static
 // SUBSET.md: Map, Set
 // forEach takes a CALLBACK, not an iterator: the runtime calls it through jsrt_call, the same
-// closure ABI the Array.prototype callback methods use. The iterator forms stay deferred.
+// closure ABI the Array.prototype callback methods use. The iterator forms landed separately (subset_collection_iterator_*).
 
 const m = new Map<string, number>();
 m.set('a', 1);

@@ -454,7 +454,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.AwaitExpression:
       return gateAwait(node);
     case ts.SyntaxKind.YieldExpression:
-      return generatorNotYet();
+      return gateYield(node);
 
     default:
       return notYet(`${describeKind(kind)} is not yet supported`, 5);
@@ -606,7 +606,7 @@ function dateNotYet(message: string, phase?: number): GateResult {
         code: 'STA1210',
         message:
           `${message} needs the ICU feature build: rebuild with ` +
-          '`make -C runtime intl` and compile with STATOR_RUNTIME=intl',
+          '`just runtime-intl` and compile with STATOR_RUNTIME=intl',
       }
     : {
         kind: 'not-yet',
@@ -1280,6 +1280,14 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
           return notYet('search with anything but a regular expression is not yet supported', 5);
         }
       }
+      // `matchAll` answers an iterator of match arrays. A non-regexp argument is RegExpCreate,
+      // which this compiler does not have — the same floor `search` sits on.
+      if (op === 'matchAll') {
+        const pattern = call.arguments[0];
+        if (pattern === undefined || !isRegExpReceiver(pattern, typeChecker)) {
+          return notYet('matchAll with anything but a regular expression is not yet supported', 5);
+        }
+      }
       // The locale-sensitive trio is the one part of this surface that Unicode's own tables cannot
       // answer: collation is a per-locale ORDER and tailored casing a per-locale EXCEPTION, both
       // of them CLDR data. They land only in the ICU feature build (Task 4.4), and only with an
@@ -1296,7 +1304,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
             code: 'STA1215',
             message:
               `String.prototype.${op} needs the ICU feature build: rebuild with ` +
-              '`make -C runtime intl` and compile with STATOR_RUNTIME=intl',
+              '`just runtime-intl` and compile with STATOR_RUNTIME=intl',
           };
         }
         if (call.arguments.length !== STRING_OPS[op].arity) {
@@ -1440,6 +1448,14 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     if (staticMemberOf(callee, typeChecker, true) !== undefined) {
       return { kind: 'accept' };
     }
+    if (callee.name.text === 'next') {
+      const receiver = tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
+      if (receiver.kind === 'iterator') {
+        return call.arguments.length <= 1
+          ? { kind: 'accept' }
+          : notYet('Iterator.next with more than one argument is not yet supported', 5);
+      }
+    }
     const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(callee.expression));
     if (declaration === undefined) {
       // A match array is Unknown in HIR; its methods are not the dynamic-call path.
@@ -1484,7 +1500,13 @@ function gateFunction(
 ): GateResult {
   // A generator's asterisk is checked here as well as at YieldExpression, because a generator
   // with no `yield` in it is still a generator and still returns an iterator.
-  if (!ts.isArrowFunction(fn) && fn.asteriskToken !== undefined) {
+  if (
+    !ts.isArrowFunction(fn) &&
+    fn.asteriskToken !== undefined &&
+    fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true
+  ) {
+    // Async generators need both machines at once. Ordinary `function*` falls through to the
+    // named-expression / nested-declaration checks below, then accepts.
     return generatorNotYet();
   }
   // A generic is compiled by MONOMORPHIZATION: one specialization per concrete type tuple a call
@@ -1512,9 +1534,8 @@ function gateFunction(
   return { kind: 'accept' };
 }
 
-/** Shared by every generator spelling: the asterisk, `yield`, and `for await`. Async landed in
- * Phase 4 and generators did not, so this code now names only what is still missing -- one code,
- * one feature, which is what makes `stator explain` legible. */
+/** Shared by the generator spellings this landing did not take: generator methods, async
+ * generators, and `for await`. `function*` declarations and unnamed expressions compile. */
 function generatorNotYet(): GateResult {
   return {
     kind: 'not-yet',
@@ -1522,6 +1543,26 @@ function generatorNotYet(): GateResult {
     message: 'generators are not yet supported; planned for Phase 5 (the iterator protocol)',
     phase: 5,
   };
+}
+
+function gateYield(node: ts.Node): GateResult {
+  if (!ts.isYieldExpression(node)) {
+    return generatorNotYet();
+  }
+  if (node.asteriskToken !== undefined) {
+    return notYet('yield* is not yet supported', 5);
+  }
+  for (let n: ts.Node | undefined = node.parent; n !== undefined; n = n.parent) {
+    if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isMethodDeclaration(n)) {
+      return n.asteriskToken !== undefined
+        ? { kind: 'accept' }
+        : notYet('yield outside a generator is not yet supported', 5);
+    }
+    if (ts.isArrowFunction(n) || ts.isConstructorDeclaration(n)) {
+      return notYet('yield outside a generator is not yet supported', 5);
+    }
+  }
+  return notYet('yield outside a generator is not yet supported', 5);
 }
 
 /** `await e`, admitted only inside an async function's body.
@@ -2019,21 +2060,23 @@ function opensWithSuperCall(ctor: ts.ConstructorDeclaration): boolean {
 /** The Map and Set surface the subset compiles, with the argument count each operation takes.
  *
  * A closed list, not a lookup on the lib declarations: everything here is one runtime function, and
- * an operation that is NOT here (`keys`, `entries`, `values`, `union`) hands back an ITERATOR,
- * which is the Symbol.iterator protocol the subset has no node for. Reading the list off the lib
- * would turn each of those into an internal error instead of a `not-yet`.
+ * `keys`/`values`/`entries` box a JSRTIterator (Phase 5 step 8). Reading the list off the lib
+ * would turn a missing name into an internal error instead of a `not-yet`.
  *
  * `forEach` IS here, and was previously grouped with them by mistake: it takes a callback, not an
  * iterator, and the runtime calls it through `jsrt_call` exactly as the `Array.prototype` callback
  * methods already do — no protocol the subset lacks (plan-notes 97). */
 const COLLECTION_OPS: Readonly<Record<'map' | 'set', Readonly<Record<string, number>>>> = {
-  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0, forEach: 1 },
+  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0, forEach: 1, keys: 0, values: 0, entries: 0 },
   set: {
     add: 1,
     has: 1,
     delete: 1,
     clear: 0,
     forEach: 1,
+    keys: 0,
+    values: 0,
+    entries: 0,
     union: 1,
     intersection: 1,
     difference: 1,
@@ -2087,7 +2130,7 @@ function gateCollectionCall(
   }
   if (isSetOperation(callee.name.text)) {
     // The spec takes a SET-LIKE object here -- anything with a `size`, a `has` and a `keys` -- and
-    // reads it by calling `keys()`, which is the iterator protocol the subset has no node for. A
+    // reads it by calling `keys()` on a user object, which is still the user-iterable protocol. A
     // real Set is read straight out of the table instead, so that is the whole of what is accepted:
     // the runtime reads this argument as a JSRTMap, and a wrong one is not a wrong answer.
     const other = call.arguments[0];
@@ -2391,6 +2434,14 @@ function gateMemberAccess(
   // `m.size`, and the method names that are only ever callees. `size` is a READ of a count the
   // structure keeps, so it is accepted as a value; a method is not, for the reason a class method is
   // not -- `const f = m.get` needs a bound closure nothing here builds.
+  const iterator = tsTypeToHType(checker.getTypeAtLocation(access.expression), checker);
+  if (iterator.kind === 'iterator') {
+    return ts.isCallExpression(access.parent) &&
+      access.parent.expression === access &&
+      access.name.text === 'next'
+      ? { kind: 'accept' }
+      : notYet(`Iterator.${access.name.text} as a value is not yet supported`, 5);
+  }
   const collection = collectionOf(access.expression, checker);
   if (collection !== undefined) {
     if (access.name.text === 'size') {
@@ -2521,7 +2572,8 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
     !checker.isArrayType(iterableType) &&
     (iterableType.flags & ts.TypeFlags.StringLike) === 0 &&
     hir.kind !== 'map' &&
-    hir.kind !== 'set'
+    hir.kind !== 'set' &&
+    hir.kind !== 'iterator'
   ) {
     return notYet('for-of over a user iterable is not yet supported', 5);
   }

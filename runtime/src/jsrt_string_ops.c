@@ -333,6 +333,14 @@ jsrt_value jsrt_string_match(jsrt_value s, jsrt_value re) {
   return jsrt_regexp_match(re, s);
 }
 
+jsrt_value jsrt_string_match_all(jsrt_value s, jsrt_value re) {
+  if (!jsrt_is_regexp(re)) {
+    jsrt_panic("STA2005: String.prototype.matchAll with anything but a regular expression is not "
+               "yet supported");
+  }
+  return jsrt_regexp_match_all(re, s);
+}
+
 jsrt_value jsrt_string_split(jsrt_value s, jsrt_value sep) {
   /* A regexp separator is the ENGINE's algorithm, not this file's: it scans rather than searching
    * for a fixed substring, and its capture groups land in the ANSWER. */

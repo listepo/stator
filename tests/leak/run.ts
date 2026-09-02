@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     process.stdout.write(
       'leak: SKIPPED — the runtime was built without Boehm (plain malloc, no collection). ' +
         'Install bdw-gc (macOS: `brew install bdw-gc`; Debian: `apt install libgc-dev`) and ' +
-        'rebuild with `make -C runtime` to run it.\n',
+        'rebuild with `just runtime` to run it.\n',
     );
     return;
   }

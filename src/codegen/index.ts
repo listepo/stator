@@ -25,6 +25,7 @@ import type {
   FunctionExpr,
   IndexAccess,
   IndexAssignment,
+  IteratorNext,
   JsonParse,
   JsonStringify,
   LogicalOp,
@@ -46,6 +47,7 @@ import type {
   TryStatement,
   UnaryOp,
   VtableEntry,
+  YieldExpr,
 } from '../hir/nodes.ts';
 import {
   arrayOpCallsBack,
@@ -207,7 +209,7 @@ class Emitter {
   /** Frame slot holding each short-circuit operator's left operand. Keyed by node identity, since
    * two `&&`s in one expression must not share a slot: the outer one's value stays live while the
    * inner one is being evaluated. */
-  private tempSlots: Map<AwaitExpr | LogicalOp, number> = new Map();
+  private tempSlots: Map<AwaitExpr | LogicalOp | YieldExpr, number> = new Map();
   /* C does not specify which operand of an operator or function call it evaluates first. Every
    * BinaryOp therefore gets two rooted slots: emitting `left` into the first before `right` into
    * the second makes the JavaScript left-to-right rule explicit, and preserves the left value if
@@ -243,7 +245,8 @@ class Emitter {
     | RegExpLiteral
     | RegExpOp
     | StringOp
-    | SuperCall,
+    | SuperCall
+    | IteratorNext,
     number
   > = new Map();
 
@@ -294,12 +297,14 @@ class Emitter {
   /* Set while counting, read once counting is done: whether this unit has a `return <expr>` at
    * all, and therefore whether `returnSlot` is a slot or a number nothing reads. */
   private returnsValue: boolean = false;
-  /* Async state for the unit being emitted. `inAsync` switches `slotAt` over to the heap
-   * environment: an async function's locals must survive a suspension, and a suspension pops the
-   * C frame. `awaitStates` numbers each suspension point, assigned while COUNTING because the
-   * resume function's dispatch switch is emitted before the body whose labels it jumps to. */
+  /* Async/generator state for the unit being emitted. `inAsync`/`inGenerator` switch `slotAt`
+   * over to the heap environment: locals must survive a suspension, and a suspension pops the
+   * C frame. `awaitStates` numbers each suspension point (await or yield), assigned while COUNTING
+   * because the resume function's dispatch switch is emitted before the body whose labels it
+   * jumps to. The two flags are mutually exclusive in this landing. */
   private inAsync: boolean = false;
-  private awaitStates: Map<AwaitExpr, number> = new Map();
+  private inGenerator: boolean = false;
+  private awaitStates: Map<AwaitExpr | YieldExpr, number> = new Map();
   /* Whether anything in the module suspended or promised. `main` drains the microtask queue only
    * then -- a program that never promises should not link the driver in at all. */
   private usedAsync: boolean = false;
@@ -515,6 +520,7 @@ class Emitter {
     const savedTryFinallyStack = this.tryFinallyStack;
     const savedTryCount = this.tryCount;
     const savedInAsync = this.inAsync;
+    const savedInGenerator = this.inGenerator;
     const savedAwaitStates = this.awaitStates;
 
     const produced: string[] = [];
@@ -533,11 +539,16 @@ class Emitter {
     this.envMap = new Map(fn.envVars.map((name, index) => [name, index]));
     this.captureMap = new Map(fn.captures.map((c) => [c.name, c]));
     this.inAsync = fn.isAsync;
+    this.inGenerator = fn.isGenerator;
     this.awaitStates = new Map();
-    // An async unit's locals live in the SAME environment array as its captured bindings, which
-    // already own indices 0..envVars.length-1 -- so numbering starts past them. One array, one
-    // allocation, and `slotRef`'s existing precedence keeps a captured name out of the local run.
-    this.slotCount = fn.isAsync ? fn.envVars.length : 0;
+    if (fn.isAsync && fn.isGenerator) {
+      throw new Error('async generators are not in this landing');
+    }
+    // An async or generator unit's locals live in the SAME environment array as its captured
+    // bindings, which already own indices 0..envVars.length-1 -- so numbering starts past them.
+    // One array, one allocation, and `slotRef`'s existing precedence keeps a captured name out of
+    // the local run.
+    this.slotCount = fn.isAsync || fn.isGenerator ? fn.envVars.length : 0;
 
     for (const param of fn.params) {
       // `function f(a, a)` is legal in sloppy JavaScript and the later parameter wins; reusing the
@@ -551,8 +562,9 @@ class Emitter {
     this.returnsValue = false;
     this.countBindings(fn.body.statements);
     // An async unit always parks its result: every exit settles the promise, and the value has to
-    // be in a rooted slot while `jsrt_async_return` allocates the microtask that delivers it.
-    if (fn.isAsync) {
+    // be in a rooted slot while `jsrt_async_return` allocates the microtask that delivers it. A
+    // generator parks the same way: `jsrt_generator_return` writes the completion into the object.
+    if (fn.isAsync || fn.isGenerator) {
       this.returnsValue = true;
     }
     if (this.returnsValue) {
@@ -562,6 +574,8 @@ class Emitter {
 
     if (fn.isAsync) {
       this.emitAsyncUnit(unit);
+    } else if (fn.isGenerator) {
+      this.emitGeneratorUnit(unit);
     } else {
       this.emitSyncUnit(unit);
     }
@@ -580,6 +594,7 @@ class Emitter {
     this.padStack = savedPadStack;
     this.unwindUsed = savedUnwindUsed;
     this.inAsync = savedInAsync;
+    this.inGenerator = savedInGenerator;
     this.awaitStates = savedAwaitStates;
     this.tryFinallyStack = savedTryFinallyStack;
     this.tryCount = savedTryCount;
@@ -926,6 +941,7 @@ class Emitter {
       // way out, and it holds the resumed result on the way back in. The state number is assigned
       // here too, because the dispatch switch is emitted ahead of the labels it jumps to.
       case 'await':
+      case 'yield':
         this.tempSlots.set(expr, this.slotCount);
         this.slotCount += 1;
         this.awaitStates.set(expr, this.awaitStates.size + 1);
@@ -969,6 +985,12 @@ class Emitter {
         for (const arg of expr.args) {
           this.countExpression(arg);
         }
+        break;
+      case 'iterator-next':
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += 2;
+        this.countExpression(expr.target);
+        this.countExpression(expr.sent);
         break;
       // Numbers are immediates -- nothing to root -- so the slots exist for SEQUENCING alone:
       // `Math.pow(f(), g())` must run f before g, and C leaves argument order unspecified. A
@@ -1235,6 +1257,10 @@ class Emitter {
         const iterable = this.slotAt(slot);
         this.appendLine(`${iterable} = ${this.emitExpression(stmt.iterable)};`, stmt.span);
         const id = this.enterLoop(stmt.label);
+        if (stmt.iterable.type.kind === 'iterator') {
+          this.emitBoxedIteratorForOf(stmt, iterable, id);
+          break;
+        }
         if (stmt.iterable.type.kind === 'map' || stmt.iterable.type.kind === 'set') {
           this.emitMapSetForOf(stmt, iterable, id);
           break;
@@ -1261,10 +1287,7 @@ class Emitter {
             stmt.span,
           );
           this.indent++;
-          this.appendLine(
-            `${this.slotRef(stmt.binding)} = jsrt_as_array(${iterable})->elements[${cursor}];`,
-            stmt.span,
-          );
+          this.emitArrayForOfYield(stmt, iterable, cursor);
         }
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
@@ -1286,6 +1309,10 @@ class Emitter {
           if (this.tryFinallyStack.length === 0) {
             if (this.inAsync) {
               this.emitAsyncSettle('jsrt_async_return', 'JSRT_UNDEFINED', stmt.span);
+              break;
+            }
+            if (this.inGenerator) {
+              this.emitGeneratorSettle('JSRT_UNDEFINED', stmt.span);
               break;
             }
             this.appendLine('JSRT_FRAME_POP();', stmt.span);
@@ -1310,6 +1337,11 @@ class Emitter {
         if (this.inAsync) {
           this.appendLine(`${slot} = ${value};`, stmt.span);
           this.emitAsyncSettle('jsrt_async_return', slot, stmt.span);
+          break;
+        }
+        if (this.inGenerator) {
+          this.appendLine(`${slot} = ${value};`, stmt.span);
+          this.emitGeneratorSettle(slot, stmt.span);
           break;
         }
         this.appendLine(`return (${slot} = ${value}, JSRT_FRAME_POP(), ${slot});`, stmt.span);
@@ -1423,9 +1455,9 @@ class Emitter {
    * continue (and a break that lands on `brk` just before `fin`) stay inside. */
   private emitMapSetForOf(stmt: ForOfStatement, iterable: string, id: number): void {
     const span = stmt.span;
-    const nextFn = stmt.iterable.type.kind === 'map' ? 'jsrt_map_iter_next' : 'jsrt_set_iter_next';
     const cursor = `jsrt_iter_${id}`;
-    const item = `_jsrt_item_${id}`;
+    const key = `_jsrt_k_${id}`;
+    const val = `_jsrt_v_${id}`;
     const coll = `_jsrt_coll_${id}`;
     // A bare `return` through this cleanup parks `undefined` in `returnSlot`, which is slot 0 when
     // the function never returns a value — the same index as the iterable. Hold the collection in
@@ -1449,13 +1481,14 @@ class Emitter {
     this.tryFinallyStack.push(scope);
     this.padStack.push(finThr);
 
-    this.appendLine(`jsrt_value ${item};`, span);
+    this.appendLine(`jsrt_value ${key};`, span);
+    this.appendLine(`jsrt_value ${val};`, span);
     this.appendLine(
-      `for (uint32_t ${cursor} = 0; ${nextFn}(${coll}, &${cursor}, &${item}); ) {`,
+      `for (uint32_t ${cursor} = 0; jsrt_map_iter_step(${coll}, &${cursor}, &${key}, &${val}); ) {`,
       span,
     );
     this.indent++;
-    this.appendLine(`${this.slotRef(stmt.binding)} = ${item};`, span);
+    this.emitMapSetForOfYield(stmt, key, val);
     for (const s of stmt.body.statements) {
       this.emitStatement(s);
     }
@@ -1484,6 +1517,66 @@ class Emitter {
     }
     this.indent--;
     this.appendLine('}', span);
+    this.enclosing.pop();
+  }
+
+  private emitArrayForOfYield(stmt: ForOfStatement, iterable: string, cursor: string): void {
+    const bind = this.slotRef(stmt.binding);
+    if (stmt.view === 'keys') {
+      this.appendLine(`${bind} = jsrt_number((double)${cursor});`, stmt.span);
+      return;
+    }
+    const element = `jsrt_as_array(${iterable})->elements[${cursor}]`;
+    if (stmt.view === 'entries') {
+      const pair = `_jsrt_pair_${cursor}`;
+      this.appendLine(
+        `jsrt_value ${pair}[2] = { jsrt_number((double)${cursor}), ${element} };`,
+        stmt.span,
+      );
+      this.appendLine(`${bind} = jsrt_array_new(2, ${pair});`, stmt.span);
+      return;
+    }
+    this.appendLine(`${bind} = ${element};`, stmt.span);
+  }
+
+  private emitMapSetForOfYield(stmt: ForOfStatement, key: string, val: string): void {
+    const bind = this.slotRef(stmt.binding);
+    const map = stmt.iterable.type.kind === 'map';
+    if (stmt.view === 'keys' || (!map && stmt.view !== 'entries')) {
+      this.appendLine(`${bind} = ${key};`, stmt.span);
+      return;
+    }
+    if (stmt.view === 'values' && map) {
+      this.appendLine(`${bind} = ${val};`, stmt.span);
+      return;
+    }
+    const pair = `_jsrt_pair_${key}`;
+    const second = map ? val : key;
+    this.appendLine(`jsrt_value ${pair}[2] = { ${key}, ${second} };`, stmt.span);
+    this.appendLine(`${bind} = jsrt_array_new(2, ${pair});`, stmt.span);
+  }
+
+  private emitBoxedIteratorForOf(stmt: ForOfStatement, iterable: string, id: number): void {
+    const span = stmt.span;
+    const item = `_jsrt_item_${id}`;
+    this.appendLine(`jsrt_value ${item};`, span);
+    this.appendLine(`for (;;) {`, span);
+    this.indent++;
+    this.appendLine(`if (!jsrt_iterator_step(${iterable}, &${item})) {`, span);
+    this.indent++;
+    // A generator's step can throw: false then means "stop AND unwind", not "exhausted".
+    this.appendLine(`if (jsrt_pending()) { goto ${this.currentPad()}; }`, span);
+    this.appendLine('break;', span);
+    this.indent--;
+    this.appendLine('}', span);
+    this.appendLine(`${this.slotRef(stmt.binding)} = ${item};`, span);
+    for (const s of stmt.body.statements) {
+      this.emitStatement(s);
+    }
+    this.emitJumpTarget(`cont_${id}`, span);
+    this.indent--;
+    this.appendLine('}', span);
+    this.emitJumpTarget(`brk_${id}`, span);
     this.enclosing.pop();
   }
 
@@ -1587,6 +1680,10 @@ class Emitter {
       const slot = this.slotAt(this.returnSlot);
       if (this.inAsync) {
         this.emitAsyncSettle('jsrt_async_return', slot, span);
+        return;
+      }
+      if (this.inGenerator) {
+        this.emitGeneratorSettle(slot, span);
         return;
       }
       this.appendLine(`return (JSRT_FRAME_POP(), ${slot});`, span);
@@ -1942,6 +2039,25 @@ class Emitter {
         return `jsrt_object_get(${this.emitExpression(expr.target)}, ${expr.slot})`;
       }
 
+      case 'iterator-next': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('iterator-next was not registered during counting');
+        }
+        const parts: string[] = [];
+        this.sequencePart(parts, expr.target, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
+        this.sequencePart(parts, expr.sent, expr.span, (v) => `${this.slotAt(base + 1)} = ${v}`);
+        this.flushParts(parts, expr.span);
+        // A generator's next() can throw: the resume left the exception pending. Specialized
+        // iterators never do, and the same check is then a no-op.
+        this.appendLine(
+          `${this.slotAt(base)} = jsrt_iterator_next(${this.slotAt(base)}, ${this.slotAt(base + 1)});`,
+          expr.span,
+        );
+        this.emitPendingCheck(expr.span);
+        return this.slotAt(base);
+      }
+
       // The site's cache is a static JSRTIC: a hit is one pointer compare and one load, a miss
       // walks the shape chain and refills it (docs/VALUE.md §4.10). Runs no user code, so no
       // pending check -- and a missing property is `undefined`, not an error.
@@ -2180,19 +2296,25 @@ class Emitter {
         ].join(', ');
         // A date op names its C function from the table rather than deriving it: snakeCase would
         // turn `getUTCFullYear` into `get_u_t_c_full_year`.
+        const boxed =
+          expr.kind === 'array-op' || expr.kind === 'collection-op'
+            ? iteratorBoxCall(expr, operands)
+            : undefined;
         const opCall =
-          expr.kind === 'collection-op'
-            ? collectionCall(expr.op, expr.collection, operands)
-            : expr.kind === 'date-op'
-              ? `${DATE_OPS[expr.op].fn}(${operands})`
-              : expr.kind === 'regexp-op'
-                ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
-                  // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
-                  // `exec` already answers a value: the match array, or null.
-                  REGEXP_OPS[expr.op].result === 'boolean'
-                  ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
-                  : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
-                : `jsrt_${expr.kind === 'array-op' ? 'array' : 'string'}_${snakeCase(expr.op)}(${operands})`;
+          boxed !== undefined
+            ? boxed
+            : expr.kind === 'collection-op'
+              ? collectionCall(expr.op, expr.collection, operands)
+              : expr.kind === 'date-op'
+                ? `${DATE_OPS[expr.op].fn}(${operands})`
+                : expr.kind === 'regexp-op'
+                  ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
+                    // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
+                    // `exec` already answers a value: the match array, or null.
+                    REGEXP_OPS[expr.op].result === 'boolean'
+                    ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
+                    : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
+                  : `jsrt_${expr.kind === 'array-op' ? 'array' : 'string'}_${snakeCase(expr.op)}(${operands})`;
         // An op that calls back into compiled code can throw, so it gets its own STATEMENT and a
         // pending check -- the same discipline `call` follows, and for the same reason: the check
         // has to sit between the op and whatever consumes its result, which a comma expression
@@ -2269,24 +2391,27 @@ class Emitter {
         if (!this.inAsync) {
           throw new Error('await outside an async function; the gate should have caught it');
         }
-        const slot = this.tempSlots.get(expr);
-        const state = this.awaitStates.get(expr);
-        if (slot === undefined || state === undefined) {
-          throw new Error('await was not registered during counting');
-        }
-        const at = this.slotAt(slot);
-        const value = this.emitExpression(expr.value);
-        this.appendLine(`${at} = ${value};`, expr.span);
-        this.appendLine(`_jsrt_self->state = ${state};`, expr.span);
-        this.appendLine(`jsrt_await(_jsrt_self, ${at});`, expr.span);
-        this.appendLine('JSRT_FRAME_POP();', expr.span);
-        this.appendLine('return;', expr.span);
-        this.appendLine(`_jsrt_res_${state}: ;`, expr.span);
+        const at = this.emitPark(expr, `jsrt_await(_jsrt_self, ${this.suspendSlot(expr)});`);
         // A rejected awaited promise resumes with its reason: put it back in the pending cell so
         // an enclosing try -- or this unit's own pad -- treats it exactly like a `throw`.
         this.appendLine(
           `if (_jsrt_err) { jsrt_throw(_jsrt_v); goto ${this.currentPad()}; }`,
           expr.span,
+        );
+        this.appendLine(`${at} = _jsrt_v;`, expr.span);
+        return at;
+      }
+
+      // Same suspension as await, answering the caller rather than the scheduler: park the
+      // resume state, write the yielded value, pop the frame and leave. The next `next(v)`
+      // re-enters at the label and the yield expression becomes `v`.
+      case 'yield': {
+        if (!this.inGenerator) {
+          throw new Error('yield outside a generator; the gate should have caught it');
+        }
+        const at = this.emitPark(
+          expr,
+          `jsrt_generator_yield(_jsrt_self, ${this.suspendSlot(expr)});`,
         );
         this.appendLine(`${at} = _jsrt_v;`, expr.span);
         return at;
@@ -2367,59 +2492,21 @@ class Emitter {
       `static void ${resume}(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err);`,
     );
     this.appendLine('');
-    this.appendLine(
-      `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
-    );
-    this.indent++;
     // One frame slot, used for nothing but carrying the environment: JSRT_FRAME_ENV is what roots
     // it while `jsrt_async_start` allocates the promise and the frame that holds it.
-    this.appendLine('JSRT_FRAME(1);', fn.span);
-    this.appendLine(
-      `JSRTEnv *_jsrt_env = jsrt_env_new(env, ${Math.max(1, this.slotCount)});`,
-      fn.span,
-    );
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', fn.span);
-    this.emitParameterPrologue(fn);
-    this.appendLine(`jsrt_value _jsrt_p = jsrt_async_start(_jsrt_env, ${resume});`, fn.span);
-    this.appendLine('JSRT_FRAME_POP();', fn.span);
-    this.appendLine('return _jsrt_p;', fn.span);
-    this.indent--;
-    this.appendLine('}');
-    this.appendLine('');
-
+    this.emitSuspendEntry(unit, `jsrt_async_start(_jsrt_env, ${resume})`);
     this.appendLine(
       `static void ${resume}(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err) {`,
     );
     this.indent++;
-    this.appendLine('JSRT_FRAME(1);', fn.span);
-    this.appendLine('JSRTEnv *_jsrt_env = _jsrt_self->env;', fn.span);
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', fn.span);
     // Enclosing environments are reached through the parent link rather than a parameter: the
     // scheduler calls this function, and it has no environment to pass. `(void)` unconditionally
     // -- a body that captures nothing still declares it, and -Werror would object.
-    this.appendLine('JSRTEnv *env = _jsrt_env->parent;', fn.span);
-    this.appendLine('(void)env;', fn.span);
     // The dispatch sits AFTER the prologue so it never jumps over a declaration, and before the
     // body so every `_jsrt_res_N:` it names is defined further down. State 0 is the first entry,
     // which falls through into the body's prefix.
-    if (this.awaitStates.size > 0) {
-      this.appendLine('switch (_jsrt_self->state) {', fn.span);
-      this.indent++;
-      for (const state of this.awaitStates.values()) {
-        this.appendLine(`case ${state}: goto _jsrt_res_${state};`, fn.span);
-      }
-      this.appendLine('default: break;');
-      this.indent--;
-      this.appendLine('}', fn.span);
-    } else {
-      // An async function with no `await` still answers a promise; it just never suspends.
-      this.appendLine('(void)_jsrt_v;', fn.span);
-      this.appendLine('(void)_jsrt_err;', fn.span);
-    }
-    this.emitHoistedFunctions(fn.body.statements);
-    for (const stmt of fn.body.statements) {
-      this.emitStatement(stmt);
-    }
+    this.emitResumeOpen(fn.span, ['_jsrt_v', '_jsrt_err']);
+    this.emitResumeBody(fn);
     this.emitAsyncSettle('jsrt_async_return', 'JSRT_UNDEFINED', fn.span);
     if (this.unwindUsed) {
       // An exception that reached the top of an async body REJECTS the promise rather than
@@ -2433,10 +2520,122 @@ class Emitter {
     this.appendLine('');
   }
 
+  /* A generator unit is TWO C functions, like an async unit, with three differences: the entry
+   * point ALLOCATES and returns without running the body (the first `next()` is what starts it);
+   * resume is synchronous on `next()`'s stack rather than a microtask; and an uncaught throw
+   * stays pending for the call site of `next()` instead of rejecting a promise. Locals still live
+   * in the heap environment because a `yield` pops the C frame. */
+  private emitGeneratorUnit(unit: FunctionUnit): void {
+    const { fn } = unit;
+    const resume = `_jsrt_gen_${unit.id}`;
+    this.appendLine(`static void ${resume}(JSRTGenerator *_jsrt_self, jsrt_value _jsrt_v);`);
+    this.appendLine('');
+    this.emitSuspendEntry(unit, `jsrt_generator_new(_jsrt_env, ${resume})`);
+    this.appendLine(`static void ${resume}(JSRTGenerator *_jsrt_self, jsrt_value _jsrt_v) {`);
+    this.indent++;
+    this.emitResumeOpen(fn.span, ['_jsrt_v']);
+    this.emitResumeBody(fn);
+    this.emitGeneratorSettle('JSRT_UNDEFINED', fn.span);
+    if (this.unwindUsed) {
+      // Leave the exception pending: `next()`'s call site observes it. Mark done so a later
+      // `next()` after the throw answers `{ value: undefined, done: true }` rather than re-entering.
+      this.appendLine('_jsrt_unwind: ;', fn.span);
+      this.appendLine('_jsrt_self->done = true;', fn.span);
+      this.appendLine('JSRT_FRAME_POP();', fn.span);
+      this.appendLine('return;', fn.span);
+    }
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* Entry point shared by async and generator units: allocate the heap environment, store the
+   * arguments, produce the promise or generator object, pop, return. The body lives in resume. */
+  private emitSuspendEntry(unit: FunctionUnit, produce: string): void {
+    const { fn } = unit;
+    this.appendLine(
+      `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
+    );
+    this.indent++;
+    this.appendLine('JSRT_FRAME(1);', fn.span);
+    this.appendLine(
+      `JSRTEnv *_jsrt_env = jsrt_env_new(env, ${Math.max(1, this.slotCount)});`,
+      fn.span,
+    );
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', fn.span);
+    this.emitParameterPrologue(fn);
+    this.appendLine(`jsrt_value _jsrt_r = ${produce};`, fn.span);
+    this.appendLine('JSRT_FRAME_POP();', fn.span);
+    this.appendLine('return _jsrt_r;', fn.span);
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  private emitResumeOpen(span: Span, unusedWhenEmpty: readonly string[]): void {
+    this.appendLine('JSRT_FRAME(1);', span);
+    this.appendLine('JSRTEnv *_jsrt_env = _jsrt_self->env;', span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', span);
+    this.appendLine('JSRTEnv *env = _jsrt_env->parent;', span);
+    this.appendLine('(void)env;', span);
+    if (this.awaitStates.size > 0) {
+      this.appendLine('switch (_jsrt_self->state) {', span);
+      this.indent++;
+      for (const state of this.awaitStates.values()) {
+        this.appendLine(`case ${state}: goto _jsrt_res_${state};`, span);
+      }
+      this.appendLine('default: break;');
+      this.indent--;
+      this.appendLine('}', span);
+      return;
+    }
+    for (const name of unusedWhenEmpty) {
+      this.appendLine(`(void)${name};`, span);
+    }
+  }
+
+  private emitResumeBody(fn: FunctionExpr): void {
+    this.emitHoistedFunctions(fn.body.statements);
+    for (const stmt of fn.body.statements) {
+      this.emitStatement(stmt);
+    }
+  }
+
+  /* Slot holding a suspension's operand / resume value. Shared by await and yield so the park
+   * sequence is one function rather than two copies of the same six lines. */
+  private suspendSlot(expr: AwaitExpr | YieldExpr): string {
+    const slot = this.tempSlots.get(expr);
+    if (slot === undefined) {
+      throw new Error(`${expr.kind} was not registered during counting`);
+    }
+    return this.slotAt(slot);
+  }
+
+  private emitPark(expr: AwaitExpr | YieldExpr, parkCall: string): string {
+    const state = this.awaitStates.get(expr);
+    if (state === undefined) {
+      throw new Error(`${expr.kind} was not registered during counting`);
+    }
+    const at = this.suspendSlot(expr);
+    this.appendLine(`${at} = ${this.emitExpression(expr.value)};`, expr.span);
+    this.appendLine(`_jsrt_self->state = ${state};`, expr.span);
+    this.appendLine(`${parkCall}`, expr.span);
+    this.appendLine('JSRT_FRAME_POP();', expr.span);
+    this.appendLine('return;', expr.span);
+    this.appendLine(`_jsrt_res_${state}: ;`, expr.span);
+    return at;
+  }
+
   /* Settle THEN pop: settling enqueues a microtask, which allocates, and the value being settled
    * with must still be rooted while it does. */
   private emitAsyncSettle(fn: string, value: string, span: Span): void {
     this.appendLine(`${fn}(_jsrt_self, ${value});`, span);
+    this.appendLine('JSRT_FRAME_POP();', span);
+    this.appendLine('return;', span);
+  }
+
+  private emitGeneratorSettle(value: string, span: Span): void {
+    this.appendLine(`jsrt_generator_return(_jsrt_self, ${value});`, span);
     this.appendLine('JSRT_FRAME_POP();', span);
     this.appendLine('return;', span);
   }
@@ -2706,10 +2905,10 @@ class Emitter {
   /* The C lvalue for a slot of the unit being emitted. Same slot number, different array: a
    * function's slots are its stack frame, the module's are the file-static globals. */
   private slotAt(slot: number): string {
-    // An async unit keeps every local in its heap environment instead: the frame it would
-    // otherwise sit in is popped at each suspension and rebuilt on each resume, so a C frame slot
-    // would not survive a single `await`.
-    if (this.inAsync) {
+    // An async or generator unit keeps every local in its heap environment instead: the frame it
+    // would otherwise sit in is popped at each suspension and rebuilt on each resume, so a C frame
+    // slot would not survive a single `await` or `yield`.
+    if (this.inAsync || this.inGenerator) {
       return `_jsrt_env->slots[${slot}]`;
     }
     return this.inFunction ? `JSRT_LOCAL(${slot})` : `JSRT_GLOBAL(${slot})`;
@@ -2788,6 +2987,17 @@ export function emitC(module: Module): string {
  * A Set shares the Map's functions rather than having its own: the structure IS the same one, and
  * `add` differs from `set` only in passing no value. The two that return a C `bool` are boxed here,
  * and `clear`, which returns nothing, yields `undefined` -- the value JavaScript gives it. */
+function iteratorBoxCall(expr: ArrayOp | CollectionOp, operands: string): string | undefined {
+  if (expr.op !== 'keys' && expr.op !== 'values' && expr.op !== 'entries') {
+    return undefined;
+  }
+  const source: 'array' | 'map' | 'set' =
+    expr.kind === 'array-op' ? 'array' : expr.collection === 'set' ? 'set' : 'map';
+  const base = source === 'array' ? 0 : source === 'map' ? 3 : 6;
+  const off = expr.op === 'keys' ? 0 : expr.op === 'values' ? 1 : 2;
+  return `jsrt_iterator_new(${operands}, ${String(base + off)})`;
+}
+
 function collectionCall(
   op: CollectionOperation,
   collection: 'map' | 'set',
@@ -2813,6 +3023,13 @@ function collectionCall(
       // pending check. A Set hands the element to the callback twice, which is the whole of the
       // Map/Set difference and lives in the runtime, not here.
       return `jsrt_${collection}_for_each(${operands})`;
+    case 'keys':
+    case 'values':
+    case 'entries':
+      return (
+        iteratorBoxCall({ kind: 'collection-op', collection, op } as CollectionOp, operands) ??
+        `jsrt_iterator_new(${operands}, 0)`
+      );
     default: {
       // The ES2025 set operations, whose C names are their method names in snake_case. The four
       // combining forms answer a new Set; the three predicates answer a C bool, boxed here exactly

@@ -380,6 +380,8 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'date-op':
     case 'string-op':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    case 'iterator-next':
+      return expressionHasUnknown(expr.target) || expressionHasUnknown(expr.sent);
     case 'date-new':
     case 'json-stringify':
       return expressionHasUnknown(expr.arg);
@@ -394,6 +396,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     // is on the node -- the check at the top of this function has already read it. What remains
     // is the operand: `await someUnknown` is a dynamic site, as is `Promise.all(dynamic)`.
     case 'await':
+    case 'yield':
       return expressionHasUnknown(expr.value);
     case 'promise-static':
       return expressionHasUnknown(expr.arg);

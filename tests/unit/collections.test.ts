@@ -3,8 +3,8 @@
  *
  * The golden fixtures prove the runtime behaviour against Node. What they cannot show is the
  * decision that precedes it: `class Map {}` in user code is an ordinary class and must NOT become a
- * hash table, `m.entries()` must be refused rather than silently accepted, and `m.set(k)` with the
- * value missing has no argv to pad. Those are tested here, at the layer that makes them.
+ * hash table, and `m.set(k)` with the value missing has no argv to pad. Those are tested here, at
+ * the layer that makes them.
  */
 
 import { strict as assert } from 'node:assert';
@@ -99,11 +99,10 @@ void test('a user class named Map is a class, not a collection', () => {
 });
 
 void test('a method the runtime does not implement is refused, not accepted silently', () => {
-  // `keys`/`values`/`entries` as VALUES still allocate a JSRTIterator this step has not boxed.
-  // for-of over the collection itself is a specialized loop and is accepted separately.
-  assert.deepEqual(gateCodes('const m = new Map<string, number>();\nconsole.log(m.entries());'), [
-    'STA1214',
-  ]);
+  assert.deepEqual(
+    gateCodes('const m = new Map<string, number>();\nconsole.log(m.entries());'),
+    [],
+  );
   assert.deepEqual(gateCodes('const s = new Set<string>();\nconsole.log(s.forEach);'), ['STA1214']);
 });
 

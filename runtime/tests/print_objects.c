@@ -1,7 +1,7 @@
 /* print_objects.c — prints a fixed corpus of class instances through jsrt_print.
  *
  * Ground truth is Node, not a table written here: runtime/tests/print_objects.mjs builds the SAME
- * objects in the same order and prints them with console.log; `make -C runtime test` diffs the two
+ * objects in the same order and prints them with console.log; `just runtime-test` diffs the two
  * byte-for-byte. Keep the two corpora in the same order or the diff means nothing.
  *
  * What this file has to pin, beyond "it prints the fields": the class NAME prints in front and

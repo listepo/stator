@@ -94,6 +94,16 @@ export interface HSet {
   readonly element: HType;
 }
 
+/** A boxed specialized iterator — `arr.keys()` stored, not the inlined for-of form.
+ *
+ * `element` is what `next().value` / for-of over the box yields. The kind tag (array-keys vs
+ * map-entries) lives on the runtime object, not here: TypeScript's `ArrayIterator<T>` does not
+ * say which of the three array walks produced it, and `it.next()` does not need to know. */
+export interface HIterator {
+  readonly kind: 'iterator';
+  readonly element: HType;
+}
+
 /** A `RegExp`: a compiled pattern.
  *
  * A leaf, like `string`: a pattern describes text rather than containing values, so there is no
@@ -191,6 +201,7 @@ export type HType =
   | HArray
   | HMap
   | HSet
+  | HIterator
   | HRegExp
   | HDate
   | HPromise
@@ -219,6 +230,10 @@ export function hMap(key: HType, value: HType): HMap {
 
 export function hSet(element: HType): HSet {
   return { kind: 'set', element };
+}
+
+export function hIterator(element: HType): HIterator {
+  return { kind: 'iterator', element };
 }
 
 export function hPromise(value: HType): HPromise {
@@ -287,6 +302,9 @@ export function hTypeEquals(a: HType, b: HType): boolean {
     return hTypeEquals(a.key, b.key) && hTypeEquals(a.value, b.value);
   }
   if (a.kind === 'set' && b.kind === 'set') {
+    return hTypeEquals(a.element, b.element);
+  }
+  if (a.kind === 'iterator' && b.kind === 'iterator') {
     return hTypeEquals(a.element, b.element);
   }
   if (a.kind === 'promise' && b.kind === 'promise') {
@@ -363,7 +381,7 @@ export function hTypeHasUnknown(t: HType): boolean {
   if (t.kind === 'unknown') {
     return true;
   }
-  if (t.kind === 'array' || t.kind === 'set') {
+  if (t.kind === 'array' || t.kind === 'set' || t.kind === 'iterator') {
     return hTypeHasUnknown(t.element);
   }
   if (t.kind === 'map') {
@@ -390,6 +408,7 @@ export function hasTypeParam(t: HType): boolean {
       return true;
     case 'array':
     case 'set':
+    case 'iterator':
       return hasTypeParam(t.element);
     case 'map':
       return hasTypeParam(t.key) || hasTypeParam(t.value);
@@ -418,6 +437,9 @@ export function hTypeName(t: HType): string {
   }
   if (t.kind === 'set') {
     return `Set<${hTypeName(t.element)}>`;
+  }
+  if (t.kind === 'iterator') {
+    return `Iterator<${hTypeName(t.element)}>`;
   }
   if (t.kind === 'promise') {
     return `Promise<${hTypeName(t.value)}>`;

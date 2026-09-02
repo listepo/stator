@@ -1,9 +1,11 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1201
+// @verdict: dynamic
 // SUBSET.md: generator functions and `yield`
+// An untyped yield's injected value is Unknown, so a file that binds it is dynamic.
 
-function* counter() {
-  yield 1;
+function* echo() {
+  const a = yield 1;
+  return a;
 }
-export { counter };
+console.log(echo().next());
+console.log(echo().next(2));

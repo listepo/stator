@@ -1,7 +1,7 @@
 /* print_numbers.c — prints a fixed corpus of doubles through jsrt_print.
  *
  * Ground truth is Node, not a table hand-written here: runtime/tests/print_numbers.mjs prints
- * the SAME corpus with console.log, and `make -C runtime test` diffs the two byte-for-byte.
+ * the SAME corpus with console.log, and `just runtime-test` diffs the two byte-for-byte.
  * Hand-written expectations would only encode whatever this file already believes.
  *
  * Keep the two corpora in the same order. Each entry is a case that the obvious "%g"

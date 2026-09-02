@@ -438,6 +438,7 @@ jsrt_value jsrt_unicode_normalize(jsrt_value s, jsrt_value form);
  * converts a non-regexp with `new RegExp(...)`, a constructor the compiler does not have. */
 jsrt_value jsrt_string_search(jsrt_value s, jsrt_value re);
 jsrt_value jsrt_string_match(jsrt_value s, jsrt_value re);
+jsrt_value jsrt_string_match_all(jsrt_value s, jsrt_value re);
 jsrt_value jsrt_string_normalize(jsrt_value s, jsrt_value form);
 jsrt_value jsrt_string_split(jsrt_value s, jsrt_value sep);
 jsrt_value jsrt_string_replace(jsrt_value s, jsrt_value pattern, jsrt_value replacement);
@@ -446,7 +447,7 @@ jsrt_value jsrt_string_to_upper_case(jsrt_value s);
 
 /* The locale-sensitive trio (runtime/src/jsrt_intl.c). Collation and TAILORED casing are CLDR
  * data, not Unicode tables, so these are the one part of the string surface that needs ICU: they
- * are implemented in the `make -C runtime intl` build and abort with an STA2005 naming that flag
+ * are implemented in the `just runtime-intl` build and abort with an STA2005 naming that flag
  * in the default one. `locales` is a single BCP 47 tag, never absent -- an implicit default locale
  * would make the answer depend on the machine that RUNS the binary. */
 jsrt_value jsrt_string_locale_compare(jsrt_value s, jsrt_value that, jsrt_value locales);
@@ -653,6 +654,37 @@ void jsrt_map_iter_begin(jsrt_value map);
 void jsrt_map_iter_end(jsrt_value map);
 bool jsrt_map_iter_next(jsrt_value map, uint32_t *index, jsrt_value *out);
 bool jsrt_set_iter_next(jsrt_value set, uint32_t *index, jsrt_value *out);
+/* Key and value separately, so keys()/values()/entries() can pick a yield without a second walk. */
+bool jsrt_map_iter_step(jsrt_value map, uint32_t *index, jsrt_value *key, jsrt_value *value);
+
+/* Boxed specialized iterators (docs/VALUE.md §4.13). `cls` is the shared object header; the
+ * three fields after it are the cursor VALUE.md names. Kind values are stable so generated C
+ * can pass them as literals. */
+#define JSRT_ITER_ARRAY_KEYS 0
+#define JSRT_ITER_ARRAY_VALUES 1
+#define JSRT_ITER_ARRAY_ENTRIES 2
+#define JSRT_ITER_MAP_KEYS 3
+#define JSRT_ITER_MAP_VALUES 4
+#define JSRT_ITER_MAP_ENTRIES 5
+#define JSRT_ITER_SET_KEYS 6
+#define JSRT_ITER_SET_VALUES 7
+#define JSRT_ITER_SET_ENTRIES 8
+#define JSRT_ITER_MATCH_ALL 9
+
+typedef struct JSRTIterator {
+  const JSRTClass *cls; /* &jsrt_class_iterator -- prefix-shared with JSRTObject */
+  jsrt_value target;    /* the iterable; a GC root */
+  jsrt_value extra;     /* matchAll: the cloned regexp; undefined otherwise */
+  uint32_t index;       /* specialized cursor */
+  uint8_t kind;         /* JSRT_ITER_* */
+} JSRTIterator;
+
+extern const JSRTClass jsrt_class_iterator;
+
+jsrt_value jsrt_iterator_new(jsrt_value target, uint8_t kind);
+jsrt_value jsrt_iterator_match_all_new(jsrt_value str, jsrt_value matcher);
+jsrt_value jsrt_iterator_next(jsrt_value it, jsrt_value sent);
+bool jsrt_iterator_step(jsrt_value it, jsrt_value *out);
 
 /* `m.set(k, v)` and `s.add(v)` both RETURN THE COLLECTION, which is what makes them chainable. */
 jsrt_value jsrt_map_set(jsrt_value map, jsrt_value key, jsrt_value value);
@@ -845,6 +877,10 @@ jsrt_value jsrt_regexp_exec(jsrt_value re, jsrt_value str);
  * answers a PLAIN dense array of the whole-match strings -- the spec builds that one with
  * CreateArrayFromList, so it carries no properties -- or `null` when nothing matched. */
 jsrt_value jsrt_regexp_match(jsrt_value re, jsrt_value str);
+/* `s.matchAll(re)` — §22.1.3.14. Requires `/g` (STA2005 otherwise, the spec's TypeError).
+ * Answers a boxed iterator of match arrays; the original regexp's lastIndex is not mutated. */
+jsrt_value jsrt_regexp_match_all(jsrt_value re, jsrt_value str);
+bool jsrt_regexp_match_all_step(jsrt_value re, jsrt_value str, jsrt_value *out);
 
 /* ------------------------------------------------- the data-property surface (§22.2.6)
  *
@@ -1092,6 +1128,33 @@ void jsrt_await(JSRTAsync *self, jsrt_value awaited);
 
 void jsrt_async_return(JSRTAsync *self, jsrt_value value);
 void jsrt_async_throw(JSRTAsync *self, jsrt_value reason);
+
+/* ---------------------------------------------------------- generators (Phase 5 step 8)
+ *
+ * A generator is an iterator whose cursor is a resume point, not an index. Calling the function
+ * ALLOCATES the object and does not run the body -- the first `next()` does. `sent` is what a
+ * subsequent `next(v)` injects as the value of the `yield` that suspended. `return`/`throw` on
+ * the generator object are out of scope for this landing. */
+typedef struct JSRTGenerator JSRTGenerator;
+typedef void (*JSRTGenResume)(JSRTGenerator *self, jsrt_value sent);
+
+struct JSRTGenerator {
+  const JSRTClass *cls; /* &jsrt_class_generator -- prefix-shared with JSRTObject */
+  JSRTEnv *env;
+  JSRTGenResume resume;
+  uint32_t state;
+  jsrt_value yielded;
+  bool done;
+};
+
+extern const JSRTClass jsrt_class_generator;
+
+jsrt_value jsrt_generator_new(JSRTEnv *env, JSRTGenResume resume);
+void jsrt_generator_yield(JSRTGenerator *self, jsrt_value value);
+void jsrt_generator_return(JSRTGenerator *self, jsrt_value value);
+static inline bool jsrt_is_generator(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) && jsrt_as_object(v)->cls == &jsrt_class_generator;
+}
 
 /* ------------------------------------------------------------- typeof */
 

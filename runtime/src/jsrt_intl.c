@@ -7,7 +7,7 @@
  * Turkish). Both live in CLDR's data, which is ICU's reason to exist and 10 MB of tables we are
  * not writing.
  *
- * So ICU is a FEATURE BUILD, off by default: `make -C runtime intl` produces build-intl/libjsrt.a
+ * So ICU is a FEATURE BUILD, off by default: `just runtime-intl` produces build-intl/libjsrt.a
  * and `STATOR_RUNTIME=intl` links against it. This file compiles in BOTH builds. Without ICU the
  * three entry points are STA2005 aborts naming the flag, so a program that reaches them fails
  * loudly with an actionable message rather than failing to LINK with a mangled symbol name -- the
@@ -132,7 +132,7 @@ jsrt_value jsrt_string_to_locale_lower_case(jsrt_value s, jsrt_value locales) {
 
 #define NO_ICU                                                                                     \
   "STA2005: the locale-sensitive string methods need the ICU feature build; rebuild with "         \
-  "`make -C runtime intl` and compile with STATOR_RUNTIME=intl"
+  "`just runtime-intl` and compile with STATOR_RUNTIME=intl"
 
 jsrt_value jsrt_string_locale_compare(jsrt_value s, jsrt_value that, jsrt_value locales) {
   (void)s;

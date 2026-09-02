@@ -377,9 +377,8 @@ export interface CollectionNew extends Node {
  *
  * `forEach` is the one operation here that runs USER CODE, so it carries the same consequences an
  * `ARRAY_OPS` entry with `calls` does: the emitter follows it with a pending check, and the
- * runtime's walk stops the moment an exception is pending (plan-notes 96). The other iteration
- * forms -- `keys`/`values`/`entries` -- are not here, because they hand back an ITERATOR, which is
- * the Symbol.iterator protocol the subset still has no node for.
+ * runtime's walk stops the moment an exception is pending (plan-notes 96). `keys`/`values`/`entries`
+ * box a JSRTIterator when stored, and inline as a specialized for-of when they are the loop operand.
  *
  * The last seven are the ES2025 set operations, which are `SET_OPS` below: they take another SET
  * rather than an element, which is a contract neither the arity check nor the receiver check would
@@ -393,6 +392,9 @@ export type CollectionOperation =
   | 'add'
   | 'size'
   | 'forEach'
+  | 'keys'
+  | 'values'
+  | 'entries'
   | SetOperation;
 
 /** The ES2025 set operations, mapped to what each ANSWERS.
@@ -403,7 +405,7 @@ export type CollectionOperation =
  * consult it rather than trusting an arity count.
  *
  * The spec accepts any SET-LIKE object (a `size`, a `has` and a `keys`), which the gate refuses:
- * reading one means calling its `keys()` iterator, the protocol the forms above wait on. */
+ * reading one means calling its `keys()` on a user object, which is still the user-iterable protocol. */
 export const SET_OPS = {
   union: 'set',
   intersection: 'set',
@@ -460,6 +462,7 @@ export const STRING_OPS = {
   padStart: { arity: 2, result: 'string' },
   repeat: { arity: 1, result: 'string' },
   match: { arity: 1, result: 'match' },
+  matchAll: { arity: 1, result: 'iterator' },
   search: { arity: 1, result: 'number' },
   replace: { arity: 2, result: 'string' },
   replaceAll: { arity: 2, result: 'string' },
@@ -478,7 +481,10 @@ export const STRING_OPS = {
   valueOf: { arity: 0, result: 'string' },
 } as const satisfies Record<
   string,
-  { arity: number; result: 'boolean' | 'element' | 'match' | 'number' | 'string' | 'string-array' }
+  {
+    arity: number;
+    result: 'boolean' | 'element' | 'iterator' | 'match' | 'number' | 'string' | 'string-array';
+  }
 >;
 
 export type StringOpName = keyof typeof STRING_OPS;
@@ -559,6 +565,9 @@ export const ARRAY_OPS = {
   toString: { arity: 0, result: 'string' },
   unshift: { arity: 1, result: 'number' },
   with: { arity: 2, result: 'self' },
+  keys: { arity: 0, result: 'iterator' },
+  values: { arity: 0, result: 'iterator' },
+  entries: { arity: 0, result: 'iterator' },
 } as const satisfies Record<
   string,
   {
@@ -567,6 +576,7 @@ export const ARRAY_OPS = {
       | 'boolean'
       | 'checker'
       | 'element'
+      | 'iterator'
       | 'mapped'
       | 'number'
       | 'self'
@@ -752,6 +762,10 @@ export interface FunctionExpr extends Node {
    * bindings — including the emitter's own temporaries — lives in the heap environment, because a
    * suspended body's C frame is gone by the time it resumes. */
   readonly isAsync: boolean;
+  /** A `function*`. It returns a generator (an iterator) rather than its body's value, and every
+   * one of its bindings lives in the heap environment for the same reason an async function's do:
+   * a `yield` pops the C frame. Mutually exclusive with `isAsync` in this landing. */
+  readonly isGenerator: boolean;
   /** Where this function's SIGNATURE types came from (plan.md §8 step 1). About the signature
    * alone, not the body: the signature is what a caller — and therefore a boundary — can see. */
   readonly provenance: Provenance;
@@ -789,6 +803,17 @@ export type Provenance = 'typed' | 'inferred' | 'dynamic';
  * else — an await outside one is not a wrong answer, it is a node the emitter cannot spell. */
 export interface AwaitExpr extends Node {
   readonly kind: 'await';
+  readonly value: Expression;
+  readonly type: HType;
+}
+
+/** `yield e` (and bare `yield`, whose value is `undefined`).
+ *
+ * `type` is what a later `next(v)` injects as this expression's value -- TNext, typically Unknown.
+ * A yield may only appear inside a generator's body; the emitter's resume machinery is what it
+ * compiles into. `yield*` is a separate not-yet (it drives another iterator). */
+export interface YieldExpr extends Node {
+  readonly kind: 'yield';
   readonly value: Expression;
   readonly type: HType;
 }
@@ -1180,8 +1205,10 @@ export type Expression =
   | FunctionExpr
   | CallExpr
   | AwaitExpr
+  | YieldExpr
   | PromiseStaticCall
-  | ConsoleLogCall;
+  | ConsoleLogCall
+  | IteratorNext;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Statements
@@ -1389,12 +1416,27 @@ export interface ForStatement extends Node, Labelled {
  * `iterable` is an array, a string, a Map or a Set. All four compile to specialized loops
  * (docs/VALUE.md §4.13); a user iterable still waits on the protocol object. A Map yields a
  * `[key, value]` pair, which the HIR has no tuple for, so that binding is Unknown. */
+/** Which specialized walk a for-of uses. `identity` is the collection itself; the other three
+ * are the `keys`/`values`/`entries` views inlined when the call is the loop operand. */
+export type IteratorView = 'identity' | 'keys' | 'values' | 'entries';
+
 export interface ForOfStatement extends Node, Labelled {
   readonly kind: 'for-of-statement';
   readonly binding: string;
   readonly declKind: 'let' | 'const';
   readonly iterable: Expression;
+  readonly view: IteratorView;
   readonly body: Block;
+}
+
+/** `it.next()` on a boxed specialized iterator. Answers `{ value, done }` — an ordinary two-field
+ * dynamic object, typed Unknown because IteratorResult is an interface this model does not layout. */
+export interface IteratorNext extends Node {
+  readonly kind: 'iterator-next';
+  readonly target: Expression;
+  /** What `next(v)` sends into a waiting `yield`. Absent `next()` pads `undefined`. Specialized
+   * iterators ignore it; generators inject it as the yield's value. */
+  readonly sent: Expression;
 }
 
 /** One `case` or `default` arm. An absent `test` is `default`.

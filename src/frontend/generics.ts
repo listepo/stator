@@ -160,6 +160,8 @@ export function substituteHType(type: HType, lookup: (name: string) => HType | u
       return { kind: 'array', element: substituteHType(type.element, lookup) };
     case 'set':
       return { kind: 'set', element: substituteHType(type.element, lookup) };
+    case 'iterator':
+      return { kind: 'iterator', element: substituteHType(type.element, lookup) };
     case 'map':
       return {
         kind: 'map',

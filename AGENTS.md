@@ -76,10 +76,10 @@ Gallery + captions: `docs/ARCHITECTURE.md`. Shared theme: `docs/architecture/the
 ## Commands
 
 Dev runs TS directly on the pinned Node (≥24, see `.node-version`) — no build step needed.
-`mise install` provides that Node, pnpm, and LLVM clang 21.1.8.
+`mise install` provides that Node, pnpm, just, and LLVM clang 21.1.8.
 
 ```
-mise install                    # Node, pnpm, LLVM clang (Unix)
+mise install                    # Node, pnpm, just, LLVM clang (Unix)
 pnpm install --frozen-lockfile  # install (exact-pinned deps)
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # biome check — lint + format (must be clean)
@@ -93,9 +93,9 @@ pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-f
 pnpm run test:asan              # golden fixtures with runtime + generated C under ASan/UBSan
 pnpm run test:leak              # 10M-object loop; RSS must plateau (skips without Boehm)
 pnpm run bench:record           # refresh tests/bench/baseline.json (valid for this machine only)
-make -C runtime                 # build libjsrt.a (clang, -Wall -Wextra -Werror)
-make -C runtime asan            # ASan/UBSan runtime build (golden tests must also pass on this)
-make -C runtime intl            # ICU feature build (off by default; needs pkg-config icu-uc icu-i18n)
+just runtime                    # build libjsrt.a (clang, -Wall -Wextra -Werror)
+just runtime-asan               # ASan/UBSan runtime build (golden tests must also pass on this)
+just runtime-intl               # ICU feature build (off by default; needs pkg-config icu-uc icu-i18n)
 pnpm run test:intl              # the intl_* golden fixtures against that build (not part of `ci`)
 pnpm run ci                     # all of the above, in order — run before claiming any task done
 node src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]

@@ -529,6 +529,38 @@ jsrt_value jsrt_regexp_match(jsrt_value re_value, jsrt_value str) {
   return out;
 }
 
+jsrt_value jsrt_regexp_match_all(jsrt_value re_value, jsrt_value str) {
+  /* Tag-check the subject the same way exec/match do, before cloning anything. */
+  (void)subject_of(str, "matchAll");
+  JSRTRegExp *re = jsrt_as_regexp(re_value);
+  if ((re->lre_flags & LRE_FLAG_GLOBAL) == 0) {
+    jsrt_panic("STA2005: String.prototype.matchAll requires a global regular expression; the spec "
+               "throws TypeError, which builtins cannot raise yet");
+  }
+  /* @@matchAll clones the matcher so walking the iterator cannot mutate the original lastIndex. */
+  jsrt_value clone = jsrt_regexp_new(re->source, re->flags);
+  jsrt_as_regexp(clone)->last_index = re->last_index;
+  return jsrt_iterator_match_all_new(str, clone);
+}
+
+bool jsrt_regexp_match_all_step(jsrt_value re_value, jsrt_value str, jsrt_value *out) {
+  jsrt_value hit = jsrt_regexp_exec(re_value, str);
+  if (hit == JSRT_NULL) {
+    return false;
+  }
+  /* Spec: an empty match still yields, then AdvanceStringIndex so the next exec cannot spin. */
+  const JSRTArray *a = jsrt_as_array(hit);
+  const jsrt_value whole = a->length > 0 ? a->elements[0] : JSRT_UNDEFINED;
+  if (jsrt_is(whole, JSRT_TAG_STRING) && jsrt_string_length(whole) == 0) {
+    JSRTRegExp *re = jsrt_as_regexp(re_value);
+    const JSString *s = (const JSString *)jsrt_ptr(str);
+    const bool unicode = (re->lre_flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS)) != 0;
+    re->last_index = advance_string_index(s, re->last_index, unicode);
+  }
+  *out = hit;
+  return true;
+}
+
 jsrt_value jsrt_regexp_split(jsrt_value re_value, jsrt_value str) {
   const JSString *s = subject_of(str, "split");
   const JSRTRegExp *re = jsrt_as_regexp(re_value);

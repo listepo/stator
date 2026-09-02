@@ -37,7 +37,7 @@ Declared at the bottom of `libregexp.h`, defined by us in `runtime/src/jsrt_rege
 version bump is a re-vendor plus a re-apply, and never a silent divergence. The re-vendor is
 `node runtime/vendor/update.mjs quickjs-ng [ref]` (`pnpm run vendor:update`).
 
-They are also the one exception to the runtime's `-Wall -Wextra -Werror`: the Makefile compiles
+They are also the one exception to the runtime's `-Wall -Wextra -Werror`: the justfile compiles
 `vendor/` with `-Wall` alone, because holding code we may not edit to our own warning policy would
 force exactly the edits the rule above forbids (plan-notes 101). The bridge in `runtime/src/` is
 ours, and is held to the full flags like everything else there.

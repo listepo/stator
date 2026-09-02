@@ -1,7 +1,7 @@
 /* print_regexp.c — the regexp engine and its printing, checked against Node.
  *
  * Ground truth is Node, not a table written here: runtime/tests/print_regexp.mjs builds the SAME
- * patterns in the same order and prints the same answers with console.log; `make -C runtime test`
+ * patterns in the same order and prints the same answers with console.log; `just runtime-test`
  * diffs the two byte-for-byte. Keep the two corpora in the same order or the diff means nothing.
  *
  * The engine is quickjs-ng's libregexp, vendored (runtime/vendor/quickjs-ng). What is under test

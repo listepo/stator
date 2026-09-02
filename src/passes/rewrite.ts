@@ -331,6 +331,11 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       const target = sub(expr.target);
       return target === expr.target ? expr : { ...expr, target };
     }
+    case 'iterator-next': {
+      const target = sub(expr.target);
+      const sent = sub(expr.sent);
+      return target === expr.target && sent === expr.sent ? expr : { ...expr, target, sent };
+    }
     case 'array-op':
     case 'method-call':
     case 'collection-op':
@@ -355,7 +360,8 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       const arg = sub(expr.arg);
       return arg === expr.arg ? expr : { ...expr, arg };
     }
-    case 'await': {
+    case 'await':
+    case 'yield': {
       const value = sub(expr.value);
       return value === expr.value ? expr : { ...expr, value };
     }

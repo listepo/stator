@@ -477,9 +477,10 @@ void test('String.prototype ops in the landed set are accepted', () => {
 void test('String.prototype residue stays deferred', () => {
   // A method as a VALUE: there is no bound-function object to hand out yet.
   assert.deepEqual(codesFor('const f = "abc".trim;\nconsole.log(f());'), ['STA1214']);
-  // A member outside the landed set. `match` is no longer one -- it landed with Task 4.1's array
-  // with properties -- but `matchAll` still is, because it answers an ITERATOR.
-  assert.deepEqual(codesFor('console.log("abc".matchAll(/b/g));'), ['STA1214']);
+  // A member outside the landed set. `match` and `matchAll` are in the table; a string pattern
+  // for matchAll is still refused (RegExpCreate).
+  assert.deepEqual(codesFor('console.log("abc".matchAll(/b/g));'), []);
+  assert.deepEqual(codesFor('console.log("abc".matchAll("b"));'), ['STA1214']);
   // split's limit argument changes the element-count contract; deferred with the rest.
   assert.deepEqual(codesFor('console.log("a,b".split(",", 1));'), ['STA1214']);
   // A REPLACEMENT that is a regexp is not a pattern: only argument zero takes one.
@@ -734,8 +735,8 @@ test('gate: Date lands the UTC and local surfaces and refuses the ICU forms by n
 });
 
 // Task 4.2: Map/Set forEach takes a CALLBACK, not an iterator — the distinction that lets it land
-// while `keys`/`values`/`entries` wait on the Symbol.iterator protocol.
-void test('Map and Set forEach are accepted; the iterator forms stay deferred', () => {
+// without waiting on the boxed-iterator form of keys/values/entries (Phase 5 step 8).
+void test('Map and Set forEach are accepted; keys/values/entries are accepted as iterator boxes', () => {
   const map = 'const m = new Map<string, number>();\nm.set("a", 1);\n';
   const set = 'const s = new Set<number>();\ns.add(1);\n';
   assert.deepEqual(
@@ -751,10 +752,14 @@ void test('Map and Set forEach are accepted; the iterator forms stay deferred', 
   assert.deepEqual(codesFor(`${map}m.forEach((v: number): void => { console.log(v); }, {});`), [
     'STA1214',
   ]);
-  // The iterator forms hand back an iterator, which the subset has no node for.
-  assert.deepEqual(codesFor(`${map}console.log(m.keys());`), ['STA1214']);
-  assert.deepEqual(codesFor(`${map}console.log(m.entries());`), ['STA1214']);
-  assert.deepEqual(codesFor(`${set}console.log(s.values());`), ['STA1214']);
+  assert.deepEqual(codesFor(`${map}console.log(m.keys());`), []);
+  assert.deepEqual(codesFor(`${map}console.log(m.entries());`), []);
+  assert.deepEqual(codesFor(`${set}console.log(s.values());`), []);
+  assert.deepEqual(codesFor(`${map}const it = m.keys();\nconsole.log(it.next());`), []);
+  assert.deepEqual(
+    codesFor('const xs: number[] = [1];\nfor (const k of xs.keys()) { console.log(k); }'),
+    [],
+  );
   // An operation belongs to the collection that has it: a Set has no `get`, so it never reaches
   // the arity rule below the table lookup.
   assert.deepEqual(codesFor(`${set}console.log(s.get(1));`), ['STA1214']);
@@ -778,8 +783,8 @@ void test('the ES2025 set operations are accepted over two Sets, and refused ove
     codesFor(
       `${two}const like = { size: 0, has: (v: number): boolean => v === 1, keys: (): IterableIterator<number> => b.keys() };\nconsole.log(a.union(like));`,
     ),
-    // Two refusals: the `keys()` the value cannot be written without, and the argument rule.
-    ['STA1214', 'STA1214'],
+    // The set-like OBJECT is still refused; `b.keys()` itself is now a legal iterator box.
+    ['STA1214'],
   );
   // They belong to Set alone -- a Map has no `union`, so it never reaches the argument rule.
   assert.deepEqual(codesFor(`${two}${map}console.log(m.union(a));`), ['STA1214']);
@@ -971,9 +976,8 @@ void test('the regexp forms of the pattern-taking string methods are accepted', 
   // Task 4.1, array-with-properties slice: `match` joined the table once an array could carry the
   // `index`/`input`/`groups` a non-global match hangs off its result.
   assert.deepEqual(codesFor("console.log('a1b'.match(/\\d/));"), []);
-  // `matchAll` did NOT: it answers an ITERATOR, which is Phase 5 step 8's protocol, and that is
-  // the whole reason the two split.
-  assert.deepEqual(codesFor("console.log('a1b'.matchAll(/\\d/g));"), ['STA1214']);
+  // `matchAll` answers an iterator of match arrays, which is why it split from `match`.
+  assert.deepEqual(codesFor("console.log('a1b'.matchAll(/\\d/g));"), []);
 });
 
 // Phase 5 step 2: the diagnostic table is a function of mode. The same source that is a never in
@@ -1046,4 +1050,27 @@ void test('for-of over a Map or a Set is accepted', () => {
     codesFor('const s = new Set();\ns.add("a");\nfor (const e of s) { console.log(e); }\n', 'js'),
     [],
   );
+});
+
+void test('function* declarations and yield are accepted; methods and yield* are not', () => {
+  assert.deepEqual(
+    codesFor(
+      'function* g(): Generator<number> { yield 1; }\nfor (const x of g()) { console.log(x); }\n',
+    ),
+    [],
+  );
+  assert.deepEqual(codesFor('function* g() { yield 1; }\nconsole.log(g().next());\n', 'js'), []);
+  assert.deepEqual(
+    codesFor(
+      'function* g(): Generator<number, number, number> { const a: number = yield 1; return a; }\nconsole.log(g().next(2));\n',
+    ),
+    [],
+  );
+  // Generator methods keep STA1201: a receiver would have to join the heap environment.
+  assert.deepEqual(codesFor('class C { *m(): Generator<number> { yield 1; } }\n'), ['STA1201']);
+  assert.deepEqual(codesFor('class C { *m() { yield 1; } }\n', 'js'), ['STA1201']);
+  assert.deepEqual(codesFor('function* g(): Generator<number> { yield* [1]; }\n'), ['STA1214']);
+  assert.deepEqual(codesFor('async function* g(): AsyncGenerator<number> { yield 1; }\n'), [
+    'STA1201',
+  ]);
 });

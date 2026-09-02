@@ -68,6 +68,7 @@ import type {
   IfStatement,
   IndexAccess,
   InstanceOf,
+  IteratorView,
   LogicalOp,
   MatchField,
   MathMethod,
@@ -113,6 +114,7 @@ import {
   H_UNDEFINED,
   hasTypeParam,
   hFunction,
+  hIterator,
   hPromise,
   hTypeHasUnknown,
   hTypeName,
@@ -687,7 +689,14 @@ function lowerForOf(
   diagnostics: Diagnostic[],
   label?: string,
 ): Statement | null {
-  const iterable = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+  const peeled = peelIteratorView(node.expression, checker, bindings);
+  const iterable = lowerExpression(
+    peeled === undefined ? node.expression : peeled.inner,
+    sourceFile,
+    checker,
+    bindings,
+    diagnostics,
+  );
   if (!iterable) {
     return null;
   }
@@ -726,9 +735,32 @@ function lowerForOf(
     binding,
     declKind: (list.flags & ts.NodeFlags.Const) !== 0 ? 'const' : 'let',
     iterable,
+    view: peeled === undefined ? 'identity' : peeled.view,
     body,
     ...(label !== undefined && { label }),
   };
+}
+
+function peelIteratorView(
+  expr: ts.Expression,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+): { view: Exclude<IteratorView, 'identity'>; inner: ts.Expression } | undefined {
+  if (!ts.isCallExpression(expr) || expr.arguments.length !== 0) {
+    return undefined;
+  }
+  if (!ts.isPropertyAccessExpression(expr.expression)) {
+    return undefined;
+  }
+  const name = expr.expression.name.text;
+  if (name !== 'keys' && name !== 'values' && name !== 'entries') {
+    return undefined;
+  }
+  const receiver = typeAt(expr.expression.expression, checker, bindings);
+  if (receiver.kind !== 'array' && receiver.kind !== 'map' && receiver.kind !== 'set') {
+    return undefined;
+  }
+  return { view: name, inner: expr.expression.expression };
 }
 
 function lowerFor(
@@ -2001,6 +2033,23 @@ function lowerExpression(
     };
   }
 
+  if (ts.isYieldExpression(node)) {
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    const value =
+      node.expression === undefined
+        ? { kind: 'undefined-literal' as const, type: H_UNDEFINED, span }
+        : lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+    if (value === null) {
+      return null;
+    }
+    return {
+      kind: 'yield',
+      type: typeAt(node, checker, bindings),
+      span,
+      value,
+    };
+  }
+
   // `x as T`. A widening or identity cast asserts nothing and lowers to its operand alone; anything
   // else is the program overruling the checker, and the check is what makes that safe.
   if (ts.isAsExpression(node)) {
@@ -2401,6 +2450,7 @@ function lowerExpression(
         while (padded.length < shape.arity) {
           padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
         }
+        const checkerType = typeAt(node, checker, bindings);
         const type: HType =
           shape.result === 'element' || shape.result === 'match'
             ? hUnknown(false)
@@ -2410,8 +2460,35 @@ function lowerExpression(
                 ? H_NUMBER
                 : shape.result === 'boolean'
                   ? H_BOOLEAN
-                  : H_STRING;
+                  : shape.result === 'iterator'
+                    ? checkerType.kind === 'iterator'
+                      ? checkerType
+                      : hIterator(hUnknown(false))
+                    : H_STRING;
         return { kind: 'string-op', type, span, op, target, args: padded };
+      }
+
+      if (propName === 'next' && typeAt(obj, checker, bindings).kind === 'iterator') {
+        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+        if (target === null) {
+          return null;
+        }
+        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const sentArg = node.arguments[0];
+        const sent =
+          sentArg === undefined
+            ? { kind: 'undefined-literal' as const, type: H_UNDEFINED, span }
+            : lowerExpression(sentArg, sourceFile, checker, bindings, diagnostics);
+        if (sent === null) {
+          return null;
+        }
+        return {
+          kind: 'iterator-next',
+          type: typeAt(node, checker, bindings),
+          span,
+          target,
+          sent,
+        };
       }
 
       // The landed Array.prototype surface, on the same table discipline: pad optional positions
@@ -2456,7 +2533,9 @@ function lowerExpression(
                       ? H_BOOLEAN
                       : shape.result === 'string'
                         ? H_STRING
-                        : hUnknown(false);
+                        : shape.result === 'iterator'
+                          ? checkerType
+                          : hUnknown(false);
         return { kind: 'array-op', type, span, op, target, args: padded };
       }
 
@@ -2832,6 +2911,12 @@ function lowerFunction(
     params,
     body,
     isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
+    isGenerator:
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isMethodDeclaration(node)
+        ? node.asteriskToken !== undefined
+        : false,
     envVars: info?.envVars ?? [],
     captures: info?.captures ?? [],
     needsEnv: info?.needsEnv ?? false,
@@ -3440,6 +3525,7 @@ function synthesizedConstructor(
     params: [{ name: RECEIVER, type: self, span }, ...forwarded],
     body: { kind: 'block', type: H_UNDEFINED, span, statements },
     isAsync: false,
+    isGenerator: false,
     envVars: [],
     captures: [],
     needsEnv: false,
@@ -3834,6 +3920,9 @@ function collectionOperation(name: string): CollectionOperation | undefined {
     case 'add':
     case 'size':
     case 'forEach':
+    case 'keys':
+    case 'values':
+    case 'entries':
       return name;
     default:
       // The ES2025 set operations, which are a table rather than seven more cases -- the gate and

@@ -386,6 +386,7 @@ export function fn(
     captures: [],
     needsEnv: false,
     isAsync: false,
+    isGenerator: false,
     provenance: 'typed',
   } as const;
   return name === undefined
@@ -452,7 +453,7 @@ export function call(
 
 /** A `node:test` option object that skips a test which compiles and runs a native binary.
  *
- * Producing one needs `runtime/build/libjsrt.a` and clang, a toolchain the runtime's Makefile does
+ * Producing one needs `runtime/build/libjsrt.a` and clang, a toolchain the justfile does
  * not target on Windows. Every OTHER unit test is portable TypeScript, so gating these few HERE is
  * what lets `pnpm run test` run on all six CI platforms instead of only the Unix four — a skipped
  * proof is visible in the runner's output, a whole unrun file is not. */

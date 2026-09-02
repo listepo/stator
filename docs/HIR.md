@@ -179,7 +179,7 @@ the property is a NAME resolved through the shape table at run time, with a per-
 
 `CollectionNew` and `CollectionOp` are the two nodes rung 7 added for `Map` and `Set`. Each names a
 `collection` (`'map'` or `'set'`) and, for the operation, one of a closed set of `op`s —
-`get`, `set`, `has`, `delete`, `clear`, `add`, `size`, `forEach` — with a target and an argument
+`get`, `set`, `has`, `delete`, `clear`, `add`, `size`, `forEach`, `keys`, `values`, `entries` — with a target and an argument
 list. The
 closed set is the point: an operation is not a general method call that happens to land on a builtin,
 it is one HIR node the emitter turns into one runtime function with a fixed C signature. `.size` is
@@ -198,8 +198,10 @@ the gate, the verifier and the emitter all read it.
 `jsrt_call`, exactly as the `Array.prototype` callback ops do, so the emitter gives it the same
 treatment those get — the call is emitted as its own STATEMENT and a pending check follows it, so a
 `throw` from the callback reaches its landing pad instead of being read as a result. The iterator
-forms (`keys`, `values`, `entries`) stay out for a different reason entirely: they hand back an
-ITERATOR, and the subset has no node for one.
+forms (`keys`, `values`, `entries`) land as a result kind `iterator` (Phase 5 step 8): a for-of
+operand peels to an inlined walk, and a stored result is a boxed `JSRTIterator` whose `next()` is
+the `IteratorNext` node. `function*` is the same `iterator` type wrapping a `JSRTGenerator`:
+`YieldExpr` is the suspension, and `IteratorNext.sent` is what a later `next(v)` injects.
 
 Task 4.2 added `MathCall` on the CollectionOp precedent: a closed method set, exact arity, one
 runtime function per operation, no function value anywhere. Post-lowering arity is FIXED at one or
@@ -332,7 +334,7 @@ Each is a singleton (except `unknown`, which carries a flag—see §3).
 
 ### 2.2 Phase 3+ types — planned
 
-`fn(params, ret)` landed with rung 4, `array<T>` with rung 5, and `object` — a class instance: a name, fields in slot order, and method signatures — with rung 6a. `object` is compared **nominally**, unlike every other kind: two classes that declare the same fields are still two classes, which matches what the emitter allocated (one descriptor per declaration) and is also the only comparison that terminates, since `class C { self: C }` is a cyclic type. Rung 7 added `map<K, V>` and `set<T>`.
+`fn(params, ret)` landed with rung 4, `array<T>` with rung 5, and `object` — a class instance: a name, fields in slot order, and method signatures — with rung 6a. `object` is compared **nominally**, unlike every other kind: two classes that declare the same fields are still two classes, which matches what the emitter allocated (one descriptor per declaration) and is also the only comparison that terminates, since `class C { self: C }` is a cyclic type. Rung 7 added `map<K, V>` and `set<T>`. Phase 5 step 8 added `iterator<T>` — a boxed specialized cursor (`arr.keys()` stored), distinct from the inlined for-of walk that allocates nothing.
 
 Task 3.4 added one more, `type-param`, which is the single HType kind that must NEVER reach the HIR: it lives only inside `src/frontend/`, as the thing unification binds and substitution replaces. Monomorphization happens at the lowering, so a node carrying a `type-param` means a specialization was built outside its own substitution — the verifier refuses it as `STA4054`.
 

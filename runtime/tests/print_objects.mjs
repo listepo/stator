@@ -1,5 +1,5 @@
 /* Ground truth for print_objects.c. Builds the SAME objects in the SAME order and prints them with
- * console.log; `make -C runtime test` diffs the two byte-for-byte. Keep the order in sync.
+ * console.log; `just runtime-test` diffs the two byte-for-byte. Keep the order in sync.
  *
  * The classes here declare their fields in the constructor in slot order, because that is what the
  * C side's JSRTClass field list means: slot 0 is the first field, and Node prints own properties in

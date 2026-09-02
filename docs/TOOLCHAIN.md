@@ -14,7 +14,8 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | Biome | `2.5.11` (exact) | `devDependencies` |
 | cpd (copy/paste detector) | `5.0.16` (exact) | `devDependencies` |
 | pnpm | `11.20.0` | `packageManager` in `package.json`, `mise.toml` |
-| LLVM | `21.1.8` | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the Makefile and `src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
+| LLVM | `21.1.8` | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
+| just | `1.58.0` | `mise.toml`. The runtime build (`just runtime`, `just runtime-asan`, `just runtime-intl`). |
 
 Node ≥ 24 is required because dev runs the compiler's TypeScript sources directly
 (`node src/cli/main.ts`) via native type stripping — there is no build step in development.
@@ -30,7 +31,7 @@ The host this bootstrap was verified on (a data point, not a requirement):
 ```
 node    v26.7.0
 clang   Apple clang version 21.0.0 (clang-2100.1.1.101), arm64-apple-darwin25.5.0
-make    GNU Make 3.81
+just    1.58.0
 git     2.50.1 (Apple Git-155)
 os      Darwin 25.5.0 arm64
 ```
@@ -43,9 +44,11 @@ CI must run at least ubuntu-latest and macos-latest (plan.md §4 Task 1.0 step 1
 pnpm install --frozen-lockfile   # install exactly the pinned tree
 pnpm run ci                      # typecheck -> lint -> dupes -> unit+coverage -> runtime -> subset -> golden
 pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info
-make -C runtime       # runtime/build/libjsrt.a          (clang -O2, -Werror)
-make -C runtime asan  # runtime/build-asan/libjsrt.a     (-fsanitize=address,undefined -O1 -g)
-make -C runtime clean
+just runtime          # runtime/build/libjsrt.a          (clang -O2, -Werror)
+just runtime-asan     # runtime/build-asan/libjsrt.a     (-fsanitize=address,undefined -O1 -g)
+just runtime-intl     # runtime/build-intl/libjsrt.a     (ICU feature build)
+just runtime-test     # print corpus vs Node
+just runtime-clean
 ./ci.sh               # what CI runs, locally
 ```
 
@@ -61,7 +64,7 @@ ASan's global-registration sections are exactly what `--gc-sections` is document
 ## Native libraries
 
 None of these come from the npm tree. Vendored sources live in the repo and build with the runtime;
-system libraries are discovered at `make` time and recorded in `build*/link-flags.txt`, which
+system libraries are discovered at `just runtime` time and recorded in `build*/link-flags.txt`, which
 `src/cli/build.ts` reads back — so the emitted program links exactly what the archive it links was
 compiled against (plan-notes 106).
 
@@ -71,7 +74,7 @@ compiled against (plan-notes 106).
 | fdlibm (V8 `ieee754.cc`, mechanically ported to C11) | vendored, fdlibm + BSD-3-Clause | yes | `Math.sin` and 19 siblings, bit-identical to the pinned Node's | `runtime/vendor/fdlibm/` — provenance in its `VENDOR.md` |
 | libm (`-lm`) | system | yes | `floor`/`trunc`/`sqrt`/`fmod` — ToInt32, array indexing, the print path | part of libSystem on macOS (the flag is a no-op there), separate on glibc (plan-notes 122) |
 | Boehm GC (`bdw-gc`) | system | optional | the collector (`docs/VALUE.md` §4.12); without it the runtime falls back to plain `malloc`, no collection | `pkg-config --libs bdw-gc`; macOS `brew install bdw-gc`, Debian `apt install libgc-dev` |
-| ICU (`icu-uc`, `icu-i18n`) | system | optional, feature build only | `Intl` — `make -C runtime intl`, into `build-intl/` | `pkg-config`; macOS `brew install icu4c`, Debian `apt install libicu-dev` |
+| ICU (`icu-uc`, `icu-i18n`) | system | optional, feature build only | `Intl` — `just runtime-intl`, into `build-intl/` | `pkg-config`; macOS `brew install icu4c`, Debian `apt install libicu-dev` |
 
 The default archive is byte-identical whether or not ICU is installed on the host — that is why
 Intl is a separate object directory rather than a flag on the default build.
@@ -89,14 +92,14 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 
 | Tool | Used by | For |
 |---|---|---|
-| `clang` (`$CC`) | `runtime/Makefile`, `src/cli/build.ts` | the runtime, the emitted C, and the final link |
-| `ar` (`$AR`) | `runtime/Makefile` | archiving `libjsrt.a` |
-| `make` | `runtime/Makefile` | the runtime build (GNU Make 3.81 suffices) |
-| `pkg-config` | `runtime/Makefile` | finding bdw-gc and ICU; absent means both are simply off |
-| `diff` | `make -C runtime test` | the print corpus against Node, byte-for-byte |
+| `clang` (`$CC`) | justfile, `src/cli/build.ts` | the runtime, the emitted C, and the final link |
+| `ar` (`$AR`) | justfile | archiving `libjsrt.a` |
+| `just` | justfile | the runtime build (pinned `1.58.0` in `mise.toml`) |
+| `pkg-config` | justfile | finding bdw-gc and ICU; absent means both are simply off |
+| `diff` | `just runtime-test` | the print corpus against Node, byte-for-byte |
 
-`clang` (and the rest of LLVM) is `mise install` on Unix. The other four still come from the Xcode
-command-line tools (`xcode-select --install`) on macOS and from `binutils`/`make`/`pkg-config`/
+`clang` (and the rest of LLVM) is `mise install` on Unix. The other three still come from the Xcode
+command-line tools (`xcode-select --install`) on macOS and from `binutils`/`pkg-config`/
 `diffutils` on Debian/Ubuntu. A missing compiler is a diagnostic with the install hint (`STA0008`),
 not a crash.
 

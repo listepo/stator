@@ -184,19 +184,45 @@ function checkField(
 /** Separate from checkIndexable because the emitted loop is different, not just the message: a
  * for-of over an array, a string, a Map or a Set compiles to a specialized loop (docs/VALUE.md
  * §4.13). */
+function forOfElementType(
+  iterable: HType,
+  view: 'identity' | 'keys' | 'values' | 'entries',
+): HType {
+  if (iterable.kind === 'iterator') {
+    return iterable.element;
+  }
+  if (iterable.kind === 'string') {
+    return H_STRING;
+  }
+  if (view === 'entries') {
+    return hUnknown(false); /* a two-element array; the HIR has no tuple */
+  }
+  if (iterable.kind === 'array') {
+    return view === 'keys' ? H_NUMBER : iterable.element;
+  }
+  if (iterable.kind === 'map') {
+    return view === 'keys' ? iterable.key : view === 'values' ? iterable.value : hUnknown(false);
+  }
+  if (iterable.kind === 'set') {
+    return iterable.element;
+  }
+  return hUnknown(false);
+}
+
 function checkIterable(iterable: Expression, problems: VerifyProblem[]): void {
   if (
     iterable.type.kind !== 'array' &&
     iterable.type.kind !== 'string' &&
     iterable.type.kind !== 'map' &&
     iterable.type.kind !== 'set' &&
+    iterable.type.kind !== 'iterator' &&
     iterable.type.kind !== 'unknown'
   ) {
     problems.push({
       kind: 'for-of-statement',
       span: iterable.span,
       code: 'STA4045',
-      message: `for-of iterable has type '${hTypeName(iterable.type)}', which is not an array, string, Map or Set`,
+      message: `for-of iterable has type '${hTypeName(iterable.type)}', which is not an array, string, Map, Set or iterator`,
     });
   }
 }
@@ -403,14 +429,7 @@ function verifyStatement(
       const scope = new Map(bindings);
       scope.set(stmt.binding, {
         kind: stmt.declKind,
-        type:
-          stmt.iterable.type.kind === 'array'
-            ? stmt.iterable.type.element
-            : stmt.iterable.type.kind === 'string'
-              ? H_STRING
-              : stmt.iterable.type.kind === 'set'
-                ? stmt.iterable.type.element
-                : hUnknown(false),
+        type: forOfElementType(stmt.iterable.type, stmt.view),
       });
       verifyBlock(stmt.body, problems, scope, inner);
       break;
@@ -1266,7 +1285,7 @@ function verifyExpression(
       const shape = STRING_OPS[expr.op];
       // `element` is unchecked, the array-op rule: the honest answer is Unknown.
       const want: HType | undefined =
-        shape.result === 'element' || shape.result === 'match'
+        shape.result === 'element' || shape.result === 'match' || shape.result === 'iterator'
           ? undefined
           : shape.result === 'string-array'
             ? { kind: 'array', element: H_STRING }
@@ -1295,6 +1314,13 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4081',
           message: `${expr.op} results in '${hTypeName(expr.type)}', not '${hTypeName(want)}'`,
+        });
+      } else if (shape.result === 'iterator' && expr.type.kind !== 'iterator') {
+        problems.push({
+          kind: 'string-op',
+          span: expr.span,
+          code: 'STA4081',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not an iterator`,
         });
       }
       break;
@@ -1344,6 +1370,13 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4082',
           message: `${expr.op} results in '${hTypeName(expr.type)}', not '${hTypeName(want)}'`,
+        });
+      } else if (shape.result === 'iterator' && expr.type.kind !== 'iterator') {
+        problems.push({
+          kind: 'array-op',
+          span: expr.span,
+          code: 'STA4082',
+          message: `${expr.op} results in '${hTypeName(expr.type)}', not an iterator`,
         });
       } else if (shape.result === 'mapped' && expr.type.kind !== 'array') {
         // Only the KIND is pinned: the element is the checker's answer (map) or a possibly
@@ -1592,6 +1625,11 @@ function verifyExpression(
     // value type. Awaiting anything else is legal (`await 1` is a spec-sanctioned no-op that
     // still yields to the microtask queue), and its result type is the operand's own, so
     // nothing is pinned there -- peeling would get exactly that case wrong.
+    case 'yield': {
+      verifyExpression(expr.value, problems, bindings);
+      break;
+    }
+
     case 'await': {
       verifyExpression(expr.value, problems, bindings);
       if (expr.value.type.kind === 'promise' && !hTypeEquals(expr.type, expr.value.type.value)) {
@@ -1682,6 +1720,20 @@ function verifyExpression(
       break;
     }
 
+    case 'iterator-next': {
+      verifyExpression(expr.target, problems, bindings);
+      verifyExpression(expr.sent, problems, bindings);
+      if (expr.target.type.kind !== 'iterator') {
+        problems.push({
+          kind: 'iterator-next',
+          span: expr.span,
+          code: 'STA4045',
+          message: `next() on a receiver of type '${hTypeName(expr.target.type)}'`,
+        });
+      }
+      break;
+    }
+
     default: {
       const _exhaustive: never = expr;
       throw new Error(`Exhaustiveness check failed: ${_exhaustive}`);
@@ -1692,7 +1744,18 @@ function verifyExpression(
 /** Which operations each collection answers, and with how many arguments. The emitter's C
  * signatures are the reason this is checked at all -- see the `collection-op` case. */
 const COLLECTION_ARITY: Readonly<Record<'map' | 'set', Readonly<Record<string, number>>>> = {
-  map: { get: 1, set: 2, has: 1, delete: 1, clear: 0, size: 0, forEach: 1 },
+  map: {
+    get: 1,
+    set: 2,
+    has: 1,
+    delete: 1,
+    clear: 0,
+    size: 0,
+    forEach: 1,
+    keys: 0,
+    values: 0,
+    entries: 0,
+  },
   set: {
     add: 1,
     has: 1,
@@ -1700,6 +1763,9 @@ const COLLECTION_ARITY: Readonly<Record<'map' | 'set', Readonly<Record<string, n
     clear: 0,
     size: 0,
     forEach: 1,
+    keys: 0,
+    values: 0,
+    entries: 0,
     union: 1,
     intersection: 1,
     difference: 1,

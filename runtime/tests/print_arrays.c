@@ -1,7 +1,7 @@
 /* print_arrays.c — prints a fixed corpus of arrays through jsrt_print.
  *
  * Ground truth is Node, not a table written here: runtime/tests/print_arrays.mjs builds the SAME
- * arrays in the same order and prints them with console.log; `make -C runtime test` diffs the two
+ * arrays in the same order and prints them with console.log; `just runtime-test` diffs the two
  * byte-for-byte. Keep the two corpora in the same order or the diff means nothing.
  *
  * Array output is util.inspect, not ToString, and its layout rules are the whole reason this file

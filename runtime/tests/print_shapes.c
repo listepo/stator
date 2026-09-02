@@ -1,7 +1,7 @@
 /* print_shapes.c — dynamic objects (shape table + inline caches) through jsrt_print.
  *
  * Ground truth is Node: print_shapes.mjs builds the SAME objects with plain object literals and
- * property assignment, in the same order; `make -C runtime test` diffs the two byte-for-byte.
+ * property assignment, in the same order; `just runtime-test` diffs the two byte-for-byte.
  *
  * Beyond "properties print in insertion order", this pins: a dynamic object prints exactly like
  * an object literal (no constructor name — Node cannot tell them apart); a missing property reads

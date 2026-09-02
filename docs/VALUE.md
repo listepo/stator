@@ -754,11 +754,11 @@ first the mask yields the referent; on the second it is the identity. A word tha
 double, a length — can mask to a plausible address and retain one object it does not own. That is
 ordinary conservative-collector behaviour: it costs memory, never correctness.
 
-**Two configurations, both supported.** `runtime/Makefile` asks `pkg-config` for `bdw-gc`. Found:
+**Two configurations, both supported.** The justfile asks `pkg-config` for `bdw-gc`. Found:
 the archive compiles with `-DJSRT_HAVE_BOEHM` and records `-lgc` in `build*/link-flags.txt`, which
 `src/cli/build.ts` reads back so the emitted program links the same collector its archive was
 compiled against (plan-notes 106). Not found: `jsrt_gc_alloc` is plain `malloc`, nothing is ever
-collected, and every test still passes — the program simply keeps every object it allocates. `make`
+collected, and every test still passes — the program simply keeps every object it allocates. `just runtime`
 prints which one it built (`Runtime built with: Boehm GC` / `plain malloc (no collection)`).
 
 **The check.** `pnpm run test:leak` compiles a 10M-object loop and samples RSS from `ps`: the last
@@ -800,29 +800,49 @@ re-read, the same rule the array loop already documents.
 `arr.keys()` / `arr.values()` / `arr.entries()` (and the Map/Set triples) are the same loops
 exposed as **values**. When the call is the operand of a `for-of`, the loop is inlined and still
 allocates nothing. When the call's result is stored (`const it = arr.keys()`), the runtime boxes
-the cursor in a `JSRTIterator` (below) so `it.next()` is a method on a real object. The boxed form
-is a cursor plus a tag saying which specialized loop it is, not a user-callable `next` closure.
+the cursor in a `JSRTIterator` (below) so `it.next()` is a method on a real object. `s.matchAll(re)`
+is always this boxed form: the call IS the iterator. The boxed form is a cursor plus a tag saying
+which specialized loop it is, not a user-callable `next` closure.
 
 ### User iterables — one protocol object
 
-Only a value whose checker type has a `[Symbol.iterator]()` the frontend can see (a generator
-instance, a user class that declares the method, `matchAll`'s answer) allocates:
+Only a value whose checker type has a `[Symbol.iterator]()` the frontend can see (a user class
+that declares the method) allocates a protocol object. That case is still not-yet (`STA1214`):
+it needs `Symbol` as a value. Specialized iterators and generators do not go through it.
 
 ```c
 typedef struct JSRTIterator {
-  jsrt_value target;   /* the iterable; a GC root */
-  uint32_t index;      /* specialized cursors use this; generators use the resume point */
-  uint8_t kind;        /* array-keys / array-values / array-entries / map / set / string / generator / user */
+  const JSRTClass *cls; /* &jsrt_class_iterator -- prefix-shared with JSRTObject */
+  jsrt_value target;    /* the iterable; a GC root */
+  jsrt_value extra;     /* matchAll: the cloned regexp; undefined otherwise */
+  uint32_t index;       /* specialized cursors use this */
+  uint8_t kind;         /* JSRT_ITER_* */
 } JSRTIterator;
 ```
 
 `next()` on this object answers `{ value, done }` — an ordinary two-field shape, not a new HIR
-type. `return`/`throw` on the iterator object are out of scope for the first landing if they fight
-the generator state machine; they get their own not-yet rather than a silent no-op.
+type. `return`/`throw` on the iterator object are out of scope for the first landing; they get
+their own not-yet rather than a silent no-op.
 
-Generators (`function*` / `yield`) are this object plus Task 4.6's resume points, with `yield`
-answering the caller instead of the scheduler. `next(v)` lands with the protocol; `return`/`throw`
-on the generator may defer.
+### Generators
+
+A generator is a different object, not a tagged `JSRTIterator`. The cursor is a resume point and
+the locals live in a heap environment, which a specialized cursor has no reason to carry:
+
+```c
+typedef struct JSRTGenerator {
+  const JSRTClass *cls; /* &jsrt_class_generator -- prefix-shared with JSRTObject */
+  JSRTEnv *env;
+  JSRTGenResume resume;
+  uint32_t state;
+  jsrt_value yielded;
+  bool done;
+} JSRTGenerator;
+```
+
+`function*` is Task 4.6's resume machine driven by the caller: `gen()` only allocates, the body
+runs on the first `next()`, and `yield e` parks `e` then pops the C frame. A later `next(v)` is
+the value of that `yield`. `return`/`throw` on the generator object may defer.
 
 `Symbol.iterator` as a *value* stays `STA1212` until the Symbol primitive lands; the specialized
 loops and the `JSRTIterator` tag do not need the symbol as a first-class value, which is why

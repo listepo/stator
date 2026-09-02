@@ -12,7 +12,7 @@
  *
  * THE NO-PHASE CASE. Some not-yets have no phase to name, and the convention is to OMIT `phase`
  * rather than invent a number (`Diagnostic.phase` is optional for exactly this reason). Two kinds
- * exist today: `STA1215` names a BUILD FLAG (`make -C runtime intl`), and the `Date` residue waits
+ * exist today: `STA1215` names a BUILD FLAG (`just runtime-intl`), and the `Date` residue waits
  * on that same flag's ICU data. Neither is scheduled -- both are available right now to anyone who
  * builds the runtime with the feature on -- so a phase number would read as "wait for release N",
  * which is false in a way no reassignment fixes. The message names the flag instead. */

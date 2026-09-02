@@ -15,4 +15,4 @@ pnpm run ci
 
 # Second job: the sanitized runtime build. Golden tests run against this once Phase 2
 # lands them (plan.md §5 Task 2.7).
-make -C runtime asan
+just runtime-asan

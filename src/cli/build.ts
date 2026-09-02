@@ -57,18 +57,22 @@ const RUNTIME_INCLUDE = join(REPO_ROOT, 'runtime', 'include');
 const FLAVOR = runtimeFlavor();
 const SANITIZED = FLAVOR === 'asan';
 const RUNTIME_DIR_OF = { default: 'build', asan: 'build-asan', intl: 'build-intl' } as const;
-const RUNTIME_MAKE_TARGET = { default: '', asan: ' asan', intl: ' intl' } as const;
+const RUNTIME_JUST_RECIPE = {
+  default: 'runtime',
+  asan: 'runtime-asan',
+  intl: 'runtime-intl',
+} as const;
 const RUNTIME_LIB_DIR = join(REPO_ROOT, 'runtime', RUNTIME_DIR_OF[FLAVOR]);
 const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
 const SANITIZER_FLAGS = ['-O1', '-g', '-fsanitize=address,undefined'];
 
 /** The libraries a program linking this archive needs — Boehm's `-lgc` when the runtime was built
  * against it, ICU's when the archive is the feature build — written next to the archive by the
- * make rule that produced it. Reading them back is the only way this link cannot disagree with the
+ * just recipe that produced it. Reading them back is the only way this link cannot disagree with the
  * objects it links: rediscovering them here would ask `pkg-config` a second time, in a different
  * environment, and an archive compiled WITH Boehm linked WITHOUT `-lgc` is an undefined-symbol
  * error at the end of every compile (plan-notes 106). Absent means an archive built before the
- * make rule wrote one; the link then fails the way it always did, which is the honest outcome. */
+ * recipe wrote one; the link then fails the way it always did, which is the honest outcome. */
 function extraLinkFlags(): string[] {
   const recorded = join(RUNTIME_LIB_DIR, 'link-flags.txt');
   if (!existsSync(recorded)) {
@@ -173,7 +177,7 @@ function linkExecutable(cPath: string, out: string): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
       'STA0011',
-      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`make -C runtime${RUNTIME_MAKE_TARGET[FLAVOR]}\``,
+      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`just ${RUNTIME_JUST_RECIPE[FLAVOR]}\``,
     );
   }
 
@@ -182,7 +186,7 @@ function linkExecutable(cPath: string, out: string): void {
   // at .o granularity -- one referenced symbol drags in every builtin its object file holds. The
   // linker's dead-stripping restores function granularity: a builtin the program never references
   // is not in the binary. Mach-O strips per-symbol out of the box; ELF needs the sections split at
-  // compile time (the runtime Makefile does the same for the archive's own objects). Sanitized
+  // compile time (the justfile does the same for the archive's own objects). Sanitized
   // builds skip it -- ASan's global registration arrays are exactly the kind of unreferenced
   // section --gc-sections is documented to break.
   const shakeFlags = SANITIZED

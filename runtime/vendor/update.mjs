@@ -120,7 +120,7 @@ async function update(name, ref) {
     );
   }
   process.stdout.write(
-    `\n${name} @ ${ref} (${commit})\nnow: make -C runtime && pnpm run test:runtime && pnpm run test:golden\n`,
+    `\n${name} @ ${ref} (${commit})\nnow: just runtime && pnpm run test:runtime && pnpm run test:golden\n`,
   );
   spawnSync('git', ['status', '--short', '--', dir], { stdio: ['ignore', 'inherit', 'inherit'] });
 }

@@ -67,6 +67,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+        if: runner.os != 'Windows'
+        with:
+          just-version: '1.58.0'
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -82,7 +86,7 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run test:subset
       # A handful of unit tests compile and execute a native binary, so they need the archive the
-      # Unix Makefile builds. Windows has no such toolchain, so those tests skip THEMSELVES there
+      # Unix justfile builds. Windows has no such toolchain, so those tests skip THEMSELVES there
       # (`NATIVE_ONLY` in tests/unit/helpers.ts) and the rest of the file still runs -- which is
       # why unit tests below are unconditional and only this build step is gated.
       # linux/x64 is the coverage owner: it has the runtime archive, so native-only tests
@@ -104,7 +108,7 @@ jobs:
         if: ${{ !(matrix.platform == 'linux' && matrix.arch == 'x64') }}
         run: pnpm run test
 
-  # The C runtime and everything that links it. Unix only: the runtime's make/clang toolchain is
+  # The C runtime and everything that links it. Unix only: the runtime's just/clang toolchain is
   # not ported to Windows, and pretending otherwise with a red job helps nobody.
   runtime:
     name: runtime (${{ matrix.platform }}/${{ matrix.arch }})
@@ -119,12 +123,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: '1.58.0'
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
           cache: pnpm
-      # Without bdw-gc the Makefile silently falls back to malloc and `test:leak` SKIPS -- a green
+      # Without bdw-gc the justfile silently falls back to malloc and `test:leak` SKIPS -- a green
       # run that proved nothing about GC hygiene (plan.md Task 4.5). Installing it is what makes
       # the leak job's plateau assertion a real assertion.
       - name: Install Boehm GC
@@ -163,6 +170,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: '1.58.0'
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -194,13 +204,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: '1.58.0'
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
           cache: pnpm
       # icu4c is keg-only on Homebrew, so its .pc files are not on the default search path and
-      # `make intl` would report ICU missing on a machine that has it.
+      # `just runtime-intl` would report ICU missing on a machine that has it.
       - name: Install ICU and Boehm GC
         shell: bash
         run: |

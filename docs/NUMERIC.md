@@ -93,7 +93,7 @@ a checked add (`__builtin_add_overflow`) that falls back to the double path, or 
 in `int64_t` and demote per §2.1.
 
 > `__builtin_add_overflow` and friends are available in clang and gcc. Stator builds with clang
-> (`runtime/Makefile`), so using them is not a portability compromise.
+> (`justfile`), so using them is not a portability compromise.
 
 ### 2.4 The choice of representation is a compiler decision, not a source-level one
 
