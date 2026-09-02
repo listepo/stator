@@ -441,10 +441,13 @@ Steps (detailed 2026-09-01; plan-notes 131):
    git-ignored default. **Missing corpus SKIPS with a message naming the fetch command — never
    fails** — so `pnpm run ci` stays runnable offline; the skip must be visible in the output, since
    a silently-skipped conformance suite is the dishonest version of this whole task.
-2. **Frontmatter parser** (~40 lines, no dependency): the `/*---` … `---*/` block is a fixed subset
-   of YAML — `esid`, `features`, `includes`, `flags`, `negative`, `locale`. Parse exactly those
-   keys and **hard-error on an unknown key** rather than ignoring it; an unrecognized key is how a
-   corpus bump silently changes the meaning of a test.
+2. **Frontmatter parser** (~50 lines, no dependency): locate the `/*---` … `---*/` block after any
+   copyright header. Extract the execution keys `esid`, `features`, `includes`, `flags`, `negative`,
+   and `locale`; recognize Test262's standard descriptive keys (`es5id`, `es6id`, `description`,
+   `info`, `author`) without interpreting them. **Hard-error on any other top-level key** rather
+   than ignoring it; an unrecognized key is how a corpus bump silently changes the meaning of a
+   test. Tests without a frontmatter block are explicitly skipped and reported as `missing
+   frontmatter`, never silently excluded.
 3. **Harness adapter.** Each test is `harness/assert.js` + `harness/sta.js` + every file named in
    `includes:` (`compareArray.js`, `propertyHelper.js`, …), concatenated ahead of the test body,
    then compiled as one `js`-mode unit. `flags: [raw]` means no harness and no strict wrapper;

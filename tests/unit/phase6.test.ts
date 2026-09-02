@@ -20,14 +20,23 @@ test('differential minimizer preserves the reported predicate', () => {
   assert.ok(minimized.length < source.length);
 });
 
-test('Test262 frontmatter accepts the fixed subset and rejects unknown keys', () => {
+test('Test262 frontmatter accepts standard headers after license comments and rejects unknown keys', () => {
   const metadata = parseFrontmatter(
     [
+      '// Copyright Test262 contributors.',
+      '',
       '/*---',
+      'es5id: 15.4',
+      ' description: >',
+      '  A description may span several lines.',
+      'info: |',
+      '  An indented note may contain a colon: without becoming a key.',
+      'author: Test262',
       'features:',
       '  - Array',
       'includes: [compareArray.js]',
       'flags: [raw]',
+      'locale: [en, de]',
       'negative:',
       '  phase: parse',
       '  type: SyntaxError',
@@ -38,6 +47,7 @@ test('Test262 frontmatter accepts the fixed subset and rejects unknown keys', ()
   );
   assert.deepEqual(metadata.features, ['Array']);
   assert.deepEqual(metadata.includes, ['compareArray.js']);
+  assert.deepEqual(metadata.locale, ['en', 'de']);
   assert.deepEqual(metadata.negative, { phase: 'parse', type: 'SyntaxError' });
   assert.throws(
     () => parseFrontmatter('/*---\nunknown: true\n---*/', 'bad.js'),

@@ -7,6 +7,13 @@ export type FeatureStatus =
 
 const SUPPORTED: Readonly<Record<string, string>> = {
   Array: 'Array.prototype row in docs/SUBSET.md',
+  Date: 'Date row in docs/SUBSET.md',
+  JSON: 'JSON.parse and JSON.stringify rows in docs/SUBSET.md',
+  Math: 'Math row in docs/SUBSET.md',
+  Object: 'Object row in docs/SUBSET.md',
+  Promise: 'Promise row in docs/SUBSET.md',
+  RegExp: 'RegExp row in docs/SUBSET.md',
+  String: 'String.prototype row in docs/SUBSET.md',
   'array-methods': 'Array.prototype row in docs/SUBSET.md',
   'arrow-functions': 'Function declarations and arrow functions row in docs/SUBSET.md',
   'async-functions': 'async function row in docs/SUBSET.md',

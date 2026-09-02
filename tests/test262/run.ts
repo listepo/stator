@@ -11,7 +11,7 @@ export interface Test262Frontmatter {
   readonly includes: readonly string[];
   readonly flags: readonly string[];
   readonly negative?: { readonly phase: string; readonly type: string };
-  readonly locale?: string;
+  readonly locale?: readonly string[];
 }
 
 export interface Test262Result {
@@ -26,8 +26,21 @@ const REPO = join(HERE, '..', '..');
 const DEFAULT_CORPUS = join(HERE, 'corpus');
 const CLI = join(REPO, 'src', 'cli', 'main.ts');
 const RESULTS = join(HERE, 'results.json');
-const ALLOWED_KEYS = new Set(['esid', 'features', 'includes', 'flags', 'negative', 'locale']);
+const PIN = join(HERE, 'pin.json');
+const EXECUTION_KEYS = new Set(['esid', 'features', 'includes', 'flags', 'negative', 'locale']);
+// Test262's standard header also carries descriptive information that does not affect how a test
+// is built. It must be recognized rather than mistaken for a corpus-format change, while a new
+// top-level key remains an error (plan.md §9 Task 6.1).
+const DESCRIPTIVE_KEYS = new Set(['author', 'description', 'es5id', 'es6id', 'info']);
 const ALLOWED_FLAGS = new Set(['raw', 'onlyStrict', 'noStrict', 'module', 'async']);
+const ASYNC_COMPLETE = 'Test262:AsyncTestComplete';
+const DIAGNOSTIC_ERROR_CLASSES: Readonly<Record<string, readonly string[]>> = {
+  STA0012: ['SyntaxError'],
+  STA2001: ['TypeError'],
+  STA2004: ['TypeError'],
+  STA2005: ['RangeError', 'SyntaxError', 'TypeError'],
+  STA2006: ['TypeError'],
+};
 
 function listValue(raw: string): string[] {
   const value = raw.trim();
@@ -48,13 +61,14 @@ function scalar(raw: string): string {
   return raw.trim().replace(/^['"]|['"]$/g, '');
 }
 
-/** Parse only Test262's deliberately small frontmatter vocabulary. Unknown keys are errors. */
+/** Parse the Test262 execution metadata; unknown top-level keys are corpus-format errors. */
 export function parseFrontmatter(source: string, file = '<source>'): Test262Frontmatter {
   const lines = source.split(/\r?\n/);
-  if (lines[0]?.trim() !== '/*---') {
+  const start = lines.findIndex((line) => line.trim() === '/*---');
+  if (start < 0) {
     throw new Error(`${file}: missing /*--- frontmatter`);
   }
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---*/');
+  const end = lines.findIndex((line, index) => index > start && line.trim() === '---*/');
   if (end < 0) {
     throw new Error(`${file}: unterminated frontmatter`);
   }
@@ -62,11 +76,17 @@ export function parseFrontmatter(source: string, file = '<source>'): Test262Fron
   const includes: string[] = [];
   const flags: string[] = [];
   let esid: string | undefined;
-  let locale: string | undefined;
+  let locale: string[] | undefined;
   let negative: { phase?: string; type?: string } | undefined;
   let pendingList: string[] | undefined;
-  for (let i = 1; i < end; i += 1) {
+  let blockScalarIndent: number | undefined;
+  for (let i = start + 1; i < end; i += 1) {
     const line = lines[i] ?? '';
+    const indent = line.match(/^\s*/)?.[0].length ?? 0;
+    if (blockScalarIndent !== undefined && (line.trim() === '' || indent >= blockScalarIndent)) {
+      continue;
+    }
+    blockScalarIndent = undefined;
     const listItem = /^\s*-\s*(.+)$/.exec(line);
     if (listItem !== null) {
       if (pendingList === undefined) throw new Error(`${file}: list item without a list key`);
@@ -78,19 +98,26 @@ export function parseFrontmatter(source: string, file = '<source>'): Test262Fron
       if (line.trim() === '') continue;
       throw new Error(`${file}: invalid frontmatter line ${line}`);
     }
-    const indent = match[1]?.length ?? 0;
+    const keyIndent = match[1]?.length ?? 0;
     const key = match[2] ?? '';
     const value = match[3] ?? '';
-    if (indent > 0) {
-      if (negative === undefined || (key !== 'phase' && key !== 'type') || indent < 2) {
+    // A handful of legacy Test262 files indent a descriptive top-level key by one space. The
+    // field has no execution meaning, so recognize that historical formatting without treating
+    // arbitrary nested metadata as a top-level key.
+    const legacyDescriptiveKey = keyIndent === 1 && DESCRIPTIVE_KEYS.has(key);
+    if (keyIndent > 0 && !legacyDescriptiveKey) {
+      if (negative === undefined || (key !== 'phase' && key !== 'type') || keyIndent < 2) {
         throw new Error(`${file}: unknown nested frontmatter key "${key}"`);
       }
       negative[key] = scalar(value);
       continue;
     }
     pendingList = undefined;
-    if (!ALLOWED_KEYS.has(key)) {
+    if (!EXECUTION_KEYS.has(key) && !DESCRIPTIVE_KEYS.has(key)) {
       throw new Error(`${file}: unknown frontmatter key "${key}"`);
+    }
+    if (/^[>|][+-]?$/.test(value.trim())) {
+      blockScalarIndent = 1;
     }
     if (key === 'negative') {
       negative = {};
@@ -101,7 +128,13 @@ export function parseFrontmatter(source: string, file = '<source>'): Test262Fron
     } else if (key === 'esid') {
       esid = scalar(value);
     } else if (key === 'locale') {
-      locale = scalar(value);
+      locale =
+        value.trim() === ''
+          ? []
+          : value.trim().startsWith('[')
+            ? listValue(value)
+            : [scalar(value)];
+      if (value.trim() === '') pendingList = locale;
     }
   }
   const parsedNegative =
@@ -136,6 +169,19 @@ function corpusRoot(): string {
   return root;
 }
 
+function pinnedCommit(): string {
+  const parsed: unknown = JSON.parse(readFileSync(PIN, 'utf8'));
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('commit' in parsed) ||
+    typeof parsed.commit !== 'string'
+  ) {
+    throw new Error(`${PIN}: expected a commit SHA`);
+  }
+  return parsed.commit;
+}
+
 function testFiles(root: string): string[] {
   const result: string[] = [];
   const visit = (directory: string): void => {
@@ -154,7 +200,13 @@ function diagnosticCode(stderr: string): string | undefined {
 }
 
 function errorClassMatches(stderr: string, type: string): boolean {
-  return new RegExp(`\\b${type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(stderr);
+  const code = diagnosticCode(stderr);
+  const mapped = code === undefined ? undefined : DIAGNOSTIC_ERROR_CLASSES[code];
+  if (mapped !== undefined) return mapped.includes(type);
+  return (
+    code === undefined &&
+    new RegExp(`\\b${type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(stderr)
+  );
 }
 
 function harnessSource(root: string, path: string, metadata: Test262Frontmatter): string {
@@ -241,6 +293,14 @@ function execute(path: string, root: string, metadata: Test262Frontmatter): Test
         features: metadata.features,
       };
     }
+    if (metadata.flags.includes('async') && !execution.stdout.includes(ASYNC_COMPLETE)) {
+      return {
+        path: rel,
+        verdict: 'failed',
+        reason: `async test did not call $DONE (missing ${ASYNC_COMPLETE})`,
+        features: metadata.features,
+      };
+    }
     return {
       path: rel,
       verdict: execution.status === 0 && execution.error === undefined ? 'passed' : 'failed',
@@ -296,7 +356,7 @@ function main(): void {
     process.stdout.write('test262: corpus missing — fetch with `pnpm run test262:fetch`\n');
     writeFileSync(
       RESULTS,
-      `${JSON.stringify({ corpus: null, passed: 0, failed: 0, skipped: 0, results: [] }, null, 2)}\n`,
+      `${JSON.stringify({ corpus: null, commit: pinnedCommit(), passed: 0, failed: 0, skipped: 0, results: [] }, null, 2)}\n`,
       'utf8',
     );
     process.stdout.write(
@@ -310,6 +370,15 @@ function main(): void {
       const metadata = parseFrontmatter(readFileSync(path, 'utf8'), path);
       results.push(execute(path, root, metadata));
     } catch (error) {
+      if (error instanceof Error && error.message.endsWith('missing /*--- frontmatter')) {
+        results.push({
+          path: relative(root, path),
+          verdict: 'skipped',
+          reason: 'missing frontmatter',
+          features: [],
+        });
+        continue;
+      }
       results.push({
         path: relative(root, path),
         verdict: 'failed',
@@ -323,14 +392,16 @@ function main(): void {
   const skipped = results.filter((result) => result.verdict === 'skipped').length;
   writeFileSync(
     RESULTS,
-    `${JSON.stringify({ corpus: root, passed, failed, skipped, results }, null, 2)}\n`,
+    `${JSON.stringify({ corpus: root, commit: pinnedCommit(), passed, failed, skipped, results }, null, 2)}\n`,
     'utf8',
   );
-  const featureCounts = new Map<string, number>();
-  for (const result of results.filter((item) => item.verdict === 'skipped'))
-    for (const feature of result.features)
-      featureCounts.set(feature, (featureCounts.get(feature) ?? 0) + 1);
-  const details = [...featureCounts.entries()]
+  const skipCounts = new Map<string, number>();
+  for (const result of results.filter((item) => item.verdict === 'skipped')) {
+    const feature = /\(([^()]+)\)$/.exec(result.reason ?? '')?.[1];
+    const category = feature ?? result.reason ?? 'unattributed skip';
+    skipCounts.set(category, (skipCounts.get(category) ?? 0) + 1);
+  }
+  const details = [...skipCounts.entries()]
     .sort()
     .map(([feature, count]) => `${feature}: ${String(count)}`)
     .join(', ');
@@ -340,19 +411,31 @@ function main(): void {
   );
   const known = expectedFailures();
   const failures = results.filter((result) => result.verdict === 'failed');
-  for (const result of failures) {
-    if (!known.has(result.path)) process.stderr.write(`FAIL ${result.path}: unexplained failure\n`);
-  }
+  const unexplained = failures.filter((result) => !known.has(result.path));
+  for (const result of unexplained)
+    process.stderr.write(`FAIL ${result.path}: unexplained failure\n`);
+  const staleExpected = [...known.keys()].filter(
+    (path) => results.find((result) => result.path === path)?.verdict !== 'failed',
+  );
   for (const path of known.keys()) {
     const result = results.find((item) => item.path === path);
     if (result?.verdict === 'passed')
       process.stderr.write(`FAIL ${path}: unexpected PASS; remove it from expected-fail.txt\n`);
   }
+  for (const path of staleExpected) {
+    const result = results.find((item) => item.path === path);
+    if (result === undefined)
+      process.stderr.write(`FAIL ${path}: expected failure is absent from the pinned corpus\n`);
+    else if (result.verdict !== 'passed')
+      process.stderr.write(
+        `FAIL ${path}: expected failure is now ${result.verdict}; update expected-fail.txt\n`,
+      );
+  }
   const ratchetFailures = ratchetCheck(passed, failed);
   for (const failure of ratchetFailures) process.stderr.write(`FAIL ${failure}\n`);
   if (
-    failed > 0 ||
-    failures.some((result) => !known.has(result.path)) ||
+    unexplained.length > 0 ||
+    staleExpected.length > 0 ||
     ratchetFailures.length > 0 ||
     [...known.keys()].some(
       (path) => results.find((item) => item.path === path)?.verdict === 'passed',

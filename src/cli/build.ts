@@ -184,7 +184,15 @@ function linkExecutable(cPath: string, out: string): void {
     );
   }
 
-  const cc = process.env['CC'] ?? 'clang';
+  // conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
+  // initialization on the current macOS host. Match justfile's sanitizer fallback so the
+  // generated golden binaries use the same compiler as the sanitized runtime archive. An
+  // explicit compiler-path CC remains authoritative for callers testing another toolchain.
+  const cc =
+    process.env['CC'] ??
+    (SANITIZED && process.platform === 'darwin' && existsSync('/usr/bin/clang')
+      ? '/usr/bin/clang'
+      : 'clang');
   // Tree-shaking builtins (plan.md Task 3.12): builtins live in libjsrt.a, and the archive links
   // at .o granularity -- one referenced symbol drags in every builtin its object file holds. The
   // linker's dead-stripping restores function granularity: a builtin the program never references

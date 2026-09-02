@@ -11,5 +11,6 @@ runtime/build-intl/
 reasonix.toml
 tests/differential/failures/
 tests/bench/results/
+tests/test262/corpus/
 tests/test262/results.json
 tests/test262/.tmp/

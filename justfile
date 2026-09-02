@@ -53,6 +53,14 @@ _runtime flavor:
     CC='{{cc}}'
     AR='{{ar}}'
     FLAVOR='{{flavor}}'
+    # The conda-clang ASan runtime deadlocks in dyld's early malloc initialization on the
+    # Darwin 25/26 host used by the pinned mise toolchain. Apple clang's sanitizer runtime is
+    # ABI-compatible with the archive and starts normally. Keep an explicit compiler path
+    # override intact; only the default command name `clang` gets this host-specific fallback.
+    if [[ "${FLAVOR}" == 'asan' && "$(uname -s)" == 'Darwin' && "${CC}" == 'clang' && -x /usr/bin/clang ]]; then
+      CC='/usr/bin/clang'
+    fi
+    CC_ID="$(${CC} --version | head -1)"
     VENDOR_POSIX='{{vendor_posix}}'
     VENDOR_INC='-Ivendor/quickjs-ng -Ivendor/fdlibm'
     # The runtime sources use POSIX clock/time APIs too; glibc hides them under strict C11
@@ -146,9 +154,10 @@ _runtime flavor:
     # A flag change (the LTO probe flipping, Boehm appearing) must rebuild every object: the
     # timestamp walk cannot see it, and a mixed archive links fine while silently lacking what the
     # flag was for.
-    if [[ "$(cat "${DIR}/cflags.txt" 2>/dev/null || true)" != "${CFLAGS} ${VFLAGS}" ]]; then
+    CFLAGS_KEY="${CC_ID}"$'\n'"${CFLAGS} ${VFLAGS}"
+    if [[ "$(cat "${DIR}/cflags.txt" 2>/dev/null || true)" != "${CFLAGS_KEY}" ]]; then
       rm -f "${DIR}"/*.o "${DIR}"/*.d
-      printf '%s\n' "${CFLAGS} ${VFLAGS}" > "${DIR}/cflags.txt"
+      printf '%b\n' "${CFLAGS_KEY}" > "${DIR}/cflags.txt"
     fi
 
     stale() {
@@ -205,6 +214,9 @@ _runtime-test flavor:
     CC='{{cc}}'
     NODE='{{node}}'
     FLAVOR='{{flavor}}'
+    if [[ "${FLAVOR}" == 'asan' && "$(uname -s)" == 'Darwin' && "${CC}" == 'clang' && -x /usr/bin/clang ]]; then
+      CC='/usr/bin/clang'
+    fi
     CORPORA=(print_numbers print_arrays print_objects print_maps print_shapes print_typeof print_regexp print_promise print_dates)
 
     VENDOR_POSIX='{{vendor_posix}}'

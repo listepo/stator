@@ -4286,3 +4286,78 @@ semantics change to the runtime.
 The owner policy for weekly results is **no CI write-back to `main`**: CI uploads the immutable
 JSON artifact and the generated page; a deliberate owner-side commit is required for a result to
 enter history. This avoids a bot commit racing feature work while preserving every measurement.
+
+## 166. Runtime object stamps include the compiler identity (2026-09-02)
+
+The incremental runtime build previously keyed `cflags.txt` only by flags. Switching the pinned
+toolchain from Apple clang 21.0 to conda-clang 21.1.8 left stale ASan objects in `runtime/build-asan`;
+the next link failed with `___asan_version_mismatch_check_apple_clang_2100`. The just recipe now
+stamps the compiler's first version line along with both CFLAGS strings, forcing all objects to
+rebuild when the compiler changes. This is required for sanitizer archives because the compiler
+runtime ABI is part of the object contract even when source and flags are unchanged.
+
+## 167. Darwin ASan uses Apple clang (2026-09-02)
+
+The pinned conda-clang 21.1.8 sanitizer runtime never reaches `main` on this Darwin 25/26 host:
+even a one-line ASan program hangs in `libclang_rt.asan_osx_dynamic.dylib` while initializing
+shadow memory, and `sample` shows the sanitizer's static spin mutex waiting during dyld malloc
+initialization. The same program and Stator's `print_numbers` corpus complete with Apple clang
+21.0.0 from `/usr/bin/clang`; release builds remain on the pinned conda compiler. The ASan just
+recipes and generated-C build therefore select Apple clang only when Darwin's compiler is the
+default command name `clang`, while preserving an explicit compiler-path `CC` override. This is a host toolchain workaround,
+not a runtime or semantics change.
+
+## 168. Test262 async adapter must use the landed JS subset (2026-09-02)
+
+The initial `tests/test262/harness/sta.js` declared `$DONE` as a named function expression. Stator
+rejects named function expressions with STA1214, so every async Test262 test failed at compilation
+before reaching its assertions. The adapter now uses an anonymous function, prints
+`Test262:AsyncTestComplete` on successful `$DONE()`, and the runner requires that marker for
+`flags: [async]`. A temporary pinned-style corpus test passes end to end.
+
+## 169. JS-mode dynamic calls must reach the runtime (2026-09-02)
+
+Test262 runtime-negative coverage exposed TypeScript diagnostic 2349 (`This expression is not
+callable`) as another checker refusal that violates JS mode's untyped-code contract. It is now
+suppressed alongside the dynamic property diagnostics, allowing an unknown callee to reach the HIR
+and runtime's STA2006 TypeError path. A statically inferred number remains verifier-rejected; the
+valid dynamic case is an untyped parameter, which is the intended boundary.
+
+## 170. Test262 negative and expected-failure verdicts are explicit (2026-09-02)
+
+Negative tests cannot rely only on error-name text: Stator compile diagnostics carry an STA code,
+while runtime diagnostics may name a JavaScript class in their message. The runner now has an
+explicit STA-to-class table (including STA0012 parse SyntaxError and the runtime TypeError/RangeError
+cases), refusing to infer a class from an unmapped STA diagnostic. Known expected failures no longer
+fail the job by themselves, but a pass, skip, or missing path makes the expectation stale and fails
+the run.
+
+## 171. Test262 adapter follows repository lint rules (2026-09-02)
+
+The async `$DONE` adapter's anonymous function was semantically correct but Biome's
+`useArrowFunction` rule made the Phase 6 lint Check fail. It now uses an arrow function, which is
+also accepted by the JS-mode subset and preserves the completion-marker behavior.
+
+## 172. Test262 standard frontmatter precedes execution metadata (2026-09-02)
+
+The pinned `771005236e88a909635104e03ba12559688c0172` corpus puts every `/*---` block after a
+copyright header, not at byte zero, and its 53,580 frontmatter-bearing tests standardly use
+`description`, `info`, `author`, `es5id`, and/or `es6id` as well as execution metadata. The
+original Step 6.1 wording, which allowed only six keys and required the block on line one, would
+therefore reject every test before feature mapping. Step 2 now distinguishes standard descriptive
+metadata (recognized but deliberately not interpreted) from execution metadata, still hard-errors
+on an unknown *top-level* key, and explicitly reports the 294 legacy files with no frontmatter
+rather than silently excluding them. This is a corpus-format compatibility correction, not a
+relaxation of the corpus-bump tripwire.
+
+## 173. Test262 corpus must be ignored by every local tool (2026-09-02)
+
+The Step 6.1 text already required `tests/test262/corpus/` to be git-ignored, but `.gitignore`
+omitted it. Fetching the pinned corpus therefore made 53,874 third-party files candidates for
+Biome; `pnpm run format` then reached dynamic-import syntax that panics the installed Biome parser.
+The path is now ignored. This makes the fetch destination the promised local cache, keeps format
+and lint scoped to repository-owned files, and prevents accidental commits of the 50k-file corpus.
+Biome has an explicit include allowlist, so it needs the matching `!tests/test262/corpus` exclusion
+as well; `.gitignore` alone does not override that list. The runner's ignored `results.json` and
+temporary directory need the equivalent exclusions too: a result is generated on every conformance
+run and formatting it would make `pnpm run ci` fail after a successful offline/mini-corpus run.
