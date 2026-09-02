@@ -19,6 +19,7 @@ concurrency:
 #   lint        -> static
 #   dupes       -> static
 #   test        -> frontend
+#   test:coverage -> frontend (linux/x64; lcov artifact)
 #   runtime     -> runtime
 #   test:runtime-> runtime
 #   test:subset -> frontend
@@ -83,11 +84,25 @@ jobs:
       # A handful of unit tests compile and execute a native binary, so they need the archive the
       # Unix Makefile builds. Windows has no such toolchain, so those tests skip THEMSELVES there
       # (`NATIVE_ONLY` in tests/unit/helpers.ts) and the rest of the file still runs -- which is
-      # why `pnpm run test` below is unconditional and only this build step is gated.
+      # why unit tests below are unconditional and only this build step is gated.
+      # linux/x64 is the coverage owner: it has the runtime archive, so native-only tests
+      # actually run, and one platform is enough for the lcov artifact.
       - name: Build runtime archive
         if: runner.os != 'Windows'
         run: pnpm run runtime
-      - run: pnpm run test
+      - name: Unit tests with coverage
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: pnpm run test:coverage
+      - name: Upload coverage
+        if: ${{ always() && matrix.platform == 'linux' && matrix.arch == 'x64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          if-no-files-found: ignore
+      - name: Unit tests
+        if: ${{ !(matrix.platform == 'linux' && matrix.arch == 'x64') }}
+        run: pnpm run test
 
   # The C runtime and everything that links it. Unix only: the runtime's make/clang toolchain is
   # not ported to Windows, and pretending otherwise with a red job helps nobody.
@@ -116,7 +131,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libgc-dev
+            sudo apt-get update && sudo apt-get install -y libgc-dev clang llvm
           else
             brew install bdw-gc
           fi
@@ -157,7 +172,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libgc-dev
+            sudo apt-get update && sudo apt-get install -y libgc-dev clang llvm
           else
             brew install bdw-gc
           fi
@@ -190,7 +205,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y libicu-dev libgc-dev
+            sudo apt-get update && sudo apt-get install -y libicu-dev libgc-dev clang llvm
           else
             brew install icu4c bdw-gc
             echo "PKG_CONFIG_PATH=$(brew --prefix icu4c)/lib/pkgconfig" >> "$GITHUB_ENV"

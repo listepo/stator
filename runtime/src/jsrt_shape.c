@@ -111,22 +111,43 @@ const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t cou
 
 static JSRTDynObject *as_dynobj(jsrt_value v, const char *op) {
   (void)op;
-  /* A fixed-shape object CAN reach a dynamic site today, through structural aliasing the checker
-   * blesses: `const a = { x: 1 }; const b: { x?: number } = a; b.x`. The value is a JSRTObject
-   * with a slot layout, the site expects the shape table, and answering the read anyway would be
-   * silently wrong for exactly the values where it matters — so it is a loud runtime not-yet
-   * until Phase 5 teaches these entry points to read through a JSRTClass descriptor. */
-  if (jsrt_is(v, JSRT_TAG_OBJECT) && !jsrt_is_dynobj(v)) {
-    jsrt_panic(
-        "STA2004: a statically-shaped object reached a dynamic property site; planned for Phase 5");
-  }
-  /* Anything else — a primitive, an array, a closure, nullish — the compiler cannot emit a
-   * dynamic site for at all, so reaching here with one is a compiler bug, not a program state. */
-  if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
-    jsrt_panic("STA4058: dynamic property access on a non-object value");
-  }
   return (JSRTDynObject *)jsrt_ptr(v);
 }
+
+static bool has_prop_table(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_ARRAY) || jsrt_is_dynobj(v);
+}
+
+static int32_t fixed_slot(jsrt_value obj, const char *key) {
+  JSRTObject *o = jsrt_as_object(obj);
+  const JSRTClass *cls = o->cls;
+  if (cls->fields == NULL) {
+    return -1;
+  }
+  for (uint32_t i = 0; i < cls->field_count; i++) {
+    const char *name = cls->fields[i];
+    if (name != NULL && (name == key || strcmp(name, key) == 0)) {
+      return (int32_t)i;
+    }
+  }
+  return -1;
+}
+
+static jsrt_value fixed_get(jsrt_value obj, const char *key) {
+  const int32_t slot = fixed_slot(obj, key);
+  return slot < 0 ? JSRT_UNDEFINED : jsrt_as_object(obj)->fields[slot];
+}
+
+static bool fixed_set(jsrt_value obj, const char *key, jsrt_value value) {
+  const int32_t slot = fixed_slot(obj, key);
+  if (slot < 0) {
+    return false;
+  }
+  jsrt_as_object(obj)->fields[slot] = value;
+  return true;
+}
+
+static bool fixed_has(jsrt_value obj, const char *key) { return fixed_slot(obj, key) >= 0; }
 
 /* The property table, as the two receivers that own one both expose it: a dynamic object keeps it
  * inline, an array keeps it beside its elements. Everything below walks this view, so a match
@@ -222,6 +243,21 @@ static const JSRTShape *shape_find(const JSRTShape *shape, const char *key) {
 }
 
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
+  if (jsrt_is_nullish(obj)) {
+    jsrt_panic("TypeError: Cannot read properties of null or undefined");
+  }
+  if (jsrt_is(obj, JSRT_TAG_ARRAY) && strcmp(key, "length") == 0) {
+    return jsrt_number((double)jsrt_as_array(obj)->length);
+  }
+  if (!has_prop_table(obj)) {
+    if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
+      return fixed_get(obj, key);
+    }
+    if (jsrt_is(obj, JSRT_TAG_STRING) && strcmp(key, "length") == 0) {
+      return jsrt_number((double)jsrt_string_length(obj));
+    }
+    return JSRT_UNDEFINED;
+  }
   const PropTable o = as_prop_table(obj, "get");
   if (ic != NULL && ic->shape == *o.shape) {
     return (*o.slots)[ic->offset];
@@ -238,11 +274,33 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
 }
 
 bool jsrt_has_prop(jsrt_value obj, const char *key) {
+  if (jsrt_is_nullish(obj)) {
+    return false;
+  }
+  if (!has_prop_table(obj)) {
+    if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
+      return fixed_has(obj, key);
+    }
+    return jsrt_is(obj, JSRT_TAG_STRING) && strcmp(key, "length") == 0;
+  }
   const PropTable o = as_prop_table(obj, "has");
   return shape_find(*o.shape, key) != NULL;
 }
 
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic) {
+  if (jsrt_is_nullish(obj)) {
+    jsrt_panic("TypeError: Cannot set properties of null or undefined");
+  }
+  if (!has_prop_table(obj)) {
+    if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
+      if (fixed_set(obj, key, value)) {
+        return;
+      }
+      jsrt_panic(
+          "STA2004: a statically-shaped object cannot grow a new property; planned for Phase 8");
+    }
+    jsrt_panic("TypeError: Cannot set properties of a primitive");
+  }
   const PropTable o = as_prop_table(obj, "set");
   if (ic != NULL && ic->shape == (*o.shape)) {
     (*o.slots)[ic->offset] = value;
@@ -299,4 +357,19 @@ void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic
    * transition cache would only ever hit across objects — worth building when Phase 5 measures
    * construction-heavy dynamic code, not before. */
   (*o.shape) = next;
+}
+
+jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic) {
+  if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
+    return jsrt_array_get(obj, index);
+  }
+  return jsrt_get_prop(obj, jsrt_shape_key(jsrt_to_string(index)), ic);
+}
+
+void jsrt_dyn_index_set(jsrt_value obj, jsrt_value index, jsrt_value value, JSRTIC *ic) {
+  if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
+    jsrt_array_set(obj, index, value);
+    return;
+  }
+  jsrt_set_prop(obj, jsrt_shape_key(jsrt_to_string(index)), value, ic);
 }

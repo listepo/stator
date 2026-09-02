@@ -860,3 +860,79 @@ Tests: `tests/unit/gate.test.ts` (same-source any, as-any vs STA1003, eval/Funct
 STA1002 message), `tests/unit/cli.test.ts` (real `.js` file through `program.ts`, not the
 in-memory host), subset fixtures `subset_eval_call_*`, `subset_new_function_*` (expected-fail
 removed), `subset_js_file_ts.js`, `subset_as_any_*`.
+
+### Step 3 — Lower `var`
+
+**Step 3 landed (2026-09-02).** `var` in js mode is function-scoped, hoisted, and initialized
+`undefined`. There is no HIR `var` kind: each binding becomes a function-scoped (or module-scoped)
+`let` initialized `undefined` at the start of its unit, and the original site is an assignment
+when it has an initializer. A second `var` of the same name is a second write to that slot. A
+`var` that repeats a parameter or a function declaration shares that slot — the spec instantiates
+the function/parameter first and does not reinitialize the var to `undefined`.
+
+Capturing a `var` whose spelling sits inside a loop is accepted: the binding is function-scoped,
+so every closure sees one slot, which env capture already implements. Capturing a loop `let`/`const`
+stays not-yet (per-iteration bindings). ts mode is unchanged (`STA1104` never).
+
+checkJs's "used before assigned" still rejects `console.log(x); var x = 1` as `STA0012`. That
+spelling is legal JS and the lowering desugars it (pinned by `tests/unit/var.test.ts`); the
+golden proves the observable fact with the equivalent `var x; console.log(x); x = 1`.
+
+Tests: `tests/unit/var.test.ts`, `tests/unit/gate.test.ts` (js accept / ts STA1104 / loop-var
+capture vs loop-let capture), `tests/golden/js/var_hoist.js` (read-before-write, block escape,
+redeclaration, parameter shadow, loop-shared closures), `tests/subset/subset_var_declarations_js.js`
+(expected-fail removed).
+
+### Step 4 — Dynamic lowering completion
+
+**Step 4 landed (2026-09-02).** Unknown (and empty `{}`) property get/set/index/call lower onto
+Task 4.1's shape table. Empty anonymous objects are dynamic so they can grow; a required-field
+literal stays a fixed layout. `jsrt_get_prop` reads existing fields of a fixed object through
+its class descriptor; growing a new key is still `STA2004` (Phase 8). Computed index is
+`jsrt_dyn_index_get`/`set`. Calling a non-function is `STA2006` at `file:line`. Arity padding
+is `jsrt_arg`. Ordinary functions do not take `this` as argv[0]. `==`/`!=` was already
+`jsrt_loose_equals` (`tests/golden/js/to-primitive.js`). `STA4058` retired.
+
+Tests: `tests/unit/dyn.test.ts`, `tests/unit/gate.test.ts` (Unknown get/set/index/call, empty
+`{}` grow), `tests/unit/codegen.test.ts` (`jsrt_call_at`, `jsrt_dyn_index_*`),
+`tests/unit/cli.test.ts` (aliased read prints; grow still STA2004; STA2006 locates the site),
+`tests/golden/js/dyn_unknown.js`, `tests/subset/subset_unknown_property_js.js`. plan-notes 143.
+
+### Step 5 — Mixed-graph boundary checks
+
+**Step 5 landed (2026-09-02).** An Unknown value reaching a checkable annotation (`number` /
+`string` / `boolean`) is wrapped in `BoundaryCheck` at the edge: a declaration initializer, an
+assignment to an annotated binding, a call argument against a typed parameter, and a return against
+a typed return. The key is the EDGE, not provenance (plan-notes 140). A lying JSDoc is still a
+compile error (`STA0012`); the runtime trap is an untyped `.js` `wrap(x){return x}` imported into
+`.ts` and assigned to `const factor: number` — `STA2001`, empty stdout. The happy path is
+`tests/golden/js/mixed_graph/` (js-mode directory entering at `main.ts`).
+
+Tests: `tests/unit/narrowing.test.ts` (declaration / assignment / call / return / JSDoc),
+`tests/unit/cli.test.ts` (STA2001 mixed-graph trap), `tests/golden/js/mixed_graph/`. plan-notes 144.
+
+### Step 6 — JSDoc freebie (file verdict static)
+
+**Step 6 landed (2026-09-02).** A `.js` module whose every function is fully JSDoc-annotated
+reports file verdict `static` with provenance `typed`. The per-function half was already pinned
+by step 1's `explain --json` matrix; this step pins the FILE claim and a vs-Node golden on the
+static path. No lowering change: `hasUnknown` was already the rollup.
+
+Tests: `tests/unit/cli.test.ts` (`a fully JSDoc-annotated .js module has file verdict static`),
+`tests/golden/js/jsdoc_static.js`.
+
+### Step 7 — js-column honesty + untyped capstone
+
+**Step 7 landed (2026-09-02).** Twelve js-column subset fixtures whose constructs already compiled
+dropped `@expected-fail` (never in bulk for not-yet work): typed-literal arithmetic/bitwise/
+comparison/unary/template/switch/let-const/`==`/number/string are `static`; untyped `if` and `??`
+are `dynamic`. Remaining expected-fail still name their owner (rest, destructure, iterators,
+`import()`, bigint, …). Capstone `tests/golden/js/capstone.js` is an untyped in-memory catalog
+(~200 lines) matching Node, covering var, growing objects, computed index, Unknown call, and `==`.
+
+`var xs = []` was STA4004: the hoist splits a binding from its initializer and the two `unknown[]`
+differed only in `fromImplicitAny`. `hTypeAssignable` now recurses into arrays.
+
+Tests: the twelve subset flips, `tests/golden/js/capstone.js`, `tests/unit/types.test.ts`.
+plan-notes 146.
+

@@ -3119,6 +3119,14 @@ done, and plan-notes gained two entries numbered 126 and two numbered 127.
 take max+1 — and when two sessions may be active, expect the tail to move between reading and
 committing. This note is itself numbered by that rule.
 
+**Amended 2026-09-01, after the third occurrence** (both 133s — see 137). "Renumber the later
+append" was a proxy for the thing that actually matters, and it is the wrong proxy when the later
+entry is the one everything cites: **renumber whichever duplicate has FEWER inbound references**,
+then repoint those and leave a banner on the moved entry. In that collision the later entry (Date
+slice B) had eight references across four files including a C source comment, and the earlier had
+one — so the later one kept 133. Cascading renumbers stay forbidden either way: 134/135/136 were
+already cited by commit messages, which cannot be edited.
+
 ---
 
 ## 131. Steps for every remaining phase, written against the tree rather than the task lines (2026-09-01)
@@ -3270,7 +3278,16 @@ delivered or reassigned.
 
 ---
 
-## 133. The optimization ladder gets details, and one rung dies of a measurement (2026-09-01)
+## 137. The optimization ladder gets details, and one rung dies of a measurement (2026-09-01)
+
+> Renumbered from 133 (2026-09-01): third occurrence of the note-115 defect — two entries the same
+> day both took 133 (this one and "Date slice B"). **This time the LATER entry kept the number**,
+> departing from note 130's "renumber the later append" wording, because the rule's purpose is to
+> minimize repointing and the risk of a missed reference: Date slice B had eight inbound references
+> across `plan.md`, `done.md`, `docs/DIAGNOSTICS.md`, `docs/SUBSET.md` and `runtime/src/jsrt_date.c`;
+> this entry had one (`plan.md` §12, repointed with this change). Left in file position rather than
+> moved — entries 110–114 are already out of sequence, so position is not the index. See 130's
+> standing fix, amended.
 
 `plan.md` §12 was eight table rows and four one-line practices — the only section of the plan with no
 detail under it, written from research figures rather than from this tree. Details added per rung:
@@ -3570,6 +3587,40 @@ the newer entry, never retroactively renumber a note others may cite. Both 133s 
 and both are already cited, so neither is safe to move by the rule that produced the rule; recorded
 here so the next collision is the fourth, not a surprise.
 
+## 138. LLVM clang is a mise pin, not a system package (2026-09-01)
+
+**Context.** `mise.toml` already pinned Node and pnpm. clang was "whatever Xcode CLT / apt
+shipped", which is what `docs/TOOLCHAIN.md` recorded as an unversioned `C compiler` row.
+
+**Decision.** Pin LLVM **21.1.8** in `mise.toml` as `conda:llvm` + `conda:clang`, Unix-only.
+Conda is the prebuilt backend: the asdf `mise-llvm` plugin downloads the llvm-project tarball
+and compiles it with ninja, which is not a toolchain pin. Windows is out because the runtime
+Makefile is not a Windows toolchain (plan-notes 122) and those backends are bash/conda, not a
+MSVC story. `make`/`ar`/`pkg-config`/`diff` stay system packages; they are not the compiler.
+
+`STA0008` now names `mise install` first. CI still uses the runner's clang (plus `apt install
+clang llvm` on Linux next to libgc-dev) — a version pin on GitHub-hosted images is a different
+change from making `mise install` the local bootstrap.
+
+**plan.md edited:** no. The C11/clang requirement did not change.
+
+## 139. Architecture diagrams switch from Mermaid to D2 (2026-09-01)
+
+**Request.** Owner asked for D2 as the modern diagram of how the compiler works, and for
+`AGENTS.md` to tell agents about it.
+
+**What landed.** `docs/architecture/*.d2` is the source (pipeline, build sequence, packages,
+value-flow — the same four views plan-notes 126 put in Mermaid). SVGs next to them are the
+GitHub-visible render (`d2` v0.8.2). `docs/ARCHITECTURE.md` is the gallery. Mermaid is gone
+from that file: GitHub does not render D2 natively, so the committed SVG is the display path.
+`d2` is a docs tool (`brew install d2`), not a compile pin and not in CI.
+
+`plan.md` §2 now names D2 instead of Mermaid; repo layout lists `architecture/*.d2`.
+`AGENTS.md` gained an "Architecture diagrams (for agents)" section so agents read the `.d2`
+files rather than inventing a fifth view.
+
+Same subordination as 126: diagrams visualize §2, they never override it.
+
 ## 140. The `inferred` provenance grade was already landed, and the plan asked for it in the wrong words (2026-09-01)
 
 **Context.** Phase 5 step 1's only remaining item, per its own text: *"the `inferred` middle grade
@@ -3698,3 +3749,178 @@ mode table.
 
 **plan.md edited:** yes, §8 step 2 struck through; Phase 8 item 5 no longer claims `STA1206`
 has never been emitted.
+
+
+## 142. `var` desugars to a hoisted `let`; checkJs still rejects the classic use-before-decl spelling (2026-09-02)
+
+Phase 5 step 3. js mode now accepts `var`. The HIR did not grow a third `declKind`.
+
+**Desugaring.** Each `var` name is collected from the function (or module), skipping nested
+functions. Names not already bound (a parameter or a function declaration) become a `let`
+initialized `undefined` at the top of that unit. The original site is an assignment if it has
+an initializer, and a no-op otherwise. A second `var` of the same name is a second write to
+the same slot — that is the spec's Instantiation, not a second Declaration node.
+
+**Why no `declKind: 'var'`.** The runtime difference from `let` is *where the slot lives and
+when it is initialized*, not how it is stored. Putting that in the lowering keeps every pass
+that already understands `let`/`assignment` honest, and stops a later pass inventing a second
+TDZ.
+
+**Loop capture.** `gateIdentifier` used to refuse any capture whose declaration AST sat inside
+a loop. For `var` that is the wrong scope: the binding is function-scoped, so capturing it is
+the ordinary shared-binding case env capture already implements. The refusal now applies only
+to `let`/`const` (per-iteration bindings, still Phase 5 step 12 / the capture-in-loop row).
+
+**checkJs vs the classic spelling.** `console.log(x); var x = 1` is legal JS and the lowering
+desugars it (pinned by `tests/unit/var.test.ts`, which does not run the tsc diagnostic
+surface). `program.ts` still forwards every checkJs diagnostic as `STA0012`, and checkJs under
+`strict` reports "Variable 'x' is used before being assigned" for that spelling. Dropping that
+one tsc code would be a policy change this step does not own. The golden therefore proves the
+runtime fact with the equivalent form checkJs accepts: `var x; console.log(x); x = 1`. Same
+slot, same `undefined`, no TDZ.
+
+**Parameter shadow.** `function f(x) { var x = 2 }` is one slot. checkJs also rejects
+`var x = 2` against an untyped parameter (`any` vs `number`); the golden uses `var x; x = 2`
+so the subsequent declaration has no initializer type to disagree with.
+
+**Biome.** `docs/architecture/` (generated D2 SVGs) is excluded from `biome.json`. The a11y
+`noSvgWithoutTitle` rule fires on every generated rectangle; those files are diagrams, not UI.
+
+**plan.md edited:** yes, §8 step 3 struck through.
+
+
+## 143. Empty `{}` is dynamic; STA2004 shrinks to grow-only; STA4058 retires (2026-09-02)
+
+Phase 5 step 4. The runtime half (shape table + ICs) existed; the lowering did not target
+Unknown receivers, and the shape-table entry points panicked on anything that was not a
+`JSRTDynObject`.
+
+**Empty `{}`.** `isDynamicShape` now includes zero-property anonymous types, and
+`shapeTypeToHType` returns null for them, so they are Unknown in HIR rather than a layout
+with no slots. An all-required anonymous shape *with at least one field* stays fixed —
+making those dynamic would deoptimize every literal. Growing therefore works for
+`let o = {}; o.x = 1` and not for `let o = { x: 1 }; o.y = 2` (STA2004).
+
+**STA2004.** The aliased-read honesty clause is lifted: `jsrt_get_prop` walks the class
+descriptor for a fixed object, so `const a = { x: 1 }; const b: { x?: number } = a; b.x`
+prints `1`. Growing a key the descriptor does not list still cannot invent a slot, and
+that is the remaining STA2004 (Phase 8, dictionary mode).
+
+**STA4058 retired.** Nullish → TypeError; string `"length"` → length; other primitives →
+`undefined` on get / TypeError on set; arrays share the property table they already had
+for match-array fields.
+
+**Call convention.** `jsrt_call_at` names `file:line` (`STA2006`). Column is not on `Span`
+(the BoundaryCheck `where` rationale). `this` is not argv[0] for ordinary functions: the
+gate still forbids `this` outside class members, so prepending the receiver would break
+every non-method. Arity padding was already `jsrt_arg`.
+
+**js-only 2339/2551/2353.** checkJs reports "property does not exist" for untyped `o.x = 1`.
+Those three codes are skipped in js mode only, so the shape table can answer at run time.
+ts mode still surfaces them as `STA0012`.
+
+**`==`.** Already `jsrt_loose_equals` with ToPrimitive (NUMERIC.md §6.3.1);
+`tests/golden/js/to-primitive.js` pins the table. Not re-derived here.
+
+**plan.md edited:** yes, §8 step 4 struck through.
+
+**JSON.parse `data.x`.** `subset_json_parse_boundary_js.js` flipped: the parse result is
+Unknown, so `data.x` is now a shape-table read rather than a not-yet. The ts counterpart
+stays expected-fail (`any` return is STA1001).
+
+**Empty `{}` as an argument.** Contextual type `any` is not a shape, so the gate used to
+refuse `f({})` as "shape is not a layout" after empty objects stopped being a zero-field
+layout. `objectLiteralIsDynamic` falls back to the literal's own type.
+
+**Computed-index ICs.** An inline cache is "same shape implies same offset" for a key *fixed at
+the site* (`o.x`). `o[k]` reuses one site for many keys, so a shape-only hit would return the
+wrong slot (the golden's `get(o, 'missing')` answered `1` after `get(o, 'x')`). Dyn-index
+passes `NULL` for the cache.
+
+**Match arrays.** `m.length` is a match-read, and match receivers are Unknown, so the new
+dyn-field arm stole it and `jsrt_get_prop` walked the property table, missing `length`. The
+match-read arm is restored (skip match receivers in dyn-field), and `jsrt_get_prop` answers
+array `"length"` for Unknown array receivers.
+
+## 145. Code coverage uses Node's test runner, not c8 (2026-09-02)
+
+`pnpm run test:coverage` is `--experimental-test-coverage` scoped to `src/**`, with
+`--test-coverage-include-all` so a file the suite never loads counts as 0% rather than
+vanishing from the report. The lcov output is `coverage/lcov.info`. No new dependency —
+the budget is still `typescript` only; Node 26 already prints the table and emits lcov.
+
+CI: the linux/x64 frontend job is the one that builds the runtime and therefore exercises
+the native-only unit tests, so it owns the report. Other frontend platforms keep
+`pnpm run test`. `pnpm run ci` uses the coverage run in place of the plain one.
+
+C runtime coverage (llvm-cov) is a different toolchain and is not this change. Thresholds
+are not gated: the first measured numbers (unit tests over `src/`) were about 91% lines /
+87% branches / 95% functions, and a floor is a later policy call.
+
+**plan.md edited:** no.
+
+## 144. Mixed-graph checks wrap the edge; a typed-looking lie is a compile error (2026-09-02)
+
+Phase 5 step 5. Three things the plan's proof-shape paragraph got slightly wrong, measured rather
+than re-litigated:
+
+1. **The trap cannot be a function whose body checkJs can type.** `export function factorFrom(n) {
+   return String(n); }` assigned to `const factor: number` is `STA0012` "Type 'string' is not
+   assignable to type 'number'" — the same compile-error path plan-notes 140 already recorded for a
+   lying JSDoc. The value that reaches runtime is an *untyped* identity, `function wrap(x) { return
+   x; }`, whose return is `any` and therefore Unknown. `wrap("10")` into a `number` slot is the
+   trap; `wrap(10)` into the same slot is the happy path.
+
+2. **Expected-stderr on the golden harness was not added.** STA2004 and STA2006 already pin runtime
+   aborts as CLI native tests (`NATIVE_ONLY`, empty stdout, code in stderr). A second harness mode
+   whose only client would be this one trap is duplication. The happy-path mixed graph is an
+   ordinary vs-Node golden; the trap is `tests/unit/cli.test.ts`.
+
+3. **`docs/MODES.md` §4 Examples 2 and 3 were false.** Example 2 assigned an inferred `number`
+   (`MAX_RETRIES = 3`) to `string` and called that a runtime check; it is `STA0012`. Example 3
+   assigned `unknown[]` to `number[]` and promised per-element checks; `number[]` is not
+   `isCheckable`, so the assignment is not wrapped and element reads stay dynamic until a checkable
+   narrowing at the use. Both examples rewritten.
+
+The wrap itself is `maybeBoundary` in `src/lower/index.ts`: Unknown value + checkable expected type
+→ `BoundaryCheck`. Call arguments use the callee's HIR `fn` parameter types, so builtins that lower
+to their own nodes (`Math.abs`, `JSON.parse`) are not wrapped by this path — they already have a
+typed lowering of their own.
+
+## 146. js-column expected-fail was stale for landed operators; `var xs = []` was STA4004 (2026-09-02)
+
+Phase 5 step 7. Note 145 is the coverage runner from a parallel change the same day; this is the
+step 7 record.
+
+The plan's "64 fixture files" was already stale (32 js files after steps 2–4). Of those, twelve
+were constructs that compiled today and had never had their marker removed:
+
+- Typed *literals* (`5 + 3`, `5 & 3`, `` `Hello ${name}` ``, `switch (2)`, `const x = 42`) are
+  **static**, not the `dynamic` the fixtures claimed. The js column is dynamic for *untyped
+  operands*; these fixtures never had any.
+- `function test(x) { if (x > 0) ... }` is **dynamic** because `x` is untyped — the fixture said
+  `static`.
+- `null ?? 0` is STA0012 (checkJs rejects a literal `??`); `function coalesce(x) { return x ?? 0; }`
+  is the js-column case and is dynamic.
+
+The rest stay expected-fail because the construct is not landed (`**`, rest, destructure, `for-in`,
+`import()`, generators, …) or the allocated never-code is not the one emitted (`@dec` is STA1214
+not STA1112). Those flip in their owner step, not here.
+
+`var xs = []` (and `var hits = search()` returning an array) was an internal STA4004:
+`hTypeAssignable` treated `unknown[]` as an array, so the Unknown-on-either-side clause did not
+fire, and `hTypeEquals` then rejected two `unknown[]` that differed only in `fromImplicitAny` —
+exactly the split the `var` hoist introduces. Recursing into array elements is the same rule the
+Unknown clause already stated.
+
+The capstone is `tests/golden/js/capstone.js`, an untyped catalog: growing empty objects, computed
+index, Unknown call, `==`, `var` on scalars.
+
+## 147. `for-of` over a string is a counted loop of code points, not units (2026-09-02)
+
+Phase 5 step 8, first code slice after the §4.13 representation. `String.prototype[@@iterator]`
+yields code points: `"a👍b"` is three iterations, and the middle value has `.length === 2`. The
+loop calls `jsrt_string_iter_next`, which advances the UTF-16 cursor by 1 or 2. Map/Set/user
+iterables, `keys`/`values`/`entries`, `matchAll`, and `function*` are still open under this step.
+
+The gate test that used `for (const c of 'ab')` as the non-array STA1214 witness now uses a `Map`.

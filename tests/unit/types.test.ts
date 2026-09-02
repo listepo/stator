@@ -12,7 +12,9 @@ import {
   H_NUMBER,
   H_STRING,
   H_UNDEFINED,
+  hArray,
   hFunction,
+  hTypeAssignable,
   hTypeEquals,
   hTypeName,
   hUnknown,
@@ -76,4 +78,14 @@ void test('hTypeName matches the primitive kind name, and formats fn as a signat
     '(a0: number, a1: string) => boolean',
   );
   assert.equal(hTypeName(hFunction([], H_UNDEFINED)), '() => undefined');
+});
+
+void test('unknown[] is assignable to unknown[] even when fromImplicitAny disagrees', () => {
+  // `var xs = []` hoists a binding whose element is implicit-any Unknown and assigns a literal
+  // whose element is not; equality would reject that, assignability must not.
+  const hoisted = hArray(hUnknown(true));
+  const literal = hArray(hUnknown(false));
+  assert.equal(hTypeEquals(hoisted, literal), false);
+  assert.equal(hTypeAssignable(literal, hoisted), true);
+  assert.equal(hTypeAssignable(hoisted, literal), true);
 });

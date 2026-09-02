@@ -1209,8 +1209,11 @@ export interface SuperCall extends Node {
 }
 
 /** let or const binding. The initializer is required: an uninitialized `let` would need
- * definite-assignment tracking to know whether a read yields `undefined`, which is Phase 3 work.
- * The gate rejects `let x;` rather than lowering it. */
+ * definite-assignment tracking to know whether a read yields `undefined`, which is Phase 5
+ * step 12 work. The gate rejects `let x;` rather than lowering it.
+ *
+ * `var` is not a third declKind. The lowering hoists it to a function-scoped `let` initialized
+ * `undefined` and emits an assignment at the original site (plan.md §8 step 3). */
 export interface Declaration extends Node {
   readonly kind: 'declaration';
   readonly name: string;
@@ -1382,8 +1385,8 @@ export interface ForStatement extends Node, Labelled {
  * and — unlike `a[i]` — its type is the element type with no `| undefined`, because the loop only
  * ever visits indices that exist. That is what keeps a typed iteration on the static path.
  *
- * `iterable` is an array. The general iterator protocol (`Symbol.iterator`) arrives with the object
- * model; until then the gate admits only an operand the checker types as an array. */
+ * `iterable` is an array or a string. Both compile to counted loops (docs/VALUE.md §4.13); Map/Set
+ * and user iterables still wait on the protocol object. */
 export interface ForOfStatement extends Node, Labelled {
   readonly kind: 'for-of-statement';
   readonly binding: string;

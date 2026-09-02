@@ -155,7 +155,7 @@ Argument of type 'string' is not assignable to parameter of type 'number'`) rath
 one — measured 2026-09-01, plan-notes 140. What no checker can see is the value `factorFrom`
 actually answers, and narrowing it to `number` is where the boundary check goes.
 
-**Example 2: Inferred type from untyped .js**
+**Example 2: inferred `number` from untyped `.js` is already a number**
 
 ```javascript
 // config.js
@@ -166,9 +166,20 @@ export const MAX_RETRIES = 3;
 // app.ts
 import { MAX_RETRIES } from "./config.js";
 
-const retries: string = MAX_RETRIES;  // Type-checks: inferred number from assignment
-// Emitted: assignment checks the type; retries can be a string only if Stator
-// failed to infer MAX_RETRIES's type. If inference succeeds (number), this is STA2001 at runtime.
+const retries: number = MAX_RETRIES;  // no check: the checker inferred `number`
+// `const retries: string = MAX_RETRIES` is a compile error (`STA0012`), not a trap.
+```
+
+A check appears only when the imported value is still Unknown:
+
+```javascript
+export function retriesFrom(settings) {
+  return settings.n;
+}
+```
+
+```typescript
+const retries: number = retriesFrom({});  // check(retriesFrom(...), "number")
 ```
 
 **Example 3: Heterogeneous array from .js**
@@ -182,9 +193,10 @@ export const items = [1, "two", true];  // Inferred as unknown[]
 // consumer.ts
 import { items } from "./data.js";
 
-const nums: number[] = items;  // Type-checks against unknown[]
-// Emitted: check(items[i], "number") for each element access,
-//   halt with STA2001 if type mismatch
+const nums: number[] = items;
+// `number[]` is not a tag the runtime can settle in constant time, so this assignment
+// is NOT wrapped (docs/HIR.md §3.2.1). Element reads stay on the dynamic path until a
+// checkable narrowing (`as number`, `typeof`) at the use.
 ```
 
 ### Typing contract at boundaries

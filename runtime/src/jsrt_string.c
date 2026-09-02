@@ -204,6 +204,24 @@ static JSString *as_string(jsrt_value v) {
   return (JSString *)jsrt_ptr(v);
 }
 
+jsrt_value jsrt_string_iter_next(jsrt_value s, uint32_t *index) {
+  JSString *str = as_string(s);
+  uint32_t i = *index;
+  if (i >= str->length) {
+    return JSRT_UNDEFINED;
+  }
+  uint32_t take = 1;
+  uint16_t c = str->data[i];
+  if (c >= 0xD800u && c <= 0xDBFFu && i + 1 < str->length) {
+    uint16_t d = str->data[i + 1];
+    if (d >= 0xDC00u && d <= 0xDFFFu) {
+      take = 2;
+    }
+  }
+  *index = i + take;
+  return jsrt_string_from_units(str->data + i, take);
+}
+
 bool jsrt_string_equals(jsrt_value a, jsrt_value b) {
   JSString *sa = as_string(a);
   JSString *sb = as_string(b);

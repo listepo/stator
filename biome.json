@@ -4,6 +4,7 @@
     "includes": [
       "**",
       "!dist",
+      "!coverage",
       "!runtime",
       "!tests/subset/subset_*",
       "!tests/subset/helper_*",
@@ -11,6 +12,7 @@
       "!tests/golden/ts",
       "!tests/golden/js",
       "!tests/differential",
+      "!docs/architecture",
       "!pnpm-lock.yaml"
     ]
   },

@@ -217,7 +217,7 @@ function linkExecutable(cPath: string, out: string): void {
     throw new BuildError(
       'STA0008',
       `C compiler "${cc}" not found — install clang ` +
-        '(macOS: `xcode-select --install`; Debian/Ubuntu: `apt install clang`) or set `CC`',
+        '(`mise install`, or macOS: `xcode-select --install`; Debian/Ubuntu: `apt install clang`) or set `CC`',
     );
   }
   if (result.error !== undefined) {

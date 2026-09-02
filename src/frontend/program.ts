@@ -96,6 +96,12 @@ export function createProgram(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = ts.getPreEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
+    // js mode: untyped code is dynamic, not rejected (plan.md §1.2, §8 step 4). checkJs still
+    // infers what it can; these three codes are the checker refusing a property the shape table
+    // will answer at run time.
+    if (mode === 'js' && (diag.code === 2339 || diag.code === 2551 || diag.code === 2353)) {
+      continue;
+    }
     const file = diag.file;
     if (file === undefined) {
       // File-less diagnostic (e.g., "tsconfig.json not found")

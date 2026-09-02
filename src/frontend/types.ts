@@ -288,6 +288,11 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
       type: tsTypeToHType(checker.getTypeOfSymbolAtLocation(property, at), checker, depth + 1),
     });
   }
+  // Zero fields is not a layout: `{}` has to grow (plan.md §8 step 4), so it is Unknown and
+  // takes the shape table. An all-required shape with at least one field stays fixed.
+  if (fields.length === 0) {
+    return null;
+  }
   return hObject(shapeName(fields), fields, [], []);
 }
 
@@ -297,9 +302,10 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
  * The line between the two paths is drawn here and nowhere else. A shape qualifies when it is
  * anonymous (interfaces stay refused: a value typed by one may be an instance of any class, and
  * Phase 5 owns that), callable in no way, has no methods or accessors (calling through the shape
- * table is also Phase 5), and -- the actual trigger -- carries an OPTIONAL property or an index
- * signature: exactly what a fixed slot list cannot hold. An all-required anonymous shape stays on
- * the fixed path; making it dynamic too would silently deoptimize every literal in the program. */
+ * table is also Phase 5), and -- the actual trigger -- carries an OPTIONAL property, an index
+ * signature, or no properties at all. An empty `{}` has to grow (plan.md §8 step 4); an
+ * all-required anonymous shape with at least one field stays on the fixed path, because making
+ * those dynamic too would silently deoptimize every literal in the program. */
 export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean {
   const symbol = type.getSymbol();
   const anonymous =
@@ -323,7 +329,28 @@ export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean 
     }
     optional = optional || (property.flags & ts.SymbolFlags.Optional) !== 0;
   }
-  return optional || checker.getIndexInfosOfType(type).length > 0;
+  return (
+    optional ||
+    checker.getIndexInfosOfType(type).length > 0 ||
+    checker.getPropertiesOfType(type).length === 0
+  );
+}
+
+/** Whether an object literal should take the shape-table path.
+ *
+ * The contextual type wins when it is itself a dynamic shape (`const o: { x?: number } = { x: 1 }`).
+ * Otherwise the literal's own type decides: empty `{}` is dynamic even when the context is `any`
+ * (an untyped parameter), which is not a shape `isDynamicShape` would recognize. */
+export function objectLiteralIsDynamic(
+  literal: ts.ObjectLiteralExpression,
+  checker: ts.TypeChecker,
+): boolean {
+  const own = checker.getTypeAtLocation(literal);
+  const contextual = checker.getContextualType(literal);
+  return (
+    (contextual !== undefined && isDynamicShape(contextual, checker)) ||
+    isDynamicShape(own, checker)
+  );
 }
 
 /** The structural name of a shape: what makes two identical literals one layout. */

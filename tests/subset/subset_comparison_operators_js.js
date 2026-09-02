@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: Comparison operators: <, >, <=, >=
 
 const c = 5 < 3;

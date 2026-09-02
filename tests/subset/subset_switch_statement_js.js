@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: switch statement
 
 // No function here on purpose: this fixture names `switch`, so it must not also depend on

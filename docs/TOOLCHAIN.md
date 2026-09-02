@@ -13,8 +13,8 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | `@types/node` | `26.4.0` (exact) | `devDependencies` |
 | Biome | `2.5.11` (exact) | `devDependencies` |
 | cpd (copy/paste detector) | `5.0.16` (exact) | `devDependencies` |
-| pnpm | `11.20.0` | `packageManager` in `package.json` |
-| C compiler | `clang`, C11 | `runtime/Makefile` |
+| pnpm | `11.20.0` | `packageManager` in `package.json`, `mise.toml` |
+| LLVM | `21.1.8` | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the Makefile and `src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
 
 Node ≥ 24 is required because dev runs the compiler's TypeScript sources directly
 (`node src/cli/main.ts`) via native type stripping — there is no build step in development.
@@ -41,7 +41,8 @@ CI must run at least ubuntu-latest and macos-latest (plan.md §4 Task 1.0 step 1
 
 ```
 pnpm install --frozen-lockfile   # install exactly the pinned tree
-pnpm run ci                      # typecheck -> lint -> dupes -> unit -> runtime -> subset -> golden
+pnpm run ci                      # typecheck -> lint -> dupes -> unit+coverage -> runtime -> subset -> golden
+pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info
 make -C runtime       # runtime/build/libjsrt.a          (clang -O2, -Werror)
 make -C runtime asan  # runtime/build-asan/libjsrt.a     (-fsanitize=address,undefined -O1 -g)
 make -C runtime clean
@@ -94,9 +95,10 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 | `pkg-config` | `runtime/Makefile` | finding bdw-gc and ICU; absent means both are simply off |
 | `diff` | `make -C runtime test` | the print corpus against Node, byte-for-byte |
 
-On macOS these come from the Xcode command-line tools (`xcode-select --install`); on Debian/Ubuntu
-from `clang`, `binutils`, `make`, `pkg-config`, `diffutils`. A missing compiler is a diagnostic with
-the install hint (`STA0008`), not a crash.
+`clang` (and the rest of LLVM) is `mise install` on Unix. The other four still come from the Xcode
+command-line tools (`xcode-select --install`) on macOS and from `binutils`/`make`/`pkg-config`/
+`diffutils` on Debian/Ubuntu. A missing compiler is a diagnostic with the install hint (`STA0008`),
+not a crash.
 
 ## Not yet required
 

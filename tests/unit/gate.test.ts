@@ -54,11 +54,14 @@ void test('a label on a loop or switch is accepted; a label on anything else is 
 
 // `for`, `for-of`, `for-in` all parse as loops, but they are three different things and their
 // diagnostics have to say so. Conflating them ("for loops is not yet supported") would misname
-// what is actually missing (plan-notes 44). for-of over an ARRAY landed with rung 5; for-of over
-// anything else is the iterator protocol, and for-in needs the object model.
+// what is actually missing (plan-notes 44). for-of over an ARRAY landed with rung 5 and over a
+// STRING with Phase 5 step 8; Map/Set still wait on the protocol, and for-in needs the object model.
 void test('for-of and for-in report distinctly from the for loop they are not', () => {
   assert.deepEqual(codesFor('for (const x of [1, 2]) { }'), []);
-  assert.deepEqual(codesFor("for (const c of 'ab') { }"), ['STA1214']);
+  assert.deepEqual(codesFor("for (const c of 'ab') { }"), []);
+  assert.deepEqual(codesFor('const m: Map<number, number> = new Map();\nfor (const e of m) { }'), [
+    'STA1214',
+  ]);
   assert.deepEqual(codesFor('for (const x in {}) { }'), ['STA1214']);
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i++) { }'), []);
 });
@@ -94,12 +97,27 @@ void test('try/catch/finally and throw are accepted; destructured catch bindings
   ]);
 });
 
-// `var` is banned in ts mode BY DESIGN (STA1104, a 'never' code, no phase) — hoisting with a TDZ
-// is the dynamic-scoping behaviour strict mode exists to exclude. In js mode it is merely not
-// implemented yet, which is a different class of diagnostic entirely (docs/DIAGNOSTICS.md).
-void test('var is a permanent rejection in ts mode, but only "not yet" in js mode', () => {
+// `var` is banned in ts mode BY DESIGN (STA1104, a 'never' code, no phase) — function-scoped
+// hoisting with `undefined` initialization is the dynamic-scoping behaviour strict mode exists
+// to exclude. js mode accepts it (plan.md §8 step 3).
+void test('var is a permanent rejection in ts mode and is accepted in js mode', () => {
   assert.deepEqual(codesFor('var x = 1;'), ['STA1104']);
-  assert.deepEqual(codesFor('var x = 1;', 'js'), ['STA1214']);
+  assert.deepEqual(codesFor('var x = 1;', 'js'), []);
+  assert.deepEqual(codesFor('var x;', 'js'), []);
+  assert.deepEqual(
+    codesFor(
+      'function f() { for (var i = 0; i < 2; i++) { const g = function () { return i; }; console.log(g()); } }',
+      'js',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      'function f() { for (let i = 0; i < 2; i++) { const g = function () { return i; }; console.log(g()); } }',
+      'js',
+    ),
+    ['STA1214'],
+  );
 });
 
 // The HIR's Declaration always carries exactly one name and one initializer (docs/HIR.md) — both
@@ -378,14 +396,24 @@ void test('compound assignment through a dynamic shape stays deferred', () => {
   assert.deepEqual(codesFor(source), ['STA1214']);
 });
 
-void test('a method MEMBER still refuses the literal; a call through the shape stays deferred', () => {
-  // A function-typed property is data — a closure in a slot — and is accepted like any value. What
-  // stays refused is method SYNTAX in the literal, and CALLING through the shape: both need a
-  // bound method object nothing builds yet (Phase 5).
+void test('a method MEMBER still refuses the literal; a function-valued property is a get then a call', () => {
+  // Method SYNTAX in the literal still needs a bound method object. A function stored as data
+  // (`m?: () => number`) is an Unknown get then a call — plan.md §8 step 4 — and does not pass
+  // the receiver as `this`.
   const method = 'const o: { x?: number } = { x: 1, m() { return 2; } } as { x?: number };';
   assert.notDeepEqual(codesFor(method), []);
   const call = 'const o: { x?: number; m?: () => number } = { m: () => 2 };\nconsole.log(o.m());';
-  assert.deepEqual(codesFor(call), ['STA1214']);
+  assert.deepEqual(codesFor(call), []);
+});
+
+void test('an Unknown receiver accepts property get, set, index, and call', () => {
+  // plan.md §8 step 4: untyped `o.x` / `o.x = v` / `o[k]` / `o.m()` take the shape-table path.
+  // A typed dynamic shape still refuses a CALL through the table (bound methods wait).
+  assert.deepEqual(codesFor('function f(o) { return o.x; }', 'js'), []);
+  assert.deepEqual(codesFor('function f(o) { o.x = 1; }', 'js'), []);
+  assert.deepEqual(codesFor('function f(o, k) { return o[k]; }', 'js'), []);
+  assert.deepEqual(codesFor('function f(o) { return o.m(1); }', 'js'), []);
+  assert.deepEqual(codesFor('let o = {};\no.x = 1;\nconsole.log(o.x);', 'js'), []);
 });
 
 void test('the contextual type decides: a fully-required literal under an optional annotation is dynamic', () => {
@@ -983,4 +1011,9 @@ void test('a .js file under ts mode is STA1002 with a --mode=js hint', () => {
     ['STA1002'],
   );
   assert.match(diags[0]?.message ?? '', /`--mode=js`/);
+});
+
+void test('for-of over a string is accepted', () => {
+  assert.deepEqual(codesFor('for (const c of "ab") { console.log(c); }\n'), []);
+  assert.deepEqual(codesFor('for (const c of "ab") { console.log(c); }\n', 'js'), []);
 });

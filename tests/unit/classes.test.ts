@@ -601,10 +601,9 @@ test('a nested literal is an entry value with a shape of its own', () => {
   assert.equal((value.type as { name: string }).name, '{c: {d: number}}');
 });
 
-test('an empty literal has no entries and still has a shape to allocate', () => {
+test('an empty literal takes the dynamic path so it can grow', () => {
   const decl = statements('const e = {};\nconsole.log(e);\n')[0];
-  const value = (decl as Extract<Statement, { kind: 'declaration' }>).value as ObjectLiteral;
-  assert.equal(value.kind, 'object-literal');
-  assert.deepEqual(value.entries, []);
-  assert.equal((value.type as { name: string }).name, '{}');
+  const value = (decl as Extract<Statement, { kind: 'declaration' }>).value;
+  assert.equal(value.kind, 'dyn-object-literal');
+  assert.deepEqual((value as { entries: readonly unknown[] }).entries, []);
 });

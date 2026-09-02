@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: Unary +, -, ~, !
 
 const y = -5;

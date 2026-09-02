@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: let, const bindings
 
 const x = 42;

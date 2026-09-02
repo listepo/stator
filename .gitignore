@@ -1,5 +1,6 @@
 node_modules/
 dist/
+coverage/
 runtime/build/
 runtime/build-asan/
 runtime/build-intl/

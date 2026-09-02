@@ -116,6 +116,11 @@ jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len);
 /* String construction from UTF-16 code units, copied verbatim (lone surrogates included). */
 jsrt_value jsrt_string_from_units(const uint16_t *units, uint32_t len);
 
+/* One step of String.prototype[@@iterator]: yield the code point at *index (a string of 1 or 2
+ * UTF-16 units) and advance *index. Strings are immutable so the caller may bound the loop on
+ * jsrt_string_length. */
+jsrt_value jsrt_string_iter_next(jsrt_value s, uint32_t *index);
+
 /* String operations: concatenation, equality, and lexicographic comparison. */
 jsrt_value jsrt_string_concat(jsrt_value a, jsrt_value b);
 jsrt_value jsrt_string_at(jsrt_value s, jsrt_value i);
@@ -356,6 +361,10 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic);
  * outlive the program (generated C passes string literals); the shape table stores the pointer. */
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic);
 bool jsrt_has_prop(jsrt_value obj, const char *key);
+/* Computed-key get/set for an Unknown receiver: arrays go through the dense element path,
+ * everything else through the property table with ToString(index) as the key. */
+jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic);
+void jsrt_dyn_index_set(jsrt_value obj, jsrt_value index, jsrt_value value, JSRTIC *ic);
 
 /* Math builtins (jsrt_math.c) — number -> number, ECMA-262 §21.3.2 exactly. The approximated
  * transcendentals below come from the vendored fdlibm (the code V8 runs), never the host libm,
@@ -972,6 +981,9 @@ static inline jsrt_value jsrt_arg(uint32_t argc, const jsrt_value *argv, uint32_
  * (Phase 6 until 2026-09-01: the phase restructuring of plan-notes 116 moved the mechanism, and
  * Phase 6 is conformance fuzzing. Corrected in plan-notes 125.) */
 jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
+/* Same as jsrt_call, with a `file:line` baked in so a non-function callee names the site
+ * (STA2006). `loc` may be NULL, which keeps the unlocated TypeError for builtin-internal calls. */
+jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv, const char *loc);
 
 /* ------------------------------------------------------------ promises */
 

@@ -1,0 +1,61 @@
+# Compile pipeline — component view of plan.md §2.
+# Mode is a policy layer at the frontend gate; nothing below it knows the mode existed (plan §0.8).
+
+...@theme
+
+direction: down
+
+src: {
+  label: "entry.ts / entry.js\n(+ module graph)"
+  shape: page
+}
+
+frontend: {
+  label: "src/frontend/ — the only place ts.Type may appear"
+
+  tsc: "ts.createProgram\n(typescript npm pkg, in-process;\nStator owns compilerOptions)"
+  ast: "ts.SourceFile ASTs"
+  chk: TypeChecker
+  gate: {
+    label: "mode policy gate (ts | js)\nfile acceptance · subset/mode diagnostics · verdicts"
+    class: gate
+  }
+
+  tsc -> ast
+  tsc -> chk
+  ast -> gate
+  chk -> gate
+}
+
+lower: "src/lower/\nTS AST → HIR"
+
+middle: {
+  label: "mode-blind middle end"
+
+  hir: "Typed HIR (src/hir/)\nevery node carries an HType;\nUnknown is a first-class HType"
+  passes: "src/passes/\nmonomorphize · shape-resolve\nboundary-check insert\nconst-fold · DCE/tree-shake · inline\n(HIR verifier after each, debug builds)"
+
+  hir -> passes
+}
+
+emit: "C emitter (src/codegen/)\n#line source maps · JSRT_FRAME rooting"
+clang: "clang -O2"
+ld: "link runtime/build/libjsrt.a"
+bin: {
+  label: "native binary"
+  shape: cylinder
+  class: bin
+}
+
+runtime: {
+  label: "runtime/ (C11)"
+
+  rt: "NaN-boxed jsrt_value · Boehm GC (v0) →\nprecise generational (§12) · builtins ·\nQuickJS-NG libregexp · shortest-round-trip dtoa"
+}
+
+src -> frontend.tsc
+frontend.gate -> lower
+lower -> middle.hir
+middle.passes -> emit
+emit -> clang -> ld -> bin
+runtime.rt -> ld

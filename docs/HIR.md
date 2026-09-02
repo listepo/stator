@@ -92,7 +92,7 @@ therefore need distinct slots — in `(a && b) && c` the outer operand stays liv
 one is evaluated.
 
 **Statement union** (current scope):
-- `Declaration` — `let` or `const` binding with required initializer
+- `Declaration` — `let` or `const` binding with required initializer. `var` is desugared by the lowering into a hoisted `let` initialized `undefined` plus an assignment at the original site (plan.md §8 step 3); it is not a third `declKind`.
 - `Assignment` — assignment to an existing binding
 - `ExpressionStatement` — wraps an expression
 - `IfStatement` — `if` (optionally with `else`)
@@ -170,9 +170,12 @@ the property is a NAME resolved through the shape table at run time, with a per-
   consumer narrows the value back the way it narrows a `Map.get`.
 - **No pending check follows a dynamic access.** `jsrt_get_prop` allocates nothing and runs no
   user code; `jsrt_set_prop` can grow slot storage — which is why its operands sit in rooted
-  frame slots — but cannot throw. The nodes are cheap to sequence precisely because the runtime
-  entry points are total over dynamic receivers, and loudly not-yet (`STA2004`) over aliased
-  fixed-shape ones.
+  frame slots. A nullish receiver is a TypeError; a primitive read answers `undefined`; a
+  primitive write is a TypeError; growing a *new* key on a fixed-layout object is `STA2004`
+  (Phase 8). Reads and writes of an existing field on an aliased fixed object walk the class
+  descriptor. An Unknown (or empty `{}`) receiver uses the same three nodes; a computed index
+  on one emits `jsrt_dyn_index_get`/`set`, which dispatches arrays to the dense path and
+  everything else through the property table. Calling a non-function is `STA2006` at `file:line`.
 
 `CollectionNew` and `CollectionOp` are the two nodes rung 7 added for `Map` and `Set`. Each names a
 `collection` (`'map'` or `'set'`) and, for the operation, one of a closed set of `op`s —
@@ -377,7 +380,7 @@ interface HUnknown {
 
 ### 3.2.1 What a narrowing site is (Task 3.5)
 
-An `Unknown` becomes concrete in exactly one node, `BoundaryCheck`, and the lowering is the only thing that builds one — a later pass could not, because by then the HIR has already forgotten which type the checker narrowed to. Two spellings produce it: a read of an `Unknown` binding at a point where the checker has narrowed it (a `typeof` guard, an `instanceof`, an `!== undefined`), and an `as` cast off an `Unknown`. The emitted C is `jsrt_check_number/string/boolean(v, "file:line:col")`, which returns `v` or raises `STA2001`.
+An `Unknown` becomes concrete in exactly one node, `BoundaryCheck`, and the lowering is the only thing that builds one — a later pass could not, because by then the HIR has already forgotten which type the checker narrowed to. Four spellings produce it: a read of an `Unknown` binding at a point where the checker has narrowed it (a `typeof` guard, an `instanceof`, an `!== undefined`); an `as` cast off an `Unknown`; a dynamic value flowing into an annotated binding, parameter, or return (plan.md §8 step 5 — the mixed-graph edge); and the same edge written in JSDoc (`/** @type {number} */ const n = produce()`). The emitted C is `jsrt_check_number/string/boolean(v, "file:line:col")`, which returns `v` or raises `STA2001`.
 
 Three rules follow from the preservation rule above rather than from convenience:
 

@@ -13,7 +13,7 @@ Instructions for AI agents (and humans) working in this repository. Read this fi
 
 One pipeline; mode is a policy layer (file acceptance + diagnostic table + typing of unresolved code). Nothing below the frontend gate knows the mode existed.
 
-Pipeline: `typescript` API (parse + type-check, in-process) → mode gate → typed HIR → passes → C emitter → clang → link `libjsrt.a` (C11 runtime) → native binary.
+Pipeline: `typescript` API (parse + type-check, in-process) → mode gate → typed HIR → passes → C emitter → clang → link `libjsrt.a` (C11 runtime) → native binary. How that looks: D2 in `docs/architecture/` (gallery `docs/ARCHITECTURE.md`). `plan.md` §2 is the authority.
 
 ## Bootstrap awareness
 
@@ -37,7 +37,7 @@ done.md            completion record for finished tasks (archive; not normative)
 AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
-docs/              ARCHITECTURE.md (pipeline diagrams) MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
+docs/              ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
 src/cli/           argument parsing, build/explain drivers
 src/frontend/      ts.Program loading, mode policy gate, ts.Type → HType (only place ts.Type may appear)
 src/hir/           typed HIR definitions, HType model, verifier
@@ -55,17 +55,38 @@ tests/differential/ fuzzer corpus    tests/bench/ baselines + results
 tests/leak/        GC hygiene: a 10M-object loop whose RSS must plateau
 ```
 
+## Architecture diagrams (for agents)
+
+How the compiler works is drawn in **D2**, not Mermaid and not a new ASCII sketch.
+
+| View | Source (edit this) | Render (GitHub) |
+|---|---|---|
+| Compile pipeline | `docs/architecture/pipeline.d2` | `docs/architecture/pipeline.svg` |
+| `stator build` sequence | `docs/architecture/build.d2` | `docs/architecture/build.svg` |
+| Package imports | `docs/architecture/packages.d2` | `docs/architecture/packages.svg` |
+| Value boxing | `docs/architecture/values.d2` | `docs/architecture/values.svg` |
+
+Gallery + captions: `docs/ARCHITECTURE.md`. Shared theme: `docs/architecture/theme.d2`.
+
+- **Authority is `plan.md` §2.** If a diagram and §2 disagree, fix the diagram — or file `plan-notes.md` and edit §2 if the plan is wrong.
+- Read `pipeline.d2` first when you need the pipeline. Do not invent a fifth view.
+- When the pipeline changes (new pass, new package, `ts.Type` leaking, mode leaking below the gate), update the matching `.d2` in the same change and regenerate the SVG with the `d2` commands in `docs/ARCHITECTURE.md`.
+- `d2` is a docs tool (`brew install d2`), not part of `pnpm run ci`.
+
 ## Commands
 
 Dev runs TS directly on the pinned Node (≥24, see `.node-version`) — no build step needed.
+`mise install` provides that Node, pnpm, and LLVM clang 21.1.8.
 
 ```
+mise install                    # Node, pnpm, LLVM clang (Unix)
 pnpm install --frozen-lockfile  # install (exact-pinned deps)
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # biome check — lint + format (must be clean)
 pnpm run format                 # biome check --write (applies safe fixes + formatting)
 pnpm run dupes                  # cpd copy/paste detector (fails above 1% duplication)
 pnpm run test                   # unit tests (node --test)
+pnpm run test:coverage          # unit tests + src/ coverage table; writes coverage/lcov.info
 pnpm run test:subset            # decision tests → verdict matrix
 pnpm run test:golden            # compile + run vs Node, byte-for-byte
 pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-for-byte
@@ -125,3 +146,4 @@ node src/cli/main.ts explain file.ts --json     # per-construct verdicts (decisi
 - Don't quote competitor benchmark numbers as measurements — measure locally, record version/flags/hardware.
 - Don't "fix" a golden-test mismatch by changing the expected output without proving Node produces it.
 - Don't let mode logic leak below the frontend gate — if a pass or the emitter needs to know the mode, the design is wrong (plan §0.8).
+- Don't draw the compiler pipeline in Mermaid or a new ASCII sketch — D2 in `docs/architecture/` is the diagram language.

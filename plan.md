@@ -81,14 +81,14 @@ entry.ts / entry.js (+ module graph)
         for eval/untyped modules (Phase 8, js mode only)
 ```
 
-`docs/ARCHITECTURE.md` renders this section as Mermaid diagrams (component, sequence, package,
-value-flow views). It is a visualization of this section, never an authority over it.
+`docs/ARCHITECTURE.md` renders this section as D2 diagrams (component, sequence, package,
+value-flow views) sourced from `docs/architecture/*.d2`. It is a visualization of this section, never an authority over it.
 
 **Repo layout (fixed):**
 
 ```
 plan.md AGENTS.md plan-notes.md NICHE.md          # root
-docs/    ARCHITECTURE.md MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
+docs/    ARCHITECTURE.md architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
 src/     cli/  frontend/  hir/  lower/  passes/  codegen/  support/
 runtime/ include/jsrt_value.h  src/  vendor/  Makefile     → runtime/build/libjsrt.a
 tests/   unit/  subset/  golden/ts/  golden/js/  differential/  bench/
@@ -284,8 +284,8 @@ has to be split to report progress. Do it by plan edit (§15.3), not by drift, a
 NUMBER rather than renumbering 6/7/8, which `plan.md §N` citations in code comments and `docs/`
 depend on.
 
-Steps (all eleven detailed 2026-09-01 against the live substrate — much of step 1 is already real;
-plan-notes 131):
+Steps (1–11 detailed 2026-09-01 against the live substrate — much of step 1 is already real;
+plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-notes 136):
 1. ~~Frontend: `allowJs` + `checkJs`-style inference in the `ts.Program`; per-function
    "typed | inferred | dynamic" provenance recorded into HIR.~~ ✅ **landed** — the substrate
    (`program.ts` wiring `allowJs`/`checkJs` by mode, HIR's `provenance` field, `explain`'s
@@ -316,49 +316,44 @@ plan-notes 131):
    does not drop the file and answer `STA0012`; (d) `eval`/`new Function`/`Function(...)` emit
    `STA1101`/`STA1103` never in ts and `STA1206` not-yet Phase 8 in js. Three findings, plan-notes
    141.
-3. Lower `var`: function-scoped binding, hoisting to the enclosing function (or module) scope,
-   `undefined` init before the first statement runs, legal redeclaration folding to one slot.
-   Decision + golden tests: read-before-write answers `undefined` (not a TDZ trap), the classic
-   loop-var closure capture (one shared binding — build the closures in a loop, call them after),
-   `var` shadowing a parameter, and `var` inside a block escaping it.
-4. Dynamic lowering completion. The RUNTIME half exists — Task 4.1's shape chains and per-site
-   inline caches ("same shape implies same offset") are live in `jsrt_value.h` — what is missing
-   is the LOWERING that targets it: (a) HIR nodes for property get/set, index, and call on an
-   `Unknown` receiver, emitted as IC-site runtime calls (each syntactic site owns one static
-   cache slot, the model the shape doc already promises); (b) the dynamic call convention —
-   callee check, `this`, arity padding — with the located `STA2001`-style trap for calling a
-   non-function; (c) `==`/`!=` on dynamic operands: `jsrt_loose_equals` already exists and `==`
-   already lowers on typed paths — finish the ToPrimitive coercion path exactly per
-   `NUMERIC.md` §6.3 and pin the table's rows (null/undefined pairs, number↔string,
-   boolean coercion, object→primitive) with decision + golden tests.
-5. Mixed-graph boundaries: imports from `.js` into `.ts` get boundary checks against the
-   declared/inferred type at the import site (Task 3.5's machinery).
-   **Answer the KEY before building (2026-09-01, plan-notes 140).** This step used to say "keyed
-   on step 1's provenance — `typed` callers trust, `inferred`/`dynamic` sources get checks", and a
-   measurement killed that: `program.ts` sets `checkJs` in js mode and surfaces every `tsc`
-   diagnostic as a fatal `STA0012`, so a JSDoc contradicting its own body, and a call contradicting
-   a JSDoc, are both COMPILE errors today — `const r: number = double("5")` against
-   `@param {number} x` answers `STA0012 [js] Argument of type 'string' is not assignable`, never a
-   runtime trap. What survives to runtime is not a lying signature but a **dynamic argument
-   reaching an annotated one**, which is a property of the EDGE that no per-function grade can
-   express. So the key is the edge; provenance narrows what to check once the edge says to check.
-   **Proof shape (refined 2026-09-01, corrected 2026-09-01):** the trap fixture cannot be a
-   Node-diff golden — Node runs the trapping program happily, so there is nothing to byte-match —
-   and it cannot be a lying JSDoc either, because that program no longer reaches runtime. It lands
-   as a pinned-expectation test over a DYNAMIC value narrowed at the boundary: the harness gains an
-   expected-stderr mode for fixtures whose POINT is the trap, and the happy-path mixed graph stays
-   an ordinary vs-Node golden.
-6. JSDoc freebie test: a `.js` file with correct JSDoc types stays on the static path — assert via
-   `stator explain` that its functions report `static` with provenance **`typed`** (an annotation is
-   an annotation in either spelling; this step said `inferred` until 2026-09-01, plan-notes 140).
-   The per-function half is already pinned by `tests/unit/cli.test.ts`; what remains is the FILE
-   claim — a fully JSDoc'd `.js` module whose file verdict is `static` — and a golden fixture
-   proving it runs, byte-for-byte against Node, on the static path.
-7. Flip the `js`-column decision tests from expected-fail — **64 fixture files still carry the
-   marker today**; each flips in the commit that lands its construct, never in bulk — and add the
-   capstone `tests/golden/js/` fixture: one real ~200-line untyped utility library exercising
-   steps 2–4 together (the existing `js` goldens cover builtins, not untyped-object-graph code).
-8. **The iterator protocol, and generators with it** (inherited from Task 4.6, which delivered `async`/`await` and deferred the rest — see plan-notes 112). One blocker, **four** surfaces: `for`-`of` over anything but an array (a string, `Map`, `Set` or user iterable — **`STA1214`**, and note that for-of over an array already works, so this step narrows that code rather than clearing it), the `keys`/`values`/`entries` triple that `Array.prototype`, `Map.prototype` and `Set.prototype` are each missing, `String.prototype.matchAll` (it answers an iterator, which is what splits it from `match` — `match` stays Phase 4), and `function*` (**`STA1201`**). Generators are last because they are the only one that also needs a state machine, and Task 4.6 already built that half — a `yield` differs from an `await` in who it answers (its caller, not a scheduler), not in how it suspends. `STA1201` names this phase.
+3. ~~Lower `var`: function-scoped binding, hoisting to the enclosing function (or module) scope,
+   `undefined` init before the first statement runs, legal redeclaration folding to one slot.~~
+   ✅ **landed** (2026-09-02) — desugars to a function-scoped `let` initialized `undefined` plus
+   an assignment at the original site, so HIR gained no third `declKind`. A `var` that repeats a
+   parameter or a function declaration shares that slot (no second `undefined` init). Capturing a
+   loop `var` is the ordinary shared binding; capturing a loop `let` stays not-yet. checkJs's
+   "used before assigned" still rejects the classic `console.log(x); var x = 1` spelling as
+   `STA0012`; the golden proves the runtime fact via `var x; console.log(x); x = 1`, and the
+   lowering unit test pins the source-order desugaring. plan-notes 142.
+4. ~~Dynamic lowering completion.~~ ✅ **landed** (2026-09-02) — (a) Unknown (and empty `{}`)
+   property get/set lower to the existing dyn-field nodes; computed index emits
+   `jsrt_dyn_index_get`/`set` (arrays stay dense; everything else ToString's the key into the
+   shape table); `o.m(...)` on Unknown is a get then a call. (b) `jsrt_call_at` raises
+   `STA2006` at `file:line` for a non-function; arity padding is `jsrt_arg`; ordinary functions
+   do not take `this` as argv[0], so the receiver is not prepended. (c) `==`/`!=` was already
+   `jsrt_loose_equals` (NUMERIC.md §6.3.1); `tests/golden/js/to-primitive.js` pins the table.
+   STA2004 now only fires when a fixed layout is asked to *grow*; an aliased read of an
+   existing field answers. STA4058 retired. plan-notes 143.
+5. ~~Mixed-graph boundaries.~~ ✅ **landed** (2026-09-02) — a dynamic (Unknown) value reaching a
+   checkable annotation is wrapped in `BoundaryCheck` at the EDGE: declaration, assignment, call
+   argument, and return. The key is the edge, not provenance (plan-notes 140, 144). A lying JSDoc
+   is still `STA0012` at compile time; the trap is an untyped `.js` identity (`wrap(x){return x}`)
+   assigned to `const n: number` in a `.ts` importer, which aborts `STA2001`. Happy path is
+   `tests/golden/js/mixed_graph/` (`.ts` entry importing `.js`). The trap is a CLI native test,
+   the same pattern as STA2004/STA2006 — an expected-stderr golden mode would duplicate it.
+6. ~~JSDoc freebie test.~~ ✅ **landed** (2026-09-02) — a fully JSDoc'd `.js` module reports file
+   verdict `static` with provenance `typed` (`tests/unit/cli.test.ts`); `tests/golden/js/jsdoc_static.js`
+   matches Node on the static path. No compiler change: `hasUnknown` was already the file rollup,
+   and JSDoc is `typed` since step 1 (plan-notes 140).
+7. ~~Flip remaining js expected-fail + capstone golden.~~ ✅ **landed** (2026-09-02) — twelve
+   js-column fixtures whose constructs already compiled (arithmetic, bitwise, comparison, unary,
+   template, switch, let/const, loose `==`, number/string, `if`, `??`) dropped `@expected-fail`
+   with honest verdicts (typed literals are `static`; untyped `if`/`??` are `dynamic`). Remaining
+   expected-fail wait on their owner steps (rest/destructure → 12, iterators → 8, `import()` → 10,
+   …), never bulk-flipped. Capstone `tests/golden/js/capstone.js` is an untyped catalog (~200
+   lines) matching Node. `var xs = []` taught `hTypeAssignable` to recurse into arrays (plan-notes
+   146).
+8. **The iterator protocol, and generators with it** — in progress: `docs/VALUE.md` §4.13 is written and `for-of` over a string is a specialized code-point loop (plan-notes 147). Remaining: Map/Set `for-of`, the nine `keys`/`values`/`entries` members, `matchAll`, `function*`. (inherited from Task 4.6, which delivered `async`/`await` and deferred the rest — see plan-notes 112). One blocker, **four** surfaces: `for`-`of` over anything but an array (a string, `Map`, `Set` or user iterable — **`STA1214`**, and note that for-of over an array already works, so this step narrows that code rather than clearing it), the `keys`/`values`/`entries` triple that `Array.prototype`, `Map.prototype` and `Set.prototype` are each missing, `String.prototype.matchAll` (it answers an iterator, which is what splits it from `match` — `match` stays Phase 4), and `function*` (**`STA1201`**). Generators are last because they are the only one that also needs a state machine, and Task 4.6 already built that half — a `yield` differs from an `await` in who it answers (its caller, not a scheduler), not in how it suspends. `STA1201` names this phase.
    In order: (a) the representation decision FIRST, in `docs/VALUE.md` — compile-time-known
    iterables (string, array, `Map`, `Set`) lower to SPECIALIZED loops with no protocol object
    allocated (the AOT-friendly path); only a user iterable (a `[Symbol.iterator]` the checker can
@@ -1081,3 +1076,8 @@ Standing practices:
 - **v3.0** (2026-09-01): **Phase 4 closed.** Task 4.7 was its last open task, and closing it is what made the phase closable honestly -- 165 not-yet sites re-derived, every one now naming the phase that owns its blocker, and `tests/unit/phases.test.ts` failing the build if that stops being true. §7 compresses to a completed-phase stub on §6's model (task numbers and titles stay, so `§7 Task 4.N` citations resolve); `done.md` gains the exit criterion answered bullet by bullet with the dashboard beside it, and its Phase 4 heading now reads ✅ COMPLETE, which `src/support/phases.ts` mirrors in the same change because the test pins the two together. Three of the five exit bullets sit below 100% on the dashboard and the phase still exits: the dashboard counts MEMBERS, not blockers, and every residue names an owner (plan-notes 125). Phase 5 is now the open phase.
 - **v3.1** (2026-09-01): **Phase 5 step 1 was already landed, and its own wording was the thing that needed fixing** (plan-notes 140). The `inferred` grade shipped in `5e9f2b4` the day before v2.7 wrote it up as remaining; what was actually missing was the `explain --json` test, now in `tests/unit/cli.test.ts` and proved able to fail. The step's spec half was worse than stale: it graded a fully JSDoc'd `.js` function `inferred` while the tree grades it `typed`, and step 5 was about to key boundary insertion on a field whose two readings put the trust axis in OPPOSITE directions. A measurement settled it — `checkJs` plus `program.ts`'s fatal `STA0012` means a lying JSDoc is a compile error, not a runtime trap, so what needs checking is a dynamic argument reaching an annotated signature, which is a property of the EDGE and not of any per-function grade. Steps 1, 5 and 6 edited accordingly; `docs/MODES.md` §4 Example 1 (which asserted a runtime check for a call `tsc` rejects statically) and `docs/HIR.md`'s undocumented `provenance` field fixed in the same change.
 - **v3.2** (2026-09-02): **Phase 5 step 2 landed** — the diagnostic table now switches by mode (plan-notes 141). Three things that looked implemented were dead: `STA1002` never fired because `allowJs` was ts-off and tsc dropped the `.js` file as `STA0012`; the eval check required `getSymbolAtLocation === undefined` and eval has a lib symbol, so the global catch-all swallowed it as `STA1214`; `1 as any` fired `STA1003` on the binding first. `STA1206` is now emitted. Indirect eval `(0, eval)("x")` is still the arbitrary-callee not-yet.
+- **v3.3** (2026-09-02): **Phase 5 step 3 landed** — `var` in js mode is function-scoped, hoisted, initialized `undefined` (plan-notes 142). ts mode stays `STA1104` never. HIR has no `var` kind: the lowering hoists a `let` and assigns at the original site.
+- **v3.4** (2026-09-02): **Phase 5 step 4 landed** — Unknown/empty-`{}` property get/set/index/call, `STA2006`, STA2004 grow-only, STA4058 retired (plan-notes 143).
+- **v3.5** (2026-09-02): **Phase 5 step 5 landed** — mixed-graph boundary checks at declaration/assignment/call/return edges (plan-notes 144). Trap is an untyped `.js` identity into a `.ts` `number` slot (`STA2001`); a function whose body checkJs types as `string` is `STA0012` and never reaches runtime. Happy path `tests/golden/js/mixed_graph/`.
+- **v3.6** (2026-09-02): **Phase 5 step 6 landed** — a fully JSDoc'd `.js` module has file verdict `static` with provenance `typed`; `tests/golden/js/jsdoc_static.js` matches Node.
+- **v3.7** (2026-09-02): **Phase 5 step 7 landed** — js-column honesty sweep of already-landed operators/statements plus `tests/golden/js/capstone.js`; `hTypeAssignable` recurses into arrays so `var xs = []` verifies (plan-notes 146).

@@ -24,6 +24,7 @@ import {
   isImplicitAny,
   isStaticMember,
   methodDeclaringClass,
+  objectLiteralIsDynamic,
   staticMemberOf,
   tsTypeToHType,
 } from './types.ts';
@@ -721,7 +722,11 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
   if (decl === undefined || enclosingFunction(decl) === enclosingFunction(node)) {
     return { kind: 'accept' };
   }
-  return loopScopeOf(decl) === undefined
+  // `var` is function-scoped even when its spelling sits inside a loop, so capturing it is the
+  // ordinary shared-binding case — every closure sees one slot, which is already what env
+  // capture implements. `let`/`const` in a loop are the ones that still need per-iteration
+  // bindings, and those stay not-yet.
+  return loopScopeOf(decl) === undefined || isVarBinding(decl)
     ? { kind: 'accept' }
     : notYet('capturing a variable declared inside a loop is not yet supported', 5);
 }
@@ -836,9 +841,11 @@ function gateDeclarationList(list: ts.VariableDeclarationList, mode: Mode): Gate
   if ((list.flags & ts.NodeFlags.Let) !== 0 || (list.flags & ts.NodeFlags.Const) !== 0) {
     return { kind: 'accept' };
   }
-  // `var` is rejected in ts mode by DESIGN, not by schedule: function-scoped hoisting with a
-  // temporal dead zone is exactly the dynamic-scoping behaviour the strict mode exists to exclude.
-  // It carries a never code and therefore no phase (plan §1.3).
+  // `var` is rejected in ts mode by DESIGN, not by schedule: function-scoped hoisting with
+  // `undefined` initialization (no TDZ) is exactly the dynamic-scoping behaviour the strict
+  // mode exists to exclude. It carries a never code and therefore no phase (plan §1.3). js
+  // mode accepts it; the lowering desugars each binding to a function-scoped `let` initialized
+  // `undefined`, then an assignment at the original site (plan.md §8 step 3).
   if (mode === 'ts') {
     return {
       kind: 'never',
@@ -846,17 +853,24 @@ function gateDeclarationList(list: ts.VariableDeclarationList, mode: Mode): Gate
       message: 'var is not allowed in ts mode; use let or const instead',
     };
   }
-  return notYet('var is not yet supported in js mode', 5);
+  return { kind: 'accept' };
 }
 
 function gateDeclaration(decl: ts.VariableDeclaration): GateResult {
   // `let x;` would need definite-assignment analysis to know whether a read yields undefined,
-  // which is Phase 3 work. The HIR's Declaration requires an initializer for the same reason.
-  // A for-of binding is the exception and not an exception to the reasoning: `for (const x of a)`
-  // has no initializer to write because the LOOP assigns it, definitely, before the body runs.
-  // A catch binding is a VariableDeclaration too, and the loop's reasoning applies to it as well:
-  // the CATCH assigns it, definitely, before its block runs.
-  if (decl.initializer === undefined && !isForOfBinding(decl) && !ts.isCatchClause(decl.parent)) {
+  // which is Phase 5 step 12 work. The HIR's Declaration requires an initializer for the same
+  // reason. A for-of binding is the exception and not an exception to the reasoning:
+  // `for (const x of a)` has no initializer to write because the LOOP assigns it, definitely,
+  // before the body runs. A catch binding is a VariableDeclaration too, and the loop's
+  // reasoning applies to it as well: the CATCH assigns it, definitely, before its block runs.
+  // `var x;` is the other exception: there is no TDZ, the slot exists from function entry, and
+  // a read before the initializer (or with none) answers `undefined`.
+  if (
+    decl.initializer === undefined &&
+    !isForOfBinding(decl) &&
+    !ts.isCatchClause(decl.parent) &&
+    !isVarBinding(decl)
+  ) {
     return notYet('a declaration without an initializer is not yet supported', 5);
   }
   // Destructuring binds several names from one value; the HIR has one name per Declaration.
@@ -915,7 +929,9 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
       // is not -- so they stay refused below, not admitted here.
       return isAssignableTarget(bin.left, typeChecker) ||
         (ts.isPropertyAccessExpression(bin.left) &&
-          isDynamicShape(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker))
+          (isDynamicShape(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker) ||
+            tsTypeToHType(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker).kind ===
+              'unknown'))
         ? { kind: 'accept' }
         : notYet('assignment to anything but a variable is not yet supported', 5);
 
@@ -1426,7 +1442,15 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     }
     const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(callee.expression));
     if (declaration === undefined) {
-      return notYet('method calls are not yet supported', 5);
+      // A match array is Unknown in HIR; its methods are not the dynamic-call path.
+      if (isMatchReceiver(callee.expression, typeChecker)) {
+        return notYet(`${callee.name.text} on a RegExp match is not yet supported`, 5);
+      }
+      // `o.m()` on an Unknown receiver: get the name through the shape table, then call.
+      return tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind ===
+        'unknown'
+        ? { kind: 'accept' }
+        : notYet('method calls are not yet supported', 5);
     }
     return methodDeclaringClass(declaration, callee.name.text, typeChecker) !== undefined
       ? { kind: 'accept' }
@@ -1649,6 +1673,22 @@ function isForOfBinding(decl: ts.VariableDeclaration): boolean {
   return ts.isVariableDeclarationList(list) && ts.isForOfStatement(list.parent);
 }
 
+/** A `var` binding: neither `let` nor `const` on the enclosing list.
+ *
+ * Exported so the lowering can desugar the same set the gate just accepted, rather than
+ * re-deriving the flag test and drifting. */
+export function isVarDeclarationList(list: ts.VariableDeclarationList): boolean {
+  return (list.flags & ts.NodeFlags.Let) === 0 && (list.flags & ts.NodeFlags.Const) === 0;
+}
+
+function isVarBinding(decl: ts.Declaration): boolean {
+  return (
+    ts.isVariableDeclaration(decl) &&
+    ts.isVariableDeclarationList(decl.parent) &&
+    isVarDeclarationList(decl.parent)
+  );
+}
+
 /** `.length` on something the checker says is an array. The same reasoning as isStringLength: the
  * syntax alone does not say which runtime function the read becomes. A TUPLE is excluded with
  * everything else, because `checker.isArrayType` is false for one and its `.length` is a literal
@@ -1709,8 +1749,7 @@ function gateObjectLiteral(
   // good layout -- but the binding's type is the annotation, and every later read of `o` sees THAT.
   // Building a fixed object here would make each of those reads a runtime not-yet; honoring the
   // annotation builds the dynamic object the reads expect (docs/VALUE.md §4.10).
-  const decisive = checker.getContextualType(literal) ?? checker.getTypeAtLocation(literal);
-  if (isDynamicShape(decisive, checker)) {
+  if (objectLiteralIsDynamic(literal, checker)) {
     return { kind: 'accept' };
   }
   return tsTypeToHType(checker.getTypeAtLocation(literal), checker).kind === 'object'
@@ -2368,34 +2407,33 @@ function gateMemberAccess(
   if (declaration === undefined) {
     // `p.x` on an object literal's shape. A shape has fields and nothing else -- no methods, no
     // accessors, no statics -- so the whole rule is that the name is one of them.
-    const shape = tsTypeToHType(checker.getTypeAtLocation(access.expression), checker);
-    if (shape.kind === 'object') {
-      return shape.fields.some((f) => f.name === access.name.text)
+    // A match array's HIR type is Unknown, so this has to win before the Unknown arm or
+    // `m.slice` would look like a dynamic method call (plan.md §8 step 4) instead of the
+    // union-work not-yet the match row records.
+    if (isMatchReceiver(access.expression, checker)) {
+      return Object.hasOwn(MATCH_FIELDS, access.name.text)
         ? { kind: 'accept' }
-        : notYet('a property that is not a field of the shape is not yet supported', 5);
+        : notYet(`${access.name.text} on a RegExp match is not yet supported`, 5);
     }
-    // `p.x` on a DYNAMIC shape -- one with an optional property or an index signature -- resolves
-    // through the shape table at run time (docs/VALUE.md §4.10). Reads and writes only: a name the
-    // type does not admit is a checker error before it is a gate question, and a CALL through the
-    // table needs a bound method object nothing here builds yet.
+    const shape = tsTypeToHType(checker.getTypeAtLocation(access.expression), checker);
+    if (shape.kind === 'unknown') {
+      return { kind: 'accept' };
+    }
+    // Dynamic shapes (optional fields, index signatures, empty `{}`) must be asked BEFORE the
+    // fixed-layout arm. The shape table answers an absent name `undefined`. A CALL through the
+    // table needs a bound method object nothing here builds yet — except an Unknown receiver,
+    // which is a get-then-call and is accepted above.
     const receiver = checker.getTypeAtLocation(access.expression);
     if (isDynamicShape(receiver, checker)) {
       if (ts.isCallExpression(access.parent) && access.parent.expression === access) {
         return notYet('calling a method through a dynamic shape is not yet supported', 5);
       }
-      return checker.getPropertyOfType(receiver, access.name.text) !== undefined ||
-        checker.getIndexInfosOfType(receiver).length > 0
-        ? { kind: 'accept' }
-        : notYet('a property the dynamic shape does not declare is not yet supported', 5);
+      return { kind: 'accept' };
     }
-    // `m.index` and its siblings. A match array is not an HIR array — its HIR type is Unknown —
-    // so it reaches here rather than the array arms above, and the four names below are the whole
-    // of what it exposes. Anything else on it (`m.map`, `m.slice`) waits for the match array to
-    // have an HIR type of its own, which is Phase 5's union work.
-    if (isMatchReceiver(access.expression, checker)) {
-      return Object.hasOwn(MATCH_FIELDS, access.name.text)
+    if (shape.kind === 'object') {
+      return shape.fields.some((f) => f.name === access.name.text)
         ? { kind: 'accept' }
-        : notYet(`${access.name.text} on a RegExp match is not yet supported`, 5);
+        : notYet('a property that is not a field of the shape is not yet supported', 5);
     }
     return notYet('property access is not yet supported', 5);
   }
@@ -2456,7 +2494,11 @@ function gateElementAccess(
     // A match array indexes like any array at run time -- it IS a dense jsrt array, carrying a
     // property table beside its elements -- so `m[0]` is admitted even though its HIR type is the
     // Unknown a match-or-null has to be. The verifier already accepts an Unknown index target.
-    return notYet('index access on a non-array is not yet supported', 5);
+    // Untyped receivers (plan.md §8 step 4) take the same path.
+    const receiver = checker.getTypeAtLocation(access.expression);
+    return tsTypeToHType(receiver, checker).kind === 'unknown' || isDynamicShape(receiver, checker)
+      ? { kind: 'accept' }
+      : notYet('index access on a non-array is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -2472,7 +2514,8 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
     // another name -- not the await that landed with async functions.
     return generatorNotYet();
   }
-  if (!checker.isArrayType(checker.getTypeAtLocation(statement.expression))) {
+  const iterableType = checker.getTypeAtLocation(statement.expression);
+  if (!checker.isArrayType(iterableType) && (iterableType.flags & ts.TypeFlags.StringLike) === 0) {
     return notYet('for-of over a non-array is not yet supported', 5);
   }
   const initializer = statement.initializer;

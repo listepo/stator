@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: Template literals
 
 const name = "world";

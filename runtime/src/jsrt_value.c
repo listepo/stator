@@ -88,14 +88,23 @@ void jsrt_init(void) {
 
 /* ----------------------------------------------------------------- calls */
 
-jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv) {
+jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv, const char *loc) {
   if (!jsrt_is(callee, JSRT_TAG_CLOSURE)) {
+    if (loc != NULL) {
+      char msg[512];
+      (void)snprintf(msg, sizeof msg, "STA2006: calling a non-function at %s", loc);
+      jsrt_panic(msg);
+    }
     jsrt_panic("TypeError: callee is not a function");
   }
   const JSRTClosure *c = jsrt_as_closure(callee);
   /* `env` is NULL for a non-capturing function; the callee takes the parameter either way, so
    * dispatch here does not have to know which kind it is holding. */
   return c->fn(argc, argv, c->env);
+}
+
+jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv) {
+  return jsrt_call_at(callee, argc, argv, NULL);
 }
 
 /* -------------------------------------------------------------- objects */

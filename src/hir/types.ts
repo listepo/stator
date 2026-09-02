@@ -342,6 +342,13 @@ export function hTypeAssignable(value: HType, target: HType): boolean {
   if (value.kind === 'object' && target.kind === 'object') {
     return value.name === target.name || value.bases.includes(target.name);
   }
+  // Arrays (and the same fact for maps/sets) recurse: `unknown[]` is not kind `unknown`, so the
+  // clause above would not fire, and `hTypeEquals` then rejects two `unknown[]` whose elements
+  // differ only in `fromImplicitAny` — which is exactly `var xs = []` after the hoist splits the
+  // binding from the initializer (plan-notes 146).
+  if (value.kind === 'array' && target.kind === 'array') {
+    return hTypeAssignable(value.element, target.element);
+  }
   return hTypeEquals(value, target);
 }
 

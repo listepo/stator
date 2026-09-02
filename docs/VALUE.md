@@ -588,6 +588,10 @@ Failure ABORTS rather than returning an error value. That is the whole contract:
 compiler emits downstream of a check is entitled to trust the type completely, and a check that
 could be ignored would make that entitlement false.
 
+The same family is what a mixed graph uses: an untyped `.js` value assigned to, passed into, or
+returned as a checkable annotation is wrapped here, not trusted. A lying JSDoc never reaches this
+path — `checkJs` makes that a compile error (`STA0012`).
+
 ---
 
 ## 4.9 Exceptions — the pending cell and the landing-pad protocol (Task 3.10)
@@ -663,10 +667,11 @@ objects — worth building when Phase 5 measures construction-heavy dynamic code
 The subset has no `delete`, so shapes need no removal edges; when deletion lands it gets a
 dictionary-mode escape, not shape surgery. Keys are `const char *` with program lifetime
 (generated C passes string literals; the shape table stores the pointer and compares by pointer
-first, `strcmp` as the backstop for one key spelled at two sites). Dynamic property access on
-anything that is not a dynamic object panics `STA4058` — loudly unimplemented until Phase 5 gives
-fixed-shape objects, primitives and nullish receivers their deliberate dynamic paths, never
-silently wrong.
+first, `strcmp` as the backstop for one key spelled at two sites). Each receiver has a deliberate path: a dynamic object or array walks the shape table; a
+fixed-layout object reads and writes existing fields through its `JSRTClass` descriptor and
+raises `STA2004` if asked to grow a new key (Phase 8); a string answers `"length"` and
+everything else `undefined`; nullish is a TypeError; a primitive write is a TypeError.
+`STA4058` is retired.
 
 Pinned by `runtime/tests/print_shapes.{c,mjs}`: insertion-order printing through the chain,
 overwrite-in-place, undefined-on-miss, shared-IC reads across shape-sharing objects, the
@@ -769,6 +774,59 @@ becomes traced rather than masked, and the frame chain becomes an exact root set
 unboxing pass over one. The discipline that makes that swap runtime-only is already emitted (§4.1).
 
 ---
+
+## 4.13 Iterators — specialized loops first, a protocol object only for user iterables (Phase 5 step 8)
+
+The iterator protocol is one *question* with four *surfaces* (`for-of` over non-arrays,
+`keys`/`values`/`entries`, `matchAll`, `function*`). The representation is decided here before any
+of those surfaces grow a node, so four lowerings do not invent four objects.
+
+### Specialized loops (no protocol object)
+
+A compile-time-known iterable never allocates an iterator. The emitter writes a counted loop
+against the representation the value already has:
+
+| Iterable | Cursor | Yields | Why no object |
+|---|---|---|---|
+| `T[]` | `uint32_t i` vs **current** `length` (already shipped) | `elements[i]` | The array *is* the iterator state |
+| `string` | `uint32_t i` over UTF-16 units, advancing 1 or 2 | one string of the **code point** at `i` (surrogate pairs are one yield — `String.prototype[@@iterator]`, not `charAt`) | The string *is* the iterator state |
+| `Map` | the table's insertion-order chain | `[key, value]` pair (an array of two) | Map already stores that order |
+| `Set` | the same chain | the element | Set is a Map of element → element |
+
+`for (const x of xs)` where `xs` is one of those four types lowers to that loop. `break`/`continue`/
+labels are the existing jump labels. A body that mutates length is visible because the bound is
+re-read, the same rule the array loop already documents.
+
+`arr.keys()` / `arr.values()` / `arr.entries()` (and the Map/Set triples) are the same loops
+exposed as **values**. When the call is the operand of a `for-of`, the loop is inlined and still
+allocates nothing. When the call's result is stored (`const it = arr.keys()`), the runtime boxes
+the cursor in a `JSRTIterator` (below) so `it.next()` is a method on a real object. The boxed form
+is a cursor plus a tag saying which specialized loop it is, not a user-callable `next` closure.
+
+### User iterables — one protocol object
+
+Only a value whose checker type has a `[Symbol.iterator]()` the frontend can see (a generator
+instance, a user class that declares the method, `matchAll`'s answer) allocates:
+
+```c
+typedef struct JSRTIterator {
+  jsrt_value target;   /* the iterable; a GC root */
+  uint32_t index;      /* specialized cursors use this; generators use the resume point */
+  uint8_t kind;        /* array-keys / array-values / array-entries / map / set / string / generator / user */
+} JSRTIterator;
+```
+
+`next()` on this object answers `{ value, done }` — an ordinary two-field shape, not a new HIR
+type. `return`/`throw` on the iterator object are out of scope for the first landing if they fight
+the generator state machine; they get their own not-yet rather than a silent no-op.
+
+Generators (`function*` / `yield`) are this object plus Task 4.6's resume points, with `yield`
+answering the caller instead of the scheduler. `next(v)` lands with the protocol; `return`/`throw`
+on the generator may defer.
+
+`Symbol.iterator` as a *value* stays `STA1212` until the Symbol primitive lands; the specialized
+loops and the `JSRTIterator` tag do not need the symbol as a first-class value, which is why
+`for-of` over an array already compiled without it.
 
 ## 5. What Phase 2 actually implements
 

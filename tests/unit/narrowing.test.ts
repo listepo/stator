@@ -183,3 +183,83 @@ test('a cast to a type no tag settles is dropped, not believed', () => {
   assert.deepEqual(gateCodes(code), []);
   assert.deepEqual(checksIn(code), []);
 });
+
+test('an untyped value reaching an annotated binding is checked', () => {
+  // plan.md §8 step 5: the edge, not provenance. `any` is assignable to `number`, so this
+  // program type-checks; without the wrap the number slot would hold a boxed unknown.
+  const checks = checksIn(`
+    function produce(): any {
+      return 1;
+    }
+    const n: number = produce();
+    console.log(n);
+  `);
+  assert.equal(checks.length, 1);
+  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+  assert.equal(checks[0]?.value.type.kind, 'unknown');
+});
+
+test('an untyped argument reaching an annotated parameter is checked', () => {
+  const checks = checksIn(`
+    function use(n: number): number {
+      return n + 1;
+    }
+    function produce(): any {
+      return 1;
+    }
+    console.log(use(produce()));
+  `);
+  assert.equal(checks.length, 1);
+  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+});
+
+test('an untyped value reaching an annotated return is checked', () => {
+  const checks = checksIn(`
+    function produce(): any {
+      return 1;
+    }
+    function use(): number {
+      return produce();
+    }
+    console.log(use());
+  `);
+  assert.equal(checks.length, 1);
+  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+});
+
+test('assigning an untyped value into an annotated binding is checked', () => {
+  const checks = checksIn(`
+    function produce(): any {
+      return 1;
+    }
+    let n: number = 0;
+    n = produce();
+    console.log(n);
+  `);
+  assert.equal(checks.length, 1);
+  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+});
+
+test('a JSDoc-annotated binding in .js is the same edge', () => {
+  const { module, diagnostics } = lowerSource(
+    `
+      function produce(x) {
+        return x;
+      }
+      /** @type {number} */
+      const n = produce("1");
+      console.log(n);
+    `,
+    '/test.js',
+  );
+  assert.deepEqual(
+    diagnostics.map((d) => d.code),
+    [],
+    'lowering should be clean',
+  );
+  const checks = hirNodes(module.statements).filter(
+    (n): n is BoundaryCheck => n.kind === 'boundary-check',
+  );
+  assert.equal(checks.length, 1);
+  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+});

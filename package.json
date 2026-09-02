@@ -21,6 +21,7 @@
     "lint": "biome check --error-on-warnings .",
     "format": "biome check --write .",
     "test": "node --test \"tests/unit/*.test.ts\"",
+    "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include-all --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info \"tests/unit/*.test.ts\"",
     "test:subset": "node tests/subset/run.ts",
     "test:golden": "node tests/golden/run.ts",
     "bench:record": "node tests/bench/record.ts",
@@ -31,7 +32,7 @@
     "runtime": "make -C runtime",
     "vendor:update": "node runtime/vendor/update.mjs",
     "dupes": "cpd .",
-    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run runtime && pnpm run test && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
+    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run runtime && pnpm run test:coverage && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
     "test:builtins": "node tests/golden/builtins.ts"
   },
   "dependencies": {

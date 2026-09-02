@@ -1,71 +1,34 @@
 # ARCHITECTURE.md — how Stator works (diagrams)
 
 UML-style views of the pipeline defined in `plan.md` §2. That section is the authority; these
-diagrams visualize it and may not contradict it. Mermaid renders natively on GitHub — no tooling.
+diagrams visualize it and may not contradict it.
+
+Diagram **source** is D2 in [`architecture/`](architecture/) (not Mermaid). The SVGs next to the
+`.d2` files are the GitHub-visible render. After editing a `.d2` file, regenerate:
+
+```
+d2 --layout=elk docs/architecture/pipeline.d2 docs/architecture/pipeline.svg
+d2 docs/architecture/build.d2 docs/architecture/build.svg
+d2 --layout=elk docs/architecture/packages.d2 docs/architecture/packages.svg
+d2 docs/architecture/values.d2 docs/architecture/values.svg
+```
+
+`d2` is a docs tool (`brew install d2`), not part of `pnpm run ci`.
 
 ## 1. Compile pipeline (component view)
 
 One pipeline, two modes. Mode is a policy layer at the frontend gate; nothing below it knows the
 mode existed (plan §0.8).
 
-```mermaid
-flowchart TD
-    SRC["entry.ts / entry.js<br/>(+ module graph)"] --> TSC
+![Compile pipeline](architecture/pipeline.svg)
 
-    subgraph FRONTEND["src/frontend/ — the only place ts.Type may appear"]
-        TSC["ts.createProgram<br/>(typescript npm pkg, in-process;<br/>Stator owns compilerOptions)"]
-        TSC --> AST["ts.SourceFile ASTs"]
-        TSC --> CHK["TypeChecker"]
-        AST --> GATE
-        CHK --> GATE["mode policy gate (ts | js)<br/>file acceptance · subset/mode diagnostics · verdicts"]
-    end
-
-    GATE --> LOWER["src/lower/ — TS AST → HIR"]
-
-    subgraph MIDDLE["mode-blind middle end"]
-        LOWER --> HIR["Typed HIR (src/hir/)<br/>every node carries an HType;<br/>Unknown is a first-class HType"]
-        HIR --> PASSES["src/passes/: monomorphize · shape-resolve ·<br/>boundary-check insert · const-fold · DCE/tree-shake · inline<br/>(HIR verifier after each, debug builds)"]
-    end
-
-    PASSES --> EMIT["C emitter (src/codegen/)<br/>#line source maps · JSRT_FRAME rooting"]
-    EMIT --> CLANG["clang -O2"]
-    CLANG --> LINK["link runtime/build/libjsrt.a"]
-    LINK --> BIN["native binary"]
-
-    subgraph RUNTIME["runtime/ (C11)"]
-        RT["NaN-boxed jsrt_value · Boehm GC (v0) →<br/>precise generational (§12) · builtins ·<br/>QuickJS-NG libregexp · shortest-round-trip dtoa"]
-    end
-    RT --> LINK
-```
+Source: [`architecture/pipeline.d2`](architecture/pipeline.d2)
 
 ## 2. A `stator build` invocation (sequence view)
 
-```mermaid
-sequenceDiagram
-    participant CLI as src/cli
-    participant FE as src/frontend
-    participant TS as typescript pkg
-    participant LO as src/lower
-    participant HIR as src/hir (verifier)
-    participant PA as src/passes
-    participant CG as src/codegen
-    participant CC as clang
+![Build sequence](architecture/build.svg)
 
-    CLI->>FE: build(entry, mode)
-    FE->>TS: ts.createProgram(entry, locked compilerOptions)
-    TS-->>FE: SourceFiles + TypeChecker
-    FE->>FE: gate: accept files, apply mode policy,<br/>emit STA diagnostics / verdicts
-    Note over FE: ts.Type → HType here; ts.Type never leaks past frontend
-    FE->>LO: gated AST + HTypes
-    LO->>HIR: typed HIR
-    loop each pass
-        PA->>HIR: transform
-        HIR-->>PA: verify (debug builds)
-    end
-    PA->>CG: final HIR
-    CG->>CC: C source (#line maps, JSRT_FRAME discipline)
-    CC-->>CLI: object code, linked with libjsrt.a → native binary
-```
+Source: [`architecture/build.d2`](architecture/build.d2)
 
 Diagnostics short-circuit: any `STA` error at the gate stops the build with code + span + mode;
 `stator explain` runs the same front half and reports per-construct verdicts
@@ -75,20 +38,9 @@ Diagnostics short-circuit: any `STA` error at the gate stops the build with code
 
 Arrows mean "imports from". The two structural invariants are the point of this diagram.
 
-```mermaid
-flowchart LR
-    cli[src/cli] --> frontend[src/frontend]
-    cli --> support[src/support<br/>diagnostics engine]
-    frontend --> hir[src/hir<br/>HType + HIR + verifier]
-    frontend --> support
-    lower[src/lower] --> hir
-    lower --> support
-    passes[src/passes] --> hir
-    codegen[src/codegen] --> hir
-    codegen -. emits C against .-> jsrt["runtime/include/jsrt_value.h<br/>(mirrors docs/VALUE.md —<br/>the codegen↔runtime contract)"]
+![Package dependencies](architecture/packages.svg)
 
-    tsp[typescript pkg] --> frontend
-```
+Source: [`architecture/packages.d2`](architecture/packages.d2)
 
 Invariants:
 - **`ts.Type` stops at `src/frontend/`** — everything downstream speaks HType only.
@@ -100,12 +52,6 @@ Invariants:
 
 Why typed code is fast and untyped code still works (plan §1, §2):
 
-```mermaid
-flowchart TD
-    V[value] --> Q{statically typed<br/>and trusted?}
-    Q -- "yes (checked .ts code)" --> RAW["raw machine value<br/>(unboxed i32 / f64 / struct field)"]
-    Q -- "no (unknown, union, JSON.parse,<br/>FFI, .js → .ts import)" --> BOX["NaN-boxed jsrt_value<br/>(tag + 48-bit payload)"]
-    BOX --> NARROW{runtime boundary check<br/>at the narrowing point}
-    NARROW -- passes --> RAW
-    NARROW -- fails --> ERR["STA2001 runtime type error<br/>with source location"]
-```
+![Value flow at a type boundary](architecture/values.svg)
+
+Source: [`architecture/values.d2`](architecture/values.d2)

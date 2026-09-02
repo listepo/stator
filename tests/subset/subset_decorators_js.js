@@ -5,6 +5,7 @@
 // SUBSET.md: Decorators
 
 function dec() {}
+@dec
 class C {
   x = 42;
 }

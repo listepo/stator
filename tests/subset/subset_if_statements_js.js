@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: static
-// @expected-fail: true
+// @verdict: dynamic
 // SUBSET.md: if statements
 
 function test(x) {

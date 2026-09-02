@@ -8,6 +8,7 @@
   "ignore": [
     "**/node_modules/**",
     "dist/**",
+    "coverage/**",
     "runtime/build*/**",
     "runtime/vendor/**",
     "tests/subset/subset_*",
@@ -15,6 +16,7 @@
     "tests/subset/cycle_partner_*",
     "tests/golden/ts/**",
     "tests/golden/js/**",
-    "tests/differential/**"
+    "tests/differential/**",
+    "docs/architecture/**"
   ]
 }

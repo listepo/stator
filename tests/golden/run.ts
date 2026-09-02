@@ -7,7 +7,7 @@
  * comparison to make it pass.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,25 @@ const PINNED_ENV = { ...process.env, TZ: 'UTC' };
  * `pnpm run ci` stays green without ICU and `pnpm run test:intl` is what turns them on. */
 const INTL = process.env['STATOR_RUNTIME'] === 'intl';
 
+/** A directory's entry is `main.<mode>`, except a js-mode mixed graph may enter at `main.ts`.
+ *
+ * js mode compiles TypeScript (plan.md §8 step 5): the point of that fixture is a `.ts` file
+ * importing an untyped `.js` module, and looking only for `main.js` would skip it. */
+function fixtureEntry(dir: string, name: string, mode: 'ts' | 'js'): string {
+  if (name.endsWith(`.${mode}`)) {
+    return join(dir, name);
+  }
+  const folder = join(dir, name);
+  const preferred = join(folder, `main.${mode}`);
+  if (mode === 'js' && !existsSync(preferred)) {
+    const tsEntry = join(folder, 'main.ts');
+    if (existsSync(tsEntry)) {
+      return tsEntry;
+    }
+  }
+  return preferred;
+}
+
 function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: string }[] {
   const dir = join(HERE, mode);
   let names: string[];
@@ -42,7 +61,7 @@ function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: s
   } catch {
     return [];
   }
-  // A DIRECTORY is a multi-file fixture: its entry point is `main.<mode>` and the other
+  // A DIRECTORY is a multi-file fixture: its entry point is `main.<mode>` (or `main.ts` in js mode) and the other
   // files in it are modules the entry imports. Stator compiles the whole graph from the
   // entry; Node likewise runs just the entry — both resolve the imports themselves.
   return names
@@ -56,7 +75,7 @@ function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: s
     .map((name) => ({
       mode,
       name,
-      path: name.endsWith(`.${mode}`) ? join(dir, name) : join(dir, name, `main.${mode}`),
+      path: fixtureEntry(dir, name, mode),
     }));
 }
 

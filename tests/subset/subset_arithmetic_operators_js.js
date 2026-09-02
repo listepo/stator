@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: Arithmetic operators: +, -, *, /, %
 
 const c = 5 + 3;

@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: dynamic
-// @expected-fail: true
+// @verdict: static
 // SUBSET.md: Bitwise operators: &, |, ^, <<, >>, >>>
 
 const c = 5 & 3;

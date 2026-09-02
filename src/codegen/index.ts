@@ -1219,7 +1219,11 @@ class Emitter {
         this.appendLine(`${target} = ${this.emitExpression(stmt.target)};`, stmt.span);
         this.appendLine(`${index} = ${this.emitExpression(stmt.index)};`, stmt.span);
         this.appendLine(`${value} = ${this.emitExpression(stmt.value)};`, stmt.span);
-        this.appendLine(`jsrt_array_set(${target}, ${index}, ${value});`, stmt.span);
+        const set =
+          stmt.target.type.kind === 'unknown'
+            ? `jsrt_dyn_index_set(${target}, ${index}, ${value}, NULL)`
+            : `jsrt_array_set(${target}, ${index}, ${value})`;
+        this.appendLine(`${set};`, stmt.span);
         break;
       }
 
@@ -1228,22 +1232,36 @@ class Emitter {
         if (slot === undefined) {
           throw new Error('for-of has no iterable slot; countBindings missed a node');
         }
-        const array = this.slotAt(slot);
-        this.appendLine(`${array} = ${this.emitExpression(stmt.iterable)};`, stmt.span);
+        const iterable = this.slotAt(slot);
+        this.appendLine(`${iterable} = ${this.emitExpression(stmt.iterable)};`, stmt.span);
         const id = this.enterLoop(stmt.label);
-        // The length is re-read every iteration, not hoisted: the array iterator compares the
-        // cursor against the CURRENT length on each step, so a body that shortens the array must
-        // stop early. Hoisting it would walk off the end of a shrunk array.
         const cursor = `jsrt_iter_${id}`;
-        this.appendLine(
-          `for (uint32_t ${cursor} = 0; ${cursor} < jsrt_as_array(${array})->length; ${cursor}++) {`,
-          stmt.span,
-        );
-        this.indent++;
-        this.appendLine(
-          `${this.slotRef(stmt.binding)} = jsrt_as_array(${array})->elements[${cursor}];`,
-          stmt.span,
-        );
+        if (stmt.iterable.type.kind === 'string') {
+          // Strings are immutable, so bounding on length is safe. The cursor advances 1 or 2
+          // units per step — one code point, matching String.prototype[@@iterator].
+          this.appendLine(
+            `for (uint32_t ${cursor} = 0; ${cursor} < jsrt_string_length(${iterable}); ) {`,
+            stmt.span,
+          );
+          this.indent++;
+          this.appendLine(
+            `${this.slotRef(stmt.binding)} = jsrt_string_iter_next(${iterable}, &${cursor});`,
+            stmt.span,
+          );
+        } else {
+          // The length is re-read every iteration, not hoisted: the array iterator compares the
+          // cursor against the CURRENT length on each step, so a body that shortens the array must
+          // stop early. Hoisting it would walk off the end of a shrunk array.
+          this.appendLine(
+            `for (uint32_t ${cursor} = 0; ${cursor} < jsrt_as_array(${iterable})->length; ${cursor}++) {`,
+            stmt.span,
+          );
+          this.indent++;
+          this.appendLine(
+            `${this.slotRef(stmt.binding)} = jsrt_as_array(${iterable})->elements[${cursor}];`,
+            stmt.span,
+          );
+        }
         for (const s of stmt.body.statements) {
           this.emitStatement(s);
         }
@@ -1803,7 +1821,10 @@ class Emitter {
         const parts: string[] = [];
         this.sequencePart(parts, expr.target, expr.span, (v) => `${target} = ${v}`);
         this.sequencePart(parts, expr.index, expr.span, (v) => `${index} = ${v}`);
-        const read = `jsrt_array_get(${target}, ${index})`;
+        const read =
+          expr.target.type.kind === 'unknown'
+            ? `jsrt_dyn_index_get(${target}, ${index}, NULL)`
+            : `jsrt_array_get(${target}, ${index})`;
         if (parts.length === 2) {
           return `(${parts.join(', ')}, ${read})`;
         }
@@ -1831,8 +1852,9 @@ class Emitter {
           );
         });
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
+        const loc = this.callLocation(expr.span);
         parts.push(
-          `${this.slotAt(base)} = jsrt_call(${this.slotAt(base)}, ${expr.args.length}, ${argv})`,
+          `${this.slotAt(base)} = jsrt_call_at(${this.slotAt(base)}, ${expr.args.length}, ${argv}, ${loc})`,
         );
         this.flushParts(parts, expr.span);
         this.emitPendingCheck(expr.span);
@@ -2364,6 +2386,14 @@ class Emitter {
     const name = `_jsrt_ic_${String(this.icCount)}`;
     this.icCount += 1;
     return name;
+  }
+
+  /** `file:line` baked into `jsrt_call_at` so a non-function callee names the site (STA2006).
+   * Column is not on `Span` by design (docs/HIR.md BoundaryCheck): the emitter has no source
+   * text, and growing every node for one human-facing trap is the trade the IR already refused. */
+  private callLocation(span: Span): string {
+    const file = this.escapeFilePath(span.file ?? this.fileName);
+    return `"${file}:${String(span.line)}"`;
   }
 
   private registerShape(expr: ObjectLiteral): void {

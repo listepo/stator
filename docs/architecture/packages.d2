@@ -1,0 +1,33 @@
+# Module dependencies — package view of plan.md §2.
+# Arrows mean "imports from". Two invariants: ts.Type stops at frontend; mode stops at the gate.
+
+...@theme
+
+direction: right
+
+cli: src/cli
+frontend: src/frontend
+support: "src/support\ndiagnostics engine"
+hir: "src/hir\nHType + HIR + verifier"
+lower: src/lower
+passes: src/passes
+codegen: src/codegen
+jsrt: {
+  label: "runtime/include/jsrt_value.h\n(mirrors docs/VALUE.md —\nthe codegen↔runtime contract)"
+  shape: parallelogram
+}
+tsp: "typescript pkg"
+
+cli -> frontend
+cli -> support
+frontend -> hir
+frontend -> support
+frontend -> tsp
+lower -> hir
+lower -> support
+passes -> hir
+codegen -> hir
+codegen -> jsrt: {
+  style.stroke-dash: 3
+  label: "emits C against"
+}

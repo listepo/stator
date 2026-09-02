@@ -121,27 +121,89 @@ void test('a relative entry path resolves its imports (module graph is cwd-indep
   }
 });
 
-// Task 4.1's honesty clause: structural aliasing can hand a FIXED-shape object to a dynamic
-// property site — `b`'s annotation says shape table, `a`'s literal built a layout, and the checker
-// blesses the assignment. Answering the read would require guessing a slot; the runtime aborts
-// with the not-yet instead (golden rule 4: loudly unimplemented beats silently wrong).
+// Phase 5 step 4 lifted STA2004 for *reads* of an existing field: the shape-table entry points
+// walk the class descriptor. Growing a NEW key on a fixed layout still cannot invent a slot, so
+// that write stays STA2004 (Phase 8).
+void test('a fixed-shape object answers an aliased read of an existing field', NATIVE_ONLY, () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
+  try {
+    const entry = join(work, 'alias.ts');
+    writeFileSync(
+      entry,
+      'const a: { x: number } = { x: 1 };\nconst b: { x?: number } = a;\nconsole.log(b.x);\n',
+    );
+    const binary = join(work, 'alias');
+    const build = stator('build', entry, '-o', binary);
+    assert.equal(build.status, 0, build.stderr);
+    const run = spawnSync(binary, [], { encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout, '1\n');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+void test('adding a new key to a fixed-shape object still aborts with STA2004', NATIVE_ONLY, () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
+  try {
+    const entry = join(work, 'grow.ts');
+    writeFileSync(
+      entry,
+      'const a: { x: number } = { x: 1 };\nconst b: { x?: number; y?: number } = a;\nb.y = 2;\nconsole.log(b.y);\n',
+    );
+    const binary = join(work, 'grow');
+    const build = stator('build', entry, '-o', binary);
+    assert.equal(build.status, 0, build.stderr);
+    const run = spawnSync(binary, [], { encoding: 'utf8' });
+    assert.notEqual(run.status, 0, 'growing a fixed layout must abort, never invent a slot');
+    assert.match(run.stderr, /STA2004/);
+    assert.equal(run.stdout, '', 'nothing may print before the abort');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 void test(
-  'a fixed-shape object reaching a dynamic site aborts with STA2004, not a wrong answer',
+  'calling a non-function through an Unknown callee aborts with STA2006 at the site',
   NATIVE_ONLY,
   () => {
     const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
     try {
-      const entry = join(work, 'alias.ts');
-      writeFileSync(
-        entry,
-        'const a: { x: number } = { x: 1 };\nconst b: { x?: number } = a;\nconsole.log(b.x);\n',
-      );
-      const binary = join(work, 'alias');
-      const build = stator('build', entry, '-o', binary);
+      const entry = join(work, 'call.js');
+      writeFileSync(entry, 'function f(g) {\n  return g(1);\n}\nconsole.log(f(1));\n');
+      const binary = join(work, 'call');
+      const build = stator('build', entry, '-o', binary, '--mode=js');
       assert.equal(build.status, 0, build.stderr);
       const run = spawnSync(binary, [], { encoding: 'utf8' });
-      assert.notEqual(run.status, 0, 'the aliased read must abort, never answer');
-      assert.match(run.stderr, /STA2004/);
+      assert.notEqual(run.status, 0, 'a non-function callee must abort, never jump');
+      assert.match(run.stderr, /STA2006/);
+      assert.match(run.stderr, /call\.js:2/);
+      assert.equal(run.stdout, '', 'nothing may print before the abort');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  },
+);
+
+void test(
+  'a dynamic value reaching an annotated .ts binding aborts with STA2001',
+  NATIVE_ONLY,
+  () => {
+    const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
+    try {
+      writeFileSync(join(work, 'wrap.js'), 'export function wrap(x) {\n  return x;\n}\n');
+      const entry = join(work, 'main.ts');
+      writeFileSync(
+        entry,
+        'import { wrap } from "./wrap.js";\nconst factor: number = wrap("10");\nconsole.log(factor);\n',
+      );
+      const binary = join(work, 'main');
+      const build = stator('build', entry, '-o', binary, '--mode=js');
+      assert.equal(build.status, 0, build.stderr);
+      const run = spawnSync(binary, [], { encoding: 'utf8' });
+      assert.notEqual(run.status, 0, 'a string in a number slot must abort, never print');
+      assert.match(run.stderr, /STA2001/);
+      assert.match(run.stderr, /main\.ts:2/);
       assert.equal(run.stdout, '', 'nothing may print before the abort');
     } finally {
       rmSync(work, { recursive: true, force: true });
@@ -206,6 +268,27 @@ void test('explain --json grades every function typed, inferred or dynamic', () 
         { name: 'halfWritten', line: 7, provenance: 'inferred', verdict: 'static' },
         { name: 'none', line: 8, provenance: 'dynamic', verdict: 'dynamic' },
       ],
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+void test('a fully JSDoc-annotated .js module has file verdict static', () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-jsdoc-'));
+  try {
+    const entry = join(work, 'freebie.js');
+    writeFileSync(
+      entry,
+      '/**\n * @param {number} x\n * @returns {number}\n */\n' +
+        'function double(x) {\n  return x * 2;\n}\n' +
+        'console.log(double(21));\n',
+    );
+    const explained = stator('explain', entry, '--mode=js', '--json');
+    assert.equal(explained.status, 0, explained.stderr);
+    assert.deepEqual(JSON.parse(explained.stdout), {
+      verdict: 'static',
+      functions: [{ name: 'double', line: 5, provenance: 'typed', verdict: 'static' }],
     });
   } finally {
     rmSync(work, { recursive: true, force: true });

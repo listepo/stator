@@ -18,6 +18,7 @@ import {
   isMatchReceiver,
   isRegExpReceiver,
   isStringReceiver,
+  isVarDeclarationList,
   MATH_CONSTANTS,
   MATH_METHODS,
   OBJECT_STATICS,
@@ -37,6 +38,7 @@ import {
   isDynamicShape,
   isStaticMember,
   methodDeclaringClass,
+  objectLiteralIsDynamic,
   staticMemberOf,
   tsTypeToHType,
 } from '../frontend/types.ts';
@@ -119,7 +121,7 @@ import {
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
-import { analyzeCaptures } from './captures.ts';
+import { analyzeCaptures, isFunctionLike } from './captures.ts';
 
 /** Token -> HIR operator. A table rather than a chain of `if`s so that the gate's accept set and
  * the HIR's vocabulary can be compared against it by eye: a token the gate lets through and this
@@ -202,6 +204,20 @@ export function lowerProgram(
       for (const specialization of specializations) {
         bindings.set(specialization.name, specializationType(specialization, checker));
       }
+      // Functions first, then `var`: a `var x` that shares a name with a function declaration
+      // does not reinitialize the slot to `undefined` (the spec instantiates the function, then
+      // skips the var). Registering functions above and skipping already-bound names in the
+      // hoist is that order.
+      const hoistedVars = hoistVarDeclarations(
+        sourceFile,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      if (hoistedVars === null) {
+        return { module: null, diagnostics };
+      }
 
       for (const specialization of specializations) {
         const declaration = lowerSpecialization(
@@ -216,6 +232,7 @@ export function lowerProgram(
         }
         statements.push(declaration);
       }
+      statements.push(...hoistedVars);
       for (const node of sourceFile.statements) {
         // A generic declaration lowers to nothing: its specializations are already above, and the
         // name itself binds no value (the gate refuses reading one).
@@ -508,7 +525,11 @@ function lowerStatement(
       if (lowered === null) {
         return null;
       }
-      value = lowered;
+      const contextual = checker.getContextualType(node.expression);
+      value =
+        contextual === undefined
+          ? lowered
+          : maybeBoundary(lowered, tsTypeToHType(contextual, checker), node.expression, sourceFile);
     }
     const statement: ReturnStatement = {
       kind: 'return-statement',
@@ -546,6 +567,49 @@ function lowerStatement(
   return null;
 }
 
+/** Check each argument against the callee's parameter types — a dynamic value reaching an
+ * annotated parameter is the call-shaped form of the same edge `maybeBoundary` wraps. */
+function checkCallArgs(
+  callee: Expression,
+  args: Expression[],
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+): Expression[] {
+  const signature = callee.type;
+  if (signature.kind !== 'fn') {
+    return args;
+  }
+  return args.map((arg, i) => {
+    const expected = signature.params[i];
+    const site = node.arguments[i];
+    if (expected === undefined || site === undefined) {
+      return arg;
+    }
+    return maybeBoundary(arg, expected, site, sourceFile);
+  });
+}
+
+/** Wrap `value` in a BoundaryCheck when it is Unknown and `expected` is a tag the runtime
+ * can settle (plan.md §8 step 5). This is the EDGE: a dynamic value reaching an annotated
+ * binding. A lying JSDoc never gets here — checkJs makes that a compile error. */
+function maybeBoundary(
+  value: Expression,
+  expected: HType,
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+): Expression {
+  if (value.type.kind !== 'unknown' || !isCheckable(expected)) {
+    return value;
+  }
+  return {
+    kind: 'boundary-check',
+    type: expected,
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    value,
+    where: sourceLocation(node, sourceFile),
+  };
+}
+
 /** `let x = 1` / `const x = 1`, from either a statement or a `for` header's first slot.
  *
  * `at` is the node the span comes from — the whole VariableStatement at statement level, and the
@@ -568,6 +632,10 @@ function lowerDeclarationList(
   if (!list.declarations || list.declarations.length === 0) {
     return fail(at, 'empty variable declaration list');
   }
+  if (isVarDeclarationList(list)) {
+    return lowerVarList(list, at, sourceFile, checker, bindings, diagnostics, fail);
+  }
+
   // One binding per Declaration node, so `let a = 1, b = 2;` has nowhere to go yet.
   if (list.declarations.length > 1) {
     return fail(at, 'multiple declarations in one statement not supported');
@@ -578,8 +646,8 @@ function lowerDeclarationList(
   }
 
   const name = decl.name.getText(sourceFile);
-  const value = lowerExpression(decl.initializer, sourceFile, checker, bindings, diagnostics);
-  if (!value) {
+  const lowered = lowerExpression(decl.initializer, sourceFile, checker, bindings, diagnostics);
+  if (!lowered) {
     return null;
   }
 
@@ -589,6 +657,7 @@ function lowerDeclarationList(
   // let a later pass unbox a slot that can hold a string.
   const type = typeAt(decl.name, checker, bindings);
   bindings.set(name, type);
+  const value = maybeBoundary(lowered, type, decl.initializer, sourceFile);
 
   const stmt: Declaration = {
     kind: 'declaration',
@@ -961,7 +1030,10 @@ function assignmentParts(
       name: target,
     };
     const value = make(current);
-    return value === null ? null : { target, value };
+    if (value === null) {
+      return null;
+    }
+    return { target, value: maybeBoundary(value, binding, targetNode, sourceFile) };
   };
 
   if (ts.isBinaryExpression(expr)) {
@@ -1161,7 +1233,10 @@ function memberAssignment(
         ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
         : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
     };
-  } else if (isDynamicShape(checker.getTypeAtLocation(targetNode.expression), checker)) {
+  } else if (
+    isDynamicShape(checker.getTypeAtLocation(targetNode.expression), checker) ||
+    typeAt(targetNode.expression, checker, bindings).kind === 'unknown'
+  ) {
     // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). Only plain `=`
     // reaches here -- the gate refused the compound and update forms -- so `current` is never
     // read; it is built anyway so the two halves of a place stay one shape.
@@ -1506,7 +1581,9 @@ function lowerExpression(
   // property reads as `undefined`, and narrowing it back is the caller's job, like a Map get.
   if (
     ts.isPropertyAccessExpression(node) &&
-    isDynamicShape(checker.getTypeAtLocation(node.expression), checker)
+    !isMatchReceiver(node.expression, checker) &&
+    (isDynamicShape(checker.getTypeAtLocation(node.expression), checker) ||
+      typeAt(node.expression, checker, bindings).kind === 'unknown')
   ) {
     const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (target === null) {
@@ -1721,8 +1798,7 @@ function lowerExpression(
     // `const o: { x?: number } = { x: 1 }` the literal's own type is a layout, but every later
     // read of `o` goes through the annotation -- so the object must be the dynamic one those
     // reads resolve against (same reasoning, same order, as gateObjectLiteral).
-    const decisive = checker.getContextualType(node) ?? checker.getTypeAtLocation(node);
-    if (isDynamicShape(decisive, checker)) {
+    if (objectLiteralIsDynamic(node, checker)) {
       return { kind: 'dyn-object-literal', type: hUnknown(false), span, entries };
     }
     const type = typeAt(node, checker, bindings);
@@ -2536,7 +2612,7 @@ function lowerExpression(
       type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       callee,
-      args,
+      args: checkCallArgs(callee, args, node, sourceFile),
     };
     return call;
   }
@@ -2569,6 +2645,118 @@ function hoistFunctionDeclarations(
       bindings.set(statement.name.text, typeAt(statement, checker, bindings));
     }
   }
+}
+
+/** Every `var` in `root` that belongs to this function/module, as hoisted `let`s.
+ *
+ * Nested functions are skipped: each one hoists its own vars when it is lowered. Names already
+ * in `bindings` (a parameter, a function declaration) are the spec's "already instantiated"
+ * case — the var shares that slot, so there is no second declaration and no `undefined` init.
+ * The original site still becomes an assignment when it has an initializer. */
+function hoistVarDeclarations(
+  root: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+): Statement[] | null {
+  const seen = new Set<string>();
+  const hoisted: Statement[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (node !== root && isFunctionLike(node)) {
+      return;
+    }
+    if (ts.isVariableDeclarationList(node) && isVarDeclarationList(node)) {
+      for (const decl of node.declarations) {
+        if (!ts.isIdentifier(decl.name)) {
+          diagnostics.push(
+            diagnosticFromNode(
+              decl,
+              sourceFile,
+              'STA4032',
+              'internal',
+              'ts',
+              'var binding is not an identifier',
+            ),
+          );
+          return;
+        }
+        const name = decl.name.text;
+        if (seen.has(name) || bindings.has(name)) {
+          seen.add(name);
+          continue;
+        }
+        seen.add(name);
+        const type = typeAt(decl.name, checker, bindings);
+        bindings.set(name, type);
+        const span = makeSpan(decl.getStart(sourceFile), decl.getWidth(sourceFile), sourceFile);
+        const stmt: Declaration = {
+          kind: 'declaration',
+          type,
+          span,
+          name,
+          declKind: 'let',
+          value: { kind: 'undefined-literal', type: H_UNDEFINED, span },
+        };
+        hoisted.push(stmt);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return hoisted;
+}
+
+/** A `var` list at its original site: assignments for initializers, a no-op otherwise.
+ *
+ * The slot already exists — `hoistVarDeclarations` created it, or a parameter/function of the
+ * same name already owns it. Multiple names in one statement become a block of assignments
+ * because HIR Declaration is one name; `var a = 1, b = 2` is two writes, not two slots. */
+function lowerVarList(
+  list: ts.VariableDeclarationList,
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+  diagnostics: Diagnostic[],
+  fail: (target: ts.Node, message: string) => null,
+): Statement | null {
+  const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
+  const parts: Statement[] = [];
+  for (const decl of list.declarations) {
+    if (!ts.isIdentifier(decl.name)) {
+      return fail(decl, 'var binding is not an identifier');
+    }
+    const name = decl.name.text;
+    if (!bindings.has(name)) {
+      return fail(decl, `var '${name}' was not hoisted`);
+    }
+    if (decl.initializer === undefined) {
+      continue;
+    }
+    const lowered = lowerExpression(decl.initializer, sourceFile, checker, bindings, diagnostics);
+    if (!lowered) {
+      return null;
+    }
+    const expected = bindings.get(name);
+    const value =
+      expected === undefined
+        ? lowered
+        : maybeBoundary(lowered, expected, decl.initializer, sourceFile);
+    parts.push({
+      kind: 'assignment',
+      type: value.type,
+      span: makeSpan(decl.getStart(sourceFile), decl.getWidth(sourceFile), sourceFile),
+      target: name,
+      value,
+    });
+  }
+  if (parts.length === 1) {
+    const only = parts[0];
+    return only === undefined ? { kind: 'block', type: H_UNDEFINED, span, statements: [] } : only;
+  }
+  return { kind: 'block', type: H_UNDEFINED, span, statements: parts };
 }
 
 /** The one lowering for all three function spellings.
@@ -3303,7 +3491,19 @@ function lowerFunctionBody(
     return null;
   }
   if (ts.isBlock(body)) {
-    return lowerBlock(body, sourceFile, checker, bindings, diagnostics);
+    hoistFunctionDeclarations(body.statements, checker, bindings);
+    const hoistedVars = hoistVarDeclarations(body, sourceFile, checker, bindings, diagnostics);
+    if (hoistedVars === null) {
+      return null;
+    }
+    const lowered = lowerBlock(body, sourceFile, checker, bindings, diagnostics);
+    if (lowered === null) {
+      return null;
+    }
+    if (hoistedVars.length === 0) {
+      return lowered;
+    }
+    return { ...lowered, statements: [...hoistedVars, ...lowered.statements] };
   }
   const value = lowerExpression(body, sourceFile, checker, bindings, diagnostics);
   if (value === null) {

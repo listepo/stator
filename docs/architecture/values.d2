@@ -1,0 +1,35 @@
+# Value flow at a type boundary — activity view of plan.md §1 and §2.
+# Typed code is fast because it is unboxed; untyped code still works because it is boxed until a check.
+
+...@theme
+
+direction: down
+
+v: value
+q: {
+  label: "statically typed\nand trusted?"
+  shape: diamond
+}
+raw: {
+  label: "raw machine value\n(unboxed i32 / f64 / struct field)"
+  class: fast
+}
+box: {
+  label: "NaN-boxed jsrt_value\n(tag + 48-bit payload)"
+  class: boxed
+}
+narrow: {
+  label: "runtime boundary check\nat the narrowing point"
+  shape: diamond
+}
+err: {
+  label: "STA2001 runtime type error\nwith source location"
+  class: err
+}
+
+v -> q
+q -> raw: "yes (checked .ts code)"
+q -> box: "no (unknown, union, JSON.parse,\nFFI, .js → .ts import)"
+box -> narrow
+narrow -> raw: passes
+narrow -> err: fails

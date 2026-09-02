@@ -177,15 +177,15 @@ void test('a call dispatches to jsrt_call with its own argc, and passes NULL whe
   const declareF = fnDecl('f', [], block([]));
 
   const noArgs = emitC(makeModule([declareF, exprStmt(call(id('f', H_NUMBER)), H_NUMBER)]));
-  assert.match(noArgs, /jsrt_call\([^,]+, 0, NULL\)/);
+  assert.match(noArgs, /jsrt_call_at\([^,]+, 0, NULL, "/);
 
   // With arguments, argv points into the rooted slot run rather than at a C array literal, whose
   // storage the collector would not know about.
   const twoArgs = emitC(
     makeModule([declareF, exprStmt(call(id('f', H_NUMBER), [num(1), num(2)]), H_NUMBER)]),
   );
-  assert.match(twoArgs, /jsrt_call\([^,]+, 2, &/);
-  assert.doesNotMatch(twoArgs, /jsrt_call\([^,]+, 2, \(jsrt_value\[\]\)/);
+  assert.match(twoArgs, /jsrt_call_at\([^,]+, 2, &/);
+  assert.doesNotMatch(twoArgs, /jsrt_call_at\([^,]+, 2, \(jsrt_value\[\]\)/);
 });
 
 void test('a call evaluates arguments left to right, and dispatches only once all are rooted', () => {
@@ -516,4 +516,47 @@ void test('dynamic objects emit shape-table calls with per-site inline caches', 
   // File-scope, static, zero-initialized: a NULL shape IS the empty cache.
   assert.match(c, /static JSRTIC _jsrt_ic_0;/);
   assert.match(c, /static JSRTIC _jsrt_ic_1;/);
+});
+
+void test('an Unknown index site emits jsrt_dyn_index_* with a per-site cache', () => {
+  const unknown = hUnknown(false);
+  const s = span(1);
+  const target = id('o', unknown);
+  const index = str('x');
+  const module = makeModule([
+    decl(
+      'o',
+      {
+        kind: 'dyn-object-literal',
+        type: unknown,
+        span: s,
+        entries: [],
+      },
+      'let',
+      unknown,
+    ),
+    exprStmt(
+      {
+        kind: 'index-access',
+        type: unknown,
+        span: s,
+        target,
+        index,
+      },
+      unknown,
+    ),
+    {
+      kind: 'index-assignment',
+      type: H_NUMBER,
+      span: s,
+      target,
+      index,
+      value: num(1),
+    },
+  ]);
+  const c = emitC(module);
+  assert.match(c, /jsrt_dyn_index_get\([^\n]*NULL\)/);
+  assert.match(c, /jsrt_dyn_index_set\([^\n]*NULL\)/);
+  assert.doesNotMatch(c, /jsrt_array_get\(/);
+  assert.doesNotMatch(c, /jsrt_array_set\(/);
 });

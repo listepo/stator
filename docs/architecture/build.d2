@@ -1,0 +1,32 @@
+# A `stator build` invocation — sequence view of plan.md §2.
+# Diagnostics short-circuit at the gate; `stator explain` stops after verdicts.
+
+...@theme
+
+shape: sequence_diagram
+
+cli: src/cli
+fe: src/frontend
+ts: "typescript pkg"
+lo: src/lower
+hir: "src/hir (verifier)"
+pa: src/passes
+cg: src/codegen
+cc: clang
+
+cli -> fe: build(entry, mode)
+fe -> ts: "ts.createProgram(entry, locked compilerOptions)"
+ts -> fe: SourceFiles + TypeChecker
+fe -> fe: "gate: accept files, apply mode policy,\nemit STA diagnostics / verdicts"
+fe."ts.Type → HType here;\nts.Type never leaks past frontend"
+fe -> lo: gated AST + HTypes
+lo -> hir: typed HIR
+
+each pass: {
+  pa -> hir: transform
+  hir -> pa: "verify (debug builds)"
+}
+
+pa -> cg: final HIR
+cg -> cc: "C source (#line maps, JSRT_FRAME discipline)"
+cc -> cli: "object code, linked with libjsrt.a → native binary"
