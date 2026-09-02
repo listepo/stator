@@ -36,10 +36,10 @@ import {
   ancestry,
   baseClassOf,
   classDeclarationOf,
+  ITERATOR_METHOD_NAME,
   instanceMethodName,
   isDynamicShape,
   isStaticMember,
-  ITERATOR_METHOD_NAME,
   methodDeclaringClass,
   objectLiteralIsDynamic,
   staticMemberOf,
@@ -179,6 +179,12 @@ export function lowerSourceFile(
  * so a dependency's top-level names are already registered when its importers lower, and an
  * imported identifier resolves to the exporting file's own binding by name. The graph walk has
  * already refused what would make that unsound: cycles (STA3001) and cross-file name collisions. */
+/** Nesting of functions being lowered. Zero means module top-level: an `await` there makes
+ * the merged program an async module (Phase 5 step 9). */
+let functionNesting = 0;
+/** Set when an await is lowered at functionNesting === 0. Reset per lowerProgram. */
+let moduleAwaits = false;
+
 export function lowerProgram(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
@@ -186,6 +192,8 @@ export function lowerProgram(
   const diagnostics: Diagnostic[] = [];
   const bindings = new Map<string, HType>();
   const statements: Statement[] = [];
+  functionNesting = 0;
+  moduleAwaits = false;
   const entry = files.at(-1);
   if (entry === undefined) {
     throw new Error('lowerProgram requires at least one file');
@@ -270,6 +278,7 @@ export function lowerProgram(
       span: makeSpan(0, entry.getEnd(), entry),
       fileName: entry.fileName,
       statements,
+      isAsync: moduleAwaits,
     };
 
     return { module, diagnostics };
@@ -775,7 +784,10 @@ function wrapUserIterator(
     );
     return null;
   }
-  const slot = iterable.type.kind === 'object' ? iterable.type.methods.findIndex((m) => m.name === ITERATOR_METHOD_NAME) : -1;
+  const slot =
+    iterable.type.kind === 'object'
+      ? iterable.type.methods.findIndex((m) => m.name === ITERATOR_METHOD_NAME)
+      : -1;
   if (slot < 0) {
     diagnostics.push(
       diagnosticFromNode(
@@ -2087,6 +2099,9 @@ function lowerExpression(
   // for the await expression rather than by peeling the operand -- `await 1` is legal and its
   // operand is not a promise at all, which is exactly the case peeling would get wrong.
   if (ts.isAwaitExpression(node)) {
+    if (functionNesting === 0) {
+      moduleAwaits = true;
+    }
     const value = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (!value) {
       return null;
@@ -2940,75 +2955,87 @@ function lowerFunction(
   diagnostics: Diagnostic[],
   receiver?: HObject,
 ): FunctionExpr | null {
-  const inner = new Map(bindings);
-  const params: Parameter[] = [];
-  // A method's receiver is parameter zero under a name no source can spell. Everything downstream
-  // -- arity padding, the closure ABI, capture analysis, the emitter -- then treats `this` as an
-  // ordinary parameter, which is why methods needed no machinery of their own.
-  if (receiver !== undefined) {
-    const at = makeSpan(node.getStart(sourceFile), 0, sourceFile);
-    params.push({ name: RECEIVER, type: receiver, span: at });
-    inner.set(RECEIVER, receiver);
-  }
-  for (const param of node.parameters) {
-    if (!ts.isIdentifier(param.name)) {
-      diagnostics.push(
-        diagnosticFromNode(param, sourceFile, 'STA4031', 'internal', 'ts', 'unexpected parameter'),
-      );
+  functionNesting++;
+  try {
+    const inner = new Map(bindings);
+    const params: Parameter[] = [];
+    // A method's receiver is parameter zero under a name no source can spell. Everything downstream
+    // -- arity padding, the closure ABI, capture analysis, the emitter -- then treats `this` as an
+    // ordinary parameter, which is why methods needed no machinery of their own.
+    if (receiver !== undefined) {
+      const at = makeSpan(node.getStart(sourceFile), 0, sourceFile);
+      params.push({ name: RECEIVER, type: receiver, span: at });
+      inner.set(RECEIVER, receiver);
+    }
+    for (const param of node.parameters) {
+      if (!ts.isIdentifier(param.name)) {
+        diagnostics.push(
+          diagnosticFromNode(
+            param,
+            sourceFile,
+            'STA4031',
+            'internal',
+            'ts',
+            'unexpected parameter',
+          ),
+        );
+        return null;
+      }
+      const type = typeAt(param, checker, bindings);
+      params.push({
+        name: param.name.text,
+        type,
+        span: makeSpan(param.getStart(sourceFile), param.getWidth(sourceFile), sourceFile),
+      });
+      inner.set(param.name.text, type);
+    }
+
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    const body = lowerFunctionBody(node.body, sourceFile, checker, inner, diagnostics);
+    if (body === null) {
       return null;
     }
-    const type = typeAt(param, checker, bindings);
-    params.push({
-      name: param.name.text,
+
+    const info = capturesFor(sourceFile, checker).get(node);
+    // Without a receiver the checker's own type is the answer. With one, the emitted function has a
+    // parameter the source did not write, so the type has to describe what is actually called --
+    // and for a constructor the checker has no function type to offer at all.
+    const declared = typeAt(node, checker, bindings);
+    const type =
+      receiver === undefined
+        ? declared
+        : hFunction(
+            params.map((p) => p.type),
+            declared.kind === 'fn' ? declared.ret : H_UNDEFINED,
+          );
+    const name = ts.isConstructorDeclaration(node)
+      ? undefined
+      : node.name !== undefined && ts.isIdentifier(node.name)
+        ? node.name.text
+        : undefined;
+    const fn: FunctionExpr = {
+      kind: 'function',
       type,
-      span: makeSpan(param.getStart(sourceFile), param.getWidth(sourceFile), sourceFile),
-    });
-    inner.set(param.name.text, type);
+      span,
+      ...(name !== undefined && { name }),
+      params,
+      body,
+      isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
+      isGenerator:
+        ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isMethodDeclaration(node)
+          ? node.asteriskToken !== undefined
+          : false,
+      envVars: info?.envVars ?? [],
+      captures: info?.captures ?? [],
+      needsEnv: info?.needsEnv ?? false,
+      provenance: provenanceOf(node, params, type),
+    };
+    return fn;
+  } finally {
+    functionNesting--;
   }
-
-  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-  const body = lowerFunctionBody(node.body, sourceFile, checker, inner, diagnostics);
-  if (body === null) {
-    return null;
-  }
-
-  const info = capturesFor(sourceFile, checker).get(node);
-  // Without a receiver the checker's own type is the answer. With one, the emitted function has a
-  // parameter the source did not write, so the type has to describe what is actually called --
-  // and for a constructor the checker has no function type to offer at all.
-  const declared = typeAt(node, checker, bindings);
-  const type =
-    receiver === undefined
-      ? declared
-      : hFunction(
-          params.map((p) => p.type),
-          declared.kind === 'fn' ? declared.ret : H_UNDEFINED,
-        );
-  const name = ts.isConstructorDeclaration(node)
-    ? undefined
-    : node.name !== undefined && ts.isIdentifier(node.name)
-      ? node.name.text
-      : undefined;
-  const fn: FunctionExpr = {
-    kind: 'function',
-    type,
-    span,
-    ...(name !== undefined && { name }),
-    params,
-    body,
-    isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
-    isGenerator:
-      ts.isFunctionDeclaration(node) ||
-      ts.isFunctionExpression(node) ||
-      ts.isMethodDeclaration(node)
-        ? node.asteriskToken !== undefined
-        : false,
-    envVars: info?.envVars ?? [],
-    captures: info?.captures ?? [],
-    needsEnv: info?.needsEnv ?? false,
-    provenance: provenanceOf(node, params, type),
-  };
-  return fn;
 }
 
 /** Where a function's signature types came from (docs/HIR.md, plan.md §8 step 1).

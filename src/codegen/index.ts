@@ -308,6 +308,9 @@ class Emitter {
    * because the resume function's dispatch switch is emitted before the body whose labels it
    * jumps to. The two flags are mutually exclusive in this landing. */
   private inAsync: boolean = false;
+  /** The module body is an async unit: named bindings stay in `globalMap`, temps go to the
+   * heap environment. Distinct from `inAsync` on a function, which puts names in the env too. */
+  private moduleAsync: boolean = false;
   private inGenerator: boolean = false;
   private awaitStates: Map<AwaitExpr | YieldExpr, number> = new Map();
   /* Whether anything in the module suspended or promised. `main` drains the microtask queue only
@@ -358,6 +361,7 @@ class Emitter {
     this.globalMap = new Map();
     this.globalCount = 0;
     this.inFunction = false;
+    this.moduleAsync = false;
     this.envMap = new Map();
     this.captureMap = new Map();
     this.returnSlot = 0;
@@ -465,6 +469,11 @@ class Emitter {
     this.tryFinallyStack = [];
     this.tryCount = 0;
 
+    if (module.isAsync) {
+      this.emitAsyncModule(module, globalSlots);
+      return produced;
+    }
+
     this.appendLine('int main(void) {');
     this.indent++;
     this.appendLine('jsrt_init();', module.span);
@@ -490,6 +499,83 @@ class Emitter {
     this.appendLine('}');
 
     return produced;
+  }
+
+  /* A module with a top-level await is an async unit (Phase 5 step 9). Named bindings stay in
+   * the globals array so the rest of the program still reads JSRT_GLOBAL; temps and await state
+   * live in a heap environment because a suspension pops main's C frame. Init runs in Task 3.11's
+   * topological order — Stator does not interleave sibling subgraphs the way Node does. */
+  private emitAsyncModule(module: Module, globalSlots: number): void {
+    this.usedAsync = true;
+    this.moduleAsync = true;
+    this.inAsync = true;
+    this.inFunction = true;
+    this.slotMap = new Map();
+    this.slotCount = 0;
+    this.envMap = new Map();
+    this.captureMap = new Map();
+    this.awaitStates = new Map();
+    this.returnsValue = true;
+    this.countBindings(module.statements);
+    this.returnSlot = this.slotCount;
+    this.slotCount++;
+    const envSlots = Math.max(1, this.slotCount);
+
+    this.appendLine(
+      'static void _jsrt_module_done(void *state, jsrt_value value, bool rejected) {',
+    );
+    this.indent++;
+    this.appendLine('(void)state;');
+    this.appendLine('if (rejected) {');
+    this.indent++;
+    this.appendLine('jsrt_throw(value);');
+    this.appendLine('jsrt_uncaught();');
+    this.indent--;
+    this.appendLine('}');
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+    this.appendLine(
+      'static void _jsrt_async_module(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err);',
+    );
+    this.appendLine('');
+
+    this.appendLine('int main(void) {');
+    this.indent++;
+    this.appendLine('jsrt_init();', module.span);
+    this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
+    this.emitHoistedFunctions(module.statements);
+    this.appendLine('JSRT_FRAME(1);', module.span);
+    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
+    this.appendLine(
+      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
+      module.span,
+    );
+    this.appendLine('jsrt_promise_subscribe(JSRT_LOCAL(0), _jsrt_module_done, NULL);', module.span);
+    this.appendLine('jsrt_run_microtasks();', module.span);
+    this.appendLine('JSRT_FRAME_POP();', module.span);
+    this.appendLine('return 0;', module.span);
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+
+    this.appendLine(
+      'static void _jsrt_async_module(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err) {',
+    );
+    this.indent++;
+    this.emitResumeOpen(module.span, ['_jsrt_v', '_jsrt_err']);
+    for (const stmt of module.statements) {
+      this.emitStatement(stmt);
+    }
+    this.emitAsyncSettle('jsrt_async_return', 'JSRT_UNDEFINED', module.span);
+    if (this.unwindUsed) {
+      this.appendLine('_jsrt_unwind: ;', module.span);
+      this.appendLine(`${this.slotAt(this.returnSlot)} = jsrt_take_exception();`, module.span);
+      this.emitAsyncSettle('jsrt_async_throw', this.slotAt(this.returnSlot), module.span);
+    }
+    this.indent--;
+    this.appendLine('}');
   }
 
   /* Emits every function unit, counting each body immediately before emitting it. The list grows
@@ -645,6 +731,11 @@ class Emitter {
    * locals audit in tests/unit/frames.test.ts is what holds this to exactly that. */
   private bindSlot(name: string): void {
     if (this.envMap.has(name) || this.slotMap.has(name)) {
+      return;
+    }
+    // A top-level name already lives in the globals array; the async module body must not grow a
+    // second home for it in the heap environment (temps still bind, they have no global name).
+    if (this.moduleAsync && this.globalMap.has(name)) {
       return;
     }
     this.slotMap.set(name, this.slotCount);

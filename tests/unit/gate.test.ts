@@ -55,7 +55,7 @@ void test('a label on a loop or switch is accepted; a label on anything else is 
 // `for`, `for-of`, `for-in` all parse as loops, but they are three different things and their
 // diagnostics have to say so. Conflating them ("for loops is not yet supported") would misname
 // what is actually missing (plan-notes 44). for-of over an ARRAY landed with rung 5, over a
-// STRING/Map/Set with Phase 5 step 8; a user iterable still needs the protocol object, and for-in
+// STRING/Map/Set with Phase 5 step 8; a class with `[Symbol.iterator]()` is a user iterable; for-in
 // needs the object model.
 void test('for-of and for-in report distinctly from the for loop they are not', () => {
   assert.deepEqual(codesFor('for (const x of [1, 2]) { }'), []);
@@ -68,6 +68,15 @@ void test('for-of and for-in report distinctly from the for loop they are not', 
   assert.deepEqual(codesFor('const xs: Iterable<number> = [1];\nfor (const e of xs) { }'), [
     'STA1214',
   ]);
+  assert.deepEqual(
+    codesFor(
+      'function* g(): Generator<number, void, undefined> { yield 1; }\n' +
+        'class C { [Symbol.iterator](): Generator<number, void, undefined> { return g(); } }\n' +
+        'for (const x of new C()) { }',
+    ),
+    [],
+  );
+  assert.deepEqual(codesFor('const s = Symbol("id");'), ['STA1212']);
   assert.deepEqual(codesFor('for (const x in {}) { }'), ['STA1214']);
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i++) { }'), []);
 });
@@ -1073,4 +1082,10 @@ void test('function* declarations and yield are accepted; methods and yield* are
   assert.deepEqual(codesFor('async function* g(): AsyncGenerator<number> { yield 1; }\n'), [
     'STA1201',
   ]);
+});
+
+void test('top-level await is accepted; await in a non-async function is not', () => {
+  assert.deepEqual(codesFor('const x: number = await Promise.resolve(1);\nconsole.log(x);\n'), []);
+  assert.deepEqual(codesFor('const x = await Promise.resolve(1);\nconsole.log(x);\n', 'js'), []);
+  assert.deepEqual(codesFor('function f() { return await Promise.resolve(1); }\n'), ['STA1214']);
 });

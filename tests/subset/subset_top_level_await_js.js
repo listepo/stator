@@ -1,7 +1,7 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1208
+// @verdict: static
 // SUBSET.md: Top-level await
+// Promise.resolve(42) is a typed builtin; the awaited binding is inferred number.
 
 const result = await Promise.resolve(42);
-export { result };
+console.log(result);

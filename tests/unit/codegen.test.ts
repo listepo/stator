@@ -398,12 +398,13 @@ void test('try/finally stashes the exception, runs the finally, then rethrows', 
       }),
     ]),
   );
-  // Completion protocol: 0 normal, 1 throw. The take happens BEFORE the finally body -- its own
-  // throw must find the cell empty -- and the rethrow AFTER it.
-  assert.match(c, /int _jsrt_comp_0 = 0;/);
+  // Completion protocol: 0 normal, 1 throw, stored in a counted slot as a boxed number so a
+  // suspension between the route and the dispatch cannot drop it. The take happens BEFORE the
+  // finally body -- its own throw must find the cell empty -- and the rethrow AFTER it.
+  assert.match(c, /= jsrt_number\(0\);/);
   const stash = c.indexOf('= jsrt_take_exception();');
   const body = c.indexOf('jsrt_print');
-  const rethrow = c.indexOf('if (_jsrt_comp_0 == 1) { jsrt_throw(');
+  const rethrow = c.search(/if \(jsrt_number_value\(.*\) == 1\) \{ jsrt_throw\(/);
   assert.ok(stash > -1 && body > stash && rethrow > body, 'stash, finally body, rethrow');
 });
 
@@ -423,9 +424,9 @@ void test('a return through a finally routes via the completion dispatch', () =>
   );
   // The return parks its value, records jump code 2, and enters the finally; the dispatch after
   // the finally body performs the actual return, popping the frame.
-  assert.match(c, /_jsrt_comp_0 = 2;/);
+  assert.match(c, /= jsrt_number\(2\);/);
   assert.match(c, /goto _jsrt_fin_0;/);
-  const dispatch = c.indexOf('if (_jsrt_comp_0 == 2) {');
+  const dispatch = c.search(/if \(jsrt_number_value\(.*\) == 2\) \{/);
   const realReturn = c.indexOf('return (JSRT_FRAME_POP(), JSRT_LOCAL(', dispatch);
   assert.ok(dispatch > -1 && realReturn > dispatch, 'the dispatch re-performs the return');
 });
@@ -449,8 +450,8 @@ void test('a break out of a try inside a loop routes through the finally first',
     ]),
   );
   // The break records a jump code instead of jumping; the dispatch performs the goto.
-  assert.match(c, /_jsrt_comp_0 = 2;/);
-  const dispatch = c.indexOf('if (_jsrt_comp_0 == 2) {');
+  assert.match(c, /= jsrt_number\(2\);/);
+  const dispatch = c.search(/if \(jsrt_number_value\(.*\) == 2\) \{/);
   const jump = c.indexOf('goto brk_0;', dispatch);
   assert.ok(dispatch > -1 && jump > dispatch, 'the dispatch performs the break');
 });
@@ -469,7 +470,7 @@ void test('a break inside try/finally that targets a loop inside the same try do
     ]),
   );
   // The jump never leaves the protected code, so no completion code is allocated for it.
-  assert.ok(!c.includes('_jsrt_comp_0 = 2;'), 'no route for a jump that stays inside the try');
+  assert.ok(!c.includes('= jsrt_number(2);'), 'no route for a jump that stays inside the try');
   assert.match(c, /goto brk_0;/);
 });
 

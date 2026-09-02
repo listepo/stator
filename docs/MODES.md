@@ -256,6 +256,12 @@ Structure: `path:line:col STA#### [mode] message`
 - `severity` — one of `"error"`, `"warning"` (warnings in Phase 2+)
 - All codes must be stable; tests reference them
 
+### Module init and top-level await
+
+Stator merges the program into one module in Task 3.11's topological order (dependencies first, entry last) and evaluates that body as a single unit. When the body contains a top-level `await`, that unit is async: `main` starts it and drains the microtask queue until it settles.
+
+Node's ESM loader may **interleave sibling subgraphs** — two modules that do not import each other can both run their prefix, hit `await`, and continue in registration order. Stator does not. A dependency's top-level await runs to completion before the next file in topological order begins. The difference is observable only in sibling interleavings; a linear import chain matches Node. Mirroring Node would need per-file init promises and a scheduler, which the whole-program merge does not have.
+
 ## 6. `stator explain` — per-construct verdict reporter
 
 The `explain` command analyzes a source file and reports the verdict for each top-level construct (function, class, const, etc.). It shows what would happen if that construct were compiled: static (compiles to unboxed machine code), dynamic (uses the dynamic representation), error (rejected), or not-yet (deferred to a later phase).

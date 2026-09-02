@@ -187,6 +187,7 @@ export function makeModule(statements: readonly Statement[] = []): Module {
     span: span(1),
     fileName: '/test.ts',
     statements,
+    isAsync: false,
   };
 }
 

@@ -197,10 +197,11 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
     }
     for (const property of checker.getPropertiesOfType(ancestorType)) {
       const at = property.valueDeclaration ?? property.declarations?.[0];
-      if (at === undefined || claimed.has(property.name)) {
+      const name = hirPropertyName(property.name);
+      if (at === undefined || claimed.has(name)) {
         continue;
       }
-      claimed.add(property.name);
+      claimed.add(name);
       const declarations = property.declarations ?? [];
       const valueType = tsTypeToHType(
         checker.getTypeOfSymbolAtLocation(property, at),
@@ -228,7 +229,7 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
         }
         continue;
       }
-      const member: HField = { name: property.name, type: valueType };
+      const member: HField = { name, type: valueType };
       // Split by what the member's DECLARATION is, not by what its type is: a field holding a
       // closure (`onClick: () => void`) is a slot, and a method is not, though both are functions.
       if (declarations.some(ts.isMethodDeclaration)) {
@@ -439,6 +440,14 @@ export function isStaticMember(member: ts.ClassElement): boolean {
  * MethodCall slot and a vtable entry name the same row. */
 export const ITERATOR_METHOD_NAME = '__@iterator';
 
+/** TypeScript unique-ifies well-known symbol properties as `__@iterator@<id>`. HIR uses one
+ * spelling so a MethodCall slot matches `instanceMethodName`. */
+export function hirPropertyName(name: string): string {
+  return name === ITERATOR_METHOD_NAME || name.startsWith(`${ITERATOR_METHOD_NAME}@`)
+    ? ITERATOR_METHOD_NAME
+    : name;
+}
+
 /** `[Symbol.iterator]` as a computed name. Does not ask whether `Symbol` is the global — the
  * caller that admits the spelling as the well-known method does. */
 export function symbolIteratorAccess(
@@ -469,6 +478,12 @@ export function instanceMethodName(member: ts.NamedDeclaration): string | undefi
   }
   if (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)) {
     return member.name.text;
+  }
+  if (ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name)) {
+    return member.name.text;
+  }
+  if (!ts.isComputedPropertyName(member.name)) {
+    return undefined;
   }
   return symbolIteratorAccess(member.name) === undefined ? undefined : ITERATOR_METHOD_NAME;
 }

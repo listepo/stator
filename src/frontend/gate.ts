@@ -20,12 +20,12 @@ import {
   baseClassOf,
   classDeclarationOf,
   hasExplicitAny,
+  ITERATOR_METHOD_NAME,
   instanceMethodName,
   isDynamicShape,
   isGlobalSymbolIteratorName,
   isImplicitAny,
   isStaticMember,
-  ITERATOR_METHOD_NAME,
   methodDeclaringClass,
   objectLiteralIsDynamic,
   staticMemberOf,
@@ -1623,12 +1623,10 @@ function gateYield(node: ts.Node): GateResult {
   return notYet('yield outside a generator is not yet supported', 5);
 }
 
-/** `await e`, admitted only inside an async function's body.
+/** `await e`, admitted inside an async function's body or at module top-level.
  *
- * An await compiles into the resume machinery of the function that contains it -- a state number,
- * a suspension point, a label -- and a module body has none of that: it runs once, on the way to
- * `main`'s return, with no promise to settle and nothing to re-enter. Top-level await is therefore
- * a separate feature rather than the same one in another place, and it gets its own code. */
+ * A top-level await compiles into the same resume machinery as an async function: the module
+ * body is itself an async unit (Phase 5 step 9). Await in a non-async function is still not-yet. */
 function gateAwait(node: ts.Node): GateResult {
   for (let n: ts.Node | undefined = node.parent; n !== undefined; n = n.parent) {
     if (
@@ -1645,15 +1643,9 @@ function gateAwait(node: ts.Node): GateResult {
         : notYet('await outside an async function is not yet supported', 5);
     }
   }
-  return {
-    kind: 'not-yet',
-    code: 'STA1208',
-    message:
-      'top-level await is not yet supported: a module body has no resume point to suspend into',
-    // Phase 5 step 9, not 4: Task 4.6 built resume points for FUNCTIONS, and making the module
-    // init function an async unit is lowering work (plan-notes 116).
-    phase: 5,
-  };
+  // The module body is itself an async unit (Phase 5 step 9): resume points live on that unit
+  // the same way they live on an async function.
+  return { kind: 'accept' };
 }
 
 /** A parameter the HIR can bind: one plain name, always present, never defaulted. Everything
@@ -1942,9 +1934,11 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       // method, stored under TypeScript's `__@iterator`. A field, a static, or any other computed
       // spelling still needs a shape table.
       if (
-        !(ts.isMethodDeclaration(member) &&
+        !(
+          ts.isMethodDeclaration(member) &&
           !isStaticMember(member) &&
-          isGlobalSymbolIteratorName(member.name, checker))
+          isGlobalSymbolIteratorName(member.name, checker)
+        )
       ) {
         return notYet('a computed class member name is not yet supported', 5);
       }

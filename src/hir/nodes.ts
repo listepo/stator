@@ -798,9 +798,9 @@ export type Provenance = 'typed' | 'inferred' | 'dynamic';
  * takes a value back out of a promise. Awaiting a non-promise is legal and still suspends for a
  * tick, so the operand is NOT required to be one; the runtime wraps whatever it gets.
  *
- * An await may only appear inside an async function's body. Nothing below the gate re-checks that,
- * because the emitter's resume machinery is what an await compiles into and there is none anywhere
- * else — an await outside one is not a wrong answer, it is a node the emitter cannot spell. */
+ * An await appears inside an async function's body, or at module top-level once the module itself
+ * is an async unit (Phase 5 step 9). Nothing below the gate re-checks the non-async-function case,
+ * because the emitter's resume machinery is what an await compiles into. */
 export interface AwaitExpr extends Node {
   readonly kind: 'await';
   readonly value: Expression;
@@ -1582,6 +1582,10 @@ export interface Module extends Node {
   readonly kind: 'module';
   readonly fileName: string;
   readonly statements: readonly Statement[];
+  /** True when a top-level `await` appears in the merged program. The module body is then an
+   * async unit (docs/MODES.md): named bindings stay globals; temps live in a heap environment so
+   * they survive a suspension. */
+  readonly isAsync: boolean;
 }
 
 /* jscpd:ignore-end */

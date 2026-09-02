@@ -4035,3 +4035,51 @@ IteratorResult is an interface the HIR does not layout, which is also why no sta
 calls `.next()`.
 
 Remaining under step 8: `for-of` over a user iterable (needs `Symbol` as a value, STA1212).
+
+## 154. User-iterable `for-of` is a compile-time method, not a Symbol primitive (2026-09-02)
+
+Phase 5 step 8's remaining line said user-iterable `for-of` "needs `Symbol` as a value". Tags in
+`docs/VALUE.md` §1 are fully allocated; Map/Date/Generator are Object-tagged plus a class pointer,
+so a new Symbol NaN-box tag was never the path.
+
+What landed: a class instance method `[Symbol.iterator]()` whose return type is already HIR
+`iterator` (a Generator, or a boxed specialized iterator). Lowering wraps the `for-of` iterable
+in a MethodCall of that method; the existing boxed-iterator walk drives the result. `Symbol.iterator`
+as a *stored value*, `Symbol("id")`, and `Symbol.for` stay `STA1212`. Generator methods
+(`*[Symbol.iterator]()`, `*m()`), async generators, and `for await` stay `STA1201`. `yield*`
+and a custom `{next()}` object (not a Generator) stay `STA1214`.
+
+TypeScript unique-ifies well-known symbol properties as `__@iterator@<id>` (the suffix is
+per-program; do not hardcode it). `userIteratorMethod` looked up `__@iterator` and missed, so
+the gate still emitted STA1214 for a class the checker could see. `hirPropertyName` canonicalizes
+that spelling in `classTypeToHType` so the MethodCall slot, the vtable row, and the lookup agree.
+
+Check: `tests/golden/ts/user_iterable.ts` and `tests/golden/js/user_iterable.js` match Node;
+decision tests `subset_user_iterable_{ts,js}`; `subset_symbol_primitive_{ts,js}` dropped
+`@expected-fail` and keep `STA1212`; unit test admits the class method and still rejects
+`Symbol("id")` and `Iterable<number>`.
+
+## 155. Top-level await is an async module unit; init stays topological (2026-09-02)
+
+Phase 5 step 9 required an ordering decision before code. Node's ESM loader interleaves sibling
+subgraphs: two modules that do not import each other both run their prefix, hit `await`, and
+continue in registration order. Measured:
+
+- `a` has TLA, sibling `b` does not: Node prints `a-start, b, a-end, main`
+- both siblings have TLA: Node prints `sa-start, sb-start, sa-end, sb-end, siblings-main`
+
+Stator merges the program into one module in Task 3.11's topological order and evaluates that body
+as a single unit. There are no per-file init functions to schedule. Mirroring Node would invent a
+scheduler the whole-program model does not have. Decision: **topological, not Node's interleaving**.
+The difference is observable only among siblings; a linear import chain matches Node. Recorded in
+`docs/MODES.md`.
+
+Implementation: a top-level `await` marks `Module.isAsync`. The emitter keeps named bindings in
+the globals array and puts temps/await-state in a heap environment so a suspension cannot drop
+them. `main` roots the init promise, subscribes a completion that turns a rejection into
+`jsrt_uncaught`, and drains the microtask queue. `STA1208` is no longer emitted (the code stays
+allocated). Await in a non-async function remains `STA1214`.
+
+Check: `tests/golden/{ts,js}/top_level_await.ts` match Node (`before / 42 / after`); decision
+tests `subset_top_level_await_{ts,js}` are `static`; gate unit test admits top-level await and
+still refuses `await` in a non-async function.
