@@ -106,9 +106,17 @@ export function createProgram(
     // js mode: untyped code is dynamic, not rejected (plan.md §1.2, §8 step 4). checkJs still
     // infers what it can; these codes are checker refusals for operations the dynamic runtime
     // settles at run time (property reads/writes and calls through an unknown value).
+    // 2367 ("this comparison appears to be unintentional ... have no overlap") is the same rule for
+    // an operator rather than a member: `"" == 0` is not a mistake in JavaScript, it is the coercion
+    // table, and js mode exists to run it. Refusing it also made the region plan.md §9 Task 6.2
+    // step 4 tells the fuzzer to weight toward ungeneratable (plan-notes 177).
     if (
       mode === 'js' &&
-      (diag.code === 2339 || diag.code === 2551 || diag.code === 2353 || diag.code === 2349)
+      (diag.code === 2339 ||
+        diag.code === 2551 ||
+        diag.code === 2353 ||
+        diag.code === 2349 ||
+        diag.code === 2367)
     ) {
       continue;
     }

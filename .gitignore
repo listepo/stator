@@ -10,6 +10,9 @@ runtime/build-intl/
 /.serena
 reasonix.toml
 tests/differential/failures/
+# Live fuzzer scratch: repo-local (the CLI resolves relative to the input), so lint and git both
+# have to know it is transient -- otherwise `pnpm run ci` fails whenever a fuzzer run overlaps it.
+.differential-*/
 tests/bench/results/
 tests/test262/corpus/
 tests/test262/results.json

@@ -141,14 +141,19 @@ async function main(): Promise<void> {
       `peak RSS ${String(peak)} KB is above the ${String(RSS_CAP_KB)} KB cap — nothing was collected`,
     );
   }
-  // A plateau, not a slope: the last third of the run must not sit meaningfully above the middle
-  // third. Comparing thirds rather than first-to-last keeps the process's own startup out of it.
-  const third = Math.floor(run.samples.length / 3);
-  if (third >= 1) {
-    const middle = Math.max(...run.samples.slice(third, third * 2));
-    const tail = Math.max(...run.samples.slice(third * 2));
-    if (tail > middle * 1.5) {
-      problems.push(`RSS climbed from ${String(middle)} KB to ${String(tail)} KB — no plateau`);
+  // A plateau, not a slope: once the heap is up, the second half of the run must not sit
+  // meaningfully above the first. The window is anchored on a VALUE, not a sample index: the run is
+  // under a second and `ps` yields ~20 samples, so a "middle third" could still be process startup
+  // (32 KB observed) and the steady-state 3 MB tail then read as a 94x climb — a red build from
+  // scheduler jitter, which is exactly the dishonest signal plan.md §9 exists to keep out.
+  const rampEnd = run.samples.findIndex((kb) => kb >= peak / 2);
+  const steady = rampEnd < 0 ? [] : run.samples.slice(rampEnd);
+  const half = Math.floor(steady.length / 2);
+  if (half >= 1) {
+    const early = Math.max(...steady.slice(0, half));
+    const late = Math.max(...steady.slice(half));
+    if (late > early * 1.5) {
+      problems.push(`RSS climbed from ${String(early)} KB to ${String(late)} KB — no plateau`);
     }
   }
 

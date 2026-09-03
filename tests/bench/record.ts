@@ -262,7 +262,10 @@ function main(): void {
       );
   }
   mkdirSync(RESULTS, { recursive: true });
-  const path = join(RESULTS, `${stamp.slice(0, 10)}-${hostId()}.json`);
+  // Full timestamp, not `stamp.slice(0, 10)`: two recordings on the same day wrote the same file,
+  // so the second SILENTLY REPLACED the first and the regression gate lost the run it should have
+  // compared against. Step 5's clause is "appended, never overwritten"; the date alone cannot be.
+  const path = join(RESULTS, `${stamp.replace(/[:.]/g, '-')}-${hostId()}.json`);
   writeFileSync(path, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   const oldBaseline: unknown = JSON.parse(readFileSync(join(HERE, 'baseline.json'), 'utf8'));
   writeFileSync(

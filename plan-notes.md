@@ -4467,3 +4467,90 @@ here: this task's job is to publish an honest number and a ratchet, and it now h
 measured, ordered backlog for the phase that owns the surface. Which is what §9 says the phase is
 for — it produces evidence, not features.
 
+
+## 177. The fuzzer's three unreachable regions, and the two defects that hid them (2026-09-03)
+
+**Context.** `plan.md` §9 Task 6.2 step 4 names five regions the generator must weight toward,
+"because everything else is already covered by fixtures": float formatting and the shortest
+round-trip boundary, the `i32` refinement's overflow edges, string indexing across surrogate
+pairs, `Map`/`Set` key identity (`-0`, `NaN`), and coercion order in `==`. The generator covered
+the first two — `NUMBER_EDGES` carries both — and none of the last three.
+
+**Two defects, not one gap.**
+
+1. *Cross-type `==` was ungeneratable.* TypeScript's 2367 ("this comparison appears to be
+   unintentional because the types have no overlap") fired in **js** mode, so `"" == 0` was a
+   compile error. That is a lint about intent, and in JavaScript a cross-type `==` is not a
+   mistake — it is the coercion table, which is most of what js mode exists to run. Suppressed in
+   js mode alongside 2339/2551/2353/2349, which are the same judgement about a member rather than
+   an operator. ts mode keeps it: there both operand types are known and disjoint, so the
+   comparison cannot be anything but a bug. Pinned by the `subset_loose_equals_cross_type_{js,ts}`
+   pair. This is the same finding as note 175 — the two checks there rejected *valid* JavaScript
+   rather than untyped JavaScript — arriving a third time, which is why §8 step 2a exists.
+
+2. *The time budget was shared, not split.* `--minutes=N` set one deadline for the whole run, so
+   the first mode spent the entire budget and the second fell through to `count` cases — one, by
+   default — and still printed a clean sheet. An hour-long nightly would have fuzzed `ts` for an
+   hour, `js` for one program, and reported "0 divergences" for both. The arm that would have
+   silently disappeared is `js`, which is step 8's whole subject. Now `budgetPerMode =
+   minutes * 60_000 / modes.length`, with a fresh deadline per mode.
+
+**What landed.** `IDENTITY_EDGES` (`NaN`, `Infinity`, `-Infinity`, `-0`, `0`) is deliberately
+kept out of `NUMBER_EDGES`: arithmetic over those values mostly yields `NaN`, which would drown
+the float-formatting region rather than add to it. The typed program now prints `text.length`,
+`text.charCodeAt(i)`, an identity edge, and `1 / edge` — the last because `-0` and `0` print
+alike in some positions and `-Infinity` vs `Infinity` is the cheapest way to tell them apart. The
+dynamic program adds `Map`/`Set` construction over two identity edges (SameValueZero agrees with
+neither `===` on `NaN` nor `==` on `-0`, so it is reachable only through the containers) and a
+cross-type `==`. `Object.is` stays out: still `STA1214`, and step 3's rule is that a generated
+program which fails to compile is a **generator** bug.
+
+## 178. The fuzzer's first finding: lone surrogates were lost in the C source (2026-09-03)
+
+**Divergence.** `const text: string = "\ud800"; console.log(text.charCodeAt(0));` — Node answers
+`55296`, Stator answered `65533`. Seed 20260915, ts mode, found within seconds of the generator
+gaining step 4's surrogate region (note 177). Minimized to two lines by `minimize.ts`.
+
+**Cause, and where it was not.** The runtime is correct: `JSString` is `uint16_t data[]`, and
+`jsrt_string_char_code_at` reads a code unit straight out of it. `utf8_decode` is already
+WTF-8-tolerant — it never rejects the three-byte encodings of `D800..DFFF`. The loss was in the
+**emitter**: `escapeString` copied non-ASCII source characters verbatim into the generated `.c`,
+and writing an unpaired surrogate to a file as UTF-8 substitutes U+FFFD. By the time clang saw
+the literal the code unit was already gone, so nothing downstream could have recovered it.
+
+**Fix.** `wtf8Bytes` encodes the literal from its UTF-16 code units — pairing lead+trail into a
+four-byte sequence, and encoding an unpaired surrogate as its own three-byte sequence — and
+`escapeBytes` writes every byte outside printable ASCII as a **three-digit octal** escape. Octal,
+not `\x`: a C hex escape consumes as many hex digits as follow it, so `"\xEDa"` is one
+out-of-range character rather than two. The byte count passed to `jsrt_string_from_utf8` now comes
+from that array rather than from `Buffer.byteLength(value, 'utf8')`, which was computing the
+length of the *lossy* encoding — two bugs that happened to agree.
+
+**Why this is the region step 4 named.** No hand-written fixture had a lone surrogate in it,
+because nobody writes one on purpose; the golden suite had thirteen string files and every one of
+them was well-formed. This is exactly the class the step calls "where a divergence is a semantics
+bug rather than a typo", and it took the generator about one second to find once it could reach
+it. Landed as `tests/golden/ts/string_surrogates.ts` with the pre-minimization program in
+`tests/differential/corpus/` (step 7).
+
+## 179. The leak test's plateau window was indexed, not anchored (2026-09-03)
+
+`pnpm run ci` went red on `tests/leak` — `RSS climbed from 32 KB to 3024 KB — no plateau` — and five
+consecutive reruns passed with the same peak (3008–3024 KB, ~5% of the 64 MB cap). Nothing leaked:
+the middle third of the samples was still process STARTUP.
+
+The plateau check compared `max(samples[n/3 .. 2n/3])` against `max(samples[2n/3 ..])`. That split
+assumes the middle third is past startup, and the run is under a second with a 25 ms sampler, so
+`ps` yields ~20 samples and one early sample landing at 32 KB makes the steady-state 3 MB tail read
+as a 94× climb. The verdict depended on how many samples the scheduler let through before the heap
+came up, which is a coin flip, not a measurement.
+
+The window is now anchored on a VALUE: drop every sample before RSS first reaches half the peak,
+then compare the halves of what remains. Same assertion — memory must stop growing — with a start
+point the sampling rate cannot move. The cap check is untouched and is still the one that separates
+"collected" from "never freed" (320 MB if nothing is ever freed, against a 64 MB cap).
+
+Worth naming because of where it sat: a flaky red is the mirror image of the failure mode §9's
+opening paragraph is written against. A green that proves less than it appears to teaches people to
+trust a signal that is not there; a red that fires on jitter teaches them to re-run until it is
+green, which costs the same signal by the other route.

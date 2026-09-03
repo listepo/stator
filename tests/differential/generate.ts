@@ -45,6 +45,22 @@ const NUMBER_EDGES = [
 
 const STRINGS = ['', 'a', 'hello', '\ud800', '\ud83d\udc4d', 'left\tright', '𝄞'];
 
+// The values whose IDENTITY the spec treats differently from their equality, which is what makes
+// them Map/Set key edges (SameValueZero folds -0 into 0 and makes NaN equal to itself) and print
+// edges (`-0` keeps its sign, `NaN`/`Infinity` are not decimal). Kept OUT of NUMBER_EDGES because
+// arithmetic over them mostly yields NaN, which would drown the float-formatting region rather
+// than add to it (plan.md §9 Task 6.2 step 4).
+const IDENTITY_EDGES = ['NaN', 'Infinity', '-Infinity', '-0', '0'] as const;
+
+// Operands from disjoint types, so `==` has to run the coercion table rather than compare directly.
+// js mode only: ts mode refuses a cross-type `==` (STA0012, TS 2367), which is the whole point of
+// the subset_loose_equals_cross_type pair. `Object.is` is deliberately absent -- still STA1214.
+const COERCION_OPERANDS = ['""', '"1"', '"0"', '0', '1', 'null', 'undefined', 'false', 'true'] as const;
+
+function pick(values: readonly string[], random: XorShift32): string {
+  return values[random.int(values.length)] ?? '0';
+}
+
 function numberLiteral(value: number): string {
   return Object.is(value, -0) ? '-0' : String(value);
 }
@@ -110,6 +126,15 @@ function typedProgram(random: XorShift32): string {
   lines.push('console.log(b);');
   lines.push('console.log(total);');
   lines.push('console.log(values.length);');
+  // String indexing across surrogate pairs and the identity/print edges: two of the five regions
+  // step 4 names, and the two the golden fixtures cannot enumerate by hand. `codePointAt` stays in
+  // the js half -- it is `number | undefined`, which ts mode would have to narrow first.
+  lines.push(`const text: string = ${JSON.stringify(STRINGS[random.int(STRINGS.length)] ?? '')};`);
+  lines.push('console.log(text.length);');
+  lines.push(`console.log(text.charCodeAt(${String(random.int(4))}));`);
+  lines.push(`const edge: number = ${pick(IDENTITY_EDGES, random)};`);
+  lines.push('console.log(edge);');
+  lines.push('console.log(1 / edge);');
   return `${lines.join('\n')}\n`;
 }
 
@@ -117,6 +142,10 @@ function dynamicProgram(random: XorShift32): string {
   const number = expression('number', random, 2);
   const string = expression('string', random, 1);
   const key = random.int(2) === 0 ? '"value"' : '"other"';
+  const keyA = pick(IDENTITY_EDGES, random);
+  const keyB = pick(IDENTITY_EDGES, random);
+  const left = pick(COERCION_OPERANDS, random);
+  const right = pick(COERCION_OPERANDS, random);
   return [
     `var n = ${number};`,
     `const text = ${string};`,
@@ -127,6 +156,20 @@ function dynamicProgram(random: XorShift32): string {
     'console.log(object.value ?? object.other);',
     'console.log(text);',
     'console.log(n == total);',
+    // Map/Set key identity is SameValueZero, which agrees with neither `===` (NaN) nor `==` (-0),
+    // so it is only reachable through the containers themselves.
+    'const map = new Map();',
+    `map.set(${keyA}, "a");`,
+    `map.set(${keyB}, "b");`,
+    'console.log(map.size);',
+    `console.log(map.get(${keyA}));`,
+    'const set = new Set();',
+    `set.add(${keyA});`,
+    `set.add(${keyB});`,
+    'console.log(set.size);',
+    `console.log(${left} == ${right});`,
+    'console.log(text.length);',
+    `console.log(text.codePointAt(${String(random.int(4))}));`,
     '',
   ].join('\n');
 }

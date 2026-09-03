@@ -12,6 +12,7 @@
       "!tests/golden/ts",
       "!tests/golden/js",
       "!tests/differential",
+      "!.differential-*",
       "!tests/test262/corpus",
       "!tests/test262/results.json",
       "!tests/test262/.tmp",

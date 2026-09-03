@@ -136,10 +136,17 @@ function main(): void {
   const modeArg = process.argv.find((arg) => arg.startsWith('--mode='))?.slice('--mode='.length) ?? 'both';
   if (modeArg !== 'both' && modeArg !== 'ts' && modeArg !== 'js') throw new Error('--mode must be both, ts, or js');
   const modes: readonly DifferentialMode[] = modeArg === 'both' ? ['ts', 'js'] : [modeArg];
-  const deadline = minutes === 0 ? Number.POSITIVE_INFINITY : Date.now() + minutes * 60_000;
+  // The time budget is split EVENLY across modes rather than shared. A single shared deadline let
+  // the first mode spend the whole hour, after which the second ran `count` cases -- one, by
+  // default -- and still printed "0 divergences". A fuzzing arm that tried one program and reported
+  // a clean sheet is the dishonest version §9 warns about, and it is the `js` arm (step 8) that
+  // would have been the one to disappear.
+  const budgetPerMode = minutes === 0 ? 0 : (minutes * 60_000) / modes.length;
   process.stdout.write(`differential: seed=${String(seed)} modes=${modes.join(',')}\n`);
   let cases = 0;
   for (const mode of modes) {
+    const deadline =
+      budgetPerMode === 0 ? Number.POSITIVE_INFINITY : Date.now() + budgetPerMode;
     for (let offset = 0; offset < count || (minutes > 0 && Date.now() < deadline); offset += 1) {
       const currentSeed = seed + offset;
       const source = generateProgram(currentSeed, mode);

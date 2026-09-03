@@ -271,6 +271,20 @@ void test('string escaping handles special characters', () => {
   assert.match(c, /line1\\nline2\\ttab\\"quote\\\\backslash/);
 });
 
+void test('string literals travel as WTF-8 octal escapes', () => {
+  // An unpaired surrogate is a legal UTF-16 code unit that UTF-8 cannot carry, so the emitter must
+  // spell it rather than write it: raw, the .c file's UTF-8 encoding replaced it with U+FFFD and
+  // `charCodeAt(0)` answered 65533 instead of 55296 (plan-notes 178). Octal and not `\x`, because a
+  // C hex escape swallows every hex digit that follows it.
+  const lone = emitC(makeModule([decl('s', str('a\ud800'), 'const', H_STRING)]));
+  assert.match(lone, /jsrt_string_from_utf8\("a\\355\\240\\200", 4\)/);
+
+  // A well-formed pair still becomes ONE four-byte sequence -- the byte count is the encoding's,
+  // never the code-unit count.
+  const pair = emitC(makeModule([decl('s', str('\ud83d\udc4d'), 'const', H_STRING)]));
+  assert.match(pair, /jsrt_string_from_utf8\("\\360\\237\\221\\215", 4\)/);
+});
+
 void test('identifier reference uses allocated slot', () => {
   const module = makeModule([
     decl('x', num(5), 'let', H_NUMBER, 1),

@@ -228,6 +228,55 @@ function shapeNameOf(expr: ObjectLiteral): string {
   return expr.type.name;
 }
 
+/* A JS string is a sequence of UTF-16 CODE UNITS, and a lone surrogate is a legal one. UTF-8
+ * cannot represent it, so `"\ud800"` written straight into the .c file comes back as U+FFFD --
+ * `charCodeAt(0)` answered 65533 where Node answers 55296 (plan-notes 178, found by the fuzzer).
+ * WTF-8 is UTF-8 plus the three-byte encodings of unpaired surrogates, which is exactly what
+ * `utf8_decode` in runtime/src/jsrt_string.c already accepts, so the transport needs no runtime
+ * change -- only an emitter that stops losing the bytes. */
+function wtf8Bytes(value: string): number[] {
+  const bytes: number[] = [];
+  for (let i = 0; i < value.length; i += 1) {
+    let code = value.charCodeAt(i);
+    const next = i + 1 < value.length ? value.charCodeAt(i + 1) : 0;
+    if (code >= 0xd800 && code <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+      i += 1;
+    }
+    if (code < 0x80) {
+      bytes.push(code);
+    } else if (code < 0x800) {
+      bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code < 0x10000) {
+      bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    } else {
+      bytes.push(
+        0xf0 | (code >> 18),
+        0x80 | ((code >> 12) & 0x3f),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    }
+  }
+  return bytes;
+}
+
+/* Octal, never `\x`: a C hex escape consumes as many hex digits as follow it, so `"\xEDa"` is one
+ * out-of-range character rather than two. Three octal digits are always exactly three. */
+function escapeBytes(bytes: readonly number[]): string {
+  let result = '';
+  for (const byte of bytes) {
+    if (byte === 0x0a) result += '\\n';
+    else if (byte === 0x09) result += '\\t';
+    else if (byte === 0x0d) result += '\\r';
+    else if (byte === 0x5c) result += '\\\\';
+    else if (byte === 0x22) result += '\\"';
+    else if (byte >= 0x20 && byte < 0x7f) result += String.fromCharCode(byte);
+    else result += `\\${byte.toString(8).padStart(3, '0')}`;
+  }
+  return result;
+}
+
 class Emitter {
   private lines: string[] = [];
   private indent: number = 0;
@@ -3247,7 +3296,8 @@ class Emitter {
   }
 
   private emitStringLiteral(value: string): string {
-    return `jsrt_string_from_utf8("${this.escapeString(value)}", ${Buffer.byteLength(value, 'utf8')})`;
+    const bytes = wtf8Bytes(value);
+    return `jsrt_string_from_utf8("${escapeBytes(bytes)}", ${String(bytes.length)})`;
   }
 
   private emitLogicalOp(expr: LogicalOp): string {
@@ -3432,35 +3482,6 @@ class Emitter {
     }
     if (place.kind !== 'identifier') {
       this.emitPendingCheck(expr.span);
-    }
-    return result;
-  }
-
-  private escapeString(s: string): string {
-    let result = '';
-    for (const char of s) {
-      const code = char.charCodeAt(0);
-      if (char === '\\') {
-        result += '\\\\';
-      } else if (char === '"') {
-        result += '\\"';
-      } else if (char === '\n') {
-        result += '\\n';
-      } else if (char === '\t') {
-        result += '\\t';
-      } else if (char === '\r') {
-        result += '\\r';
-      } else if (code < 0x20 || code >= 0x7f) {
-        // For bytes >= 0x80 (UTF-8 multi-byte), emit raw UTF-8
-        // For control chars < 0x20, use octal escapes
-        if (code < 0x20) {
-          result += `\\${code.toString(8).padStart(3, '0')}`;
-        } else {
-          result += char;
-        }
-      } else {
-        result += char;
-      }
     }
     return result;
   }

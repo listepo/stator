@@ -211,6 +211,13 @@ Choosing UTF-8 to save memory would make every one of those operations either wr
 the conversion cost would reappear at every boundary. Revisit only with measurements, via
 `plan-notes.md`.
 
+A string LITERAL reaches the runtime through `jsrt_string_from_utf8`, and the emitter encodes it as
+**WTF-8** — UTF-8 plus the three-byte encodings of unpaired surrogates — with every byte outside
+printable ASCII written as a three-digit octal escape in the generated C. A lone surrogate is a
+legal JS code unit that UTF-8 cannot carry, so emitting the literal as raw source characters lost
+it to U+FFFD before clang ever saw it (plan-notes 178). `utf8_decode` already accepts the surrogate
+range, so this is an emitter contract, not a runtime one.
+
 `length` is `uint32_t`, not `size_t`: it caps strings at 4 Gi code units (JS's own limit is lower),
 keeps the header 4 bytes so `data` starts 8-byte-aligned after padding, and makes the struct the
 same size on both 32- and 64-bit targets.

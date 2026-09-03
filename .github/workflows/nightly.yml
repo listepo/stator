@@ -33,10 +33,21 @@ jobs:
 
       - name: Record benchmark
         if: github.event.schedule == '0 3 * * 0'
-        run: pnpm run bench:record 2>&1 | tee benchmark.log
+        # `pipefail` is NOT the default for a `run:` step, so without it `tee` decides this step's
+        # exit status and a failed recording would still be green -- the same defect already fixed
+        # in ci.yml's Test262 step (plan-notes 175), in the job that publishes the numbers.
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm run bench:record 2>&1 | tee benchmark.log
       - name: Publish benchmark summary
         if: always() && github.event.schedule == '0 3 * * 0'
-        run: grep '^bench:' benchmark.log >> "$GITHUB_STEP_SUMMARY" || true
+        # The generated page IS the summary. Grepping the one `bench:` progress line put a file
+        # path in the summary and left the numbers in an artifact nobody opens, which is the
+        # weak-signal version of §9's rule -- a green job that reports less than it measured.
+        run: |
+          cat tests/bench/README.md >> "$GITHUB_STEP_SUMMARY" || true
+          grep '^bench:' benchmark.log >> "$GITHUB_STEP_SUMMARY" || true
       - name: Upload benchmark result
         if: always() && github.event.schedule == '0 3 * * 0'
         uses: actions/upload-artifact@v4
