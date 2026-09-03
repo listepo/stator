@@ -387,11 +387,12 @@ bool jsrt_in(jsrt_value key, jsrt_value obj);
 jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic);
 void jsrt_dyn_index_set(jsrt_value obj, jsrt_value index, jsrt_value value, JSRTIC *ic);
 
-/* Math builtins (jsrt_math.c) — number -> number, ECMA-262 §21.3.2 exactly. The approximated
+/* Math builtins (jsrt_math.c) — number -> number, ECMA-262 §21.3.2 exactly. Entry points
+ * apply ToNumber, so js-mode calls preserve JavaScript coercion semantics. The approximated
  * transcendentals below come from the vendored fdlibm (the code V8 runs), never the host libm,
- * so they agree with Node bit-for-bit (plan-notes 117).
- * min/max/hypot are BINARY: the frontend folds min/max's variadic forms into nested calls, and
- * gates hypot above two arguments because hypot is not associative. */
+ * so they agree with Node bit-for-bit (plan-notes 117). min/max/hypot are BINARY: the frontend
+ * folds min/max's variadic forms into nested calls, and gates hypot above two arguments because
+ * hypot is not associative. */
 jsrt_value jsrt_math_abs(jsrt_value x);
 jsrt_value jsrt_math_clz32(jsrt_value x);
 jsrt_value jsrt_math_fround(jsrt_value x);

@@ -4708,3 +4708,14 @@ the diagnosed binding symbol and passes that mode-free lowering policy downstrea
 
 The full pinned Test262 run is **2379 passed, 8444 failed, 42757 skipped**: 395 further failures
 became scheduled skips, with passes unchanged.
+
+
+## 185. JavaScript argument mismatch needs the callee’s coercion, not only a diagnostic filter (2026-09-03)
+
+**What landed.** JS-mode TypeScript diagnostic **2345** (`Argument of type X is not assignable to parameter of type Y`) is now deferred. The paired function-call fixtures retain the ordinary `STA0012` error in ts mode, while `tests/golden/js/argument_mismatch.js` proves both a compiled function call (`increment("2")`) and `Math.abs("-3")` match the pinned Node.
+
+**Blocker found before landing.** A bare 2345 filter made the Math example reach HIR, where the verifier raised `STA4080`: it asserted every `math-call` argument had HType `number`, despite the C signature accepting a boxed `jsrt_value`. Worse, the runtime then used `jsrt_number_value`, which reads a non-number’s NaN-box payload as a double. Removing only the verifier assertion would have made the compiler emit a wrong native program.
+
+**Decision.** Math’s HIR contract is now exact arity plus a number result; operand coercion is runtime semantics. `jsrt_math.c` applies `jsrt_to_number` once in its shared argument helper, so every Math entry point implements ECMAScript `ToNumber` before numeric work. This preserves statically typed paths and makes a JS argument mismatch execute under JavaScript’s coercion rules. `runtime/include/jsrt_value.h` documents that contract.
+
+**Evidence.** After `just runtime`, typecheck, lint, the subset matrix (**338 fixtures: 307 passed, 31 expected-fail**), the golden corpus (**145/145**) and runtime print corpus passed. The pinned full Test262 run moved from **2379 passed / 8444 failed / 42757 skipped** to **2379 passed / 7433 failed / 43768 skipped**. No passed test regressed; 1011 final classifiers became scheduled skips.

@@ -1322,15 +1322,12 @@ function verifyExpression(
           code: 'STA4080',
           message: `Math.${expr.method} takes ${String(arity ?? NaN)} arguments, not ${String(expr.args.length)}`,
         });
-      } else if (
-        expr.type.kind !== 'number' ||
-        expr.args.some((arg) => arg.type.kind !== 'number')
-      ) {
+      } else if (expr.type.kind !== 'number') {
         problems.push({
           kind: 'math-call',
           span: expr.span,
           code: 'STA4080',
-          message: `Math.${expr.method} must be number -> number, got (${expr.args.map((a) => hTypeName(a.type)).join(', ')}) -> ${hTypeName(expr.type)}`,
+          message: `Math.${expr.method} must return number, got ${hTypeName(expr.type)}`,
         });
       }
       break;

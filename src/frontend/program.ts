@@ -38,6 +38,7 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   1016, // A required parameter cannot follow an optional parameter.
   2554, // Expected N arguments, but got M.
   2322, // Type 'X' is not assignable to type 'Y'.
+  2345, // Argument of type 'X' is not assignable to parameter of type 'Y'.
   // Member access and calls through a value the checker could not resolve.
   2339, // Property 'x' does not exist on type 'T'.
   2551, // Property 'x' does not exist on type 'T'. Did you mean 'y'?

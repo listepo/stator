@@ -24,7 +24,8 @@
 #include "fdlibm.h"
 #include "jsrt_value.h"
 
-static double arg(jsrt_value v) { return jsrt_number_value(v); }
+/* Math functions apply ECMAScript ToNumber to every argument before their numeric work. */
+static double arg(jsrt_value v) { return jsrt_to_number(v); }
 
 jsrt_value jsrt_math_abs(jsrt_value x) { return jsrt_number(fabs(arg(x))); }
 
