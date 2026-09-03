@@ -30,7 +30,7 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 | Feature | `ts` mode | `js` mode | Notes |
 |---|---|---|---|
 | `let`, `const` bindings | static | static if typed, else dynamic | Binding semantics are static; initialization and narrowing drive the static/dynamic split. |
-| Function declarations, function expressions, arrow functions | static | static if typed, else dynamic | Closure capture via environment structs; untyped parameters widen to `Unknown`. Capturing a binding declared *inside a loop* clones the heap environment each iteration (`perIterationEnv`) so each closure sees that iteration's value. |
+| Function declarations, function expressions, arrow functions | static | static if typed, else dynamic | Closure capture via environment structs; untyped parameters widen to `Unknown`. In `js` mode calls may provide too many or too few arguments: extras are ignored and missing parameters receive `undefined`; `ts` mode retains the checker arity error. Capturing a binding declared *inside a loop* clones the heap environment each iteration (`perIterationEnv`) so each closure sees that iteration's value. |
 | `if` statements | static | static | Condition is evaluated; predicate narrowing is type-driven. |
 | `while`, `do`/`while` loops | static | static | Control flow only. |
 | `for` loop (C-style) **[proposed]** | static | static | Loop variable and bounds are typed; control flow is unboxed. |

@@ -22,6 +22,7 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // JSDoc's optional-parameter spelling is checker metadata; JavaScript has no corresponding
   // function-signature restriction, so a required parameter may follow it at runtime.
   1016, // A required parameter cannot follow an optional parameter.
+  2554, // Expected N arguments, but got M.
   // Member access and calls through a value the checker could not resolve.
   2339, // Property 'x' does not exist on type 'T'.
   2551, // Property 'x' does not exist on type 'T'. Did you mean 'y'?

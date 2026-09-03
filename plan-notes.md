@@ -4690,3 +4690,10 @@ requirement that every code suppression move an aggregate test ratchet was there
 for multi-error programs; its Check now distinguishes a classifier-changing suppression from one
 that merely exposes a later blocker, retaining the aggregate ratchet and requiring this per-code
 evidence for the latter.
+
+
+## 183. Function arity is runtime behavior in JavaScript (2026-09-03)
+
+TypeScript diagnostic **2554** (`Expected N arguments, but got M`) is now suppressed in `js` mode only. The existing closure ABI already carries an argument count: extra values are ignored and `jsrt_arg` supplies `undefined` for an absent parameter, matching Node. A typed JS function call is therefore static after the checker refusal is removed; the TS-mode fixture retains `STA0012`.
+
+The subset and golden fixtures cover both directions. The full pinned Test262 run from this tree passed with **2379 passed, 8839 failed, 42362 skipped**, ratcheting 383 tests from failure to a scheduled skip while retaining the pass count.
