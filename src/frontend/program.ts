@@ -48,6 +48,8 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // most of what js mode is for. ts mode keeps it: there both operand types are known and disjoint
   // (plan-notes 177).
   2367, // This comparison appears to be unintentional because the types have no overlap.
+  2362, // Left-hand side of arithmetic operation must be numeric.
+  2363, // Right-hand side of arithmetic operation must be numeric.
   // The possibly-null family: 3855 of Task 6.1's 10,513 Test262 failures, the largest bucket by a
   // factor of three, and every one of them ordinary JavaScript that runs (plan-notes 176, 180).
   // `xs[i].toFixed(2)` is how JavaScript indexes an array; the spec's answer for the miss is a

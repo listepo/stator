@@ -4719,3 +4719,12 @@ became scheduled skips, with passes unchanged.
 **Decision.** Math’s HIR contract is now exact arity plus a number result; operand coercion is runtime semantics. `jsrt_math.c` applies `jsrt_to_number` once in its shared argument helper, so every Math entry point implements ECMAScript `ToNumber` before numeric work. This preserves statically typed paths and makes a JS argument mismatch execute under JavaScript’s coercion rules. `runtime/include/jsrt_value.h` documents that contract.
 
 **Evidence.** After `just runtime`, typecheck, lint, the subset matrix (**338 fixtures: 307 passed, 31 expected-fail**), the golden corpus (**145/145**) and runtime print corpus passed. The pinned full Test262 run moved from **2379 passed / 8444 failed / 42757 skipped** to **2379 passed / 7433 failed / 43768 skipped**. No passed test regressed; 1011 final classifiers became scheduled skips.
+
+
+## 186. Arithmetic operand types are a JavaScript coercion question (2026-09-03)
+
+**What landed.** JS-mode TypeScript diagnostics **2362** and **2363** — a non-numeric left or right arithmetic operand — are now deferred. The matching ts fixture retains `STA0012`; the js fixture and golden use `"3" - 1`, `1 - "3"`, and `"3" * 2`, all byte-for-byte against the pinned Node.
+
+**Why this is safe.** This is not a new dynamic operation. `binary-op` already lowers subtraction and multiplication through the runtime’s ECMAScript numeric operators, which apply coercion to boxed operands. The diagnostic had been preventing a path whose runtime behavior was already implemented and independently verified.
+
+**Evidence.** Typecheck, lint, subset (**340 fixtures: 309 passed, 31 expected-fail**) and golden (**146/146**) passed. The full pinned Test262 run moved from **2379 passed / 7433 failed / 43768 skipped** to **2379 passed / 7276 failed / 43925 skipped** — 157 final classifiers became scheduled skips, with no passed-test regression.
