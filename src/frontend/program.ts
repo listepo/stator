@@ -19,6 +19,9 @@ type Mode = 'ts' | 'js';
  * Nothing in here is a free pass for a REAL refusal — an operation no runtime could settle stays a
  * hard error in both modes, and that is why the list is enumerated rather than ranged. */
 const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
+  // JSDoc's optional-parameter spelling is checker metadata; JavaScript has no corresponding
+  // function-signature restriction, so a required parameter may follow it at runtime.
+  1016, // A required parameter cannot follow an optional parameter.
   // Member access and calls through a value the checker could not resolve.
   2339, // Property 'x' does not exist on type 'T'.
   2551, // Property 'x' does not exist on type 'T'. Did you mean 'y'?

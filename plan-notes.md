@@ -4669,3 +4669,24 @@ the last write wins the way §13.2.5.5 says, and `keyOrderOf` keeps the key's fi
 a value with no fixed shape stays `STA1214`; methods and accessors in a literal stay `STA1214` (both
 need calling through a shape the declaration does not build, and accessors need a get/set slot the
 runtime has no representation for); computed keys stay `STA1214`.
+
+## 182. JSDoc optionality is not a JavaScript parameter-order rule (2026-09-03)
+
+TypeScript diagnostic **1016** (`A required parameter cannot follow an optional parameter`) is now
+suppressed in `js` mode only. Its premise is metadata: JavaScript parameters have no optional marker
+and no signature-order rule, so a JSDoc declaration such as `@param {number=} first` followed by
+`@param {number} second` executes with the ordinary positional calling convention. The matching
+TypeScript spelling stays an `STA0012` error in `ts` mode.
+
+The suppression is deliberately one code, not a relaxation of compiler options. The paired subset
+fixtures and `tests/golden/js/required_after_optional.js` prove the distinction and the Node result.
+It is the first individually judged item in plan.md §8 step 2a(b). The full Test262 pass from this
+exact tree remained **2379 passed, 9222 failed, 41979 skipped**: it did not change the ratchet.
+That is not an ineffective suppression. The runner classifies a TEST only after all its checker
+diagnostics are considered, and each affected Test262 harness program still raises another
+`STA0012` (for example the `PropertyDescriptor | undefined` argument mismatch). The old 1016 line
+is absent; the test stays a failure for the next independently unsuppressed code. The plan's former
+requirement that every code suppression move an aggregate test ratchet was therefore impossible
+for multi-error programs; its Check now distinguishes a classifier-changing suppression from one
+that merely exposes a later blocker, retaining the aggregate ratchet and requiring this per-code
+evidence for the latter.

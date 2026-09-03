@@ -340,8 +340,12 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
    `implicitly has an 'any' type`, 265 + 183 arity, 235 `left-hand side of an arithmetic operation`,
    196 `No overload matches this call`.
    **Check:** each suppression lands with a both-modes decision fixture (the same source, `error` in
-   ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer, and the
-   Test262 ratchet moves in the commit that lands it.
+   ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer. The Test262
+   ratchet moves in that commit **when a test's final classifier changes**; a harness file can carry
+   several independent checker diagnostics, so removing an earlier one may only expose the next
+   `STA0012` and leave the aggregate count honestly unchanged. In that case record the per-code
+   before/after evidence in `plan-notes.md` rather than claim a numerical improvement that did not
+   happen (plan-notes 182).
 3. ~~Lower `var`: function-scoped binding, hoisting to the enclosing function (or module) scope,
    `undefined` init before the first statement runs, legal redeclaration folding to one slot.~~
    ✅ **landed** (2026-09-02) — desugars to a function-scoped `let` initialized `undefined` plus
