@@ -42,8 +42,8 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
 
   jsrt_value out = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; i < count; i++) {
-    const uint32_t slot = dynamic ? links[i]->offset : i;
-    const char *key = dynamic ? links[i]->key : fixed->cls->fields[i];
+    const uint32_t slot = dynamic ? links[i]->offset : jsrt_class_key_slot(fixed->cls, i);
+    const char *key = dynamic ? links[i]->key : fixed->cls->fields[slot];
     if (!dynamic && is_private_field(key)) {
       continue;
     }

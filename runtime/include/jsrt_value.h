@@ -265,7 +265,24 @@ typedef struct JSRTClass {
    * whose methods capture: such a closure is not one constant per class. */
   uint32_t method_count;
   const struct JSRTClosure *const *methods;
+  /* Slot indices in PROPERTY-INSERTION order, or NULL when insertion order IS slot order.
+   *
+   * A fixed shape's slot order is the LAYOUT -- what `o.x` resolves against, and therefore a
+   * property of the TYPE, which the checker may list in a different order than the literal wrote
+   * (`const o: { y: number; x: string } = { x: "s", y: 2 }`, and every object spread). Enumeration
+   * order is a different fact: §10.1.11 OrdinaryOwnPropertyKeys answers in insertion order, which
+   * only the allocating literal knows. Keeping both means a reordering annotation and a spread
+   * store to the right slots AND print the way Node prints (plan-notes 181).
+   *
+   * Length is field_count when present; every slot appears exactly once. */
+  const uint32_t *key_order;
 } JSRTClass;
+
+/* The slot the i-th enumerated property lives in. Identity when a class declares no reordering --
+ * a class declaration's fields are laid out in the order they are written, so it never does. */
+static inline uint32_t jsrt_class_key_slot(const JSRTClass *cls, uint32_t i) {
+  return cls->key_order == NULL ? i : cls->key_order[i];
+}
 
 struct JSRTClosure;
 

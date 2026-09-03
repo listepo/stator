@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: Object literals with static keys
 
 const base = { x: 1 };

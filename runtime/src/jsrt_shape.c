@@ -16,12 +16,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL};
+const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL, NULL};
 
 /* Identical to `jsrt_class_dynamic` in every field that means anything -- the SHAPE owns the layout
  * -- and distinct from it by address, which is the whole job: it marks the objects §22.2.7.2 builds
  * with a null prototype so the printer writes Node's `[Object: null prototype]` prefix. */
-const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL};
+const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL};
 
 /* The one shape with no key: every dynamic object starts here. Static, so "has no properties"
  * needs no allocation and compares by address. */

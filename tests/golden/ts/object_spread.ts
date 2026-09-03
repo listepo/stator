@@ -1,0 +1,20 @@
+const base: { x: number; z: string } = { x: 1, z: "z" };
+const after = { ...base, y: 2 };
+console.log(after);
+const before = { y: 2, ...base };
+console.log(before);
+const shadowed = { ...base, x: 9 };
+console.log(shadowed);
+console.log(after.x);
+console.log(after.y);
+console.log(after.z);
+console.log(shadowed.x);
+console.log(Object.keys(after));
+console.log(Object.entries(before));
+const twice = { ...base, ...after };
+console.log(twice);
+// The layout is the ANNOTATION's field order; the printed order is the one written here.
+const reordered: { y: number; x: string } = { x: "s", y: 2 };
+console.log(reordered);
+console.log(reordered.x);
+console.log(reordered.y);

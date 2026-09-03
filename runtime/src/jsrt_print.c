@@ -730,13 +730,20 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
     }
     free(links);
   } else {
-    for (uint32_t slot = 0; slot < cls->field_count; slot++) {
+    for (uint32_t i = 0; i < cls->field_count; i++) {
+      /* Insertion order, not slot order: the two differ whenever the layout came from a type the
+       * literal did not write in that order (jsrt_value.h, JSRTClass::key_order). */
+      const uint32_t slot = jsrt_class_key_slot(cls, i);
       if (cls->fields[slot][0] == '#') {
         continue;
       }
       Buf *entry = &entries[next++];
       buf_init(entry);
-      buf_puts(entry, cls->fields[slot]);
+      /* A class field's name is an identifier by construction, but an object literal's is only a
+       * key: `{ "a-b": 1 }` has a fixed layout and a name no identifier could spell, and
+       * `util.inspect` quotes exactly that. Same helper the dynamic path uses, so one rule
+       * decides quoting for both. */
+      append_key(entry, cls->fields[slot]);
       buf_puts(entry, ": ");
       inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
     }

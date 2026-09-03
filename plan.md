@@ -324,16 +324,21 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
    `noFallthroughCasesInSwitch` and `useUnknownInCatchVariables` are already fixed (they are now
    `mode === 'ts'`); Test262 found them because no decision fixture had asked, both being things
    nobody writes deliberately in TypeScript. What is left, in measured order:
-   (a) **The possibly-null family** — `'x' is possibly 'null'/'undefined'`, `Object is possibly
-   'undefined'`, `Cannot invoke an object which is possibly 'undefined'` — is ~3400 of the 8212
-   Test262 failures, the single largest bucket by a factor of three. Suppress the CODES in js mode
-   as `program.ts` already does for 2339/2551/2353/2349; do **not** set `strictNullChecks: false`,
-   because compilerOptions are program-wide and that would strip null safety from the `.ts` half of
-   a mixed graph and delete the boundary checks §0.4 requires. Leaving `T | undefined` in the type
-   is the point: the union lowers to the dynamic path and the check still happens, at run time.
-   (b) The rest of the `STA0012` buckets, re-measured after (a) — assignability, arity, and
-   `implicitly has an 'any' type` — each judged individually against §1.2 rather than as a group.
-   Some are real refusals Stator should keep.
+   ~~(a) **The possibly-null family.**~~ ✅ **landed 2026-09-03** (plan-notes 180) — the nine codes
+   (2531/2532/2533, 2721/2722/2723, 18047/18048/18049) joined 2339/2551/2353/2349/2367 in
+   `JS_MODE_RUNTIME_CODES`, enumerated with a reason per line. Test262: **10,513 failed → 9222,
+   18.5% → 20.5%**, `passed` unchanged at 2379 — the 1291 did not start passing, they moved from a
+   checker lint to Stator's own schedule (the `STA12xx` skip column), which is the attribution
+   §1.3's disjoint ranges exist to make. Uncovered and fixed one internal error: `typeAt` answered
+   with the checker's NARROWED type while an identifier lowers to its BINDING, and the two disagree
+   on exactly the narrowings `isCheckable` refuses.
+   (b) The rest of the `STA0012` buckets, each judged individually against §1.2 rather than as a
+   group — some are real refusals Stator should keep. **Re-measured after (a)** (the numbers below
+   are the second measurement, not the first — every one of these tests used to die on possibly-null
+   before reaching its own diagnostic): 3233 `Argument of type 'X' is not assignable to parameter of
+   type 'X'`, 1326 `Cannot find name 'X'`, 468 `Type 'X' is not assignable to type 'X'`, 408
+   `implicitly has an 'any' type`, 265 + 183 arity, 235 `left-hand side of an arithmetic operation`,
+   196 `No overload matches this call`.
    **Check:** each suppression lands with a both-modes decision fixture (the same source, `error` in
    ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer, and the
    Test262 ratchet moves in the commit that lands it.
@@ -412,7 +417,17 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
     (`describeKind`) (**landed** 2026-09-02, plan-notes 164). Accessor compound and `#n in o` stay
     not-yet (families (d) / private).
     (c) **Object literal forms**: shorthand, spread, method and accessor members; keys that are not
-    identifiers.
+    identifiers. **Shorthand, non-identifier keys, and spread landed 2026-09-03** (plan-notes 181):
+    `{ x }` desugars to `{ x: x }` in the lowering; a string-literal key is a slot like any other and
+    `o["a-b"]` reads it back; `{ ...a, y: 1 }` expands to one field read per field of `a`'s shape.
+    Landing spread required separating a fixed shape's two orders — the LAYOUT (the type's field
+    order, what `o.x` resolves against) from the ENUMERATION order (§10.1.11, what `console.log` and
+    `Object.keys` answer) — which the compiler had conflated, silently miscompiling a reordering
+    annotation into swapped field values. `JSRTClass::key_order` now carries the second.
+    **Residue:** a spread of anything but a variable of fixed shape, methods, accessors, and
+    computed keys stay `STA1214`. Accessors need a get/set slot the value model has no
+    representation for; decide it in `docs/VALUE.md` before writing any of it, the way family (e)
+    must decide the bound-method one.
     (d) **The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an

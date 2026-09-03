@@ -421,6 +421,12 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     // A `name: value` pair of an accepted literal. gateObjectLiteral vetted the whole literal --
     // these are its children, reached on the way down, and the values are gated normally.
     case ts.SyntaxKind.PropertyAssignment:
+    // `{ x }`, whose name IS its value. Same reasoning: the literal was vetted above, and the
+    // identifier underneath is gated as the ordinary identifier it desugars to.
+    case ts.SyntaxKind.ShorthandPropertyAssignment:
+    // `{ ...a }`. gateObjectLiteral already held the operand to a variable of fixed shape; the
+    // identifier underneath is gated as the ordinary read the expansion makes of it.
+    case ts.SyntaxKind.SpreadAssignment:
     // A member of a TYPE literal (`let p: { x: number }`). The enclosing TypeLiteral is a type
     // node and skipped as one, but its members are not type nodes themselves, so the walk reaches
     // them; they carry no runtime construct, exactly as the annotation around them does not.
@@ -1880,14 +1886,36 @@ function gateArrayLiteral(literal: ts.ArrayLiteralExpression): GateResult {
   return { kind: 'accept' };
 }
 
+/** Whether `name` is a key a FIXED layout can carry.
+ *
+ * An identifier always is. A string literal is too — the slot is found by the name the source
+ * wrote, and the only thing that ever needed the name to be spellable was the PRINTER, which now
+ * quotes a key like `util.inspect` does rather than assuming one (`append_key`).
+ *
+ * An integer index is the exception, and not for a layout reason: OrdinaryOwnPropertyKeys puts
+ * integer indices first in ASCENDING NUMERIC order, ahead of the string keys in insertion order, so
+ * `{ b: 1, "0": 2 }` prints `{ '0': 2, b: 1 }` while a fixed layout is declaration order by
+ * definition. The dynamic shape table already implements that ordering, so such a literal belongs
+ * on the dynamic path, not in a slot table that would have to re-implement it. */
+function isLayoutKey(name: ts.PropertyName): boolean {
+  if (ts.isIdentifier(name)) {
+    return true;
+  }
+  return ts.isStringLiteral(name) && !isIntegerIndex(name.text);
+}
+
+/** ECMA-262's array-index test on a property key: the canonical decimal spelling of a number below
+ * 2^32-1. `"01"` and `"1.0"` are ordinary string keys — only the canonical form is an index. */
+function isIntegerIndex(key: string): boolean {
+  return /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < 0xffffffff;
+}
+
 /** `{ x: 1, y: f() }`, admitted only where the shape is a layout.
  *
- * The key set must be known and spellable: a computed key is not a name until there is a shape
- * table to look one up in, a spread copies a shape this one does not know, and a method or an
- * accessor in a literal has no class to hang a member function on. A key that is not an
- * identifier is refused for a printing reason as much as a layout one -- `util.inspect` quotes
- * `{ 'a-b': 1 }`, and a field name in the descriptor is an identifier by construction everywhere
- * else in the runtime.
+ * The key set must be known: a computed key is not a name until there is a shape table to look one
+ * up in, a spread copies a shape this one does not know, and a method or an accessor in a literal
+ * has no class to hang a member function on. A key that is merely not an IDENTIFIER is fine
+ * (`isLayoutKey`) -- the printer quotes it.
  *
  * The TYPE has to be a shape too, and that is the load-bearing check: `tsTypeToHType` refuses an
  * optional property, an index signature and anything with a call signature, so accepting a literal
@@ -1897,13 +1925,30 @@ function gateObjectLiteral(
   checker: ts.TypeChecker,
 ): GateResult {
   for (const property of literal.properties) {
-    if (!ts.isPropertyAssignment(property)) {
-      return notYet(
-        'an object literal with a shorthand, spread, method or accessor member is not yet supported',
-        5,
-      );
+    // `{ x }` is `{ x: x }` -- the same key, the same value, and a name the checker has already
+    // resolved. It gets no layout question of its own, so it is accepted here and desugared in the
+    // lowering rather than carried into HIR as a second member kind.
+    if (ts.isShorthandPropertyAssignment(property)) {
+      continue;
     }
-    if (!ts.isIdentifier(property.name)) {
+    // `{ ...a, b: 1 }`: the spread's own type names the keys it contributes, so the result is a
+    // fixed slot list after all -- the lowering expands it into one entry per field. The operand
+    // must be a plain IDENTIFIER, because the expansion reads it once per field and anything with
+    // an effect would run that effect N times (plan.md §8 step 12 family c; plan-notes 181).
+    if (ts.isSpreadAssignment(property)) {
+      if (!ts.isIdentifier(property.expression)) {
+        return notYet('an object spread of anything but a variable is not yet supported', 5);
+      }
+      const spread = tsTypeToHType(checker.getTypeAtLocation(property.expression), checker);
+      if (spread.kind !== 'object') {
+        return notYet('an object spread of a value with no fixed shape is not yet supported', 5);
+      }
+      continue;
+    }
+    if (!ts.isPropertyAssignment(property)) {
+      return notYet('an object literal with a method or accessor member is not yet supported', 5);
+    }
+    if (!isLayoutKey(property.name)) {
       return notYet('an object literal key that is not an identifier is not yet supported', 5);
     }
   }
@@ -2719,7 +2764,19 @@ function gateElementAccess(
     // Unknown a match-or-null has to be. The verifier already accepts an Unknown index target.
     // Untyped receivers (plan.md §8 step 4) take the same path.
     const receiver = checker.getTypeAtLocation(access.expression);
-    return tsTypeToHType(receiver, checker).kind === 'unknown' || isDynamicShape(receiver, checker)
+    const hir = tsTypeToHType(receiver, checker);
+    // `o["a-b"]` on a fixed shape: the key is a literal, so the slot is known at compile time and
+    // this is a field read spelled the only way TypeScript allows a non-identifier key to be
+    // spelled. Anything else -- a computed key, or a key naming no field -- is still an index.
+    const key = ts.isStringLiteral(access.argumentExpression)
+      ? access.argumentExpression.text
+      : undefined;
+    if (hir.kind === 'object' && key !== undefined) {
+      return hir.fields.some((field) => field.name === key)
+        ? { kind: 'accept' }
+        : notYet('index access on a non-array is not yet supported', 5);
+    }
+    return hir.kind === 'unknown' || isDynamicShape(receiver, checker)
       ? { kind: 'accept' }
       : notYet('index access on a non-array is not yet supported', 5);
   }

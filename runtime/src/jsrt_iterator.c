@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-const JSRTClass jsrt_class_iterator = {"Iterator", 0, NULL, NULL, 0, NULL};
+const JSRTClass jsrt_class_iterator = {"Iterator", 0, NULL, NULL, 0, NULL, NULL};
 
 static const uint32_t ITER_DONE = UINT32_MAX;
 
@@ -119,7 +119,7 @@ static bool string_step(JSRTIterator *it, jsrt_value *out) {
   return true;
 }
 
-const JSRTClass jsrt_class_generator = {"Generator", 0, NULL, NULL, 0, NULL};
+const JSRTClass jsrt_class_generator = {"Generator", 0, NULL, NULL, 0, NULL, NULL};
 
 jsrt_value jsrt_generator_new(JSRTEnv *env, JSRTGenResume resume) {
   JSRTGenerator *g = (JSRTGenerator *)jsrt_gc_alloc(sizeof(JSRTGenerator), "generator");

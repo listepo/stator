@@ -1181,13 +1181,28 @@ function verifyExpression(
         });
         break;
       }
-      for (const [index, entry] of expr.entries.entries()) {
-        if (shape.fields[index]?.name !== entry.name) {
+      // Entries are in EVALUATION order and the shape is the LAYOUT; the two need not agree, since
+      // a reordering annotation or a spread supplies the layout (plan-notes 181). What must hold is
+      // that every entry names a field of the shape and the literal covers the shape exactly --
+      // that is the invariant the emitter's slot lookup and the shape's key order both rest on.
+      const named = new Set(expr.entries.map((entry) => entry.name));
+      for (const entry of expr.entries) {
+        if (!shape.fields.some((field) => field.name === entry.name)) {
           problems.push({
             kind: 'object-literal',
             span: expr.span,
             code: 'STA4052',
-            message: `entry '${entry.name}' is at position ${String(index)}, which the shape gives to '${shape.fields[index]?.name ?? '<none>'}'`,
+            message: `entry '${entry.name}' names no field of shape '${hTypeName(shape)}'`,
+          });
+        }
+      }
+      for (const field of shape.fields) {
+        if (!named.has(field.name)) {
+          problems.push({
+            kind: 'object-literal',
+            span: expr.span,
+            code: 'STA4052',
+            message: `shape '${hTypeName(shape)}' has field '${field.name}', which the literal does not write`,
           });
         }
       }

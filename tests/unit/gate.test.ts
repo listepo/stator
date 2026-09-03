@@ -370,23 +370,37 @@ void test('an object literal is accepted exactly where its shape is a fixed slot
 });
 
 void test('every literal form that is not a fixed slot list is a not-yet', () => {
-  // A method needs a member function table the shape has no declaration to build; a spread needs
-  // the key set at RUNTIME; a computed key needs it at runtime too; and shorthand is the one that
-  // looks accepted-adjacent -- it is a distinct AST node the gate must reach on purpose.
+  // A method needs a member function table the shape has no declaration to build, and a computed
+  // key needs the key set at RUNTIME. A spread whose operand is not a variable of fixed shape is
+  // the same runtime question: the expansion reads the operand once per field, so an operand with
+  // an effect would run that effect N times (plan-notes 181).
   assert.deepEqual(codesFor('const o = { m(): number { return 1; } };\nconsole.log(o);'), [
     'STA1214',
   ]);
-  assert.deepEqual(codesFor('const a = { x: 1 };\nconst b = { ...a };\nconsole.log(b.x);'), [
-    'STA1214',
-  ]);
+  assert.deepEqual(
+    codesFor(
+      'function f(): { x: number } {\n  return { x: 1 };\n}\nconst b = { ...f() };\nconsole.log(b.x);',
+    ),
+    ['STA1214'],
+  );
   assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), [
     'STA1214',
   ]);
-  assert.deepEqual(codesFor('const x = 1;\nconst o = { x };\nconsole.log(o.x);'), ['STA1214']);
   assert.deepEqual(
     codesFor('const o = {\n  get x(): number {\n    return 1;\n  },\n};\nconsole.log(o);'),
     ['STA1214'],
   );
+});
+
+// plan.md §8 step 12 family (c): shorthand is `{ x: x }` -- the same key, the same value, and no
+// layout question of its own -- and a string-literal key is the only spelling TypeScript gives a
+// key no identifier can express. Both are fixed slot lists, and `o["a-b"]` reads one back.
+void test('shorthand and string-literal keys are fixed slot lists', () => {
+  assert.deepEqual(codesFor('const x = 1;\nconst o = { x };\nconsole.log(o.x);'), []);
+  assert.deepEqual(codesFor('const a = { x: 1 };\nconst b = { ...a };\nconsole.log(b.x);'), []);
+  assert.deepEqual(codesFor('const o = { "a-b": 1, ok: 2 };\nconsole.log(o["a-b"] + o.ok);'), []);
+  // A literal key naming no field of the shape is still an index, not a slot read.
+  assert.deepEqual(codesFor('const o = { ok: 2 };\nconsole.log(o["nope"]);'), ['STA1214']);
 });
 
 // Task 4.1: an anonymous shape with an OPTIONAL property has no fixed slot list, so it takes the

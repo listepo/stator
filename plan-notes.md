@@ -4554,3 +4554,118 @@ Worth naming because of where it sat: a flaky red is the mirror image of the fai
 opening paragraph is written against. A green that proves less than it appears to teaches people to
 trust a signal that is not there; a red that fires on jitter teaches them to re-run until it is
 green, which costs the same signal by the other route.
+
+## 180. The possibly-null family, and the two type sources that disagreed under it (2026-09-03)
+
+**What landed.** plan.md §8 step 2a(a): the nine possibly-null diagnostic codes — 2531/2532/2533
+(`Object is possibly …`), 2721/2722/2723 (`Cannot invoke an object which is possibly …`) and
+18047/18048/18049 (`'x' is possibly …`) — are suppressed in js mode, joining 2339/2551/2353/2349
+and 2367. They were **3855 of Task 6.1's 10,513 failures**, the largest bucket by a factor of three,
+and every one of them is JavaScript that runs: `xs[i] + 1` is how the language indexes an array.
+
+The suppression is of the CODE and never of the OPTION. `strictNullChecks: false` or
+`noUncheckedIndexedAccess: false` is program-wide, so in a mixed graph it would strip null safety
+from the `.ts` half and delete the boundary checks §0.4 requires. Leaving `T | undefined` in the
+type is the point: the union lowers to the dynamic path, and the check still happens at run time.
+The five-code `||` chain became an enumerated `JS_MODE_RUNTIME_CODES` set with a reason per line —
+enumerated and not ranged, because an operation no runtime could settle must stay a hard error.
+
+**Test262 moved: 10,513 failures → 9222, pass rate 18.5% → 20.5%, `passed` unchanged at 2379.**
+That last clause is the honest half. The 1291 tests did not start passing; they stopped being
+refused by a *checker lint* and are now refused by *Stator's own schedule* — they land in the skip
+column attributed to an `STA12xx`, which is what §1.3's disjoint ranges are for. The pass number is
+the one that says the compiler runs more JavaScript, and it did not move. What moved is the
+attribution, and the next bucket is now visible underneath: `Argument of type 'X' is not assignable`
+went 992 → 3233 as the tests that used to die on possibly-null reached their second diagnostic.
+That re-measure is exactly what step 2a(b) asks for, and it is now recorded rather than predicted.
+
+**The defect the suppression uncovered.** `/** @type {{a:number}|undefined} */ var box = {a:7};
+box.a` compiled to `STA4060 no field 'a' on unknown` — an internal error, so a compiler bug by
+`AGENTS.md`'s own definition. Two type sources disagreed about one expression:
+
+- `typeAt(node)` answers with `checker.getTypeAtLocation`, the **narrowed** type at that use. CFA
+  narrows `box` to `{a:number}` there, so `isClassInstance` said "object" and the branch that wants
+  a field SLOT was taken.
+- an identifier **lowers to its binding** — the declared type, `Unknown` — and the `boundary-check`
+  that would reconcile the two is only inserted when the narrowing is one a tag can settle
+  (`isCheckable`: number, string, boolean). An object-shape narrowing is not, so no check was
+  inserted and the value stayed dynamic.
+
+They agree on every narrowing that is checkable and disagree on every one that is not, which is why
+nothing had noticed: a `.ts` program cannot get there (`unknown` narrowed to a shape is refused
+before lowering) and no `.js` fixture had a JSDoc'd nullable object. The fix is in `typeAt`, the one
+function every branch selection consults: when the identifier's binding is `Unknown` and the
+narrowed type is not checkable, answer the binding. The value really is dynamic at run time — that
+is a fact about the value, not a concession — so this is the truthful answer and not a workaround.
+It returns the binding rather than a fresh `hUnknown(false)`, because an `Unknown` carries whether
+it came from an implicit `any` and the verifier compares the two for equality (`js/destructure.js`
+caught that within one run).
+
+Worth recording separately: the comment at that site claims "the gate has already refused any
+narrowing this cannot check (`isCheckable`)". It has not — `narrowedTo`/`isCheckable` are imported
+by `src/lower/` and by nothing in `src/frontend/gate.ts`. The invariant was asserted in prose and
+enforced nowhere, which is how the two readings drifted apart in the first place.
+
+**Residue, named rather than hidden.** `xs[i].toFixed(2)` now compiles and then panics `STA2006` at
+run time, because a method call on a *dynamic primitive* needs `Number.prototype` dispatch and the
+runtime has no prototype chain (Phase 8 owns that surface). It is not a wrong answer — it is a
+located abort — but it is not Node's answer either, so the golden fixture stays on the forms the
+dynamic path can run and this line is the record that the gap is known.
+
+## 181. A fixed shape had two orders and used one: reordering annotations miscompiled, spread was blocked (2026-09-03)
+
+Found while landing plan.md §8 step 12 family (c). Reproduction, three lines of ordinary
+TypeScript, no spread involved:
+
+```ts
+const o: { y: number; x: string } = { x: "s", y: 2 };
+console.log(o.x);   // Stator: 2      Node: s
+console.log(o.y);   // Stator: s      Node: 2
+```
+
+A silent wrong answer, not a diagnostic. The cause is that a fixed shape has **two** orders and the
+compiler had conflated them:
+
+- **Layout** — which slot a field lives in. `slotOf` resolves `o.x` by looking the name up in
+  `target.type.fields`, so the layout is a property of the TYPE. Here that is the annotation's
+  order, `y, x`.
+- **Enumeration order** — what `console.log`, `Object.keys`, and `for…in` answer. §10.1.11
+  OrdinaryOwnPropertyKeys says insertion order, which only the ALLOCATING LITERAL knows. Here that
+  is `x, y`.
+
+`registerShape` built the class descriptor from the literal's `entries` and the emitter stored
+`entries[i]` into slot `i`, so writes used the literal's order while reads used the type's. Printing
+was right by accident (the descriptor's names came from the same entries as the values), which is
+why 140 golden fixtures passed: in every one of them the two orders coincided.
+
+**Object spread makes them coincide never.** TypeScript's spread result type puts explicit
+properties first: `{ ...base, y: 2 }` with `base: {x, z}` types as `{y, x, z}`, while JS builds
+`x, z, y`. Measured, not assumed. So spread could not land on the fixed path until the two orders
+were separated — which is the real reason family (c) had spread listed beside shorthand.
+
+**The fix, at the layer that owns each fact.**
+
+1. `JSRTClass` gains `key_order`: slot indices in insertion order, `NULL` when insertion order IS
+   slot order (a class declaration lays fields out in the order it writes them, so it always is).
+   `jsrt_class_key_slot` is the one accessor; `jsrt_print.c` and `jsrt_object_ops.c`'s `collect`
+   are the only two walks that had to change.
+2. The lowering takes the **contextual** type as the literal's layout when there is one, so the
+   literal stores to the slots later reads resolve against. This is the same "the contextual type
+   wins" rule `objectLiteralIsDynamic` already applies one line above.
+3. The emitter stores each entry into its NAME's slot, not its position, and emits `key_order` from
+   the entry order. The descriptor cache is keyed by shape name **plus** key order — one type with
+   two insertion orders is two descriptors, or the second literal prints in the first's order.
+4. The HIR verifier's check was "entry `i` is the shape's field `i`", which is exactly the
+   conflation. It is now the invariant that survives: every entry names a field of the shape, and
+   the literal covers the shape exactly.
+
+Spread then falls out as pure lowering: `{ ...a }` expands to one `field-access` per field of `a`'s
+shape. The gate holds the operand to an **identifier** — the expansion reads it once per field, so
+anything with an effect would run that effect N times — and to a fixed shape. `{ ...a, x: 1 }`
+needs no dedup rule: both entries resolve to one slot and the emitter stores in source order, so
+the last write wins the way §13.2.5.5 says, and `keyOrderOf` keeps the key's first position.
+
+**Residue in family (c), named rather than hidden.** A spread of a call result, a member access, or
+a value with no fixed shape stays `STA1214`; methods and accessors in a literal stay `STA1214` (both
+need calling through a shape the declaration does not build, and accessors need a get/set slot the
+runtime has no representation for); computed keys stay `STA1214`.

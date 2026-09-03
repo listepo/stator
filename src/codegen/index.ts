@@ -62,6 +62,7 @@ import {
   REGEXP_OPS,
   SET_OPS,
 } from '../hir/nodes.ts';
+import type { HField } from '../hir/types.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
  *
@@ -228,6 +229,30 @@ function shapeNameOf(expr: ObjectLiteral): string {
   return expr.type.name;
 }
 
+/** The literal's LAYOUT: the type's fields, which is what every later read resolves against. */
+function shapeFieldsOf(expr: ObjectLiteral): readonly HField[] {
+  if (expr.type.kind !== 'object') {
+    throw new Error('object literal has no shape');
+  }
+  return expr.type.fields;
+}
+
+/** Slot indices in the order the literal wrote its keys, or `undefined` when that IS slot order.
+ * A duplicate key keeps its first position and its single slot, which is what §13.2.5.5 does. */
+function keyOrderOf(expr: ObjectLiteral, layout: readonly HField[]): number[] | undefined {
+  const order: number[] = [];
+  for (const entry of expr.entries) {
+    const slot = layout.findIndex((field) => field.name === entry.name);
+    if (slot >= 0 && !order.includes(slot)) {
+      order.push(slot);
+    }
+  }
+  // A literal that does not cover its own layout cannot describe an enumeration order for it;
+  // that shape is unreachable (a partial literal is a dynamic one), so identity is the safe answer.
+  const identity = order.every((slot, i) => slot === i);
+  return order.length !== layout.length || identity ? undefined : order;
+}
+
 /* A JS string is a sequence of UTF-16 CODE UNITS, and a lone surrogate is a legal one. UTF-8
  * cannot represent it, so `"\ud800"` written straight into the .c file comes back as U+FFFD --
  * `charCodeAt(0)` answered 65533 where Node answers 55296 (plan-notes 178, found by the fuzzer).
@@ -337,6 +362,8 @@ class Emitter {
 
   private classes: ClassDeclaration[] = [];
   private classIds: Map<string, number> = new Map();
+  /** Class id -> enumeration order, present only for a literal whose keys are not in slot order. */
+  private classKeyOrders: Map<number, number[]> = new Map();
   /* An array literal's elements occupy a contiguous run, for the same reason a call's arguments do:
    * `jsrt_array_new` takes a pointer to the first, and every element already evaluated must stay
    * rooted while the rest are evaluated -- the allocation inside `jsrt_array_new` itself can
@@ -500,9 +527,18 @@ class Emitter {
       }
       const table =
         cls.vtable.length === 0 ? '0, NULL' : `${cls.vtable.length}, _jsrt_methods_${id}`;
+      // Absent unless the literal's key order differs from its layout: a class declaration lays
+      // its fields out in the order it writes them, so identity is the overwhelming case.
+      const keyOrder = this.classKeyOrders.get(id);
+      if (keyOrder !== undefined) {
+        out.push(
+          `static const uint32_t _jsrt_keys_${id}[] = {${keyOrder.map(String).join(', ')}};`,
+        );
+      }
       out.push(
         `static const JSRTClass _jsrt_class_${id} = {${cNameLiteral(descriptorName(cls.name))}, ` +
-          `${cls.fields.length}, _jsrt_fields_${id}, ${this.baseDescriptor(cls, id)}, ${table}};`,
+          `${cls.fields.length}, _jsrt_fields_${id}, ${this.baseDescriptor(cls, id)}, ${table}, ` +
+          `${keyOrder === undefined ? 'NULL' : `_jsrt_keys_${id}`}};`,
       );
     }
     if (this.classes.length > 0) {
@@ -2544,16 +2580,25 @@ class Emitter {
         if (slot === undefined) {
           throw new Error('object literal was not registered during counting');
         }
-        const id = String(this.classIds.get(shapeNameOf(expr)));
+        const layout = shapeFieldsOf(expr);
+        const order = keyOrderOf(expr, layout);
+        const name = `${shapeNameOf(expr)}${order === undefined ? '' : `#${order.join(',')}`}`;
+        const id = String(this.classIds.get(name));
         const parts = [`${this.slotAt(slot)} = jsrt_object_new(&_jsrt_class_${id})`];
         let flushed = false;
-        expr.entries.forEach((entry, index) => {
+        // Source order is the EVALUATION order (§13.2.5.5 runs the initializers left to right);
+        // the slot each value lands in comes from the layout, which need not agree.
+        expr.entries.forEach((entry) => {
+          const target = layout.findIndex((field) => field.name === entry.name);
+          if (target < 0) {
+            throw new Error(`object literal key ${entry.name} is not in its own shape`);
+          }
           flushed =
             this.sequencePart(
               parts,
               entry.value,
               expr.span,
-              (v) => `jsrt_object_set(${this.slotAt(slot)}, ${index}, ${v})`,
+              (v) => `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, ${v})`,
             ) || flushed;
         });
         if (!flushed) {
@@ -3139,25 +3184,30 @@ class Emitter {
     return `"${file}:${String(span.line)}"`;
   }
 
+  /** The layout is the TYPE's field order, because that is what a later `o.x` resolves against
+   * (`slotOf` in the lowering indexes `type.fields`). The literal's own key order is a second,
+   * independent fact -- enumeration order -- and the two differ whenever the annotation or a
+   * spread listed the keys in another order, so the descriptor carries both (plan-notes 181). */
   private registerShape(expr: ObjectLiteral): void {
-    const name = shapeNameOf(expr);
+    const layout = shapeFieldsOf(expr);
+    const order = keyOrderOf(expr, layout);
+    // Two literals of the same TYPE can still have different insertion orders, so the descriptor
+    // is keyed by both -- one shape name would otherwise print the second literal in the first's
+    // order.
+    const name = `${shapeNameOf(expr)}${order === undefined ? '' : `#${order.join(',')}`}`;
     if (this.classIds.has(name)) {
       return;
     }
     this.classIds.set(name, this.classes.length);
+    if (order !== undefined) {
+      this.classKeyOrders.set(this.classes.length, order);
+    }
     this.classes.push({
       kind: 'class-declaration',
       type: expr.type,
       span: expr.span,
       name,
-      fields: expr.entries.map((entry, index) => ({
-        name: entry.name,
-        type:
-          expr.type.kind === 'object'
-            ? (expr.type.fields[index]?.type ?? entry.value.type)
-            : entry.value.type,
-        span: expr.span,
-      })),
+      fields: layout.map((field) => ({ name: field.name, type: field.type, span: expr.span })),
       methods: [],
       statics: [],
       vtable: [],

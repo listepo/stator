@@ -6,6 +6,43 @@ import { diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts'
 
 type Mode = 'ts' | 'js';
 
+/* The checker refusals js mode drops, because each one refuses an operation the DYNAMIC RUNTIME
+ * settles at run time -- not untyped code, which §1.2 already promises never to reject, but valid
+ * JavaScript whose answer is a value rather than a type (plan.md §8 steps 2, 2a).
+ *
+ * Suppressing the CODE and not the OPTION is the whole design. `strictNullChecks: false` (or
+ * `noUncheckedIndexedAccess: false`) is program-wide, so in a mixed graph it would strip null
+ * safety from the `.ts` half and delete the boundary checks §0.4 requires. Leaving `T | undefined`
+ * in the type is the point: the union lowers to the dynamic path and the check still happens, at
+ * run time, which is where a dynamic value's check belongs.
+ *
+ * Nothing in here is a free pass for a REAL refusal — an operation no runtime could settle stays a
+ * hard error in both modes, and that is why the list is enumerated rather than ranged. */
+const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
+  // Member access and calls through a value the checker could not resolve.
+  2339, // Property 'x' does not exist on type 'T'.
+  2551, // Property 'x' does not exist on type 'T'. Did you mean 'y'?
+  2353, // Object literal may only specify known properties.
+  2349, // This expression is not callable.
+  // `"" == 0` is not a mistake in JavaScript, it is the coercion table, and running that table is
+  // most of what js mode is for. ts mode keeps it: there both operand types are known and disjoint
+  // (plan-notes 177).
+  2367, // This comparison appears to be unintentional because the types have no overlap.
+  // The possibly-null family: 3855 of Task 6.1's 10,513 Test262 failures, the largest bucket by a
+  // factor of three, and every one of them ordinary JavaScript that runs (plan-notes 176, 180).
+  // `xs[i].toFixed(2)` is how JavaScript indexes an array; the spec's answer for the miss is a
+  // TypeError at run time, which is a fact about the value and not a reason to refuse the program.
+  2531, // Object is possibly 'null'.
+  2532, // Object is possibly 'undefined'.
+  2533, // Object is possibly 'null' or 'undefined'.
+  2721, // Cannot invoke an object which is possibly 'null'.
+  2722, // Cannot invoke an object which is possibly 'undefined'.
+  2723, // Cannot invoke an object which is possibly 'null' or 'undefined'.
+  18047, // 'x' is possibly 'null'.
+  18048, // 'x' is possibly 'undefined'.
+  18049, // 'x' is possibly 'null' or 'undefined'.
+]);
+
 /** Build a ts.Program from an entry file, using Stator-owned compilerOptions.
  * Stator owns strict family + noEmit; user's tsconfig.json is ignored for these.
  * Returns the program and any diagnostics emitted during program construction.
@@ -103,21 +140,7 @@ export function createProgram(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = ts.getPreEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
-    // js mode: untyped code is dynamic, not rejected (plan.md §1.2, §8 step 4). checkJs still
-    // infers what it can; these codes are checker refusals for operations the dynamic runtime
-    // settles at run time (property reads/writes and calls through an unknown value).
-    // 2367 ("this comparison appears to be unintentional ... have no overlap") is the same rule for
-    // an operator rather than a member: `"" == 0` is not a mistake in JavaScript, it is the coercion
-    // table, and js mode exists to run it. Refusing it also made the region plan.md §9 Task 6.2
-    // step 4 tells the fuzzer to weight toward ungeneratable (plan-notes 177).
-    if (
-      mode === 'js' &&
-      (diag.code === 2339 ||
-        diag.code === 2551 ||
-        diag.code === 2353 ||
-        diag.code === 2349 ||
-        diag.code === 2367)
-    ) {
+    if (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code)) {
       continue;
     }
     const file = diag.file;

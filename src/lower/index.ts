@@ -2491,6 +2491,34 @@ function lowerExpression(
   }
 
   if (ts.isElementAccessExpression(node)) {
+    // `o["a-b"]` on a fixed shape is `o.a` written the only way TypeScript allows a key that is not
+    // an identifier to be spelled. The slot is known here, so this is the same field read as a dot
+    // access and not an index at all -- without it, `{ "a-b": 1 }` would be a literal nothing could
+    // read back (plan.md §8 step 12 family c).
+    const literalKey = ts.isStringLiteral(node.argumentExpression)
+      ? node.argumentExpression.text
+      : undefined;
+    if (literalKey !== undefined) {
+      const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+      if (target === null) {
+        return null;
+      }
+      if (target.type.kind === 'object') {
+        const slot = slotOf(target, literalKey, node, sourceFile, diagnostics);
+        if (slot === null) {
+          return null;
+        }
+        const access: FieldAccess = {
+          kind: 'field-access',
+          type: typeAt(node, checker, bindings),
+          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+          target,
+          field: literalKey,
+          slot,
+        };
+        return access;
+      }
+    }
     return lowerIndexAccess(node, sourceFile, checker, bindings, diagnostics);
   }
 
@@ -2520,7 +2548,69 @@ function lowerExpression(
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
     const entries: ObjectEntry[] = [];
     for (const property of node.properties) {
-      if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) {
+      // `{ x }` is `{ x: x }`. The desugaring lives here and not in HIR: the value is the ordinary
+      // identifier expression, so every later pass sees a name/value pair like any other.
+      if (ts.isShorthandPropertyAssignment(property)) {
+        const value = lowerExpression(property.name, sourceFile, checker, bindings, diagnostics);
+        if (value === null) {
+          return null;
+        }
+        entries.push({ name: property.name.text, value });
+        continue;
+      }
+      // `{ ...a }` expands to one entry per field of `a`, read out of `a` here rather than copied
+      // by a runtime walk: the gate held the operand to a variable of fixed shape, so both the key
+      // set and each slot are known now (plan.md §8 step 12 family c). A later key of the same
+      // name overwrites this entry, which is the `{ ...a, x: 1 }` rule -- the emitter stores in
+      // source order into one slot, so the last write wins on its own.
+      if (ts.isSpreadAssignment(property)) {
+        const source = lowerExpression(
+          property.expression,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+        );
+        if (source === null) {
+          return null;
+        }
+        if (source.type.kind !== 'object') {
+          diagnostics.push(
+            diagnosticFromNode(
+              property,
+              sourceFile,
+              'STA4068',
+              'internal',
+              'ts',
+              'object spread of a value with no shape',
+            ),
+          );
+          return null;
+        }
+        const spreadSpan = makeSpan(
+          property.getStart(sourceFile),
+          property.getWidth(sourceFile),
+          sourceFile,
+        );
+        source.type.fields.forEach((field, slot) => {
+          const read: FieldAccess = {
+            kind: 'field-access',
+            type: field.type,
+            span: spreadSpan,
+            target: source,
+            field: field.name,
+            slot,
+          };
+          entries.push({ name: field.name, value: read });
+        });
+        continue;
+      }
+      // An identifier or a string-literal key; the gate settled which spellings reach here, and
+      // both carry the key as `.text`, so the slot is found by the name the source wrote.
+      if (
+        !ts.isPropertyAssignment(property) ||
+        !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))
+      ) {
         diagnostics.push(
           diagnosticFromNode(
             property,
@@ -2552,7 +2642,20 @@ function lowerExpression(
     if (objectLiteralIsDynamic(node, checker)) {
       return { kind: 'dyn-object-literal', type: hUnknown(false), span, entries };
     }
-    const type = typeAt(node, checker, bindings);
+    // The CONTEXTUAL type is the layout when there is one, because every later read of this object
+    // goes through it: `const o: { y: number; x: string } = { x: "s", y: 2 }` resolves `o.x`
+    // against the ANNOTATION's field order, so the literal must store to those same slots. Taking
+    // the literal's own type here stored `"s"` in y's slot and read it back as `o.y`, silently
+    // (plan-notes 181). Enumeration order stays the literal's -- the emitter carries it separately.
+    const contextual = checker.getContextualType(node);
+    const contextualType =
+      contextual === undefined
+        ? undefined
+        : substituteHType(tsTypeToHType(contextual, checker), (name) =>
+            bindings.get(typeParameterKey(name)),
+          );
+    const own = typeAt(node, checker, bindings);
+    const type = contextualType?.kind === 'object' ? contextualType : own;
     if (type.kind !== 'object') {
       diagnostics.push(
         diagnosticFromNode(
@@ -4779,9 +4882,21 @@ function typeParameterKey(name: string): string {
  * to find and rewrite. Outside a specialization the lookup finds nothing and this is `tsTypeToHType`
  * exactly. */
 function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Map<string, HType>): HType {
-  return substituteHType(tsTypeToHType(checker.getTypeAtLocation(node), checker), (name) =>
+  const type = substituteHType(tsTypeToHType(checker.getTypeAtLocation(node), checker), (name) =>
     bindings.get(typeParameterKey(name)),
   );
+  // A narrowing the compiler does not CHECK is not a fact about the value. `getTypeAtLocation`
+  // answers with the checker's narrowed type at this use, but an identifier lowers to its BINDING,
+  // and the boundary-check that would reconcile them is only inserted for the three types a tag can
+  // settle (`isCheckable`). For every other narrowing the value stays dynamic at run time, so this
+  // has to say so: `/** @type {{a:number}|undefined} */ var box = {a:7}; box.a` narrows to an object
+  // shape, and a caller that believed the narrowing asked for a field SLOT on a value that has no
+  // layout (STA4060, plan-notes 180). Every branch selection reads this one answer, so agreeing here
+  // is what keeps them agreeing with each other.
+  // The binding itself, not a fresh `hUnknown`: an `Unknown` carries whether it came from an
+  // implicit `any`, and the verifier compares the two for equality.
+  const binding = ts.isIdentifier(node) ? bindings.get(node.text) : undefined;
+  return binding?.kind === 'unknown' && !isCheckable(type) ? binding : type;
 }
 
 /** Every argument of a call, lowered left to right, or `null` if any of them failed.

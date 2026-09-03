@@ -1,0 +1,11 @@
+const x: number = 1;
+const label: string = "n";
+const o: { x: number; label: string } = { x, label };
+console.log(o);
+const dashed: { "a-b": string; ok: number } = { "a-b": "dash", ok: 2 };
+console.log(dashed);
+const quoted: { "it's": number } = { "it's": 5 };
+console.log(quoted);
+console.log(dashed["a-b"]);
+console.log(quoted["it's"]);
+console.log(o["x"] + o["label"].length);

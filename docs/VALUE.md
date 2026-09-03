@@ -478,6 +478,32 @@ A method is not in the object. One function is shared by every instance, with th
 as argument zero under the ordinary closure ABI. Putting methods in slots would cost one closure
 per method per object and turn every call into an indirect one.
 
+### Two orders, and why the descriptor carries both
+
+Slot order is the **layout**: which offset a field lives at, and therefore what `o.x` compiles to.
+It is a property of the TYPE, because the type is all a read has — `slotOf` in the lowering resolves
+a name against `type.fields`, and the same read must work on a value that arrived from anywhere.
+
+Enumeration order is a different fact. §10.1.11 OrdinaryOwnPropertyKeys answers in **insertion**
+order, and only the literal that allocated the object knows it. The two coincide for a class
+declaration, which lays its fields out in the order it writes them, and for the ordinary literal
+whose keys are already in its type's order. They do not coincide when the layout came from
+somewhere else:
+
+```ts
+const o: { y: number; x: string } = { x: "s", y: 2 };  // layout y,x — printed x,y
+const spread = { ...base, y: 2 };                      // TS types it y,x,z — built x,z,y
+```
+
+So `JSRTClass` carries `key_order`: slot indices in insertion order, `NULL` when insertion order IS
+slot order. `jsrt_class_key_slot(cls, i)` is the only accessor, and exactly two walks use it —
+`jsrt_print.c`'s object inspector and `jsrt_object_ops.c`'s `collect` (keys/values/entries).
+Everything else indexes by slot and must keep doing so. Conflating the two silently miscompiled the
+first example above into swapped field values (plan-notes 181).
+
+One consequence for the emitter: the descriptor cache is keyed by the shape name **and** the key
+order, because one type with two insertion orders is two descriptors.
+
 Where a method is overridden the descriptor carries a METHOD TABLE: `method_count` entries, each a
 pointer to a file-scope `JSRTClosure`, in the same prefix order the fields have — a subclass's table
 begins with its base's, so a slot resolved against a receiver's static type indexes the right method
