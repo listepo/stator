@@ -82,7 +82,11 @@ export function explainFile(entry: string, mode: Mode): Explanation {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
 
-  const { program, diagnostics: programDiagnostics } = createProgram(entry, mode);
+  const {
+    program,
+    diagnostics: programDiagnostics,
+    runtimeDynamicSymbols,
+  } = createProgram(entry, mode);
   const verdictFromDiagnostics = classify([...programDiagnostics, ...gateProgram(program, mode)]);
   if (verdictFromDiagnostics !== null) {
     return verdictFromDiagnostics;
@@ -105,7 +109,11 @@ export function explainFile(entry: string, mode: Mode): Explanation {
     return graphVerdict;
   }
 
-  const { module, diagnostics } = lowerProgram(order, program.getTypeChecker());
+  const { module, diagnostics } = lowerProgram(
+    order,
+    program.getTypeChecker(),
+    runtimeDynamicSymbols,
+  );
   const verdictFromLowering = classify(diagnostics);
   if (verdictFromLowering !== null) {
     return verdictFromLowering;

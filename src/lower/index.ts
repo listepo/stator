@@ -200,9 +200,13 @@ let moduleAwaits = false;
 export function lowerProgram(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
+  runtimeDynamicSymbols: ReadonlySet<ts.Symbol> = new Set(),
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
   const bindings = new Map<string, HType>();
+  for (const symbol of runtimeDynamicSymbols) {
+    bindings.set(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`, hUnknown(false));
+  }
   const statements: Statement[] = [];
   functionNesting = 0;
   moduleAwaits = false;
@@ -4882,6 +4886,15 @@ function typeParameterKey(name: string): string {
  * to find and rewrite. Outside a specialization the lookup finds nothing and this is `tsTypeToHType`
  * exactly. */
 function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Map<string, HType>): HType {
+  if (ts.isIdentifier(node)) {
+    const symbol = checker.getSymbolAtLocation(node);
+    if (
+      symbol !== undefined &&
+      bindings.has(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`)
+    ) {
+      return hUnknown(false);
+    }
+  }
   const type = substituteHType(tsTypeToHType(checker.getTypeAtLocation(node), checker), (name) =>
     bindings.get(typeParameterKey(name)),
   );

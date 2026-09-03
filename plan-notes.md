@@ -4697,3 +4697,14 @@ evidence for the latter.
 TypeScript diagnostic **2554** (`Expected N arguments, but got M`) is now suppressed in `js` mode only. The existing closure ABI already carries an argument count: extra values are ignored and `jsrt_arg` supplies `undefined` for an absent parameter, matching Node. A typed JS function call is therefore static after the checker refusal is removed; the TS-mode fixture retains `STA0012`.
 
 The subset and golden fixtures cover both directions. The full pinned Test262 run from this tree passed with **2379 passed, 8839 failed, 42362 skipped**, ratcheting 383 tests from failure to a scheduled skip while retaining the pass count.
+
+
+## 184. A checker-inferred binding must widen before JavaScript can reassign it (2026-09-03)
+
+TS2322 is now suppressed in js mode only, but not as a bare diagnostic filter. The frontend records
+the diagnosed binding symbol and passes that mode-free lowering policy downstream; lowering answers
+`Unknown` for that symbol, so the HIR verifier sees dynamic assignment rather than the impossible
+`number = string` pair. Module and nested-function fixtures prove the symbol identity survives scope.
+
+The full pinned Test262 run is **2379 passed, 8444 failed, 42757 skipped**: 395 further failures
+became scheduled skips, with passes unchanged.

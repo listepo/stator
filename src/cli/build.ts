@@ -120,7 +120,11 @@ export function compileToC(entry: string, mode: Mode): string | null {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
 
-  const { program, diagnostics: programDiagnostics } = createProgram(entry, mode);
+  const {
+    program,
+    diagnostics: programDiagnostics,
+    runtimeDynamicSymbols,
+  } = createProgram(entry, mode);
   if (report(programDiagnostics)) {
     return null;
   }
@@ -143,7 +147,11 @@ export function compileToC(entry: string, mode: Mode): string | null {
     return null;
   }
 
-  const { module, diagnostics: lowerDiagnostics } = lowerProgram(order, program.getTypeChecker());
+  const { module, diagnostics: lowerDiagnostics } = lowerProgram(
+    order,
+    program.getTypeChecker(),
+    runtimeDynamicSymbols,
+  );
   if (report(lowerDiagnostics) || module === null) {
     return null;
   }

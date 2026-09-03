@@ -6,6 +6,20 @@ import { diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts'
 
 type Mode = 'ts' | 'js';
 
+function identifierAt(source: ts.SourceFile, position: number): ts.Identifier | undefined {
+  let found: ts.Identifier | undefined;
+  const visit = (node: ts.Node): void => {
+    if (position < node.getStart(source) || position >= node.getEnd()) return;
+    if (ts.isIdentifier(node)) {
+      found = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
 /* The checker refusals js mode drops, because each one refuses an operation the DYNAMIC RUNTIME
  * settles at run time -- not untyped code, which §1.2 already promises never to reject, but valid
  * JavaScript whose answer is a value rather than a type (plan.md §8 steps 2, 2a).
@@ -23,6 +37,7 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // function-signature restriction, so a required parameter may follow it at runtime.
   1016, // A required parameter cannot follow an optional parameter.
   2554, // Expected N arguments, but got M.
+  2322, // Type 'X' is not assignable to type 'Y'.
   // Member access and calls through a value the checker could not resolve.
   2339, // Property 'x' does not exist on type 'T'.
   2551, // Property 'x' does not exist on type 'T'. Did you mean 'y'?
@@ -54,7 +69,11 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
 export function createProgram(
   entryFile: string,
   mode: Mode,
-): { program: ts.Program; diagnostics: Diagnostic[] } {
+): {
+  program: ts.Program;
+  diagnostics: Diagnostic[];
+  runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
+} {
   // Stator owns these options — strict family on, noEmit true
   const compilerOptions: ts.CompilerOptions = {
     // Strict mode (Stator's policy)
@@ -140,11 +159,21 @@ export function createProgram(
     compilerOptions,
   );
   const diagnostics: Diagnostic[] = [];
+  const runtimeDynamicSymbols = new Set<ts.Symbol>();
 
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = ts.getPreEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
     if (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code)) {
+      // An inferred binding that TypeScript says has an incompatible assignment must be dynamic
+      // throughout lowering. The diagnostic starts at the assignment target, whose symbol is the
+      // one binding the HIR verifier otherwise (correctly) keeps monomorphic.
+      if (diag.code === 2322 && diag.file !== undefined && diag.start !== undefined) {
+        const token = identifierAt(diag.file, diag.start);
+        const symbol =
+          token === undefined ? undefined : program.getTypeChecker().getSymbolAtLocation(token);
+        if (symbol !== undefined) runtimeDynamicSymbols.add(symbol);
+      }
       continue;
     }
     const file = diag.file;
@@ -182,7 +211,7 @@ export function createProgram(
     }
   }
 
-  return { program, diagnostics };
+  return { program, diagnostics, runtimeDynamicSymbols };
 }
 
 /** Format and print diagnostics for user output. */
