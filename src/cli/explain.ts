@@ -23,8 +23,9 @@ import { hTypeHasUnknown } from '../hir/types.ts';
 import { lowerProgram } from '../lower/index.ts';
 import { rewriteModule } from '../passes/rewrite.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
-import { renderDiagnostic } from '../support/diagnostics.ts';
+import { withSpan } from '../support/telemetry.ts';
 import { BuildError } from './build.ts';
+import { diagnosticLines, INK_COLORS, type InkColor, type Line, print } from './render.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -56,28 +57,42 @@ export interface FunctionReport {
 
 /** Returns the process exit code. A rejected program is still a SUCCESSFUL explain: the user asked
  * what would happen and got a true answer, so exit 0 unless explain itself could not run. */
-export function explain(entry: string, mode: Mode, json: boolean): number {
-  const result = explainFile(entry, mode);
+/** What a verdict looks like on a terminal: the byte text never changes; the color does. */
+const VERDICT_COLOR: Record<Verdict, InkColor> = {
+  static: INK_COLORS.staticVerdict,
+  dynamic: INK_COLORS.dynamic,
+  error: INK_COLORS.error,
+  'not-yet': INK_COLORS.notYet,
+};
+
+export async function explain(entry: string, mode: Mode, json: boolean): Promise<number> {
+  const result = await explainFile(entry, mode);
 
   if (json) {
+    // The machine path NEVER goes through ink (decision tests parse this verbatim).
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } else {
-    process.stdout.write(
-      result.code === undefined
-        ? `${entry}: ${result.verdict}\n`
-        : `${entry}: ${result.verdict} (${result.code})\n`,
-    );
+    const lines: Line[] = [
+      {
+        text:
+          result.code === undefined
+            ? `${entry}: ${result.verdict}`
+            : `${entry}: ${result.verdict} (${result.code})`,
+        color: VERDICT_COLOR[result.verdict],
+      },
+    ];
     // The file line first, then its functions indented under it: the file verdict is the stronger
     // claim (it counts bodies), so a `dynamic` file over all-`static` rows reads as the narrowing
     // it is rather than as a contradiction.
     for (const fn of result.functions ?? []) {
-      process.stdout.write(`  ${fn.line}: ${fn.name}: ${fn.verdict} (${fn.provenance})\n`);
+      lines.push({ text: `  ${fn.line}: ${fn.name}: ${fn.verdict} (${fn.provenance})` });
     }
+    await print(lines, process.stdout);
   }
   return 0;
 }
 
-export function explainFile(entry: string, mode: Mode): Explanation {
+export async function explainFile(entry: string, mode: Mode): Promise<Explanation> {
   if (!existsSync(entry)) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
@@ -86,8 +101,11 @@ export function explainFile(entry: string, mode: Mode): Explanation {
     program,
     diagnostics: programDiagnostics,
     runtimeDynamicSymbols,
-  } = createProgram(entry, mode);
-  const verdictFromDiagnostics = classify([...programDiagnostics, ...gateProgram(program, mode)]);
+  } = withSpan('frontend/program', {}, () => createProgram(entry, mode));
+  const verdictFromDiagnostics = classify([
+    ...programDiagnostics,
+    ...withSpan('frontend/gate', {}, () => gateProgram(program, mode)),
+  ]);
   if (verdictFromDiagnostics !== null) {
     return verdictFromDiagnostics;
   }
@@ -103,16 +121,16 @@ export function explainFile(entry: string, mode: Mode): Explanation {
   // cross-file collision decides the entry's verdict, and a dependency's Unknown makes the
   // program dynamic -- per-file verdicts would claim `static` for an entry whose import graph
   // cannot compile.
-  const { order, diagnostics: graphDiagnostics } = moduleOrder(program, entryFile, mode);
+  const { order, diagnostics: graphDiagnostics } = withSpan('frontend/module-graph', {}, () =>
+    moduleOrder(program, entryFile, mode),
+  );
   const graphVerdict = classify(graphDiagnostics);
   if (graphVerdict !== null) {
     return graphVerdict;
   }
 
-  const { module, diagnostics } = lowerProgram(
-    order,
-    program.getTypeChecker(),
-    runtimeDynamicSymbols,
+  const { module, diagnostics } = withSpan('lower', {}, () =>
+    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols),
   );
   const verdictFromLowering = classify(diagnostics);
   if (verdictFromLowering !== null) {
@@ -121,9 +139,7 @@ export function explainFile(entry: string, mode: Mode): Explanation {
   if (module === null) {
     // Lowering gave up without saying why. That is a bug, and reporting `static` here would be a
     // false claim about a program that does not compile.
-    for (const d of diagnostics) {
-      process.stderr.write(`${renderDiagnostic(d)}\n`);
-    }
+    await print(diagnosticLines(diagnostics), process.stderr);
     return { verdict: 'error', code: 'STA4021' };
   }
 

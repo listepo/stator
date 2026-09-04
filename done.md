@@ -861,6 +861,78 @@ STA1002 message), `tests/unit/cli.test.ts` (real `.js` file through `program.ts`
 in-memory host), subset fixtures `subset_eval_call_*`, `subset_new_function_*` (expected-fail
 removed), `subset_js_file_ts.js`, `subset_as_any_*`.
 
+### Step 2a — the `compilerOptions`, not just the diagnostic table
+
+Step 2 switched *which diagnostics the gate emits* by mode; 2a audits *what Stator asks the checker
+to enforce* against the same §1.2 contract — untyped code is never rejected. Task 6.1's first
+corpus pass is what surfaced it: `noFallthroughCasesInSwitch` and `useUnknownInCatchVariables` were
+refusing valid JavaScript in js mode (plan-notes 175), and both became `mode === 'ts'` there.
+
+**The rule every landing below obeys.** The suppression is of the CODE and never of the OPTION.
+`strictNullChecks: false` or `noUncheckedIndexedAccess: false` is program-wide, so in a mixed graph
+it would strip null safety from the `.ts` half and delete the boundary checks §0.4 requires.
+Leaving `T | undefined` in the type is the point: the union lowers to the dynamic path and the
+check still happens at run time. `JS_MODE_RUNTIME_CODES` is therefore an **enumerated** set with a
+reason per line, never a range — an operation no runtime could settle must stay a hard error.
+
+**And the honest half of every number.** `passed` stayed at **2379** through all five landings. The
+tests did not start passing; they stopped being refused by a *checker lint* and are now refused by
+*Stator's own schedule*, landing in the skip column attributed to an `STA12xx`. That is what §1.3's
+disjoint never/not-yet ranges are for, and the pass number is the one that says the compiler runs
+more JavaScript.
+
+| # | landed | codes | Test262 after (passed / failed / skipped) |
+|---|---|---|---|
+| (a) | 2026-09-03, plan-notes 180 | 2531/2532/2533, 2721/2722/2723, 18047/18048/18049 — possibly-null | 2379 / **9222** / 41,979 |
+| (b) arity | 2026-09-03, plan-notes 183 | 2554 extra/missing arguments | 2379 / **8839** / 42,362 |
+| (b) assignment | 2026-09-03, plan-notes 184 | 2322 assignment mismatch | 2379 / **8444** / 42,757 |
+| (b) argument | 2026-09-03, plan-notes 185 | 2345 argument mismatch | 2379 / **7433** / 43,768 |
+| (b) arithmetic | 2026-09-03, plan-notes 186 | 2362 / 2363 arithmetic operands | 2379 / **7276** / 43,925 |
+
+Baseline before (a) was Task 6.1's first pin: 2379 / 10,513 / 40,688.
+
+**(a) the possibly-null family** was 3855 of those 10,513 — the largest bucket by a factor of three,
+and every one of them JavaScript that runs (`xs[i] + 1` is how the language indexes an array). It
+uncovered one internal error worth keeping: `typeAt` answered with the checker's **narrowed** type
+while an identifier **lowers to its binding**, and the two disagree on exactly the narrowings
+`isCheckable` refuses. `/** @type {{a:number}|undefined} */ var box = {a:7}; box.a` compiled to
+`STA4060`. The fix is in `typeAt`, the one function every branch selection consults: when the
+binding is `Unknown` and the narrowed type is not checkable, answer the binding — the value really
+is dynamic at run time, so that is the truthful answer, not a workaround. It returns the binding
+rather than a fresh `hUnknown(false)`, because an `Unknown` carries whether it came from an implicit
+`any` and the verifier compares the two for equality. Nothing had noticed because a `.ts` program
+cannot reach it and no `.js` fixture had a JSDoc'd nullable object. **Residue:** `xs[i].toFixed(2)`
+compiles and then panics `STA2006` — a method call on a dynamic *primitive* needs `Number.prototype`
+dispatch and the runtime has no prototype chain (Phase 8 owns that surface). A located abort, not a
+wrong answer, but not Node's answer either.
+
+**(b) argument mismatch (2345) was not a diagnostic filter**, and finding that out is the entry's
+value. A bare filter let `Math.abs("-3")` reach HIR, where the verifier raised `STA4080`: it
+asserted every `math-call` argument had HType `number` despite the C signature accepting a boxed
+`jsrt_value`, and the runtime then read a non-number's NaN-box payload as a double through
+`jsrt_number_value`. Removing only the verifier assertion would have emitted a wrong native
+program. Math's HIR contract is now exact arity plus a number result, with operand coercion as
+runtime semantics: `jsrt_math.c` applies `jsrt_to_number` once in its shared argument helper, so
+every Math entry point implements ECMAScript `ToNumber` before numeric work
+(`runtime/include/jsrt_value.h` documents it).
+
+**(b) assignment mismatch (2322)** is likewise not a filter: the frontend records the diagnosed
+binding *symbol* and passes that mode-free lowering policy downstream, so lowering answers `Unknown`
+for that symbol and the verifier sees a dynamic assignment rather than the impossible
+`number = string` pair. Module and nested-function fixtures prove the symbol identity survives
+scope. **(b) arity (2554)** and **arithmetic (2362/2363)** needed no new mechanism — the closure ABI
+already ignores extra arguments and `jsrt_arg` supplies `undefined` for an absent one, and
+`binary-op` already lowers through the runtime's ECMAScript numeric operators. Both diagnostics had
+been blocking paths whose runtime behavior was implemented and independently verified.
+
+Each landing carries a both-modes decision fixture (the same source, `error` in ts and `dynamic` in
+js) and a golden proving js mode compiles it to Node's answer — e.g. `tests/golden/js/argument_mismatch.js`
+(`increment("2")` and `Math.abs("-3")`), and `"3" - 1` / `1 - "3"` / `"3" * 2` for the arithmetic pair.
+
+**Still open in (b)**, measured after (a): 1326 `Cannot find name 'X'`, 408 `implicitly has an 'any'
+type`, 183 arity, 196 `No overload matches this call`. Each is judged individually against §1.2 —
+some are real refusals Stator should keep — and the live Check stays in `plan.md` §8 step 2a.
+
 ### Step 3 — Lower `var`
 
 **Step 3 landed (2026-09-02).** `var` in js mode is function-scoped, hoisted, and initialized
@@ -986,6 +1058,94 @@ inside a loop, `instanceof` against anything but a class name, assignment and co
 to a non-variable, `++`/`--` on a non-variable and in value position, and the binary/unary/statement
 catch-alls (`describeKind`) — one family of HIR nodes, not a second lowering. Accessor compound and
 `#n in o` stay not-yet (families d / private). plan-notes 164.
+
+### Step 12c — object literal forms (shorthand, non-identifier keys, spread)
+
+**Landed 2026-09-03** (plan-notes 181). `{ x }` desugars to `{ x: x }` in the lowering; a
+string-literal key is a slot like any other and `o["a-b"]` reads it back; `{ ...a, y: 1 }` expands to
+one field read per field of `a`'s shape.
+
+Landing spread first required fixing a **silent wrong answer** it uncovered — three lines of
+ordinary TypeScript, no spread involved:
+
+```ts
+const o: { y: number; x: string } = { x: "s", y: 2 };
+console.log(o.x);   // Stator: 2      Node: s
+console.log(o.y);   // Stator: s      Node: 2
+```
+
+A fixed shape has **two** orders and the compiler had conflated them. **Layout** — which slot a
+field lives in — is a property of the TYPE (`slotOf` looks the name up in `target.type.fields`),
+here the annotation's `y, x`. **Enumeration order** — what `console.log`, `Object.keys` and
+`for…in` answer — is §10.1.11 OrdinaryOwnPropertyKeys insertion order, which only the ALLOCATING
+LITERAL knows, here `x, y`. `registerShape` built the descriptor from the literal's entries and the
+emitter stored `entries[i]` into slot `i`, so writes used the literal's order while reads used the
+type's. Printing was right by accident, which is why 140 golden fixtures passed: in every one of
+them the two orders coincided. Object spread makes them coincide **never** — TypeScript's spread
+result type puts explicit properties first (`{ ...base, y: 2 }` with `base: {x, z}` types as
+`{y, x, z}` while JS builds `x, z, y`; measured, not assumed) — which is the real reason family (c)
+listed spread beside shorthand.
+
+The fix, at the layer that owns each fact: `JSRTClass` gains `key_order` (slot indices in insertion
+order, `NULL` when insertion order IS slot order, which a class declaration always satisfies), with
+`jsrt_class_key_slot` the one accessor and `jsrt_print.c` plus `jsrt_object_ops.c`'s `collect` the
+only two walks that changed; the lowering takes the **contextual** type as the literal's layout when
+there is one, the same "contextual type wins" rule `objectLiteralIsDynamic` already applies; the
+emitter stores each entry into its NAME's slot, not its position, and the descriptor cache is keyed
+by shape name **plus** key order (one type with two insertion orders is two descriptors); and the
+HIR verifier's "entry `i` is the shape's field `i`" check — which was exactly the conflation —
+becomes the invariant that survives, that every entry names a field of the shape and the literal
+covers the shape exactly.
+
+Spread then falls out as pure lowering. The gate holds the operand to an **identifier** — the
+expansion reads it once per field, so anything with an effect would run that effect N times — and to
+a fixed shape. `{ ...a, x: 1 }` needs no dedup rule: both entries resolve to one slot and the
+emitter stores in source order, so the last write wins per §13.2.5.5, and `keyOrderOf` keeps the
+key's first position.
+
+**Residue**, named rather than hidden: a spread of a call result, a member access, or a value with
+no fixed shape stays `STA1214`; methods in a literal stay `STA1214` (they need calling through a
+shape the declaration does not build); computed keys stay `STA1214`. Accessors landed separately —
+next section.
+
+### Step 12c accessors — getters and setters on object literals ✅ (2026-09-04)
+
+`{ get x() { … }, set x(v) { … } }` compiles. plan-notes 192; representation `docs/VALUE.md` §4.15;
+row 85 of `docs/SUBSET.md`.
+
+**The representation, and why it is not where the plan first put it.** The get/set pair lives in the
+object's **slot**, as a `JSRTAccessorCell` — not on the `JSRTShape` entry, where plan-notes 190 had
+put it. A shape is shared by every object with the same key history; a getter can capture. Node
+settles it: `for (let i = 0; i < 3; i++) out.push({ get x() { return i; } })` gives three objects,
+one shape, and three different getters. `JSRTShape`, `JSRTIC` and `JSRTClass` are therefore all
+**unchanged** — a property read tests the value it just loaded against `&jsrt_class_accessor`, and
+nothing in the language can construct a cell, so the test cannot be fooled. Each half is an ordinary
+function unit with the receiver as parameter zero (the method ABI, unchanged), so a capturing getter
+needs no new machinery: `jsrt_closure_new(fn, 1, "at", env)`.
+
+**An accessor is a dynamic TRIGGER, not a refusal.** `isDynamicShape` used to lump accessors in with
+methods and answer "not dynamic" for both, which meant `shapeTypeToHType` built a layout for
+`{ get at(): number }` — field `at` at slot 0 — and a read through such a type compiled to
+`jsrt_object_get` on a `JSRTDynObject`. Measured: `2e-323` where Node printed `0`. An accessor now
+joins the optional property and the index signature as a trigger; a method stays a refusal (step
+12(e)). Consequence, stated because it is a cost: an accessor deoptimizes its whole shape, siblings
+included — one object cannot be half a layout.
+
+**The one refusal left.** TypeScript calls `{ get at(): number }` assignable to `{ at: number }`.
+It is not representationally, and there is no conversion to insert — a slot cannot hold "call this
+on read" — so an accessor literal in a position typed as a fixed shape is `STA1214` (Phase 5) rather
+than a program that reads garbage.
+
+**Node's semantics, pinned byte-for-byte.** `util.inspect` does NOT call the getter (`[Getter]`,
+`[Setter]`, `[Getter/Setter]`); `Object.keys` does not either, while `Object.values`,
+`Object.entries` and `JSON.stringify` do; a write to a get-only property throws `TypeError: Cannot
+set property x of #<Object> which has only a getter`. That last needed an ESM probe to measure —
+`node -e 'o.x = 5'` runs sloppy, where the write silently does nothing, and compiled modules are
+always strict.
+
+**Check.** `pnpm run ci` clean: 149 golden fixtures (adds `ts/object_accessors.ts`,
+`js/object_accessors.js`), 342 subset fixtures with `subset_object_literal_accessors_{ts,js}` flipped
+out of expected-fail, and the runtime print corpus gains `print_accessors.{c,mjs}`.
 
 ---
 

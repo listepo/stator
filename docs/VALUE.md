@@ -929,6 +929,167 @@ top-level code has already run when the Promise is produced; `import()` is `Prom
 of that namespace. A computed specifier stays `STA1207` (Phase 8): the graph cannot name a file
 it has not seen.
 
+## 4.15 Accessors — a get/set pair in the object's slot, never on the shape (Phase 5 step 12c/12d)
+
+§4.5 already settles the class case: `get x`/`set x` are member functions like any other, so a
+class with accessors keeps the fixed-slot layout of its actual fields, and the accessor does not
+print because there is no slot. That stays true and nothing below changes it. What it does not
+answer is the two cases step 12 opens, which is why plan.md §8 blocked both families here.
+
+**An object-literal accessor is an OWN property and a class accessor is not.** Measured on the
+pinned Node v26.7.0 (plan-notes 190):
+
+```
+{ get x(){…}, set y(v){…}, get z(){…}, set z(v){…} }
+  → { x: [Getter], y: [Setter], z: [Getter/Setter] }   Object.keys → [ 'x', 'y', 'z' ]
+class C { get x(){…} }, new C()
+  → C {}                                               Object.keys → []
+```
+
+So the two cannot share an answer: the literal's accessor must occupy a key, and the class's must
+not. The inspector prints the half that exists — three forms, which is why the pair below carries
+both halves rather than a single function plus a flag.
+
+**The class half is already built and does not change.** `docs/SUBSET.md`'s "Classes with
+getters/setters" row is **implemented** as of rung 6b: an accessor is a pair of methods under a
+name no source can spell (`get x`, `set x`), `o.x` is a call to the first and `o.x = v` a call to
+the second, and the property occupies no slot — which is why accessors needed no HIR node, no
+verifier case and no emitter case, and why `util.inspect` never prints them. Step 12(d)'s residue
+there is dispatch and naming, not representation: a static accessor, a `#private` or computed
+accessor name, an override of an inherited accessor, and `o.x += 1`. Only the first two need a
+word here, and both are answers rather than mechanisms. A static accessor read through the class
+NAME (`C.x`) is a call on a compile-time-known function, because statics are bindings and not slots
+(plan-notes 65) — but only that case: reached through a class VALUE, or inherited by a subclass,
+it needs the class object `docs/SUBSET.md` row 78 says a plain binding is not, and that is family
+(e)'s other half, which stays `STA1214`. A computed or `#private` accessor name stays `STA1214`
+too, because the key is an expression the shape model cannot name. An override rides the method
+table it already inherits (§4.5).
+
+**The literal half is the shape table, not a new field on `JSRTClass`.** `docs/SUBSET.md`'s
+"Getters/setters on object literals" row — the row authority — already gives the verdict as
+**dynamic**, "property access routes through the descriptor". That is
+Task 4.1's `JSRTDynObject` (§4.10), and it is the right mechanism for the reason row 84 gives for
+optional properties: a fixed shape's reads compile to slot indices decided at build time, and an
+accessor has no slot to index. So a literal containing an accessor builds a shape table, exactly
+as a literal with an optional property already does, and this section adds **nothing** to
+`JSRTClass` — the fixed-slot path keeps the layout, the two orders and the branch-free read it has
+today.
+
+**The pair goes in the object's SLOT, not on the shape — and that is not a preference.** A
+`JSRTShape` is shared program-lifetime metadata: every object that gained the same keys in the same
+order points at the same shape, which is the whole reason an inline cache works. An accessor's
+functions are not shared, because a getter can capture:
+
+```js
+for (let i = 0; i < 3; i++) out.push({ get x() { return i; } });   // three different closures
+```
+
+Those three objects have one shape and must have three getters, so a `get`/`set` pair hung off the
+shape would alias them onto whichever literal ran last. The pair is therefore per object, and the
+place an object already keeps per-object GC values is its slots:
+
+```c
+/* Prefix-shared with JSRTObject exactly as JSRTMap and JSRTDynObject are: `cls` first, so the
+   Object tag covers it and the descriptor pointer is what says which builtin it is (§4.6). */
+typedef struct JSRTAccessorCell {
+  const JSRTClass *cls;   /* &jsrt_class_accessor */
+  jsrt_value get;         /* undefined for a set-only accessor */
+  jsrt_value set;         /* undefined for a get-only accessor */
+} JSRTAccessorCell;
+
+extern const JSRTClass jsrt_class_accessor;
+```
+
+Both halves are carried, never one function plus a flag, because the inspector prints three forms
+and `Object.getOwnPropertyDescriptor` (Phase 8) will want both. The cell is an ordinary
+`jsrt_value` in an ordinary slot, so it is traced, enumerated and ordered by machinery that already
+exists: `JSRTShape` and `JSRTIC` are **unchanged**, the shape table stays insertion-ordered by
+construction, and `Object.keys` and the inspector get the measured order above for free with no
+second order to maintain — §4.5's two orders were conflated once already and silently miscompiled
+field values (plan-notes 181).
+
+**What tells a cell from a value is the cell itself.** `jsrt_get_prop` and `jsrt_set_prop` resolve
+the name through the shape table with the site's inline cache exactly as they do today, then test
+the LOADED value: an `Object`-tagged value whose `cls` is `&jsrt_class_accessor` is a cell and the
+access becomes a call; anything else is the property's value. Nothing in the language can construct
+a cell — `jsrt_define_accessor` is the only producer and generated C is its only caller — so the
+test cannot be fooled by a user value, and the IC needs no third field because it caches where the
+key lives, not what kind of thing lives there. A getter runs user code, so it can throw and it can
+allocate: the receiver stays in its frame slot across the call like any other method receiver
+(§4.3), and a throw takes the caller's landing pad through §4.9's pending cell. A setter's argument
+is evaluated before the call, in source order.
+
+**The cost, stated rather than discovered.** An accessor deoptimizes its whole literal: a sibling
+data property in the same literal becomes an IC lookup instead of a slot load. That is the trade
+row 84 already accepted for optional properties, taken here for the same reason, and it is why
+this is one paragraph instead of a second object model.
+
+**A literal's accessor makes its whole SHAPE dynamic, siblings included.** `isDynamicShape`
+(`src/frontend/types.ts`) treats an accessor as a trigger alongside an optional property and an
+index signature; a method stays a refusal, because calling through the shape table is step 12(e).
+The corollary is the one refusal this section leaves standing: TypeScript calls
+`{ get at(): number }` assignable to `{ at: number }`, and it is not representationally — the
+literal must be a `JSRTDynObject` while every read typed by the annotation would compile to a slot
+load on it. No conversion can bridge that (a slot cannot hold "call this on read"), so the gate
+refuses an accessor literal in a position typed as a fixed shape rather than emitting a program
+that reads a raw slot word back as a number. **Implemented 2026-09-04; plan-notes 192.**
+
+**Deliberately not here, and it has an owner.** Property attributes (`enumerable`, `configurable`,
+`writable`), `Object.defineProperty` and `getOwnPropertyDescriptor` are Phase 8's descriptor
+surface. A `JSRTAccessorCell` is two function values, not a property descriptor, and the gap is the
+point: this pair answers "which function runs", never "what may be done to the property".
+
+## 4.16 A method used as a value is the method's own closure — there is no bound closure (Phase 5 step 12e)
+
+Five gate sites name this blocker in the same words ("a bound closure nothing here builds", and
+`STA1214` for a method in value position), and plan.md §8 step 12(e) calls it the family where an
+accidental second closure representation gets built. It does not need one. The representation
+already exists and is a `JSRTClosure`.
+
+A method is emitted as an ordinary unit with the receiver as parameter zero (§4.5), and every
+callee reads parameters through `jsrt_arg`, which answers `undefined` for a parameter no call
+supplied (§1.1). So a method's closure called with no receiver already computes what ECMA-262
+gives a strict-mode call with no receiver — `this` is `undefined` — and class bodies and modules
+are always strict. `const f = o.m; f()` is `jsrt_call(m_closure, 0, NULL)`. No allocation, no
+adapter, no new struct.
+
+Two behaviours fall out correct rather than having to be arranged:
+
+- **Identity.** `o.m === o.m` and `p.m === o.m` are both `true`, because both read the same
+  file-scope closure constant — which is also Node's answer, since both read the same prototype
+  method. An adapter allocated per evaluation would have made the first one `false`.
+- **`this`.** It is `undefined`, not `o`. **Auto-binding is the wrong answer**, and the temptation
+  is why this is written down: `const f = o.m` in JavaScript does not bind, and a receiver-capturing
+  closure would diverge from Node on the first golden fixture that prints `this`.
+
+Three things this decision has to pay for, none of them a representation:
+
+- **`arity` must not count the receiver.** `declaredArity` runs over `fn.params`, whose slot zero
+  is the receiver for a method unit, so a method's closure constant subtracts one.
+  `Function.prototype.length` is not in the subset yet, so nothing observes it today — which is
+  exactly why it is cheap to get right now and a bug to inherit later.
+- **A virtual method's value is the receiver's entry, not the statically named one.** Where a
+  subclass overrides, `o.m` in value position loads `jsrt_method(recv, slot)` — the same choice
+  `method-call` already makes between direct and virtual dispatch, made at the same place. The
+  result is still a pointer out of the method table; still no allocation.
+- **`this` being `undefined` must be a `TypeError`, not an abort.** A method value called with no
+  receiver whose body touches `this` raises the same `TypeError` Node raises, through §4.9's
+  pending cell. This is the one runtime behaviour the decision adds.
+
+**A real bound closure has exactly one creator, and it is not this.** `Function.prototype.bind`
+(and `call`/`apply`) stay not-yet. When `bind` lands it is a `JSRTClosure` whose `env` holds the
+receiver in slot 0 and the target in slot 1, driven by ONE shared runtime thunk that inserts slot 0
+at `argv[0]` — an env, which is where captured values already live (§4.3), never a second closure
+struct. Writing that down now is the whole point of this section: `bind` is the only construct in
+the language that creates a bound function, so it is the only place a second representation could
+enter, and it enters as a two-slot env or not at all.
+
+**A builtin method in value position stays not-yet, on purpose.** `const f = m.get` on a `Map` is
+not this case: a builtin is not a `JSRTClosure` at all but a compile-time-selected runtime function
+with its own signature, so handing one out as a value means a closure constant per builtin member —
+a per-member code-size cost with nothing waiting on it. `super` as a value stays `STA1214` too; it
+needs a class object, which is family (e)'s other half.
+
 ## 5. What Phase 2 actually implements
 
 The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap

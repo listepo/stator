@@ -67,11 +67,16 @@ because of a stale object file. **plan.md edited:** no — additive detail, reco
 `no-floating-promises` flags every call. Marked with the `void` operator — the escape the rule
 itself sanctions — with a comment saying why. No lint rule was disabled (AGENTS.md forbids it).
 
-### 9. Node pin is 26.7.0 — OPEN QUESTION for the owner
+### 9. Node pin is 26.7.0 — ~~OPEN QUESTION for the owner~~ RESOLVED 2026-09-04
 `.node-version` is pinned to the host's `26.7.0`, satisfying the plan's `>= 24`. But plan §4
 Task 1.0 step 2 says "current Node **LTS**", and 26.x may still be Current rather than LTS.
 Since this pin is the differential-testing ground truth for the life of the project, the owner
-should confirm: stay on 26.7.0, or drop to the active 24.x LTS line. **Unresolved.**
+should confirm: stay on 26.7.0, or drop to the active 24.x LTS line. ~~**Unresolved.**~~
+**Resolved 2026-09-04 (entry 190): stay on 26.7.0.** It has been the ground truth since
+2026-08-29 and three artefacts are measured against it — 146 golden fixtures, the Test262
+ratchet, and `tests/bench/baseline.json`. Node 26 enters LTS this October; moving to 24.x would
+re-baseline all three to satisfy a word for six weeks. plan.md §4 records the answer in place of
+the follow-up.
 
 ---
 
@@ -1311,12 +1316,13 @@ binding), and `C.name`/`C.prototype` (the class object again).
 
 ## Open items carried forward
 
-- **Phase 0 is not approved.** `NICHE.md` does not exist and no `phase-0-approved` tag has been
-  created. An agent must not self-approve it (plan §3 Task 0.1 step 4). Phase 1 *and* Phase 2
-  work proceeded on explicit owner instruction (entries 22 above). Still the owner's call.
-- **No commits exist yet.** The whole tree is staged and uncommitted, so plan §4 Task 1.0's
-  "fresh clone" wording and the `phase-0-approved` tag are both unverifiable until the initial
-  commit lands.
+- ~~**Phase 0 is not approved.**~~ — resolved 2026-09-01: `NICHE.md` was approved by the owner and
+  its commit is tagged `phase-0-approved` (plan §3's Check, restated by entry 135). No agent
+  self-approved it; Phase 1 and Phase 2 had run ahead on explicit owner instruction (entries 22).
+- ~~**No commits exist yet.**~~ — resolved 2026-08-30: the tree has been committed since.
+  Struck 2026-09-04 (entry 190): both lines had gone on reading as live state for three days
+  under a heading that says "carried forward", which is what the strike-through convention on the
+  third item exists to prevent.
 - ~~**`stator explain --json` schema**~~ — resolved, see entry 12 above.
 
 ## 66. `#private` is a printing rule, and a corpus that lagged a struct change proved it
@@ -4728,3 +4734,430 @@ became scheduled skips, with passes unchanged.
 **Why this is safe.** This is not a new dynamic operation. `binary-op` already lowers subtraction and multiplication through the runtime’s ECMAScript numeric operators, which apply coercion to boxed operands. The diagnostic had been preventing a path whose runtime behavior was already implemented and independently verified.
 
 **Evidence.** Typecheck, lint, subset (**340 fixtures: 309 passed, 31 expected-fail**) and golden (**146/146**) passed. The full pinned Test262 run moved from **2379 passed / 7433 failed / 43768 skipped** to **2379 passed / 7276 failed / 43925 skipped** — 157 final classifiers became scheduled skips, with no passed-test regression.
+
+
+## 187. Owner-directed CLI tooling set: ink, execa, OpenTelemetry, dotenv (2026-09-04)
+
+**Directive.** The owner directed, in one session and over the record's formal objection, four additions that all breach the §0.9 budget as written. This entry is the required plan-notes record (AGENTS.md: new dependencies need an entry) and plan.md §0.9 is amended in the same change.
+
+**What landed and why.** (1) **ink + react** render the CLI's human-facing stdout/stderr through React components; machine output (`explain --json`) bypasses rendering entirely. Byte-exactness on pipes is preserved by two measured invariants in `src/cli/render.ts`: single-shot main-region render + immediate unmount (a `<Static>` tree was spiked to double-write on pipes), and color keyed on `stream.isTTY` only. oclif's useful conventions came WITHOUT @oclif/core: per-command `--help` and long-form flags (`--out`, space-form `--mode`). (2) **execa** (dev-only) replaces `spawnSync` in CLI tests; `stripFinalNewline: false` is mandatory — its default ate a fixture assertion. (3) **OpenTelemetry** (`@opentelemetry/api`, `sdk-trace-node`, `exporter-trace-otlp-http`, `resources`) traces the pipeline stages (`frontend/program`, `gate`, `module-graph`, `lower`, `passes/optimize`, `hir/verify`, `codegen/emit-c`, `link/clang`) plus a root span per command. Opt-in via `STATOR_OTEL`; the standard `OTEL_EXPORTER_OTLP_ENDPOINT`/`_HEADERS` envs make it work with Maple and any OTLP backend. SDK imports are dynamic so default startup is untouched (startup floor is a bench metric). Init failure degrades to a stderr warning, never a failed compile. (4) **dotenv** loads `.env` before telemetry init, with `quiet: true` — v17 otherwise logs to stdout, which would break byte-exact output. `@types/react` accompanies react.
+
+**Cost accepted by the owner.** Every CLI spawn now pays the ink/react import (~tens of ms per process; the subset suite runs hundreds of spawns). **[Corrected by note 189: measured at ~1.6 s, not tens of ms — 50× this estimate. The import is now lazy (inside `print`), which is what keeps this acceptance defensible; the rest of this entry stands.]** `tests/bench/baseline.json` predates this and should be re-recorded on the owner machine. The five native cli.test failures seen during the session were a pre-existing `mise trust` gap, not this work.
+
+**Verification state at write-time.** typecheck, lint, and the execa-based CLI unit suite are green; the subset/golden suites and a telemetry export test are written down as remaining work — this entry was committed before they ran.
+
+**Verification completed (final, under the pinned Node 26.7.0).** The earlier in-session numbers were gathered under node 24.20.0 — the shell's PATH resolved mise's `node/lts` install dir before the shims, so `node` answered 24 until `mise which node` was prefixed onto PATH; every "green" claim before that fix is retried below on the pin, and the golden runner compares against `process.execPath`, meaning the pre-fix runs diffed against node 24 itself. The exit-9 CI failure was exactly this: `--test-coverage-include-all` needs Node ≥26. The correct invocation on this host is `export PATH="$(dirname "$(mise which node)"):$PATH"` (or `mise exec node --`) before any suite. Pinned-Node results: typecheck + lint clean; `node --test tests/unit/*.test.ts` **367/367** (incl. `telemetry.test.ts` 3/3); `pnpm run test:coverage` **90.04% src lines** (telemetry.ts 42–43, the catch arm, uncovered); `pnpm run test:subset` **342 fixtures — 311 passed, 31 expected-fail, 0 failed**; `pnpm run test:golden` **147/147** (a fixture added by a concurrent session since the first run; pre-fix numbers 340/146 were that session's earlier tree, not Node skew); `pnpm run test:asan` **147/147** under the sanitized runtime; `pnpm run dupes` **0.9%**; leak loop plateaus at **3024 KB RSS**; `test:runtime` corpus matches Node. The measured invariants held: `explain --json` unchanged on pipes with `STATOR_OTEL=1`, and every suite spawning the CLI hundreds of times matches Node byte-for-byte. `tests/bench/baseline.json` re-record remains open for the owner machine (recorded above as accepted cost).
+
+
+## 188. The no-network constraint is stale, and Phase 8 step 3's acquisition clause contradicted itself (2026-09-04)
+
+**What was believed.** Note 28 (2026-08-29) recorded that this environment has no network access,
+which is why Ryū was never vendored. Three live sites inherited it: plan.md §11 Phase 8 step 3
+("this environment has no network (plan-notes 28), so the source has to arrive by the same route
+the existing vendor drop did"), plan.md §12 rung 1 (mimalloc/jemalloc: "a vendor drop … under the
+no-network constraint"), and `docs/TOOLCHAIN.md`'s Ryū row.
+
+**Measured, 2026-09-04.** `fetch()` of the exact file Phase 8 step 3 needs, at the exact commit
+`runtime/vendor/quickjs-ng/VENDOR.md` pins:
+
+```
+https://raw.githubusercontent.com/quickjs-ng/quickjs/1ab8676f4b6d6d669baeb5f21790fb9734636a20/quickjs.h
+→ HTTP 200, 66,272 bytes
+```
+
+This is not new as of today: Task 6.1 (2026-09-03) fetches the Test262 corpus by SHA over the same
+transport and produced the pinned conformance numbers with it. The constraint had already been
+falsified by work in the tree; nobody went back and said so, which is drift of exactly the kind
+§15.3 exists to catch.
+
+**The self-contradiction it left behind.** Step 3's clause says the source "has to arrive by the
+same route the existing vendor drop did" *because* there is no network — but that route is
+`runtime/vendor/update.mjs`, whose `fetchText`/`raw` pair is an HTTPS fetch from
+`raw.githubusercontent.com`. The sentence forbids the network and then points at the network. An
+agent reading it either stalls on an acquisition problem that does not exist or invents an
+undocumented route, which §15.6 calls a plan bug rather than a coding decision.
+
+**Edited in this change.** Step 3's acquisition clause now names the script and the one thing that
+is actually constrained — `quickjs.c`/`quickjs.h` must come from the SAME commit as the vendored
+`libregexp`/`libunicode`, or the interpreter's own copies are duplicate symbols at link time. §12
+rung 1's parenthetical drops the constraint and keeps the rule that survives it (a `VENDOR.md`-pinned
+vendor drop, never a package fetch, because the pin is what makes the version auditable — that was
+never about reachability). `docs/TOOLCHAIN.md`'s Ryū row now says Ryū is **fetchable and not yet
+fetched**, which is a scheduling fact, not an environmental one.
+
+**What this does NOT do.** It does not open Phase 8. The phase's gate is step 1 — a written,
+owner-approved record of which users are blocked on which untyped dependency or `eval` site — and
+no such record exists in the tree (no tag but `phase-0-approved`, nothing in `NICHE.md` or `docs/`).
+Network availability removes an *implementation* obstacle from step 3; it has no bearing on the
+gate, and "do not build speculatively" is unchanged.
+
+**Follow-up now unblocked and unclaimed:** Ryū. Note 28 kept the swap contained to the body of
+`shortest_digits()` on purpose, so vendoring it is a one-function change against a corpus that
+already passes byte-for-byte. It costs up to 18 `snprintf`+`strtod` pairs per number printed today,
+and §15.4 lists "Ryū-exact number printing" as a settled decision. Owner's call whether that becomes
+a task now or rides §12.
+
+## 190. The plan's six unmade decisions, made (2026-09-04)
+
+> **Numbered 190, not 189.** This entry was drafted as 189 and renumbered before landing:
+> `docs/SUBSET.md` row "Object literals with optional properties" already cited **plan-notes 189**
+> for the `exactOptionalPropertyTypes` js-mode codes (2375/2379/2412), whose fixtures were in the
+> tree uncommitted while this was written — a concurrent claim on the number. The later writer
+> moves and nothing is renumbered retroactively, which is how entry 115 handled the same collision.
+> 189 therefore belongs to that work and arrives after this one.
+
+**The finding.** `plan.md` and `plan-notes.md` carried six places where the plan tells its reader
+to decide something *before* proceeding, and none of the six had an answer anywhere in the tree.
+They are not one kind of thing — two are technical representations, four were reserved to the
+owner — but they share a shape worth naming: a deferral written as an instruction, which reads as
+scheduling and behaves as a stall. §15.6 says a task that leaves you guessing is a plan bug; these
+are the plan telling you, in advance, that you will be left guessing, and then not fixing it.
+
+Two of the six gate work that is open **right now** (§8 step 12's families (c)/(d) and (e) are two
+of the four remaining items in the open phase). One had been unresolved since 2026-08-29 and said
+in its own text that it had to be settled before the next task started.
+
+**The inventory, and where each one lived.**
+
+| # | Blocker | Site | Gated |
+|---|---|---|---|
+| 1 | Node pin: 26.7.0 (Current) or 24.x LTS | plan.md §4; notes 9, "**Unresolved.**" | Phase 6 Task 6.2 fuzzing — the differential ground truth |
+| 2 | Accessor get/set representation | plan.md §8 step 12(c): "decide it in `docs/VALUE.md` before writing any of it" | §8 step 12(c) residue and all of (d) |
+| 3 | Bound-method representation | plan.md §8 step 12(e): "Decide the bound-method REPRESENTATION in `docs/VALUE.md` before writing any of it" | §8 step 12(e), 5 gate sites |
+| 4 | CI committing bench results to `main` | plan.md §9 Task 6.3 step 6: "a repo-policy decision for the owner" | Task 6.3 step 6 |
+| 5 | Ryū: a task now, or §12 | notes 188 tail: "unclaimed … Owner's call" | nothing, but unclaimed |
+| 6 | Computed-specifier `import()` owner | plan.md §11 step 7: "only if step 10's owner-confirmed split still says so" | `STA1207`'s residue |
+
+**1 — the Node pin stays 26.7.0.** Task 1.0 step 2 said "current Node **LTS**" and 26.x is
+Current, so the letter of the plan argues for 24.x. Everything else argues against: the pin has
+been the differential ground truth since 2026-08-29, and three artefacts are now measured against
+it — 146 golden fixtures byte-for-byte, the Test262 ratchet (2379 / 7276 / 43,925), and
+`tests/bench/baseline.json`. Moving re-baselines all three, and Node 26 enters LTS this October
+anyway, so the divergence from the wording is six weeks long. `.node-version` and `mise.toml`
+already agree on 26.7.0; nothing in the tree changes. plan.md §4's "Open follow-up" paragraph
+becomes the recorded answer and notes 9's **Unresolved** is struck.
+
+**2 — accessors are a get/set pair on a shape entry (`docs/VALUE.md` §4.15).** The blocker's own
+wording — "a get/set **slot** the value model has no representation for" — points at the wrong
+answer twice over. A slot per accessor per object is one closure per accessor per instance, which
+is exactly what §4.5 refuses for methods; and the premise that a representation was missing is
+half false, because `docs/SUBSET.md`'s "Classes with getters/setters" row is **implemented** as of
+rung 6b — an accessor is a pair of methods under a name no source can spell, and the property
+occupies no slot. Step 12(d)'s class residue is dispatch and naming, not representation.
+
+What genuinely had no answer is the OBJECT-LITERAL case, and Node says why the two cannot share
+one: a class accessor is on the prototype and does not print (`C {}`, `Object.keys` `[]`), while a
+literal's is an own property and does (`{ x: [Getter] }`, keys `['x']`).
+
+**The first draft of §4.15 got this wrong and it is worth recording why.** It gave `JSRTClass` a
+new nullable `accessors` array indexed by slot — a fresh mechanism, invented while
+`docs/SUBSET.md`'s "Getters/setters on object literals" row already carried a verdict for exactly
+this case: `dynamic`, "property access routes through the descriptor". SUBSET.md is the row
+authority (plan.md §16 v2.1), so inventing a competing design in `docs/VALUE.md` would have put
+two documents in conflict on a construct neither had built yet. Corrected before landing: a
+literal containing an accessor builds Task 4.1's `JSRTDynObject` shape table, for the reason row 84
+already gives for optional properties — a fixed shape's reads compile to slot indices decided at
+build time, and an accessor has no slot to index. `JSRTClass` gains nothing; the fixed-slot path
+keeps its layout, its two orders and its branch-free read. The shape entry holds either a slot
+index or a `JSRTAccessor *` (both halves, never a function plus a flag — the inspector prints
+three forms), and the shape table is insertion-ordered by construction, so `Object.keys` and the
+inspector get the measured order with no second order to maintain (entry 181 is what a second
+order costs). Stated cost: an accessor deoptimizes its whole literal, so a sibling data property
+becomes an IC lookup — row 84's trade, taken for row 84's reason.
+
+Static accessors need no representation at all: statics are bindings, not slots (entry 65).
+Computed and `#private` accessor names stay `STA1214`. Property attributes and `defineProperty`
+stay Phase 8's — a `JSRTAccessor` is two function pointers, not a property descriptor.
+
+**3 — there is no bound closure, and that is the decision (`docs/VALUE.md` §4.16).** Five gate
+sites and plan.md both call this "a bound closure nothing here builds", and step 12(e) warns it is
+where an accidental second closure representation gets built. The warning is right and the premise
+is wrong: **`const f = o.m` does not bind in JavaScript.** `f()` gives `this === undefined` in
+strict mode, and class bodies and modules are always strict. A receiver-capturing closure would be
+a divergence from Node, not a missing feature. What the runtime already has is enough — a method
+is emitted as an ordinary unit with the receiver as parameter zero (§4.5) and every callee reads
+parameters through `jsrt_arg`, which answers `undefined` for a parameter no call supplied (§1.1),
+so `jsrt_call(m_closure, 0, NULL)` computes the spec's answer with no allocation and no adapter.
+Identity comes out right for free (`o.m === o.m` is `true`, because both read the same file-scope
+constant — Node's answer too, since both read the same prototype method); an allocated adapter
+would have made it `false`. Three things still get paid for, none a representation: a method's
+`arity` must not count the receiver (`declaredArity` runs over `fn.params`, whose slot zero is the
+receiver — `Function.prototype.length` is unobservable today, which is why it is cheap now and a
+bug to inherit); a virtual method's value loads `jsrt_method(recv, slot)`, the choice `method-call`
+already makes; and `this` being `undefined` must raise Node's `TypeError` through §4.9's pending
+cell rather than abort. The second representation is reserved for `Function.prototype.bind` — the
+only construct in the language that creates a bound function — and is specified in advance as a
+two-slot `JSRTEnv` plus one shared thunk, so it cannot arrive as a new struct. A builtin method in
+value position (`const f = m.get`) stays not-yet on purpose: a builtin is not a `JSRTClosure` at
+all, and giving each one a closure constant is a per-member code-size cost with nothing waiting on
+it.
+
+**4 — CI does not commit benchmark results to `main`.** Owner's answer. The weekly job uploads
+`tests/bench/results/<ISO-date>-<host-id>.json` as an artifact and writes to
+`$GITHUB_STEP_SUMMARY`; no write-scoped token, no bot commits on the default branch. Consistent
+with what the harness already is: `baseline.json` is explicitly machine-local (§12), so the
+authority for a committed result is the person who ran `bench:record` on the machine it describes,
+not a runner. Task 6.3 step 6 records it and step 5's generated `README.md` follows the same rule.
+
+**5 — Ryū rides §12.** Owner's answer, closing entry 188's unclaimed follow-up. §15.4 has it
+settled as a decision and `docs/TOOLCHAIN.md` now has it as fetchable-and-unfetched; what was
+missing was only *when*. It is a pure speed change — `shortest_digits()` costs up to 18
+`snprintf`+`strtod` pairs per number printed, against a corpus that already matches Node
+byte-for-byte — so there is no correctness argument for jumping §12's entry criterion, which is a
+measured before/after on a harness that does not exist yet. Recorded in §12 beside that criterion
+rather than left in a notes entry nobody reads for scheduling.
+
+**6 — the computed specifier of `import()` is Phase 8's, confirmed.** §11 step 7 said it lands
+there "only if step 10's owner-confirmed split still says so", and no such confirmation existed:
+entry 156 assigned it on the implementer's judgment and step 10 then closed against that
+assignment. So `STA1207`'s residue read as an open question for two days while the work that
+depended on it was already done — a conditional pointing at a confirmation nobody had been asked
+for. Confirmed: a computed specifier needs runtime module resolution, which is a runtime module
+system, which is what the dynamic tier is. The clause is dropped.
+
+**Also struck in this change.** The "Open items carried forward" block above entry 66 still listed
+"Phase 0 is not approved" and "No commits exist yet" as live. Phase 0 closed 2026-09-01 and the
+tree has been committed since 2026-08-30. The block's third item was already struck through with
+"resolved, see entry 12", so the convention was there and the other two had simply outlived it.
+
+**plan.md edited:** yes — §4 (the pin), §8 step 12(c) and (e) (both now pointing at the decided
+`docs/VALUE.md` sections), §9 Task 6.3 step 6, §11 step 7, §12 (Ryū), and §16 v4.0.
+`docs/VALUE.md` gains §4.15 and §4.16; `docs/TOOLCHAIN.md`'s Ryū row gains the schedule.
+
+**Evidence for 2 and 3, measured on the pinned Node v26.7.0** — both decisions rest on claims
+about Node's output, and §15.5 says a number you did not produce is not evidence:
+
+```
+$ mise exec -- node -e '...'
+literal   : { x: [Getter], y: [Setter], z: [Getter/Setter] } [ 'x', 'y', 'z' ]
+class     : C {} []
+identity  : true true          # o.m === o.m , p.m === o.m
+this      : undefined          # const f = o.m; f()
+TypeError : TypeError | Cannot read properties of undefined (reading '#n')
+node      : v26.7.0
+```
+
+Line 1 and 2 are why accessors cannot share one answer across literals and classes, and the
+three printed forms are why `JSRTAccessor` carries both halves rather than a function plus a flag.
+Lines 3–5 are the whole of decision 3: identity is `true` on both comparisons (so an allocated
+adapter would be observably wrong), `this` is `undefined` (so auto-binding would be observably
+wrong), and touching `this` from an unbound method value is a `TypeError` — which §4.16 requires
+to come through §4.9's pending cell rather than an abort.
+
+**Check.** No code changed, so the runnable check is that the tests which read these documents
+still pass: `mise exec -- node --test tests/unit/phases.test.ts` → `pass 4, fail 0` (it pins
+`src/support/phases.ts` to what `done.md` records, and §16 gained an entry in this change).
+
+**No code changed.** Every one of the six was a decision the plan had deferred, and the deliverable
+is the decision written where the implementer will look for it. Implementing §4.15 and §4.16 is
+§8 step 12's own work and lands with that step's fixtures and Check.
+
+## 191. Session follow-ups: the PATH hazard (Node 24 answering for the pin), and the builtins dashboard drifted RED (2026-09-04)
+
+**Context.** This session finished plan-notes 187's written-down remaining work (the subset/golden
+suites and the telemetry export test) and then ran the full CI gate. Two findings came out of it
+that are follow-up work, not fixes made in place — the user directed they be recorded in the plan
+and the session stopped.
+
+**Finding 1 — the PATH hazard is itself a green-signal hazard, and it bit this session.** The host
+shell's `PATH` puts mise's `node/lts` install directory (`…/installs/node/lts/bin`, v24.20.0) ahead
+of the shims, so bare `node`/`pnpm` answer **24.20.0** while `.node-version`/`mise.toml` pin
+**26.7.0**. `mise exec node --` and `mise current` both report 26.7.0 — the hazard is only in
+shell PATH ordering, and a bare `pnpm run ci` in this shell runs on the WRONG node. Consequences
+measured this session: `--test-coverage-include-all` exits 9 (needs ≥26) and the golden runner
+compares against `process.execPath` (node 24), i.e. pre-fix "green" runs diffed against a Node
+that is not the ground truth. A suite green under 24 is not evidence about 26 — the node-24 run of
+`test:golden` "passed" 146/146 against node 24's own output, while the honest pinned-Node run is
+**147/147** (a fixture had been added by a concurrent session; pre-fix counts differ from
+post-fix). The record's existing note (187's "mise trust gap") misattributed the mechanism: the
+`mise trust` state was never in question — `mise which node` resolves correctly; the PATH order is.
+
+**Finding 2 — the builtins dashboard drifted red, hiding landed work.** The dashboard
+(`tests/golden/builtins.ts` + `builtins_coverage.json`) exists to keep coverage claims honest both
+ways: stale GREEN claims fail the run (the file-exists + source-mentions checks). But the RED
+direction has no check at all — a member implemented and golden-proved can sit in the table as
+`[]` indefinitely. Measured: `Promise.prototype.then/catch/finally` **landed 2026-09-02**
+(plan-notes 157, commit `b8a0ac8`, golden `tests/golden/js/promise_then.js` passing in the 147/147)
+yet the table still lists all three as `[]` — so `pnpm run test:builtins` reports
+`Promise.prototype: 0/3 (0%) — missing: then, catch, finally`, hiding two days of landed work
+behind what reads as an open-task line. `Object.freeze`/`isFrozen` are the same shape: §7's exit
+note says they → Phase 5 step 11 (landed, plan-notes 157); `tests/golden/ts/object_freeze.ts`
+exists and passes, and the js-column twin `tests/golden/js/` has **no** freeze fixture — so
+`Object: 7/13` also under-reports. Nobody updated the JSON when step 11 landed; the dashboard
+cannot catch its own red drift, and the phase-5 step-11 unlock sweep's fixtures were never
+reflected in the table.
+
+**Why these go in the plan rather than being fixed now.** The user's instruction was to record the
+follow-up and stop. Both are small, self-contained, and next-session work:
+
+1. **Pin the invocation.** Either `package.json` scripts must guard the Node major (fail fast if
+   `node -p process.version` isn't 26+ before running suites), or `mise exec node --` must be baked
+   into every script that spawns Node (the `ci`/`test*` family), or a `just` recipe must wrap it.
+   Cheapest correct: a preflight check in `ci.sh`/`package.json` that compares `node --version`
+   against `.node-version` and fails with a one-line remediation. Also record the
+   `export PATH="$(dirname "$(mise which node)"):$PATH"` remediation in AGENTS.md's Commands
+   preamble.
+2. **Fix the dashboard's red-drift direction.** `Promise.prototype.then/catch/finally` →
+   `["ts/promise_then.ts", "js/promise_then.js"]` (mirroring how `Promise.all`/`resolve`/`reject`
+   cite both fixtures); `Object.freeze` → `["ts/object_freeze.ts", …]` — but the js-column twin
+   needs WRITING first (only the ts fixture exists today) so the claim's two fixtures both exist
+   and mention it; `isFrozen` likewise (mentioned by the ts fixture's source). Land a fix that
+   does not just hand-fix these two rows but makes red-drift detectable: e.g. a unit test that
+   greps `runtime/src/*.c` for `jsrt_<ns>_<member>` exported symbols and cross-checks the table —
+   an implemented-and-exported member with an empty claim is the smell. The alternative (a
+   dashboard-only unit test) leaves the JSON unverifiable.
+3. **Re-record `tests/bench/baseline.json`** on the owner machine (187's accepted cost, still open).
+4. **Telemetry coverage**: `telemetry.ts` lines 42–43 (the catch arm) remain the only uncovered
+   lines in `src/` (90.04% overall). Cheap to cover by a unit test that makes the dynamic import
+   fail (e.g. point `STATOR_OTEL` at an import that throws).
+5. **commit `b8a0ac8`'s step-12c-mate** — golden fixture pair `promise_then.ts` **exists** but is
+   not cited by `builtins_coverage.json` (both the ts and js fixtures exist and pass) — same as
+   item 2's first clause, listed once here for the commit-scan's benefit.
+6. **Settled by plan-notes 190** (no action): the Node pin stays 26.7.0 and accessors/method-values
+   representations are decided — items 1–2 above are process fixes, not re-opened decisions.
+
+**Where in plan.md.** Finding 1 → a new task under §9 Phase 6 (it is harness-honesty work, exactly
+this phase's theme: "a green signal that proves less than it appears to"); finding 2 → a follow-up
+under §8's step 12 (it is Phase-5-surface bookkeeping). Both carried into plan.md by this entry.
+The dashboard claim fix (items 2/5) belongs to step 12's family work and lands with those commits;
+the PATH guard (item 1) is Task 6.3-adjacent harness work and lands standalone.
+
+## 189. The test harness was serial, and `ink` cost 1.6 s on every compiler spawn (2026-09-04)
+
+**Ask.** Owner: "Optimize test runs. Make multi tread or parallel runs. Or install tools for tests.
+Should pass more fast."
+
+**Finding 1 — two of the three spawn-heavy runners were serial.** Task 6.1 built a process pool for
+`tests/test262/run.ts` because a serial conformance pass is ~5 hours. `tests/subset/run.ts` and
+`tests/golden/run.ts` have the identical shape — hundreds of independent `stator` spawns — and were
+still `spawnSync` in a `for` loop. Nothing about them required it; the pool was simply never lifted
+out of the runner that needed it first.
+
+The fix is extraction, not a third copy (AGENTS.md: find the existing helper, or extract one shared
+helper at the responsible layer). `tests/support/parallel.ts` now owns `runProcess` and `pool`, and
+the test262 runner imports them instead of defining them. Net **−19 lines** across the three
+runners, and `pnpm run dupes` stayed at 0.9% against its 1% ceiling.
+
+Two invariants are carried in that file's header because both were learned the expensive way in
+Task 6.1 and neither is visible at a call site:
+
+- **Results are indexed by ITEM, never by completion order.** A pool finishes out of order by
+  construction, so a runner that pushed as it went would emit a different failure list on every run
+  and a different `results.json` on every commit. Ordering the output is what keeps a parallel run's
+  report diffable against a serial one's — which is the only reason the comparison below is
+  meaningful at all.
+- **Nothing is keyed by pid.** Two workers in one process share a pid, so a pid-keyed temp file
+  would have each compiling the other's source and reporting the answer to the wrong test. Callers
+  get `slot`; `mkdtemp` (what the golden runner already used) is the other correct answer.
+
+`STATOR_TEST_JOBS=1` forces the serial order back. It exists so a failure that *looks* like the pool
+can be checked against a serial run without stashing — which is not a safe operation in a worktree a
+second session is editing — and it is the knob a shared CI box needs anyway.
+
+**Finding 2 — plan-notes 187 was 50× wrong about `ink`.** That entry accepted ink on the estimate
+that importing it costs "tens of ms". Measured on this machine it is **~1.6 s**, and `src/cli/main.ts`
+paid it at module scope on *every* process. Neither `explain --json` nor a successful `build` ever
+renders anything — the CLI's own test spawns were paying 1.6 s for a module they never called.
+
+Moving the import inside `print` (`await import('ink')`) cut per-spawn cost **2349 ms → 843 ms
+(2.8×)**. It forced `print` async, and with it `build`/`explain`/`run` — `require()` cannot load an
+ESM graph with top-level await, so the lazy form has to be the async one. `src/support/telemetry.ts`
+gained `withSpanAsync` in the same change: the sync `withSpan` ends the span the moment an async
+function returns a pending promise, so reusing it would have silently reported near-zero build times.
+No output changes — golden compares stdout *and* stderr byte-for-byte and stayed 147/147.
+
+**Measured, uncontended, this machine (`availableParallelism()` = 16).** Both columns already carry
+the ink fix, so this isolates the pool:
+
+| Suite | `STATOR_TEST_JOBS=1` | pooled | speedup |
+|---|---|---|---|
+| `test:subset` (342 fixtures) | 109.7 s | 17.4 s | **6.3×** |
+| `test:golden` (147 fixtures) | 151.0 s | 44.5 s | **3.4×** |
+
+Golden gains less because each fixture runs `clang` and then two binaries, so it is closer to
+CPU-bound where subset is dominated by per-spawn Node startup — exactly the cost finding 2 attacked.
+
+**No dependency was added.** The ask offered "install tools for tests"; the pool is `node:child_process`
+plus `availableParallelism()` from `node:os`, so the runtime dependency budget is untouched and no new
+entry is owed under the AGENTS.md dependency rule.
+
+**Where in plan.md.** Finding 2 corrects the cost estimate recorded in note 187; that entry's
+conclusion (ink is accepted, confined to `src/cli/`) is unchanged — only its arithmetic was wrong,
+and the lazy import is what makes the acceptance hold. Neither finding changes a Check.
+
+---
+
+## 192. Object-literal accessors: the pair belongs in the object's slot, not on the shape (2026-09-04)
+
+**Context.** plan.md §8 step 12(c)'s residue, implemented against `docs/VALUE.md` §4.15 — the
+section entry 190 wrote to unblock it. Two things in that section were wrong when the code met it,
+and one hole opened that the section did not anticipate. All three are recorded here because each
+was found by evidence, not by reading.
+
+**Correction 1 — a shape cannot hold the pair.** §4.15 as written by entry 190 put the get/set pair
+on the `JSRTShape` entry, beside the slot offset. That is unimplementable, and Node says why:
+
+```
+for (let i = 0; i < 3; i++) out.push({ get x() { return i; } })
+  → three objects, ONE shape (same key, same history), THREE getters (each captured a different i)
+```
+
+A shape is shared by every object with the same key history; a getter can capture. Aliased getters
+would have been the result. The pair therefore lives in the object's **slot**, as a
+`JSRTAccessorCell` — prefix-shared with `JSRTObject` exactly as `JSRTMap` and `JSRTDynObject` are,
+so the Object tag covers it and the descriptor pointer (`&jsrt_class_accessor`) is what says which
+builtin it is. `JSRTShape`, `JSRTIC` and `JSRTClass` are all **unchanged**: a property read tests
+the value it just loaded. Nothing in the language can construct a cell —
+`jsrt_define_accessor` is the only producer — which is what makes that test unfoolable.
+§4.15 was corrected in the same change; entry 190's conclusion (accessors deoptimize to Task 4.1's
+dynamic path, `JSRTClass` gains nothing) is unaffected.
+
+**Correction 2 — `isDynamicShape` refused what it should trigger on.** `src/frontend/types.ts`
+returned `false` for any anonymous shape with a Get/SetAccessor member, lumping accessors in with
+methods. Both halves of that were load-bearing and wrong once accessors had a representation:
+
+- `shapeTypeToHType` built a LAYOUT for `{ get at(): number }` — field `at` at slot 0 — so a read
+  through such a type compiled to `jsrt_object_get(o, 0)` on a `JSRTDynObject`. Measured: the
+  compiled program printed `2e-323` (a raw slot word read as a double) where Node printed `0`.
+- `isDynamicShape` answered "not dynamic", so the gate and the lowering disagreed with the literal
+  about which representation the object had.
+
+An accessor is now a **trigger** alongside an optional property and an index signature, and a
+method is still a refusal (calling through the shape table is step 12(e)). The rule that follows:
+an accessor deoptimizes its whole shape, siblings included — one object cannot be half a layout.
+This is the trade `docs/SUBSET.md` row 84 already accepts for optional properties.
+
+**The hole that opened: a fixed-shape position.** TypeScript calls `{ get at(): number }`
+assignable to `{ at: number }`. It is not representationally: the literal must be a `JSRTDynObject`
+to hold the pair, while every later `o.at` is typed by the annotation and compiles to a slot load
+on it. There is no conversion to insert — a slot cannot hold "call this on read" — so
+`gateObjectLiteral` refuses it as a not-yet (`STA1214`, Phase 5) rather than emitting a program that
+reads garbage. This refusal did not exist before, because before this change the literal itself was
+the not-yet.
+
+**Semantics pinned against Node, not against the spec text.** `runtime/tests/print_accessors.{c,mjs}`
+and `tests/golden/{ts/object_accessors.ts,js/object_accessors.js}` compare byte-for-byte:
+`util.inspect` does NOT call the getter (`[Getter]`, `[Setter]`, `[Getter/Setter]`); `Object.keys`
+does not either, while `Object.values`, `Object.entries` and `JSON.stringify` do; a write to a
+get-only property throws `TypeError: Cannot set property x of #<Object> which has only a getter`.
+That last one needed an ESM probe to measure: `node -e 'o.x = 5'` is **sloppy mode**, where the
+write silently does nothing. Compiled modules are always strict, so the sloppy answer would have
+been the wrong ground truth.
+
+**Found in passing, NOT fixed (pre-existing, unrelated to accessors).** A closure created at MODULE
+scope that captures a loop-body binding reads one shared global slot instead of a per-iteration
+one:
+
+```
+const fns = [];
+for (let i = 0; i < 3; i++) { const captured = i * 10; fns.push(() => captured); }
+fns.forEach(f => console.log(f()));      stator: 20 20 20      node: 0 10 20
+```
+
+The same code inside a function is correct (`0 10 20`) — the per-iteration env clone
+(`jsrt_env_clone` / `jsrt_env_copy_slots`) is emitted there and not at module scope, where bindings
+are global slots that never get an environment. No golden fixture covered it. It is a real Node
+divergence and wants its own task; the accessor fixtures put their capture case inside a function
+so they test accessors rather than this.
+
+**Where in plan.md.** Step 12(c)'s record moves to `done.md`; step 12 keeps (d)–(f).

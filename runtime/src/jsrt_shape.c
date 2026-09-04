@@ -13,6 +13,7 @@
 #include "jsrt_value.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,13 @@ const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL, NULL};
  * -- and distinct from it by address, which is the whole job: it marks the objects §22.2.7.2 builds
  * with a null prototype so the printer writes Node's `[Object: null prototype]` prefix. */
 const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL};
+
+/* The descriptor that marks an accessor CELL (docs/VALUE.md §4.15). Like the two above it means
+ * nothing by its fields and everything by its address: a property read tests the value it just
+ * loaded against this pointer to tell a get/set pair from an ordinary property value. Nothing in
+ * the language can build one, so the test cannot be fooled -- jsrt_define_accessor is the only
+ * producer. */
+const JSRTClass jsrt_class_accessor = {"", 0, NULL, NULL, 0, NULL, NULL};
 
 /* The one shape with no key: every dynamic object starts here. Static, so "has no properties"
  * needs no allocation and compares by address. */
@@ -243,6 +251,39 @@ static const JSRTShape *shape_find(const JSRTShape *shape, const char *key) {
   return NULL;
 }
 
+/* A loaded slot, resolved. An accessor cell becomes a call with the receiver as argument zero --
+ * the ordinary method ABI (docs/VALUE.md §4.5), so an accessor body is an ordinary function unit.
+ * A cell with no getter reads `undefined`, which is what §10.4.x AccessorDescriptor Get answers
+ * when [[Get]] is undefined. */
+static jsrt_value accessor_read(jsrt_value slot, jsrt_value recv) {
+  if (!jsrt_is_accessor_cell(slot)) {
+    return slot;
+  }
+  const JSRTAccessorCell *cell = (const JSRTAccessorCell *)jsrt_ptr(slot);
+  return cell->get == JSRT_UNDEFINED ? JSRT_UNDEFINED : jsrt_call(cell->get, 1, &recv);
+}
+
+/* Answers whether the write was an accessor's, so the caller knows not to store. A setter-less
+ * accessor THROWS rather than silently dropping the write: compiled modules are always strict, and
+ * strict mode is where §10.4.x OrdinarySetWithOwnDescriptor returns false and the assignment
+ * raises. Node's wording, matched exactly. */
+static bool accessor_write(jsrt_value slot, const char *key, jsrt_value recv, jsrt_value value) {
+  if (!jsrt_is_accessor_cell(slot)) {
+    return false;
+  }
+  const JSRTAccessorCell *cell = (const JSRTAccessorCell *)jsrt_ptr(slot);
+  if (cell->set == JSRT_UNDEFINED) {
+    char msg[192];
+    snprintf(msg, sizeof msg, "TypeError: Cannot set property %s of #<Object> which has only a getter",
+             key);
+    jsrt_throw_str(msg);
+    return true;
+  }
+  jsrt_value args[2] = {recv, value};
+  jsrt_call(cell->set, 2, args);
+  return true;
+}
+
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   if (jsrt_is_nullish(obj)) {
     jsrt_panic("TypeError: Cannot read properties of null or undefined");
@@ -261,7 +302,7 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   }
   const PropTable o = as_prop_table(obj, "get");
   if (ic != NULL && ic->shape == *o.shape) {
-    return (*o.slots)[ic->offset];
+    return accessor_read((*o.slots)[ic->offset], obj);
   }
   const JSRTShape *hit = shape_find(*o.shape, key);
   if (hit == NULL) {
@@ -271,7 +312,7 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
     ic->shape = *o.shape;
     ic->offset = hit->offset;
   }
-  return (*o.slots)[hit->offset];
+  return accessor_read((*o.slots)[hit->offset], obj);
 }
 
 bool jsrt_has_prop(jsrt_value obj, const char *key) {
@@ -307,7 +348,11 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   return jsrt_has_prop(obj, k);
 }
 
-void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic) {
+/* `honor_accessor` is false for exactly one caller: jsrt_define_accessor, which is INSTALLING the
+ * cell and must overwrite whatever the key held rather than invoke it. Every other write honors it,
+ * which is what makes `o.x = v` on an accessor a call. */
+static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic,
+                       bool honor_accessor) {
   if (jsrt_is_nullish(obj)) {
     jsrt_panic("TypeError: Cannot set properties of null or undefined");
   }
@@ -327,6 +372,9 @@ void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic
   }
   const PropTable o = as_prop_table(obj, "set");
   if (ic != NULL && ic->shape == (*o.shape)) {
+    if (honor_accessor && accessor_write((*o.slots)[ic->offset], key, obj, value)) {
+      return;
+    }
     (*o.slots)[ic->offset] = value;
     return;
   }
@@ -335,6 +383,9 @@ void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic
     if (ic != NULL) {
       ic->shape = (*o.shape);
       ic->offset = hit->offset;
+    }
+    if (honor_accessor && accessor_write((*o.slots)[hit->offset], key, obj, value)) {
+      return;
     }
     (*o.slots)[hit->offset] = value;
     return;
@@ -381,6 +432,19 @@ void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic
    * transition cache would only ever hit across objects — worth building when Phase 5 measures
    * construction-heavy dynamic code, not before. */
   (*o.shape) = next;
+}
+
+void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic) {
+  store_prop(obj, key, value, ic, true);
+}
+
+void jsrt_define_accessor(jsrt_value obj, const char *key, jsrt_value get, jsrt_value set) {
+  JSRTAccessorCell *cell = (JSRTAccessorCell *)slots_alloc(sizeof(JSRTAccessorCell));
+  cell->cls = &jsrt_class_accessor;
+  cell->get = get;
+  cell->set = set;
+  /* No IC: installation happens once per object at construction, so a cache would never hit. */
+  store_prop(obj, key, JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)cell), NULL, false);
 }
 
 jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic) {

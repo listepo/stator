@@ -67,6 +67,7 @@ import type {
   DateOperation,
   DateStatic,
   Declaration,
+  DynEntry,
   DynFieldAccess,
   Expression,
   FieldAccess,
@@ -109,6 +110,7 @@ import {
   CONSOLE_METHODS,
   DATE_OPS,
   DATE_STATICS,
+  isAccessorEntry,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -1368,6 +1370,28 @@ function staticName(className: string, member: string): string {
   return `${className}.${member}`;
 }
 
+/** Whether `o.x` must resolve through the SHAPE TABLE rather than a slot — the one question the
+ * read path and the write path both have to answer the same way, which is why it is one function.
+ *
+ * `this` is decided by the receiver BINDING, not by the checker. Inside an object literal's
+ * accessor the checker types `this` as the literal's structural shape, which looks exactly like a
+ * layout — but the object is a `JSRTDynObject` (docs/VALUE.md §4.15), and the binding is the only
+ * place that is recorded. Inside a class member the binding is the layout, so this answers false
+ * and the fixed-slot path takes over, unchanged. */
+function targetIsDynamic(
+  target: ts.Expression,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+): boolean {
+  if (target.kind === ts.SyntaxKind.ThisKeyword) {
+    return bindings.get(RECEIVER)?.kind === 'unknown';
+  }
+  return (
+    isDynamicShape(checker.getTypeAtLocation(target), checker) ||
+    typeAt(target, checker, bindings).kind === 'unknown'
+  );
+}
+
 /** The slot `field` occupies in `target`'s class, or `null` after reporting an internal error.
  *
  * A miss is never a user error: the checker proved the name is declared and the gate proved the
@@ -1676,10 +1700,7 @@ function memberAssignment(
         ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
         : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
     };
-  } else if (
-    isDynamicShape(checker.getTypeAtLocation(targetNode.expression), checker) ||
-    typeAt(targetNode.expression, checker, bindings).kind === 'unknown'
-  ) {
+  } else if (targetIsDynamic(targetNode.expression, checker, bindings)) {
     // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). Only plain `=`
     // reaches here -- the gate refused the compound and update forms -- so `current` is never
     // read; it is built anyway so the two halves of a place stay one shape.
@@ -2337,8 +2358,7 @@ function lowerExpression(
   if (
     ts.isPropertyAccessExpression(node) &&
     !isMatchReceiver(node.expression, checker) &&
-    (isDynamicShape(checker.getTypeAtLocation(node.expression), checker) ||
-      typeAt(node.expression, checker, bindings).kind === 'unknown')
+    targetIsDynamic(node.expression, checker, bindings)
   ) {
     const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (target === null) {
@@ -2550,7 +2570,7 @@ function lowerExpression(
   // order `console.log` prints them.
   if (ts.isObjectLiteralExpression(node)) {
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-    const entries: ObjectEntry[] = [];
+    const entries: DynEntry[] = [];
     for (const property of node.properties) {
       // `{ x }` is `{ x: x }`. The desugaring lives here and not in HIR: the value is the ordinary
       // identifier expression, so every later pass sees a name/value pair like any other.
@@ -2607,6 +2627,49 @@ function lowerExpression(
           };
           entries.push({ name: field.name, value: read });
         });
+        continue;
+      }
+      // `get x() {…}` / `set x(v) {…}`. Both halves of one key become ONE entry, so a literal that
+      // writes get and set adjacently -- the only spelling TypeScript allows -- inserts the key
+      // once and in the position the first half was written (docs/VALUE.md §4.15). The body is an
+      // ordinary function with the receiver as parameter zero; the receiver is Unknown because the
+      // gate made this literal dynamic, so `this.x` inside is a shape-table read.
+      if (ts.isGetAccessorDeclaration(property) || ts.isSetAccessorDeclaration(property)) {
+        if (!(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
+          diagnostics.push(
+            diagnosticFromNode(
+              property,
+              sourceFile,
+              'STA4068',
+              'internal',
+              'ts',
+              'object literal accessor with a key that is not a name',
+            ),
+          );
+          return null;
+        }
+        const fn = lowerFunction(
+          property,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+          hUnknown(false),
+        );
+        if (fn === null) {
+          return null;
+        }
+        const name = property.name.text;
+        const half = ts.isGetAccessorDeclaration(property) ? 'get' : 'set';
+        const existing = entries.find((e) => e.name === name);
+        if (existing !== undefined && isAccessorEntry(existing)) {
+          entries[entries.indexOf(existing)] =
+            half === 'get' ? { ...existing, get: fn } : { ...existing, set: fn };
+          continue;
+        }
+        entries.push(
+          half === 'get' ? { name, get: fn, set: undefined } : { name, get: undefined, set: fn },
+        );
         continue;
       }
       // An identifier or a string-literal key; the gate settled which spellings reach here, and
@@ -2673,7 +2736,27 @@ function lowerExpression(
       );
       return null;
     }
-    const literal: ObjectLiteral = { kind: 'object-literal', type, span, entries };
+    // A fixed layout has no accessor entry to hold: objectLiteralIsDynamic answers `true` for any
+    // literal that writes one, so this narrowing can only fail if that rule and this one drifted
+    // apart -- which is a compiler bug, not a program error.
+    const fixed: ObjectEntry[] = [];
+    for (const entry of entries) {
+      if (isAccessorEntry(entry)) {
+        diagnostics.push(
+          diagnosticFromNode(
+            node,
+            sourceFile,
+            'STA4068',
+            'internal',
+            'ts',
+            'object literal with an accessor took the fixed-shape path',
+          ),
+        );
+        return null;
+      }
+      fixed.push(entry);
+    }
+    const literal: ObjectLiteral = { kind: 'object-literal', type, span, entries: fixed };
     return literal;
   }
 
@@ -3830,7 +3913,9 @@ function lowerFunction(
   checker: ts.TypeChecker,
   bindings: Map<string, HType>,
   diagnostics: Diagnostic[],
-  receiver?: HObject,
+  // An HObject for a class member, whose receiver has a layout; Unknown for an object literal's
+  // accessor, whose receiver is a JSRTDynObject and whose `this.x` is therefore a dynamic read.
+  receiver?: HType,
 ): FunctionExpr | null {
   functionNesting++;
   try {

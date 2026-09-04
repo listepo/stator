@@ -362,6 +362,35 @@ extern const JSRTClass jsrt_class_null_proto;
 jsrt_value jsrt_dynobj_new(void);
 jsrt_value jsrt_null_proto_new(void);
 
+/* An accessor property -- `{ get x() {…}, set x(v) {…} }` -- docs/VALUE.md §4.15.
+ *
+ * The pair lives in the object's SLOT, not on the shape, and that is forced rather than chosen: a
+ * shape is shared by every object with the same key history, while a getter can capture, so three
+ * objects built by one literal in a loop have one shape and must have three getters.
+ *
+ * Prefix-shared with JSRTObject exactly as JSRTMap and JSRTDynObject are, so the Object tag covers
+ * it and the descriptor pointer is what says which builtin it is. Nothing in the language can
+ * construct one -- jsrt_define_accessor is the only producer -- which is what lets a property read
+ * tell a cell from a value by testing the value it just loaded, with no flag on the shape and no
+ * third field in the IC. */
+typedef struct JSRTAccessorCell {
+  const JSRTClass *cls; /* &jsrt_class_accessor -- prefix-shared with JSRTObject */
+  jsrt_value get;       /* JSRT_UNDEFINED for a set-only accessor */
+  jsrt_value set;       /* JSRT_UNDEFINED for a get-only accessor */
+} JSRTAccessorCell;
+
+extern const JSRTClass jsrt_class_accessor;
+
+static inline bool jsrt_is_accessor_cell(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) &&
+         ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_accessor;
+}
+
+/* Installs the pair under `key`, replacing whatever the key held. Either half may be
+ * JSRT_UNDEFINED, but not both. `key` must outlive the program, exactly as jsrt_set_prop requires:
+ * the shape table stores the pointer. */
+void jsrt_define_accessor(jsrt_value obj, const char *key, jsrt_value get, jsrt_value set);
+
 /* Own-property order for a shape -- a dynamic object's, or the table a match array carries: canonical array-index keys first in numeric order,
  * followed by the remaining string keys in insertion order (ECMA-262 OrdinaryOwnPropertyKeys).
  * The returned shape-pointer array is malloc-owned by the caller; it contains metadata pointers,

@@ -20,8 +20,9 @@ import { verifyHir } from '../hir/verify.ts';
 import { lowerProgram } from '../lower/index.ts';
 import { optimize } from '../passes/index.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
-import { renderDiagnostic } from '../support/diagnostics.ts';
 import { runtimeFlavor } from '../support/features.ts';
+import { withSpan } from '../support/telemetry.ts';
+import { diagnosticLines, INK_COLORS, print } from './render.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -86,8 +87,8 @@ function extraLinkFlags(): string[] {
 }
 
 /** Returns the process exit code: 0 on success, 1 if the program was rejected. */
-export function build(options: BuildOptions): number {
-  const c = compileToC(options.entry, options.mode);
+export async function build(options: BuildOptions): Promise<number> {
+  const c = await compileToC(options.entry, options.mode);
   if (c === null) {
     return 1;
   }
@@ -115,7 +116,7 @@ export function build(options: BuildOptions): number {
 
 /** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
  * the only path any generated C comes from. Returns null if the program was rejected. */
-export function compileToC(entry: string, mode: Mode): string | null {
+export async function compileToC(entry: string, mode: Mode): Promise<string | null> {
   if (!existsSync(entry)) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
@@ -124,12 +125,12 @@ export function compileToC(entry: string, mode: Mode): string | null {
     program,
     diagnostics: programDiagnostics,
     runtimeDynamicSymbols,
-  } = createProgram(entry, mode);
-  if (report(programDiagnostics)) {
+  } = withSpan('frontend/program', {}, () => createProgram(entry, mode));
+  if (await report(programDiagnostics)) {
     return null;
   }
 
-  if (report(gateProgram(program, mode))) {
+  if (await report(withSpan('frontend/gate', {}, () => gateProgram(program, mode)))) {
     return null;
   }
 
@@ -142,49 +143,59 @@ export function compileToC(entry: string, mode: Mode): string | null {
 
   // The module graph: every reachable file, dependencies first, cycles refused (STA3001). The
   // whole-program merge happens in the LOWERING -- the graph only decides membership and order.
-  const { order, diagnostics: graphDiagnostics } = moduleOrder(program, entryFile, mode);
-  if (report(graphDiagnostics)) {
+  const { order, diagnostics: graphDiagnostics } = withSpan('frontend/module-graph', {}, () =>
+    moduleOrder(program, entryFile, mode),
+  );
+  if (await report(graphDiagnostics)) {
     return null;
   }
 
-  const { module, diagnostics: lowerDiagnostics } = lowerProgram(
-    order,
-    program.getTypeChecker(),
-    runtimeDynamicSymbols,
+  const { module, diagnostics: lowerDiagnostics } = withSpan('lower', {}, () =>
+    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols),
   );
-  if (report(lowerDiagnostics) || module === null) {
+  if ((await report(lowerDiagnostics)) || module === null) {
     return null;
   }
 
   // Optimization runs BEFORE the verifier, so the verifier checks what the emitter will actually
   // see. A pass that produced ill-typed HIR would otherwise pass through a verifier that had only
   // inspected the lowering's output.
-  const optimized = optimize(module);
+  const optimized = withSpan('passes/optimize', {}, () => optimize(module));
 
   // The verifier is not an optional debug pass: it is the only thing standing between a lowering
   // bug and silently wrong generated C, and it costs one tree walk.
-  const problems = verifyHir(optimized);
+  const problems = withSpan('hir/verify', {}, () => verifyHir(optimized));
   if (problems.length > 0) {
-    for (const p of problems) {
-      process.stderr.write(`stator: ${p.code} internal error in ${p.kind}: ${p.message}\n`);
-    }
-    process.stderr.write('stator: this is a compiler bug — please report it with the input\n');
+    await print(
+      [
+        ...problems.map((p) => ({
+          text: `stator: ${p.code} internal error in ${p.kind}: ${p.message}`,
+          color: INK_COLORS.error,
+        })),
+        { text: 'stator: this is a compiler bug — please report it with the input' },
+      ],
+      process.stderr,
+    );
     return null;
   }
 
-  return emitC(optimized);
+  return withSpan('codegen/emit-c', {}, () => emitC(optimized));
 }
 
 /** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are
  * both rejections — the difference is what the user should do about it, not whether it compiles. */
-function report(diagnostics: readonly Diagnostic[]): boolean {
-  for (const d of diagnostics) {
-    process.stderr.write(`${renderDiagnostic(d)}\n`);
-  }
+async function report(diagnostics: readonly Diagnostic[]): Promise<boolean> {
+  await print(diagnosticLines(diagnostics), process.stderr);
   return diagnostics.length > 0;
 }
 
 function linkExecutable(cPath: string, out: string): void {
+  withSpan('link/clang', {}, () => {
+    link(cPath, out);
+  });
+}
+
+function link(cPath: string, out: string): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
       'STA0011',

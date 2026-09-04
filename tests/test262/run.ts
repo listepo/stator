@@ -1,9 +1,8 @@
 /* Test262 conformance runner (plan.md §9 Task 6.1). */
-import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pool, runProcess } from '../support/parallel.ts';
 import { featureStatus } from './features.ts';
 
 export interface Test262Frontmatter {
@@ -250,46 +249,6 @@ function harnessSource(root: string, path: string, metadata: Test262Frontmatter)
   return `${strict}${files.map((file) => readFileSync(file, 'utf8')).join('\n')}\n${body}`;
 }
 
-interface ProcessResult {
-  readonly status: number | null;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-/** Async `spawnSync`, so the pool in `main` can keep every core busy.
- *
- * A serial corpus pass is roughly five hours on this hardware, which is not a per-commit CI job
- * (step 8) — and a conformance heartbeat nobody can afford to run is the same as not having one. */
-function runProcess(command: string, args: readonly string[]): Promise<ProcessResult> {
-  return new Promise((resolve) => {
-    const child = spawn(command, [...args], { timeout: PROCESS_TIMEOUT_MS });
-    let stdout = '';
-    let stderr = '';
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
-    });
-    // `error` fires without `close` when the spawn itself failed, and WITH it when the timeout
-    // killed a running child. Settling on `close` whenever the child exists keeps the temp-file
-    // cleanup in `execute` from racing a process that is still reading its input.
-    let settled = false;
-    const settle = (status: number | null): void => {
-      if (settled) return;
-      settled = true;
-      resolve({ status, stdout, stderr });
-    };
-    child.on('error', (error: Error) => {
-      stderr += `\n${error.message}`;
-      if (child.pid === undefined) settle(null);
-    });
-    child.on('close', (code) => {
-      settle(code);
-    });
-  });
-}
-
 async function execute(
   path: string,
   root: string,
@@ -325,14 +284,11 @@ async function execute(
   const input = join(work, `test-${process.pid}-${String(slot)}.js`);
   const output = join(work, `test-${process.pid}-${String(slot)}.out`);
   writeFileSync(input, harnessSource(root, path, metadata), 'utf8');
-  const build = await runProcess(process.execPath, [
-    CLI,
-    'build',
-    input,
-    '-o',
-    output,
-    '--mode=js',
-  ]);
+  const build = await runProcess(
+    process.execPath,
+    [CLI, 'build', input, '-o', output, '--mode=js'],
+    { timeoutMs: PROCESS_TIMEOUT_MS },
+  );
   try {
     if (metadata.negative?.phase === 'parse' || metadata.negative?.phase === 'resolution') {
       if (build.status === 0)
@@ -358,7 +314,7 @@ async function execute(
         ? { path: rel, verdict: 'failed', reason: build.stderr.trim(), features: metadata.features }
         : { path: rel, verdict: 'skipped', reason: pending, features: metadata.features };
     }
-    const execution = await runProcess(output, []);
+    const execution = await runProcess(output, [], { timeoutMs: PROCESS_TIMEOUT_MS });
     if (metadata.negative?.phase === 'runtime') {
       return {
         path: rel,
@@ -462,23 +418,11 @@ async function main(): Promise<void> {
     );
     return;
   }
-  // Fixed-size pool: each slot pulls the next test, so a slow compile never idles the others. The
-  // results array is indexed by test, not by completion order, keeping results.json deterministic.
+  // The shared pool (tests/support/parallel.ts): each slot pulls the next test, so a slow compile
+  // never idles the others, and results stay indexed by test rather than by completion order —
+  // which is what keeps results.json deterministic.
   const paths = testFiles(root);
-  const results: Test262Result[] = new Array<Test262Result>(paths.length);
-  let next = 0;
-  const width = Math.max(1, Math.min(availableParallelism(), paths.length));
-  await Promise.all(
-    Array.from({ length: width }, async (_unused, slot) => {
-      for (;;) {
-        const index = next;
-        next += 1;
-        const path = paths[index];
-        if (path === undefined) return;
-        results[index] = await one(path, root, slot);
-      }
-    }),
-  );
+  const results = await pool(paths, (path, slot) => one(path, root, slot));
   const passed = results.filter((result) => result.verdict === 'passed').length;
   const failed = results.filter((result) => result.verdict === 'failed').length;
   const skipped = results.filter((result) => result.verdict === 'skipped').length;

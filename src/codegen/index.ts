@@ -58,6 +58,7 @@ import {
   consoleEntryPoint,
   DATE_OPS,
   DATE_STATICS,
+  isAccessorEntry,
   REGEXP_FIELDS,
   REGEXP_OPS,
   SET_OPS,
@@ -1152,13 +1153,30 @@ class Emitter {
       // grow the slot storage, which allocates, so the value being stored must be rooted across
       // the call -- unlike jsrt_object_set, which only writes. `{}` has no entry to store and
       // therefore no scratch: a slot the emitter never writes is one the frame roots for nothing.
-      case 'dyn-object-literal':
+      case 'dyn-object-literal': {
         this.callSlots.set(expr, this.slotCount);
-        this.slotCount += expr.entries.length === 0 ? 1 : 2;
+        // A get/set PAIR needs two scratch slots, not one: both closures are live when
+        // jsrt_define_accessor is called, and building the second may allocate. One half alone
+        // needs no more than an ordinary value does -- and the frame must be exactly as large as
+        // what it roots, so a slot nothing writes is a test failure, not slack.
+        const pair = expr.entries.some(
+          (entry) => isAccessorEntry(entry) && entry.get !== undefined && entry.set !== undefined,
+        );
+        this.slotCount += expr.entries.length === 0 ? 1 : pair ? 3 : 2;
         for (const entry of expr.entries) {
+          if (isAccessorEntry(entry)) {
+            if (entry.get !== undefined) {
+              this.countExpression(entry.get);
+            }
+            if (entry.set !== undefined) {
+              this.countExpression(entry.set);
+            }
+            continue;
+          }
           this.countExpression(entry.value);
         }
         break;
+      }
       // Target first, then each argument, each in its own rooted slot. The runtime functions take
       // positional C arguments rather than an argv, so the run does not have to be contiguous --
       // but the SEQUENCING does have to exist: C leaves argument evaluation order unspecified, and
@@ -2621,6 +2639,31 @@ class Emitter {
         const parts = [`${this.slotAt(slot)} = jsrt_dynobj_new()`];
         let flushed = false;
         for (const entry of expr.entries) {
+          // An accessor installs the pair instead of storing a value, and it must not go through
+          // jsrt_set_prop: on a key that already holds an accessor that would CALL the setter
+          // rather than replace it (docs/VALUE.md §4.15). A missing half is JSRT_UNDEFINED, which
+          // is what makes a get-only property read-only and a set-only one read `undefined`.
+          if (isAccessorEntry(entry)) {
+            // Scratches are handed out per HALF and restart at each entry, so a one-sided accessor
+            // uses the same slot an ordinary value would and the second is reserved only for the
+            // literal that actually writes a pair.
+            let next = slot + 1;
+            const half = (fn: Expression | undefined): string => {
+              if (fn === undefined) {
+                return 'JSRT_UNDEFINED';
+              }
+              const into = this.slotAt(next);
+              next += 1;
+              flushed = this.sequencePart(parts, fn, expr.span, (v) => `${into} = ${v}`) || flushed;
+              return into;
+            };
+            const get = half(entry.get);
+            const set = half(entry.set);
+            parts.push(
+              `jsrt_define_accessor(${this.slotAt(slot)}, ${cNameLiteral(entry.name)}, ${get}, ${set})`,
+            );
+            continue;
+          }
           flushed =
             this.sequencePart(parts, entry.value, expr.span, (v) => `${scratch} = ${v}`) || flushed;
           parts.push(

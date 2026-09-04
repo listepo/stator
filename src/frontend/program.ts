@@ -50,6 +50,19 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2367, // This comparison appears to be unintentional because the types have no overlap.
   2362, // Left-hand side of arithmetic operation must be numeric.
   2363, // Right-hand side of arithmetic operation must be numeric.
+  // The exactOptionalPropertyTypes family. The option stays ON in both modes -- turning it off is
+  // program-wide and would strip the .ts half of a mixed graph of the same guarantee -- but in js
+  // mode these three codes refuse ordinary JavaScript: `{ value: undefined }` for a `value?: string`
+  // parameter is how Test262's own propertyHelper writes a descriptor, and 2340 of the 7276
+  // remaining Test262 failures say it. Unlike 2322/2345 this needs no widening and no coercion,
+  // because the disagreement is only over whether `undefined` is a permitted VALUE for an optional
+  // property, and `undefined` is a value the runtime already represents in the slot. The absent /
+  // present-as-undefined distinction EOPT exists to police survives: the shape model tracks presence,
+  // so `{}` and `{ value: undefined }` still differ in `Object.keys` and in `console.log`
+  // (tests/golden/js/optional_undefined.js pins exactly that, not just the reads).
+  2375, // Type 'X' is not assignable to type 'Y' with 'exactOptionalPropertyTypes: true' (target's properties).
+  2379, // Argument of type 'X' is not assignable to parameter of type 'Y' with 'exactOptionalPropertyTypes: true'.
+  2412, // Type 'X' is not assignable to type 'Y' with 'exactOptionalPropertyTypes: true' (the target).
   // The possibly-null family: 3855 of Task 6.1's 10,513 Test262 failures, the largest bucket by a
   // factor of three, and every one of them ordinary JavaScript that runs (plan-notes 176, 180).
   // `xs[i].toFixed(2)` is how JavaScript indexes an array; the spec's answer for the miss is a
@@ -68,10 +81,14 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
 /** Build a ts.Program from an entry file, using Stator-owned compilerOptions.
  * Stator owns strict family + noEmit; user's tsconfig.json is ignored for these.
  * Returns the program and any diagnostics emitted during program construction.
- */
+ *
+ * `host` is the seam for tests (plan-notes 187): unit suites back programs with a memfs volume
+ * through it. Omitted means ts.sys against the real disk — the ONLY mode the shipped compiler
+ * runs in, since every production call passes no host. */
 export function createProgram(
   entryFile: string,
   mode: Mode,
+  host?: ts.CompilerHost,
 ): {
   program: ts.Program;
   diagnostics: Diagnostic[];
@@ -160,6 +177,7 @@ export function createProgram(
   const program = ts.createProgram(
     [globals, resolve(entryFile).replace(/\\/g, '/')],
     compilerOptions,
+    host,
   );
   const diagnostics: Diagnostic[] = [];
   const runtimeDynamicSymbols = new Set<ts.Symbol>();

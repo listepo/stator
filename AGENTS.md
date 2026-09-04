@@ -110,7 +110,7 @@ node src/cli/main.ts explain file.ts --json     # per-construct verdicts (decisi
 
 - `tsconfig.json` is locked (full flag list in plan §4 Task 1.0): `strict` + `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`, `erasableSyntaxOnly`, NodeNext modules.
 - Biome (`biome.json`) enforces: no `any`, no non-null assertions, exhaustive switches, type-only imports. Model discriminated unions and switch exhaustively — this is a compiler; unhandled cases are bugs.
-- Runtime dependency budget: **`typescript` only**. New dependencies (even dev) need a `plan-notes.md` entry saying what a few lines couldn't do.
+- Runtime dependency budget: **`typescript` only**, plus the owner-directed CLI/observability set recorded in `plan-notes.md` 187 (ink, react, dotenv, `@opentelemetry/*` behind `STATOR_OTEL`; execa is dev-only). This set may not leak below `src/cli/` (except `src/support/telemetry.ts`, which is the pipeline's only OTel seam). New dependencies (even dev) need a `plan-notes.md` entry saying what a few lines couldn't do.
 - User-facing failures are diagnostics (stable `STA` code + span + mode), never thrown stack traces. A thrown exception reaching the CLI is a compiler bug (`STA4xxx`).
 - `ts.Type` never leaks past `src/frontend/` — everything downstream speaks HType.
 - Comments state invariants the code can't (`// pops must mirror frame pushes, incl. landing pads`), not narration.

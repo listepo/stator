@@ -24,14 +24,15 @@ import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { gateProgram } from '../../src/frontend/gate.ts';
 import { renderDiagnostic } from '../../src/support/diagnostics.ts';
 import { COMPLETED_PHASES } from '../../src/support/phases.ts';
 import { createProgram } from './helpers.ts';
 
-const SRC_DIR = new URL('../../src/', import.meta.url).pathname;
-const DONE_PATH = new URL('../../done.md', import.meta.url).pathname;
+const SRC_DIR = fileURLToPath(new URL('../../src/', import.meta.url));
+const DONE_PATH = fileURLToPath(new URL('../../done.md', import.meta.url));
 
 /** Every `.ts` file under `src/`. The first version of this test read `gate.ts` alone, and missed
  * a not-yet in `src/frontend/graph.ts` that had named Phase 4 the whole time -- the same

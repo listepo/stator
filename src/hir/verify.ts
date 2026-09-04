@@ -34,6 +34,7 @@ import {
   consoleEntryPoint,
   DATE_OPS,
   DATE_STATICS,
+  isAccessorEntry,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -1212,6 +1213,25 @@ function verifyExpression(
     // See the dyn-field-assignment case for what these check and why there is no slot to verify.
     case 'dyn-object-literal': {
       for (const entry of expr.entries) {
+        if (isAccessorEntry(entry)) {
+          // Not two halves of nothing: a pair with neither half is a key the emitter would install
+          // as an accessor that can be neither read nor written, which no source can spell.
+          if (entry.get === undefined && entry.set === undefined) {
+            problems.push({
+              kind: 'dyn-object-literal',
+              span: expr.span,
+              code: 'STA4059',
+              message: `accessor '${entry.name}' has neither a getter nor a setter`,
+            });
+          }
+          if (entry.get !== undefined) {
+            verifyExpression(entry.get, problems, bindings);
+          }
+          if (entry.set !== undefined) {
+            verifyExpression(entry.set, problems, bindings);
+          }
+          continue;
+        }
         verifyExpression(entry.value, problems, bindings);
       }
       if (expr.type.kind !== 'unknown') {

@@ -20,7 +20,7 @@
 6. **The runtime is the moat, not the codegen.** GC, builtins coverage, strings, RegExp, and ICU are where the years go. Budget accordingly; tree-shake builtins from day 1.
 7. **Allocation dominates, not dispatch.** Boa's Cranelift JIT experiment proved it: 10× on numeric loops, <5% on allocation-bound benchmarks; GC tracing 10–16% of time, dispatch only ~13%. This ordering drives the optimization ladder (§12).
 8. **One pipeline, two modes.** A mode is a *policy layer* (which files are accepted, which constructs are errors, how untyped code is typed) over one shared pipeline. If a feature seems to require forking the pipeline per mode, the design is wrong — stop and fix the design (usually: the feature belongs to the dynamic representation or the Phase-8 tier).
-9. **The compiler itself is strict TypeScript.** Locked `tsconfig` (§4 Task 1.0), no `any` in compiler source, `node:test` for unit tests, runtime dependency budget: the `typescript` package only (v0). The compiler must always pass its own `ts` mode's *philosophy*: fully typed, no dynamic escape hatches.
+9. **The compiler itself is strict TypeScript.** Locked `tsconfig` (§4 Task 1.0), no `any` in compiler source, `node:test` for unit tests, runtime dependency budget: the `typescript` package only — **owner-directed exception (2026-09-04, plan-notes 187):** `src/cli/` may use ink + react (human-facing rendering plus per-command help, long-form flags) and dotenv (environment loading), and OpenTelemetry tracing (`@opentelemetry/*`, opt-in via `STATOR_OTEL`, standard OTLP env config — works with Maple and any OTLP backend) is wired through `src/support/telemetry.ts`; execa is dev-only for `tests/unit/cli.test.ts`. The budget still rules everything else: no pass, lowering, or codegen code may depend on these. The compiler must always pass its own `ts` mode's *philosophy*: fully typed, no dynamic escape hatches.
 
 **Non-goals (v1):** npm-ecosystem compatibility; `eval`/`new Function` (never in `ts` mode; `js` mode not before Phase 8); `Proxy`; `with`; prototype mutation after construction; decorators; full Intl; Node API emulation; Windows (POSIX + clang first); self-hosting the compiler.
 
@@ -150,9 +150,13 @@ logged in `plan-notes.md` (entries 1–20). Titles stay here so `§4 Task 1.N` r
 - ~~**Task 1.3** — Write `docs/DIAGNOSTICS.md`.~~ ✅
 - ~~**Task 1.4** — Decision tests + conventions.~~ ✅
 
-**Open follow-up:** the Node pin is **26.7.0**, which satisfies "≥ 24" but may be Current rather than
-LTS — owner to confirm or drop to 24.x (notes #9). It is the differential ground truth, so settle it
-before Phase 6's fuzzing leans on it. (The "nothing is committed yet" follow-up is closed: the tree
+**Settled 2026-09-04 (plan-notes 190, closing notes #9):** the Node pin is **26.7.0** and stays
+there. Task 1.0 step 2's wording was "current Node LTS" and 26.x is Current, but the pin has been
+the differential ground truth since 2026-08-29 and three artefacts are now measured against it —
+146 golden fixtures byte-for-byte, the Test262 ratchet, and `tests/bench/baseline.json`. Moving to
+24.x re-baselines all three to satisfy a word, and Node 26 enters LTS this October regardless.
+`.node-version` and `mise.toml` already agree; nothing changes but the question. (The "nothing is
+committed yet" follow-up is closed: the tree
 has been committed since 2026-08-30. **Phase 0 is now closed too** — `NICHE.md` was approved by the
 owner on 2026-09-01 and its commit is tagged `phase-0-approved`, so the §15.1 exception that let
 Phase 1 run ahead of it no longer has anything to except.)
@@ -284,38 +288,32 @@ has to be split to report progress. Do it by plan edit (§15.3), not by drift, a
 NUMBER rather than renumbering 6/7/8, which `plan.md §N` citations in code comments and `docs/`
 depend on.
 
-Steps (1–11 detailed 2026-09-01 against the live substrate — much of step 1 is already real;
-plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-notes 136):
+Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
+same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
+in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
+What is still OPEN in this phase is **step 2a(b)**, **step 12 (c)–(f)**, and the **step-12 bookkeeping
+debt** below.
+
+**Step-12 bookkeeping debt (added 2026-09-04; plan-notes 191).** The builtins dashboard
+(`tests/golden/builtins.ts` + `builtins_coverage.json`) drifted RED — the direction its checks never
+covered: `Promise.prototype.then`/`catch`/`finally` landed with step 11 (commit `b8a0ac8`, plan-notes
+157, `tests/golden/js/promise_then.js` passing) yet the table still claims `[]`, so the dashboard
+reports `Promise.prototype: 0/3 (0%)` while the golden suite proves all three. `Object.freeze`/
+`isFrozen` are the same shape (§7's exit note assigns them to step 11; `ts/object_freeze.ts` passes;
+no js-column twin exists). The fix lands **with the next step-12 family commit**, never standalone:
+(a) cite `Promise.prototype.then/catch/finally` as `["ts/promise_then.ts", "js/promise_then.js"]`;
+(b) write the js-column `freeze` twin fixture and cite both; (c) make red-drift detectable, not
+hand-fixed — a `tests/unit/` check that cross-references the table against the runtime's exported
+`jsrt_<ns>_<member>` symbols, so an implemented member with an empty claim fails the build. The
+dashboard's green direction (stale claims) already fails the run; its red direction must too.
+
 1. ~~Frontend: `allowJs` + `checkJs`-style inference in the `ts.Program`; per-function
-   "typed | inferred | dynamic" provenance recorded into HIR.~~ ✅ **landed** — the substrate
-   (`program.ts` wiring `allowJs`/`checkJs` by mode, HIR's `provenance` field, `explain`'s
-   per-function `verdict (provenance)` row), the `inferred` middle grade in `provenanceOf`
-   (`5e9f2b4`, 2026-08-31 — this step's "Remaining" clause was written a day AFTER the thing it
-   asks for), and the `explain --json` grade matrix in `tests/unit/cli.test.ts` (2026-09-01).
-   **The grade answers what the AUTHOR wrote, not which file it lives in** (plan-notes 140):
-   `typed` is a signature annotated whole in either spelling — `x: number` and `@param {number} x`
-   are the same claim by the same author — `inferred` is one the checker finished, and `dynamic` is
-   one holding an `Unknown`, which outranks both because an un-annotated `.js` parameter is not an
-   omission the checker happened to solve, it is the request for a dynamic value. This step
-   previously graded a fully JSDoc'd `.js` function `inferred`; that reading collapses the
-   annotated/un-annotated split INSIDE `.js`, which is the only split js mode trades on, and the
-   `.ts`/`.js` distinction it was reaching for is already in the report's own file path.
-2. ~~Gate: switch the diagnostic table by mode. Concretely: (a) `any`/`as any` in `js` mode stops
-   being `STA1001` and lowers to `Unknown` (the dynamic path) — decision tests asserting the SAME
-   source flips verdict by mode; (b) `var` becomes legal in `js` mode only (its `ts`-mode "never"
-   code is untouched); (c) `.js` acceptance is already real (the `js` golden fixtures compile
-   today) — pin the other direction with a decision test that a `.js` entry under `ts` mode stays
-   `STA1002` with the "use `--mode=js`" hint; (d) `eval`/`new Function` in `js` mode emit
-   **`STA1206`** — allocated in DIAGNOSTICS.md but emitted NOWHERE in src/ today — as not-yet
-   naming Phase 8; `ts` mode keeps `STA1101`/`STA1103` never.~~ ✅ **landed** (2026-09-02) —
-   (a) the same source (`const x: any = 42`, `const x = 1 as any`) is `STA1001` in ts and
-   `dynamic` in js (`subset_explicit_any_*`, `subset_as_any_*`); `as any` is explicit, not
-   implicit `STA1003`; (b) `var` was already split (`STA1104` never / `STA1214` not-yet) — the
-   lowering is step 3; (c) a `.js` entry under ts is `STA1002` with the `--mode=js` hint
-   (`subset_js_file_ts.js`, `tests/unit/cli.test.ts`) — `allowJs` is now on in both modes so tsc
-   does not drop the file and answer `STA0012`; (d) `eval`/`new Function`/`Function(...)` emit
-   `STA1101`/`STA1103` never in ts and `STA1206` not-yet Phase 8 in js. Three findings, plan-notes
-   141.
+   "typed | inferred | dynamic" provenance recorded into HIR.~~ ✅ **landed** (2026-09-01,
+   plan-notes 140) — the grade answers what the AUTHOR wrote, not which file it lives in.
+2. ~~Gate: switch the diagnostic table by mode — `any`/`as any` lowers to `Unknown` in `js`, `var`
+   becomes legal there, a `.js` entry under `ts` stays `STA1002`, and `eval`/`new Function` emit
+   `STA1206` not-yet Phase 8 while `ts` keeps `STA1101`/`STA1103` never.~~ ✅ **landed**
+   (2026-09-02, plan-notes 141).
 2a. **Step 2's other half: the `compilerOptions`, not just the diagnostic table** (added 2026-09-03
    from Task 6.1's first corpus pass; plan-notes 175–176). Step 2 switched *which diagnostics the
    gate emits* by mode and never audited *what Stator asks the checker to enforce* against the same
@@ -324,21 +322,21 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
    `noFallthroughCasesInSwitch` and `useUnknownInCatchVariables` are already fixed (they are now
    `mode === 'ts'`); Test262 found them because no decision fixture had asked, both being things
    nobody writes deliberately in TypeScript. What is left, in measured order:
-   ~~(a) **The possibly-null family.**~~ ✅ **landed 2026-09-03** (plan-notes 180) — the nine codes
-   (2531/2532/2533, 2721/2722/2723, 18047/18048/18049) joined 2339/2551/2353/2349/2367 in
-   `JS_MODE_RUNTIME_CODES`, enumerated with a reason per line. Test262: **10,513 failed → 9222,
-   18.5% → 20.5%**, `passed` unchanged at 2379 — the 1291 did not start passing, they moved from a
-   checker lint to Stator's own schedule (the `STA12xx` skip column), which is the attribution
-   §1.3's disjoint ranges exist to make. Uncovered and fixed one internal error: `typeAt` answered
-   with the checker's NARROWED type while an identifier lowers to its BINDING, and the two disagree
-   on exactly the narrowings `isCheckable` refuses.
+   ~~(a) **The possibly-null family** (2531/2532/2533, 2721/2722/2723, 18047/18048/18049).~~
+   ✅ **landed 2026-09-03** (plan-notes 180).
    (b) The rest of the `STA0012` buckets, each judged individually against §1.2 rather than as a
-   group — some are real refusals Stator should keep. **Re-measured after (a)** (the numbers below
-   are the second measurement, not the first — every one of these tests used to die on possibly-null
-   before reaching its own diagnostic): 3233 `Argument of type 'X' is not assignable to parameter of
-   type 'X'`, 1326 `Cannot find name 'X'`, 468 `Type 'X' is not assignable to type 'X'`, 408
-   `implicitly has an 'any' type`, 265 + 183 arity, 235 `left-hand side of an arithmetic operation`,
-   196 `No overload matches this call`. **The fixed-arity subset is partly landed (2026-09-03, plan-notes 183):** JS-mode TS2554 now defers extra/missing argument checks to the existing closure ABI, moving Test262 from 9222 failed / 41979 skipped to **8839 failed / 42362 skipped** with passes unchanged at 2379. Other arity diagnostics remain individually open. **Assignment mismatch is also partly landed (2026-09-03, plan-notes 184):** TS2322 widens the diagnosed JS binding to Unknown before lowering, preserving HIR verification and moving the ratchet to **8444 failed / 42757 skipped** with 2379 passes. **Argument mismatch is now landed (2026-09-03, plan-notes 185):** JS-mode TS2345 defers argument compatibility to JavaScript call semantics; Math entry points apply `ToNumber` and HIR verifies their result/arity rather than pretending every boxed operand is already a number. The ratchet is now **7433 failed / 43768 skipped** with 2379 passes. **Arithmetic operand diagnostics are now landed (2026-09-03, plan-notes 186):** JS-mode TS2362/TS2363 defer numeric coercion to the existing binary-operation runtime, leaving the ratchet at **7276 failed / 43925 skipped** with 2379 passes.
+   group — some are real refusals Stator should keep. The bucket sizes are the measurement taken
+   after (a); four have since landed and are struck through:
+   ~~3233 `Argument of type 'X' is not assignable to parameter of type 'X'`~~ ✅ 2026-09-03
+   (plan-notes 185) · **1326 `Cannot find name 'X'`** · ~~468 `Type 'X' is not assignable to type
+   'X'`~~ ✅ 2026-09-03 (plan-notes 184) · **408 `implicitly has an 'any' type`** · ~~265 arity~~
+   ✅ 2026-09-03 (plan-notes 183) **+ 183 arity still open** · ~~235 `left-hand side of an
+   arithmetic operation`~~ ✅ 2026-09-03 (plan-notes 186) · **196 `No overload matches this call`**.
+   Across the five landings the Test262 ratchet moved **10,513 → 7276 failed** and
+   **40,688 → 43,925 skipped** with `passed` unchanged at **2379** throughout — the tests did not
+   start passing, they moved from a checker lint to Stator's own schedule (the `STA12xx` skip
+   column), which is the attribution §1.3's disjoint ranges exist to make. Per-landing evidence:
+   [done.md](done.md) → Phase 5 step 2a.
    **Check:** each suppression lands with a both-modes decision fixture (the same source, `error` in
    ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer. The Test262
    ratchet moves in that commit **when a test's final classifier changes**; a harness file can carry
@@ -348,61 +346,32 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
    happen (plan-notes 182).
 3. ~~Lower `var`: function-scoped binding, hoisting to the enclosing function (or module) scope,
    `undefined` init before the first statement runs, legal redeclaration folding to one slot.~~
-   ✅ **landed** (2026-09-02) — desugars to a function-scoped `let` initialized `undefined` plus
-   an assignment at the original site, so HIR gained no third `declKind`. A `var` that repeats a
-   parameter or a function declaration shares that slot (no second `undefined` init). Capturing a
-   loop `var` is the ordinary shared binding; capturing a loop `let` stays not-yet. checkJs's
-   "used before assigned" still rejects the classic `console.log(x); var x = 1` spelling as
-   `STA0012`; the golden proves the runtime fact via `var x; console.log(x); x = 1`, and the
-   lowering unit test pins the source-order desugaring. plan-notes 142.
-4. ~~Dynamic lowering completion.~~ ✅ **landed** (2026-09-02) — (a) Unknown (and empty `{}`)
-   property get/set lower to the existing dyn-field nodes; computed index emits
-   `jsrt_dyn_index_get`/`set` (arrays stay dense; everything else ToString's the key into the
-   shape table); `o.m(...)` on Unknown is a get then a call. (b) `jsrt_call_at` raises
-   `STA2006` at `file:line` for a non-function; arity padding is `jsrt_arg`; ordinary functions
-   do not take `this` as argv[0], so the receiver is not prepended. (c) `==`/`!=` was already
-   `jsrt_loose_equals` (NUMERIC.md §6.3.1); `tests/golden/js/to-primitive.js` pins the table.
-   STA2004 now only fires when a fixed layout is asked to *grow*; an aliased read of an
-   existing field answers. STA4058 retired. plan-notes 143.
-5. ~~Mixed-graph boundaries.~~ ✅ **landed** (2026-09-02) — a dynamic (Unknown) value reaching a
-   checkable annotation is wrapped in `BoundaryCheck` at the EDGE: declaration, assignment, call
-   argument, and return. The key is the edge, not provenance (plan-notes 140, 144). A lying JSDoc
-   is still `STA0012` at compile time; the trap is an untyped `.js` identity (`wrap(x){return x}`)
-   assigned to `const n: number` in a `.ts` importer, which aborts `STA2001`. Happy path is
-   `tests/golden/js/mixed_graph/` (`.ts` entry importing `.js`). The trap is a CLI native test,
-   the same pattern as STA2004/STA2006 — an expected-stderr golden mode would duplicate it.
-6. ~~JSDoc freebie test.~~ ✅ **landed** (2026-09-02) — a fully JSDoc'd `.js` module reports file
-   verdict `static` with provenance `typed` (`tests/unit/cli.test.ts`); `tests/golden/js/jsdoc_static.js`
-   matches Node on the static path. No compiler change: `hasUnknown` was already the file rollup,
-   and JSDoc is `typed` since step 1 (plan-notes 140).
-7. ~~Flip remaining js expected-fail + capstone golden.~~ ✅ **landed** (2026-09-02) — twelve
-   js-column fixtures whose constructs already compiled (arithmetic, bitwise, comparison, unary,
-   template, switch, let/const, loose `==`, number/string, `if`, `??`) dropped `@expected-fail`
-   with honest verdicts (typed literals are `static`; untyped `if`/`??` are `dynamic`). Remaining
-   expected-fail wait on their owner steps (rest/destructure → 12, iterators → 8, `import()` → 10,
-   …), never bulk-flipped. Capstone `tests/golden/js/capstone.js` is an untyped catalog (~200
-   lines) matching Node. `var xs = []` taught `hTypeAssignable` to recurse into arrays (plan-notes
-   146).
-8. ~~The iterator protocol, and generators with it.~~ ✅ **landed** (2026-09-02) — specialized
-    `for-of` (array/string/Map/Set), `keys`/`values`/`entries`, `matchAll`, `function*`, and
-    generator `.return()`/`.throw()` (plan-notes 147–153). User-iterable `for-of` is a compile-time
-    MethodCall of a class `[Symbol.iterator]()` whose return type is already HIR `iterator`; the
-    existing boxed-iterator walk drives the result. TypeScript unique-ifies the well-known as
-    `__@iterator@<id>`; HIR canonicalizes to `__@iterator` so the MethodCall slot matches
-    `instanceMethodName` (plan-notes 154). `Symbol.iterator` as a stored value, `Symbol()`, and
-    `Symbol.for` stay `STA1212`. Generator methods, async generators, and `for await` stay
-    `STA1201`; `yield*` and a custom `{next()}` object stay `STA1214`.
-9. ~~Top-level await (`STA1208`).~~ ✅ **landed** (2026-09-02) — the merged module body is
-    an async unit on Task 4.6's resume points: named bindings stay globals, temps live in a heap
-    environment, `main` starts the unit and drains the microtask queue. Init order is Task 3.11's
-    topological order, **not** Node's sibling-subgraph interleaving (docs/MODES.md, plan-notes 155).
-    `STA1208` is no longer emitted.
-10. ~~Dynamic `import()` (`STA1207`).~~ ✅ **landed** (2026-09-02) — a module namespace is an
-    `HObject` with `namespace: true`; field reads compile to the export's global slot (live
-    bindings). Literal-specifier `import()` is `Promise.resolve` of that dummy object, and the
-    specifier is a value-import edge so the target's top-level has already run. Computed specifier
-    stays `STA1207` (Phase 8). `import * as ns` is still `STA1214` (step 12).
-11. ~~`Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)` (`STA1216`).~~ ✅ **landed** (2026-09-02) — `jsrt_call_protected` extends §4.9's pending cell into a completion value; then/catch/finally/new Promise consume it. `Object.freeze`/`isFrozen` and `toISOString` on an Invalid Date raise through the same mailbox. Combinator residue (`allSettled`/`any`/`race`/`withResolvers`/`try`) stays not-yet (`Promise.${name}`). JSON/RegExp/string STA2005 panics are re-dated: the mechanism exists, converting each abort is follow-up. `STA1216` remains allocated for other Promise.prototype members and a non-arity-1 constructor.
+   ✅ **landed** (2026-09-02, plan-notes 142).
+4. ~~Dynamic lowering completion — Unknown property get/set, computed index, dynamic calls
+   (`STA2006` at `file:line` for a non-function), and `==`/`!=` through `jsrt_loose_equals`.~~
+   ✅ **landed** (2026-09-02, plan-notes 143) — STA4058 retired.
+5. ~~Mixed-graph boundaries: a dynamic (Unknown) value reaching a checkable annotation is wrapped
+   in `BoundaryCheck` at the EDGE — declaration, assignment, call argument, return.~~
+   ✅ **landed** (2026-09-02, plan-notes 140, 144).
+6. ~~JSDoc freebie test — a fully JSDoc'd `.js` module reports file verdict `static`,
+   provenance `typed`.~~ ✅ **landed** (2026-09-02) — no compiler change was needed.
+7. ~~Flip remaining js expected-fail + capstone golden.~~ ✅ **landed** (2026-09-02, plan-notes 146)
+   — twelve fixtures flipped with honest verdicts; the rest wait on their owner steps, never
+   bulk-flipped.
+8. ~~The iterator protocol, and generators with it.~~ ✅ **landed** (2026-09-02, plan-notes 147–154)
+   — `Symbol.iterator` as a stored value, `Symbol()` and `Symbol.for` stay `STA1212`; generator
+   methods, async generators and `for await` stay `STA1201`; `yield*` and a custom `{next()}`
+   object stay `STA1214`.
+9. ~~Top-level await (`STA1208`).~~ ✅ **landed** (2026-09-02, plan-notes 155) — init order is
+   Task 3.11's topological order, **not** Node's sibling-subgraph interleaving (a documented
+   divergence, docs/MODES.md). `STA1208` is no longer emitted.
+10. ~~Dynamic `import()` (`STA1207`).~~ ✅ **landed** (2026-09-02, plan-notes 156) — literal
+    specifiers only; **computed specifier stays `STA1207`, owned by Phase 8 step 7**, and
+    `import * as ns` stays `STA1214` (step 12).
+11. ~~`Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)` (`STA1216`).~~
+    ✅ **landed** (2026-09-02, plan-notes 157) — combinator residue
+    (`allSettled`/`any`/`race`/`withResolvers`/`try`) and a non-arity-1 constructor stay not-yet
+    under `STA1216`.
 
 12. **The lowering ladder's residue — `ts`-mode static language surface** (added 2026-09-01,
     plan-notes 136). Phase 3's rungs each landed a core and deferred its surface under
@@ -413,25 +382,25 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
     TypeScript with a statically known shape, which §1.1 promises will "eventually compile", in the
     product's DEFAULT mode. Land by family, each family flipping its `tests/subset/` rows out of
     expected-fail in the commit that lands it, never in bulk:
-    (a) **Parameter and binding forms** first, because every later family calls functions: rest, default, optional, uninitialized `let`, and shallow destructuring of parameters/declarations/catch (**landed** 2026-09-02, plan-notes 158–161). Nested/rest/default-in-pattern residue stays not-yet in this family.
-    (b) **Expression-position residue** next — cheap, and it unblocks the decision corpus: labels
-    on anything but a loop or switch, capturing a variable declared inside a loop, `instanceof`
-    against anything but a class name, assignment and compound assignment to a non-variable,
-    `++`/`--` on a non-variable and in value position, and the binary/unary/statement catch-alls
-    (`describeKind`) (**landed** 2026-09-02, plan-notes 164). Accessor compound and `#n in o` stay
-    not-yet (families (d) / private).
+    ~~(a) **Parameter and binding forms** first, because every later family calls functions: rest,
+    default, optional, uninitialized `let`, and shallow destructuring of parameters/declarations/
+    catch.~~ ✅ **landed 2026-09-02** (plan-notes 158–161). **Residue:** nested patterns,
+    rest-in-pattern, and default-in-pattern stay not-yet in this family.
+    ~~(b) **Expression-position residue**: labels on anything but a loop or switch, capturing a
+    variable declared inside a loop, `instanceof` against anything but a class name, assignment and
+    compound assignment to a non-variable, `++`/`--` on a non-variable and in value position, and
+    the binary/unary/statement catch-alls (`describeKind`).~~ ✅ **landed 2026-09-02**
+    (plan-notes 164). **Residue:** accessor compound and `#n in o` stay not-yet (families (d) /
+    private).
     (c) **Object literal forms**: shorthand, spread, method and accessor members; keys that are not
-    identifiers. **Shorthand, non-identifier keys, and spread landed 2026-09-03** (plan-notes 181):
-    `{ x }` desugars to `{ x: x }` in the lowering; a string-literal key is a slot like any other and
-    `o["a-b"]` reads it back; `{ ...a, y: 1 }` expands to one field read per field of `a`'s shape.
-    Landing spread required separating a fixed shape's two orders — the LAYOUT (the type's field
-    order, what `o.x` resolves against) from the ENUMERATION order (§10.1.11, what `console.log` and
-    `Object.keys` answer) — which the compiler had conflated, silently miscompiling a reordering
-    annotation into swapped field values. `JSRTClass::key_order` now carries the second.
-    **Residue:** a spread of anything but a variable of fixed shape, methods, accessors, and
-    computed keys stay `STA1214`. Accessors need a get/set slot the value model has no
-    representation for; decide it in `docs/VALUE.md` before writing any of it, the way family (e)
-    must decide the bound-method one.
+    identifiers. **Shorthand, non-identifier keys, and spread landed 2026-09-03** (plan-notes 181;
+    evidence in [done.md](done.md) → Phase 5 step 12c, including the LAYOUT-vs-ENUMERATION order
+    split it forced into `JSRTClass::key_order`).
+    **Accessors landed 2026-09-04** (plan-notes 192; evidence in [done.md](done.md) → Phase 5
+    step 12c accessors, including the two corrections to `docs/VALUE.md` §4.15 the implementation
+    forced and the fixed-shape-position refusal it opened).
+    **Residue:** a spread of anything but a variable of fixed shape, methods, and computed keys
+    stay `STA1214`.
     (d) **The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an
@@ -440,12 +409,16 @@ plan-notes 131. Step 12 was added the same day from Task 4.7's inventory; plan-n
     override rules, anonymous classes, and the `extends` forms. The `this`/`super`/`new` position
     sites ride here (`this` in a static member or outside a class member; `super` on anything but
     an inherited method; `new` on anything but a named class).
-    (e) **Values that need a closure or a class object**: bound method values (`const f = o.m` —
-    the sites' own comments already name the blocker, "a bound closure nothing here builds"), a
-    class used as a value, `super` as a value, named function expressions, function declarations
-    inside a block/loop/branch, calling a class field, and calling an arbitrary expression. Decide
-    the bound-method REPRESENTATION in `docs/VALUE.md` before writing any of it — this family is
-    where an accidental second closure representation gets built.
+    (e) **Values that need a closure or a class object**: method values (`const f = o.m` — the
+    sites' own comments name the blocker "a bound closure nothing here builds"), a class used as a
+    value, `super` as a value, named function expressions, function declarations inside a
+    block/loop/branch, calling a class field, and calling an arbitrary expression. The
+    representation is **decided** (2026-09-04, plan-notes 190): `docs/VALUE.md` §4.16 — there is no
+    bound closure, because `const f = o.m` does not bind in JavaScript. A method value is the
+    method's own `JSRTClosure`, and `jsrt_arg` already answers `undefined` for the receiver a
+    plain call does not supply. The second closure representation this family was expected to grow
+    is reserved for `Function.prototype.bind`, which stays not-yet and, when it lands, is a
+    two-slot `JSRTEnv` and one shared thunk. Implement against that section.
     (f) **Generics beyond monomorphization** last, because they multiply everything above:
     constrained and defaulted type parameters, generic classes, generic function expressions and
     arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a
@@ -531,6 +504,24 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 Satisfies the Check's second clause (≥1 h nightly, zero unexplained divergences) via steps 5–9.
 
+**Task 6.2a — Pin the ground truth's invocation (added 2026-09-04; plan-notes 191).** A green signal
+that proves less than it appears to — this phase's own failure mode — was measured on this host:
+the shell's `PATH` puts mise's `node/lts` install directory (v24.20.0) ahead of the shims, so bare
+`node`/`pnpm` answer 24 while `.node-version` pins 26.7.0, the differential ground truth. The
+golden runner compares against `process.execPath`, so a suite run from such a shell diff-compiles
+against a Node that is **not** the oracle, and `--test-coverage-include-all` exits 9 needing ≥26.
+A green run under 24 is not evidence about 26. Steps:
+1. **Fail fast, everywhere Node is spawned.** A preflight in the `ci`/`test*` script family (or
+   `ci.sh`) that compares `node --version` against `.node-version` and exits nonzero with a
+   one-line remediation (`mise exec node --` or fixing PATH order). Cheapest correct form: one
+   guard script invoked first by `pnpm run ci`.
+2. **Record the remediation where the commands live** — AGENTS.md's Commands preamble — so the
+   next agent (or human) hitting exit-9 or a suspicious version string finds it in seconds, not
+   by bisecting the harness. The pin stays 26.7.0 (settled, plan-notes 190); this task is
+   plumbing, not a re-decision.
+**Check (6.2a):** in a shell whose bare `node` is not the pinned major, `pnpm run ci` refuses to
+start and prints the remediation; under the pin, CI is unchanged and green.
+
 **Task 6.3 — Benchmark harness** (weekly, results committed): startup time, binary size, RSS, and a compute set (fib, nbody, JSON round-trip, string churn) vs Node, Bun, QuickJS, and — where installable — Perry/scriptc/Static Hermes. Record version, flags, and hardware with every number. **Never quote a competitor's self-published figure as a measurement.**
 
 Steps (detailed 2026-09-01; plan-notes 131):
@@ -559,10 +550,12 @@ Steps (detailed 2026-09-01; plan-notes 131):
    `tests/bench/results/<ISO-date>-<host-id>.json`, appended, never overwritten. The "benchmark
    page" of the Check is `tests/bench/README.md`, **generated** from the newest results file per
    host — "auto-updates" means generated and committed by a job, not hand-maintained prose.
-6. **Weekly job**, sharing `nightly.yml` from Task 6.2 with a different cron. Default to uploading
-   the results file as an artifact and writing the summary to `$GITHUB_STEP_SUMMARY`. Committing
-   results back to `main` from CI is a repo-policy decision for the owner — record the answer in
-   `plan-notes.md` before wiring it, either way.
+6. **Weekly job**, sharing `nightly.yml` from Task 6.2 with a different cron. It uploads the results
+   file as an artifact and writes the summary to `$GITHUB_STEP_SUMMARY`. **CI does not commit to
+   `main`** — the owner's answer, 2026-09-04 (plan-notes 190), to the repo-policy question this step
+   used to leave open. So no write-scoped token and no bot commits on the default branch; step 5's
+   generated `tests/bench/README.md` is regenerated and committed by whoever runs `bench:record`,
+   which is where the machine-local rule already puts the authority. Reopening this is a plan edit.
 7. **Perf-regression gate** (§12's standing practice, which has no home until this harness exists).
    Compare against the previous results file **for the same host** and fail on a geomean regression
    beyond a threshold. Measure the threshold before setting it: record the same commit twice, take
@@ -572,7 +565,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 Satisfies the Check's third clause (benchmark page auto-updates) via steps 5–6.
 
-**Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates.
+**Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a).
 
 ---
 
@@ -816,9 +809,11 @@ two things that must exist before implementation is allowed to start:
    version — or a naive add of the full source next to the existing subset — is duplicate symbols
    at link time, not a merge conflict a compiler will catch. Vendor `quickjs.c`/`quickjs.h` at the
    **same commit**, extend the existing `VENDOR.md` rather than starting a second one, and check who
-   supplies the `lre_*` embedder callbacks once both halves are present. Acquisition is also
-   constrained: this environment has no network (plan-notes 28), so the source has to arrive by the
-   same route the existing vendor drop did.
+   supplies the `lre_*` embedder callbacks once both halves are present. Acquisition is
+   `node runtime/vendor/update.mjs quickjs-ng` (`pnpm run vendor:update`) with `quickjs.c`/
+   `quickjs.h` added to that manifest — the same route the existing drop took, and it reaches the
+   network (plan-notes 188 corrects the stale no-network constraint). The commit, not the transport,
+   is the constraint.
 4. **Feature flag on the Task 4.4 model, which already works.** `just runtime-dynamic` builds a
    separate archive into its own build directory, exactly as `just runtime-intl` does, and gets its own CI
    job like `intl` has. The default archive must not gain a byte — which is what the flag is FOR,
@@ -834,8 +829,11 @@ two things that must exist before implementation is allowed to start:
    interpreted-tier objects — the shape model deliberately cannot express them, which is why they
    waited for this phase and not for more shape work.
 7. **The computed-specifier half of dynamic `import()`** (Phase 5 step 10c): runtime module
-   resolution needs a runtime module system, which is what this tier is. It lands here only if step
-   10's owner-confirmed split still says so.
+   resolution needs a runtime module system, which is what this tier is. **Owner-confirmed
+   2026-09-04** (plan-notes 190) — the conditional this step used to carry pointed at a
+   confirmation that had never been recorded, so `STA1207`'s residue read as an open question for
+   two days while step 10 was already closed against it. It is settled: the computed specifier is
+   Phase 8's.
 8. **`ts` mode is untouched, and that is a test, not a promise.** A decision test asserts `eval` in
    `ts` mode is still `STA1101` **with the dynamic tier built in**. For the Check's byte-identical
    clause: record the default archive's size and content hash before and after the phase, and have
@@ -870,6 +868,14 @@ above is a claim about a number; without the harness there is no way for one to 
 ladder of unfalsifiable claims is a wish list. When a rung is scheduled it becomes a numbered task in
 a phase, with Steps and a Check like any other — this table is an ordering, not a backlog.
 
+**Ryū rides here too** (owner's call, 2026-09-04, plan-notes 190, closing note 188's unclaimed
+follow-up). §15.4 lists Ryū-exact number printing as settled and `docs/TOOLCHAIN.md` now records it
+as fetchable and unfetched; what is NOT settled is when. `shortest_digits()` costs up to 18
+`snprintf`+`strtod` pairs per number printed, and note 28 kept the swap contained to that one
+function's body — but the corpus it would replace already matches Node byte-for-byte, so this is a
+pure speed change with no correctness argument for jumping the entry criterion above. It becomes a
+rung with a measured before/after when the harness exists, not a task now.
+
 **The discipline every rung shares:**
 - **Baseline, change, re-measure on the same host**, recording version, flags, hardware and the exact
   program (§15.5). Cross-host comparison is not evidence: `tests/bench/baseline.json` is explicitly
@@ -891,8 +897,8 @@ scratch, shape key encoding, unicode conversion buffers, JSON digit buffers, the
 `console.time` tables, Intl — plus the no-Boehm fallback, where `jsrt_gc_alloc` *is* `malloc`.
 So profile those sites first; if they are a couple of percent, record it and skip the rung.
 Otherwise this lands **after** rung 3, when the collector is ours and its backing allocator is a real
-choice. Acquisition is a vendor drop with a `VENDOR.md` pin under the no-network constraint
-(plan-notes 28), never a package fetch — and never a global `malloc` interposition while Boehm is in
+choice. Acquisition is a vendor drop with a `VENDOR.md` pin (plan-notes 188),
+never a package fetch — the pin is what makes the version auditable — and never a global `malloc` interposition while Boehm is in
 the process: two allocators contending for one symbol is a debugging session, not a benchmark.
 
 **2 — Escape analysis.** The preconditions already hold: allocation sites are visible in HIR (object
@@ -1047,3 +1053,8 @@ Standing practices:
 - **v3.5** (2026-09-02): **Phase 5 step 5 landed** — mixed-graph boundary checks at declaration/assignment/call/return edges (plan-notes 144). Trap is an untyped `.js` identity into a `.ts` `number` slot (`STA2001`); a function whose body checkJs types as `string` is `STA0012` and never reaches runtime. Happy path `tests/golden/js/mixed_graph/`.
 - **v3.6** (2026-09-02): **Phase 5 step 6 landed** — a fully JSDoc'd `.js` module has file verdict `static` with provenance `typed`; `tests/golden/js/jsdoc_static.js` matches Node.
 - **v3.7** (2026-09-02): **Phase 5 step 7 landed** — js-column honesty sweep of already-landed operators/statements plus `tests/golden/js/capstone.js`; `hTypeAssignable` recurses into arrays so `var xs = []` verifies (plan-notes 146).
+- **v3.8** (2026-09-04): **§8's landed steps archived** (golden rule 1). Steps 1–11's evidence narratives moved to `done.md` → Phase 5, leaving struck-through stubs that keep every number and title so `§8 step N` citations resolve; step 2a(a) and step 12(c)'s landed halves got the `done.md` sections they had never been given, and step 2a(b)'s bucket list now strikes the four codes that landed (2554/2322/2345/2362-2363) instead of narrating each in place. §8 shrank 1050 → 1000 lines and now states its open surface in one line: **step 2a(b) and step 12(c)–(f)**. The log itself had stopped at v3.7 (2026-09-02) while steps 8–12b, 2a, Task 6.1 and the fuzzer landed on 09-03 — those are recorded in `plan-notes.md` 147–186 and `done.md`, and this entry is the note that they never reached this list rather than a retroactive reconstruction of them.
+- **v3.9** (2026-09-04): **the no-network constraint is retired** (plan-notes 188). A `fetch` of `quickjs.h` at the exact commit `runtime/vendor/quickjs-ng/VENDOR.md` pins returns HTTP 200 / 66,272 bytes, and Task 6.1 has been fetching the Test262 corpus over the same transport since 2026-09-03 — the constraint was falsified by work already in the tree. §11 step 3's acquisition clause had also contradicted itself (it forbade the network, then pointed at `runtime/vendor/update.mjs`, which fetches over HTTPS); it now names the script and the one real constraint, the SAME commit as the vendored `libregexp`. §12 rung 1 keeps the `VENDOR.md` pin rule without the reachability reason, and `docs/TOOLCHAIN.md` restates Ryū as fetchable-and-unfetched. **Phase 8's gate is untouched:** step 1's owner record still does not exist, and network availability removes an implementation obstacle from step 3, not the gate.
+- **v3.10** (2026-09-04): **the spawn-heavy suites are parallel, and `ink` no longer loads on every spawn** (plan-notes 189). Task 6.1's process pool was lifted out of `tests/test262/run.ts` into `tests/support/parallel.ts` and reused by the subset and golden runners, which were still `spawnSync` in a `for` loop — extraction rather than a third copy, net **−19 lines**, `dupes` steady at 0.9%. Results stay indexed by item so a pooled run's failure list is diffable against a serial one's, and `STATOR_TEST_JOBS=1` restores the serial order without a stash. Separately, plan-notes 187 estimated the ink/react import at "tens of ms"; it measures **~1.6 s** and was paid at module scope by every process, including the `explain --json` and successful-`build` paths that never render — moving it inside `print` cut per-spawn cost **2349 ms → 843 ms**, and forced the `print`/`build`/`explain`/`run` async cascade plus `withSpanAsync` in `src/support/telemetry.ts` (the sync form ends a span the moment an async fn returns a pending promise). Measured uncontended at 16-way parallelism, both columns carrying the ink fix: **`test:subset` 109.7 s → 17.4 s (6.3×)**, **`test:golden` 151.0 s → 44.5 s (3.4×)**. No dependency added — `node:child_process` and `availableParallelism()`. Byte-exactness held: golden **147/147** on stdout *and* stderr.
+- **v4.0** (2026-09-04): **the plan's six unmade decisions are made** (plan-notes 190). Every one was a sentence in this file telling the reader to decide something before proceeding, and none of them had been answered — two of them gating the phase that is open right now. Settled: the **Node pin stays 26.7.0** (notes #9, unresolved since 2026-08-29 and marked "settle it before Phase 6's fuzzing leans on it", which is the next task); **accessors** get a get/set pair on a shape entry, `docs/VALUE.md` §4.15 — following `docs/SUBSET.md`'s existing `dynamic` verdict for the row rather than inventing a competing one, so `JSRTClass` gains nothing — unblocking §8 step 12(c)/(d); **method values** need no bound closure at all, §4.16 — `const f = o.m` does not bind in JavaScript, so the method's own `JSRTClosure` is the answer and the second closure representation step 12(e) was told to expect is reserved for `Function.prototype.bind` — unblocking step 12(e); **CI does not commit benchmark results to `main`** (Task 6.3 step 6); **Ryū rides §12** rather than becoming a task (note 188's unclaimed follow-up); and **the computed specifier of `import()` is confirmed Phase 8's** (§11 step 7's "only if owner-confirmed" pointed at a confirmation nobody had recorded). No code changed: this is §15.6 applied to the plan's own backlog of deferred judgment.
+- **v4.1** (2026-09-04): **plan-notes 187's written-down remaining work verified, and two green-signal hazards found and planned (plan-notes 191).** The uncommitted 187 tree ran its remaining suites under the pinned Node: unit **367/367** (telemetry 3/3), subset **342 — 311 passed / 31 expected-fail / 0 failed**, golden **147/147** (also under ASan/UBSan), coverage 90.04%, dupes 0.9%, leak plateau 3024 KB. First hazard: the host shell resolves bare `node` to mise's `node/lts` (24.20.0) ahead of the shims while the pin is 26.7.0 — the golden runner diffs against `process.execPath`, so pre-fix "green" runs used the wrong oracle, and `--test-coverage-include-all` exits 9 under 24. 187's "mise trust gap" misattributed it; the PATH order is the mechanism. New **Task 6.2a** fails CI fast when bare `node` is off-pin. Second hazard: the builtins dashboard drifted RED — `Promise.prototype.then/catch/finally` and `Object.freeze`/`isFrozen` landed with step 11 (`b8a0ac8`) but `builtins_coverage.json` still claims `[]`, so `test:builtins` reports `Promise.prototype: 0/3 (0%)` while golden proves all three; the dashboard checks stale-green claims but has no red-direction check. §8 gains **step-12 bookkeeping debt**: cite the landed fixtures, write the js-column freeze twin, and add a unit check cross-referencing the table against the runtime's exported `jsrt_<ns>_<member>` symbols so implemented-but-unclaimed members fail the build. Neither was fixed in place — the session's instruction was to plan them and stop.

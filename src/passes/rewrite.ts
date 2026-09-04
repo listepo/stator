@@ -23,6 +23,7 @@
 import type {
   Block,
   ClassMethod,
+  DynEntry,
   Expression,
   FunctionExpr,
   Module,
@@ -30,6 +31,7 @@ import type {
   Statement,
   SwitchClause,
 } from '../hir/nodes.ts';
+import { isAccessorEntry } from '../hir/nodes.ts';
 
 /** What a pass supplies. All three are called with children already rewritten; all three may return
  * their argument unchanged, and returning it by identity is how "nothing happened" is expressed.
@@ -415,11 +417,22 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       const value = sub(expr.value);
       return value === expr.value ? expr : { ...expr, value };
     }
-    case 'object-literal':
-    case 'dyn-object-literal': {
+    case 'object-literal': {
       const entries = rewriteEach(expr.entries, (entry): ObjectEntry => {
         const value = sub(entry.value);
         return value === entry.value ? entry : { ...entry, value };
+      });
+      return entries === expr.entries ? expr : { ...expr, entries };
+    }
+    case 'dyn-object-literal': {
+      const entries = rewriteEach(expr.entries, (entry): DynEntry => {
+        if (!isAccessorEntry(entry)) {
+          const value = sub(entry.value);
+          return value === entry.value ? entry : { ...entry, value };
+        }
+        const get = entry.get === undefined ? undefined : sub(entry.get);
+        const set = entry.set === undefined ? undefined : sub(entry.set);
+        return get === entry.get && set === entry.set ? entry : { ...entry, get, set };
       });
       return entries === expr.entries ? expr : { ...expr, entries };
     }

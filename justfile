@@ -96,10 +96,15 @@ _runtime flavor:
     probe="$(mktemp -d)"
     printf 'int f(void){return 0;}\n' > "${probe}/f.c"
     printf 'int f(void);int main(void){return f();}\n' > "${probe}/m.c"
-    # conda-clang's Darwin linker can pass this toy archive probe but abort later when the real
-    # runtime archive contains stack-probing metadata. Do not turn a false-positive probe into a
-    # broken archive: on Darwin the runtime stays plain until a real archive/link probe exists.
-    if [[ "$(uname -s)" != 'Darwin' ]] \
+     # The toy probe (two trivial TUs) passes on toolchains where the real runtime fails:
+    # - Linux arm64: LLVM 18 producer vs LLVM 17 reader → "Unknown attribute kind (91)" at link time
+    # - Linux x64: -flto=thin + -Wl,--gc-sections drops jsrt_class_regexp (jsrt_print.c) as dead
+    #   even though print_to references it, leading to "undefined reference to jsrt_class_regexp".
+    # Both were observed in frontend (linux/*) jobs that build and run native binaries via the unit
+    # suite. Keep the archive plain on Linux until the probe exercises a runtime TU.
+    # conda-clang's Darwin linker can also pass the toy probe but abort later on stack-probing
+    # metadata, so Darwin also stays plain. See CI failures 2026-09-04 (linux/arm64, linux/x64).
+    if false \
        && ${CC} -O2 -flto=thin -c "${probe}/f.c" -o "${probe}/f.o" 2>/dev/null \
        && ${AR} rcs "${probe}/libf.a" "${probe}/f.o" 2>/dev/null \
        && ${CC} -O2 -flto=thin "${probe}/m.c" -L"${probe}" -lf -o "${probe}/m" 2>/dev/null; then
@@ -217,7 +222,7 @@ _runtime-test flavor:
     if [[ "${FLAVOR}" == 'asan' && "$(uname -s)" == 'Darwin' && "${CC}" == 'clang' && -x /usr/bin/clang ]]; then
       CC='/usr/bin/clang'
     fi
-    CORPORA=(print_numbers print_arrays print_objects print_maps print_shapes print_typeof print_regexp print_promise print_dates)
+    CORPORA=(print_numbers print_arrays print_objects print_maps print_shapes print_typeof print_regexp print_promise print_dates print_accessors)
 
     VENDOR_POSIX='{{vendor_posix}}'
     VENDOR_INC='-Ivendor/quickjs-ng -Ivendor/fdlibm'

@@ -1,6 +1,5 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Getters/setters on object literals
 
 export const obj = {

@@ -386,8 +386,27 @@ void test('every literal form that is not a fixed slot list is a not-yet', () =>
   assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), [
     'STA1214',
   ]);
+});
+
+// plan.md §8 step 12(c): an accessor member is ACCEPTED, and it takes the shape-table path -- the
+// pair lives in the object's slot (docs/VALUE.md §4.15), which no fixed layout has room for. The
+// one refusal left is a position typed as a fixed shape: TypeScript calls `{ get at() {…} }`
+// assignable to `{ at: number }`, and there is no conversion that could honor it.
+void test('an object literal accessor is accepted, except into a fixed-shape position', () => {
   assert.deepEqual(
-    codesFor('const o = {\n  get x(): number {\n    return 1;\n  },\n};\nconsole.log(o);'),
+    codesFor('const o = {\n  get x(): number {\n    return 1;\n  },\n};\nconsole.log(o.x);'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      'const o = {\n  val: 1,\n  get x(): number {\n    return this.val;\n  },\n  set x(v: number) {\n    this.val = v;\n  },\n};\nconsole.log(o.x);',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      'const o: { x: number } = {\n  get x(): number {\n    return 1;\n  },\n};\nconsole.log(o.x);',
+    ),
     ['STA1214'],
   );
 });

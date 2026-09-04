@@ -866,6 +866,16 @@ static void inspect_date(Buf *out, jsrt_value v) {
 }
 
 static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent) {
+  /* An accessor cell is a SLOT value, never a value the language can hold, so this is the one
+   * place it can surface -- and util.inspect never calls a getter to print it. Node writes what
+   * the descriptor has, not what it would return. */
+  if (jsrt_is_accessor_cell(v)) {
+    const JSRTAccessorCell *cell = (const JSRTAccessorCell *)jsrt_ptr(v);
+    const bool has_get = cell->get != JSRT_UNDEFINED;
+    buf_puts(out, has_get ? (cell->set != JSRT_UNDEFINED ? "[Getter/Setter]" : "[Getter]")
+                          : "[Setter]");
+    return;
+  }
   if (jsrt_is_date(v)) {
     inspect_date(out, v);
   } else if (jsrt_is_regexp(v)) {

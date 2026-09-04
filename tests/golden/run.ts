@@ -6,11 +6,11 @@
  * included (Ryu shortest-round-trip). A mismatch is a semantics bug: never loosen the
  * comparison to make it pass.
  */
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pool, runProcess } from '../support/parallel.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
@@ -86,18 +86,22 @@ interface Streams {
   readonly stderr: string;
 }
 
-function runCompiled(path: string, mode: 'ts' | 'js'): Streams {
+/* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
+ * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
+ * compile into each other's `app`. */
+async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<Streams> {
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
-    const build = spawnSync(process.execPath, [CLI, 'build', path, '-o', out, `--mode=${mode}`], {
-      encoding: 'utf8',
-      env: PINNED_ENV,
-    });
+    const build = await runProcess(
+      process.execPath,
+      [CLI, 'build', path, '-o', out, `--mode=${mode}`],
+      { env: PINNED_ENV },
+    );
     if (build.status !== 0) {
       throw new Error(`stator build failed: ${build.stderr.trim()}`);
     }
-    const exec = spawnSync(out, [], { encoding: 'utf8', env: PINNED_ENV });
+    const exec = await runProcess(out, [], { env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
     }
@@ -107,37 +111,37 @@ function runCompiled(path: string, mode: 'ts' | 'js'): Streams {
   }
 }
 
-function runNode(path: string): Streams {
-  const result = spawnSync(process.execPath, [path], { encoding: 'utf8', env: PINNED_ENV });
+async function runNode(path: string): Promise<Streams> {
+  const result = await runProcess(process.execPath, [path], { env: PINNED_ENV });
   if (result.status !== 0) {
     throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);
   }
   return { stdout: result.stdout, stderr: result.stderr };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const all = [...fixtures('ts'), ...fixtures('js')];
-  let passed = 0;
-  const failures: string[] = [];
 
-  for (const fixture of all) {
+  // One result per fixture, indexed by fixture: the pool completes out of order, and a golden
+  // report whose failure order shifted run to run would be unreadable as a diff.
+  const results = await pool(all, async (fixture): Promise<string | undefined> => {
     try {
-      const actual = runCompiled(fixture.path, fixture.mode);
-      const expected = runNode(fixture.path);
+      const [actual, expected] = await Promise.all([
+        runCompiled(fixture.path, fixture.mode),
+        runNode(fixture.path),
+      ]);
       if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
-        passed += 1;
-      } else {
-        const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
-        failures.push(
-          `${fixture.mode}/${fixture.name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`,
-        );
+        return undefined;
       }
+      const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
+      return `${fixture.mode}/${fixture.name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`;
     } catch (error) {
-      failures.push(
-        `${fixture.mode}/${fixture.name}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      return `${fixture.mode}/${fixture.name}: ${error instanceof Error ? error.message : String(error)}`;
     }
-  }
+  });
+
+  const failures = results.filter((result) => result !== undefined);
+  const passed = all.length - failures.length;
 
   for (const failure of failures) {
     process.stderr.write(`FAIL ${failure}\n`);
@@ -150,4 +154,4 @@ function main(): void {
   }
 }
 
-main();
+await main();

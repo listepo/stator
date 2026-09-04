@@ -1,18 +1,36 @@
 import { strict as assert } from 'node:assert';
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { execaSync } from 'execa';
 import { NATIVE_ONLY } from './helpers.ts';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = join(REPO, 'src', 'cli', 'main.ts');
 
-function stator(...args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+interface Run {
+  readonly status: number | undefined;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/** All process spawning in this file goes through execa (owner directive, plan-notes 187):
+ * rejection never throws — a CLI test asserts the failure, it doesn't die from it. */
+function spawn(command: string, args: readonly string[], cwd?: string): Run {
+  const result = execaSync(command, [...args], {
+    reject: false,
+    // Byte-exactness is this codebase's testing contract; execa's convenience default would
+    // silently eat a trailing '\n' and lie to an assertion comparing against one.
+    stripFinalNewline: false,
+    ...(cwd ? { cwd } : {}),
+  });
+  return { status: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+}
+
+function stator(...args: string[]): Run {
+  return spawn(process.execPath, [CLI, ...args]);
 }
 
 function packageJson(): Record<string, unknown> {
@@ -111,10 +129,7 @@ void test('a relative entry path resolves its imports (module graph is cwd-indep
     // The regression: with a relative root the program's fileNames stayed relative while the
     // resolver answered absolute, so every import edge silently missed and legal source died
     // as STA4035 in the lowering.
-    const result = spawnSync(process.execPath, [CLI, 'explain', 'entry.ts', '--json'], {
-      cwd: work,
-      encoding: 'utf8',
-    });
+    const result = spawn(process.execPath, [CLI, 'explain', 'entry.ts', '--json'], work);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /"verdict":"static"/);
   } finally {
@@ -136,7 +151,7 @@ void test('a fixed-shape object answers an aliased read of an existing field', N
     const binary = join(work, 'alias');
     const build = stator('build', entry, '-o', binary);
     assert.equal(build.status, 0, build.stderr);
-    const run = spawnSync(binary, [], { encoding: 'utf8' });
+    const run = spawn(binary, []);
     assert.equal(run.status, 0, run.stderr);
     assert.equal(run.stdout, '1\n');
   } finally {
@@ -155,7 +170,7 @@ void test('adding a new key to a fixed-shape object still aborts with STA2004', 
     const binary = join(work, 'grow');
     const build = stator('build', entry, '-o', binary);
     assert.equal(build.status, 0, build.stderr);
-    const run = spawnSync(binary, [], { encoding: 'utf8' });
+    const run = spawn(binary, []);
     assert.notEqual(run.status, 0, 'growing a fixed layout must abort, never invent a slot');
     assert.match(run.stderr, /STA2004/);
     assert.equal(run.stdout, '', 'nothing may print before the abort');
@@ -175,7 +190,7 @@ void test(
       const binary = join(work, 'call');
       const build = stator('build', entry, '-o', binary, '--mode=js');
       assert.equal(build.status, 0, build.stderr);
-      const run = spawnSync(binary, [], { encoding: 'utf8' });
+      const run = spawn(binary, []);
       assert.notEqual(run.status, 0, 'a non-function callee must abort, never jump');
       assert.match(run.stderr, /STA2006/);
       assert.match(run.stderr, /call\.js:2/);
@@ -201,7 +216,7 @@ void test(
       const binary = join(work, 'main');
       const build = stator('build', entry, '-o', binary, '--mode=js');
       assert.equal(build.status, 0, build.stderr);
-      const run = spawnSync(binary, [], { encoding: 'utf8' });
+      const run = spawn(binary, []);
       assert.notEqual(run.status, 0, 'a string in a number slot must abort, never print');
       assert.match(run.stderr, /STA2001/);
       assert.match(run.stderr, /main\.ts:2/);

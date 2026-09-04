@@ -331,10 +331,15 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
   const fields: HField[] = [];
   for (const property of checker.getPropertiesOfType(type)) {
     const at = property.valueDeclaration ?? property.declarations?.[0];
+    // An ACCESSOR is not a slot: `o.x` on it must RUN the getter, and a layout would compile that
+    // read to a slot load. Refusing the layout here is what sends the whole shape to the dynamic
+    // path, where the get/set pair lives in the object's slot (docs/VALUE.md §4.15).
     if (
       at === undefined ||
       (property.flags & ts.SymbolFlags.Optional) !== 0 ||
-      (property.flags & ts.SymbolFlags.Method) !== 0
+      (property.flags &
+        (ts.SymbolFlags.Method | ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !==
+        0
     ) {
       return null;
     }
@@ -356,11 +361,16 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
  *
  * The line between the two paths is drawn here and nowhere else. A shape qualifies when it is
  * anonymous (interfaces stay refused: a value typed by one may be an instance of any class, and
- * Phase 5 owns that), callable in no way, has no methods or accessors (calling through the shape
- * table is also Phase 5), and -- the actual trigger -- carries an OPTIONAL property, an index
- * signature, or no properties at all. An empty `{}` has to grow (plan.md §8 step 4); an
- * all-required anonymous shape with at least one field stays on the fixed path, because making
- * those dynamic too would silently deoptimize every literal in the program. */
+ * Phase 5 owns that), callable in no way, has no METHODS (calling through the shape table is still
+ * Phase 5), and carries one of the triggers: an ACCESSOR, an OPTIONAL property, an index signature,
+ * or no properties at all. An empty `{}` has to grow (plan.md §8 step 4); an all-required anonymous
+ * shape with at least one field stays on the fixed path, because making those dynamic too would
+ * silently deoptimize every literal in the program.
+ *
+ * An accessor is a trigger and not a refusal because there IS a representation for it — a get/set
+ * pair in the object's slot (docs/VALUE.md §4.15) — and only the dynamic path has one. It
+ * deoptimizes its whole shape, siblings included: `{ val: 1, get x() {…} }` resolves `val` through
+ * the shape table too, because one object cannot be half a layout. */
 export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean {
   const symbol = type.getSymbol();
   const anonymous =
@@ -373,19 +383,19 @@ export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean 
   ) {
     return false;
   }
-  let optional = false;
+  let trigger = false;
   for (const property of checker.getPropertiesOfType(type)) {
-    if (
-      (property.flags &
-        (ts.SymbolFlags.Method | ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !==
-      0
-    ) {
+    if ((property.flags & ts.SymbolFlags.Method) !== 0) {
       return false;
     }
-    optional = optional || (property.flags & ts.SymbolFlags.Optional) !== 0;
+    trigger =
+      trigger ||
+      (property.flags &
+        (ts.SymbolFlags.Optional | ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !==
+        0;
   }
   return (
-    optional ||
+    trigger ||
     checker.getIndexInfosOfType(type).length > 0 ||
     checker.getPropertiesOfType(type).length === 0
   );
@@ -395,7 +405,10 @@ export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean 
  *
  * The contextual type wins when it is itself a dynamic shape (`const o: { x?: number } = { x: 1 }`).
  * Otherwise the literal's own type decides: empty `{}` is dynamic even when the context is `any`
- * (an untyped parameter), which is not a shape `isDynamicShape` would recognize. */
+ * (an untyped parameter), which is not a shape `isDynamicShape` would recognize.
+ *
+ * An ACCESSOR member needs no case here: `isDynamicShape` treats one as a trigger, so a literal
+ * that writes `get x()` is dynamic by its own type. */
 export function objectLiteralIsDynamic(
   literal: ts.ObjectLiteralExpression,
   checker: ts.TypeChecker,

@@ -1945,8 +1945,13 @@ function gateObjectLiteral(
       }
       continue;
     }
-    if (!ts.isPropertyAssignment(property)) {
-      return notYet('an object literal with a method or accessor member is not yet supported', 5);
+    // `{ get x() {…}, set x(v) {…} }`. An accessor has no slot to lay out -- it is a get/set pair
+    // in the object's slot (docs/VALUE.md §4.15) -- so it never has a fixed shape, and
+    // objectLiteralIsDynamic answers that below. A METHOD member is still not-yet: it needs the
+    // shape table to hold a callable, which is step 12's (e) family.
+    const accessor = ts.isGetAccessorDeclaration(property) || ts.isSetAccessorDeclaration(property);
+    if (!accessor && !ts.isPropertyAssignment(property)) {
+      return notYet('an object literal with a method member is not yet supported', 5);
     }
     if (!isLayoutKey(property.name)) {
       return notYet('an object literal key that is not an identifier is not yet supported', 5);
@@ -1958,6 +1963,25 @@ function gateObjectLiteral(
   // Building a fixed object here would make each of those reads a runtime not-yet; honoring the
   // annotation builds the dynamic object the reads expect (docs/VALUE.md §4.10).
   if (objectLiteralIsDynamic(literal, checker)) {
+    // `const o: { at: number } = { get at() {…} }`. TypeScript calls that assignable, and it is --
+    // structurally. It is not REPRESENTATIONALLY: the literal must be a JSRTDynObject to hold the
+    // pair, while every later `o.at` is typed by the annotation and would compile to a slot load
+    // on it. There is no conversion to insert (a slot cannot hold "call this on read"), so the
+    // mismatch is refused here rather than emitted and read back as garbage.
+    const context = checker.getContextualType(literal);
+    if (
+      context !== undefined &&
+      !isDynamicShape(context, checker) &&
+      tsTypeToHType(context, checker).kind === 'object' &&
+      literal.properties.some(
+        (p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p),
+      )
+    ) {
+      return notYet(
+        'an object literal with an accessor in a position typed as a fixed shape is not yet supported',
+        5,
+      );
+    }
     return { kind: 'accept' };
   }
   return tsTypeToHType(checker.getTypeAtLocation(literal), checker).kind === 'object'
@@ -2408,10 +2432,10 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
   return { kind: 'accept' };
 }
 
-/** `this`, admitted only inside a class member — which is the only place the lowering has a
- * receiver to bind it to. At the top level of a module `this` is `undefined`, and in an ordinary
- * function it depends on how the function was CALLED, which is exactly the dynamic behaviour the
- * subset does not model. */
+/** `this`, admitted only inside a class member or an object literal's accessor — the two places
+ * the lowering has a receiver to bind it to, both of them by making the receiver parameter zero.
+ * At the top level of a module `this` is `undefined`, and in an ordinary function it depends on how
+ * the function was CALLED, which is exactly the dynamic behaviour the subset does not model. */
 function gateThis(node: ts.Node): GateResult {
   for (let n: ts.Node | undefined = node.parent; n !== undefined; n = n.parent) {
     // A field INITIALIZER is a `this` position too, though it is lexically inside no function:

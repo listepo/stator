@@ -47,7 +47,14 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
     if (!dynamic && is_private_field(key)) {
       continue;
     }
-    const jsrt_value value = dynamic ? dyn->slots[slot] : fixed->fields[slot];
+    jsrt_value value = dynamic ? dyn->slots[slot] : fixed->fields[slot];
+    /* An accessor's value is what its getter RETURNS: Object.values and Object.entries perform a
+     * [[Get]], while Object.keys needs only the key and must not call anything. jsrt_get_prop is
+     * the single place that knows how to resolve a cell, so the call is spelled as a property
+     * read rather than repeated here. */
+    if (select != OBJ_KEYS && jsrt_is_accessor_cell(value)) {
+      value = jsrt_get_prop(v, key, NULL);
+    }
     jsrt_value item;
     if (select == OBJ_KEYS) {
       item = key_string(key);

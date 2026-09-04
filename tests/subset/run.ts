@@ -9,10 +9,10 @@
  * Verdicts come from `stator explain --json`. Fixtures marked expected-fail are not
  * executed — they are counted, so the corpus can land before the compiler can pass it.
  */
-import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pool, runProcess } from '../support/parallel.ts';
 
 type Verdict = 'static' | 'dynamic' | 'error' | 'not-yet';
 
@@ -66,10 +66,17 @@ function parseDirectives(file: string, source: string): Directives {
   return code === undefined ? parsed : { ...parsed, code };
 }
 
-function explain(file: string, mode: 'ts' | 'js'): { verdict: string; code?: string } {
-  const result = spawnSync(process.execPath, [CLI, 'explain', file, `--mode=${mode}`, '--json'], {
-    encoding: 'utf8',
-  });
+async function explain(
+  file: string,
+  mode: 'ts' | 'js',
+): Promise<{ verdict: string; code?: string }> {
+  const result = await runProcess(process.execPath, [
+    CLI,
+    'explain',
+    file,
+    `--mode=${mode}`,
+    '--json',
+  ]);
   if (result.status !== 0) {
     throw new Error(`stator explain failed (${String(result.status)}): ${result.stderr.trim()}`);
   }
@@ -85,52 +92,62 @@ function explain(file: string, mode: 'ts' | 'js'): { verdict: string; code?: str
   return code === undefined ? { verdict } : { verdict, code };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const fixtures = readdirSync(HERE)
     .filter((name) => name.startsWith('subset_'))
     .sort();
 
   const allocated = allocatedCodes();
-  let passed = 0;
-  let expectedFail = 0;
-  const failures: string[] = [];
 
-  for (const name of fixtures) {
+  // One outcome per fixture, INDEXED BY FIXTURE: the pool finishes out of order, and a failure list
+  // whose order depended on that would differ between two runs of an unchanged tree.
+  type Outcome =
+    | { readonly kind: 'passed' }
+    | { readonly kind: 'expected-fail' }
+    | { readonly kind: 'failed'; readonly message: string };
+
+  const outcomes = await pool(fixtures, async (name): Promise<Outcome> => {
     const path = join(HERE, name);
     const want = parseDirectives(name, readFileSync(path, 'utf8'));
     if (want.code !== undefined && !allocated.has(want.code)) {
-      failures.push(`${name}: @code ${want.code} is not allocated in docs/DIAGNOSTICS.md`);
-      continue;
+      return {
+        kind: 'failed',
+        message: `${name}: @code ${want.code} is not allocated in docs/DIAGNOSTICS.md`,
+      };
     }
     // Expected-fail fixtures are still evaluated. A marker that outlives the work it was waiting
     // for is worse than no marker: it silently exempts a fixture that would now hold the line.
     try {
-      const got = explain(path, want.mode);
+      const got = await explain(path, want.mode);
       const matches =
         got.verdict === want.verdict && (want.code === undefined || got.code === want.code);
       if (want.expectedFail) {
-        if (matches) {
-          failures.push(`${name}: now passes — remove the @expected-fail marker`);
-        } else {
-          expectedFail += 1;
-        }
-      } else if (!matches) {
-        failures.push(
+        return matches
+          ? { kind: 'failed', message: `${name}: now passes — remove the @expected-fail marker` }
+          : { kind: 'expected-fail' };
+      }
+      if (matches) return { kind: 'passed' };
+      return {
+        kind: 'failed',
+        message:
           got.verdict === want.verdict
             ? `${name}: code ${got.code ?? '(none)'}, want ${want.code ?? '(none)'}`
             : `${name}: verdict ${got.verdict}, want ${want.verdict}`,
-        );
-      } else {
-        passed += 1;
-      }
+      };
     } catch (error) {
-      if (want.expectedFail) {
-        expectedFail += 1;
-      } else {
-        failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      if (want.expectedFail) return { kind: 'expected-fail' };
+      return {
+        kind: 'failed',
+        message: `${name}: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
-  }
+  });
+
+  const passed = outcomes.filter((outcome) => outcome.kind === 'passed').length;
+  const expectedFail = outcomes.filter((outcome) => outcome.kind === 'expected-fail').length;
+  const failures = outcomes
+    .filter((outcome) => outcome.kind === 'failed')
+    .map((outcome) => outcome.message);
 
   for (const failure of failures) {
     process.stderr.write(`FAIL ${failure}\n`);
@@ -144,4 +161,4 @@ function main(): void {
   }
 }
 
-main();
+await main();

@@ -363,7 +363,31 @@ export interface ObjectEntry {
  * fixed-shape object. `entries` is written order, evaluated left to right, exactly once. */
 export interface DynObjectLiteral extends Node {
   readonly kind: 'dyn-object-literal';
-  readonly entries: readonly ObjectEntry[];
+  readonly entries: readonly DynEntry[];
+}
+
+/** `get x() { … }` / `set x(v) { … }` on an object literal (docs/VALUE.md §4.15).
+ *
+ * A pair, not two entries, because one key holds both halves and either may be absent. Each half is
+ * an ordinary `FunctionExpr` with the receiver as parameter zero — the method ABI unchanged — so
+ * capture analysis, rooting and the emitter need nothing new to build a getter that closes over a
+ * local, which is precisely the case that forced the pair into the object's slot rather than onto
+ * the shape it shares with its siblings.
+ *
+ * An accessor member makes its WHOLE literal dynamic: a fixed layout would store the getter's
+ * result once instead of calling it per read. */
+export interface AccessorEntry {
+  readonly name: string;
+  readonly get: Expression | undefined;
+  readonly set: Expression | undefined;
+}
+
+/** One member of a dynamic object literal: a value or an accessor pair, in written order — the
+ * order matters, because it is the order the keys are inserted and therefore printed. */
+export type DynEntry = ObjectEntry | AccessorEntry;
+
+export function isAccessorEntry(entry: DynEntry): entry is AccessorEntry {
+  return 'get' in entry;
 }
 
 /** `new Map()` and `new Set()`.
