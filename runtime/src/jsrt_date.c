@@ -14,6 +14,14 @@
  * rather than an approximation: 1900 is not a leap year here, 2000 is, and year 0 exists.
  */
 
+/* Linux builds request strict POSIX declarations globally. That exposes `localtime_r` but hides
+ * the BSD/GNU `tm_gmtoff` alias below in both glibc and musl unless GNU extensions are requested
+ * before the first system header. Keep that broader feature set local to the one runtime source
+ * that needs it. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "jsrt_value.h"
 
 #include "jsrt.h"
