@@ -9,7 +9,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import * as ts from 'typescript';
-import type { CaptureInfo, CaptureMap, FunctionLike } from '../../src/lower/captures.ts';
+import type { CaptureInfo, CaptureMap, EnvOwner } from '../../src/lower/captures.ts';
 import { analyzeCaptures } from '../../src/lower/captures.ts';
 import { createProgram } from './helpers.ts';
 
@@ -31,7 +31,10 @@ function analyze(source: string): {
   return { named, raw };
 }
 
-function nameOf(fn: FunctionLike): string | undefined {
+function nameOf(fn: EnvOwner): string | undefined {
+  if (ts.isSourceFile(fn)) {
+    return undefined;
+  }
   const own = ts.isArrowFunction(fn) || ts.isConstructorDeclaration(fn) ? undefined : fn.name;
   if (own !== undefined && ts.isIdentifier(own)) {
     return own.text;

@@ -50,6 +50,31 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2367, // This comparison appears to be unintentional because the types have no overlap.
   2362, // Left-hand side of arithmetic operation must be numeric.
   2363, // Right-hand side of arithmetic operation must be numeric.
+  // Same table, spelled for one operand: `1 + undefined` is NaN, not a mistake. Test262 asserts
+  // exactly that in `language/expressions/addition/S11.6.1_A3.1_*` (plan-notes 194).
+  18050, // The value 'undefined' cannot be used here.
+  // `var x = 1; var x = 'a'` is one binding assigned twice -- legal JavaScript, and a redeclaration
+  // TypeScript refuses only because it wants one type per name.
+  2403, // Subsequent variable declarations must have the same type.
+  // A style lint, not a refusal: the comma operator's answer is its right operand either way.
+  2695, // Left side of comma operator is unused and has no side effects.
+  // A COMMENT cannot refuse a program. JSDoc is checker metadata; the parameter list is the code.
+  8024, // JSDoc '@param' tag has name 'X', but there is no parameter with that name.
+  8029, // JSDoc '@param' tag has name 'X', ... It would match 'arguments' if it had an array type.
+  // Writing through a read-only reference IS the operation `Object.freeze` exists to define, and
+  // its answer is a TypeError the runtime now raises as a real Error object -- catchable, with
+  // Node's wording and a working `instanceof` (plan.md §8 step 2a(c), plan-notes 195). Before that
+  // model existed these two had to stay: a refusal whose runtime answer the runtime could not build
+  // is not a refusal js mode may drop.
+  // A name nothing declares is not a type error, it is a RUNTIME question, and now that the Error
+  // model exists the runtime can answer it: `ReferenceError: x is not defined`, catchable, with
+  // Node's wording (plan.md §8 step 2a(c)). This is the largest bucket the sweep left, and it is
+  // the one that needed no runtime it did not have -- only somewhere for the answer to come from.
+  // 2552 is the same refusal with a spelling suggestion attached.
+  2304, // Cannot find name 'X'.
+  2552, // Cannot find name 'X'. Did you mean 'Y'?
+  2540, // Cannot assign to 'X' because it is a read-only property.
+  2704, // The operand of a 'delete' operator cannot be a read-only property.
   // The exactOptionalPropertyTypes family. The option stays ON in both modes -- turning it off is
   // program-wide and would strip the .ts half of a mixed graph of the same guarantee -- but in js
   // mode these three codes refuse ordinary JavaScript: `{ value: undefined }` for a `value?: string`
@@ -188,8 +213,15 @@ export function createProgram(
     if (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code)) {
       // An inferred binding that TypeScript says has an incompatible assignment must be dynamic
       // throughout lowering. The diagnostic starts at the assignment target, whose symbol is the
-      // one binding the HIR verifier otherwise (correctly) keeps monomorphic.
-      if (diag.code === 2322 && diag.file !== undefined && diag.start !== undefined) {
+      // one binding the HIR verifier otherwise (correctly) keeps monomorphic. 2403 is the same
+      // disagreement spelled as a redeclaration (`var x = 1; var x = 'a'`) rather than as an
+      // assignment, and it needs the same widening -- without it the suppression turns a checker
+      // refusal into an STA4004 internal error (plan-notes 194).
+      if (
+        (diag.code === 2322 || diag.code === 2403) &&
+        diag.file !== undefined &&
+        diag.start !== undefined
+      ) {
         const token = identifierAt(diag.file, diag.start);
         const symbol =
           token === undefined ? undefined : program.getTypeChecker().getSymbolAtLocation(token);

@@ -7,7 +7,8 @@
  * in this IR.
  */
 
-import type { HType } from './types.ts';
+import type { HObject, HType } from './types.ts';
+import { H_NUMBER, H_STRING, hUnknown } from './types.ts';
 
 /* jscpd:ignore-start
  *
@@ -1099,6 +1100,78 @@ export const DATE_STATICS = {
 
 export type DateStatic = keyof typeof DATE_STATICS;
 
+/** The standard Error constructors, mirroring `ERROR_CTORS` in the gate and the descriptors in
+ * `runtime/src/jsrt_error.c`. */
+export const ERROR_CLASSES = [
+  'Error',
+  'TypeError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+] as const;
+
+export type ErrorClass = (typeof ERROR_CLASSES)[number];
+
+/** The `JSRTClass` descriptor a given error class is emitted against. One per class, defined in the
+ * runtime rather than by the emitter -- which is the only thing that distinguishes this from a
+ * `new` on a user class. */
+export function errorDescriptor(ctor: ErrorClass): string {
+  const snake = ctor === 'Error' ? 'error' : `${ctor.slice(0, -5).toLowerCase()}_error`;
+  return `jsrt_class_${snake}`;
+}
+
+/** What an error VALUE is typed as: a fixed-shape object whose slots mirror the runtime layout in
+ * `jsrt_error.c` exactly — slot 0 `name`, slot 1 `message` — so `e.message` is the ordinary
+ * fixed-shape read and no downstream pass needs to know an error from any other object.
+ *
+ * `bases` carries `Error` for a subclass, which is what makes `e instanceof Error` assignable the
+ * way the runtime's `parent` link makes it true. */
+export function errorHType(ctor: ErrorClass): HObject {
+  return {
+    kind: 'object',
+    name: ctor,
+    fields: [
+      { name: 'name', type: H_STRING },
+      { name: 'message', type: H_STRING },
+    ],
+    methods: [],
+    bases: ctor === 'Error' ? [] : ['Error'],
+  };
+}
+
+/** `new TypeError(message)` and its four siblings.
+ *
+ * Not a `NewExpr`: there is no class DECLARATION to take a descriptor from, because the descriptor
+ * lives in the runtime. Not a `CollectionNew` either -- this one takes an argument. The message is
+ * always present: the lowering supplies an empty-string literal for `new Error()`, which is what
+ * §20.5.1.1 step 3 leaves `message` as when the argument is undefined. */
+export interface ErrorNew extends Node {
+  readonly kind: 'error-new';
+  readonly ctor: ErrorClass;
+  readonly arg: Expression;
+}
+
+/** Reading a name that nothing in the program declares.
+ *
+ * This is the ONLY node whose value never reaches its consumer: evaluating it throws
+ * `ReferenceError: <name> is not defined`, and the emitter follows it with the same pending check
+ * every throwing call gets. It exists as an EXPRESSION rather than a statement because that is
+ * where the language puts it -- `x + 1` and `f(x)` are the failing programs, and neither has a
+ * statement position to hoist the throw into.
+ *
+ * The name is carried as a string because there is no binding to point at, which is the whole
+ * condition being modelled. Reaching this node means the CHECKER could not resolve the identifier
+ * either (the lowering only builds it when `getSymbolAtLocation` answers undefined) -- a name the
+ * checker resolved but the lowering has no binding for is still `STA4035`, an internal error, and
+ * keeping those two apart is what stops this node from swallowing compiler bugs.
+ *
+ * ts mode never builds one: `TS2304` is not in the js-mode suppression list, so the program is
+ * already refused with `STA0012` before lowering runs. */
+export interface ReferenceErrorRead extends Node {
+  readonly kind: 'reference-error';
+  readonly name: string;
+}
+
 /** `new Date(x)` for a given x -- a number of milliseconds, an ISO string, or another Date.
  *
  * Not a `NewExpr` (no descriptor, no constructor body) and not a `CollectionNew` (that one takes no
@@ -1240,6 +1313,8 @@ export type Expression =
   | RegExpFieldRead
   | DateComponents
   | DateNew
+  | ErrorNew
+  | ReferenceErrorRead
   | DateOp
   | DateStaticCall
   | NumberLiteral
@@ -1506,6 +1581,41 @@ export interface ForOfStatement extends Node, Labelled {
   readonly body: Block;
 }
 
+/** What one step of a `for-of` binds, given the ITERABLE'S HIR TYPE.
+ *
+ * The HIR type, never the checker's answer at the binding name, and that distinction is the whole
+ * point of this living here rather than at either call site. The two can disagree: `const xs = []`
+ * followed by `xs.push(1)` is an evolving array the checker resolves to `number[]`, while js mode
+ * has deliberately widened the binding to Unknown — so the checker types the loop variable
+ * `number` and the emitted loop yields a tagged value. Lowering it from the checker produced HIR
+ * whose binding claimed `number` and whose verifier, reading the iterable, said `unknown`
+ * (STA4010). Both callers ask this one function so the answer cannot diverge again.
+ *
+ * Separate from the indexing rule because the emitted loop is different, not just the message: a
+ * for-of over an array, a string, a Map or a Set compiles to a specialized loop
+ * (docs/VALUE.md §4.13). */
+export function forOfElementType(iterable: HType, view: IteratorView): HType {
+  if (iterable.kind === 'iterator') {
+    return iterable.element;
+  }
+  if (iterable.kind === 'string') {
+    return H_STRING;
+  }
+  if (view === 'entries') {
+    return hUnknown(false); /* a two-element array; the HIR has no tuple */
+  }
+  if (iterable.kind === 'array') {
+    return view === 'keys' ? H_NUMBER : iterable.element;
+  }
+  if (iterable.kind === 'map') {
+    return view === 'keys' ? iterable.key : view === 'values' ? iterable.value : hUnknown(false);
+  }
+  if (iterable.kind === 'set') {
+    return iterable.element;
+  }
+  return hUnknown(false);
+}
+
 /** `it.next()` / `it.return(v)` / `it.throw(e)` on an iterator VALUE.
  *
  * `next` is the ordinary step; it exists for boxed specialized iterators (`arr.keys()`) and for
@@ -1559,7 +1669,7 @@ export interface ContinueStatement extends Node, Labelled {
 /** `throw e;`.
  *
  * The value is ANY value — JavaScript throws strings and numbers as happily as Error objects, and
- * this subset has no Error yet (Task 4.2), so a fixture that throws throws a primitive. The
+ * Error objects landed with plan.md §8 step 2a(c), so a fixture that throws throws a primitive. The
  * statement never completes: control transfers to the nearest enclosing catch, running every
  * `finally` on the way, or unwinds out of `main` as an uncaught exception (exit code 1, message on
  * stderr — matching Node's observable behaviour, which is what the golden runner compares). */
@@ -1667,6 +1777,12 @@ export interface Module extends Node {
    * async unit (docs/MODES.md): named bindings stay globals; temps live in a heap environment so
    * they survive a suspension. */
   readonly isAsync: boolean;
+  /** The module's own bindings that a nested function reads and the globals array cannot hold: a
+   * `let`/`const` declared inside a top-level loop, which JavaScript re-creates every iteration.
+   * They live in a module environment instead, laid out exactly like a function's `envVars` — the
+   * array position IS the slot index — so the loop's per-iteration clone gives each iteration its
+   * own copy. Empty for the overwhelming majority of modules. */
+  readonly envVars: readonly string[];
 }
 
 /* jscpd:ignore-end */

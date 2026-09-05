@@ -41,3 +41,13 @@ console.table(undefined);
 console.group('G');
 console.table([{ a: 1 }]);
 console.groupEnd();
+
+// The ts-mode twin: a console call used as a VALUE. TypeScript types it `void` -- the value that
+// reaches the binding is still `undefined`, and the emitter has to supply it, because the C entry
+// point behind the call returns nothing at all.
+// `void` is not itself printable in ts mode -- the checker refuses it as an argument -- so what is
+// asserted here is that the two value positions COMPILE and that what they hold is undefined.
+const logged: void = console.log('valued');
+console.log(typeof logged);
+const viaArrow = (): void => console.log('from arrow');
+viaArrow();

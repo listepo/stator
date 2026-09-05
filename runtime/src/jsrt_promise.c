@@ -353,7 +353,7 @@ static jsrt_value promise_reject_fn(uint32_t argc, const jsrt_value *argv, JSRTE
 jsrt_value jsrt_promise_construct(jsrt_value executor) {
   jsrt_value promise = jsrt_promise_new();
   if (!jsrt_is(executor, JSRT_TAG_CLOSURE)) {
-    jsrt_throw_str("TypeError: Promise resolver is not a function");
+    jsrt_throw_error(&jsrt_class_type_error, "Promise resolver is not a function");
     return JSRT_UNDEFINED;
   }
   JSRTEnv *env = jsrt_env_new(NULL, 1);

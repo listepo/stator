@@ -287,7 +287,12 @@ jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *ar
 void jsrt_object_set(jsrt_value obj, uint32_t slot, jsrt_value v) {
   JSRTObject *object = jsrt_as_object(obj);
   if (object->frozen) {
-    jsrt_throw_str("TypeError: Cannot assign to read only property");
+    /* The class knows the field names, so the fixed-shape path names the property just as the
+     * dynamic one does (jsrt_shape.c store_prop) -- Node's exact wording. */
+    char msg[256];
+    snprintf(msg, sizeof msg, "Cannot assign to read only property '%s' of object '#<Object>'",
+             slot < object->cls->field_count ? object->cls->fields[slot] : "?");
+    jsrt_throw_error(&jsrt_class_type_error, msg);
     return;
   }
   object->fields[slot] = v;

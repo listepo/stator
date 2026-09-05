@@ -8,6 +8,7 @@
 
 import * as ts from 'typescript';
 import {
+  errorCtorName,
   INSTANCEOF_BUILTINS,
   isArrayReceiver,
   isDateReceiver,
@@ -110,6 +111,8 @@ import {
   CONSOLE_METHODS,
   DATE_OPS,
   DATE_STATICS,
+  errorHType,
+  forOfElementType,
   isAccessorEntry,
   isSetOperation,
   MATCH_FIELDS,
@@ -290,6 +293,15 @@ export function lowerProgram(
       }
     }
 
+    // Unioned across the graph, because the merged program has ONE module environment and each
+    // file contributes its own per-iteration top-level bindings to it. Concatenation is safe
+    // without a dedupe: cross-file name collisions are already refused before lowering, so two
+    // files cannot contribute the same name. Sorted for the same reason a function's envVars are:
+    // the layout must depend on the source and not on file order.
+    const envVars = files
+      .flatMap((file) => capturesFor(file, checker).get(file)?.envVars ?? [])
+      .sort();
+
     const module: Module = {
       kind: 'module',
       type: H_UNDEFINED,
@@ -297,6 +309,7 @@ export function lowerProgram(
       fileName: entry.fileName,
       statements,
       isAsync: moduleAwaits,
+      envVars,
     };
 
     return { module, diagnostics };
@@ -1005,8 +1018,17 @@ function lowerForOf(
   const binding = declaration.name.text;
   // In scope for the body, and only for the body: a fresh binding each iteration is exactly what
   // `let`/`const` in a for-of header means.
+  //
+  // Typed from the LOWERED iterable, not from the checker at the binding name. What the loop
+  // actually yields is decided by the HIR type of the thing being walked, and where the two
+  // disagree -- an evolving `const xs = []` that js mode widened to Unknown, which the checker
+  // still resolves to `number[]` -- the checker's answer would put a type on the binding that the
+  // emitted loop does not produce (STA4010). `forOfElementType` is the verifier's own rule.
   const inner = new Map(bindings);
-  inner.set(binding, typeAt(declaration.name, checker, bindings));
+  inner.set(
+    binding,
+    forOfElementType(iterable.type, peeled === undefined ? 'identity' : peeled.view),
+  );
 
   const body = lowerBody(node.statement, sourceFile, checker, inner, diagnostics);
   if (!body) {
@@ -1289,6 +1311,47 @@ function lowerExpressionAsStatement(
     return member;
   }
 
+  // Writing to a name nothing declares. This used to be STA4034 -- an INTERNAL error for a program
+  // the language has a perfectly good answer for -- and it stayed invisible until js mode dropped
+  // TS2304 and the checker stopped refusing these first (plan-notes 197).
+  const undeclared = undeclaredWriteTarget(expr, checker, bindings);
+  if (undeclared !== undefined) {
+    const thrown: Statement = {
+      kind: 'expression-statement',
+      type: hUnknown(false),
+      span,
+      expression: {
+        kind: 'reference-error',
+        type: hUnknown(false),
+        span: makeSpan(
+          undeclared.node.getStart(sourceFile),
+          undeclared.node.getWidth(sourceFile),
+          sourceFile,
+        ),
+        name: undeclared.node.text,
+      },
+    };
+    if (undeclared.rhs === undefined) {
+      return thrown;
+    }
+    // A simple `=` runs its right side first, so its side effects survive the throw. `flatten`
+    // keeps this a desugaring sequence rather than a scope: it introduces no binding of its own.
+    const value = lowerExpression(undeclared.rhs, sourceFile, checker, bindings, diagnostics);
+    if (!value) {
+      return null;
+    }
+    return {
+      kind: 'block',
+      type: hUnknown(false),
+      span,
+      flatten: true,
+      statements: [
+        { kind: 'expression-statement', type: value.type, span: value.span, expression: value },
+        thrown,
+      ],
+    };
+  }
+
   const assignment = assignmentParts(expr, sourceFile, checker, bindings, diagnostics);
   if (assignment === null) {
     return null;
@@ -1302,6 +1365,49 @@ function lowerExpressionAsStatement(
     return null;
   }
   return { kind: 'expression-statement', type: exp.type, span, expression: exp };
+}
+
+/** An assignment or update whose TARGET is a name nothing declares.
+ *
+ * In strict mode -- which §1.2 makes every module, both modes -- PutValue on an unresolvable
+ * reference throws a ReferenceError rather than creating a global, so this is a runtime answer and
+ * not an internal error. `rhs` is present for exactly one form, and the distinction is observable:
+ * a simple `=` evaluates its right side BEFORE the throw (`missing = side()` runs `side`), while a
+ * compound assignment or an update reads the target first and throws before the right side runs.
+ *
+ * The symbol test is what keeps this narrow. TypeScript auto-declares a global from a property
+ * assignment in a `.js` file (`missing.a = 1` reports nothing and HAS a symbol), so only the forms
+ * the checker actually refused with TS2304 -- the ones js mode now suppresses -- arrive here. */
+function undeclaredWriteTarget(
+  expr: ts.Expression,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+): { node: ts.Identifier; rhs?: ts.Expression } | undefined {
+  const unresolved = (node: ts.Expression): ts.Identifier | undefined =>
+    ts.isIdentifier(node) &&
+    bindings.get(node.text) === undefined &&
+    checker.getSymbolAtLocation(node) === undefined
+      ? node
+      : undefined;
+  if (ts.isBinaryExpression(expr)) {
+    const target = unresolved(expr.left);
+    if (target === undefined) {
+      return undefined;
+    }
+    if (expr.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      return { node: target, rhs: expr.right };
+    }
+    return COMPOUND_OPERATORS.has(expr.operatorToken.kind) ||
+      LOGICAL_ASSIGN_OPERATORS.has(expr.operatorToken.kind)
+      ? { node: target }
+      : undefined;
+  }
+  const update = updateOperator(expr);
+  if (update === undefined) {
+    return undefined;
+  }
+  const target = unresolved(update.operand);
+  return target === undefined ? undefined : { node: target };
 }
 
 /** The binding an assignment TARGET names, or `undefined` if it names no binding at all.
@@ -2775,6 +2881,26 @@ function lowerExpression(
       };
       return created;
     }
+    // `new TypeError('x')`. The class name comes from the CALLEE rather than from the checker's
+    // type: TypeScript types every error as the structural `Error` interface, so the type would
+    // lose which of the five was written -- and that is exactly what `instanceof` has to answer.
+    const errorCtor = errorCtorName(node.expression, checker);
+    if (errorCtor !== undefined) {
+      const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+      if (args === null) {
+        return null;
+      }
+      // §20.5.1.1 step 3 sets `message` only when the argument is not undefined, leaving it the
+      // empty string otherwise -- so the omitted form is `''`, not `undefined`.
+      const arg: Expression = args[0] ?? {
+        kind: 'string-literal',
+        type: H_STRING,
+        span,
+        value: '',
+      };
+      return { kind: 'error-new', type: errorHType(errorCtor), span, ctor: errorCtor, arg };
+    }
     // A Date is allocated too, but unlike a collection it takes an ARGUMENT: the one-argument form
     // is the only one the gate let through, and `jsrt_date_from_value` discriminates its three
     // shapes -- a time value, an ISO string, another Date -- by tag.
@@ -2896,6 +3022,20 @@ function lowerExpression(
       };
     }
     if (!binding) {
+      // Two different failures wear the same shape here, and telling them apart is the whole point.
+      // A name the CHECKER could not resolve is a `ReferenceError` the program is entitled to catch
+      // -- js mode drops TS2304/TS2552 precisely so this can be the answer (plan.md §8 step 2a(c)).
+      // A name the checker DID resolve, arriving with no binding, is a compiler bug: the gate is
+      // supposed to have refused every global the HIR has no vocabulary for, so reaching here means
+      // the accept set and the lowering disagree, which is what STA4035 exists to report.
+      if (checker.getSymbolAtLocation(node) === undefined) {
+        return {
+          kind: 'reference-error',
+          type: hUnknown(false),
+          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+          name,
+        };
+      }
       diagnostics.push(
         diagnosticFromNode(
           node,
@@ -2935,6 +3075,27 @@ function lowerExpression(
   // `typeof x`. The operand is lowered as an ordinary expression and constrains nothing: this is
   // the one operator that is total on every value the runtime has.
   if (ts.isTypeOfExpression(node)) {
+    // `typeof undeclared` is the one position where reading an unresolved name is NOT an error:
+    // §13.5.1.1 short-circuits before the reference is resolved, which is why
+    // `typeof x === 'undefined'` is the idiom for asking whether a global exists at all. The
+    // exception belongs on the OPERATOR, which is why it is answered here rather than by teaching
+    // the identifier branch about its parent.
+    let operandNode: ts.Expression = node.expression;
+    while (ts.isParenthesizedExpression(operandNode)) {
+      operandNode = operandNode.expression;
+    }
+    if (
+      ts.isIdentifier(operandNode) &&
+      bindings.get(operandNode.text) === undefined &&
+      checker.getSymbolAtLocation(operandNode) === undefined
+    ) {
+      return {
+        kind: 'string-literal',
+        type: H_STRING,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        value: 'undefined',
+      };
+    }
     const operand = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (!operand) {
       return null;

@@ -627,6 +627,35 @@ static inline bool jsrt_instanceof(jsrt_value v, const JSRTClass *cls) {
   return false;
 }
 
+/* ---------------------------------------------------------------- errors */
+
+/* The standard Error classes. Each is an ordinary `JSRTClass` whose `parent` is `Error`, so the
+ * subclass relation IS the walk `jsrt_instanceof` above already does — there is no error-specific
+ * machinery, which is the point. Layout is fixed and shared: slot 0 `name`, slot 1 `message`, so
+ * `e.name` and `e.message` are the same fixed-shape reads every other object gets.
+ *
+ * Defined in jsrt_error.c, where the two divergences from Node (enumerability of the two slots,
+ * and the absence of a stack trace) are recorded. */
+#define JSRT_ERROR_SLOT_NAME 0u
+#define JSRT_ERROR_SLOT_MESSAGE 1u
+
+extern const JSRTClass jsrt_class_error;
+extern const JSRTClass jsrt_class_type_error;
+extern const JSRTClass jsrt_class_range_error;
+extern const JSRTClass jsrt_class_reference_error;
+extern const JSRTClass jsrt_class_syntax_error;
+
+/* The descriptor for a standard error class by name, or NULL if the name is not one. */
+const JSRTClass *jsrt_error_class(const char *name);
+
+/* `new <cls>(message)`. `message` is already a value because the caller may have one that is not a
+ * C string; jsrt_throw_error is the convenience for the runtime's own literal messages. */
+jsrt_value jsrt_error_new(const JSRTClass *cls, jsrt_value message);
+void jsrt_throw_error(const JSRTClass *cls, const char *message);
+/* Throws `ReferenceError: <name> is not defined` and answers undefined so an expression
+ * position has a value; the caller checks jsrt_pending() and unwinds (plan.md §8 step 2a(c)). */
+jsrt_value jsrt_reference_error(const char *name);
+
 /* ------------------------------------------------------------ Map and Set */
 
 /* A Map and a Set are ONE structure under two descriptors, because they differ in exactly two
@@ -1140,10 +1169,21 @@ static inline bool jsrt_is_promise(jsrt_value v) {
 }
 
 
-/* `x instanceof Array` / `Object` / `Function` / `Date` / `Map` / `Set` / `RegExp` /
- * `Promise`. Built-ins have tags (or a well-known `JSRTClass` pointer), not a user descriptor.
- * `Error` / boxed `Boolean`/`Number`/`String` have no representation yet and answer false. */
+/* `x instanceof Array` / `Object` / `Function` / `Date` / `Map` / `Set` / `RegExp` / `Promise` /
+ * `Error` and its four standard subclasses. Built-ins have tags (or a well-known `JSRTClass`
+ * pointer), not a user descriptor. Boxed `Boolean`/`Number`/`String` have no representation yet and
+ * answer false — which is a WRONG answer, not an absent one, and the reason the error classes are
+ * handled here rather than left in that list: `e instanceof TypeError` silently answering false is
+ * how a catch block mis-routes (plan.md §8 step 2a(c)). */
 static inline bool jsrt_instanceof_builtin(jsrt_value v, const char *name) {
+  {
+    /* Checked first because the error names are the only ones that reach a chain walk: `Error`
+     * must be true for every subclass, which is exactly what `parent` gives. */
+    const JSRTClass *const error = jsrt_error_class(name);
+    if (error != NULL) {
+      return jsrt_instanceof(v, error);
+    }
+  }
   if (strcmp(name, "Array") == 0) {
     return jsrt_is(v, JSRT_TAG_ARRAY);
   }
@@ -1357,6 +1397,9 @@ jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
  * more than it can read one out of the heap (plan-notes 108). `jsrt_pending_slot` is how the
  * collector reaches it; nothing else may call it. */
 void jsrt_throw(jsrt_value v);
+/* Throws a bare STRING. Kept for the two callers that have no better answer yet; everything the
+ * spec calls a TypeError/RangeError/... goes through jsrt_throw_error, so that a `catch` can read
+ * `.name`, `.message` and `instanceof` the way it does in Node (plan.md §8 step 2a(c)). */
 void jsrt_throw_str(const char *msg);
 bool jsrt_pending(void);
 jsrt_value jsrt_take_exception(void);
@@ -1444,6 +1487,13 @@ static inline JSRTEnv *jsrt_env_up(JSRTEnv *env, uint32_t levels) {
   } while (0)
 
 #define JSRT_GLOBAL(i) (_jsrt_globals[(i)])
+
+/* JSRT_FRAME_ENV's counterpart for module scope, where the live frame is the globals frame rather
+ * than a `JSRT_FRAME(n)` on the stack. A module owns an environment only when a top-level loop
+ * declares a `let`/`const` that a closure captures: those bindings are per-iteration, so one
+ * global slot cannot hold them (docs/VALUE.md §4.3). Rooting them through the globals frame is
+ * what makes them outlive `main`'s locals, exactly as the globals array does. */
+#define JSRT_GLOBALS_ENV(e) (_jsrt_global_frame.env = (e))
 
 /* ------------------------------------------------------------- lifecycle */
 

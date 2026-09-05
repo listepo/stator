@@ -929,9 +929,128 @@ Each landing carries a both-modes decision fixture (the same source, `error` in 
 js) and a golden proving js mode compiles it to Node's answer — e.g. `tests/golden/js/argument_mismatch.js`
 (`increment("2")` and `Math.abs("-3")`), and `"3" - 1` / `1 - "3"` / `"3" * 2` for the arithmetic pair.
 
-**Still open in (b)**, measured after (a): 1326 `Cannot find name 'X'`, 408 `implicitly has an 'any'
-type`, 183 arity, 196 `No overload matches this call`. Each is judged individually against §1.2 —
-some are real refusals Stator should keep — and the live Check stays in `plan.md` §8 step 2a.
+**The (b) sweep finished on 2026-09-04** (plan-notes 194): every remaining `STA0012` bucket was
+judged one at a time rather than as a group, and four more codes landed with the fixture pair and
+golden the Check demands — 18050 `The value 'undefined' cannot be used here` (`1 + undefined` is
+NaN, which is what `language/expressions/addition/S11.6.1_A3.1_*` asserts), 2403 `Subsequent variable
+declarations must have the same type` (`var x = 1; var x = 'a'` is one binding written twice), 2695
+`Left side of comma operator is unused` (a style lint — the comma operator's answer is its right
+operand either way), and 8024/8029 JSDoc `@param` (a COMMENT cannot refuse a program; the parameter
+list is the code).
+
+**2403 is the rule the sweep produced, and it produced it by breaking it.** Suppressing the code
+alone turned the checker refusal into `STA4004 internal error in assignment: assignment target type
+number does not match value type string` — because a redeclaration is the same type disagreement as
+2322, just spelled differently, and needed the same widening. Extending the `runtimeDynamicSymbols`
+branch built for 2322 fixed it, and the general rule was recorded: **a suppression is finished only
+when the program it admits COMPILES; a code that turns `STA0012` into `STA4xxx` is a bug report, not
+a candidate.**
+
+**The strict-mode family is a real refusal Stator keeps** (`with`, reserved words, "Modules are
+automatically in strict mode" — ~383 tests). §1.2 makes ESM strict in both modes, so there is no
+sloppy reading left to run. This is the enumerated list earning its keep: it is not a free pass, and
+an operation no runtime could settle stays a hard error in both modes.
+
+### Step 2a(c) — the Error object model
+
+**Landed 2026-09-05** (plan-notes 195). The (b) sweep ended pointing at one shared blocker rather
+than a set of buckets: several §1.2 violations have a *thrown Error object* as their runtime answer,
+and the runtime could not build one — `jsrt_throw_str` threw a **string**, and every runtime
+TypeError was a string-literal prefix, so no golden could prove js mode reached Node's answer.
+
+**It needed no new mechanism.** `JSRTClass` already carries a name, a field list and a `parent`, and
+`jsrt_instanceof` already walked that chain for user classes, so the whole model is five descriptors
+and two functions in `runtime/src/jsrt_error.c`:
+
+```c
+static const char *const error_fields[] = {"name", "message"};
+const JSRTClass jsrt_class_error      = {"Error",     2, error_fields, NULL,              0, NULL, NULL};
+const JSRTClass jsrt_class_type_error = {"TypeError", 2, error_fields, &jsrt_class_error, 0, NULL, NULL};
+/* RangeError, ReferenceError, SyntaxError likewise */
+```
+
+Pointing each standard class at `Error` IS the subclass relation as far as `instanceof` can observe
+it. Making `name` and `message` ordinary slots 0 and 1 meant `fixed_get` resolved `e.message` with
+zero special-casing — **nothing in `jsrt_shape.c` changed**. `errorHType` in `src/hir/nodes.ts` is
+the emitter's copy of that layout and **STA4095** is the verifier check that the two have not
+drifted; `new TypeError('x')` lowers to an `error-new` node whose class comes from the CALLEE, not
+the checker, because TypeScript types all five as the structural `Error` interface.
+
+**It removed a wrong answer, not just a gap.** `Error` was already in `INSTANCEOF_BUILTINS`, so
+`e instanceof Error` compiled and silently answered **false**. `jsrt_instanceof_builtin` now resolves
+the name to a descriptor through `jsrt_error_class` and does the same pointer walk.
+
+That immediately unblocked **2540** read-only assignment, which the (b) sweep had refused precisely
+because the runtime could not build its answer — the loop closing. The runtime's own TypeErrors now
+go through `jsrt_throw_error` with Node's exact wording (`Cannot assign to read only property 'a' of
+object '#<Object>'`), so a `catch` reads `name`/`message`/`instanceof` as it does in Node.
+
+**Three divergences from Node, deliberate and recorded** (plan-notes 195, docs/VALUE.md §4.17):
+`name`/`message` are enumerable here and non-enumerable in Node, so `Object.keys(new Error('x'))`
+differs — non-enumerability is a property-descriptor feature the subset does not have at all;
+`console.log(err)` prints the object rather than a stack trace this runtime does not have; and the
+`jsrt_panic` sites still abort where Node throws a catchable TypeError, because turning a panic into
+a throw changes control flow at every caller and is its own change.
+
+**What the landings were measured to have done** (plan-notes 196). `tests/test262/run.ts` has no
+filter flag, so the check was taken by pointing `STATOR_TEST262` at a scratch root holding the four
+directories the landed codes touch — 655 tests:
+
+```
+TOTAL 655: passed 41, failed 115, skipped 499
+FAIL REASONS:  115  STA0012
+```
+
+Every remaining failure is `STA0012` and **not one is `STA4xxx`** — the 2403 rule above, asked of 655
+programs at once instead of one fixture. The measurement also forced a correction: **2704** read-only
+*delete* landed only as a RECLASSIFICATION (`STA0012` → `STA1214 (DeleteExpression)`), because the
+`delete` operator has no lowering anywhere; and it surfaced **2790**, a bucket the sweep had missed.
+Both are recorded as open in `plan.md` §8 step 2a(c).
+
+**`Cannot find name` — the largest bucket — landed 2026-09-05** (plan-notes 197). TS2304/TS2552
+(1345 Test262 lines) are dropped in js mode, and reading a name nothing declares now answers the way
+JavaScript does: `ReferenceError: <name> is not defined`, catchable, with a working `instanceof`.
+This is the bucket the (b) sweep said needed no runtime it did not have — only somewhere for the
+answer to come from, which the Error model above built.
+
+The mechanism is one HIR node and one runtime function. `ReferenceErrorRead` carries a NAME rather
+than a binding, because having no binding is the condition being modelled; `jsrt_reference_error`
+formats Node's message and returns `JSRT_UNDEFINED` purely so the emitter has a C value for an
+expression position. Because the emitter's case appends LINES, `sequencePart` flushes the operands
+already evaluated out as a statement first, which is what keeps the language's evaluation order
+across a throw that happens mid-expression.
+
+**The gate needed no change, which corrected the plan's own premise.** §8 step 2a(c) had recorded
+this as needing "the gate path"; in fact `gateIdentifier`'s global branch is guarded by
+`symbol !== undefined`, so a symbol-less identifier already fell through to `accept` — it was the
+LOWERING that manufactured `STA4035`. One branch there fixed it, turning on the test that does the
+real work: `checker.getSymbolAtLocation(node) === undefined` separates a name the checker could not
+resolve (a ReferenceError the program may catch) from a name the checker DID resolve arriving with
+no binding (a compiler bug). Collapsing those two would let the new node swallow compiler bugs.
+
+`typeof` is answered on the OPERATOR, not the operand: §13.5.1.1 short-circuits before the reference
+is resolved, so `typeof missingName` lowers to a `'undefined'` string literal. Teaching the
+identifier branch about its parent would have put the language's exception in the wrong place.
+
+**The rule earned its keep a second time.** Suppressing 2304 turned three WRITE forms into
+`STA4034` — an internal error for a program the language answers fine. It was caught by asking the
+TS2403 question of 24 syntactic positions at once instead of one fixture (`STA4xxx internal errors:
+2` → `0`), and the fix models the ordering the language specifies, because the difference is
+observable: a simple `=` evaluates its right side FIRST and throws after, while a compound
+assignment or an update reads the target before the right side runs. The first lowers to a `flatten`
+Block, the second to the throw alone, and `tests/golden/js/reference_error_write.js` pins the
+ORDERING — `rhs ran` printed, `never ran` absent — not merely the message.
+
+A pre-existing bug was uncovered and deliberately left: `missing.a = 1` still raises `STA4035`,
+because TypeScript auto-declares a global from a property assignment in a `.js` file and the checker
+reports nothing for it, so it reached the lowering with a symbol long before 2304 was suppressed. It
+is recorded as open in `plan.md` §8 step 2a(c) rather than folded into this change.
+
+Evidence: `pnpm run ci` green — 378 unit tests, `subset: 354 fixtures — 325 passed, 29
+expected-fail, 0 failed`, `golden: 160 fixtures — 160 passed`, and the same 160 under ASan/UBSan.
+
+The live Check for everything still open under step 2a stays in `plan.md` §8 — this section is the
+record of what landed, not the authority on what remains.
 
 ### Step 3 — Lower `var`
 
@@ -1206,3 +1325,67 @@ Tests: `tests/unit/phase6.test.ts` (frontmatter, feature map, `scheduleSkipCode`
 `tests/subset/subset_switch_fallthrough_{js,ts}`, `tests/subset/subset_catch_binding_property_{js,ts}`,
 `tests/golden/js/mode_policy_es5.js`.
 
+
+## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)
+
+Entry 192 ended by reporting a divergence it had found and deliberately not fixed: a closure created
+at MODULE scope capturing a loop-body binding printed `20 20 20` where Node prints `0 10 20`. Fixing
+it meant fixing two unrelated defects first, because neither let the repro compile.
+
+**The console call had no value.** Every `console.*` entry point returns `void` in C. The emitter
+returned that call as an expression, which is correct in statement position and a hard error in
+value position — `const r = console.log(x)` emitted `JSRT_LOCAL(0) = jsrt_print(...)` and clang
+refused the file (`STA0009`). The HIR had always said otherwise: the verifier pins a console node's
+type to `undefined`. The emitter now supplies that value with the `void` operator's own shape,
+`(call, JSRT_UNDEFINED)`, in value position only — as a statement it would be a `-Wunused-value`
+warning on every `console.log` in the program, which was measured rather than assumed. One
+`consoleCall` helper serves both positions so the width-to-entry-point rule is stated once.
+
+**The `for-of` binding had two types.** The lowering typed the loop variable from the checker at the
+binding name; the verifier typed it from the lowered iterable. Those agree everywhere annotated and
+disagree exactly where js mode widens something the checker still resolves — `const xs = [];
+xs.push(1)` is an evolving array, `number[]` to the checker and `Unknown` to the widening — so the
+binding claimed a type the emitted loop never produced (`STA4010`). `forOfElementType` moved from
+`verify.ts` to `hir/nodes.ts`; both callers ask it now, so the two answers cannot drift apart again.
+
+**The capture itself.** The root cause was one assumption in `lower/captures.ts` pass 1: a
+module-level binding lives in the globals array, so it is never a capture. True for the life of the
+program, false for a `let`/`const` declared inside a top-level loop — JavaScript re-creates that
+binding every iteration, and one global slot cannot hold three of them. The module now owns an
+environment (`EnvOwner = FunctionLike | ts.SourceFile`) holding exactly those bindings, laid out by
+the rule a function's `envVars` already follow.
+
+No new mechanism: `loopNeedsPerIterationEnv` had been firing at module scope all along and
+`enterLoop` discarded it for want of an environment (`envMap.size > 0`), so the clone/commit pair
+now runs there unchanged. `JSRT_GLOBALS_ENV` roots the module env through the globals frame — the
+only frame a sync `main` has — and the async-module path reuses the layout an async FUNCTION already
+uses (captured bindings at indices `0..envVars.length-1`, suspension-surviving locals past them), so
+top-level `await` needed no separate case. `var` is excluded on purpose: one shared binding IS its
+semantics, and the globals array already implements that.
+
+**Check.** `pnpm run ci` clean on the pinned Node:
+
+```
+biome check --error-on-warnings .   Checked 85 files. No fixes applied.
+tsc --noEmit (src + tests)           clean
+unit:    368 tests, 368 pass, 0 fail
+golden:  151 fixtures — 151 passed, 0 failed
+subset:  342 fixtures — 313 passed, 29 expected-fail, 0 failed
+runtime: print corpus matches Node
+asan:    print corpus matches Node (ASan/UBSan); golden 151/151 passed
+leak:    10M objects — peak RSS 3024 KB of a 65536 KB cap, plateau
+dupes:   72 clones · 0.9% duplication
+```
+
+ASan/UBSan matters more than usual here: the module environment is a new GC root, reached through
+the globals frame rather than a stack frame, and the new fixtures exercise it under the sanitizers.
+
+Fixtures, all matching the pinned Node byte-for-byte:
+`tests/golden/{js,ts}/module_loop_capture.*` pin four semantics measured against Node rather than
+assumed — the loop VARIABLE is per-iteration too (`for (let i)` closures print `0 1 2`); a write
+after the closure is built is visible through it, so the closure holds the binding and not a
+snapshot; `var` in the same shape still prints `3 3 3`; and nested top-level loops each contribute
+their own binding. `tests/golden/{js,ts}/console_builtins.*` gained the value positions — the ts
+twin asserts they COMPILE and prints `typeof`, because TypeScript types `console.log` as `void` and
+refuses it as an argument. `tests/golden/js/dyn_unknown.js` gained the evolving array, including a
+mixed-element one and an `entries()` view.

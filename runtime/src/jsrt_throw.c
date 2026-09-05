@@ -52,8 +52,9 @@ void jsrt_throw_str(const char *msg) {
 JSRTCompletion jsrt_call_protected(jsrt_value callee, uint32_t argc, const jsrt_value *argv) {
   JSRTCompletion done;
   if (!jsrt_is(callee, JSRT_TAG_CLOSURE)) {
-    done.value = jsrt_string_from_utf8("TypeError: callee is not a function",
-                                       strlen("TypeError: callee is not a function"));
+    done.value = jsrt_error_new(&jsrt_class_type_error,
+                                jsrt_string_from_utf8("callee is not a function",
+                                                      strlen("callee is not a function")));
     done.threw = true;
     return done;
   }

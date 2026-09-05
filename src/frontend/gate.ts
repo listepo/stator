@@ -1,10 +1,17 @@
 import * as ts from 'typescript';
-import type { ConsoleMethod, DateOperation, DateStatic, RegExpOperation } from '../hir/nodes.ts';
+import type {
+  ConsoleMethod,
+  DateOperation,
+  DateStatic,
+  ErrorClass,
+  RegExpOperation,
+} from '../hir/nodes.ts';
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
   DATE_OPS,
   DATE_STATICS,
+  ERROR_CLASSES,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -842,7 +849,7 @@ export const INSTANCEOF_BUILTINS: ReadonlySet<string> = new Set([
   'Set',
   'RegExp',
   'Promise',
-  'Error',
+  ...ERROR_CLASSES,
   'Boolean',
   'Number',
   'String',
@@ -2420,6 +2427,19 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
     }
     return { kind: 'accept' };
   }
+  // `new TypeError('x')`. The descriptor lives in the runtime rather than being emitted from a
+  // class declaration, so this never reaches the classDeclarationOf test below (plan.md §8 step
+  // 2a(c)). At most one argument: `options` (the `cause` bag, ES2022) is a second slot this layout
+  // does not have, and silently dropping it would lose data the program passed.
+  if (errorCtorName(node.expression, checker) !== undefined) {
+    const args = node.arguments ?? [];
+    if (args.some((argument) => ts.isSpreadElement(argument))) {
+      return notYet('a spread argument to an Error constructor is not yet supported', 5);
+    }
+    return args.length <= 1
+      ? { kind: 'accept' }
+      : notYet('the Error constructor options argument is not yet supported', 5);
+  }
   if (node.typeArguments !== undefined) {
     return notYet('explicit type arguments on a constructor call are not yet supported', 5);
   }
@@ -2921,6 +2941,16 @@ export function isGlobalDate(node: ts.Expression, checker: ts.TypeChecker): bool
  * the lowering agree on what a date receiver is, exactly as they do for a regexp. */
 export function isDateReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
   return tsTypeToHType(checker.getTypeAtLocation(expression), checker).kind === 'date';
+}
+
+/** The standard error constructor this expression names, or undefined. The same declaration-file
+ * test every other global uses, so a user `class TypeError` stays on the ordinary class path. */
+export function errorCtorName(
+  node: ts.Expression,
+  checker: ts.TypeChecker,
+): ErrorClass | undefined {
+  const hit = ERROR_CLASSES.find((name) => isGlobalNamed(node, checker, name));
+  return hit;
 }
 
 function isGlobalNamed(node: ts.Expression, checker: ts.TypeChecker, name: string): boolean {

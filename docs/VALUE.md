@@ -1090,6 +1090,42 @@ with its own signature, so handing one out as a value means a closure constant p
 a per-member code-size cost with nothing waiting on it. `super` as a value stays `STA1214` too; it
 needs a class object, which is family (e)'s other half.
 
+## 4.17 Errors — five descriptors, and no mechanism of their own (Phase 5 step 2a(c))
+
+An Error is an **object with a class descriptor**, the way a Map is (§4.6). There is no error tag, no
+error struct, and nothing in `jsrt_shape.c` that knows what an error is.
+
+```c
+static const char *const error_fields[] = {"name", "message"};
+const JSRTClass jsrt_class_error      = {"Error",     2, error_fields, NULL,              0, NULL, NULL};
+const JSRTClass jsrt_class_type_error = {"TypeError", 2, error_fields, &jsrt_class_error, 0, NULL, NULL};
+/* RangeError, ReferenceError, SyntaxError likewise */
+```
+
+**`parent` is the whole of the subclassing.** §4.5's descriptor already carries a base pointer, and
+`jsrt_instanceof` already walks it; pointing each standard class at `Error` is therefore all that
+`e instanceof TypeError && e instanceof Error` requires. The `instanceof` on a builtin NAME
+(`jsrt_instanceof_builtin`) resolves the name to a descriptor through `jsrt_error_class` and then
+does the same walk — which is why a sibling class correctly answers false.
+
+**The layout is fixed and shared: slot 0 `name`, slot 1 `message`.** That is the contract between
+`jsrt_error_new`, which writes both by index, and every `e.message` the emitter lowers, which
+resolves against the same two fields. `errorHType` in `src/hir/nodes.ts` is the emitter's copy of it
+and STA4095 is the check that the two have not drifted. Because the slots are ordinary fields, a
+read needs no special case: `fixed_get` finds them exactly as it finds any class instance's.
+
+**Raising one.** `jsrt_throw_error(cls, msg)` builds the object and hands it to the pending cell of
+§4.9 — the unwind protocol is unchanged, because a thrown Error is just a thrown value. The bare
+`jsrt_throw_str` remains for the sites that have no better answer yet, and it throws a STRING, which
+is what every runtime TypeError used to be.
+
+**Three divergences from Node, deliberate and recorded** (plan-notes 195): `name` and `message` are
+enumerable here and non-enumerable in Node, so `Object.keys` differs — non-enumerability is a
+property-descriptor feature the subset does not have at all; `console.log(err)` prints the object
+rather than a stack trace, which this runtime has none of (the same deviation `jsrt_uncaught`
+documents); and the `jsrt_panic` sites still abort where Node throws a catchable TypeError, because
+turning a panic into a throw changes control flow at every caller and is its own change.
+
 ## 5. What Phase 2 actually implements
 
 The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap

@@ -34,6 +34,8 @@ import {
   consoleEntryPoint,
   DATE_OPS,
   DATE_STATICS,
+  errorHType,
+  forOfElementType,
   isAccessorEntry,
   isSetOperation,
   MATCH_FIELDS,
@@ -180,34 +182,6 @@ function checkField(
       message: `field '${field}' is not slot ${String(slot)} of ${target.type.name}`,
     });
   }
-}
-
-/** Separate from checkIndexable because the emitted loop is different, not just the message: a
- * for-of over an array, a string, a Map or a Set compiles to a specialized loop (docs/VALUE.md
- * §4.13). */
-function forOfElementType(
-  iterable: HType,
-  view: 'identity' | 'keys' | 'values' | 'entries',
-): HType {
-  if (iterable.kind === 'iterator') {
-    return iterable.element;
-  }
-  if (iterable.kind === 'string') {
-    return H_STRING;
-  }
-  if (view === 'entries') {
-    return hUnknown(false); /* a two-element array; the HIR has no tuple */
-  }
-  if (iterable.kind === 'array') {
-    return view === 'keys' ? H_NUMBER : iterable.element;
-  }
-  if (iterable.kind === 'map') {
-    return view === 'keys' ? iterable.key : view === 'values' ? iterable.value : hUnknown(false);
-  }
-  if (iterable.kind === 'set') {
-    return iterable.element;
-  }
-  return hUnknown(false);
 }
 
 function checkIterable(iterable: Expression, problems: VerifyProblem[]): void {
@@ -1614,6 +1588,24 @@ function verifyExpression(
       break;
     }
 
+    // `new TypeError(x)`. The LAYOUT is what is pinned, not just the kind: `jsrt_error_new` writes
+    // slot 0 and slot 1 by index, and every `e.message` read downstream resolves against the same
+    // two fields, so a type that disagreed with jsrt_error.c would be a wrong slot rather than a
+    // wrong answer. Comparing against errorHType checks the name, the field order and the base
+    // chain in one place, which is the only place the two definitions can drift.
+    case 'error-new': {
+      verifyExpression(expr.arg, problems, bindings);
+      if (!hTypeEquals(expr.type, errorHType(expr.ctor))) {
+        problems.push({
+          kind: 'error-new',
+          span: expr.span,
+          code: 'STA4095',
+          message: `new ${expr.ctor} results in '${hTypeName(expr.type)}', not the ${expr.ctor} layout`,
+        });
+      }
+      break;
+    }
+
     // A `Date.prototype` call, pinned where a regexp op's receiver is and for the same reason: the
     // C accessors read a `JSRTDate` without a tag test, so a wrong receiver kind here is memory
     // corruption rather than a wrong answer. Arity is EXACT because the lowering pads omitted
@@ -1868,6 +1860,31 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4013',
           message: `update result must be number, got ${hTypeName(expr.type)}`,
+        });
+      }
+      break;
+    }
+
+    // Unknown is not a default here, it is the contract. The node stands where a value of an
+    // unknowable type would have been, and every consumer downstream -- boundary insertion above
+    // all -- reads that type to decide whether a check is owed. Typing it `undefined` (the C value
+    // the emitter returns) would let `const n: number = undeclared` through as a static assignment
+    // of the wrong type instead of a boundary, which is the bug this pins shut.
+    case 'reference-error': {
+      if (expr.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'reference-error',
+          span: expr.span,
+          code: 'STA4096',
+          message: `reference-error must have type 'unknown', got '${hTypeName(expr.type)}'`,
+        });
+      }
+      if (expr.name === '') {
+        problems.push({
+          kind: 'reference-error',
+          span: expr.span,
+          code: 'STA4096',
+          message: 'reference-error must carry the name it failed to resolve',
         });
       }
       break;

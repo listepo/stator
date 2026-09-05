@@ -196,6 +196,7 @@ export function makeModule(statements: readonly Statement[] = []): Module {
     fileName: '/test.ts',
     statements,
     isAsync: false,
+    envVars: [],
   };
 }
 

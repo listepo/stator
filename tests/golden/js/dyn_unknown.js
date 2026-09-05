@@ -37,3 +37,26 @@ console.log(1 == id('1'));
 console.log(null == id(undefined));
 console.log(true == id(1));
 console.log(0 == id(false));
+
+// An EVOLVING array: `const xs = []` is widened to Unknown by js mode, while the checker keeps
+// resolving it to `number[]` as the pushes accumulate. A `for-of` over it must bind what the
+// emitted loop actually yields -- the two disagreed, and the binding claimed a type the loop
+// never produced (STA4010).
+const evolving = [];
+evolving.push(1);
+evolving.push('two');
+for (const item of evolving) {
+  console.log(item);
+}
+
+// The same disagreement one level up: the elements are closures, so the loop variable is called.
+const evolvingFns = [];
+evolvingFns.push(() => 'called');
+for (const f of evolvingFns) {
+  console.log(f());
+}
+
+// `entries()` over an evolving array: the view decides the binding, not the checker.
+for (const pair of evolving.entries()) {
+  console.log(pair);
+}

@@ -322,6 +322,9 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'null-literal':
     case 'undefined-literal':
     case 'identifier':
+    // Unreachable in practice: its type IS Unknown, so the check above already answered true.
+    // Listed so the switch stays exhaustive rather than relying on that.
+    case 'reference-error':
       return false;
     case 'binary-op':
     case 'logical-op':
@@ -419,6 +422,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'iterator-next':
       return expressionHasUnknown(expr.target) || expressionHasUnknown(expr.sent);
     case 'date-new':
+    case 'error-new':
     case 'json-stringify':
       return expressionHasUnknown(expr.arg);
     // A namespace walk answers what its argument holds, so an Unknown ARGUMENT carries through --

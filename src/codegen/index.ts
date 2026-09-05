@@ -13,6 +13,7 @@ import type {
   CollectionOp,
   CollectionOperation,
   ConditionalExpr,
+  ConsoleLogCall,
   DateComponents,
   DateNew,
   DateOp,
@@ -20,6 +21,7 @@ import type {
   DynFieldAssignment,
   DynObjectLiteral,
   EnvCapture,
+  ErrorNew,
   Expression,
   FieldAssignment,
   ForOfStatement,
@@ -58,6 +60,7 @@ import {
   consoleEntryPoint,
   DATE_OPS,
   DATE_STATICS,
+  errorDescriptor,
   isAccessorEntry,
   REGEXP_FIELDS,
   REGEXP_OPS,
@@ -338,6 +341,7 @@ class Emitter {
     | DateOp
     | DateStaticCall
     | DynObjectLiteral
+    | ErrorNew
     | MathCall
     | MethodCall
     | NewExpr
@@ -479,6 +483,10 @@ class Emitter {
     this.lines = [];
     this.indent = 0;
 
+    // Seeded BEFORE counting, because `bindSlot` skips a name that already has an environment
+    // home: a per-iteration top-level binding must not also get a global slot, or the loop would
+    // update one copy while every closure read the other.
+    this.envMap = new Map(module.envVars.map((name, index) => [name, index]));
     // The module's own bindings are counted first and become the globals; counting also assigns
     // every function its id, which the closure references below depend on.
     this.countBindings(module.statements);
@@ -588,6 +596,15 @@ class Emitter {
     this.indent++;
     this.appendLine('jsrt_init();', module.span);
     this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
+    // Rooted through the globals frame, which is pushed once and never popped -- the module
+    // environment has to outlive main's locals for the same reason the globals array does.
+    if (module.envVars.length > 0) {
+      this.appendLine(
+        `JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(module.envVars.length)});`,
+        module.span,
+      );
+      this.appendLine('JSRT_GLOBALS_ENV(_jsrt_env);', module.span);
+    }
     this.emitHoistedFunctions(module.statements);
     for (const stmt of module.statements) {
       this.emitStatement(stmt);
@@ -621,8 +638,12 @@ class Emitter {
     this.inAsync = true;
     this.inFunction = true;
     this.slotMap = new Map();
-    this.slotCount = 0;
-    this.envMap = new Map();
+    // Same layout an async FUNCTION uses (see emitFunctionUnit): the module's captured
+    // per-iteration bindings own env indices 0..envVars.length-1, and the suspension-surviving
+    // locals are numbered past them into the same environment. One env, two tenants -- which is
+    // why the per-iteration clone works here unchanged.
+    this.envMap = new Map(module.envVars.map((name, index) => [name, index]));
+    this.slotCount = module.envVars.length;
     this.captureMap = new Map();
     this.awaitStates = new Map();
     this.returnsValue = true;
@@ -1186,6 +1207,7 @@ class Emitter {
       // `new Date(x)` is the same shape: the argument (a string, or another Date) must stay
       // reachable across the JSRTDate allocation.
       case 'date-new':
+      case 'error-new':
       case 'json-parse':
       case 'json-stringify':
         this.callSlots.set(expr, this.slotCount);
@@ -1302,6 +1324,8 @@ class Emitter {
       case 'null-literal':
       case 'undefined-literal':
       case 'identifier':
+      // No slot: the name is a C string literal in the emitted call, not a rooted value.
+      case 'reference-error':
         break;
       default: {
         const _exhaustive: never = expr;
@@ -1329,6 +1353,12 @@ class Emitter {
       }
 
       case 'expression-statement': {
+        // The console call's own statement form: bare, without the `undefined` that value position
+        // has to append. See the `console-log` case in emitExpression for why the two differ.
+        if (stmt.expression.kind === 'console-log') {
+          this.appendLine(`${this.consoleCall(stmt.expression)};`, stmt.span);
+          break;
+        }
         const expr = this.emitExpression(stmt.expression);
         // A call already ran as its own statements; what came back is only the slot its result
         // sits in, and a bare `JSRT_LOCAL(3);` line would be a no-op -- one clang warns about.
@@ -1916,6 +1946,13 @@ class Emitter {
     return this.enclosing.some((e) => e.id === id && e.iterEnv === true);
   }
 
+  /* Re-roots the live frame at a new environment. Which frame that IS depends on scope: inside a
+   * function it is the `JSRT_FRAME(n)` the unit opened, and at module top level it is the globals
+   * frame, which is the only one a sync `main` has. Both spellings assign the same field. */
+  private frameEnvLine(env: string): string {
+    return this.inFunction ? `JSRT_FRAME_ENV(${env});` : `JSRT_GLOBALS_ENV(${env});`;
+  }
+
   private emitIterEnvOpen(id: number, span: Span): void {
     if (!this.iterEnvOf(id)) {
       return;
@@ -1934,7 +1971,7 @@ class Emitter {
     this.indent++;
     this.appendLine(`_jsrt_iter_env_${id} = jsrt_env_clone(_jsrt_saved_env_${id});`, span);
     this.appendLine(`_jsrt_env = _jsrt_iter_env_${id};`, span);
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', span);
+    this.appendLine(this.frameEnvLine('_jsrt_env'), span);
     this.indent--;
     this.appendLine('}', span);
   }
@@ -1947,7 +1984,7 @@ class Emitter {
     this.indent++;
     this.appendLine(`jsrt_env_copy_slots(_jsrt_saved_env_${id}, _jsrt_iter_env_${id});`, span);
     this.appendLine(`_jsrt_env = _jsrt_saved_env_${id};`, span);
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', span);
+    this.appendLine(this.frameEnvLine('_jsrt_env'), span);
     this.indent--;
     this.appendLine('}', span);
   }
@@ -2287,6 +2324,24 @@ class Emitter {
     this.enclosing.pop();
   }
 
+  /** The bare C call behind a console node — no value appended.
+   *
+   * The operand list is positional; the WIDTH picks the entry point, which is the only thing the
+   * two short forms need from it. No rooted slots: every one of these runtime functions is a
+   * formatter that allocates only its own scratch buffer, and the arguments it reads are already
+   * evaluated when it starts. Both call sites (value position and statement position) go through
+   * here so the width-to-entry-point rule is stated once. */
+  private consoleCall(expr: ConsoleLogCall): string {
+    const fn = consoleEntryPoint(expr.method, expr.args.length);
+    if (fn === null) {
+      throw new Error(
+        `console.${expr.method} has no entry point for ${String(expr.args.length)} arguments`,
+      );
+    }
+    const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
+    return `${fn}(${operands})`;
+  }
+
   private emitExpression(expr: Expression): string {
     switch (expr.kind) {
       case 'number-literal': {
@@ -2325,6 +2380,18 @@ class Emitter {
         return `jsrt_typeof(${this.emitExpression(expr.operand)})`;
       }
 
+      // The one expression whose value never reaches its consumer. The call always throws, so the
+      // pending check on the very next line always jumps to the landing pad; `JSRT_UNDEFINED` is
+      // emitted only because C needs the expression to HAVE a value, and nothing ever reads it.
+      // Appending lines here is what makes it correct inside a larger expression: `sequencePart`
+      // sees a non-empty buffer and flushes the operands evaluated so far out as a statement first,
+      // which keeps the language's evaluation order across the throw.
+      case 'reference-error': {
+        this.appendLine(`jsrt_reference_error("${this.escapeCString(expr.name)}");`, expr.span);
+        this.emitPendingCheck(expr.span);
+        return 'JSRT_UNDEFINED';
+      }
+
       // The location is a string literal in the emitted C rather than something reconstructed at
       // failure time: the emitter is the only party that still knows where this value came from,
       // and a check that could not say where it failed would be nearly useless in a compiled
@@ -2334,7 +2401,7 @@ class Emitter {
         if (check === undefined) {
           throw new Error(`no boundary check for type kind: ${expr.type.kind}`);
         }
-        return `${check}(${this.emitExpression(expr.value)}, "${this.escapeFilePath(expr.where)}")`;
+        return `${check}(${this.emitExpression(expr.value)}, "${this.escapeCString(expr.where)}")`;
       }
 
       case 'logical-op': {
@@ -2357,19 +2424,14 @@ class Emitter {
         return `jsrt_number((double)jsrt_string_length(${this.emitExpression(expr.operand)}))`;
       }
 
-      // The operand list is positional; the WIDTH picks the entry point, which is the only thing
-      // the two short forms need from it. No rooted slots: every one of these runtime functions is
-      // a formatter that allocates only its own scratch buffer, and the arguments it reads are
-      // already evaluated when it starts.
+      // Every console entry point returns `void` in C, but the call's JS value is `undefined` --
+      // the verifier pins the HIR type to it. In VALUE position that gap is a hard error, not a
+      // style question: `const r = console.log(x)` emitted `JSRT_LOCAL(0) = jsrt_print(...)` and
+      // clang refused the file. The comma supplies the value the type promised. Statement position
+      // takes `consoleCall` bare instead, because `(jsrt_print(x), JSRT_UNDEFINED);` is a
+      // -Wunused-value warning on every console.log in the program.
       case 'console-log': {
-        const fn = consoleEntryPoint(expr.method, expr.args.length);
-        if (fn === null) {
-          throw new Error(
-            `console.${expr.method} has no entry point for ${String(expr.args.length)} arguments`,
-          );
-        }
-        const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
-        return `${fn}(${operands})`;
+        return `(${this.consoleCall(expr)}, JSRT_UNDEFINED)`;
       }
 
       case 'function': {
@@ -2695,6 +2757,7 @@ class Emitter {
 
       // A single-operand runtime walk: the argument rides in its rooted slot across the call.
       case 'date-new':
+      case 'error-new':
       case 'json-parse':
       case 'json-stringify':
       case 'promise-static': {
@@ -2719,8 +2782,13 @@ class Emitter {
             ? `jsrt_promise_${expr.method}`
             : expr.kind === 'date-new'
               ? 'jsrt_date_from_value'
-              : `jsrt_json_${expr.kind === 'json-parse' ? 'parse' : 'stringify'}`;
-        const opCall = `${runtimeCall}(${this.slotAt(base)})`;
+              : expr.kind === 'error-new'
+                ? 'jsrt_error_new'
+                : `jsrt_json_${expr.kind === 'json-parse' ? 'parse' : 'stringify'}`;
+        // The only one of these that names a DESCRIPTOR as well as its operand: the error class is
+        // a runtime constant, not an emitted one, so it rides in front of the rooted slot.
+        const leading = expr.kind === 'error-new' ? `&${errorDescriptor(expr.ctor)}, ` : '';
+        const opCall = `${runtimeCall}(${leading}${this.slotAt(base)})`;
         if (!flushed) {
           parts.push(opCall);
           return `(${parts.join(', ')})`;
@@ -3223,7 +3291,7 @@ class Emitter {
    * Column is not on `Span` by design (docs/HIR.md BoundaryCheck): the emitter has no source
    * text, and growing every node for one human-facing trap is the trade the IR already refused. */
   private callLocation(span: Span): string {
-    const file = this.escapeFilePath(span.file ?? this.fileName);
+    const file = this.escapeCString(span.file ?? this.fileName);
     return `"${file}:${String(span.line)}"`;
   }
 
@@ -3642,15 +3710,17 @@ class Emitter {
 
     // Add #line directive before statements (but not for braces/empty lines)
     if (span && line && !line.startsWith('}')) {
-      const escapedFile = this.escapeFilePath(span.file ?? this.fileName);
+      const escapedFile = this.escapeCString(span.file ?? this.fileName);
       fullLine = `#line ${span.line} "${escapedFile}"\n${fullLine}`;
     }
 
     this.lines.push(fullLine);
   }
 
-  private escapeFilePath(path: string): string {
-    return path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  /** Escapes for a C string literal. Named for the job, not for its first caller: file paths
+   * and the identifier a `reference-error` carries both go through it. */
+  private escapeCString(text: string): string {
+    return text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 }
 

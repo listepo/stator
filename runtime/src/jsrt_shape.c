@@ -274,9 +274,8 @@ static bool accessor_write(jsrt_value slot, const char *key, jsrt_value recv, js
   const JSRTAccessorCell *cell = (const JSRTAccessorCell *)jsrt_ptr(slot);
   if (cell->set == JSRT_UNDEFINED) {
     char msg[192];
-    snprintf(msg, sizeof msg, "TypeError: Cannot set property %s of #<Object> which has only a getter",
-             key);
-    jsrt_throw_str(msg);
+    snprintf(msg, sizeof msg, "Cannot set property %s of #<Object> which has only a getter", key);
+    jsrt_throw_error(&jsrt_class_type_error, msg);
     return true;
   }
   jsrt_value args[2] = {recv, value};
@@ -331,7 +330,8 @@ bool jsrt_has_prop(jsrt_value obj, const char *key) {
 
 bool jsrt_in(jsrt_value key, jsrt_value obj) {
   if (jsrt_is_nullish(obj)) {
-    jsrt_throw_str("TypeError: Cannot use 'in' operator to search for a value in null or undefined");
+    jsrt_throw_error(&jsrt_class_type_error,
+                     "Cannot use 'in' operator to search for a value in null or undefined");
     return false;
   }
   const char *k = jsrt_shape_key(jsrt_to_string(key));
@@ -357,7 +357,11 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
     jsrt_panic("TypeError: Cannot set properties of null or undefined");
   }
   if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
-    jsrt_throw_str("TypeError: Cannot assign to read only property");
+    /* Node's exact wording, property name included -- a frozen-write TypeError that did not say
+     * WHICH property is the least useful half of the message (plan.md §8 step 2a(c)). */
+    char msg[256];
+    snprintf(msg, sizeof msg, "Cannot assign to read only property '%s' of object '#<Object>'", key);
+    jsrt_throw_error(&jsrt_class_type_error, msg);
     return;
   }
   if (!has_prop_table(obj)) {

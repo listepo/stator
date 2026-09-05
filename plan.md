@@ -292,7 +292,7 @@ Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. St
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
 What is still OPEN in this phase is **step 2a(b)**, **step 12 (c)–(f)**, and the **step-12 bookkeeping
-debt** below.
+debt** below. Step 13 was added and landed on 2026-09-04 (plan-notes 193).
 
 **Step-12 bookkeeping debt (added 2026-09-04; plan-notes 191).** The builtins dashboard
 (`tests/golden/builtins.ts` + `builtins_coverage.json`) drifted RED — the direction its checks never
@@ -337,6 +337,59 @@ dashboard's green direction (stale claims) already fails the run; its red direct
    start passing, they moved from a checker lint to Stator's own schedule (the `STA12xx` skip
    column), which is the attribution §1.3's disjoint ranges exist to make. Per-landing evidence:
    [done.md](done.md) → Phase 5 step 2a.
+   ~~The remaining buckets were swept 2026-09-04; four more codes landed (18050, 2403, 2695,
+   8024/8029) and the strict-mode family was judged a **real refusal Stator keeps**.~~
+   ✅ **the sweep is complete** (plan-notes 194, 196) — evidence in [done.md](done.md) → Phase 5
+   step 2a. **Still open in (b):** three buckets **judged correct but blocked on a Stator not-yet**,
+   not on the judgment — 2683 (`this` implicitly any — and when it is taken it goes in as the OPTION
+   `noImplicitThis: mode === 'ts'`, **not** as a code), 2769 (`No overload matches this call`) and
+   2464 (computed property name), all three waiting on step 12(c)/(d)/(e) surface. What is left after
+   those is one shared blocker, not a set of buckets — see (c).
+   (c) **The error-object model, and the buckets that sat behind it** (added 2026-09-04 from the (b)
+   sweep; plan-notes 194).
+   ~~**Check:** an `Error` object model in the runtime — constructor, `name`/`message`, the
+   `instanceof` chain for the standard subclasses — proved by a golden that CATCHES a thrown builtin
+   error and prints `name`, `message` and an `instanceof` result matching Node byte-for-byte~~
+   ✅ **the model landed 2026-09-05** (plan-notes 195; evidence in [done.md](done.md) → Phase 5
+   step 2a(c)) — five descriptors in `runtime/src/jsrt_error.c`, no new mechanism, STA4095 pinning
+   the layout, and one WRONG ANSWER removed (`e instanceof Error` had compiled and answered false).
+   **Still open under this step, now for three different reasons:**
+   ~~2540 read-only assign~~ ✅ **landed 2026-09-05** in the same commit, which is the loop closing —
+   (b) refused to suppress it precisely because the runtime could not build its answer, and now it
+   compiles and the runtime raises Node's `TypeError`. ~~2704 read-only delete~~ ✅ **landed the same
+   day but only as a RECLASSIFICATION** (plan-notes 196, measured): the `delete` operator has no
+   lowering at all — no `DeleteExpression` case in `src/lower/` or `src/frontend/gate.ts`, no
+   `jsrt_delete` — so dropping the checker's refusal moves the program from `STA0012` to
+   `STA1214 (DeleteExpression)`. That is a legitimate §1.3 landing (checker lint → Stator's own
+   schedule, naming the phase that owns the blocker) and **not** a claim that `delete` works; the
+   operator is step-12 residue. · **2790 `The operand of a 'delete' operator must be optional`**
+   — a bucket the (b) sweep missed entirely, found by the same measurement (plan-notes 196): `delete`
+   on a REQUIRED property, distinct from 2704's read-only one, a §1.2 violation whose JavaScript
+   answer is a boolean, blocked on that same missing operator plus the shape question a fixed-shape
+   object losing a field would ask. · ~~**2304/2552 `Cannot find name` (1345 lines)**~~
+   ✅ **landed 2026-09-05** (plan-notes 197; evidence in [done.md](done.md) → Phase 5 step 2a(c)).
+   The gate needed no change after all — its global branch is guarded by `symbol !== undefined`, so a
+   symbol-less identifier already fell through to `accept`, and it was the LOWERING that manufactured
+   `STA4035`. Reading an undeclared name now throws a catchable `ReferenceError`, `typeof` answers
+   `"undefined"` without throwing, and the three WRITE forms the suppression newly admitted were
+   caught manufacturing `STA4034` and fixed in the same change — the TS2403 rule again, asked of 24
+   syntactic positions instead of one fixture. · **2488 `Symbol.iterator`**
+   and **2454 TDZ** need their sites converted from `jsrt_panic` (an abort) to a throw, which changes
+   control flow at every caller and is its own change (plan-notes 195, divergence 3).
+   · **`missing.a = 1` and `missing[0] = 1` raise `STA4035`** — a PRE-EXISTING internal error this
+   step uncovered but did not cause and did not fix (plan-notes 197). TypeScript auto-declares a
+   global from a property assignment in a `.js` file, so the checker reports nothing for these and
+   they reached the lowering with a symbol long before 2304 was suppressed. Their answer is the same
+   `ReferenceError`; the work is telling a TS-synthesized JS global apart from a real binding.
+   ~~**Check:** `typeof unresolvableName` answers `"undefined"` without throwing and a bare
+   unresolvable reference throws a catchable `ReferenceError` whose `name`/`message`/`instanceof`
+   match Node~~ ✅ 2026-09-05 (`tests/golden/js/reference_error.js`,
+   `tests/golden/js/reference_error_write.js`). **Check:** the panic-to-throw conversion lands with a
+   golden that CATCHES each converted site;
+   and the two delete buckets (2704, 2790) land with the `delete` OPERATOR — lowering plus whatever
+   answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
+   returns Node's boolean and the subsequent read answers `undefined`. Until then `STA1214
+   (DeleteExpression)` is the honest verdict and this Check is what stops it being called done.
    **Check:** each suppression lands with a both-modes decision fixture (the same source, `error` in
    ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer. The Test262
    ratchet moves in that commit **when a test's final classifier changes**; a harness file can carry
@@ -426,6 +479,15 @@ dashboard's green direction (stale claims) already fails the run; its red direct
     **Check (step 12):** one golden fixture per family matching the pinned Node byte-for-byte; the
     decision-test rows for every construct named above out of expected-fail; and `gate.ts` emits no
     `not-yet` for any construct this step names.
+
+13. ~~**Module-scope closures, and the two defects stacked in front of them**~~ ✅ **landed
+    2026-09-04** (plan-notes 193) — evidence in [done.md](done.md) → Phase 5 step 13. A closure
+    created at module scope capturing a loop-body binding read one shared global slot; the module
+    now owns an environment for exactly those per-iteration bindings, so the loop's existing
+    clone/commit runs there unchanged. Reproducing it first required fixing a console call in value
+    position (returned `void` in C, so the generated file did not compile) and a `for-of` binding
+    the lowering and the verifier typed from two different sources. Not step 12 residue: no
+    `notYet` site ever named these — they are defects in shipped constructs.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
@@ -1053,6 +1115,34 @@ Standing practices:
 - **v3.5** (2026-09-02): **Phase 5 step 5 landed** — mixed-graph boundary checks at declaration/assignment/call/return edges (plan-notes 144). Trap is an untyped `.js` identity into a `.ts` `number` slot (`STA2001`); a function whose body checkJs types as `string` is `STA0012` and never reaches runtime. Happy path `tests/golden/js/mixed_graph/`.
 - **v3.6** (2026-09-02): **Phase 5 step 6 landed** — a fully JSDoc'd `.js` module has file verdict `static` with provenance `typed`; `tests/golden/js/jsdoc_static.js` matches Node.
 - **v3.7** (2026-09-02): **Phase 5 step 7 landed** — js-column honesty sweep of already-landed operators/statements plus `tests/golden/js/capstone.js`; `hTypeAssignable` recurses into arrays so `var xs = []` verifies (plan-notes 146).
+- **v3.10** (2026-09-05): **§8 step 2a(c)'s first clause landed — `Cannot find name`, the largest
+  bucket left (1345 Test262 lines).** Reading an undeclared name now throws a catchable
+  `ReferenceError` with Node's wording and a working `instanceof`; `typeof` answers `"undefined"`
+  without throwing, answered on the operator where §13.5.1.1 puts it. Two premises in this plan were
+  corrected by the work: the gate needed no change (its global branch is guarded by
+  `symbol !== undefined`, so the symbol-less identifier already reached the lowering, which was the
+  thing manufacturing `STA4035`), and the suppression turned three WRITE forms into `STA4034` until
+  the TS2403 rule was asked of 24 syntactic positions at once rather than one fixture. A pre-existing
+  `STA4035` on `missing.a = 1` was uncovered, proved pre-existing (TypeScript auto-declares a JS
+  global from a property assignment, so the checker never refused it), and left open rather than
+  folded in. New: `ReferenceErrorRead`, `jsrt_reference_error`, STA4096. Evidence: plan-notes 197,
+  `done.md` → Phase 5 step 2a(c), `pnpm run ci` green (378 unit tests; `subset: 354 fixtures — 325
+  passed, 29 expected-fail, 0 failed`; `golden: 160 fixtures — 160 passed`; the same 160 under
+  ASan/UBSan).
+- **v3.9** (2026-09-05): **§8 step 2a(b) swept to completion and step 2a(c)'s Error model landed.**
+  The (b) sweep judged every remaining `STA0012` bucket individually and landed four codes (18050,
+  2403, 2695, 8024/8029), judging the strict-mode family a real refusal Stator keeps; 2403 produced
+  the sweep's general rule by breaking it — **a suppression is finished only when the program it
+  admits COMPILES**, since suppressing it alone turned `STA0012` into `STA4004`. Step 2a(c) then
+  landed the Error object model with no new mechanism (five `JSRTClass` descriptors, `name`/`message`
+  as ordinary slots, nothing in `jsrt_shape.c` changed, STA4095 pinning the shared layout) and
+  removed a wrong answer: `e instanceof Error` had compiled and silently answered false. A 655-test
+  Test262 slice (plan-notes 196) then checked the 2403 rule at scale — 115 remaining failures, all
+  `STA0012`, **no `STA4xxx`** — and forced two honesty edits: 2704 landed only as a reclassification
+  (`STA1214`, the `delete` operator has no lowering), and 2790 was a bucket the sweep had missed.
+  `ratchet.json` was neither consulted nor moved: the slice is not the corpus. Evidence: plan-notes
+  194–196, `done.md` → Phase 5 step 2a and 2a(c), `pnpm run ci` green (`subset: 352 fixtures — 323
+  passed, 29 expected-fail, 0 failed`; `golden: 158 fixtures — 158 passed`; ASan/UBSan golden 158/158).
 - **v3.8** (2026-09-04): **§8's landed steps archived** (golden rule 1). Steps 1–11's evidence narratives moved to `done.md` → Phase 5, leaving struck-through stubs that keep every number and title so `§8 step N` citations resolve; step 2a(a) and step 12(c)'s landed halves got the `done.md` sections they had never been given, and step 2a(b)'s bucket list now strikes the four codes that landed (2554/2322/2345/2362-2363) instead of narrating each in place. §8 shrank 1050 → 1000 lines and now states its open surface in one line: **step 2a(b) and step 12(c)–(f)**. The log itself had stopped at v3.7 (2026-09-02) while steps 8–12b, 2a, Task 6.1 and the fuzzer landed on 09-03 — those are recorded in `plan-notes.md` 147–186 and `done.md`, and this entry is the note that they never reached this list rather than a retroactive reconstruction of them.
 - **v3.9** (2026-09-04): **the no-network constraint is retired** (plan-notes 188). A `fetch` of `quickjs.h` at the exact commit `runtime/vendor/quickjs-ng/VENDOR.md` pins returns HTTP 200 / 66,272 bytes, and Task 6.1 has been fetching the Test262 corpus over the same transport since 2026-09-03 — the constraint was falsified by work already in the tree. §11 step 3's acquisition clause had also contradicted itself (it forbade the network, then pointed at `runtime/vendor/update.mjs`, which fetches over HTTPS); it now names the script and the one real constraint, the SAME commit as the vendored `libregexp`. §12 rung 1 keeps the `VENDOR.md` pin rule without the reachability reason, and `docs/TOOLCHAIN.md` restates Ryū as fetchable-and-unfetched. **Phase 8's gate is untouched:** step 1's owner record still does not exist, and network availability removes an implementation obstacle from step 3, not the gate.
 - **v3.10** (2026-09-04): **the spawn-heavy suites are parallel, and `ink` no longer loads on every spawn** (plan-notes 189). Task 6.1's process pool was lifted out of `tests/test262/run.ts` into `tests/support/parallel.ts` and reused by the subset and golden runners, which were still `spawnSync` in a `for` loop — extraction rather than a third copy, net **−19 lines**, `dupes` steady at 0.9%. Results stay indexed by item so a pooled run's failure list is diffable against a serial one's, and `STATOR_TEST_JOBS=1` restores the serial order without a stash. Separately, plan-notes 187 estimated the ink/react import at "tens of ms"; it measures **~1.6 s** and was paid at module scope by every process, including the `explain --json` and successful-`build` paths that never render — moving it inside `print` cut per-spawn cost **2349 ms → 843 ms**, and forced the `print`/`build`/`explain`/`run` async cascade plus `withSpanAsync` in `src/support/telemetry.ts` (the sync form ends a span the moment an async fn returns a pending promise). Measured uncontended at 16-way parallelism, both columns carrying the ink fix: **`test:subset` 109.7 s → 17.4 s (6.3×)**, **`test:golden` 151.0 s → 44.5 s (3.4×)**. No dependency added — `node:child_process` and `availableParallelism()`. Byte-exactness held: golden **147/147** on stdout *and* stderr.

@@ -302,6 +302,9 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'undefined-literal':
     case 'identifier':
     case 'collection-new':
+    // Carries a NAME, not an expression -- there is no binding to point at, which is the condition
+    // it models. Nothing inside to rewrite.
+    case 'reference-error':
       return expr;
     case 'binary-op':
     // LogicalOp's right operand may not be evaluated at all. Rewriting it is still sound -- a
@@ -397,6 +400,7 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       return args === expr.args ? expr : { ...expr, args };
     }
     case 'date-new':
+    case 'error-new':
     case 'json-parse':
     case 'json-stringify':
     case 'promise-static': {
