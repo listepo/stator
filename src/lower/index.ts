@@ -3108,6 +3108,63 @@ function lowerExpression(
     };
   }
 
+  // `delete o.x` / `delete o[k]`: a BinaryOp rather than a node of its own, because it is
+  // (receiver, key) -> boolean -- `in` with its operands the other way round -- and the gate has
+  // already limited the receiver to a dynamic shape or an Unknown. Any other operand is evaluated
+  // and answers true (§13.5.1.2 step 2), which the comma operator spells exactly; the checker
+  // refuses that form (TS2703) in both modes today, so it is reached only if that is ever dropped.
+  if (ts.isDeleteExpression(node)) {
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    let target: ts.Expression = node.expression;
+    while (ts.isParenthesizedExpression(target)) {
+      target = target.expression;
+    }
+    if (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) {
+      const receiver = lowerExpression(
+        target.expression,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      const key: Expression | null = ts.isPropertyAccessExpression(target)
+        ? {
+            kind: 'string-literal',
+            type: H_STRING,
+            span: makeSpan(
+              target.name.getStart(sourceFile),
+              target.name.getWidth(sourceFile),
+              sourceFile,
+            ),
+            value: target.name.text,
+          }
+        : lowerExpression(target.argumentExpression, sourceFile, checker, bindings, diagnostics);
+      if (receiver === null || key === null) {
+        return null;
+      }
+      return {
+        kind: 'binary-op',
+        type: H_BOOLEAN,
+        span,
+        operator: 'delete',
+        left: receiver,
+        right: key,
+      };
+    }
+    const operand = lowerExpression(target, sourceFile, checker, bindings, diagnostics);
+    if (operand === null) {
+      return null;
+    }
+    return {
+      kind: 'binary-op',
+      type: H_BOOLEAN,
+      span,
+      operator: ',',
+      left: operand,
+      right: { kind: 'boolean-literal', type: H_BOOLEAN, span, value: true },
+    };
+  }
+
   // `await e`. The result type is the promise's value type, taken from the checker's own answer
   // for the await expression rather than by peeling the operand -- `await 1` is legal and its
   // operand is not a promise at all, which is exactly the case peeling would get wrong.

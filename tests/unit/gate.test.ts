@@ -1162,3 +1162,28 @@ void test('top-level await is accepted; await in a non-async function is not', (
   assert.deepEqual(codesFor('const x = await Promise.resolve(1);\nconsole.log(x);\n', 'js'), []);
   assert.deepEqual(codesFor('function f() { return await Promise.resolve(1); }\n'), ['STA1214']);
 });
+
+// `delete` (plan.md §8 step 2a(c)): the RECEIVER decides. A dynamic shape or an Unknown compiles;
+// a fixed layout keeps its old codes (never in ts, Phase 8 in js); an array element is a hole.
+void test('delete: dynamic shape, index signature, and Unknown receivers are accepted', () => {
+  assert.deepEqual(codesFor('const o: { a?: number } = { a: 1 };\ndelete o.a;'), []);
+  assert.deepEqual(
+    codesFor("const o: { a?: number } = { a: 1 };\nconst k = 'a';\ndelete o[k];"),
+    [],
+  );
+  assert.deepEqual(codesFor('function f(o) { return delete o.x; }', 'js'), []);
+  assert.deepEqual(codesFor('function f(o, k) { return delete (o)[k]; }', 'js'), []);
+});
+
+void test('delete: a fixed-shape receiver is STA1108 in ts and STA1205 in js', () => {
+  assert.deepEqual(codesFor('const o = { a: 1 };\ndelete o.a;'), ['STA1108']);
+  assert.deepEqual(codesFor('const o = { a: 1 };\ndelete o.a;', 'js'), ['STA1205']);
+  assert.deepEqual(codesFor('class C { x: number = 1; }\ndelete new C().x;'), ['STA1108']);
+});
+
+void test('delete: an array element and an optional chain are not-yet', () => {
+  assert.deepEqual(codesFor('const xs: number[] = [1];\ndelete xs[0];'), ['STA1214']);
+  assert.deepEqual(codesFor('const o: { a?: number } | undefined = { a: 1 };\ndelete o?.a;'), [
+    'STA1214',
+  ]);
+});

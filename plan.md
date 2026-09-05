@@ -356,17 +356,13 @@ dashboard's green direction (stale claims) already fails the run; its red direct
    **Still open under this step, now for three different reasons:**
    ~~2540 read-only assign~~ ✅ **landed 2026-09-05** in the same commit, which is the loop closing —
    (b) refused to suppress it precisely because the runtime could not build its answer, and now it
-   compiles and the runtime raises Node's `TypeError`. ~~2704 read-only delete~~ ✅ **landed the same
-   day but only as a RECLASSIFICATION** (plan-notes 196, measured): the `delete` operator has no
-   lowering at all — no `DeleteExpression` case in `src/lower/` or `src/frontend/gate.ts`, no
-   `jsrt_delete` — so dropping the checker's refusal moves the program from `STA0012` to
-   `STA1214 (DeleteExpression)`. That is a legitimate §1.3 landing (checker lint → Stator's own
-   schedule, naming the phase that owns the blocker) and **not** a claim that `delete` works; the
-   operator is step-12 residue. · **2790 `The operand of a 'delete' operator must be optional`**
-   — a bucket the (b) sweep missed entirely, found by the same measurement (plan-notes 196): `delete`
-   on a REQUIRED property, distinct from 2704's read-only one, a §1.2 violation whose JavaScript
-   answer is a boolean, blocked on that same missing operator plus the shape question a fixed-shape
-   object losing a field would ask. · ~~**2304/2552 `Cannot find name` (1345 lines)**~~
+   compiles and the runtime raises Node's `TypeError`. ~~2704 read-only delete · 2790 `The operand of a 'delete' operator must be optional`~~
+   ✅ **both landed 2026-09-05 with the `delete` OPERATOR** (plan-notes 202; evidence in
+   [done.md](done.md) → Phase 5 step 2a(c), the `delete` operator). 2704 had landed earlier that day
+   as a reclassification only (plan-notes 196: no lowering, so `STA0012` → `STA1214`), and 2790 was
+   the bucket that sweep missed; now `delete o.a` on a dynamic shape or an Unknown receiver compiles
+   to Node's boolean and the next read is `undefined`, while a fixed layout keeps `STA1108`/`STA1205`
+   because a C struct cannot lose a slot (the `STA2004` fact, read the other way). · ~~**2304/2552 `Cannot find name` (1345 lines)**~~
    ✅ **landed 2026-09-05** (plan-notes 197; evidence in [done.md](done.md) → Phase 5 step 2a(c)).
    The gate needed no change after all — its global branch is guarded by `symbol !== undefined`, so a
    symbol-less identifier already fell through to `accept`, and it was the LOWERING that manufactured
@@ -386,10 +382,11 @@ dashboard's green direction (stale claims) already fails the run; its red direct
    match Node~~ ✅ 2026-09-05 (`tests/golden/js/reference_error.js`,
    `tests/golden/js/reference_error_write.js`). **Check:** the panic-to-throw conversion lands with a
    golden that CATCHES each converted site;
-   and the two delete buckets (2704, 2790) land with the `delete` OPERATOR — lowering plus whatever
+   ~~and the two delete buckets (2704, 2790) land with the `delete` OPERATOR — lowering plus whatever
    answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
-   returns Node's boolean and the subsequent read answers `undefined`. Until then `STA1214
-   (DeleteExpression)` is the honest verdict and this Check is what stops it being called done.
+   returns Node's boolean and the subsequent read answers `undefined`~~ ✅ 2026-09-05
+   (`tests/golden/js/delete_property.js`, `tests/golden/ts/delete_property.ts`; the fixed-shape
+   answer is the refusal a struct always gave, `STA1108`/`STA1205`, now decided by the RECEIVER).
    **Check:** each suppression lands with a both-modes decision fixture (the same source, `error` in
    ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer. The Test262
    ratchet moves in that commit **when a test's final classifier changes**; a harness file can carry

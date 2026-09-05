@@ -5573,3 +5573,82 @@ folded into this change.
 
 **Still open under step 2a(c) after this:** 2488 `Symbol.iterator` and 2454 TDZ (panic-to-throw), and
 the two delete buckets 2704/2790 (the `delete` operator has no lowering at all — notes 196).
+
+## 202. The `delete` operator: the receiver decides, and the shape is replayed, not patched (2026-09-05)
+
+**Contradiction.** `plan.md` §8 step 2a(c) carried two `STA0012` buckets — 2704 (`delete` on a
+read-only property) and 2790 (`delete` on a REQUIRED property) — whose answer in JavaScript is a
+boolean, blocked on "the `delete` operator plus whatever answer a fixed-shape object gives when it
+loses a field". 2704 had already been suppressed in js mode (notes 196) but only moved programs from
+`STA0012` to `STA1214 (DeleteExpression)`, because there was no lowering. Meanwhile `docs/VALUE.md`
+§4.10 promised that "when deletion lands it gets a dictionary-mode escape, not shape surgery", and
+`docs/DIAGNOSTICS.md` described `STA1108`/`STA1205` as "delete on class fields".
+
+**What the fixed-shape question actually asks.** A fixed-layout object is a C struct whose fields
+are offsets the emitter baked in. It cannot lose one; that is exactly the fact `STA2004` already
+states about GAINING one. So the honest answer is the refusal the docs always gave — `STA1108`
+(never, ts) and `STA1205` (Phase 8, js) — now decided by the RECEIVER's type rather than by "is it a
+class field": a literal with no optional property is a fixed layout too, and a class instance behind
+a dynamic annotation is a dynamic shape. That makes the two codes symmetric with `STA2004` instead of
+a special case for classes. An array element is refused as `not-yet` in both modes: the dense buffer
+has no holes (`STA2002`), and inventing one here would be the sparse-array decision by the back door.
+
+**Why replay, not dictionary mode.** The shape table's invariants are: shapes immutable, shared by
+every object built by the same key sequence, and an inline cache is (shape, offset) filled only on a
+hit. A removal edge would break the first; a per-object dictionary would break the second and put a
+second representation under every property site. Replaying the survivors through the same
+`shape_append` a write uses keeps all three untouched: the object simply lands on the shape that key
+sequence reaches (shared with any object built that way from scratch), a cache filled on the old
+shape misses because the shape pointer changed, and re-adding the key appends it last — which is
+Node's order, not a coincidence. Cost is O(keys) per delete; a delete-heavy program that measures it
+gets the dictionary escape as an upgrade, and nothing above the runtime would notice.
+
+**Where `delete` lives in the HIR.** It is a `BinaryOp` operator, not a node of its own: it is
+`(receiver, key) → boolean`, which is `in` with its operands swapped, and the spec evaluates them in
+that order. The one difference from every other binary operator is that it can THROW (nullish
+receiver, frozen object), so the emitter lands the answer in a slot and checks `jsrt_pending()`
+before any consumer runs, the discipline every throwing call already follows; the folder never
+touches it (`delete "s".length` has two literal operands and still throws). The non-member forms
+(`delete 1`, `delete f()`) answer `true` after evaluating the operand, which the comma operator
+spells exactly — but the CHECKER refuses them (TS2703) in both modes, a bucket the step-2a sweeps
+never measured because nobody writes it; it stays refused rather than become a fourth js-mode
+runtime code on no evidence.
+
+**What Node says, verified before the runtime said it** (a script against the pinned Node):
+nullish receiver → `Cannot convert undefined or null to object`; frozen → `Cannot delete property
+'a' of #<Object>`; string `length`/index → `Cannot delete property 'length' of [object String]`;
+array `length` → `... of [object Array]`; `delete 'abc'.x`, `delete 1`, and an absent key → `true`.
+`runtime/tests/print_delete.{c,mjs}` pins every one of those byte-for-byte, plus the shared-cache
+case: two objects on one shape, one deleted from, the cache filled on the other keeps answering it.
+
+**A test-side misuse caught on the way.** The first corpus draft reused one `JSRTIC` for two
+different keys on the same object and read a wrong slot — not a runtime bug: a cache is per SITE,
+and a site has one key. The corpus now says so at the line.
+
+**Golden note.** Every object the js golden hands to an Unknown parameter is built DYNAMIC (a JSDoc
+shape with optional keys, or `{}`): a fixed-layout literal reaching an Unknown site by structural
+aliasing aborts with `STA2004`, the same honesty clause `docs/SUBSET.md` states for growth. The first
+draft passed `{ only: 1 }` and `Object.freeze({ a: 1 })` and hit that abort, which is the clause
+working as written, not a defect in `delete`.
+
+**Test262.** `language/expressions/delete` (69 tests) run as a slice against a copy of the pinned
+corpus with `STATOR_TEST262` (a symlinked slice enumerates nothing — the walker asks `isDirectory()`
+of a `Dirent`, which a symlink is not — so the slice is a copy):
+
+```
+test262: 2 passed, 42 skipped (STA1205: 1, STA1206: 1, STA1214: 37, class: 3), 25 failed
+```
+
+The 25 failures are all CHECKER refusals, none of them the operator: 18 × TS1102 `'delete' cannot
+be called on an identifier in strict mode` (sloppy-mode tests; the harness compiles every test as an
+ESM module, so Node too would reject them there), 4 × TS2703 (the non-reference operand, the bucket
+above), 2 × `with`, 1 × `super` property. The two passes are the strict-mode identifier tests. The
+37 `STA1214` skips are the harness-level constructs the slice's tests reach before `delete`
+(`propertyHelper.js` and friends), which the runner records by code only. The full ratchet in
+`pin.json` is not moved by this change; it moves on the next full run (notes 198: sharded CI).
+
+**Plan edits.** §8 step 2a(c): the 2704/2790 text and the delete half of the Check are struck and
+point here; the panic-to-throw half of the Check stays live. `docs/DIAGNOSTICS.md` rows STA1108 and
+STA1205, `docs/SUBSET.md` (new dynamic-shape row, fixed-shape row reworded, the object-literal row's
+"Deferred: … `delete`" clause), `docs/VALUE.md` §4.10 (the dictionary-mode promise replaced by the
+replay), `docs/HIR.md` (`BinaryOp` list), `docs/MODES.md` (both delete lines).

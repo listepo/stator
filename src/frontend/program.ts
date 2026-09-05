@@ -75,6 +75,10 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2552, // Cannot find name 'X'. Did you mean 'Y'?
   2540, // Cannot assign to 'X' because it is a read-only property.
   2704, // The operand of a 'delete' operator cannot be a read-only property.
+  // `delete o.a` on a property the type says is REQUIRED: legal JavaScript whose answer is a
+  // boolean, and the operator now has a lowering (plan.md §8 step 2a(c)). What the gate then says
+  // is about the RECEIVER: a dynamic shape or an Unknown compiles, a fixed layout stays STA1205.
+  2790, // The operand of a 'delete' operator must be optional.
   // The exactOptionalPropertyTypes family. The option stays ON in both modes -- turning it off is
   // program-wide and would strip the .ts half of a mixed graph of the same guarantee -- but in js
   // mode these three codes refuse ordinary JavaScript: `{ value: undefined }` for a `value?: string`

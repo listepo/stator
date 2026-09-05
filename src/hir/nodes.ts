@@ -111,7 +111,13 @@ export type BinaryOperator =
   // Comma: evaluate left for effects, yield right.
   | ','
   // `prop in obj`. The left operand is ToString'd; the right must be an object.
-  | 'in';
+  | 'in'
+  // `delete obj[key]` (§13.5.1.2): left is the RECEIVER, right the key -- the order the operator
+  // evaluates them in, and `in` with its operands swapped. Answers boolean. The one binary
+  // operator that can throw (nullish receiver, frozen object), so the emitter checks pending
+  // after it. The receiver is a dynamic shape or an Unknown: the gate refuses a fixed layout,
+  // which cannot lose a slot (STA1108/STA1205), and an array element, which would leave a hole.
+  | 'delete';
 
 export interface BinaryOp extends Node {
   readonly kind: 'binary-op';

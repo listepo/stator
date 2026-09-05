@@ -48,7 +48,7 @@ Expressions produce values; statements do not. An expression-statement wraps an 
 - `NullLiteral` — `null`
 - `UndefinedLiteral` — `undefined`. Not a keyword but a global binding, so the lowering resolves it through the binding table first: a local named `undefined` shadows it, exactly as at runtime
 - `Identifier` — reference to a binding
-- `BinaryOp` — the nineteen operators whose operands are **both** evaluated, exactly once, left to right: `+ - * / %`, `< > <= >=`, `=== !== == !=`, `& | ^ << >> >>>`
+- `BinaryOp` — the operators whose operands are **both** evaluated, exactly once, left to right: `+ - * / %`, `< > <= >=`, `=== !== == !=`, `& | ^ << >> >>>`, `**`, `,`, `in`, and `delete` — `delete o[k]` is `(receiver, key) → boolean`, `in` with its operands the other way round, and the one binary operator that can throw (a nullish receiver, a frozen object), so the emitter checks pending after it; the verifier pins both boolean (`STA4050`-style, `STA4018`) and constant folding never touches `delete`
 - `UnaryOp` — prefix `-`, `+`, `!`, `~`
 - `TypeOf` — `typeof x`. Not a `UnaryOp`: it runs no conversion (it is total on every value, where the other four run ToNumber or ToBoolean) and its type is `string`, where `UnaryOp`'s is fixed to `number` or `boolean` by the verifier's own rule (`STA4055`)
 - `BoundaryCheck` — the one node where an `Unknown` becomes concrete, carrying the checked type and a `file:line:col`. Its presence in the HIR IS the statement that a boundary was crossed; see §3.2.1 for where the lowering builds one (`STA4056`)

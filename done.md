@@ -1052,6 +1052,47 @@ expected-fail, 0 failed`, `golden: 160 fixtures — 160 passed`, and the same 16
 The live Check for everything still open under step 2a stays in `plan.md` §8 — this section is the
 record of what landed, not the authority on what remains.
 
+### Step 2a(c) — the `delete` operator ✅ (2026-09-05)
+
+**The two delete buckets (2704 read-only, 2790 required property) landed with the operator itself**
+(plan-notes 202). Before this, `delete` had no lowering at all: 2704 had been suppressed in js mode as
+a reclassification only (`STA0012` → `STA1214 (DeleteExpression)`, plan-notes 196) and 2790 was the
+bucket that sweep had missed.
+
+**The RECEIVER decides.** `gateDelete` in `src/frontend/gate.ts` accepts `delete o.x` / `delete o[k]`
+when the receiver is a dynamic shape (`isDynamicShape`) or an Unknown, keeps the codes the docs always
+gave a fixed layout (`STA1108` never in ts, `STA1205` Phase 8 in js — a C struct cannot lose a slot,
+the `STA2004` fact read the other way), and answers `not-yet` for an array element (the dense buffer
+has no holes, `STA2002`) and for an optional chain. Any other operand (`delete 1`, `delete f()`) is
+accepted by the gate and refused by the checker (TS2703) in both modes; the lowering spells it as
+`(operand, true)` should that refusal ever be dropped. 2790 joined `JS_MODE_RUNTIME_CODES`.
+
+**One node, not a new one.** `delete` is a `BinaryOp` operator — `(receiver, key) → boolean`, `in`
+with its operands swapped, evaluated in the order the spec evaluates them. A property access lowers
+its name to a string literal on the right; an element access lowers the argument. The verifier pins
+the boolean result (`STA4018`), constant folding never touches it, and the emitter — because it is the
+one binary operator that can throw — lands the answer in a slot and checks `jsrt_pending()` before
+any consumer runs.
+
+**The runtime replays the shape instead of patching it.** `jsrt_delete_prop` in
+`runtime/src/jsrt_shape.c`: shapes are immutable and shared, so a removal re-adds the surviving keys
+from the root in offset order through the same `shape_append` a write uses, the object lands on the
+shape that sequence reaches, and the vacated last slot is cleared for the collector. A re-add lands
+LAST, as in Node; an inline cache filled on the old shape misses and re-resolves; deleting the only
+key lands back on the root. Cost is O(keys) per delete — the dictionary-mode escape docs/VALUE.md
+used to promise is now the upgrade path, not the design. The refusals throw Node's `TypeError`
+messages: a nullish receiver, a frozen object, an array's `length`, a string's `length`/index. An
+array ELEMENT panics `STA2002` (the gate refuses it first); a fixed-layout object reaching the runtime
+by structural aliasing panics `STA2004`, the honesty clause docs/SUBSET.md already states for growth.
+
+Evidence: `pnpm run ci` green — 381 unit tests (three new `delete` gate tests), `subset: 358 fixtures
+— 331 passed, 27 expected-fail, 0 failed` (the two `subset_delete_class_field_*` fixtures lost their
+`@expected-fail` marker; four `subset_delete_{property,required}_{ts,js}` fixtures added), `golden:
+162 fixtures — 162 passed` including `tests/golden/js/delete_property.js` and
+`tests/golden/ts/delete_property.ts`, the same 162 under ASan/UBSan, and the new
+`runtime/tests/print_delete.{c,mjs}` corpus matching Node byte-for-byte. Test262
+`language/expressions/delete` slice: see plan-notes 202.
+
 ### Step 3 — Lower `var`
 
 **Step 3 landed (2026-09-02).** `var` in js mode is function-scoped, hoisted, and initialized

@@ -348,6 +348,133 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   return jsrt_has_prop(obj, k);
 }
 
+/* `delete obj[key]` with strict-mode answers (§13.5.1.2): true when the key is absent or removed, a
+ * TypeError where [[Delete]] would answer false -- a frozen object, an array's or a string's
+ * `length`, a string index. One thing is REFUSED rather than answered: an array element, which
+ * would leave a hole the dense buffer cannot represent (the STA2002 ceiling, jsrt_value.h). A
+ * fixed-layout receiver reaches here only through an Unknown -- the gate refuses the static form
+ * (STA1108/STA1205) -- and cannot lose a slot any more than it can gain one (STA2004). */
+static void shape_append(PropTable o, const char *key, jsrt_value value);
+
+bool jsrt_delete_prop(jsrt_value obj, jsrt_value key) {
+  if (jsrt_is_nullish(obj)) {
+    jsrt_throw_error(&jsrt_class_type_error, "Cannot convert undefined or null to object");
+    return false;
+  }
+  const char *k = jsrt_shape_key(jsrt_to_string(key));
+  uint32_t index = 0;
+  const bool is_index = array_index_value(k, &index);
+  if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
+    if (strcmp(k, "length") == 0) {
+      jsrt_throw_error(&jsrt_class_type_error, "Cannot delete property 'length' of [object Array]");
+      return false;
+    }
+    if (is_index) {
+      if (index < jsrt_as_array(obj)->length) {
+        jsrt_panic("STA2002: sparse arrays are not yet supported: delete of an array element");
+      }
+      return true;
+    }
+  } else if (!has_prop_table(obj)) {
+    if (jsrt_is(obj, JSRT_TAG_STRING) &&
+        (strcmp(k, "length") == 0 || (is_index && index < jsrt_string_length(obj)))) {
+      char msg[256];
+      snprintf(msg, sizeof msg, "Cannot delete property '%s' of [object String]", k);
+      jsrt_throw_error(&jsrt_class_type_error, msg);
+      return false;
+    }
+    if (jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_has(obj, k)) {
+      jsrt_panic(
+          "STA2004: a statically-shaped object cannot lose a property; planned for Phase 8");
+    }
+    return true;
+  }
+  const PropTable o = as_prop_table(obj, "delete");
+  const JSRTShape *hit = shape_find(*o.shape, k);
+  if (hit == NULL) {
+    return true;
+  }
+  if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "Cannot delete property '%s' of #<Object>", k);
+    jsrt_throw_error(&jsrt_class_type_error, msg);
+    return false;
+  }
+  /* Replay the survivors in offset order -- which IS insertion order for non-index keys -- from the
+   * root, so enumeration order is preserved and a later re-add lands at the end, as §10.1.11
+   * answers. Nothing here allocates a collected block (the offsets only shrink, so the slots never
+   * grow), which is what makes a plain malloc scratch safe to hold values across the replay. */
+  const uint32_t count = shape_slot_count(*o.shape);
+  const JSRTShape **order = (const JSRTShape **)malloc((size_t)count * sizeof(*order));
+  jsrt_value *values = (jsrt_value *)malloc((size_t)count * sizeof(*values));
+  if (order == NULL || values == NULL) {
+    jsrt_panic("out of memory: delete");
+  }
+  for (const JSRTShape *s = *o.shape; s->key != NULL; s = s->parent) {
+    order[s->offset] = s;
+    values[s->offset] = (*o.slots)[s->offset];
+  }
+  *o.shape = &shape_root;
+  for (uint32_t i = 0; i < count; i++) {
+    if (order[i] != hit) {
+      shape_append(o, order[i]->key, values[i]);
+    }
+  }
+  /* The slot the survivors vacated: cleared so it stops keeping its old value alive. */
+  (*o.slots)[count - 1] = JSRT_UNDEFINED;
+  free(order);
+  free(values);
+  return true;
+}
+
+/* A NEW key: take (or build) the transition, grow the slots if its offset needs it, store, and
+ * move the object's shape. Reuse before allocation is what keeps two same-history objects on ONE
+ * shape. Shared by a set that misses and by jsrt_delete_prop, which re-derives an object's shape
+ * by replaying its surviving keys through these same transitions -- so a delete adds no removal
+ * edge and mutates no shape, and the object lands on exactly the shape another object with that
+ * key history would have. */
+static void shape_append(PropTable o, const char *key, jsrt_value value) {
+  JSRTShape *next = NULL;
+  for (JSRTShape *s = (*o.shape)->transitions; s != NULL; s = s->sibling) {
+    if (s->key == key || strcmp(s->key, key) == 0) {
+      next = s;
+      break;
+    }
+  }
+  if (next == NULL) {
+    next = (JSRTShape *)malloc(sizeof(JSRTShape));
+    if (next == NULL) {
+      jsrt_panic("out of memory: shape");
+    }
+    next->parent = (*o.shape);
+    next->key = key;
+    next->offset = shape_slot_count((*o.shape));
+    next->transitions = NULL;
+    next->sibling = (*o.shape)->transitions;
+    (*o.shape)->transitions = next;
+  }
+
+  if (next->offset >= (*o.capacity)) {
+    /* Double from 4 so repeated additions stay amortized O(1). The old slots are copied, not
+     * reallocated in place: under Boehm the old block is simply dropped for the collector. */
+    uint32_t grown = (*o.capacity) == 0 ? 4 : (*o.capacity) * 2;
+    jsrt_value *fresh = (jsrt_value *)slots_alloc((size_t)grown * sizeof(jsrt_value));
+    for (uint32_t i = 0; i < (*o.capacity); i++) {
+      fresh[i] = (*o.slots)[i];
+    }
+#ifndef JSRT_HAVE_BOEHM
+    free((*o.slots));
+#endif
+    (*o.slots) = fresh;
+    (*o.capacity) = grown;
+  }
+  (*o.slots)[next->offset] = value;
+  /* Transitions are not IC-cached: each object performs a given addition exactly once, so a
+   * transition cache would only ever hit across objects — worth building when Phase 5 measures
+   * construction-heavy dynamic code, not before. */
+  (*o.shape) = next;
+}
+
 /* `honor_accessor` is false for exactly one caller: jsrt_define_accessor, which is INSTALLING the
  * cell and must overwrite whatever the key held rather than invoke it. Every other write honors it,
  * which is what makes `o.x = v` on an accessor a call. */
@@ -395,47 +522,7 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
     return;
   }
 
-  /* New property: take (or build) the transition. Reuse before allocation is what keeps two
-   * same-history objects on ONE shape. */
-  JSRTShape *next = NULL;
-  for (JSRTShape *s = (*o.shape)->transitions; s != NULL; s = s->sibling) {
-    if (s->key == key || strcmp(s->key, key) == 0) {
-      next = s;
-      break;
-    }
-  }
-  if (next == NULL) {
-    next = (JSRTShape *)malloc(sizeof(JSRTShape));
-    if (next == NULL) {
-      jsrt_panic("out of memory: shape");
-    }
-    next->parent = (*o.shape);
-    next->key = key;
-    next->offset = shape_slot_count((*o.shape));
-    next->transitions = NULL;
-    next->sibling = (*o.shape)->transitions;
-    (*o.shape)->transitions = next;
-  }
-
-  if (next->offset >= (*o.capacity)) {
-    /* Double from 4 so repeated additions stay amortized O(1). The old slots are copied, not
-     * reallocated in place: under Boehm the old block is simply dropped for the collector. */
-    uint32_t grown = (*o.capacity) == 0 ? 4 : (*o.capacity) * 2;
-    jsrt_value *fresh = (jsrt_value *)slots_alloc((size_t)grown * sizeof(jsrt_value));
-    for (uint32_t i = 0; i < (*o.capacity); i++) {
-      fresh[i] = (*o.slots)[i];
-    }
-#ifndef JSRT_HAVE_BOEHM
-    free((*o.slots));
-#endif
-    (*o.slots) = fresh;
-    (*o.capacity) = grown;
-  }
-  (*o.slots)[next->offset] = value;
-  /* Transitions are not IC-cached: each object performs a given addition exactly once, so a
-   * transition cache would only ever hit across objects — worth building when Phase 5 measures
-   * construction-heavy dynamic code, not before. */
-  (*o.shape) = next;
+  shape_append(o, key, value);
 }
 
 void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic) {

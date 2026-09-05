@@ -1,7 +1,6 @@
 // @mode: js
 // @verdict: not-yet
 // @code: STA1205
-// @expected-fail: true
 // SUBSET.md: delete on class field (instance or static)
 
 class C {

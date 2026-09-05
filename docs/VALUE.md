@@ -709,8 +709,15 @@ a new key takes or builds a transition and moves the object's shape. Transitions
 IC-cached: each object performs a given addition once, so a transition cache pays only across
 objects — worth building when Phase 5 measures construction-heavy dynamic code, not before.
 
-The subset has no `delete`, so shapes need no removal edges; when deletion lands it gets a
-dictionary-mode escape, not shape surgery. Keys are `const char *` with program lifetime
+`delete` (plan.md §8 step 2a(c)) needs no removal edges: a shape is immutable and shared, so a
+removal is REPLAYED — the surviving keys are re-added from the root in offset order, the object
+lands on the shape that sequence reaches (shared with any object built that way), and the vacated
+last slot is cleared for the collector. A re-add therefore lands last, as in Node; an inline cache
+filled on the old shape misses and re-resolves. Cost is O(keys) per delete, which is the price of
+keeping every shape and cache invariant untouched; a dictionary-mode escape is the upgrade if a
+delete-heavy program ever measures it. `delete` answers false for nothing: the cases where
+[[Delete]] would (a frozen object, an array's `length`, a string's index) throw, because compiled
+modules are strict. Keys are `const char *` with program lifetime
 (generated C passes string literals; the shape table stores the pointer and compares by pointer
 first, `strcmp` as the backstop for one key spelled at two sites). Each receiver has a deliberate path: a dynamic object or array walks the shape table; a
 fixed-layout object reads and writes existing fields through its `JSRTClass` descriptor and

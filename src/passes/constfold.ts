@@ -140,6 +140,9 @@ function applyBinary(operator: BinaryOperator, left: Literal, right: Literal): L
     case 'in':
       // Membership is a property of an object, not of two literals.
       return false;
+    case 'delete':
+      // Never reached: `fold` keeps a delete whole (see there). Listed so the switch stays exhaustive.
+      throw new Error('delete is never constant-folded');
   }
 }
 
@@ -166,6 +169,11 @@ function applyUnary(operator: UnaryOp['operator'], operand: Literal): Literal {
 function fold(expr: Expression): Expression {
   switch (expr.kind) {
     case 'binary-op': {
+      // `delete "s".length` has two literal operands and still throws: the answer is a fact about
+      // the receiver's properties, which only the runtime holds.
+      if (expr.operator === 'delete') {
+        return expr;
+      }
       const left = literalValue(expr.left);
       const right = literalValue(expr.right);
       if (left === undefined || right === undefined) {

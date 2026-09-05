@@ -108,6 +108,7 @@ const BINARY_EMITTERS: Readonly<Record<BinaryOp['operator'], (l: string, r: stri
   '**': (l, r) => `jsrt_math_pow(${l}, ${r})`,
   ',': (_l, r) => r,
   in: (l, r) => `jsrt_bool(jsrt_in(${l}, ${r}))`,
+  delete: (l, r) => `jsrt_bool(jsrt_delete_prop(${l}, ${r}))`,
 };
 
 /** C fragment for each unary operator.
@@ -3447,6 +3448,14 @@ class Emitter {
     this.sequencePart(parts, expr.left, expr.span, (v) => `${left} = ${v}`);
     this.sequencePart(parts, expr.right, expr.span, (v) => `${right} = ${v}`);
     const result = BINARY_EMITTERS[expr.operator](left, right);
+    // `delete` can throw (a nullish receiver, a frozen object): the answer lands in a slot and the
+    // frame unwinds before any consumer runs -- the discipline every throwing call follows.
+    if (expr.operator === 'delete') {
+      this.flushParts(parts, expr.span);
+      this.appendLine(`${left} = ${result};`, expr.span);
+      this.emitPendingCheck(expr.span);
+      return left;
+    }
     if (parts.length === 2) {
       return `(${parts.join(', ')}, ${result})`;
     }

@@ -318,8 +318,9 @@ jsrt_value jsrt_object_new(const JSRTClass *cls);
  * this key leads to that shape" -- hang off the parent as a linked list of children. Shapes are
  * program-lifetime metadata: allocated on first use, never freed, never moved.
  *
- * The subset has no `delete`, so shapes never need a removal edge; when deletion lands it gets a
- * dictionary-mode escape, not shape surgery. */
+ * `delete` adds no removal edge either: jsrt_delete_prop re-derives the object's shape by
+ * replaying its surviving keys through these same transitions, so shapes stay immutable and
+ * shared and the deleted-from object lands where any object with that key history would. */
 typedef struct JSRTShape {
   struct JSRTShape *parent; /* the shape before `key` was added; NULL only at the root */
   const char *key;          /* the property this link added; NULL only at the root */
@@ -411,6 +412,10 @@ void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic
 bool jsrt_has_prop(jsrt_value obj, const char *key);
 /* `key in obj`. Throws on null/undefined; arrays answer for `length` and live indices. */
 bool jsrt_in(jsrt_value key, jsrt_value obj);
+/* `delete obj[key]`, strict mode: true when the key is absent or removed; a TypeError where
+ * [[Delete]] answers false (nullish receiver, frozen object, `length`); an array ELEMENT is refused
+ * (no holes, STA2002). May throw: generated C checks jsrt_pending() after it. */
+bool jsrt_delete_prop(jsrt_value obj, jsrt_value key);
 /* Computed-key get/set for an Unknown receiver: arrays go through the dense element path,
  * everything else through the property table with ToString(index) as the key. */
 jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic);

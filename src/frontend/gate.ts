@@ -354,6 +354,9 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.TypeOfExpression:
       return { kind: 'accept' };
 
+    case ts.SyntaxKind.DeleteExpression:
+      return gateDelete(node as ts.DeleteExpression, typeChecker, mode);
+
     case ts.SyntaxKind.AsExpression:
       return { kind: 'accept' };
 
@@ -1125,6 +1128,51 @@ function gatePrefixUnary(unary: ts.PrefixUnaryExpression, typeChecker: ts.TypeCh
     default:
       return notYet('this unary operator is not yet supported', 5);
   }
+}
+
+/** `delete o.x` / `delete o[k]` (plan.md §8 step 2a(c)). The RECEIVER decides. A dynamic shape or
+ * an Unknown walks the shape table, which can lose a key; a fixed layout cannot lose a slot -- the
+ * same fact STA2004 states about gaining one -- so it keeps the codes the docs always gave it, never
+ * in ts and Phase 8 in js; and an array element would leave a hole the dense buffer has no way to
+ * be (jsrt_value.h's STA2002 ceiling). Any other operand is legal JavaScript that answers true, and
+ * is accepted here so that the checker's own refusal of it (TS2703, kept in both modes) is what the
+ * user sees; `delete x` on a bare name is a strict-mode SyntaxError the checker refuses too. */
+function gateDelete(expr: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mode): GateResult {
+  let target: ts.Expression = expr.expression;
+  while (ts.isParenthesizedExpression(target)) {
+    target = target.expression;
+  }
+  if (!ts.isPropertyAccessExpression(target) && !ts.isElementAccessExpression(target)) {
+    return { kind: 'accept' };
+  }
+  if (target.questionDotToken !== undefined) {
+    return notYet('delete through an optional chain is not yet supported', 5);
+  }
+  const receiver = checker.getTypeAtLocation(target.expression);
+  if (checker.isArrayType(receiver) || isMatchReceiver(target.expression, checker)) {
+    return notYet('delete of an array element is not yet supported (arrays have no holes)', 8);
+  }
+  const hir = tsTypeToHType(receiver, checker);
+  if (hir.kind === 'unknown' || isDynamicShape(receiver, checker)) {
+    return { kind: 'accept' };
+  }
+  if (hir.kind !== 'object') {
+    return notYet('delete on anything but an object is not yet supported', 5);
+  }
+  return mode === 'ts'
+    ? {
+        kind: 'never',
+        code: 'STA1108',
+        message:
+          'delete on a fixed-shape object is not supported in ts mode: a class instance or a literal with a fixed layout cannot lose a field',
+      }
+    : {
+        kind: 'not-yet',
+        code: 'STA1205',
+        message:
+          'delete on a fixed-shape object is not yet supported in js mode; planned for Phase 8 (dynamic tier)',
+        phase: 8,
+      };
 }
 
 /** What a read-modify-write may be applied to: a variable, or an array element.

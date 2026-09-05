@@ -843,13 +843,13 @@ function verifyExpression(
         }
       }
 
-      if (op === 'in') {
+      if (op === 'in' || op === 'delete') {
         if (!hTypeEquals(expr.type, H_BOOLEAN)) {
           problems.push({
             kind: 'binary-op',
             span: expr.span,
             code: 'STA4018',
-            message: `'in' result must be boolean, got ${hTypeName(expr.type)}`,
+            message: `'${op}' result must be boolean, got ${hTypeName(expr.type)}`,
           });
         }
       }

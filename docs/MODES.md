@@ -38,7 +38,7 @@ is rejected for using `var`.
 - `new Function`: `STA1103` — the constructor form of the same thing.
 - `Proxy`, `Reflect`: `STA1106` — every property access becomes an opaque trap call.
 - Prototype mutation (`Object.setPrototypeOf`, `__proto__` writes): `STA1107` — shapes are fixed at compile time.
-- `delete` on a class field: `STA1108` — class instances are C structs with a fixed layout.
+- `delete` on a fixed-shape receiver (a class instance, a literal with no optional property): `STA1108` — a C struct cannot lose a slot. A dynamic shape compiles.
 - `var` declarations: `STA1104` — function scoping, hoisting, and `undefined` initialization; use `let`/`const`.
 - `arguments` object: `STA1105` — use rest parameters.
 - `with`: `STA1109`, CommonJS `require()`: `STA1110`, `.jsx`/`.tsx`: `STA1111` — these apply in **both** modes, not just `ts`.
@@ -90,7 +90,7 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
 ### Not yet (Phase 8)
 
 - `eval`, `new Function`: `STA1206` — both land with the interpreter tier, so they share one code.
-- `Proxy`: `STA1203`. Prototype mutation: `STA1204`. `delete` on a class field: `STA1205`.
+- `Proxy`: `STA1203`. Prototype mutation: `STA1204`. `delete` on a fixed-shape receiver: `STA1205` (a dynamic shape or an Unknown receiver compiles).
 
 These are the same five constructs `ts` mode rejects permanently, which is the clearest
 illustration of what a mode is: identical code, identical pipeline below the gate, different
