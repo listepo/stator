@@ -15,6 +15,7 @@
       "!.differential-*",
       "!tests/test262/corpus",
       "!tests/test262/results.json",
+      "!tests/test262/results-*-of-*.json",
       "!tests/test262/.tmp",
       "!docs/architecture",
       "!pnpm-lock.yaml"

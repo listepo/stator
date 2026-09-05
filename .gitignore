@@ -16,4 +16,6 @@ tests/differential/failures/
 tests/bench/results/
 tests/test262/corpus/
 tests/test262/results.json
+# `--shard=N/M` writes one of these per shard; `--aggregate` merges them into results.json.
+tests/test262/results-*-of-*.json
 tests/test262/.tmp/

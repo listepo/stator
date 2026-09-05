@@ -34,12 +34,17 @@ concurrency:
 jobs:
   # Test262 is intentionally separate from pnpm run ci: a missing corpus must not make the local
   # offline gate lie, while this job makes the pinned conformance number visible on every commit.
+  # The full pinned corpus is ~54k tests and costs 2-3.5 hours on one runner -- measured, not
+  # estimated: the job completed in 1h42m and 3h26m and was killed at the 2-hour ceiling three times
+  # (plan-notes 198). Four shards put each one near 50 minutes, which is what keeps the conformance
+  # number on every commit instead of moving it to a nightly.
   test262:
-    name: test262 conformance
+    name: test262 conformance (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-24.04
-    # The full pinned corpus is ~54k tests. The runner pools over every core, but this job is still
-    # the long pole by an order of magnitude, so give it a ceiling of its own rather than letting it
-    # inherit the 6-hour default and look hung.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -51,13 +56,40 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test262:fetch
       - name: Run Test262
+        run: pnpm run test262 -- --shard=${{ matrix.shard }}/4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test262-shard-${{ matrix.shard }}
+          path: tests/test262/results-${{ matrix.shard }}-of-4.json
+          if-no-files-found: error
+
+  # Where the run is actually judged. A shard sees a quarter of the corpus, and both gates are
+  # statements about the whole of it -- the ratchet compares corpus totals and expected-fail.txt
+  # names individual tests -- so `--aggregate` reassembles the shards and applies them once.
+  test262-report:
+    name: test262 conformance
+    runs-on: ubuntu-24.04
+    needs: test262
+    # `needs` alone would skip this job when a shard fails, and a skipped gate reports nothing --
+    # the dishonest version of a conformance heartbeat (§9's opening paragraph). Run it whenever the
+    # shards ran at all; `--aggregate` fails loudly on a missing shard file.
+    if: always() && needs.test262.result != 'cancelled'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test262-shard-*
+          path: shards
+      - name: Aggregate and gate
         # `pipefail` is NOT the default for a `run:` step, and without it `tee` decides this job's
         # exit status -- the ratchet could fail and the job would still be green, which is the
         # dishonest version of a conformance heartbeat (§9's opening paragraph).
         shell: bash
         run: |
           set -o pipefail
-          pnpm run test262 2>&1 | tee test262.log
+          pnpm run test262 -- --aggregate shards 2>&1 | tee test262.log
       - name: Publish conformance summary
         if: always()
         run: grep '^test262:' test262.log >> "$GITHUB_STEP_SUMMARY" || true

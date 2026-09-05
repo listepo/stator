@@ -404,33 +404,80 @@ async function one(path: string, root: string, slot: number): Promise<Test262Res
   }
 }
 
-async function main(): Promise<void> {
-  const root = corpusRoot();
-  if (!existsSync(join(root, 'test'))) {
-    process.stdout.write('test262: corpus missing — fetch with `pnpm run test262:fetch`\n');
-    writeFileSync(
-      RESULTS,
-      `${JSON.stringify({ corpus: null, commit: pinnedCommit(), passed: 0, failed: 0, skipped: 0, results: [] }, null, 2)}\n`,
-      'utf8',
+/** `--shard=N/M`: run only every Mth test starting at N (1-based).
+ *
+ * The whole corpus costs 2-3.5 hours on one runner, which is over CI's per-job ceiling; splitting
+ * it is what keeps the number on every commit (plan-notes 198). ROUND-ROBIN over the sorted list,
+ * not contiguous slices: cost per test varies by two orders of magnitude and clusters by directory
+ * (`built-ins/Temporal` skips on a feature check, `language/expressions` compiles), so contiguous
+ * shards would finish minutes and hours apart and the job would still be paced by its worst one. */
+function parseShard(argv: readonly string[]): { index: number; total: number } | undefined {
+  const flag = argv.find((argument) => argument.startsWith('--shard='));
+  if (flag === undefined) return undefined;
+  const match = /^--shard=(\d+)\/(\d+)$/.exec(flag);
+  if (match === null) throw new Error(`expected --shard=N/M, got ${flag}`);
+  const index = Number(match[1]);
+  const total = Number(match[2]);
+  if (total < 1 || index < 1 || index > total)
+    throw new Error(`--shard=N/M requires 1 <= N <= M, got ${flag}`);
+  return { index, total };
+}
+
+function shardResultsPath(index: number, total: number): string {
+  return join(HERE, `results-${String(index)}-of-${String(total)}.json`);
+}
+
+/** Reassemble the shards' results into the one list the gates need.
+ *
+ * A shard sees a slice, and every gate below is a statement about the CORPUS: the ratchet compares
+ * totals, and `expected-fail.txt` says a named test still fails — neither is decidable from a
+ * slice, so a shard reports its slice and this is where the run is judged. */
+function loadShards(directory: string): Test262Result[] {
+  const files = readdirSync(directory, { withFileTypes: true, recursive: true })
+    .filter((entry) => entry.isFile() && /^results-\d+-of-\d+\.json$/.test(entry.name))
+    .map((entry) => join(entry.parentPath, entry.name))
+    .sort();
+  if (files.length === 0) throw new Error(`no shard results under ${directory}`);
+  // A shard that died uploaded no artifact, and merging what is left would publish a SMALLER
+  // corpus as if it were the whole one -- fewer failures reads as a conformance win and sails past
+  // the ratchet. The file names carry the divisor, so the set can say whether it is complete.
+  const totals = new Set(files.map((file) => Number(/-of-(\d+)\.json$/.exec(file)?.[1])));
+  if (totals.size !== 1)
+    throw new Error(`shards disagree on the divisor: ${[...totals].join(', ')}`);
+  const [total] = [...totals];
+  if (files.length !== total)
+    throw new Error(
+      `expected ${String(total)} shards under ${directory}, found ${String(files.length)}`,
     );
-    process.stdout.write(
-      'test262: 0 passed, 0 skipped (corpus missing), 0 failed — pass rate 0.0%\n',
-    );
-    return;
+  const merged: Test262Result[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null || !('results' in parsed))
+      throw new Error(`${file}: expected a results array`);
+    const { results } = parsed as { results: Test262Result[] };
+    for (const result of results) {
+      // A shard that ran the wrong `--shard=N/M` would otherwise be invisible: its tests merge in
+      // twice and inflate the totals past the ratchet, which reads as a conformance win.
+      if (seen.has(result.path)) throw new Error(`${result.path} appears in two shards`);
+      seen.add(result.path);
+      merged.push(result);
+    }
   }
-  // The shared pool (tests/support/parallel.ts): each slot pulls the next test, so a slow compile
-  // never idles the others, and results stay indexed by test rather than by completion order —
-  // which is what keeps results.json deterministic.
-  const paths = testFiles(root);
-  const results = await pool(paths, (path, slot) => one(path, root, slot));
+  process.stdout.write(
+    `test262: merged ${String(files.length)} shard(s), ${String(merged.length)} results\n`,
+  );
+  return merged.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+/** The published number, the failure sample, and the gates that decide the exit code.
+ *
+ * Shared verbatim by the whole-corpus run and by `--aggregate` so a sharded CI run is judged by
+ * the same code as a local one — a second copy here would be a second definition of "conformance". */
+function report(results: readonly Test262Result[]): void {
   const passed = results.filter((result) => result.verdict === 'passed').length;
   const failed = results.filter((result) => result.verdict === 'failed').length;
   const skipped = results.filter((result) => result.verdict === 'skipped').length;
-  writeFileSync(
-    RESULTS,
-    `${JSON.stringify({ corpus: root, commit: pinnedCommit(), passed, failed, skipped, results }, null, 2)}\n`,
-    'utf8',
-  );
   const skipCounts = new Map<string, number>();
   for (const result of results.filter((item) => item.verdict === 'skipped')) {
     const feature = /\(([^()]+)\)$/.exec(result.reason ?? '')?.[1];
@@ -486,6 +533,74 @@ async function main(): Promise<void> {
     )
   )
     process.exitCode = 1;
+}
+
+function writeResults(
+  path: string,
+  corpus: string | null,
+  results: readonly Test262Result[],
+): void {
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        corpus,
+        commit: pinnedCommit(),
+        passed: results.filter((result) => result.verdict === 'passed').length,
+        failed: results.filter((result) => result.verdict === 'failed').length,
+        skipped: results.filter((result) => result.verdict === 'skipped').length,
+        results,
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+}
+
+async function main(): Promise<void> {
+  // `--aggregate <dir>` judges a sharded run and never touches the corpus: the shards did the work,
+  // and this reads what they wrote. It is the only mode that can apply the gates (see loadShards).
+  const aggregate = process.argv.indexOf('--aggregate');
+  if (aggregate >= 0) {
+    const directory = process.argv[aggregate + 1];
+    if (directory === undefined) throw new Error('--aggregate requires a directory');
+    const results = loadShards(directory);
+    writeResults(RESULTS, corpusRoot(), results);
+    report(results);
+    return;
+  }
+  const root = corpusRoot();
+  if (!existsSync(join(root, 'test'))) {
+    process.stdout.write('test262: corpus missing — fetch with `pnpm run test262:fetch`\n');
+    writeResults(RESULTS, null, []);
+    process.stdout.write(
+      'test262: 0 passed, 0 skipped (corpus missing), 0 failed — pass rate 0.0%\n',
+    );
+    return;
+  }
+  const shard = parseShard(process.argv);
+  const all = testFiles(root);
+  const paths =
+    shard === undefined ? all : all.filter((_, index) => index % shard.total === shard.index - 1);
+  // The shared pool (tests/support/parallel.ts): each slot pulls the next test, so a slow compile
+  // never idles the others, and results stay indexed by test rather than by completion order —
+  // which is what keeps results.json deterministic.
+  const results = await pool(paths, (path, slot) => one(path, root, slot));
+  if (shard === undefined) {
+    writeResults(RESULTS, root, results);
+    report(results);
+    return;
+  }
+  // A shard reports its slice and gates NOTHING — `--aggregate` is where the run is judged. A shard
+  // that applied the ratchet to a quarter of the corpus would fail every time by construction.
+  writeResults(shardResultsPath(shard.index, shard.total), root, results);
+  const passed = results.filter((result) => result.verdict === 'passed').length;
+  const failed = results.filter((result) => result.verdict === 'failed').length;
+  const skipped = results.filter((result) => result.verdict === 'skipped').length;
+  process.stdout.write(
+    `test262 shard ${String(shard.index)}/${String(shard.total)}: ${String(passed)} passed, ${String(skipped)} skipped, ${String(failed)} failed of ${String(paths.length)}\n`,
+  );
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href)

@@ -5161,3 +5161,65 @@ divergence and wants its own task; the accessor fixtures put their capture case 
 so they test accessors rather than this.
 
 **Where in plan.md.** Step 12(c)'s record moves to `done.md`; step 12 keeps (d)–(f).
+
+## 198. Test262 on every commit costs 2–3.5 hours, so the job is sharded (2026-09-05)
+
+**The contradiction.** `ci.yml`'s Test262 job carried `timeout-minutes: 120` and a comment saying
+the ceiling existed so a long job would not "look hung". The ceiling was below what the job costs,
+so for three consecutive pushes CI was red for a reason that was not a conformance result:
+
+| run | outcome |
+|---|---|
+| 33698313848 | green in **1h42m31s** |
+| 33648633200 | green in **3h26m12s** |
+| 33791545034 / 33814794456 / 33848166181 | killed at **2h00m21s / 2h00m18s / 2h00m22s** |
+
+The three kills are the ceiling, not a test: they land within four seconds of 120 minutes, the log
+ends mid-run with `Terminate orphan process: pid (…) (node-MainThread)`, and no `test262:` summary
+line is ever written. A run that cannot report its number is the failure mode §9's opening paragraph
+exists to prevent, and it had been the state of `main` for days.
+
+**Why it costs that.** Measured, not estimated. `built-ins/Math` is 327 files of which 276 reach a
+build (the rest stop at the feature check); the run burns 298 CPU-seconds, so **~1.0 CPU-second per
+spawned test** — dominated by `node src/cli/main.ts` booting the `typescript` package once per test.
+Across the pinned corpus, `passed + failed + STA12xx skips` is ~24,700 spawns, i.e. ~24,700
+CPU-seconds. A 4-vCPU `ubuntu-24.04` runner at roughly half this host's per-core speed lands at
+2–3.5 h, which is exactly the observed spread — the 1h42m and 3h26m completions are the same job on
+a fast and a slow runner.
+
+**The decision: shard, do not relocate.** Moving the corpus to `nightly.yml` was the smaller change
+and was rejected: `ci.yml` says this job "makes the pinned conformance number visible on every
+commit", and a nightly number stops answering "did THIS commit move conformance". Raising the
+ceiling to 360 was also rejected — it makes every push wait 2–3.5 h for a green tick while fixing
+nothing about the cost. Four shards put each near 50 minutes and keep the per-commit property.
+
+**Round-robin, not contiguous.** `--shard=N/M` takes every Mth test from the sorted list. Cost per
+test spans two orders of magnitude and clusters by directory (`built-ins/Temporal` stops at a
+feature check; `language/expressions` compiles), so contiguous slices would finish hours apart and
+the job would still be paced by its worst shard. Round-robin measured 46/46/45/45 tests on a
+182-file slice with per-verdict counts within three of each other.
+
+**A shard gates nothing.** Both gates are statements about the corpus — the ratchet compares totals,
+`expected-fail.txt` names individual tests — and neither is decidable from a quarter of it. So a
+shard writes `results-N-of-M.json` and reports its slice; a separate `test262-report` job runs
+`--aggregate`, which reassembles the shards and applies the gates once. The reporting and gating
+code is shared verbatim by both paths rather than copied, so "conformance" has one definition.
+
+**Proof of equivalence.** On a 182-file slice, four shards plus `--aggregate` reproduce the
+unsharded run's stdout **byte-for-byte** (32 passed, 129 skipped, 21 unexplained failures), and both
+exit 1 on the same ratchet failure. stderr differs only in the `test-<pid>-<slot>.js` scratch names,
+which are per-process by construction.
+
+**Two ways a sharded run could lie, both closed.** A shard that dies uploads no artifact, and
+merging the survivors would publish a smaller corpus as if it were the whole one — fewer failures
+reads as a conformance win and sails past the ratchet; `--aggregate` therefore reads the divisor out
+of the file names and refuses a set that is not complete (`expected 4 shards …, found 3`). A shard
+run twice with the wrong `--shard=N/M` would merge its tests in twice and inflate the totals the
+same way; duplicate paths are refused too.
+
+**Latent, deliberately left alone.** The Test262 job still never builds `libjsrt.a` — no `just
+runtime` step, and `actions/cache` covers only the corpus — so anything reaching the link step gets
+`STA0011`. Measured with and without the archive on `language/types`, the verdicts are *identical*
+(11 passed, 82 skipped, 20 failed): nothing currently gets far enough for the archive to matter, and
+every pass is a negative-parse test that never links. Adding the archive would change the published
+number and must be its own change against a re-recorded ratchet, not a rider on a timeout fix.
