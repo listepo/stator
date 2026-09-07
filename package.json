@@ -4,7 +4,7 @@
   "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries",
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@11.20.0",
+  "packageManager": "pnpm@12.3.4",
   "engines": {
     "node": ">=24"
   },
