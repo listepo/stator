@@ -291,7 +291,7 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)**, **step 12 (c)–(f)**, and the **step-12 bookkeeping
+What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, and the **step-12 bookkeeping
 debt** below. Step 13 was added and landed on 2026-09-04 (plan-notes 193).
 
 **Step-12 bookkeeping debt (added 2026-09-04; plan-notes 191).** The builtins dashboard
@@ -374,19 +374,25 @@ dashboard's green direction (stale claims) already fails the run; its red direct
    `"undefined"` without throwing, and the three WRITE forms the suppression newly admitted were
    caught manufacturing `STA4034` and fixed in the same change — the TS2403 rule again, asked of 24
    syntactic positions instead of one fixture. · **2488 `Symbol.iterator`**
-   and **2454 TDZ** need their sites converted from `jsrt_panic` (an abort) to a throw, which changes
-   control flow at every caller and is its own change (plan-notes 195, divergence 3).
-   · **`missing.a = 1` and `missing[0] = 1` raise `STA4035`** — a PRE-EXISTING internal error this
-   step uncovered but did not cause and did not fix (plan-notes 197). TypeScript auto-declares a
-   global from a property assignment in a `.js` file, so the checker reports nothing for these and
-   they reached the lowering with a symbol long before 2304 was suppressed. Their answer is the same
-   `ReferenceError`; the work is telling a TS-synthesized JS global apart from a real binding.
+   needs runtime dispatch for unknown iterables, not only a panic-to-throw conversion.
+   **2454 definite assignment** rejects an uninitialized annotated binding whose runtime value is
+   `undefined`; it is **not TDZ**. True syntactic TDZ is 2448 (closure-mediated TDZ may have no
+   checker diagnostic), and there is no runtime TDZ sentinel/check to convert. Suppressing 2454
+   additionally requires sound dynamic method receivers rather than trusting the annotation
+   (plan-notes 200, correcting note 195's premise). Both buckets remain open.
+   · ~~**`missing.a = 1` and `missing[0] = 1` raise `STA4035`**~~ ✅ **fixed 2026-09-05**
+   (plan-notes 199; [done.md](done.md) → Phase 5 step 2a(c), inferred JS namespaces).
    ~~**Check:** `typeof unresolvableName` answers `"undefined"` without throwing and a bare
    unresolvable reference throws a catchable `ReferenceError` whose `name`/`message`/`instanceof`
    match Node~~ ✅ 2026-09-05 (`tests/golden/js/reference_error.js`,
-   `tests/golden/js/reference_error_write.js`). **Check:** the panic-to-throw conversion lands with a
-   golden that CATCHES each converted site;
-   and the two delete buckets (2704, 2790) land with the `delete` OPERATOR — lowering plus whatever
+   `tests/golden/js/reference_error_write.js`). ~~**Check:** the panic-to-throw conversion lands with a
+   golden that CATCHES each converted site~~ ✅ **2026-09-05** (plan-notes 200; evidence in
+   [done.md](done.md) → Phase 5 step 2a(c), catchable property and iterator failures) — the nullish
+   and primitive property sites and the iterator/generator receiver sites now throw Node's
+   `TypeError`, caught by `tests/golden/js/property_errors.js` and
+   `tests/golden/js/iterator_receiver_error.js`; the 2488/2454 buckets stay open for the reasons
+   above, which are not panics. **Check:** the two delete buckets (2704, 2790) land with the
+   `delete` OPERATOR — lowering plus whatever
    answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
    returns Node's boolean and the subsequent read answers `undefined`. Until then `STA1214
    (DeleteExpression)` is the honest verdict and this Check is what stops it being called done.
@@ -1148,3 +1154,17 @@ Standing practices:
 - **v3.10** (2026-09-04): **the spawn-heavy suites are parallel, and `ink` no longer loads on every spawn** (plan-notes 189). Task 6.1's process pool was lifted out of `tests/test262/run.ts` into `tests/support/parallel.ts` and reused by the subset and golden runners, which were still `spawnSync` in a `for` loop — extraction rather than a third copy, net **−19 lines**, `dupes` steady at 0.9%. Results stay indexed by item so a pooled run's failure list is diffable against a serial one's, and `STATOR_TEST_JOBS=1` restores the serial order without a stash. Separately, plan-notes 187 estimated the ink/react import at "tens of ms"; it measures **~1.6 s** and was paid at module scope by every process, including the `explain --json` and successful-`build` paths that never render — moving it inside `print` cut per-spawn cost **2349 ms → 843 ms**, and forced the `print`/`build`/`explain`/`run` async cascade plus `withSpanAsync` in `src/support/telemetry.ts` (the sync form ends a span the moment an async fn returns a pending promise). Measured uncontended at 16-way parallelism, both columns carrying the ink fix: **`test:subset` 109.7 s → 17.4 s (6.3×)**, **`test:golden` 151.0 s → 44.5 s (3.4×)**. No dependency added — `node:child_process` and `availableParallelism()`. Byte-exactness held: golden **147/147** on stdout *and* stderr.
 - **v4.0** (2026-09-04): **the plan's six unmade decisions are made** (plan-notes 190). Every one was a sentence in this file telling the reader to decide something before proceeding, and none of them had been answered — two of them gating the phase that is open right now. Settled: the **Node pin stays 26.7.0** (notes #9, unresolved since 2026-08-29 and marked "settle it before Phase 6's fuzzing leans on it", which is the next task); **accessors** get a get/set pair on a shape entry, `docs/VALUE.md` §4.15 — following `docs/SUBSET.md`'s existing `dynamic` verdict for the row rather than inventing a competing one, so `JSRTClass` gains nothing — unblocking §8 step 12(c)/(d); **method values** need no bound closure at all, §4.16 — `const f = o.m` does not bind in JavaScript, so the method's own `JSRTClosure` is the answer and the second closure representation step 12(e) was told to expect is reserved for `Function.prototype.bind` — unblocking step 12(e); **CI does not commit benchmark results to `main`** (Task 6.3 step 6); **Ryū rides §12** rather than becoming a task (note 188's unclaimed follow-up); and **the computed specifier of `import()` is confirmed Phase 8's** (§11 step 7's "only if owner-confirmed" pointed at a confirmation nobody had recorded). No code changed: this is §15.6 applied to the plan's own backlog of deferred judgment.
 - **v4.1** (2026-09-04): **plan-notes 187's written-down remaining work verified, and two green-signal hazards found and planned (plan-notes 191).** The uncommitted 187 tree ran its remaining suites under the pinned Node: unit **367/367** (telemetry 3/3), subset **342 — 311 passed / 31 expected-fail / 0 failed**, golden **147/147** (also under ASan/UBSan), coverage 90.04%, dupes 0.9%, leak plateau 3024 KB. First hazard: the host shell resolves bare `node` to mise's `node/lts` (24.20.0) ahead of the shims while the pin is 26.7.0 — the golden runner diffs against `process.execPath`, so pre-fix "green" runs used the wrong oracle, and `--test-coverage-include-all` exits 9 under 24. 187's "mise trust gap" misattributed it; the PATH order is the mechanism. New **Task 6.2a** fails CI fast when bare `node` is off-pin. Second hazard: the builtins dashboard drifted RED — `Promise.prototype.then/catch/finally` and `Object.freeze`/`isFrozen` landed with step 11 (`b8a0ac8`) but `builtins_coverage.json` still claims `[]`, so `test:builtins` reports `Promise.prototype: 0/3 (0%)` while golden proves all three; the dashboard checks stale-green claims but has no red-direction check. §8 gains **step-12 bookkeeping debt**: cite the landed fixtures, write the js-column freeze twin, and add a unit check cross-referencing the table against the runtime's exported `jsrt_<ns>_<member>` symbols so implemented-but-unclaimed members fail the build. Neither was fixed in place — the session's instruction was to plan them and stop.
+- **v4.2** (2026-09-05): **§8 step 2a(c)'s remaining residue narrowed to what is really left.** Two
+  landings, both archived in `done.md` → Phase 5 step 2a(c): `missing.a = 1` / `missing[0] = 1` no
+  longer raise `STA4035` (plan-notes 199 — a TS-inferred expando namespace is not a runtime
+  binding, one lowering predicate shared by reads, writes, `typeof` and receiver typing), and the
+  "panic-to-throw" Check landed for the sites that actually were panics (plan-notes 200 — nullish
+  and primitive property access and the iterator/generator receiver casts now throw Node's
+  `TypeError`; a JS function whose `@returns {Generator}` lied had SIGSEGVed in `for-of`). That
+  work corrected note 195's premise: **2454 is definite assignment, not TDZ**, and there is no
+  runtime TDZ check to convert; 2488 needs runtime `GetIterator` dispatch, not a throw. Both stay
+  open with the corrected reasons, as does the `delete`-operator Check. Emitter side effect: every
+  dynamic property/index read, read-modify-write, and `Object` static call now roots its result and
+  checks pending, and `Object.assign`, `JSON.stringify` and `console.table` snapshot keys rather
+  than entries so getter/setter ordering matches Node. Evidence: `pnpm run ci` green (383 unit tests; `subset: 356 fixtures — 327 passed,
+  29 expected-fail, 0 failed`; `golden: 163 fixtures — 163 passed`; the same 163 under ASan/UBSan).

@@ -56,6 +56,10 @@ jsrt_value jsrt_iterator_match_all_new(jsrt_value str, jsrt_value matcher) {
 
 static JSRTIterator *as_iter(jsrt_value v) { return (JSRTIterator *)jsrt_ptr(v); }
 
+static bool is_iterator(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) && jsrt_as_object(v)->cls == &jsrt_class_iterator;
+}
+
 static bool array_step(JSRTIterator *it, jsrt_value *out) {
   const JSRTArray *a = jsrt_as_array(it->target);
   if (it->index >= a->length) {
@@ -149,7 +153,8 @@ static JSRTGenerator *as_gen(jsrt_value v) { return (JSRTGenerator *)jsrt_ptr(v)
  * later `next()` answers done. */
 static jsrt_value generator_inject(jsrt_value gen, jsrt_value value, uint8_t inject) {
   if (!jsrt_is_generator(gen)) {
-    jsrt_panic("STA4071: generator close on a value that is not a generator");
+    jsrt_throw_error(&jsrt_class_type_error, "Generator method called on incompatible receiver");
+    return JSRT_UNDEFINED;
   }
   JSRTGenerator *g = as_gen(gen);
   /* GeneratorResumeAbrupt (ECMA-262 27.5.1.3): suspendedStart and completed share one answer,
@@ -212,6 +217,10 @@ bool jsrt_iterator_step(jsrt_value itv, jsrt_value *out) {
   if (jsrt_is_generator(itv)) {
     return generator_step(itv, JSRT_UNDEFINED, out);
   }
+  if (!is_iterator(itv)) {
+    jsrt_throw_error(&jsrt_class_type_error, "Iterator method called on incompatible receiver");
+    return false;
+  }
   JSRTIterator *it = as_iter(itv);
   if (it->index == ITER_DONE) {
     return false;
@@ -240,6 +249,9 @@ jsrt_value jsrt_iterator_next(jsrt_value itv, jsrt_value sent) {
   (void)sent;
   jsrt_value value;
   if (!jsrt_iterator_step(itv, &value)) {
+    if (jsrt_pending()) {
+      return JSRT_UNDEFINED;
+    }
     return iterator_result(JSRT_UNDEFINED, true);
   }
   return iterator_result(value, false);

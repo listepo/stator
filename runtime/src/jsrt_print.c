@@ -1377,8 +1377,7 @@ void jsrt_console_table(jsrt_value v) {
     return;
   }
 
-  /* Rows, as (index label, value). An array indexes by position; an object by its own keys, in
-   * the enumeration order `Object.entries` already fixes for both layouts. */
+  /* Snapshot keys, not getter results: read each row only when it is about to be processed. */
   StrVec labels;
   sv_init(&labels);
   StrVec row_values; /* the `Values` cell, or an empty string when the row has key columns */
@@ -1396,7 +1395,10 @@ void jsrt_console_table(jsrt_value v) {
   bool any_values = false;
 
   const bool from_array = jsrt_is(v, JSRT_TAG_ARRAY);
-  const jsrt_value rows = from_array ? v : jsrt_object_entries(v);
+  const jsrt_value rows = from_array ? v : jsrt_object_keys(v);
+  if (jsrt_pending()) {
+    goto cleanup;
+  }
   const JSRTArray *row_list = jsrt_as_array(rows);
   row_count = row_list->length;
   key_counts = (size_t *)calloc(row_count == 0 ? 1 : row_count, sizeof(size_t));
@@ -1413,12 +1415,15 @@ void jsrt_console_table(jsrt_value v) {
       sv_push(&labels, buf_take(&label));
       value = row_list->elements[i];
     } else {
-      const JSRTArray *pair = jsrt_as_array(row_list->elements[i]);
+      const jsrt_value key = row_list->elements[i];
+      value = jsrt_get_prop(v, jsrt_shape_key(key), NULL);
+      if (jsrt_pending()) {
+        goto cleanup;
+      }
       Buf label;
       buf_init(&label);
-      inspect_scalar(&label, pair->elements[0], false); /* a key prints unquoted */
+      inspect_scalar(&label, key, false); /* a key prints unquoted */
       sv_push(&labels, buf_take(&label));
-      value = pair->elements[1];
     }
 
     if (!tabular_row(value)) {
@@ -1440,7 +1445,11 @@ void jsrt_console_table(jsrt_value v) {
       }
       continue;
     }
-    const JSRTArray *entries = jsrt_as_array(jsrt_object_entries(value));
+    const jsrt_value row_entries = jsrt_object_entries(value);
+    if (jsrt_pending()) {
+      goto cleanup;
+    }
+    const JSRTArray *entries = jsrt_as_array(row_entries);
     for (uint32_t k = 0; k < entries->length; k++) {
       const JSRTArray *pair = jsrt_as_array(entries->elements[k]);
       Buf name;
@@ -1518,6 +1527,7 @@ void jsrt_console_table(jsrt_value v) {
   buf_free(&out);
   free(grid);
   free(widths);
+cleanup:
   free(key_counts);
   sv_free(&labels);
   sv_free(&row_values);
@@ -1699,6 +1709,9 @@ static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
         buf_puts(out, "null");
       } else {
         json_value(out, a->elements[i], &here);
+        if (jsrt_pending()) {
+          return;
+        }
       }
     }
     buf_putc(out, ']');
@@ -1711,23 +1724,29 @@ static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
     }
     json_check_cycle(jsrt_ptr(v), chain);
     const JSONAncestor here = {jsrt_ptr(v), chain};
-    /* The one enumeration walk the runtime has; the pairs array is transient and stack-reachable
-     * while this frame lives, which is what the collector scans. */
-    const JSRTArray *entries = jsrt_as_array(jsrt_object_entries(v));
+    /* A nested value may throw during serialization. Later getters must not run before it. */
+    const JSRTArray *keys = jsrt_as_array(jsrt_object_keys(v));
     buf_putc(out, '{');
     bool first = true;
-    for (uint32_t i = 0; i < entries->length; i++) {
-      const JSRTArray *pair = jsrt_as_array(entries->elements[i]);
-      if (json_unserializable(pair->elements[1])) {
+    for (uint32_t i = 0; i < keys->length; i++) {
+      const jsrt_value key = keys->elements[i];
+      const jsrt_value value = jsrt_get_prop(v, jsrt_shape_key(key), NULL);
+      if (jsrt_pending()) {
+        return;
+      }
+      if (json_unserializable(value)) {
         continue; /* an unserializable VALUE drops its key */
       }
       if (!first) {
         buf_putc(out, ',');
       }
       first = false;
-      json_quote(out, (const JSString *)jsrt_ptr(pair->elements[0]));
+      json_quote(out, (const JSString *)jsrt_ptr(key));
       buf_putc(out, ':');
-      json_value(out, pair->elements[1], &here);
+      json_value(out, value, &here);
+      if (jsrt_pending()) {
+        return;
+      }
     }
     buf_putc(out, '}');
     return;
@@ -1740,6 +1759,10 @@ jsrt_value jsrt_json_stringify(jsrt_value v) {
   Buf out;
   buf_init(&out);
   json_value(&out, v, NULL);
+  if (jsrt_pending()) {
+    buf_free(&out);
+    return JSRT_UNDEFINED;
+  }
   const jsrt_value result = jsrt_string_from_utf8(out.data == NULL ? "" : out.data, out.len);
   buf_free(&out);
   return result;

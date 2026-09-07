@@ -641,6 +641,13 @@ flag, thread-local, in `runtime/src/jsrt_throw.c`:
 - `jsrt_pending()` reads the flag. Generated C checks it after every operation that can run user
   code — `jsrt_call` in all its spellings — and jumps to the nearest landing pad. The return VALUE
   of an unwinding call is `JSRT_UNDEFINED` and meaningless; the flag is the channel.
+- Dynamic property/index reads and writes can throw on nullish receivers or from accessors.
+  Their generated callers root the receiver/result and check pending before consuming the result
+  or evaluating a later operand. `Object.values`/`entries` stop on a throwing getter;
+  `Object.assign` snapshots keys, then alternates each source get and target set, checking after
+  both. Enumeration roots its partially built result across callbacks. `JSON.stringify` and
+  `console.table` also propagate property exceptions, freeing partial output instead of printing
+  it, and read each property/row only when processing it so nested failures stop later getters.
 - `jsrt_take_exception()` clears both and hands over the value. A pad that handles the exception
   takes exactly once; not taking would make every later call in the handler appear to throw.
 - `jsrt_uncaught()` is main's pad of last resort: prints `Uncaught <value>` to STDERR (stdout stays

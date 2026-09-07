@@ -21,3 +21,15 @@ for (let i = 0; i < 2; i++) {
 }
 console.log(pair[0].x);
 console.log(pair[1].x);
+
+Object.defineProperty(obj, 'bad', {
+  enumerable: true,
+  get() { throw new TypeError('access failed'); }
+});
+for (const operation of [Object.values, Object.entries, (o) => Object.assign(halves, o)]) {
+  try { operation(obj); } catch (e) { console.log(e.message); }
+}
+console.log(halves.val);
+for (const operation of [JSON.stringify, console.table, (o) => console.table([o])]) {
+  try { operation(obj); } catch (e) { console.log(e.message); }
+}

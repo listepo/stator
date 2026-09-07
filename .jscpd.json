@@ -6,6 +6,7 @@
   "reporters": ["ai"],
   "threshold": 1,
   "ignore": [
+    "**/.claude/worktrees/**",
     "**/node_modules/**",
     "dist/**",
     "coverage/**",

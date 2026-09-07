@@ -1367,6 +1367,26 @@ function lowerExpressionAsStatement(
   return { kind: 'expression-statement', type: exp.type, span, expression: exp };
 }
 
+/** Expando assignments can give an undeclared JS name a checker namespace, but no runtime slot.
+ * Real declarations may merge into that symbol too, so Assignment flags alone are not enough. */
+function isUnresolvableIdentifier(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+  bindings: Map<string, HType>,
+): boolean {
+  if (bindings.has(node.text)) {
+    return false;
+  }
+  const symbol = checker.getSymbolAtLocation(node);
+  return (
+    symbol === undefined ||
+    ((symbol.flags & ts.SymbolFlags.Assignment) !== 0 &&
+      symbol.declarations !== undefined &&
+      symbol.declarations.length > 0 &&
+      symbol.declarations.every(ts.isIdentifier))
+  );
+}
+
 /** An assignment or update whose TARGET is a name nothing declares.
  *
  * In strict mode -- which §1.2 makes every module, both modes -- PutValue on an unresolvable
@@ -1375,20 +1395,14 @@ function lowerExpressionAsStatement(
  * a simple `=` evaluates its right side BEFORE the throw (`missing = side()` runs `side`), while a
  * compound assignment or an update reads the target first and throws before the right side runs.
  *
- * The symbol test is what keeps this narrow. TypeScript auto-declares a global from a property
- * assignment in a `.js` file (`missing.a = 1` reports nothing and HAS a symbol), so only the forms
- * the checker actually refused with TS2304 -- the ones js mode now suppresses -- arrive here. */
+ * A synthesized namespace from a sibling property assignment is not a real declaration either. */
 function undeclaredWriteTarget(
   expr: ts.Expression,
   checker: ts.TypeChecker,
   bindings: Map<string, HType>,
 ): { node: ts.Identifier; rhs?: ts.Expression } | undefined {
   const unresolved = (node: ts.Expression): ts.Identifier | undefined =>
-    ts.isIdentifier(node) &&
-    bindings.get(node.text) === undefined &&
-    checker.getSymbolAtLocation(node) === undefined
-      ? node
-      : undefined;
+    ts.isIdentifier(node) && isUnresolvableIdentifier(node, checker, bindings) ? node : undefined;
   if (ts.isBinaryExpression(expr)) {
     const target = unresolved(expr.left);
     if (target === undefined) {
@@ -3023,12 +3037,11 @@ function lowerExpression(
     }
     if (!binding) {
       // Two different failures wear the same shape here, and telling them apart is the whole point.
-      // A name the CHECKER could not resolve is a `ReferenceError` the program is entitled to catch
-      // -- js mode drops TS2304/TS2552 precisely so this can be the answer (plan.md §8 step 2a(c)).
-      // A name the checker DID resolve, arriving with no binding, is a compiler bug: the gate is
+      // An unresolved name (including an expando-only namespace) is a catchable `ReferenceError`.
+      // A name with a real declaration, arriving with no binding, is a compiler bug: the gate is
       // supposed to have refused every global the HIR has no vocabulary for, so reaching here means
       // the accept set and the lowering disagree, which is what STA4035 exists to report.
-      if (checker.getSymbolAtLocation(node) === undefined) {
+      if (isUnresolvableIdentifier(node, checker, bindings)) {
         return {
           kind: 'reference-error',
           type: hUnknown(false),
@@ -3084,11 +3097,7 @@ function lowerExpression(
     while (ts.isParenthesizedExpression(operandNode)) {
       operandNode = operandNode.expression;
     }
-    if (
-      ts.isIdentifier(operandNode) &&
-      bindings.get(operandNode.text) === undefined &&
-      checker.getSymbolAtLocation(operandNode) === undefined
-    ) {
+    if (ts.isIdentifier(operandNode) && isUnresolvableIdentifier(operandNode, checker, bindings)) {
       return {
         kind: 'string-literal',
         type: H_STRING,
@@ -5133,6 +5142,11 @@ function typeParameterKey(name: string): string {
  * exactly. */
 function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Map<string, HType>): HType {
   if (ts.isIdentifier(node)) {
+    // An expando namespace has a checker shape, but its runtime read throws instead of producing
+    // an object with that layout. Property consumers must agree with the reference-error's type.
+    if (isUnresolvableIdentifier(node, checker, bindings)) {
+      return hUnknown(false);
+    }
     const symbol = checker.getSymbolAtLocation(node);
     if (
       symbol !== undefined &&

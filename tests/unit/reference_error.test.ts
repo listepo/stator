@@ -1,9 +1,9 @@
 /** Reading a name nothing declares (plan.md §8 step 2a(c)).
  *
  * The invariant under test is the one that is easy to get wrong and expensive when it is: the
- * lowering must keep TWO look-alike failures apart. A name the CHECKER could not resolve is a
- * `ReferenceError` the program may catch; a name the checker DID resolve, arriving with no binding,
- * is a compiler bug (`STA4035`) — the gate is supposed to have refused every global the HIR has no
+ * lowering must keep TWO look-alike failures apart. A name with no runtime declaration (even if
+ * the checker synthesizes an expando namespace) is a catchable `ReferenceError`; a real declaration
+ * arriving with no binding is a compiler bug (`STA4035`) — the gate must refuse globals the HIR has no
  * vocabulary for. Collapsing them would make the new node swallow compiler bugs silently, which is
  * exactly the failure mode TS2403 demonstrated when a suppression turned `STA0012` into `STA4004`.
  */
@@ -11,7 +11,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { Expression, ReferenceErrorRead } from '../../src/hir/nodes.ts';
-import { lowerSource } from './helpers.ts';
+import { lowerSourceFile } from '../../src/lower/index.ts';
+import { createProgram, hirNodes, lowerSource } from './helpers.ts';
 
 /** The first expression-statement's expression, whatever it is. */
 function firstExpression(code: string, fileName: string): Expression {
@@ -116,6 +117,58 @@ test('writes never reach the internal "assigned before declaration" error', () =
     assert.deepEqual(
       diagnostics.map((d) => d.code),
       [],
+      code,
+    );
+  }
+});
+
+test('JS expando namespace symbols do not create runtime bindings', () => {
+  for (const code of [
+    'missing.a = 1;',
+    'missing[0] = 1;',
+    'missing["a"] = 1;',
+    'missing.a = 1; missing;',
+    'missing.a = 1; missing = 2;',
+    'missing.a = 1; missing += 2;',
+    'missing.a = 1; missing++;',
+  ]) {
+    const { module, diagnostics } = lowerSource(code, '/t.js');
+    assert.deepEqual(diagnostics, [], code);
+    assert.ok(
+      hirNodes(module).some((node) => node.kind === 'reference-error'),
+      code,
+    );
+  }
+});
+
+test('typeof a synthesized JS namespace still short-circuits the missing reference', () => {
+  const expr = firstExpression('typeof (missing); missing.a = 1;', '/t.js');
+  assert.equal(expr.kind, 'string-literal');
+  assert.equal(expr.kind === 'string-literal' ? expr.value : '', 'undefined');
+});
+
+test('expando declarations merged with a real binding do not become reference-errors', () => {
+  const { module, diagnostics } = lowerSource('const real = { a: 0 }; real.a = 1; real;', '/t.js');
+  assert.deepEqual(diagnostics, []);
+  assert.ok(hirNodes(module).every((node) => node.kind !== 'reference-error'));
+  const read = module.statements[2];
+  assert.equal(read?.kind === 'expression-statement' ? read.expression.kind : '', 'identifier');
+});
+
+test('real declarations without lowered bindings retain their internal diagnostic', () => {
+  for (const code of [
+    'String;',
+    'later.a = 1; let later;',
+    'declared.a = 1; declare const declared: { a: number };',
+  ]) {
+    // Bypass the gate/checker deliberately: these are lowering-invariant tests, not accepted input.
+    const { program, sourceFile } = createProgram(
+      code,
+      code.includes('declare ') ? '/t.ts' : '/t.js',
+    );
+    const { diagnostics } = lowerSourceFile(sourceFile, program.getTypeChecker());
+    assert.ok(
+      diagnostics.some((diagnostic) => diagnostic.code === 'STA4035'),
       code,
     );
   }

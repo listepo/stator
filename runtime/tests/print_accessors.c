@@ -14,6 +14,7 @@
 
 #include "corpus.h"
 
+#include <assert.h>
 #include <stdio.h>
 
 /* An accessor body is an ordinary function unit with the receiver as parameter zero, which is what
@@ -37,6 +38,21 @@ static jsrt_value get_captured(uint32_t argc, const jsrt_value *argv, JSRTEnv *e
   (void)argc;
   (void)argv;
   return env->slots[0];
+}
+
+static jsrt_value fail_access(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {
+  (void)argc;
+  (void)argv;
+  (void)env;
+  jsrt_throw_error(&jsrt_class_type_error, "access failed");
+  return JSRT_UNDEFINED;
+}
+
+static void check_access_error(void) {
+  assert(jsrt_pending());
+  const jsrt_value error = jsrt_take_exception();
+  assert(jsrt_instanceof(error, &jsrt_class_type_error));
+  jsrt_print(jsrt_get_prop(error, "message", NULL));
 }
 
 int main(void) {
@@ -79,6 +95,23 @@ int main(void) {
   }
   jsrt_print(jsrt_get_prop(pair[0], "x", NULL));
   jsrt_print(jsrt_get_prop(pair[1], "x", NULL));
+
+  jsrt_define_accessor(obj, "bad", jsrt_closure_new(fail_access, 1, "bad", NULL),
+                       JSRT_UNDEFINED);
+  assert(jsrt_object_values(obj) == JSRT_UNDEFINED);
+  check_access_error();
+  assert(jsrt_object_entries(obj) == JSRT_UNDEFINED);
+  check_access_error();
+  assert(jsrt_object_assign(halves, obj) == JSRT_UNDEFINED);
+  check_access_error();
+  jsrt_print(jsrt_get_prop(halves, "val", NULL)); /* Earlier properties were already copied. */
+  assert(jsrt_json_stringify(obj) == JSRT_UNDEFINED);
+  check_access_error();
+  jsrt_console_table(obj);
+  check_access_error();
+  JSRT_LOCAL(2) = jsrt_array_new(1, &obj);
+  jsrt_console_table(JSRT_LOCAL(2));
+  check_access_error();
 
   JSRT_FRAME_POP();
   return 0;

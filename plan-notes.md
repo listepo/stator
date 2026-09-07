@@ -5573,3 +5573,96 @@ folded into this change.
 
 **Still open under step 2a(c) after this:** 2488 `Symbol.iterator` and 2454 TDZ (panic-to-throw), and
 the two delete buckets 2704/2790 (the `delete` operator has no lowering at all — notes 196).
+
+## 199. Inferred JS namespaces do not declare runtime bindings (2026-09-05)
+
+Fixes the `missing.a = 1` / `missing[0] = 1` internal-error residue explicitly left open by
+note 197 and plan §8 step 2a(c). On pinned TypeScript 6.0.3, both programs have no checker
+diagnostics but lower to `STA4035`. Their symbols have `SymbolFlags.Assignment` and only bare
+`Identifier` declarations: TypeScript inferred an expando namespace, not a runtime declaration.
+
+**The distinction is declarations, not just flags.** `const real = { a: 0 }; real.a = 1` has
+the same Assignment flag, but its symbol merges a `VariableDeclaration` with the expando
+identifier. Real bindings must remain real, and a missing lowered slot for a real declaration
+must still report the internal error rather than silently becoming a runtime throw.
+
+One shared `isUnresolvableIdentifier` predicate in `src/lower/index.ts` recognizes an absent
+binding whose symbol is either missing or an Assignment symbol with a nonempty, all-Identifier
+declaration list. Reads, `typeof`, and bare writes use it. `typeAt` must use it too: the inferred
+namespace shape is not an object layout the program ever produces, and a property consumer must
+agree with `ReferenceErrorRead`'s Unknown type instead of asking for a fixed field slot.
+No mode check, new HIR node, runtime change, dependency, or checker suppression is needed.
+
+**Proof before/after:** the two new regression tests failed before the implementation
+(`lowerSourceFile should produce a module`); the focused suite now passes **14/14**.
+`tests/golden/js/reference_error_property.js` compiles and its native stdout is byte-identical
+to Node v26.7.0 (`diff -u` exits 0). It catches both property-write forms, proves that neither
+the key nor RHS runs after a missing receiver, and distinguishes bare assignment (RHS runs)
+from compound assignment/update (RHS does not run). It also covers `typeof`, `finally`, and real
+and shadowing declarations. Both-mode decision fixtures keep ts mode at `STA0012` and js mode
+dynamic. Unit tests bypass the gate deliberately to verify that real declarations and unsupported
+globals still retain `STA4035` when no lowered binding exists.
+
+The Test262 corpus was not rerun or rebaselined; no aggregate conformance improvement is claimed.
+The panic-to-throw and delete work remain open under step 2a(c).
+
+**Full Check:** `pnpm run ci` exits 0 under Node v26.7.0: **382/382 unit tests**, subset **356
+fixtures — 327 passed, 29 expected-fail, 0 failed**, golden **161/161**, the same **161/161 under
+ASan/UBSan**, runtime print corpora matching Node in both builds, and the 10M-object leak loop
+plateauing at **3040 KB**. Typecheck, lint, duplication gate and builtins dashboard passed too.
+The completion record moved to `done.md`, leaving the specific bug's struck-through stub in
+`plan.md`; the rest of step 2a(c) remains live.
+
+## 200. Catchable property/iterator failures, not a fictitious TDZ conversion (2026-09-05)
+
+Step 2a(c)'s panic-to-throw premise mixed three mechanisms. A JS function annotated
+`@returns {Generator<number, void, unknown>}` but returning `1` built successfully and SIGSEGVed
+when used in `for-of`; Node caught a `TypeError`. Iterator step/next and generator return/throw
+now validate their descriptor before casting and leave a catchable TypeError in the pending cell.
+Impossible internal iterator kinds remain compiler panics. This does **not** implement dynamic
+GetIterator or justify suppressing checker diagnostic 2488.
+
+Nullish property gets/sets and primitive writes likewise raise TypeError instead of aborting.
+Dynamic property/index reads root their receiver/result and check pending immediately, as do
+dynamic indexed writes and read-modify-write reads (before evaluating the RHS). Object static
+calls now check pending too. Enumeration stops on a throwing getter and roots its partially
+built output across callbacks. `Object.assign` snapshots **keys**, then alternates each get/set:
+the old eager `collect(OBJ_ENTRIES)` ran later getters before earlier writes, losing partial
+assignment and running getters even after a setter should have thrown.
+
+The consumer audit found two additional paths through `jsrt_object_entries`: `JSON.stringify`
+and `console.table`. Both now propagate errors and free their partial output/scratch storage;
+their generated callers check pending in statement and expression positions. They snapshot keys
+and process values one at a time so a nested serialization/row error prevents later getters,
+instead of eagerly getting every property before the recursive operation has begun.
+
+**The corrected premise:** TS2454 is definite assignment, not TDZ. An uninitialized annotated
+binding holds `undefined`; syntactic TDZ is TS2448 and closure-mediated TDZ can evade both codes.
+There is no runtime TDZ sentinel/check to convert. A trial suppressing 2454 and widening those
+bindings exposed internal receiver checks for string/array/date/regexp methods (STA4081/4082/
+4092/4086). The trial was removed. These buckets remain open until admitted programs compile
+soundly, rather than trading checker diagnostics for internal errors. No suppression lands here.
+
+Focused evidence: `node --test tests/unit/property-errors.test.ts` passes; `pnpm run test:runtime`
+reports `runtime: print corpus matches Node`. The iterator corpus tests six incompatible receiver
+tags across step/next/return/throw, and the accessor corpus checks abrupt enumeration and partial
+assignment. `property_errors.js` and `iterator_receiver_error.js` match Node v26.7.0 byte-for-byte;
+the former covers operand ordering, warm ICs, catch/finally, and Object.assign getter/setter stops.
+No Test262 ratchet change.
+
+**Full Check:** `pnpm run ci` exits 0 under Node v26.7.0: **383/383 unit tests**, dupes 0.9%,
+subset **356 fixtures — 327 passed, 29 expected-fail, 0 failed**, golden **163/163** and the same
+**163/163 under ASan/UBSan**, both runtime print corpora (now including `print_iterators`) matching
+Node, builtins dashboard 217/238, and the 10M-object leak loop plateauing at **3040 KB**. The
+"panic-to-throw" Check in `plan.md` §8 step 2a(c) is struck through pointing here; its record is in
+`done.md` → Phase 5 step 2a(c). The 2488 and 2454 buckets and the delete Check stay live.
+
+The final aggregate rerun including JSON/table caller cleanup and nested-getter regressions is
+`/tmp/stator-phase5-errors-ci.log` (exit 0; 75 clones, 0.9% duplication; the same test counts above).
+
+## 201. Nested worktrees are not parent source (2026-09-05)
+
+An independent `.claude/worktrees/delete-op` checkout made even a focused Biome command fail with
+`Found a nested root configuration`. Exclude `.claude/worktrees` from the parent Biome and CPD
+scan roots; all production source rules and thresholds stay unchanged. The nested checkout and
+its configuration are untouched. This is scan ownership, not a source lint exemption.

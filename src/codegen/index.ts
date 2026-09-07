@@ -18,6 +18,7 @@ import type {
   DateNew,
   DateOp,
   DateStaticCall,
+  DynFieldAccess,
   DynFieldAssignment,
   DynObjectLiteral,
   EnvCapture,
@@ -313,8 +314,10 @@ class Emitter {
   /** Frame slot holding each short-circuit operator's left operand. Keyed by node identity, since
    * two `&&`s in one expression must not share a slot: the outer one's value stays live while the
    * inner one is being evaluated. */
-  private tempSlots: Map<AwaitExpr | LogicalOp | YieldExpr | ConditionalExpr | UpdateExpr, number> =
-    new Map();
+  private tempSlots: Map<
+    AwaitExpr | LogicalOp | YieldExpr | ConditionalExpr | UpdateExpr | DynFieldAccess,
+    number
+  > = new Map();
   /* C does not specify which operand of an operator or function call it evaluates first. Every
    * BinaryOp therefore gets two rooted slots: emitting `left` into the first before `right` into
    * the second makes the JavaScript left-to-right rule explicit, and preserves the left value if
@@ -1297,9 +1300,6 @@ class Emitter {
       // No slot: the read is a dereference with nothing allocated between evaluating the target
       // and using it, so there is no window in which the object could go unrooted.
       case 'field-access':
-      // jsrt_get_prop allocates nothing and runs no user code -- a chain walk and a load -- so
-      // the dynamic read is as slot-free as the static one.
-      case 'dyn-field-access':
       // A match read is a property load or a header read -- same story, nothing allocated. So is
       // a regexp read: a struct field or a bit test.
       case 'match-read':
@@ -1307,6 +1307,10 @@ class Emitter {
       // Same as a field read: the test is a pointer comparison against a static descriptor, with
       // nothing allocated between evaluating the target and using it.
       case 'instanceof':
+        this.countExpression(expr.target);
+        break;
+      case 'dyn-field-access':
+        this.tempSlots.set(expr, this.slotCount++);
         this.countExpression(expr.target);
         break;
       // One allocator call with no operands: nothing is evaluated between the allocation and the
@@ -1357,6 +1361,9 @@ class Emitter {
         // has to append. See the `console-log` case in emitExpression for why the two differ.
         if (stmt.expression.kind === 'console-log') {
           this.appendLine(`${this.consoleCall(stmt.expression)};`, stmt.span);
+          if (stmt.expression.method === 'table') {
+            this.emitPendingCheck(stmt.span);
+          }
           break;
         }
         const expr = this.emitExpression(stmt.expression);
@@ -1569,6 +1576,9 @@ class Emitter {
             ? `jsrt_dyn_index_set(${target}, ${index}, ${value}, NULL)`
             : `jsrt_array_set(${target}, ${index}, ${value})`;
         this.appendLine(`${set};`, stmt.span);
+        if (stmt.target.type.kind === 'unknown') {
+          this.emitPendingCheck(stmt.span);
+        }
         break;
       }
 
@@ -2431,6 +2441,11 @@ class Emitter {
       // takes `consoleCall` bare instead, because `(jsrt_print(x), JSRT_UNDEFINED);` is a
       // -Wunused-value warning on every console.log in the program.
       case 'console-log': {
+        if (expr.method === 'table') {
+          this.appendLine(`${this.consoleCall(expr)};`, expr.span);
+          this.emitPendingCheck(expr.span);
+          return 'JSRT_UNDEFINED';
+        }
         return `(${this.consoleCall(expr)}, JSRT_UNDEFINED)`;
       }
 
@@ -2483,6 +2498,12 @@ class Emitter {
           expr.target.type.kind === 'unknown'
             ? `jsrt_dyn_index_get(${target}, ${index}, NULL)`
             : `jsrt_array_get(${target}, ${index})`;
+        if (expr.target.type.kind === 'unknown') {
+          this.flushParts(parts, expr.span);
+          this.appendLine(`${target} = ${read};`, expr.span);
+          this.emitPendingCheck(expr.span);
+          return target;
+        }
         if (parts.length === 2) {
           return `(${parts.join(', ')}, ${read})`;
         }
@@ -2556,10 +2577,21 @@ class Emitter {
       }
 
       // The site's cache is a static JSRTIC: a hit is one pointer compare and one load, a miss
-      // walks the shape chain and refills it (docs/VALUE.md §4.10). Runs no user code, so no
-      // pending check -- and a missing property is `undefined`, not an error.
+      // walks the shape chain and refills it (docs/VALUE.md §4.10). A getter or nullish receiver
+      // can throw: root the result and unwind before any consumer or later operand executes.
       case 'dyn-field-access': {
-        return `jsrt_get_prop(${this.emitExpression(expr.target)}, ${cNameLiteral(expr.field)}, &${this.icSite()})`;
+        const slot = this.tempSlots.get(expr);
+        if (slot === undefined) {
+          throw new Error('dynamic property read was not registered during counting');
+        }
+        const result = this.slotAt(slot);
+        this.appendLine(`${result} = ${this.emitExpression(expr.target)};`, expr.span);
+        this.appendLine(
+          `${result} = jsrt_get_prop(${result}, ${cNameLiteral(expr.field)}, &${this.icSite()});`,
+          expr.span,
+        );
+        this.emitPendingCheck(expr.span);
+        return result;
       }
 
       // `index`, `input` and `groups` are PROPERTIES of the match array, so they read through the
@@ -2789,6 +2821,12 @@ class Emitter {
         // a runtime constant, not an emitted one, so it rides in front of the rooted slot.
         const leading = expr.kind === 'error-new' ? `&${errorDescriptor(expr.ctor)}, ` : '';
         const opCall = `${runtimeCall}(${leading}${this.slotAt(base)})`;
+        if (expr.kind === 'json-stringify') {
+          parts.push(`${this.slotAt(base)} = ${opCall}`);
+          this.flushParts(parts, expr.span);
+          this.emitPendingCheck(expr.span);
+          return this.slotAt(base);
+        }
         if (!flushed) {
           parts.push(opCall);
           return `(${parts.join(', ')})`;
@@ -2958,6 +2996,12 @@ class Emitter {
         });
         const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
         const opCall = `${name}(${operands})`;
+        if (expr.kind === 'object-static') {
+          parts.push(`${this.slotAt(base)} = ${opCall}`);
+          this.flushParts(parts, expr.span);
+          this.emitPendingCheck(expr.span);
+          return this.slotAt(base);
+        }
         if (!flushed) {
           parts.push(opCall);
           return `(${parts.join(', ')})`;
@@ -3605,6 +3649,12 @@ class Emitter {
       this.appendLine(`${write(result)};`, expr.span);
     } else {
       this.appendLine(`${result} = ${read};`, expr.span);
+      if (
+        place.kind === 'dyn-field-access' ||
+        (place.kind === 'index-access' && place.target.type.kind === 'unknown')
+      ) {
+        this.emitPendingCheck(expr.span);
+      }
       if (op === '++' || op === '--') {
         const next = `jsrt_number(jsrt_to_number(${result}) ${op === '++' ? '+' : '-'} 1.0)`;
         if (expr.prefix) {

@@ -40,7 +40,9 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
   const uint32_t count = dynamic ? jsrt_shape_property_count(dyn->shape) : fixed->cls->field_count;
   const JSRTShape **links = dynamic ? jsrt_shape_property_order(dyn->shape, count) : NULL;
 
-  jsrt_value out = jsrt_array_new(0, NULL);
+  /* A getter can allocate or collect; the partially built result is not reachable from v. */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; i < count; i++) {
     const uint32_t slot = dynamic ? links[i]->offset : jsrt_class_key_slot(fixed->cls, i);
     const char *key = dynamic ? links[i]->key : fixed->cls->fields[slot];
@@ -54,6 +56,11 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
      * read rather than repeated here. */
     if (select != OBJ_KEYS && jsrt_is_accessor_cell(value)) {
       value = jsrt_get_prop(v, key, NULL);
+      if (jsrt_pending()) {
+        free((void *)links);
+        JSRT_FRAME_POP();
+        return JSRT_UNDEFINED;
+      }
     }
     jsrt_value item;
     if (select == OBJ_KEYS) {
@@ -61,13 +68,17 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
     } else if (select == OBJ_VALUES) {
       item = value;
     } else {
+      JSRT_LOCAL(1) = value;
       const jsrt_value pair[2] = {key_string(key), value};
       item = jsrt_array_new(2, pair);
     }
-    jsrt_array_push(out, item);
+    JSRT_LOCAL(1) = item;
+    jsrt_array_push(JSRT_LOCAL(0), JSRT_LOCAL(1));
   }
   free((void *)links);
-  return out;
+  const jsrt_value result = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
+  return result;
 }
 
 jsrt_value jsrt_object_keys(jsrt_value v) { return collect(v, OBJ_KEYS); }
@@ -143,17 +154,27 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
  * the type system already listed it. A dynamic shape looks every key up through the shape table,
  * which is what makes a target that GROWS legal at all.
  *
- * `collect(OBJ_ENTRIES)` is the same walk `Object.entries` uses -- one order for both, so the
- * copy's insertion order and `Object.entries(src)` can never disagree. */
+ * Snapshot keys, not values: each source getter must run immediately before its target setter,
+ * and an exception must prevent all subsequent gets and sets. */
 jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   if (!jsrt_is_dynobj(target)) {
     jsrt_panic("STA4084: Object.assign onto a value that is not a dynamic-shape object");
   }
-  const jsrt_value pairs = collect(source, OBJ_ENTRIES);
-  const JSRTArray *list = jsrt_as_array(pairs);
+  const jsrt_value keys = collect(source, OBJ_KEYS);
+  if (jsrt_pending()) {
+    return JSRT_UNDEFINED;
+  }
+  const JSRTArray *list = jsrt_as_array(keys);
   for (uint32_t i = 0; i < list->length; i++) {
-    const JSRTArray *entry = jsrt_as_array(list->elements[i]);
-    jsrt_set_prop(target, jsrt_shape_key(entry->elements[0]), entry->elements[1], NULL);
+    const char *key = jsrt_shape_key(list->elements[i]);
+    const jsrt_value value = jsrt_get_prop(source, key, NULL);
+    if (jsrt_pending()) {
+      return JSRT_UNDEFINED;
+    }
+    jsrt_set_prop(target, key, value, NULL);
+    if (jsrt_pending()) {
+      return JSRT_UNDEFINED;
+    }
   }
   return target;
 }

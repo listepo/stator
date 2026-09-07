@@ -106,6 +106,13 @@ one is evaluated.
 - `ReturnStatement` — `return`, with an optional value
 - `Block` — sequence of statements
 
+Phase 5 step 2a(c) added `ReferenceErrorRead`: an expression typed `Unknown` carrying an
+undeclared name, not a binding. It throws through the existing pending-cell protocol. An inferred
+JS expando namespace (such as the checker symbol from `missing.a = 1`) supplies no runtime binding
+or fixed layout either; its reads and receiver types therefore use this same dynamic path. Real
+declarations merged into an expando symbol are not unresolvable. The `typeof` operator alone
+short-circuits a bare unresolvable identifier to the string `"undefined"` before lowering its read.
+
 Rung 5 added `ArrayLiteral`, `ArrayLength`, `IndexAccess` (a read), `IndexAssignment` (a write) and `ForOfStatement`.
 
 Rung 6a added classes: `ClassDeclaration` (a statement, in source order — a class is in its temporal dead zone until its declaration is reached), `NewExpr`, `FieldAccess` (a read), `FieldAssignment` (a write) and `MethodCall`. Three decisions in that set are load-bearing:

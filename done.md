@@ -1049,6 +1049,91 @@ is recorded as open in `plan.md` §8 step 2a(c) rather than folded into this cha
 Evidence: `pnpm run ci` green — 378 unit tests, `subset: 354 fixtures — 325 passed, 29
 expected-fail, 0 failed`, `golden: 160 fixtures — 160 passed`, and the same 160 under ASan/UBSan.
 
+**Inferred JS namespaces — property-reference errors fixed 2026-09-05** (plan-notes 199).
+Closes the specific `missing.a = 1` / `missing[0] = 1` residue recorded above. The checker may
+synthesize an expando namespace with only Identifier declarations; that is not a runtime binding.
+One lowering predicate now handles that distinction consistently for reads, writes, `typeof`, and
+receiver typing, reusing `ReferenceErrorRead` and the existing dynamic property path. Real
+declarations merged with expando metadata remain bindings; missing slots for real declarations
+still report `STA4035`.
+
+**Check evidence, Node v26.7.0:** the new regression tests failed before the fix; afterward
+`node --test tests/unit/reference_error.test.ts` reports **14 tests, 14 pass, 0 fail**.
+The new `tests/golden/js/reference_error_property.js` matches Node byte-for-byte and proves
+receiver-before-key/RHS ordering, bare-write ordering, `typeof`, catch/finally, and preserved real
+and shadowing bindings. Paired `subset_reference_error_property` fixtures preserve the two modes.
+`pnpm run ci` exits **0**:
+
+```text
+tests 382; pass 382; fail 0
+runtime: print corpus matches Node
+subset: 356 fixtures — 327 passed, 29 expected-fail, 0 failed
+golden: 161 fixtures — 161 passed, 0 failed
+leak: 10M objects — peak RSS 3040 KB, 39 samples, plateau
+runtime: print corpus matches Node (ASan/UBSan)
+golden: 161 fixtures — 161 passed, 0 failed
+```
+
+Typecheck, lint, duplication gate and builtins dashboard also passed as part of that command.
+No new checker diagnostic was suppressed and the Test262 corpus/ratchet was not rerun or changed.
+
+**Catchable property and iterator failures landed 2026-09-05** (plan-notes 200). This is the
+"panic-to-throw" Check of step 2a(c), delivered for the sites that actually were panics — and it
+corrected the premise that the 2488/2454 buckets sit behind such a conversion. A JS function
+annotated `@returns {Generator<…>}` but returning `1` built successfully and SIGSEGVed in `for-of`
+where Node throws a `TypeError`: iterator step/next and generator return/throw now validate their
+receiver before casting and leave a catchable `TypeError` in the pending cell (impossible internal
+iterator kinds remain compiler panics). Nullish property gets/sets use Node's wording
+(`Cannot read properties of undefined (reading 'x')`); primitive writes also raise a catchable
+TypeError instead of aborting.
+
+Making those throwable forced the emitter to root and check what it had treated as slot-free:
+`dyn-field-access` now takes a temp slot and a pending check, as do dynamic indexed reads/writes,
+read-modify-write reads (before the RHS is evaluated), and `Object` static calls. `Object.values`/
+`entries` stop on a throwing getter and root their partially built array across callbacks.
+`Object.assign` snapshots KEYS and then alternates each source get with its target set — the old
+eager `collect(OBJ_ENTRIES)` ran later getters before earlier writes, losing partial assignment and
+running getters after a setter should already have thrown.
+
+The caller audit also covered `JSON.stringify` and `console.table`: both unwind rather than casting
+a failed enumeration result to an array, free their partial output, and have generated pending
+checks (including console calls in value position). They snapshot keys and process one property or
+row at a time so a nested failure prevents later getters. The golden and runtime accessor corpus
+cover those paths, and the emitter unit assertions include their immediate checks.
+
+**What it does not do.** No dynamic `GetIterator` dispatch: 2488 `Symbol.iterator` still needs
+runtime dispatch for unknown iterables. And 2454 is definite assignment, not TDZ — an uninitialized
+annotated binding holds `undefined`, syntactic TDZ is 2448, and there is no runtime TDZ sentinel to
+convert; a trial suppressing 2454 exposed internal receiver checks for string/array/date/regexp
+methods (STA4081/4082/4092/4086) and was removed. Both buckets stay open in `plan.md` §8 step 2a(c)
+with the corrected reasons. `STA4071`'s runtime half was retired from `docs/DIAGNOSTICS.md`; the
+lowering invariant remains.
+
+**Check evidence, Node v26.7.0:** `tests/golden/js/property_errors.js` (operand ordering, warm ICs,
+catch/finally, `Object.assign` getter/setter stops) and `tests/golden/js/iterator_receiver_error.js`
+(the lying annotation, caught in `for-of`, `next`, `return`, `throw`) match Node byte-for-byte; the
+new `runtime/tests/print_iterators` corpus drives six incompatible receiver tags through
+step/next/return/throw and the accessor corpus gained abrupt enumeration and partial assignment;
+`tests/unit/property-errors.test.ts` pins the pending check after each throwing operation in the
+emitted C. `pnpm run ci` exits **0**:
+
+```text
+tests 383; pass 383; fail 0
+75 clones · 0.9% duplication
+runtime: print corpus matches Node
+subset: 356 fixtures — 327 passed, 29 expected-fail, 0 failed
+golden: 163 fixtures — 163 passed, 0 failed
+builtins: 217/238 surface members landed (91%), +5 nondeterministic (proved outside golden)
+leak: 10M objects — peak RSS 3040 KB of a 65536 KB cap, 253 samples, plateau
+runtime: print corpus matches Node (ASan/UBSan)
+golden: 163 fixtures — 163 passed, 0 failed
+```
+
+Final aggregate log (including JSON/table regressions): `/tmp/stator-phase5-errors-ci.log`.
+
+Test262 was not rerun and no ratchet changed. In the same change, `.claude/worktrees` was excluded
+from the Biome and CPD scan roots (plan-notes 201) — scan ownership, not a lint exemption.
+
 The live Check for everything still open under step 2a stays in `plan.md` §8 — this section is the
 record of what landed, not the authority on what remains.
 

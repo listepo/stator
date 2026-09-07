@@ -1160,10 +1160,10 @@ export interface ErrorNew extends Node {
  * statement position to hoist the throw into.
  *
  * The name is carried as a string because there is no binding to point at, which is the whole
- * condition being modelled. Reaching this node means the CHECKER could not resolve the identifier
- * either (the lowering only builds it when `getSymbolAtLocation` answers undefined) -- a name the
- * checker resolved but the lowering has no binding for is still `STA4035`, an internal error, and
- * keeping those two apart is what stops this node from swallowing compiler bugs.
+ * condition being modelled. The checker either has no symbol or only an expando namespace whose
+ * declarations are identifiers from JS property assignments, not runtime bindings. A name with a
+ * real declaration but no lowered binding is still `STA4035`, an internal error; keeping those two
+ * apart stops this node from swallowing compiler bugs.
  *
  * ts mode never builds one: `TS2304` is not in the js-mode suppression list, so the program is
  * already refused with `STA0012` before lowering runs. */

@@ -285,7 +285,11 @@ static bool accessor_write(jsrt_value slot, const char *key, jsrt_value recv, js
 
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   if (jsrt_is_nullish(obj)) {
-    jsrt_panic("TypeError: Cannot read properties of null or undefined");
+    char message[256];
+    snprintf(message, sizeof message, "Cannot read properties of %s (reading '%s')",
+             obj == JSRT_NULL ? "null" : "undefined", key);
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return JSRT_UNDEFINED;
   }
   if (jsrt_is(obj, JSRT_TAG_ARRAY) && strcmp(key, "length") == 0) {
     return jsrt_number((double)jsrt_as_array(obj)->length);
@@ -354,7 +358,11 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
 static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic,
                        bool honor_accessor) {
   if (jsrt_is_nullish(obj)) {
-    jsrt_panic("TypeError: Cannot set properties of null or undefined");
+    char message[256];
+    snprintf(message, sizeof message, "Cannot set properties of %s (setting '%s')",
+             obj == JSRT_NULL ? "null" : "undefined", key);
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return;
   }
   if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
     /* Node's exact wording, property name included -- a frozen-write TypeError that did not say
@@ -372,7 +380,8 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
       jsrt_panic(
           "STA2004: a statically-shaped object cannot grow a new property; planned for Phase 8");
     }
-    jsrt_panic("TypeError: Cannot set properties of a primitive");
+    jsrt_throw_error(&jsrt_class_type_error, "Cannot set properties of a primitive");
+    return;
   }
   const PropTable o = as_prop_table(obj, "set");
   if (ic != NULL && ic->shape == (*o.shape)) {
