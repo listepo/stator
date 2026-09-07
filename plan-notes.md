@@ -5666,3 +5666,25 @@ An independent `.claude/worktrees/delete-op` checkout made even a focused Biome 
 `Found a nested root configuration`. Exclude `.claude/worktrees` from the parent Biome and CPD
 scan roots; all production source rules and thresholds stay unchanged. The nested checkout and
 its configuration are untouched. This is scan ownership, not a source lint exemption.
+
+## 203. `repeat`/`padStart`/`padEnd` throw a catchable RangeError instead of aborting (2026-09-07)
+
+`String.prototype.repeat` with a negative or infinite count, and any `repeat`/`padStart`/`padEnd`
+whose result exceeds the string length cap (2^31−1), used to hit `jsrt_panic` (STA2005): a loud
+process abort, because the panic predated the throw protocol. The Error model (note 195) and the
+pending-cell protocol (note 200) both exist now, so these join it. `runtime/src/jsrt_string_ops.c`
+calls `jsrt_throw_error(&jsrt_class_range_error, …)` at those four sites and returns `JSRT_UNDEFINED`;
+the message matches Node byte-for-byte — `Invalid count value: <arg>` (the ORIGINAL argument, via
+`jsrt_to_string`, not the truncated integer count) and `Invalid string length`.
+
+A runtime throw is worthless unless the caller checks the pending cell, or the throw is silently
+dropped — a bug worse than the abort. So `repeat`/`padStart`/`padEnd` were marked `throws: true` in
+`STRING_OPS` (`src/hir/nodes.ts`), a `stringOpCanThrow` predicate joined `arrayOpCallsBack`'s pattern,
+and the emitter's `canThrow` (`src/codegen/index.ts`) now emits each as a checked statement with a
+pending check jumping to the landing pad. Two golden fixtures (`tests/golden/{js,ts}/string_range_error`)
+catch each RangeError and print `e.name`/`e.message`, proving the throw is catchable in both modes and
+identical to Node.
+
+`STA2005`'s remaining string honesty clause is `normalize` with a bad form; `toUpperCase`/`toLowerCase`
+above ASCII was already retired by libunicode (done.md, Task 4.3 third slice). DIAGNOSTICS.md STA2005
+and SUBSET.md's `String.prototype` row updated to match. Check: `pnpm run ci` green.

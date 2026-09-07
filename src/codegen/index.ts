@@ -66,6 +66,7 @@ import {
   REGEXP_FIELDS,
   REGEXP_OPS,
   SET_OPS,
+  stringOpCanThrow,
 } from '../hir/nodes.ts';
 import type { HField } from '../hir/types.ts';
 
@@ -2943,7 +2944,10 @@ class Emitter {
           expr.kind === 'array-op'
             ? arrayOpCallsBack(expr.op)
             : expr.kind === 'collection-op' && expr.op === 'forEach';
-        const canThrow = callsBack || (expr.kind === 'date-op' && expr.op === 'toISOString');
+        const canThrow =
+          callsBack ||
+          (expr.kind === 'date-op' && expr.op === 'toISOString') ||
+          (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
         if (canThrow) {
           parts.push(`${this.slotAt(base)} = ${opCall}`);
           this.flushParts(parts, expr.span);

@@ -390,8 +390,10 @@ dashboard's green direction (stale claims) already fails the run; its red direct
    [done.md](done.md) → Phase 5 step 2a(c), catchable property and iterator failures) — the nullish
    and primitive property sites and the iterator/generator receiver sites now throw Node's
    `TypeError`, caught by `tests/golden/js/property_errors.js` and
-   `tests/golden/js/iterator_receiver_error.js`; the 2488/2454 buckets stay open for the reasons
-   above, which are not panics. **Check:** the two delete buckets (2704, 2790) land with the
+   `tests/golden/js/iterator_receiver_error.js`. The same conversion later reached the string-length
+   builtins: `repeat`/`padStart`/`padEnd` throw a catchable `RangeError` matching Node instead of
+   aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets stay
+   open for the reasons above, which are not panics. **Check:** the two delete buckets (2704, 2790) land with the
    `delete` OPERATOR — lowering plus whatever
    answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
    returns Node's boolean and the subsequent read answers `undefined`. Until then `STA1214
@@ -1168,3 +1170,14 @@ Standing practices:
   checks pending, and `Object.assign`, `JSON.stringify` and `console.table` snapshot keys rather
   than entries so getter/setter ordering matches Node. Evidence: `pnpm run ci` green (383 unit tests; `subset: 356 fixtures — 327 passed,
   29 expected-fail, 0 failed`; `golden: 163 fixtures — 163 passed`; the same 163 under ASan/UBSan).
+- **v4.3** (2026-09-07): **the panic-to-throw conversion reached the string-length builtins**
+  (plan-notes 203). `String.prototype.repeat` with a negative or infinite count, and any
+  `repeat`/`padStart`/`padEnd` whose result exceeds the 2^31−1 length cap, threw `STA2005` (a loud
+  abort) because the panics predated the throw protocol; they now raise a catchable `RangeError`
+  matching Node byte-for-byte — message and all (`Invalid count value: <original arg>`, `Invalid
+  string length`). The op table gained a `throws` flag and a `stringOpCanThrow` predicate so the
+  emitter emits each as a checked statement with a pending check to the landing pad, the same
+  discipline callbacks already follow. `STA2005`'s remaining string clause is `normalize` with a bad
+  form; DIAGNOSTICS.md and SUBSET.md updated to match. Evidence: `pnpm run ci` green (subset `356 —
+  327 passed, 29 expected-fail, 0 failed`; golden `165 — 165 passed`, the same 165 under ASan/UBSan;
+  leak plateau 3040 KB; String.prototype 32/32). New goldens: `tests/golden/{js,ts}/string_range_error`.

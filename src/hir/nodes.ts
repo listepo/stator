@@ -490,9 +490,9 @@ export const STRING_OPS = {
   lastIndexOf: { arity: 2, result: 'number' },
   localeCompare: { arity: 2, result: 'number' },
   normalize: { arity: 1, result: 'string' },
-  padEnd: { arity: 2, result: 'string' },
-  padStart: { arity: 2, result: 'string' },
-  repeat: { arity: 1, result: 'string' },
+  padEnd: { arity: 2, result: 'string', throws: true },
+  padStart: { arity: 2, result: 'string', throws: true },
+  repeat: { arity: 1, result: 'string', throws: true },
   match: { arity: 1, result: 'match' },
   matchAll: { arity: 1, result: 'iterator' },
   search: { arity: 1, result: 'number' },
@@ -516,10 +516,19 @@ export const STRING_OPS = {
   {
     arity: number;
     result: 'boolean' | 'element' | 'iterator' | 'match' | 'number' | 'string' | 'string-array';
+    /** Present on the ops whose runtime raises a catchable error (`repeat`/`padStart`/`padEnd`
+     * throw RangeError for a count/length the spec rejects). The emitter gives such an op its own
+     * statement and a pending check after it, the same discipline as {@link arrayOpCallsBack}. */
+    throws?: true;
   }
 >;
 
 export type StringOpName = keyof typeof STRING_OPS;
+
+/** Whether this string op's runtime can leave a pending exception (see the `throws` marker). */
+export function stringOpCanThrow(op: StringOpName): boolean {
+  return 'throws' in STRING_OPS[op];
+}
 
 /** `s.indexOf(t)` and the rest of the landed String.prototype surface — the CollectionOp shape
  * exactly: a closed op set, one runtime function per operation, no method value anywhere. The

@@ -4,15 +4,17 @@
  * normalization and no approximation, so byte-for-byte agreement with Node is a property of the
  * algorithm, not of the machine. The two places the spec reaches beyond what a fixed table can
  * answer are handled loudly instead of wrongly (golden rule 4): case mapping outside ASCII waits
- * on vendored libunicode (Task 4.3 brings it with libregexp), and `repeat` with a negative count
- * must throw a catchable RangeError, which the builtin call protocol cannot raise yet — both
- * panic with a runtime not-yet, never a wrong answer.
+ * on vendored libunicode (Task 4.3 brings it with libregexp) and panics with a runtime not-yet.
+ * `repeat`/`padStart`/`padEnd` with a count/length the spec rejects throw a catchable RangeError
+ * through the pending-cell protocol (the Error model and builtin participation landed 2026-09-05,
+ * plan-notes 200); their generated callers check `jsrt_pending()` after the op.
  *
  * Optional arguments arrive as JSRT_UNDEFINED — the LOWERING pads missing ones, and for every
  * method here the spec gives an explicitly-passed `undefined` the same meaning as an absent
  * argument, which is what makes the padding sound. */
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,6 +23,20 @@
 #include "jsrt_value.h"
 
 static JSString *str_of(jsrt_value v) { return (JSString *)jsrt_ptr(v); }
+
+/* Node's RangeError for a bad repeat count names the ORIGINAL argument value, not the truncated
+ * one (`repeat(-1.5)` says `-1.5`, `repeat(1/0)` says `Infinity`), so the message renders ToString
+ * of the argument. Every such rendering is ASCII, copied out through the string accessors rather
+ * than reaching into the struct. */
+static void count_to_ascii(jsrt_value n, char *buf, size_t buflen) {
+  const jsrt_value text = jsrt_to_string(n);
+  const uint32_t len = jsrt_string_length(text);
+  size_t i = 0;
+  for (; i < len && i + 1 < buflen; i++) {
+    buf[i] = (char)jsrt_string_char(text, i);
+  }
+  buf[i] = '\0';
+}
 
 static JSString *alloc_str(uint32_t len) {
   size_t size = sizeof(JSString) + (size_t)len * sizeof(uint16_t);
@@ -239,14 +255,19 @@ jsrt_value jsrt_string_repeat(jsrt_value s, jsrt_value n) {
   const JSString *str = str_of(s);
   double count = jsrt_int_or_inf(n, 0.0);
   if (count < 0.0 || isinf(count)) {
-    /* §22.1.3.19 throws a catchable RangeError here, and the builtin call protocol cannot raise
-     * one yet -- landing pads exist, but no builtin participates. Loudly not-yet, never a wrong
-     * answer or an uncatchable difference from Node's control flow. */
-    jsrt_panic("STA2005: String.prototype.repeat with a negative or infinite count must throw "
-               "RangeError; builtins cannot throw yet");
+    /* §22.1.3.19 step 4: a negative or infinite count is a catchable RangeError whose message
+     * names the original argument value (Node: `Invalid count value: -1`). */
+    char value[64];
+    count_to_ascii(n, value, sizeof value);
+    char message[128];
+    snprintf(message, sizeof message, "Invalid count value: %s", value);
+    jsrt_throw_error(&jsrt_class_range_error, message);
+    return JSRT_UNDEFINED;
   }
   if (count * (double)str->length > 2147483647.0) {
-    jsrt_panic("STA2005: String.prototype.repeat result is too large; builtins cannot throw yet");
+    /* §22.1.3.19 step 5: the result would exceed the maximum string length. */
+    jsrt_throw_error(&jsrt_class_range_error, "Invalid string length");
+    return JSRT_UNDEFINED;
   }
   uint32_t times = (uint32_t)count;
   JSString *out = alloc_str(times * str->length);
@@ -264,7 +285,9 @@ static jsrt_value pad_impl(jsrt_value s, jsrt_value target, jsrt_value pad, bool
     return s;
   }
   if (want > 2147483647.0) {
-    jsrt_panic("STA2005: String.prototype.pad result is too large; builtins cannot throw yet");
+    /* §22.1.3.16 (StringPad): a result past the maximum string length is a catchable RangeError. */
+    jsrt_throw_error(&jsrt_class_range_error, "Invalid string length");
+    return JSRT_UNDEFINED;
   }
   /* The default filler is one SPACE; an explicitly empty filler answers the string unchanged. */
   const JSString *fill = pad == JSRT_UNDEFINED ? NULL : str_of(pad);
