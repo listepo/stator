@@ -808,10 +808,10 @@ double, a length — can mask to a plausible address and retain one object it do
 ordinary conservative-collector behaviour: it costs memory, never correctness.
 
 **Two configurations, both supported.** The justfile asks `pkg-config` for `bdw-gc`. Found:
-the archive compiles with `-DJSRT_HAVE_BOEHM` and records `-lgc` in `build*/link-flags.txt`, which
-`src/cli/build.ts` reads back so the emitted program links the same collector its archive was
+the archive compiles with `-DJSRT_HAVE_BOEHM` and records `-lgc` in `packages/runtime/build*/link-flags.txt`, which
+`packages/compiler/src/cli/build.ts` reads back so the emitted program links the same collector its archive was
 compiled against (plan-notes 106). Not found: `jsrt_gc_alloc` is plain `malloc`, nothing is ever
-collected, and every test still passes — the program simply keeps every object it allocates. `just runtime`
+collected, and every test still passes — the program simply keeps every object it allocates. The runtime recipe
 prints which one it built (`Runtime built with: Boehm GC` / `plain malloc (no collection)`).
 
 **The check.** `pnpm run test:leak` compiles a 10M-object loop and samples RSS from `ps`: the last

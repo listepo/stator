@@ -15,24 +15,24 @@ This is a research compiler under active construction (Phase 5 of [`plan.md`](pl
 | Speed | unboxed values inside checked code | same, wherever the checker can infer a type |
 
 ```
-node src/cli/main.ts build app.ts -o app
-node src/cli/main.ts build app.js -o app --mode=js
-node src/cli/main.ts explain app.ts --json
+node packages/compiler/src/cli/main.ts build app.ts -o app
+node packages/compiler/src/cli/main.ts build app.js -o app --mode=js
+node packages/compiler/src/cli/main.ts explain app.ts --json
 ```
 
-`explain` reports per-construct verdicts: `static`, `dynamic`, `error`, or `not-yet`. Decision tests in `tests/subset/` are that matrix.
+`explain` reports per-construct verdicts: `static`, `dynamic`, `error`, or `not-yet`. Decision tests in `packages/tests/subset/` are that matrix.
 
 ## Requirements
 
-Pinned in [`.node-version`](.node-version) and [`mise.toml`](mise.toml): Node 26.7.0, pnpm 11.20.0, LLVM clang 21.1.8, just 1.58.0. Full table: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md).
+Pinned in [`.node-version`](.node-version) and [`mise.toml`](mise.toml): Node 26.7.0, pnpm 12.3.4, LLVM clang 21.1.8, just 1.58.0. Full table: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md).
 
 ```
 mise install
 pnpm install --frozen-lockfile
-just runtime
+just -f packages/runtime/justfile -d packages/runtime runtime
 ```
 
-Boehm GC is optional (`pkg-config bdw-gc`); without it the runtime still builds, with a bump allocator. ICU is a separate `just runtime-intl` feature build.
+Boehm GC is optional (`pkg-config bdw-gc`); without it the runtime still builds, with a bump allocator. ICU is a separate `just -f packages/runtime/justfile -d packages/runtime runtime-intl` feature build.
 
 ## Commands
 
@@ -43,8 +43,8 @@ pnpm run test:subset     # feature × mode decision matrix
 pnpm run test:golden     # compile + run vs the pinned Node, byte-for-byte
 pnpm run test262         # Test262 slice (CI heartbeat; corpus fetched separately)
 pnpm run differential    # fuzzer vs Node
-just runtime             # libjsrt.a (clang -O2 -Werror; thin LTO where the linker can read it)
-just runtime-asan        # ASan/UBSan archive
+just -f packages/runtime/justfile -d packages/runtime runtime             # libjsrt.a (clang -O2 -Werror; thin LTO where the linker can read it)
+just -f packages/runtime/justfile -d packages/runtime runtime-asan        # ASan/UBSan archive
 ```
 
 Dev runs TypeScript directly on the pinned Node — no `pnpm run build` step for the CLI. GitHub Actions runs `pnpm run ci` plus a Test262 heartbeat on every push; nightly fuzz and weekly benches are `.github/workflows/nightly.yml`.

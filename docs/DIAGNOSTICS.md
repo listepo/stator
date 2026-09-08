@@ -109,7 +109,7 @@ wrong, so its class already carries that information.
 | STA0007 | both | error | entry file "{path}" does not exist | Checked before building the program, so the user gets a path error rather than a `tsc` "file not found" |
 | STA0008 | both | error | C compiler "{cc}" not found — install clang (`mise install`, or macOS: `xcode-select --install`; Debian/Ubuntu: `apt install clang`) or set `CC` | The message must name a fix: a missing toolchain is the one build failure a user can always act on. The project pin is LLVM 21.1.8 via `mise.toml`; `CC` overrides the default `clang` |
 | STA0009 | both | error | C compiler failed (exit {code}) — this is a compiler bug; keep the C with `--keep-c` and report it | Emitted C that clang rejects is always Stator's fault, never the user's. Points at `--keep-c` because the C is the evidence |
-| STA0011 | both | error | runtime archive not found at {path} — run `just runtime` | Linking needs `runtime/build/libjsrt.a`; in a source checkout it is a build step the user has not run yet |
+| STA0011 | both | error | runtime archive not found at {path} — run `just -f {runtime-root}/justfile -d {runtime-root} {recipe}` | Linking needs `packages/runtime/build/libjsrt.a`; in a source checkout it is a build step the user has not run yet |
 | STA0012 | both | error | {tsc message} | A diagnostic from the TypeScript checker itself, passed through with its location intact. One code for all of them on purpose: `tsc` already has a stable numbered error space (`TS2345` and friends), and mirroring it into the `STA` space would create a second name for every message with nothing to keep the two in sync |
 
 `STA4001` is also raised by the CLI (`--version` with an unreadable `package.json`), but it lives

@@ -48,8 +48,24 @@ export class BuildError extends Error {
   }
 }
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const RUNTIME_INCLUDE = join(REPO_ROOT, 'runtime', 'include');
+/** The C runtime (headers + built archive) is a sibling package. In the source tree it is
+ * `<workspace>/packages/runtime`, reached identically from `src/cli` and the compiled `dist/cli`
+ * because `dist` mirrors `src`'s depth; a published `statorc` bundles it beside `dist`.
+ * `STATOR_RUNTIME_ROOT` overrides both. A wrong guess is caught at link time (missing archive),
+ * exactly as before. */
+function resolveRuntimeRoot(): string {
+  const override = process.env['STATOR_RUNTIME_ROOT'];
+  if (override !== undefined && override !== '') {
+    return override;
+  }
+  const here = dirname(fileURLToPath(import.meta.url));
+  const sibling = join(here, '..', '..', '..', 'runtime'); // packages/compiler/<src|dist>/cli → packages/runtime
+  const bundled = join(here, '..', '..', 'runtime'); // published: runtime beside dist/
+  return existsSync(join(sibling, 'include')) ? sibling : bundled;
+}
+
+const RUNTIME_ROOT = resolveRuntimeRoot();
+const RUNTIME_INCLUDE = join(RUNTIME_ROOT, 'include');
 
 /** `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so CI can run
  * the SAME golden fixtures under ASan/UBSan (plan.md §5 Task 2.7). The sanitizer has to be on both
@@ -63,7 +79,7 @@ const RUNTIME_JUST_RECIPE = {
   asan: 'runtime-asan',
   intl: 'runtime-intl',
 } as const;
-const RUNTIME_LIB_DIR = join(REPO_ROOT, 'runtime', RUNTIME_DIR_OF[FLAVOR]);
+const RUNTIME_LIB_DIR = join(RUNTIME_ROOT, RUNTIME_DIR_OF[FLAVOR]);
 const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
 const SANITIZER_FLAGS = ['-O1', '-g', '-fsanitize=address,undefined'];
 
@@ -199,7 +215,7 @@ function link(cPath: string, out: string): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
       'STA0011',
-      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`just ${RUNTIME_JUST_RECIPE[FLAVOR]}\``,
+      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`just -f ${join(RUNTIME_ROOT, 'justfile')} -d ${RUNTIME_ROOT} ${RUNTIME_JUST_RECIPE[FLAVOR]}\``,
     );
   }
 

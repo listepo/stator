@@ -411,7 +411,7 @@ and each has an obvious-looking transform that is wrong.
   property of the type system: the check exists because the type is unknowable statically, so a pass
   that "proves" it redundant has proved something false.
 - reassociate floating-point arithmetic. `(a + b) + c` is not `a + (b + c)` in IEEE-754. This also
-  means the generated C must never be compiled with `-ffast-math`, and `src/cli/build.ts` must not
+  means the generated C must never be compiled with `-ffast-math`, and `packages/compiler/src/cli/build.ts` must not
   grow that flag.
 
 Each of these is verifiable: the HIR verifier runs after every transform in debug builds, and the

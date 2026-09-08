@@ -9,16 +9,16 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | Tool | Pin | Where pinned |
 |---|---|---|
 | Node | `26.7.0` | `.node-version`, `engines.node >= 24` in `package.json` |
-| TypeScript | `6.0.3` (exact) | `dependencies` in `package.json` |
+| TypeScript | `6.0.3` (exact) | `dependencies` in `packages/compiler/package.json` |
 | `@types/node` | `26.4.0` (exact) | `devDependencies` |
 | Biome | `2.5.11` (exact) | `devDependencies` |
 | cpd (copy/paste detector) | `5.0.16` (exact) | `devDependencies` |
-| pnpm | `11.20.0` | `packageManager` in `package.json`, `mise.toml` |
-| LLVM | `21.1.8` | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
-| just | `1.58.0` | `mise.toml`. The runtime build (`just runtime`, `just runtime-asan`, `just runtime-intl`). |
+| pnpm | `12.3.4` | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml` |
+| LLVM | `21.1.8` | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
+| just | `1.58.0` | `mise.toml`. The runtime build (`just -f packages/runtime/justfile -d packages/runtime runtime`, `runtime-asan`, `runtime-intl`). |
 
 Node ≥ 24 is required because dev runs the compiler's TypeScript sources directly
-(`node src/cli/main.ts`) via native type stripping — there is no build step in development.
+(`node packages/compiler/src/cli/main.ts`) via native type stripping — there is no build step in development.
 
 TypeScript is deliberately **not** on `latest`: `latest` is now 7.x (the Go port / tsgo), whose
 public compiler API plan.md §0.3 rules out. `6.0.3` is the newest stable 6.x. Re-evaluate
@@ -48,18 +48,18 @@ pnpm run test:coverage           # unit tests + src/ coverage table; writes cove
 pnpm run test:subset             # feature × mode decision matrix
 pnpm run test:golden             # compile + run vs the pinned Node, byte-for-byte
 pnpm run test262                 # Test262 slice against the pin in tests/test262/pin.json
-pnpm run differential            # fuzzer vs Node (failures land in tests/differential/failures/)
-pnpm run bench:record            # refresh tests/bench/baseline.json (this machine only)
-just runtime          # runtime/build/libjsrt.a          (clang -O2, -Werror; thin LTO where the linker allows)
-just runtime-asan     # runtime/build-asan/libjsrt.a     (-fsanitize=address,undefined -O1 -g)
-just runtime-intl     # runtime/build-intl/libjsrt.a     (ICU feature build)
-just runtime-test     # print corpus vs Node
-just runtime-clean
-node src/cli/main.ts build file.ts -o app [--mode=ts|js]
-node src/cli/main.ts explain file.ts --json
+pnpm run differential            # fuzzer vs Node (failures land in packages/tests/differential/failures/)
+pnpm run bench:record            # refresh packages/tests/bench/baseline.json (this machine only)
+just -f packages/runtime/justfile -d packages/runtime runtime          # packages/runtime/build/libjsrt.a          (clang -O2, -Werror; thin LTO where the linker allows)
+just -f packages/runtime/justfile -d packages/runtime runtime-asan     # packages/runtime/build-asan/libjsrt.a     (-fsanitize=address,undefined -O1 -g)
+just -f packages/runtime/justfile -d packages/runtime runtime-intl     # packages/runtime/build-intl/libjsrt.a     (ICU feature build)
+just -f packages/runtime/justfile -d packages/runtime runtime-test     # print corpus vs Node
+just -f packages/runtime/justfile -d packages/runtime runtime-clean
+node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js]
+node packages/compiler/src/cli/main.ts explain file.ts --json
 ```
 
-Release and sanitized runtime archives build into **separate** directories (`build/` and
+Release and sanitized runtime archives build into **separate** directories (`packages/runtime/build/` and
 `build-asan/`) so a sanitized archive can never be linked into a release binary by accident.
 
 Release links dead-strip (Task 3.12): builtins live in `libjsrt.a` compiled with
@@ -68,35 +68,34 @@ Release links dead-strip (Task 3.12): builtins live in `libjsrt.a` compiled with
 function granularity, not the archive's .o granularity. Sanitized builds skip the stripping:
 ASan's global-registration sections are exactly what `--gc-sections` is documented to drop.
 
-Release archives are thin-LTO bitcode where the toolchain can link one (plan-notes 162): `just
-runtime` probes `-flto=thin` through `$CC`/`$AR` and records the flag in `build/link-flags.txt`, so
+Release archives are thin-LTO bitcode where the toolchain can link one (plan-notes 162): `just -f packages/runtime/justfile -d packages/runtime runtime` probes `-flto=thin` through `$CC`/`$AR` and records the flag in `packages/runtime/build/link-flags.txt`, so
 the CLI's single clang call compiles the generated C to bitcode too and the runtime's accessors and
 builtins inline across the archive boundary. ld64 and lld read bitcode archives; GNU ld needs the
 LLVMgold plugin, and without it the probe fails and the archive is plain objects, reported on the
 recipe's status line. Sanitized builds never use LTO. A probe result or Boehm status that differs
-from the last build rebuilds every object (`build*/cflags.txt`).
+from the last build rebuilds every object (`packages/runtime/build*/cflags.txt`).
 
 ## Native libraries
 
 None of these come from the npm tree. Vendored sources live in the repo and build with the runtime;
-system libraries are discovered at `just runtime` time and recorded in `build*/link-flags.txt`, which
-`src/cli/build.ts` reads back — so the emitted program links exactly what the archive it links was
+system libraries are discovered at runtime-build time and recorded in `packages/runtime/build*/link-flags.txt`, which
+`packages/compiler/src/cli/build.ts` reads back — so the emitted program links exactly what the archive it links was
 compiled against (plan-notes 106).
 
 | Library | Kind | Required | For | Discovery / install |
 |---|---|---|---|---|
-| QuickJS-NG `libregexp` (+ `libunicode`, `cutils.h`) | vendored, MIT | yes | the RegExp engine (golden rule 5) | `runtime/vendor/quickjs-ng/` — provenance in its `VENDOR.md` |
-| fdlibm (V8 `ieee754.cc`, mechanically ported to C11) | vendored, fdlibm + BSD-3-Clause | yes | `Math.sin` and 19 siblings, bit-identical to the pinned Node's | `runtime/vendor/fdlibm/` — provenance in its `VENDOR.md` |
+| QuickJS-NG `libregexp` (+ `libunicode`, `cutils.h`) | vendored, MIT | yes | the RegExp engine (golden rule 5) | `packages/runtime/vendor/quickjs-ng/` — provenance in its `VENDOR.md` |
+| fdlibm (V8 `ieee754.cc`, mechanically ported to C11) | vendored, fdlibm + BSD-3-Clause | yes | `Math.sin` and 19 siblings, bit-identical to the pinned Node's | `packages/runtime/vendor/fdlibm/` — provenance in its `VENDOR.md` |
 | libm (`-lm`) | system | yes | `floor`/`trunc`/`sqrt`/`fmod` — ToInt32, array indexing, the print path | part of libSystem on macOS (the flag is a no-op there), separate on glibc (plan-notes 122) |
 | Boehm GC (`bdw-gc`) | system | optional | the collector (`docs/VALUE.md` §4.12); without it the runtime falls back to plain `malloc`, no collection | `pkg-config --libs bdw-gc`; macOS `brew install bdw-gc`, Debian `apt install libgc-dev` |
-| ICU (`icu-uc`, `icu-i18n`) | system | optional, feature build only | `Intl` — `just runtime-intl`, into `build-intl/` | `pkg-config`; macOS `brew install icu4c`, Debian `apt install libicu-dev` |
+| ICU (`icu-uc`, `icu-i18n`) | system | optional, feature build only | `Intl` — `just -f packages/runtime/justfile -d packages/runtime runtime-intl`, into `packages/runtime/build-intl/` | `pkg-config`; macOS `brew install icu4c`, Debian `apt install libicu-dev` |
 
 The default archive is byte-identical whether or not ICU is installed on the host — that is why
 Intl is a separate object directory rather than a flag on the default build.
 
 Vendored code compiles with `-Wall` alone rather than the runtime's `-Wall -Wextra -Werror`
 (plan-notes 101) and is never hand-edited. A version bump is `pnpm run vendor:update <name> [ref]`
-(`runtime/vendor/update.mjs`): it refetches the manifest's files at that ref — re-running `port.mjs`
+(`packages/runtime/vendor/update.mjs`): it refetches the manifest's files at that ref — re-running `port.mjs`
 over upstream's `ieee754.cc` for fdlibm — and prints the provenance rows for the directory's
 `VENDOR.md`. `--check` validates the manifests offline. Re-vendoring at the pinned ref reproduces
 the tree byte-for-byte, so `git status` after a run is the diff the bump actually introduces.
@@ -107,11 +106,11 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 
 | Tool | Used by | For |
 |---|---|---|
-| `clang` (`$CC`) | justfile, `src/cli/build.ts` | the runtime, the emitted C, and the final link |
+| `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts` | the runtime, the emitted C, and the final link |
 | `ar` (`$AR`) | justfile | archiving `libjsrt.a` |
 | `just` | justfile | the runtime build (pinned `1.58.0` in `mise.toml`) |
 | `pkg-config` | justfile | finding bdw-gc and ICU; absent means both are simply off |
-| `diff` | `just runtime-test` | the print corpus against Node, byte-for-byte |
+| `diff` | `just -f packages/runtime/justfile -d packages/runtime runtime-test` | the print corpus against Node, byte-for-byte |
 
 `clang` (and the rest of LLVM) is `mise install` on Unix. The other three still come from the Xcode
 command-line tools (`xcode-select --install`) on macOS and from `binutils`/`pkg-config`/
