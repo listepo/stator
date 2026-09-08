@@ -1,0 +1,23 @@
+{
+  "name": "statorc",
+  "version": "0.0.0",
+  "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "stator": "dist/cli/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.222.0",
+    "@opentelemetry/resources": "2.11.0",
+    "@opentelemetry/sdk-trace-node": "2.11.0",
+    "dotenv": "17.4.2",
+    "ink": "7.1.1",
+    "react": "19.2.8",
+    "typescript": "6.0.3"
+  }
+}

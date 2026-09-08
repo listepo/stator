@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+layer: 'library'
+language: 'bash'
+
+# `just` builds the C runtime; its justfile lives in this project dir, so the task runs from here.
+tasks:
+  build:
+    script: 'just runtime'
+    toolchain: 'system'
+    outputs:
+      - 'build/libjsrt.a'

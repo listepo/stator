@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+layer: 'application'
+language: 'typescript'
+
+# The test harnesses spawn the compiler CLI and link the built runtime archive, so runtime-touching
+# tasks depend on `runtime:build`. Commands mirror package.json's scripts (see compiler/moon.yml for
+# why moon calls tools directly rather than through pnpm). All tasks run from the workspace root.
+dependsOn:
+  - 'compiler'
+  - 'runtime'
+
+tasks:
+  typecheck:
+    script: './node_modules/.bin/tsc --noEmit -p packages/tests/tsconfig.json'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  unit:
+    script: 'node --test "packages/tests/unit/*.test.ts"'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  coverage:
+    script: 'mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include="packages/compiler/src/**" --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info "packages/tests/unit/*.test.ts"'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  subset:
+    script: 'node packages/tests/subset/run.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    deps:
+      - 'runtime:build'
+  golden:
+    script: 'node packages/tests/golden/run.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    deps:
+      - 'runtime:build'
+  builtins:
+    script: 'node packages/tests/golden/builtins.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    deps:
+      - 'runtime:build'
+  runtime-corpus:
+    script: 'just -f packages/runtime/justfile -d packages/runtime runtime-test'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    deps:
+      - 'runtime:build'
+  leak:
+    script: 'node packages/tests/leak/run.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    deps:
+      - 'runtime:build'
+  asan:
+    script: 'ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-asan && ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-test-asan && ASAN_OPTIONS=detect_leaks=0 STATOR_RUNTIME=asan node packages/tests/golden/run.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+
+  # `moon run tests:ci` runs the whole graph (with caching); the command itself is a no-op and the
+  # work happens in the dependencies. `pnpm run ci` remains the serial human/CI entry point.
+  ci:
+    command: 'noop'
+    deps:
+      - 'compiler:typecheck'
+      - 'compiler:lint'
+      - 'compiler:dupes'
+      - 'tests:typecheck'
+      - 'runtime:build'
+      - 'tests:coverage'
+      - 'tests:runtime-corpus'
+      - 'tests:subset'
+      - 'tests:golden'
+      - 'tests:builtins'
+      - 'tests:leak'
+      - 'tests:asan'

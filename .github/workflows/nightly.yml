@@ -28,7 +28,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: differential-${{ github.run_number }}
-          path: tests/differential/failures
+          path: packages/tests/differential/failures
           if-no-files-found: ignore
 
       - name: Record benchmark
@@ -46,12 +46,12 @@ jobs:
         # path in the summary and left the numbers in an artifact nobody opens, which is the
         # weak-signal version of §9's rule -- a green job that reports less than it measured.
         run: |
-          cat tests/bench/README.md >> "$GITHUB_STEP_SUMMARY" || true
+          cat packages/tests/bench/README.md >> "$GITHUB_STEP_SUMMARY" || true
           grep '^bench:' benchmark.log >> "$GITHUB_STEP_SUMMARY" || true
       - name: Upload benchmark result
         if: always() && github.event.schedule == '0 3 * * 0'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-${{ github.run_number }}
-          path: tests/bench/results
+          path: packages/tests/bench/results
           if-no-files-found: error

@@ -108,7 +108,10 @@ settings:
 importers:
 
   .:
-    dependencies:
+    devDependencies:
+      '@biomejs/biome':
+        specifier: 2.5.11
+        version: 2.5.11
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1
@@ -121,22 +124,6 @@ importers:
       '@opentelemetry/sdk-trace-node':
         specifier: 2.11.0
         version: 2.11.0(@opentelemetry/api@1.9.1)
-      dotenv:
-        specifier: 17.4.2
-        version: 17.4.2
-      ink:
-        specifier: 7.1.1
-        version: 7.1.1(@types/react@19.2.18)(react@19.2.8)
-      react:
-        specifier: 19.2.8
-        version: 19.2.8
-      typescript:
-        specifier: 6.0.3
-        version: 6.0.3
-    devDependencies:
-      '@biomejs/biome':
-        specifier: 2.5.11
-        version: 2.5.11
       '@types/node':
         specifier: 26.4.0
         version: 26.4.0
@@ -146,12 +133,63 @@ importers:
       cpd:
         specifier: 5.0.16
         version: 5.0.16
+      dotenv:
+        specifier: 17.4.2
+        version: 17.4.2
+      execa:
+        specifier: 10.0.1
+        version: 10.0.1
+      ink:
+        specifier: 7.1.1
+        version: 7.1.1(@types/react@19.2.18)(react@19.2.8)
+      memfs:
+        specifier: 4.69.1
+        version: 4.69.1
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
+  packages/compiler:
+    dependencies:
+      '@opentelemetry/api':
+        specifier: 1.9.1
+        version: 1.9.1
+      '@opentelemetry/exporter-trace-otlp-http':
+        specifier: 0.222.0
+        version: 0.222.0
+      '@opentelemetry/resources':
+        specifier: 2.11.0
+        version: 2.11.0
+      '@opentelemetry/sdk-trace-node':
+        specifier: 2.11.0
+        version: 2.11.0
+      dotenv:
+        specifier: 17.4.2
+        version: 17.4.2
+      ink:
+        specifier: 7.1.1
+        version: 7.1.1
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
+  packages/tests:
+    devDependencies:
       execa:
         specifier: 10.0.1
         version: 10.0.1
       memfs:
         specifier: 4.69.1
         version: 4.69.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
 packages:
 

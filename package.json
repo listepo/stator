@@ -1,59 +1,51 @@
 {
-  "name": "statorc",
+  "name": "stator",
   "version": "0.0.0",
-  "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries",
+  "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries (monorepo root)",
   "license": "MIT",
   "type": "module",
+  "private": true,
   "packageManager": "pnpm@12.3.4",
   "engines": {
     "node": ">=24"
   },
-  "bin": {
-    "stator": "dist/cli/main.js"
-  },
-  "files": [
-    "dist",
-    "runtime"
-  ],
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
-    "build": "tsc",
+    "typecheck": "tsc --noEmit -p packages/compiler/tsconfig.json && tsc --noEmit -p packages/tests/tsconfig.json",
+    "build": "tsc -p packages/compiler/tsconfig.json",
     "lint": "biome check --error-on-warnings .",
     "format": "biome check --write .",
-    "test": "node --test \"tests/unit/*.test.ts\"",
-    "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include=\"src/**\" --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info \"tests/unit/*.test.ts\"",
-    "test:subset": "node tests/subset/run.ts",
-    "test:golden": "node tests/golden/run.ts",
-    "test262": "node tests/test262/run.ts",
-    "test262:fetch": "node tests/test262/fetch.ts",
-    "differential": "node tests/differential/run.ts",
-    "bench:record": "node tests/bench/record.ts",
-    "test:runtime": "just runtime-test",
-    "test:leak": "node tests/leak/run.ts",
-    "test:asan": "ASAN_OPTIONS=detect_leaks=0 just runtime-asan && ASAN_OPTIONS=detect_leaks=0 just runtime-test-asan && ASAN_OPTIONS=detect_leaks=0 STATOR_RUNTIME=asan node tests/golden/run.ts",
-    "test:intl": "just runtime-intl && STATOR_RUNTIME=intl node tests/golden/run.ts",
-    "runtime": "just runtime",
-    "vendor:update": "node runtime/vendor/update.mjs",
+    "test": "node --test \"packages/tests/unit/*.test.ts\"",
+    "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include=\"packages/compiler/src/**\" --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info \"packages/tests/unit/*.test.ts\"",
+    "test:subset": "node packages/tests/subset/run.ts",
+    "test:golden": "node packages/tests/golden/run.ts",
+    "test262": "node packages/tests/test262/run.ts",
+    "test262:fetch": "node packages/tests/test262/fetch.ts",
+    "differential": "node packages/tests/differential/run.ts",
+    "bench:record": "node packages/tests/bench/record.ts",
+    "test:runtime": "just -f packages/runtime/justfile -d packages/runtime runtime-test",
+    "test:leak": "node packages/tests/leak/run.ts",
+    "test:asan": "ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-asan && ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-test-asan && ASAN_OPTIONS=detect_leaks=0 STATOR_RUNTIME=asan node packages/tests/golden/run.ts",
+    "test:intl": "just -f packages/runtime/justfile -d packages/runtime runtime-intl && STATOR_RUNTIME=intl node packages/tests/golden/run.ts",
+    "runtime": "just -f packages/runtime/justfile -d packages/runtime runtime",
+    "vendor:update": "node packages/runtime/vendor/update.mjs",
     "dupes": "cpd .",
-    "ci": "pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run runtime && pnpm run test:coverage && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
-    "test:builtins": "node tests/golden/builtins.ts"
+    "ci": "node scripts/check-node.mjs && pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run runtime && pnpm run test:coverage && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
+    "test:builtins": "node packages/tests/golden/builtins.ts"
   },
-  "dependencies": {
+  "devDependencies": {
+    "@biomejs/biome": "2.5.11",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "0.222.0",
     "@opentelemetry/resources": "2.11.0",
     "@opentelemetry/sdk-trace-node": "2.11.0",
-    "dotenv": "17.4.2",
-    "ink": "7.1.1",
-    "react": "19.2.8",
-    "typescript": "6.0.3"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "2.5.11",
     "@types/node": "26.4.0",
     "@types/react": "19.2.18",
     "cpd": "5.0.16",
+    "dotenv": "17.4.2",
     "execa": "10.0.1",
-    "memfs": "4.69.1"
+    "ink": "7.1.1",
+    "memfs": "4.69.1",
+    "react": "19.2.8",
+    "typescript": "6.0.3"
   }
 }

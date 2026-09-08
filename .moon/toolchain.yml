@@ -1,0 +1,5 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/toolchain.json
+#
+# Intentionally minimal: node, pnpm, just and clang are managed by mise (mise.toml), not by
+# moon or proto. Every task declares `toolchain: 'system'` and runs in the ambient, mise-activated
+# shell, so moon never fetches or pins a runtime of its own.

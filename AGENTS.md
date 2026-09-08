@@ -39,23 +39,28 @@ AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
 docs/              README.md (index) ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
-src/cli/           argument parsing, build/explain drivers
-src/frontend/      ts.Program loading, mode policy gate, ts.Type → HType (only place ts.Type may appear)
-src/hir/           typed HIR definitions, HType model, verifier
-src/lower/         TS AST → HIR lowering
-src/passes/        monomorphize, boundary-insert, const-fold, DCE, inline
-src/codegen/       C emitter (#line source maps, JSRT_FRAME rooting discipline)
-src/support/       diagnostics engine, shared utilities
-runtime/           C11 runtime → runtime/build/libjsrt.a
-runtime/include/jsrt_value.h   mirrors docs/VALUE.md — the codegen↔runtime contract
-runtime/vendor/    Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
-tests/unit/        node:test unit tests (*.test.ts)
-tests/subset/      decision tests (feature × mode matrix)
-tests/golden/ts|js machine-checked vs Node, byte-for-byte
-tests/differential/ fuzzer corpus    tests/bench/ baselines + results
-tests/test262/     runner + pin (corpus fetched, not vendored)
-tests/leak/        GC hygiene: a 10M-object loop whose RSS must plateau
+.moon/             moon workspace: workspace.yml, toolchain.yml (orchestrator; plan-notes 204)
+packages/compiler/ the compiler package "statorc" — holds src/ + the locked tsconfig.json
+  src/cli/         argument parsing, build/explain drivers
+  src/frontend/    ts.Program loading, mode policy gate, ts.Type → HType (only place ts.Type may appear)
+  src/hir/         typed HIR definitions, HType model, verifier
+  src/lower/       TS AST → HIR lowering
+  src/passes/      monomorphize, boundary-insert, const-fold, DCE, inline
+  src/codegen/     C emitter (#line source maps, JSRT_FRAME rooting discipline)
+  src/support/     diagnostics engine, shared utilities
+packages/runtime/  C11 runtime (NOT an npm package) → packages/runtime/build/libjsrt.a (justfile)
+  include/jsrt_value.h   mirrors docs/VALUE.md — the codegen↔runtime contract
+  vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
+packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
+  unit/            node:test unit tests (*.test.ts)
+  subset/          decision tests (feature × mode matrix)
+  golden/ts|js     machine-checked vs Node, byte-for-byte
+  differential/    fuzzer corpus       bench/  baselines + results
+  test262/         runner + pin (corpus fetched, not vendored)
+  leak/            GC hygiene: a 10M-object loop whose RSS must plateau
 ```
+
+Paths in prose below are written relative to their package (`src/frontend/` = `packages/compiler/src/frontend/`, `runtime/vendor/` = `packages/runtime/vendor/`, `tests/subset/` = `packages/tests/subset/`).
 
 ## Architecture diagrams (for agents)
 
@@ -78,33 +83,43 @@ Gallery + captions: `docs/ARCHITECTURE.md`. Shared theme: `docs/architecture/the
 ## Commands
 
 Dev runs TS directly on the pinned Node (≥24, see `.node-version`) — no build step needed.
-`mise install` provides that Node, pnpm, just, and LLVM clang 21.1.8.
+`mise install` provides that Node, pnpm, just, moon, and LLVM clang 21.1.8.
+If bare `node --version` disagrees with `.node-version` (on some hosts PATH puts mise's
+`node/lts` ahead of the shims, so bare `node` answers 24), prefix commands with
+`mise exec node --` — `pnpm run ci` refuses to start otherwise (plan.md Task 6.2a).
 
 ```
-mise install                    # Node, pnpm, just, LLVM clang (Unix)
+mise install                    # Node, pnpm, just, moon, LLVM clang (Unix)
 pnpm install --frozen-lockfile  # install (exact-pinned deps)
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # biome check — lint + format (must be clean)
 pnpm run format                 # biome check --write (applies safe fixes + formatting)
 pnpm run dupes                  # cpd copy/paste detector (fails above 1% duplication)
 pnpm run test                   # unit tests (node --test)
-pnpm run test:coverage          # unit tests + src/ coverage table; writes coverage/lcov.info
+pnpm run test:coverage          # unit tests + packages/compiler/src coverage table; writes coverage/lcov.info
 pnpm run test:subset            # decision tests → verdict matrix
 pnpm run test:golden            # compile + run vs Node, byte-for-byte
 pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-for-byte
 pnpm run test:asan              # golden fixtures with runtime + generated C under ASan/UBSan
 pnpm run test:leak              # 10M-object loop; RSS must plateau (skips without Boehm)
-pnpm run test262                # Test262 slice against tests/test262/pin.json (not part of `ci`)
-pnpm run differential           # fuzzer vs Node (failures land in tests/differential/failures/)
-pnpm run bench:record           # refresh tests/bench/baseline.json (valid for this machine only)
-just runtime                    # build libjsrt.a (clang, -Wall -Wextra -Werror)
-just runtime-asan               # ASan/UBSan runtime build (golden tests must also pass on this)
-just runtime-intl               # ICU feature build (off by default; needs pkg-config icu-uc icu-i18n)
+pnpm run test262                # Test262 slice against packages/tests/test262/pin.json (not part of `ci`)
+pnpm run differential           # fuzzer vs Node (failures land in packages/tests/differential/failures/)
+pnpm run bench:record           # refresh packages/tests/bench/baseline.json (valid for this machine only)
+pnpm run runtime                # build libjsrt.a (clang, -Wall -Wextra -Werror; wraps the just recipe)
+just -f packages/runtime/justfile -d packages/runtime runtime       # the recipe directly
+just -f packages/runtime/justfile -d packages/runtime runtime-asan  # ASan/UBSan runtime build
+just -f packages/runtime/justfile -d packages/runtime runtime-intl  # ICU feature build (off by default)
 pnpm run test:intl              # the intl_* golden fixtures against that build (not part of `ci`)
 pnpm run ci                     # all of the above, in order — run before claiming any task done
-node src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]
-node src/cli/main.ts explain file.ts --json     # per-construct verdicts (decision tests use this)
+moon run tests:ci               # same gate through moon (dependency graph + caching); wraps the above
+node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]
+node packages/compiler/src/cli/main.ts explain file.ts --json   # per-construct verdicts (decision tests use this)
 ```
+
+The monorepo (plan-notes 204): `packages/{compiler,runtime,tests}` under a pnpm workspace,
+orchestrated by moon. `pnpm run ci` stays the serial gate; `moon run tests:ci` runs the same
+commands as a cached dependency graph. moon tasks call the underlying tools directly (not `pnpm`),
+because mise's `pnpm` is unusable from a raw child process on this machine — plan-notes 204.
 
 ## Implementation standards — TypeScript (`src/`)
 

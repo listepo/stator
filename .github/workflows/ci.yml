@@ -51,8 +51,8 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: actions/cache@v4
         with:
-          path: tests/test262/corpus
-          key: test262-${{ hashFiles('tests/test262/pin.json') }}
+          path: packages/tests/test262/corpus
+          key: test262-${{ hashFiles('packages/tests/test262/pin.json') }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test262:fetch
       - name: Run Test262
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: test262-shard-${{ matrix.shard }}
-          path: tests/test262/results-${{ matrix.shard }}-of-4.json
+          path: packages/tests/test262/results-${{ matrix.shard }}-of-4.json
           if-no-files-found: error
 
   # Where the run is actually judged. A shard sees a quarter of the corpus, and both gates are

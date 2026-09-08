@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+layer: 'library'
+language: 'typescript'
+
+# In this environment mise's npm-managed `pnpm` is an unresolved placeholder that crashes in a raw
+# child process (see plan-notes 204), so moon tasks call the underlying tools directly instead of
+# `pnpm -w run <script>`. package.json's scripts stay the human/CI entry point (`pnpm run ci`); the
+# commands here mirror them one-for-one. All tasks run from the workspace root so the hoisted
+# node_modules/.bin binaries and packages/* paths resolve.
+tasks:
+  typecheck:
+    script: './node_modules/.bin/tsc --noEmit -p packages/compiler/tsconfig.json'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  build:
+    script: './node_modules/.bin/tsc -p packages/compiler/tsconfig.json'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    outputs:
+      - 'dist'
+  lint:
+    script: './node_modules/.bin/biome check --error-on-warnings .'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  dupes:
+    script: './node_modules/.bin/cpd .'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true

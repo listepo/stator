@@ -1,0 +1,5 @@
+# Stator is a moon monorepo (plan-notes 204). The npm workspace holds the two JS packages;
+# `packages/runtime` is a C project (no package.json) driven by its justfile as a moon project.
+packages:
+  - packages/compiler
+  - packages/tests

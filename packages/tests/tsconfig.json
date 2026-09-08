@@ -1,0 +1,19 @@
+{
+  "extends": "../compiler/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `packages/`, not `packages/tests/`: unit tests import the compiler modules they test, so the
+    // program spans both packages. Nothing is emitted from this config, so rootDir only has to
+    // contain the inputs.
+    "rootDir": ".."
+  },
+  "include": ["**/*.ts"],
+  "exclude": [
+    "subset/subset_*",
+    "subset/helper_*",
+    "subset/cycle_partner_*",
+    "golden/ts",
+    "golden/js",
+    "differential"
+  ]
+}

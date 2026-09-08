@@ -7,17 +7,18 @@
   "threshold": 1,
   "ignore": [
     "**/.claude/worktrees/**",
+    "**/.moon/cache/**",
     "**/node_modules/**",
-    "dist/**",
+    "**/dist/**",
     "coverage/**",
-    "runtime/build*/**",
-    "runtime/vendor/**",
-    "tests/subset/subset_*",
-    "tests/subset/helper_*",
-    "tests/subset/cycle_partner_*",
-    "tests/golden/ts/**",
-    "tests/golden/js/**",
-    "tests/differential/**",
+    "packages/runtime/build*/**",
+    "packages/runtime/vendor/**",
+    "packages/tests/subset/subset_*",
+    "packages/tests/subset/helper_*",
+    "packages/tests/subset/cycle_partner_*",
+    "packages/tests/golden/ts/**",
+    "packages/tests/golden/js/**",
+    "packages/tests/differential/**",
     "docs/architecture/**"
   ]
 }

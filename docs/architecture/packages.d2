@@ -1,19 +1,20 @@
 # Module dependencies — package view of plan.md §2.
 # Arrows mean "imports from". Two invariants: ts.Type stops at frontend; mode stops at the gate.
+# All src modules live in packages/compiler/; jsrt is packages/runtime/ (monorepo, plan-notes 204).
 
 ...@theme
 
 direction: right
 
-cli: src/cli
-frontend: src/frontend
-support: "src/support\ndiagnostics engine"
-hir: "src/hir\nHType + HIR + verifier"
-lower: src/lower
-passes: src/passes
-codegen: src/codegen
+cli: packages/compiler/src/cli
+frontend: packages/compiler/src/frontend
+support: "packages/compiler/src/support\ndiagnostics engine"
+hir: "packages/compiler/src/hir\nHType + HIR + verifier"
+lower: packages/compiler/src/lower
+passes: packages/compiler/src/passes
+codegen: packages/compiler/src/codegen
 jsrt: {
-  label: "runtime/include/jsrt_value.h\n(mirrors docs/VALUE.md —\nthe codegen↔runtime contract)"
+  label: "packages/runtime/include/jsrt_value.h\n(mirrors docs/VALUE.md —\nthe codegen↔runtime contract)"
   shape: parallelogram
 }
 tsp: "typescript pkg"

@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/workspace.json
+#
+# Stator is a moon monorepo (plan-notes 204). node, pnpm, just and clang come from mise
+# (mise.toml) — moon only orchestrates and CACHES. Every task shells out to the existing
+# pnpm/just commands (moon WRAPS them; it does not replace package.json's scripts, which stay
+# the human/CI entry point via `pnpm run ci`).
+projects:
+  compiler: 'packages/compiler'
+  runtime: 'packages/runtime'
+  tests: 'packages/tests'
+
+vcs:
+  client: 'git'
+  defaultBranch: 'main'
