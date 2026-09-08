@@ -87,12 +87,14 @@ value-flow views) sourced from `docs/architecture/*.d2`. It is a visualization o
 **Repo layout (fixed):**
 
 ```
-plan.md AGENTS.md plan-notes.md NICHE.md          # root
+plan.md AGENTS.md plan-notes.md NICHE.md          # root (pnpm workspace + .moon/; plan-notes 204)
 docs/    ARCHITECTURE.md architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
-src/     cli/  frontend/  hir/  lower/  passes/  codegen/  support/
-runtime/ include/jsrt_value.h  src/  vendor/  (justfile)   → runtime/build/libjsrt.a
-tests/   unit/  subset/  golden/ts/  golden/js/  differential/  bench/
+packages/compiler/  src/{cli,frontend,hir,lower,passes,codegen,support}  (package "statorc" + locked tsconfig)
+packages/runtime/   include/jsrt_value.h  src/  vendor/  (justfile)   → packages/runtime/build/libjsrt.a
+packages/tests/     unit/  subset/  golden/ts/  golden/js/  differential/  bench/  (package "@stator/tests")
 ```
+
+The three packages sit under a private pnpm workspace and are orchestrated by moon (`.moon/`); `pnpm run ci` stays the serial gate and `moon run tests:ci` mirrors it as a cached graph (plan-notes 204). The pipeline below is unchanged by the move.
 
 **HType — the internal type model.** Never pass `ts.Type` beyond `src/frontend/`. `src/hir/types.ts` defines a small, serializable, structural type model (`number`, `i32`-refinement, `string`, `boolean`, `null`, `undefined`, `fn(params, ret)`, `array<T>`, `object-shape`, `map/set specializations`, `union`, `generic-instance`, `Unknown`). `src/frontend/types.ts` is the only module that maps `ts.Type → HType`; anything the checker can't resolve maps to `Unknown` (with an `implicit-any` flag) — never a guess. `docs/HIR.md` documents the mapping with ≥10 worked examples (generic instantiation, union widening, JSDoc-inferred, `JSON.parse`, `.d.ts` import, method bivariance…). In `ts` mode, `Unknown`-from-implicit-`any` is an error at the gate; in `js` mode it's the dynamic path.
 
@@ -291,21 +293,11 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, and the **step-12 bookkeeping
-debt** below. Step 13 was added and landed on 2026-09-04 (plan-notes 193).
+What is still OPEN in this phase is **step 2a(b)/(c)** and **step 12 (c)–(f)**. Step 13 was added
+and landed on 2026-09-04 (plan-notes 193).
 
-**Step-12 bookkeeping debt (added 2026-09-04; plan-notes 191).** The builtins dashboard
-(`tests/golden/builtins.ts` + `builtins_coverage.json`) drifted RED — the direction its checks never
-covered: `Promise.prototype.then`/`catch`/`finally` landed with step 11 (commit `b8a0ac8`, plan-notes
-157, `tests/golden/js/promise_then.js` passing) yet the table still claims `[]`, so the dashboard
-reports `Promise.prototype: 0/3 (0%)` while the golden suite proves all three. `Object.freeze`/
-`isFrozen` are the same shape (§7's exit note assigns them to step 11; `ts/object_freeze.ts` passes;
-no js-column twin exists). The fix lands **with the next step-12 family commit**, never standalone:
-(a) cite `Promise.prototype.then/catch/finally` as `["ts/promise_then.ts", "js/promise_then.js"]`;
-(b) write the js-column `freeze` twin fixture and cite both; (c) make red-drift detectable, not
-hand-fixed — a `tests/unit/` check that cross-references the table against the runtime's exported
-`jsrt_<ns>_<member>` symbols, so an implemented member with an empty claim fails the build. The
-dashboard's green direction (stale claims) already fails the run; its red direction must too.
+~~**Step-12 bookkeeping debt** (added 2026-09-04; closed 2026-09-08, all three sub-items in one
+bundle — evidence: done.md → Phase 5).~~ ✅
 
 1. ~~Frontend: `allowJs` + `checkJs`-style inference in the `ts.Program`; per-function
    "typed | inferred | dynamic" provenance recorded into HIR.~~ ✅ **landed** (2026-09-01,
@@ -574,23 +566,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 Satisfies the Check's second clause (≥1 h nightly, zero unexplained divergences) via steps 5–9.
 
-**Task 6.2a — Pin the ground truth's invocation (added 2026-09-04; plan-notes 191).** A green signal
-that proves less than it appears to — this phase's own failure mode — was measured on this host:
-the shell's `PATH` puts mise's `node/lts` install directory (v24.20.0) ahead of the shims, so bare
-`node`/`pnpm` answer 24 while `.node-version` pins 26.7.0, the differential ground truth. The
-golden runner compares against `process.execPath`, so a suite run from such a shell diff-compiles
-against a Node that is **not** the oracle, and `--test-coverage-include-all` exits 9 needing ≥26.
-A green run under 24 is not evidence about 26. Steps:
-1. **Fail fast, everywhere Node is spawned.** A preflight in the `ci`/`test*` script family (or
-   `ci.sh`) that compares `node --version` against `.node-version` and exits nonzero with a
-   one-line remediation (`mise exec node --` or fixing PATH order). Cheapest correct form: one
-   guard script invoked first by `pnpm run ci`.
-2. **Record the remediation where the commands live** — AGENTS.md's Commands preamble — so the
-   next agent (or human) hitting exit-9 or a suspicious version string finds it in seconds, not
-   by bisecting the harness. The pin stays 26.7.0 (settled, plan-notes 190); this task is
-   plumbing, not a re-decision.
-**Check (6.2a):** in a shell whose bare `node` is not the pinned major, `pnpm run ci` refuses to
-start and prints the remediation; under the pin, CI is unchanged and green.
+~~**Task 6.2a — Pin the ground truth's invocation.**~~ ✅ **landed 2026-09-08** — evidence in [done.md](done.md) → Phase 6.
 
 **Task 6.3 — Benchmark harness** (weekly, results committed): startup time, binary size, RSS, and a compute set (fib, nbody, JSON round-trip, string churn) vs Node, Bun, QuickJS, and — where installable — Perry/scriptc/Static Hermes. Record version, flags, and hardware with every number. **Never quote a competitor's self-published figure as a measurement.**
 

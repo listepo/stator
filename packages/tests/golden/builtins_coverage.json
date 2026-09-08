@@ -178,12 +178,12 @@
     "create": [],
     "defineProperty": [],
     "entries": ["ts/object_builtins.ts", "js/object_builtins.js"],
-    "freeze": [],
+    "freeze": ["ts/object_freeze.ts", "js/object_freeze.js"],
     "fromEntries": ["ts/object_builtins.ts", "js/object_builtins.js"],
     "getOwnPropertyNames": ["ts/object_builtins.ts", "js/object_builtins.js"],
     "getPrototypeOf": [],
     "hasOwn": ["ts/object_builtins.ts", "js/object_builtins.js"],
-    "isFrozen": [],
+    "isFrozen": ["ts/object_freeze.ts", "js/object_freeze.js"],
     "keys": ["ts/object_builtins.ts", "js/object_builtins.js"],
     "setPrototypeOf": [],
     "values": ["ts/object_builtins.ts", "js/object_builtins.js"]
@@ -300,8 +300,8 @@
     "try": []
   },
   "Promise.prototype": {
-    "then": [],
-    "catch": [],
-    "finally": []
+    "then": ["ts/promise_then.ts", "js/promise_then.js"],
+    "catch": ["ts/promise_then.ts", "js/promise_then.js"],
+    "finally": ["ts/promise_then.ts", "js/promise_then.js"]
   }
 }

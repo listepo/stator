@@ -1351,6 +1351,30 @@ always strict.
 `js/object_accessors.js`), 342 subset fixtures with `subset_object_literal_accessors_{ts,js}` flipped
 out of expected-fail, and the runtime print corpus gains `print_accessors.{c,mjs}`.
 
+### Interfaces and type aliases — SUBSET row 61 delivered (2026-09-08)
+
+`docs/SUBSET.md` promised `static`; the gate answered `STA1214 (InterfaceDeclaration)` — found by
+building the `examples/todo/` demo against the shared core, which needs a named shared type. The
+gate accepts both declarations, the lowering erases them (top-level skip plus a nested no-op
+block, the `EmptyStatement` shape); no HIR/verifier/codegen change, because uses of the name are
+annotations the checker already resolves. The two decision fixtures flip out of expected-fail with
+honestly different verdicts: a `type` alias of an object literal gets a fixed layout (`static`),
+while a value typed by an `interface` goes dynamic by deliberate design (an interface may be
+implemented by any class with any layout — `src/frontend/types.ts` — so only anonymous shapes get
+layouts). `tests/golden/ts/interface_erase.ts` matches Node byte-for-byte. `enum`/`namespace`
+stay refused: they have runtime meaning. Evidence: plan-notes 206.
+
+### Step-12 bookkeeping debt — closed (2026-09-08)
+
+The paragraph `plan.md` §8 carried since 2026-09-04, all three sub-items in one bundle:
+(a) `Promise.prototype.then/catch/finally` cite `["ts/promise_then.ts", "js/promise_then.js"]`;
+(b) new js-column twin `tests/golden/js/object_freeze.js` (matches Node byte-for-byte) with
+`freeze`/`isFrozen` citing both columns; (c) red drift is a build failure —
+`packages/tests/unit/builtins-coverage.test.ts` cross-references every empty claim against the
+`jsrt_*` symbols in `packages/runtime/include/jsrt_value.h` (console aliases from the same
+`CONSOLE_METHODS` table codegen emits through), negative-proofed by emptying one claim and
+watching it fail. Dashboard: 222/238, `Promise.prototype: 3/3 (100%)`. Evidence: plan-notes 206.
+
 ---
 
 ## Phase 6 — Conformance and differential fuzzing (in progress)
@@ -1409,6 +1433,51 @@ evidence, not features; this is the evidence.
 Tests: `tests/unit/phase6.test.ts` (frontmatter, feature map, `scheduleSkipCode`),
 `tests/subset/subset_switch_fallthrough_{js,ts}`, `tests/subset/subset_catch_binding_property_{js,ts}`,
 `tests/golden/js/mode_policy_es5.js`.
+
+### Task 6.2a — Pin the ground truth's invocation ✅ (2026-09-08)
+
+**Check clause:** *in a shell whose bare `node` is not the pinned major, `pnpm run ci`
+refuses to start and prints the remediation; under the pin, CI is unchanged and green.* Met.
+
+The guard is `scripts/check-node.mjs`: dependency-free (it runs before anything is
+installed, so it imports only `node:fs`/`node:path`/`node:url`), reads `.node-version` from
+the workspace root, and compares the running major against the pinned major. Major-only is
+exactly what the Check names — a 26.x drift against a 26.7.0 pin still runs. Mismatch prints
+the cause plus the one-line fix (`mise exec node -- <your command>`) and exits 1; match
+prints one confirmation line and exits 0. It runs first in `pnpm run ci` and in `ci.sh`
+(the task's "cheapest correct form": one script, invoked at the gate, not fanned out into
+every `test*` script), and the remediation is recorded in AGENTS.md's Commands preamble.
+
+Measured in this shell, whose PATH puts mise's `node/lts` (v24.20.0) ahead of the shims:
+
+```
+$ node --version
+v24.20.0
+$ pnpm run ci
+$ node scripts/check-node.mjs && ...
+stator: node v24.20.0 is not the pinned Node (26.7.0 from .node-version) — suites diff against the pinned Node, so a run here proves nothing
+stator: fix: mise exec node -- <your command>
+[ELIFECYCLE] Command failed with exit code 1.   # EXIT:1, before any suite ran
+$ mise exec node@24 -- node scripts/check-node.mjs   # same refusal, other 24
+EXIT:1
+$ mise exec node@26.7.0 -- node scripts/check-node.mjs
+stator: node v26.7.0 matches .node-version (26.7.0)
+EXIT:0
+```
+
+Under the pin every CI step is green (same host): `typecheck` (both projects), `lint`,
+`dupes` (75 clones · 0.9%), `runtime` (Boehm build), unit 383/383, coverage 90.46% exit 0,
+`test:runtime` corpus match, `test:subset` 327 passed / 29 expected-fail / 0 failed,
+`test:golden` 165/165, `test:builtins` 217/238, `test:leak` plateau, `moon run tests:ci`
+exit 0, ASan golden under `STATOR_RUNTIME=asan` exit 0.
+
+Deliberate scopings (plan-notes 205): no unit test — the matrix is the runtime itself, so
+the two-shell behavioral run above IS the test; `moon run tests:ci` does not invoke the
+guard (it spawns the ambient node directly, per plan-notes 204's no-pnpm rule), so a moon
+run from an off-pin shell still trusts PATH — recorded, not fixed, since the Check names
+only `pnpm run ci`. Drive-by in the same change: `ci.sh`'s trailing `just runtime-asan`
+no longer resolved after the `packages/*` move (no root justfile); now
+`just -f packages/runtime/justfile -d packages/runtime runtime-asan`.
 
 
 ## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)

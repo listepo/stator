@@ -5688,3 +5688,143 @@ identical to Node.
 `STA2005`'s remaining string honesty clause is `normalize` with a bad form; `toUpperCase`/`toLowerCase`
 above ASCII was already retired by libunicode (done.md, Task 4.3 third slice). DIAGNOSTICS.md STA2005
 and SUBSET.md's `String.prototype` row updated to match. Check: `pnpm run ci` green.
+
+## 204. Physical `packages/*` monorepo, orchestrated by moon (2026-09-07)
+
+Owner-directed (2026-09-07): restructure the flat tree into a `packages/*` monorepo and add moon
+(moonrepo) as the task orchestrator, both provisioned through mise. Two decisions were taken by the
+owner up front: (a) a *physical* move — `src/` → `packages/compiler/`, `runtime/` →
+`packages/runtime/`, all test harnesses → `packages/tests/` — not merely a logical grouping; and
+(b) moon *wraps* the existing pnpm/just commands rather than replacing them, so `pnpm run ci` stays
+the human/CI entry point and moon adds only a dependency graph + caching on top.
+
+Layout. Root is a private pnpm workspace (`stator`, `pnpm-workspace.yaml` listing
+`packages/compiler` and `packages/tests`; `packages/runtime` has no `package.json` — it is a C
+project, not an npm package). `packages/compiler` is the published package (`statorc`, `bin.stator`
+→ `dist/cli/main.js`) and holds `src/` + the locked `tsconfig.json`. `packages/tests`
+(`@stator/tests`, private) holds every harness (unit/subset/golden/differential/bench/leak/test262)
+plus a `tsconfig.json` extending the compiler's. All runtime deps became root devDependencies (the
+compiler's own runtime deps are declared in `packages/compiler/package.json`).
+
+Runtime path resolution. `packages/compiler/src/cli/build.ts` gained `resolveRuntimeRoot()`:
+`STATOR_RUNTIME_ROOT` override → else sibling `packages/runtime` in dev → else `runtime/` beside a
+published `dist/`. The runtime is located, never assumed relative to CWD.
+
+moon. `.moon/{workspace,toolchain}.yml` + per-project `moon.yml`. moon 2.5 vocabulary: `vcs.client`
+(not `manager`), project `layer` (not `type`), and layer relationship rules — `compiler` and
+`runtime` are `library`, `tests` is `application` (an application may depend on libraries, not the
+reverse). `moon run tests:ci` walks the whole graph with caching; `pnpm run ci` remains the serial
+gate.
+
+moon does NOT call `pnpm`. In this environment mise's `npm:@moonrepo/cli` provisions moon fine, but
+mise's `npm:pnpm` install is a broken placeholder: `…/npm-pnpm/<v>/…/pnpm/pnpm` still contains the
+"pnpm's native binary replaces this file during installation" stub, so any *raw* child process that
+resolves `pnpm` on PATH and hands the file to node crashes with `SyntaxError: Invalid or unexpected
+token` (node tries to ESM-load the stub). The interactive shell works only because a compiled mise
+shim / the lean-ctx wrapper re-execs it correctly; moon spawns raw and hits the stub. Fix: every
+moon task is `toolchain: 'system'` and invokes the real tool directly — `just` (runtime),
+`node …/run.ts` (harnesses), and the workspace-hoisted `./node_modules/.bin/{tsc,biome,cpd}` run
+from the workspace root. This is a small, deliberate duplication of package.json's script bodies; the
+moon.yml headers say package.json stays the source of truth. Compound scripts (coverage, asan) use
+moon's `script:` field so `&&` and inline env work.
+
+Fallout fixed: biome and jscpd ignore `.moon/cache` (moon caught its own cache JSON on the first
+lint); `.github/workflows/{ci,nightly}.yml` artifact/cache paths gained the `packages/tests/`
+prefix; the runtime justfile dropped its `cd runtime` now that moon/`-d` set the cwd. The
+`.github/actions/setup` composite needs nothing — it reads `.node-version` and `packageManager` at
+the root.
+
+Check: `moon run tests:ci` exits 0 (subset 327 pass/29 expected-fail/0 failed, golden 165/165, leak
+plateau, runtime-corpus matches Node, builtins 217/238), and `pnpm run ci` stays green.
+
+## 205. Task 6.2a landed: the Node-pin preflight (2026-09-08)
+
+**Plan:** §9 Task 6.2a, opened by entry 191 finding 1. **What landed:** `scripts/check-node.mjs`
+(dependency-free: `node:fs`/`node:path`/`node:url` only — it runs before anything is installed),
+invoked first by `pnpm run ci` and by `ci.sh`; AGENTS.md's Commands preamble carries the
+remediation. The guard compares the running Node MAJOR against `.node-version`'s major —
+the Check names the major, so 26.x drift against the 26.7.0 pin still runs. Mismatch exits 1
+with the cause plus `mise exec node -- <your command>`; match prints one confirmation line.
+
+**Evidence (this host, whose PATH puts mise's `node/lts` v24.20.0 ahead of the shims):**
+bare `node scripts/check-node.mjs` and `mise exec node@24 -- …` both exit 1 with the
+remediation; `mise exec node@26.7.0 -- …` exits 0; bare `pnpm run ci` exits 1 before any
+suite runs. Under the pin the full gate is green: typecheck (both projects), lint, dupes
+(75 clones · 0.9%), runtime (Boehm), unit 383/383, coverage 90.46% exit 0, runtime corpus
+match, subset 327/29/0, golden 165/165, builtins 217/238, leak plateau, `moon run tests:ci`
+exit 0, ASan golden (`STATOR_RUNTIME=asan`) exit 0.
+
+**Three deliberate scopings.** (a) No unit test: the test matrix is the runtime itself, so
+the two-shell behavioral run above is the test — a test spawning "another Node" would need
+a second binary the repo cannot assume. (b) `moon run tests:ci` does not invoke the guard:
+moon's tasks spawn the ambient node directly (entry 204's no-pnpm rule), so a moon run from
+an off-pin shell still trusts PATH. The Check names only `pnpm run ci`; the moon gap is
+recorded here, not fixed here. (c) Drive-by: `ci.sh`'s trailing `just runtime-asan` stopped
+resolving after the `packages/*` move (no root justfile since entry 204); now
+`just -f packages/runtime/justfile -d packages/runtime runtime-asan`.
+
+**Not a new dependency** (AGENTS.md budget rule): a ~50-line stdlib-only script is what "a
+few lines couldn't do" needs no entry for — there is nothing to depend on. **plan.md
+edited:** yes — Task 6.2a is a struck stub, its record in done.md → Phase 6.
+
+## 206. Shared-code todo example, interface/type-alias landing, dashboard debt, docs paths (2026-09-08)
+
+Four things, one session, each small enough to be its own commit. The request was "shared code in
+examples + fix blockers"; the blockers turned out to be real and fourfold.
+
+**1. `examples/todo/` — one shared core, both modes.** `shared.ts` is a typed task store
+(interface + five pure functions, no I/O); `main-ts.ts` (ts mode) and `main-js.js` (js mode,
+mixed graph importing the same `.ts` core) exercise it. Both binaries match the pinned Node
+byte-for-byte (`diff` exits 0 both ways), and `stator explain` reports no errors. `README.md`
+carries the exact build/run/ground-truth commands, verified verbatim from the root. `.gitignore`
+gains the two demo binaries. Biome's `useTemplate` rule forced `${}` substitutions into the
+example — which re-proved rung 2 rather than assumed it. The two entries are deliberately
+different programs (different items, different flow) so the `js-ts` cross-format cpd gate stays
+at 76 clones / 0.9%.
+
+**2. Interfaces and type aliases land (SUBSET.md row 61).** Building the example exposed the gap:
+docs promise "static", the gate answered `STA1214 (InterfaceDeclaration)`. The gate now accepts
+both declarations (`src/frontend/gate.ts`), the lowering erases them — top-level skip plus a
+nested no-op block, mirroring `EmptyStatement` (`src/lower/index.ts`). No HIR/verifier/codegen
+change: uses of the name are annotations the checker already resolves. Two decision fixtures flip
+out of expected-fail with HONESTLY DIFFERENT verdicts, and the difference is the point: `type`
+aliases of object literals get fixed layouts (ts fixture: `static`), while a value TYPED by an
+`interface` goes dynamic by deliberate design (`src/frontend/types.ts`: an interface may be
+implemented by any class with any layout, so only anonymous shapes get layouts) — the js fixture
+is now `@verdict: dynamic` with that reason in its comment, and it compiles where it used to be
+rejected. `tests/golden/ts/interface_erase.ts` (incl. a nested interface-in-function) matches
+Node byte-for-byte. `enum`/`namespace` stay refused: unlike these two, they have runtime meaning.
+
+**3. Step-12 bookkeeping debt closed (all three sub-items, one bundle).** (a) `Promise.prototype`
+claims `["ts/promise_then.ts", "js/promise_then.js"]`. (b) New js-column twin
+`tests/golden/js/object_freeze.js` (class instance + dynamic object, catchable writes) matches
+Node byte-for-byte; `freeze`/`isFrozen` cite both columns. Dashboard moves 217/238 → **222/238**,
+`Promise.prototype: 3/3 (100%)`, `Object: 9/13` with only genuinely-missing members left.
+(c) Red drift is now a build failure: `packages/tests/unit/builtins-coverage.test.ts`
+cross-references every EMPTY claim against the `jsrt_*` symbols declared in
+`packages/runtime/include/jsrt_value.h` (mechanical `jsrt_<ns>_<snake(member)>` mapping; console
+aliases read from the same `CONSOLE_METHODS` table codegen emits through; `globals` skipped —
+values, not entry points). Negative-proofed: emptying `then` fails with exactly
+`claims [] but jsrt_promise_then is declared`. Per the debt note this lands as one bundle rather
+than three commits; there is no step-12 family commit in flight to attach it to, so the bundle IS
+the vehicle and this entry is the record. **plan.md edited:** the debt paragraph is now a struck
+stub pointing at done.md → Phase 5.
+
+**4. Monorepo-fallout docs paths.** README.md and docs/TOOLCHAIN.md still gave pre-move commands
+(`node src/cli/main.ts`, bare `just runtime` — which fails with "no justfile found" at root).
+Both now use `packages/` paths and the `-f/-d` just form (mirroring package.json scripts and
+AGENTS.md); TOOLCHAIN's pin table corrected too (pnpm **12.3.4**, TS in
+`packages/compiler/package.json`). Same sweep for prose refs in VALUE/NUMERIC/SUBSET/DIAGNOSTICS.
+Two judgment calls: (i) `STA0011`'s remediation is EMITTED text, so the code changed with the doc —
+`build.ts` now prints `just -f {runtime-root}/justfile -d {runtime-root} {recipe}` from the
+resolved root (correct under `STATOR_RUNTIME_ROOT` too), verified by triggering it; no test pins
+the old text. (ii) The `just runtime-intl` strings in STA1210/STA1215 messages stay: they name the
+recipe, tests pin the codes, and `pnpm run test:intl` is the working one-hop path — renaming
+emitted diagnostics is churn, not a fix.
+
+**Full Check** (`mise exec node --`, pinned 26.7.0): tsc both projects clean; biome clean
+(94 files); cpd 76 clones · 0.9%; unit **384/384**; subset **356 — 329 passed, 27 expected-fail,
+0 failed**; golden **167/167** release and ASan; runtime print corpus matches Node both builds;
+builtins 222/238 +5 carved; leak plateau 3040 KB; differential smoke 2 cases, 0 divergences;
+coverage exit 0. The delete-operator branch (`delete-op` worktree) was inspected and left alone —
+in-flight elsewhere, not this session's blocker.
