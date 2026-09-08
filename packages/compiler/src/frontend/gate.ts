@@ -312,6 +312,15 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.TypeParameter:
       return gateTypeParameter(node as ts.TypeParameterDeclaration);
 
+    // `interface X { ... }` and `type X = ...` erase: they bind no value and emit no code
+    // (docs/SUBSET.md). Accepted so the declaration is not a diagnostic; the lowering drops
+    // them, and uses of the name are ordinary annotations the checker resolves. `enum` and
+    // `namespace` stay refused below: unlike these two, they HAVE runtime meaning the HIR
+    // does not model.
+    case ts.SyntaxKind.InterfaceDeclaration:
+    case ts.SyntaxKind.TypeAliasDeclaration:
+      return { kind: 'accept' };
+
     // `return;` and `return e;`. That a return sits inside a function is a structural fact the
     // HIR verifier checks; the gate only decides the construct is in the subset.
     case ts.SyntaxKind.ReturnStatement:

@@ -285,6 +285,13 @@ export function lowerProgram(
         ) {
           continue;
         }
+        // Type-only declarations erase: `interface` and `type` bind no value and emit no code
+        // (docs/SUBSET.md), so there is no HIR to build for them. The gate accepts them; the
+        // lowering drops them here, and uses of the name are ordinary annotations the checker
+        // already resolved to a shape.
+        if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+          continue;
+        }
         const stmt = lowerStatement(node, sourceFile, checker, bindings, diagnostics);
         if (stmt === null) {
           return { module: null, diagnostics };
@@ -646,6 +653,19 @@ function lowerStatement(
       statements: [],
     };
     return stmt;
+  }
+
+  // A nested type-only declaration (block or function scope) erases the same way a top-level
+  // one does -- the top-level loop skips those outright, but a nested one reaches this
+  // function, so it lowers to the same nothing `;` does rather than an internal error.
+  if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+    const erased: Block = {
+      kind: 'block',
+      type: H_UNDEFINED,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      statements: [],
+    };
+    return erased;
   }
 
   // Anything else is an internal error
