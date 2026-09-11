@@ -5737,6 +5737,25 @@ the root.
 Check: `moon run tests:ci` exits 0 (subset 327 pass/29 expected-fail/0 failed, golden 165/165, leak
 plateau, runtime-corpus matches Node, builtins 217/238), and `pnpm run ci` stays green.
 
+**Environment note (2026-09-11).** moon loads its wasm plugin through wasmtime, whose module cache
+defaults to the platform cache dir — `~/Library/Caches/BytecodeAlliance.wasmtime` on macOS, from
+`ProjectDirs::from("", "BytecodeAlliance", "wasmtime")`. An agent harness that permits writes only
+under the workspace therefore kills moon *before any task runs*:
+`plugin::wasm::failed_container … failed to create cache directory … Operation not permitted`.
+Nothing in the repo causes it and nothing in the repo can fix it, exactly like the mise-pnpm failure
+above. wasmtime has no environment variable for this path — the only knob is its `config.toml`
+(`crates/cache/src/config.rs`, `[cache] directory`, absolute) — so the fix is one machine-local file,
+`~/Library/Application Support/BytecodeAlliance.wasmtime/config.toml`, pointing the cache somewhere a
+restricted sandbox can still write:
+
+    [cache]
+    directory = "/tmp/BytecodeAlliance.wasmtime"
+
+Verified on this host: `moon run compiler:lint` → `Tasks: 1 completed`, exit 0, modules cached under
+`/tmp/BytecodeAlliance.wasmtime/modules`, and the old home cache dir is no longer created. Pointing it
+at `.moon/cache/…` works too but is worse: the file is machine-wide, so other wasmtime users would
+write their cache into this repository.
+
 ## 205. Task 6.2a landed: the Node-pin preflight (2026-09-08)
 
 **Plan:** §9 Task 6.2a, opened by entry 191 finding 1. **What landed:** `scripts/check-node.mjs`
