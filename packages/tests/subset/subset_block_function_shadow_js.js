@@ -1,6 +1,5 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: function declaration inside a block, loop or branch (shadowing case)
 
 function outer() {

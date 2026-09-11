@@ -141,6 +141,25 @@ import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, isFunctionLike } from './captures.ts';
+import { Scope } from './scope.ts';
+
+/* What HIR name each source declaration ended up with (plan.md §8 step 14).
+ *
+ * Normally the source name, so nothing needs this map. It exists for the one case where it is not:
+ * a declaration that SHADOWS a visible binding is emitted under a fresh name, and the capture
+ * analysis -- which resolves references by SYMBOL, before any of that has happened -- has to be
+ * told what the declaration is called in the HIR. Keyed by the declaration NODE, because that is
+ * the one thing both sides know: two variables named `x` are one string and two nodes.
+ *
+ * A WeakMap, not a Map: a program's worth of declarations is reached only through these nodes, and
+ * a compile that lowers several files should not keep them alive behind the caller's back. */
+const hirNameOfDeclaration = new WeakMap<ts.Declaration, string>();
+
+/** The HIR spelling of a declaration, or `undefined` when it was never declared through a Scope
+ * (a class, an import, a name outside this subset) -- the caller keeps the source name then. */
+function hirNameOf(decl: ts.Declaration | undefined): string | undefined {
+  return decl === undefined ? undefined : hirNameOfDeclaration.get(decl);
+}
 
 /** Token -> HIR operator. A table rather than a chain of `if`s so that the gate's accept set and
  * the HIR's vocabulary can be compared against it by eye: a token the gate lets through and this
@@ -208,7 +227,7 @@ export function lowerProgram(
   runtimeDynamicSymbols: ReadonlySet<ts.Symbol> = new Set(),
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
-  const bindings = new Map<string, HType>();
+  const bindings = Scope.root();
   for (const symbol of runtimeDynamicSymbols) {
     bindings.set(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`, hUnknown(false));
   }
@@ -303,11 +322,17 @@ export function lowerProgram(
     // Unioned across the graph, because the merged program has ONE module environment and each
     // file contributes its own per-iteration top-level bindings to it. Concatenation is safe
     // without a dedupe: cross-file name collisions are already refused before lowering, so two
-    // files cannot contribute the same name. Sorted for the same reason a function's envVars are:
-    // the layout must depend on the source and not on file order.
-    const envVars = files
-      .flatMap((file) => capturesFor(file, checker).get(file)?.envVars ?? [])
-      .sort();
+    // files cannot contribute the same name.
+    //
+    // Each file's list is already in the analysis's slot order, and that order is what the
+    // captures' `index` fields mean -- so this MUST NOT re-sort. It used to, back when every name
+    // was its own source spelling and sorting the union was idempotent; a renamed binding's HIR
+    // name starts with U+0000, so a second sort moves it to the front and every index after it
+    // points one slot off (plan-notes 216).
+    const envVars = files.flatMap((file) => {
+      const info = capturesFor(file, checker).get(file);
+      return (info?.envVars ?? []).map((v, i) => hirNameOf(info?.envDecls[i]) ?? v);
+    });
 
     const module: Module = {
       kind: 'module',
@@ -343,7 +368,7 @@ function lowerStatement(
   node: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   label?: string,
 ): Statement | null {
@@ -472,7 +497,7 @@ function lowerStatement(
   }
 
   if (ts.isTryStatement(node)) {
-    const tryBlock = lowerBlock(node.tryBlock, sourceFile, checker, bindings, diagnostics);
+    const tryBlock = lowerBlock(node.tryBlock, sourceFile, checker, bindings.child(), diagnostics);
     if (!tryBlock) {
       return null;
     }
@@ -483,11 +508,14 @@ function lowerStatement(
       // binding enters scope as an unchecked value and a narrowing of it goes through the same
       // BoundaryCheck machinery as any other unknown (Task 3.5). The scope copy is what confines
       // it to the catch block.
-      const scope = new Map(bindings);
+      const scope = bindings.child();
       const declared = node.catchClause.variableDeclaration?.name;
       if (declared !== undefined && ts.isIdentifier(declared)) {
-        catchBinding = declared.text;
-        scope.set(catchBinding, hUnknown(false));
+        // `catch (e)` is a block-scoped binding, so it shadows like any other: the copy above is
+        // what ends its scope at the block, and the rename is what keeps `catch (e)` from
+        // overwriting an outer `e` for the length of the handler.
+        catchBinding = scope.declare(declared.text, hUnknown(false));
+        hirNameOfDeclaration.set(declared, catchBinding);
       } else if (declared !== undefined) {
         catchBinding = CATCH_VALUE;
         scope.set(CATCH_VALUE, hUnknown(false));
@@ -524,7 +552,13 @@ function lowerStatement(
     }
     let finallyBlock: Block | undefined;
     if (node.finallyBlock !== undefined) {
-      const lowered = lowerBlock(node.finallyBlock, sourceFile, checker, bindings, diagnostics);
+      const lowered = lowerBlock(
+        node.finallyBlock,
+        sourceFile,
+        checker,
+        bindings.child(),
+        diagnostics,
+      );
       if (!lowered) {
         return null;
       }
@@ -584,7 +618,7 @@ function lowerStatement(
 
   // Block
   if (ts.isBlock(node)) {
-    return lowerBlock(node, sourceFile, checker, bindings, diagnostics);
+    return lowerBlock(node, sourceFile, checker, bindings.child(), diagnostics);
   }
 
   // `function f(...) { ... }`. The binding is already in `bindings` -- hoisting put it there
@@ -613,7 +647,10 @@ function lowerStatement(
       kind: 'function-declaration',
       type: H_UNDEFINED,
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-      name,
+      // The name hoisting gave it, which is the source's own unless the declaration shadows one
+      // (plan.md §8 step 14). `fn.name` keeps the SOURCE spelling, because that is what a
+      // function's `name` is and what prints.
+      name: bindings.hirName(name),
       fn,
     };
     return declaration;
@@ -739,7 +776,7 @@ function lowerPatternRead(
   at: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
@@ -773,7 +810,7 @@ function bindPatternElement(
   declKind: 'let' | 'const',
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   statements: Statement[],
 ): boolean {
@@ -797,12 +834,15 @@ function bindPatternElement(
     return false;
   }
   const type = typeAt(el.name, checker, bindings);
-  bindings.set(el.name.text, type);
+  // A destructured element is a binding like any other, so it can shadow -- and then it needs a
+  // name of its own for the same reason a plain `let` does.
+  const hirName = bindings.declare(el.name.text, type);
+  hirNameOfDeclaration.set(el, hirName);
   statements.push({
     kind: 'declaration',
     type,
     span: makeSpan(el.getStart(sourceFile), el.getWidth(sourceFile), sourceFile),
-    name: el.name.text,
+    name: hirName,
     declKind,
     value: maybeBoundary(read, type, el, sourceFile),
   });
@@ -816,7 +856,7 @@ function lowerBindingPattern(
   at: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Statement[] | null {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
@@ -905,7 +945,7 @@ function lowerDeclarationList(
   at: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Statement | null {
   const fail = (target: ts.Node, message: string): null => {
@@ -966,7 +1006,10 @@ function lowerDeclarationList(
   // initializer's `number` would make the perfectly legal `x = 'a'` an internal error, and would
   // let a later pass unbox a slot that can hold a string.
   const type = typeAt(decl.name, checker, bindings);
-  bindings.set(name, type);
+  // The HIR name, which differs from the source's exactly when this declaration SHADOWS a visible
+  // binding: the fresh name is what gives the block's `x` a slot of its own (plan.md §8 step 14).
+  const hirName = bindings.declare(name, type);
+  hirNameOfDeclaration.set(decl, hirName);
 
   let value: Expression | undefined;
   if (decl.initializer !== undefined) {
@@ -981,7 +1024,7 @@ function lowerDeclarationList(
     kind: 'declaration',
     type,
     span: makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile),
-    name,
+    name: hirName,
     declKind,
     ...(value !== undefined ? { value } : {}),
   };
@@ -1001,7 +1044,7 @@ function lowerForOf(
   node: ts.ForOfStatement,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   label?: string,
 ): Statement | null {
@@ -1044,11 +1087,15 @@ function lowerForOf(
   // disagree -- an evolving `const xs = []` that js mode widened to Unknown, which the checker
   // still resolves to `number[]` -- the checker's answer would put a type on the binding that the
   // emitted loop does not produce (STA4010). `forOfElementType` is the verifier's own rule.
-  const inner = new Map(bindings);
-  inner.set(
+  const inner = bindings.child();
+  // The header binding is a declaration of the loop's scope, so it shadows the enclosing name (if
+  // there is one) rather than sharing its slot -- and the HIR's own `binding` is the renamed name,
+  // because that is what the emitter allocates the slot under.
+  const hirBinding = inner.declare(
     binding,
     forOfElementType(iterable.type, peeled === undefined ? 'identity' : peeled.view),
   );
+  hirNameOfDeclaration.set(declaration, hirBinding);
 
   const body = lowerBody(node.statement, sourceFile, checker, inner, diagnostics);
   if (!body) {
@@ -1059,7 +1106,7 @@ function lowerForOf(
     kind: 'for-of-statement',
     type: H_UNDEFINED,
     span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-    binding,
+    binding: hirBinding,
     declKind: (list.flags & ts.NodeFlags.Const) !== 0 ? 'const' : 'let',
     iterable,
     view: peeled === undefined ? 'identity' : peeled.view,
@@ -1135,7 +1182,7 @@ function wrapUserIterator(
 function peelIteratorView(
   expr: ts.Expression,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
 ): { view: Exclude<IteratorView, 'identity'>; inner: ts.Expression } | undefined {
   if (!ts.isCallExpression(expr) || expr.arguments.length !== 0) {
     return undefined;
@@ -1158,7 +1205,7 @@ function lowerFor(
   node: ts.ForStatement,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   label?: string,
 ): Statement | null {
@@ -1166,7 +1213,7 @@ function lowerFor(
   // loop sits in. Sharing the caller's map leaked it, so `typeof i` after the loop read the loop's
   // slot and answered `"number"` where Node answers `"undefined"` (plan-notes 213) -- and the body
   // gets its own scope on top of this one, through `lowerBody`.
-  const inner = new Map(bindings);
+  const inner = bindings.child();
   let init: Statement | undefined;
   if (node.initializer !== undefined) {
     // The initializer is either a declaration list (`let i = 0`) or an expression (`i = 0`). The
@@ -1245,7 +1292,7 @@ function lowerSwitch(
   node: ts.SwitchStatement,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   label?: string,
 ): Statement | null {
@@ -1257,7 +1304,7 @@ function lowerSwitch(
   // The clause list is ONE block scope (see `SwitchClause`), so it gets one map: the hoist, every
   // clause test and every clause's statements share it, and the discriminant does not -- it is
   // evaluated before the switch's scope exists.
-  const inner = new Map(bindings);
+  const inner = bindings.child();
   for (const clause of node.caseBlock.clauses) {
     hoistFunctionDeclarations(clause.statements, checker, inner);
   }
@@ -1326,7 +1373,7 @@ function lowerExpressionAsStatement(
   at: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Statement | null {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
@@ -1399,7 +1446,7 @@ function lowerExpressionAsStatement(
 function isUnresolvableIdentifier(
   node: ts.Identifier,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
 ): boolean {
   if (bindings.has(node.text)) {
     return false;
@@ -1426,7 +1473,7 @@ function isUnresolvableIdentifier(
 function undeclaredWriteTarget(
   expr: ts.Expression,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
 ): { node: ts.Identifier; rhs?: ts.Expression } | undefined {
   const unresolved = (node: ts.Expression): ts.Identifier | undefined =>
     ts.isIdentifier(node) && isUnresolvableIdentifier(node, checker, bindings) ? node : undefined;
@@ -1485,13 +1532,11 @@ function nextBindTemp(): string {
   return ` bind${String(bindTempId)}`;
 }
 
-function bindPatternNames(
-  name: ts.BindingName,
-  checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
-): void {
+function bindPatternNames(name: ts.BindingName, checker: ts.TypeChecker, bindings: Scope): void {
   if (ts.isIdentifier(name)) {
-    bindings.set(name.text, typeAt(name, checker, bindings));
+    // A destructuring pattern's names are declarations of the scope they appear in, so they go
+    // through the same shadow-aware path: `catch ({ e })` under an outer `e` renames.
+    bindings.declare(name.text, typeAt(name, checker, bindings));
     return;
   }
   if (ts.isObjectBindingPattern(name)) {
@@ -1525,11 +1570,7 @@ function staticName(className: string, member: string): string {
  * layout — but the object is a `JSRTDynObject` (docs/VALUE.md §4.15), and the binding is the only
  * place that is recorded. Inside a class member the binding is the layout, so this answers false
  * and the fixed-slot path takes over, unchanged. */
-function targetIsDynamic(
-  target: ts.Expression,
-  checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
-): boolean {
+function targetIsDynamic(target: ts.Expression, checker: ts.TypeChecker, bindings: Scope): boolean {
   if (target.kind === ts.SyntaxKind.ThisKeyword) {
     return bindings.get(RECEIVER)?.kind === 'unknown';
   }
@@ -1582,7 +1623,7 @@ function assignmentParts(
   expr: ts.Expression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): { target: string; value: Expression } | null | undefined {
   const build = (
@@ -1621,13 +1662,18 @@ function assignmentParts(
       kind: 'identifier',
       type: binding,
       span: makeSpan(targetNode.getStart(sourceFile), targetNode.getWidth(sourceFile), sourceFile),
-      name: target,
+      // The HIR name: a shadowing binding writes to its own slot, not the outer one it shadows
+      // (plan.md §8 step 14).
+      name: bindings.hirName(target),
     };
     const value = make(current);
     if (value === null) {
       return null;
     }
-    return { target, value: maybeBoundary(value, binding, targetNode, sourceFile) };
+    return {
+      target: bindings.hirName(target),
+      value: maybeBoundary(value, binding, targetNode, sourceFile),
+    };
   };
 
   if (ts.isBinaryExpression(expr)) {
@@ -1722,7 +1768,7 @@ function memberAssignment(
   at: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Statement | null | undefined {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
@@ -1943,7 +1989,7 @@ function lowerIndexAccess(
   node: ts.ElementAccessExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): IndexAccess | null {
   const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
@@ -2020,7 +2066,7 @@ function lowerUpdateExpression(
   node: ts.Expression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null | undefined {
   const parent = node.parent;
@@ -2088,7 +2134,7 @@ function lowerUpdatePlace(
   node: ts.Expression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): UpdatePlace | null {
   const expr = lowerExpression(node, sourceFile, checker, bindings, diagnostics);
@@ -2120,7 +2166,7 @@ function lowerForIn(
   node: ts.ForInStatement,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   label?: string,
 ): Statement | null {
@@ -2134,10 +2180,11 @@ function lowerForIn(
   const keysType = hArray(H_STRING);
   // The binding and the loop's own temporaries belong to the loop, not to the list it sits in --
   // and the walk in `lowerFor`'s comment applies here for the same measured reason.
-  const inner = new Map(bindings);
+  const inner = bindings.child();
   inner.set(keysName, keysType);
   inner.set(indexName, H_NUMBER);
   let binding: string;
+  let hirBinding: string;
   let declKind: 'let' | 'const' = 'let';
   if (ts.isVariableDeclarationList(node.initializer)) {
     const decl = node.initializer.declarations[0];
@@ -2156,9 +2203,13 @@ function lowerForIn(
     }
     binding = decl.name.text;
     declKind = (node.initializer.flags & ts.NodeFlags.Const) !== 0 ? 'const' : 'let';
-    inner.set(binding, H_STRING);
+    hirBinding = inner.declare(binding, H_STRING);
+    hirNameOfDeclaration.set(decl, hirBinding);
   } else if (ts.isIdentifier(node.initializer)) {
+    // `for (x in o)` assigns an existing binding; the HIR still writes through a declaration, and
+    // it must write to the name that binding actually has.
     binding = node.initializer.text;
+    hirBinding = inner.hirName(binding);
   } else {
     diagnostics.push(
       diagnosticFromNode(
@@ -2228,7 +2279,7 @@ function lowerForIn(
     kind: 'declaration',
     type: H_STRING,
     span,
-    name: binding,
+    name: hirBinding,
     declKind,
     value: keyRead,
   };
@@ -2262,11 +2313,11 @@ function lowerBody(
   node: ts.Statement,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Block | null {
   if (ts.isBlock(node)) {
-    return lowerBlock(node, sourceFile, checker, bindings, diagnostics);
+    return lowerBlock(node, sourceFile, checker, bindings.child(), diagnostics);
   }
   const single = lowerStatement(node, sourceFile, checker, bindings, diagnostics);
   if (!single) {
@@ -2280,26 +2331,29 @@ function lowerBody(
   };
 }
 
+/** Lower a block's statement list in a scope the CALLER owns.
+ *
+ * A block is a scope, and the scope object is a parameter rather than something created here for
+ * one reason: a function body is hoisted twice by design -- once so `var`s can see the function
+ * declarations they share a name with, once by this function -- and two hoists must land in the
+ * SAME scope, where the second is a re-declaration that keeps its home. Creating a child here made
+ * the second hoist a shadow of the first, which renamed every hoisted function in every function
+ * body (`\u0000shadow:g#1` for a plain `function g(){}`) and cost it the name it prints.
+ *
+ * Every scope a caller opens is a `bindings.child()` -- a block, a loop body, a clause list, a
+ * catch clause, a function body -- so a name still stops resolving where its scope ends
+ * (plan-notes 215) and a shadow still gets a slot of its own (plan-notes 216). */
 function lowerBlock(
   node: ts.Block,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  scope: Scope,
   diagnostics: Diagnostic[],
 ): Block | null {
-  // A block IS a scope. Sharing the enclosing map made every block-scoped declaration leak out of
-  // it, and the leak has two shapes, both wrong: a name read after its block resolved to the
-  // block's binding here and nowhere in the verifier, which reported STA4002 on correct source
-  // (`{ let x = 1; } console.log(typeof x)` -- Node answers `undefined`); and a `for` header's
-  // binding answered `typeof` from its own stale slot after the loop, a WRONG ANSWER rather than a
-  // refusal (plan-notes 213). Copying is what the verifier already does per block, which is why
-  // the two now agree; the alpha-renaming step 14 lands is what makes SHADOWING correct, and this
-  // change does not pretend to (a shadowing name still shares one slot).
-  const inner = new Map(bindings);
-  hoistFunctionDeclarations(node.statements, checker, inner);
+  hoistFunctionDeclarations(node.statements, checker, scope);
   const statements: Statement[] = [];
   for (const child of node.statements) {
-    const stmt = lowerStatement(child, sourceFile, checker, inner, diagnostics);
+    const stmt = lowerStatement(child, sourceFile, checker, scope, diagnostics);
     if (stmt === null) {
       return null;
     }
@@ -2319,7 +2373,7 @@ function lowerExpression(
   node: ts.Expression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null {
   // Parentheses only expressed precedence, and the tree already encodes it. Unwrapping here
@@ -3140,7 +3194,10 @@ function lowerExpression(
       kind: 'identifier',
       type: binding,
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-      name,
+      // The HIR name, not `node.text`: a shadowing block binding lives under a name of its own, and
+      // this is the one place a reference turns a source name into the name the emitter allocates
+      // (plan.md §8 step 14). For every binding that was not renamed the two are the same string.
+      name: bindings.hirName(name),
     };
     // A narrowed read of an `unknown` is a boundary: the checker's claim about this use is settled
     // here, once, and every operation downstream may then trust the type completely. The gate has
@@ -3959,15 +4016,22 @@ function lowerExpression(
 /** Binds every function declared directly in `statements` before any of them is lowered.
  *
  * This is hoisting, and it is not optional: `f(); function f() {}` is legal and must resolve. The
- * emitter mirrors it by initialising the same bindings in the enclosing body's prologue. */
+ * emitter mirrors it by initialising the same bindings in the enclosing body's prologue.
+ *
+ * A declaration goes through `declare`, so a block-level `f` that shadows an outer `f` gets a name
+ * of its own HERE, before any reference to it is lowered (plan.md §8 step 14). Two declarations of
+ * one name in ONE list keep one home, which is the spec's last-one-wins. */
 function hoistFunctionDeclarations(
   statements: readonly ts.Statement[],
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
 ): void {
   for (const statement of statements) {
     if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
-      bindings.set(statement.name.text, typeAt(statement, checker, bindings));
+      hirNameOfDeclaration.set(
+        statement,
+        bindings.declare(statement.name.text, typeAt(statement, checker, bindings)),
+      );
     }
   }
 }
@@ -3982,7 +4046,7 @@ function hoistVarDeclarations(
   root: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Statement[] | null {
   const seen = new Set<string>();
@@ -4043,7 +4107,7 @@ function lowerVarList(
   at: ts.Node,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   fail: (target: ts.Node, message: string) => null,
 ): Statement | null {
@@ -4095,7 +4159,7 @@ function lowerImportCall(
   node: ts.CallExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null {
   const spec = node.arguments[0];
@@ -4155,7 +4219,7 @@ function lowerFunction(
   node: FunctionLike,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
   // An HObject for a class member, whose receiver has a layout; Unknown for an object literal's
   // accessor, whose receiver is a JSRTDynObject and whose `this.x` is therefore a dynamic read.
@@ -4163,7 +4227,9 @@ function lowerFunction(
 ): FunctionExpr | null {
   functionNesting++;
   try {
-    const inner = new Map(bindings);
+    // A function's own frame is a slot space of its own: names declared in it cannot collide with
+    // the enclosing function's slots, so the unit's "already declared" set starts fresh here.
+    const inner = bindings.functionScope();
     const params: Parameter[] = [];
     // A method's receiver is parameter zero under a name no source can spell. Everything downstream
     // -- arity padding, the closure ABI, capture analysis, the emitter -- then treats `this` as an
@@ -4185,9 +4251,13 @@ function lowerFunction(
         defaultExpr = lowered;
       }
       if (ts.isIdentifier(param.name)) {
-        inner.set(param.name.text, type);
+        // A parameter is a declaration of the function's scope, and it shadows: a parameter named
+        // after a module-level binding takes a name of its own, so the two cannot be confused for
+        // one slot by anything downstream (plan.md §8 step 14).
+        const hirName = inner.declare(param.name.text, type);
+        hirNameOfDeclaration.set(param, hirName);
         params.push({
-          name: param.name.text,
+          name: hirName,
           type,
           span: makeSpan(param.getStart(sourceFile), param.getWidth(sourceFile), sourceFile),
           ...(param.dotDotDotToken !== undefined ? { rest: true as const } : {}),
@@ -4269,8 +4339,16 @@ function lowerFunction(
         ts.isMethodDeclaration(node)
           ? node.asteriskToken !== undefined
           : false,
-      envVars: info?.envVars ?? [],
-      captures: info?.captures ?? [],
+      // The capture analysis resolved references by SYMBOL, so a name it reports is the one the
+      // SOURCE wrote; the HIR may have renamed the declaration it points at. Both lists are
+      // spelled in HIR names here, which is the only form the emitter's environment layout and
+      // its `slotRef` lookup understand (plan.md §8 step 14).
+      envVars: (info?.envVars ?? []).map((v, i) => hirNameOf(info?.envDecls[i]) ?? v),
+      captures: (info?.captures ?? []).map((c) => ({
+        name: hirNameOf(c.decl) ?? c.name,
+        levels: c.levels,
+        index: c.index,
+      })),
       needsEnv: info?.needsEnv ?? false,
       provenance: provenanceOf(node, params, type),
     };
@@ -4478,7 +4556,7 @@ function memberFunctionName(
 function receiverIdentifier(
   node: ts.Node,
   sourceFile: ts.SourceFile,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Identifier | null {
   const binding = bindings.get(RECEIVER);
@@ -4503,11 +4581,7 @@ function receiverIdentifier(
   };
 }
 
-function isClassInstance(
-  node: ts.Expression,
-  checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
-): boolean {
+function isClassInstance(node: ts.Expression, checker: ts.TypeChecker, bindings: Scope): boolean {
   // A class NAME is not an instance of itself, and the checker's type cannot say so: the type of
   // the expression `C` is the class's STATIC side, whose symbol is still the class declaration, so
   // `tsTypeToHType` answers with the very layout `new C()` produces. Only the spelling separates
@@ -4534,7 +4608,7 @@ function lowerClass(
   node: ts.ClassDeclaration,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): ClassDeclaration | null {
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
@@ -4740,7 +4814,7 @@ function lowerSuperCall(
   statement: ts.ExpressionStatement,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Statement | null {
   const span = makeSpan(statement.getStart(sourceFile), statement.getWidth(sourceFile), sourceFile);
@@ -4784,10 +4858,10 @@ function lowerFieldInitializers(
   self: HObject,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Statement[] | null {
-  const inner = new Map(bindings);
+  const inner = bindings.child();
   inner.set(RECEIVER, self);
   const statements: Statement[] = [];
   for (const member of members) {
@@ -4923,19 +4997,24 @@ function lowerFunctionBody(
   body: ts.Block | ts.Expression | undefined,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Block | null {
   if (body === undefined) {
     return null;
   }
   if (ts.isBlock(body)) {
-    hoistFunctionDeclarations(body.statements, checker, bindings);
-    const hoistedVars = hoistVarDeclarations(body, sourceFile, checker, bindings, diagnostics);
+    // ONE scope for the two hoists and the block: functions first, then `var`, so a `var x` that
+    // shares a name with a function declaration does not reinitialize it -- and `lowerBlock`'s own
+    // hoist lands in this same scope, where re-declaring a name keeps its home instead of renaming
+    // it (see the note on `lowerBlock`).
+    const bodyScope = bindings.child();
+    hoistFunctionDeclarations(body.statements, checker, bodyScope);
+    const hoistedVars = hoistVarDeclarations(body, sourceFile, checker, bodyScope, diagnostics);
     if (hoistedVars === null) {
       return null;
     }
-    const lowered = lowerBlock(body, sourceFile, checker, bindings, diagnostics);
+    const lowered = lowerBlock(body, sourceFile, checker, bodyScope, diagnostics);
     if (lowered === null) {
       return null;
     }
@@ -5122,7 +5201,7 @@ function specializedCallee(
   node: ts.CallExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Identifier | null | undefined {
   const instantiation = genericCallInstantiation(node, checker);
@@ -5175,10 +5254,10 @@ function lowerSpecialization(
   specialization: Specialization,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): FunctionDeclaration | null {
-  const inner = new Map(bindings);
+  const inner = bindings.child();
   for (const [parameter, type] of specialization.substitution) {
     inner.set(typeParameterKey(parameter), type);
   }
@@ -5214,7 +5293,7 @@ function typeParameterKey(name: string): string {
  * `ts.Type` becomes an HType, so no node is ever built carrying a `T` that a later pass would have
  * to find and rewrite. Outside a specialization the lookup finds nothing and this is `tsTypeToHType`
  * exactly. */
-function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Map<string, HType>): HType {
+function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType {
   if (ts.isIdentifier(node)) {
     // An expando namespace has a checker shape, but its runtime read throws instead of producing
     // an object with that layout. Property consumers must agree with the reference-error's type.
@@ -5258,7 +5337,7 @@ function lowerOnlyArgument(
   node: ts.CallExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null {
   const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
@@ -5269,7 +5348,7 @@ function lowerArguments(
   nodes: readonly ts.Expression[] | undefined,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-  bindings: Map<string, HType>,
+  bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression[] | null {
   const args: Expression[] = [];

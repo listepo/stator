@@ -121,7 +121,12 @@ void test('an intermediate function that captures nothing still carries the chai
   // function finds `tag` at level 0, the same place it would sit without `middle` in between.
   const inner = [...raw.values()].find((info) => info.captures.some((c) => c.name === 'tag'));
   assert.notEqual(inner, undefined);
-  assert.deepEqual(inner?.captures, [{ name: 'tag', levels: 0, index: 0 }]);
+  // The declaration is part of a capture now (`decl`), because the HIR may spell the binding under
+  // a name of its own -- compare what this test is about: the chain position.
+  assert.deepEqual(
+    inner?.captures.map((c) => ({ name: c.name, levels: c.levels, index: c.index })),
+    [{ name: 'tag', levels: 0, index: 0 }],
+  );
 });
 
 void test('each env-bearing scope crossed adds exactly one level', () => {

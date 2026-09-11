@@ -508,35 +508,16 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     the lowering and the verifier typed from two different sources. Not step 12 residue: no
     `notYet` site ever named these — they are defects in shipped constructs.
 
-14. **[D3] Block scoping — a shadowed block binding shares the enclosing slot** (plan-notes 209).
-    Like step 13, a defect in a shipped construct rather than step 12 residue: no `notYet` site
-    names it, and it predates every construct in this phase. `const x = 1; { const x = 2; }` emits
-    two writes to ONE global slot, so the outer `x` reads back as 2 where the pinned Node says 1 —
-    a silent wrong answer, measured in the note. The cause is that HIR names are SOURCE names, so
-    the lowering's `bindings` map, the verifier's scope map and the emitter's `bindSlot`/`slotRef`
-    all resolve by the text the user wrote and a re-declared name has one home.
-    ~~`lowerBlock` compounds it by mutating the caller's map in place instead of copying it.~~
-    **The LEAK half landed 2026-09-11** (plan-notes 215): a block, a `for`/`for-in` header, and a
-    `switch` clause list now each lower into a COPY of the binding map, so a name stops resolving
-    where its scope ends. That was a second defect wearing the first one's clothes, and both of its
-    symptoms were live: `{ let x = 1; } console.log(typeof x)` was an internal error (STA4002 — the
-    lowering resolved a name the verifier's scoped copy could not see, and the emitter is never
-    reached), and `for (let i = 0; …) {} console.log(typeof i)` printed `number` from the loop's own
-    stale slot where Node prints `undefined` — a wrong ANSWER, not a refusal, which is the worse of
-    the two. Both now match Node, pinned by `tests/golden/{js,ts}/block_scope.*`. **What remains is
-    the shadowing half, and the copies do not touch it**: a name re-declared in a nested scope still
-    shares one slot with the outer one, because every copy carries the same source name. Fix that at
-    the **lowering, by alpha-renaming**: a block-scoped declaration whose name is already bound gets a
-    fresh unspellable HIR name and references inside the block resolve to it — correct by
-    construction for the verifier, the passes, the capture analysis and the emitter, none of which
-    then learn about scopes. The size is in the threading: `bindings` is `Map<string, HType>`
-    through ~34 sites in `src/lower/index.ts` and becomes a scope carrying the HIR name too.
-    Step 12(e)'s nested function declarations already ship with a NARROW refusal for exactly the
-    shadowing case (`gate.ts`, `shadowsEnclosingBinding`), which this step removes with the defect.
-    **Check:** a golden fixture shadowing a `const`, a `let`, a parameter and a function
-    declaration in nested blocks matches the pinned Node byte-for-byte; the
-    `subset_block_function_shadow_*` rows move from `not-yet` to `static`/`dynamic`; and `gate.ts`
-    emits no `not-yet` naming a shadowed block binding.
+14. ~~**[D3] Block scoping — a shadowed block binding shares the enclosing slot** (plan-notes 209).~~
+    ✅ **landed 2026-09-11** (plan-notes 216; evidence in [done.md](done.md) → Phase 5 step 14).
+    Alpha-renaming at the lowering: `src/lower/scope.ts` maps a source name to both its type and the
+    HIR name a reference must use, and a declaration that would be a second home for its name in the
+    slot space gets an unspellable one. The LEAK half — a name staying resolvable after its scope
+    ended — landed separately and earlier the same day (plan-notes 215). **Check:** the four shapes
+    (a `const`, a `let`, a parameter, a function declaration shadowed in nested blocks) match the
+    pinned Node byte-for-byte in `tests/golden/js/block_shadow.js`; the
+    `subset_block_function_shadow_*` rows are `static`; `gate.ts` emits no `not-yet` naming a
+    shadowed block binding (the strings are gone). TDZ remains unmodelled and is NOT claimed.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---

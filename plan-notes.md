@@ -6255,3 +6255,61 @@ text now says so: a name RE-DECLARED in a nested scope still shares one slot wit
 because every copy carries the same source name — `const x = 1; { const x = 2; }` still reads back
 `2` for the outer `x`. Alpha-renaming at the lowering is what fixes that, and these copies are
 compatible with it rather than a substitute for it.
+
+## 216. Block scoping, the shadowing half: alpha-renaming at the lowering (2026-09-11)
+
+**The defect** (plan-notes 209, plan.md §8 step 14): HIR names were SOURCE names, so two bindings
+that share a spelling had one home everywhere downstream — the verifier's binding map, the
+emitter's slot table, the capture analysis. `const x = 1; { const x = 2; } console.log(x)` printed
+`2` where Node prints `1`. Nothing reported it: the HIR was well-formed and every consumer agreed
+with every other one.
+
+**The fix is alpha-renaming at the lowering.** `src/lower/scope.ts` replaces the bare
+`Map<string, HType>` with a `Scope`: a source name maps to a type AND to the HIR name a reference
+must use, and `declare(name, type)` returns the HIR name to emit the declaration under. A
+declaration that would be a SECOND home for its name — a shadow of a visible binding, or a second
+declaration of that name anywhere else in the same slot space — gets `\u0000shadow:<source>#<n>`,
+which no source can spell. Nothing downstream learns that scopes exist: it only ever sees names
+that are already distinct, which is what makes the change correct by construction for the verifier,
+the passes and the emitter at once.
+
+**The slot-space rule, not just visibility.** The first cut renamed only when the name was already
+VISIBLE, and that is not enough — `{ const value = 'block'; push(() => value); } const value =
+'module';` has no moment where both are visible, yet both are module-level globals and the emitter
+allocates one slot per HIR name, so the second write landed in the slot the first closure still
+read (measured: `module` twice where Node prints `block`, `module`). `Scope` therefore carries a
+`unitDeclared` set — every name declared anywhere in the current FUNCTION unit — shared by that
+unit's blocks and fresh at each function. A function's frame is its own slot space, so
+`functionScope()` starts a new one, while `child()` (a block, a loop body, a clause list, a catch
+clause) carries the set along.
+
+**The capture analysis had to be told.** `analyzeCaptures` runs on the TypeScript AST and resolves
+references by SYMBOL — which is exactly right, and exactly why its output is spelled in SOURCE
+names. The emitter's `envMap`/`captureMap` are keyed by name, so a renamed binding's references
+missed both and fell through to a global slot. Two changes: `CaptureInfo` now carries the
+DECLARATION each `envVar` and each capture resolved to (the lowering spells them through a
+`WeakMap<ts.Declaration, string>` filled at every `declare`), and the module environment's slot
+list is built from DECLARATIONS rather than names — two loops at module level each declaring
+`let i` are two bindings and need two slots, where the old name-keyed Set gave them one.
+**A re-sort of that list had to go with it:** `lowerProgram` used to re-sort the union of every
+file's `envVars`, which was idempotent while names were source spellings and is not once a renamed
+name starts with U+0000 — every index after it pointed one slot off, and the golden fixture that
+covers module-level per-iteration capture (`module_loop_capture`, both modes) caught it immediately.
+
+**Refusal removed.** `gate.ts`'s `shadowsEnclosingBinding`/`bindsName` — step 12(e)'s deliberately
+over-broad refusal for a block function declaration that shadows — are gone, with the defect they
+named. `subset_block_function_shadow_{ts,js}` moved from `not-yet(STA1214)` to
+`static`/`static`: the program is fully typed in both modes.
+
+**Check evidence.** `tests/golden/js/block_shadow.js` covers the four shapes the Check names (a
+`const`, a `let`, a parameter, a function declaration shadowed in nested blocks), plus four levels
+of nesting, a shadow captured by a closure that outlives its block, a shadowing `catch` parameter,
+assignment to a shadow (not just declaration) and a shadowing `for` header — all byte-for-byte
+against the pinned Node. The subsets above moved as the Check requires, and `gate.ts` emits no
+not-yet naming a shadowed block binding (the strings are gone from the file). Full suite:
+unit 384/384, subset 364 (339 passed, 25 expected-fail, 0 failed), golden 177/177.
+
+**Not claimed.** TDZ is still not modelled: `let x = x;`-style reads before a declaration are
+refused by the checker in ts mode, and in js mode a reference the checker resolves to a later
+declaration of the same name is lowered against whatever was visible at that point. That is a
+separate defect from shadowing and this change neither fixes nor worsens it.

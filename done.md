@@ -1218,6 +1218,55 @@ was `STA1214` or `STA0012`, so no passing test could have contained one) and the
 a working copy with the step-12(e) landing whose new shadowing refusal has exactly that shape. Full
 evidence and the re-measure condition: plan-notes 210.
 
+### Step 14 — Block scoping: alpha-renaming at the lowering (2026-09-11)
+
+**The Check that closed** (`plan.md` §8 step 14): *a golden fixture shadowing a `const`, a `let`, a
+parameter and a function declaration in nested blocks matches the pinned Node byte-for-byte; the
+`subset_block_function_shadow_*` rows move from `not-yet` to `static`/`dynamic`; and `gate.ts` emits
+no `not-yet` naming a shadowed block binding.* All three hold. Design record: plan-notes 216.
+
+**The defect.** HIR names were source names, so two bindings sharing a spelling had one home in
+every consumer — the verifier's binding map, the emitter's `bindSlot`/`slotRef`, the capture
+analysis. `const x = 1; { const x = 2; } console.log(x)` printed `2` where the pinned Node prints
+`1`, and nothing reported it: the HIR was well-formed and every consumer agreed with every other.
+
+**The fix.** `src/lower/scope.ts` replaces the bare `Map<string, HType>` with a `Scope`: a source
+name maps to its type AND to the HIR name a reference must use, and `declare` returns the HIR name
+to emit a declaration under. A declaration that would be a SECOND home for its name — a shadow of a
+visible binding, or a second declaration of that name anywhere in the same slot space — is emitted
+under `\u0000shadow:<source>#<n>`, which no source can spell. Nothing downstream learns that scopes
+exist; it only sees names that are already distinct. The slot-space rule is what makes
+`{ const value = 'block'; push(() => value); } const value = 'module';` come out `block`, `module`
+(Names are not visible to each other there, but both are module globals and the emitter allocates
+one slot per HIR name). `child()` (block, loop body, clause list, catch clause) shares the unit's
+declared-name set; `functionScope()` starts a new one.
+
+**The capture analysis had to be told**, because it resolves references by SYMBOL and is therefore
+spelled in source names while the emitter's `envMap`/`captureMap` are keyed by name.
+`CaptureInfo` now carries the declaration behind each `envVar` and each capture, the lowering spells
+them through a `WeakMap<ts.Declaration, string>` filled at every `declare`, and the module
+environment's slot list is built from DECLARATIONS — two loops at module level each declaring
+`let i` are two bindings and need two slots. The re-sort of that list in `lowerProgram` had to go
+too: it was idempotent while names were source spellings, and a `\u0000`-prefixed name sorts to the
+front, which put every index after it one slot off. `tests/golden/{ts,js}/module_loop_capture.*`
+caught exactly that, in both modes.
+
+**Refusal removed with the defect.** `gate.ts`'s `shadowsEnclosingBinding`/`bindsName` — step
+12(e)'s deliberately over-broad refusal for a block function declaration that shadows — are gone.
+`subset_block_function_shadow_{ts,js}` moved from `not-yet(STA1214)` to `static`/`static`.
+
+```text
+unit 384; pass 384; fail 0
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+golden: 177 fixtures — 177 passed, 0 failed
+```
+
+**Fixtures.** `tests/golden/js/block_shadow.js`: the four Check shapes, four levels of nesting, a
+shadow captured by a closure that outlives its block, a shadowing `catch` parameter, assignment to
+a shadow, and a shadowing `for` header — byte-for-byte against Node. Plus the leak half's
+`tests/golden/{js,ts}/block_scope.*` (plan-notes 215). **Not claimed:** TDZ, which is a separate
+defect this change neither fixes nor worsens.
+
 ### Step 3 — Lower `var`
 
 **Step 3 landed (2026-09-02).** `var` in js mode is function-scoped, hoisted, and initialized

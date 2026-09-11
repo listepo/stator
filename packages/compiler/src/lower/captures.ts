@@ -34,6 +34,11 @@ export type FunctionLike =
  * `levels` counts from that incoming environment: 0 is the nearest enclosing env-bearing scope. */
 export interface EnvCapture {
   readonly name: string;
+  /** The declaration this reference resolved to, by SYMBOL. The lowering uses it to spell the HIR
+   * name, which is the source name only when the binding was not renamed (plan.md §8 step 14):
+   * two variables named `x` in nested scopes are one string and two symbols, and this node is what
+   * tells them apart. */
+  readonly decl: ts.Declaration | undefined;
   readonly levels: number;
   readonly index: number;
 }
@@ -41,6 +46,8 @@ export interface EnvCapture {
 export interface CaptureInfo {
   /** Own bindings held in this function's environment; the array position IS the slot index. */
   readonly envVars: readonly string[];
+  /** The declaration each `envVars` entry names, in the same order — see `EnvCapture.decl`. */
+  readonly envDecls: readonly (ts.Declaration | undefined)[];
   readonly captures: readonly EnvCapture[];
   /** This function, or something nested inside it, reads an enclosing environment. */
   readonly needsEnv: boolean;
@@ -147,8 +154,17 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
   /* Pass 1: find every cross-function reference. A declaration is captured when some reference to
    * it sits in a different function than the one that declares it -- however it is spelled, and
    * regardless of how many scopes separate them. */
-  const capturedByOwner = new Map<EnvOwner, Set<string>>();
-  const references: { ref: ts.Identifier; declFn: EnvOwner; name: string }[] = [];
+  /* Keyed by DECLARATION, not by name. Two loops at module level can each declare `let i`, and
+   * they are two bindings that need two environment slots: one name would give them one slot, and
+   * the second loop's iterations would overwrite what the first loop's closures still read. The
+   * name is carried alongside for the sort and for the diagnostics. */
+  const capturedByOwner = new Map<EnvOwner, Map<ts.Declaration, string>>();
+  const references: {
+    ref: ts.Identifier;
+    declFn: EnvOwner;
+    name: string;
+    decl: ts.Declaration;
+  }[] = [];
 
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node)) {
@@ -165,11 +181,11 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
         if (declFn !== undefined && name !== undefined && enclosingFunction(node) !== enclosing) {
           let owned = capturedByOwner.get(declFn);
           if (owned === undefined) {
-            owned = new Set();
+            owned = new Map();
             capturedByOwner.set(declFn, owned);
           }
-          owned.add(name);
-          references.push({ ref: node, declFn, name });
+          owned.set(decl, name);
+          references.push({ ref: node, declFn, name, decl });
         }
       }
     }
@@ -178,24 +194,36 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
   visit(sourceFile);
 
   /* Pass 2: fix each environment's slot order. Sorted, so the layout depends only on the source
-   * and not on the order the walk happened to encounter references in. */
+   * and not on the order the walk happened to encounter references in. Two same-named bindings
+   * tie on the name and are ordered by position, which is what makes the order total rather than
+   * dependent on the walk. */
+  const envDeclsOf = new Map<EnvOwner, ts.Declaration[]>();
   const envVarsOf = new Map<EnvOwner, string[]>();
-  for (const [fn, names] of capturedByOwner) {
-    envVarsOf.set(fn, [...names].sort());
+  for (const [fn, decls] of capturedByOwner) {
+    const ordered = [...decls.entries()]
+      .sort(([a, an], [b, bn]) => (an === bn ? a.getStart() - b.getStart() : an < bn ? -1 : 1))
+      .map(([decl]) => decl);
+    envDeclsOf.set(fn, ordered);
+    envVarsOf.set(
+      fn,
+      ordered.map((decl) => decls.get(decl) ?? ''),
+    );
   }
   const hasEnv = (fn: FunctionLike): boolean => (envVarsOf.get(fn)?.length ?? 0) > 0;
 
   /* Pass 3: resolve every reference to (levels, index) against the chain its function receives,
    * and collect them per referencing function. */
   const capturesOf = new Map<EnvOwner, Map<string, EnvCapture>>();
-  for (const { ref, declFn, name } of references) {
+  for (const { ref, declFn, name, decl } of references) {
     const refFn = enclosingFunction(ref);
     if (refFn === undefined) {
       // A module-level reference to a function-local cannot occur in well-formed source; the
       // checker would not have resolved it. Nothing to record.
       continue;
     }
-    const index = envVarsOf.get(declFn)?.indexOf(name) ?? -1;
+    // By IDENTITY: two bindings can share a name, and `indexOf(name)` would send both references
+    // to the first one's slot.
+    const index = envDeclsOf.get(declFn)?.indexOf(decl) ?? -1;
     if (index < 0) {
       continue;
     }
@@ -213,7 +241,7 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
       own = new Map();
       capturesOf.set(refFn, own);
     }
-    own.set(name, { name, levels, index });
+    own.set(name, { name, decl, levels, index });
   }
 
   /* Pass 4: propagate `needsEnv` outward. An intermediate function that captures nothing still
@@ -237,8 +265,10 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
 
   const result = new Map<EnvOwner, CaptureInfo>();
   const record = (fn: EnvOwner): void => {
+    const envVars = envVarsOf.get(fn) ?? [];
     result.set(fn, {
-      envVars: envVarsOf.get(fn) ?? [],
+      envVars,
+      envDecls: envDeclsOf.get(fn) ?? [],
       captures: [...(capturesOf.get(fn)?.values() ?? [])],
       needsEnv: needsEnv.has(fn),
     });

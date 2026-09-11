@@ -1732,23 +1732,9 @@ function gateFunction(
     return notYet('named function expressions are not yet supported', 5);
   }
   // A function declared in a block belongs to that block and is initialised when the block is
-  // entered -- which the emitter now does (plan.md §8 step 12(e)). What it still cannot do is give
-  // the block's binding a HOME of its own: HIR names are source names, so an inner `f` and an
-  // enclosing `f` are one slot and the block's declaration would outlive the block. That is block
-  // scoping, not this construct -- `{ const x = 2; }` under an outer `const x = 1` reads back as 2
-  // for the same reason (plan.md §8 step 14, plan-notes 209) -- so the refusal is narrowed to the
-  // shadowing case instead of covering every nested declaration.
-  if (
-    ts.isFunctionDeclaration(fn) &&
-    fn.name !== undefined &&
-    !isBodyTopLevel(fn.parent) &&
-    shadowsEnclosingBinding(fn, fn.name.text)
-  ) {
-    return notYet(
-      'a function declaration in a block that shadows an enclosing binding is not yet supported',
-      5,
-    );
-  }
+  // entered (plan.md §8 step 12(e)); a block-level `f` that shadows an enclosing `f` gets a name of
+  // its own at the lowering (plan.md §8 step 14), so the narrow `shadowsEnclosingBinding` refusal
+  // step 12(e) shipped with is gone, together with the defect it named.
   return { kind: 'accept' };
 }
 
@@ -1840,83 +1826,6 @@ function gateParameter(param: ts.ParameterDeclaration): GateResult {
  * (docs/VALUE.md §4.3) -- so a reference to an enclosing function's local is no longer refused.
  * `gateIdentifier` and its declaration-site test are gone with it: every identifier the checker
  * resolves is now expressible, and the accept set matches the HIR's vocabulary again. */
-
-/** Names this node binds directly, for the shadowing test below. Deliberately over-broad rather
- * than exact: every name it can see is a name that would share one slot, and a `not-yet` that
- * refuses a little too much is a worse diagnostic than a miscompile is a bug. */
-function bindsName(scope: ts.Node, name: string): boolean {
-  const declares = (statements: readonly ts.Statement[]): boolean =>
-    statements.some((stmt) => {
-      if (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) {
-        return stmt.name?.text === name;
-      }
-      if (ts.isVariableStatement(stmt)) {
-        return stmt.declarationList.declarations.some(
-          (decl) => ts.isIdentifier(decl.name) && decl.name.text === name,
-        );
-      }
-      return false;
-    });
-
-  if (ts.isSourceFile(scope) || ts.isBlock(scope)) {
-    return declares(scope.statements);
-  }
-  if (ts.isCaseBlock(scope)) {
-    return scope.clauses.some((clause) => declares(clause.statements));
-  }
-  if (
-    ts.isFunctionDeclaration(scope) ||
-    ts.isFunctionExpression(scope) ||
-    ts.isArrowFunction(scope)
-  ) {
-    return scope.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === name);
-  }
-  if (ts.isCatchClause(scope)) {
-    const bound = scope.variableDeclaration?.name;
-    return bound !== undefined && ts.isIdentifier(bound) && bound.text === name;
-  }
-  if (ts.isForStatement(scope) || ts.isForInStatement(scope) || ts.isForOfStatement(scope)) {
-    const init = scope.initializer;
-    return (
-      init !== undefined &&
-      ts.isVariableDeclarationList(init) &&
-      init.declarations.some((decl) => ts.isIdentifier(decl.name) && decl.name.text === name)
-    );
-  }
-  return false;
-}
-
-/** True when `name`, declared directly in `fn`'s own block, also names something an ENCLOSING
- * scope binds. The two would share one frame slot, so the block's declaration would leak past the
- * block. The walk starts above that block -- and above the whole clause list for a `switch`, which
- * is one scope, so a sibling clause's declaration is not a shadow of itself. */
-function shadowsEnclosingBinding(fn: ts.FunctionDeclaration, name: string): boolean {
-  const own =
-    ts.isCaseClause(fn.parent) || ts.isDefaultClause(fn.parent) ? fn.parent.parent : fn.parent;
-  for (let scope = own.parent; scope !== undefined; scope = scope.parent) {
-    if (bindsName(scope, name)) {
-      return true;
-    }
-    if (ts.isSourceFile(scope)) {
-      return false;
-    }
-  }
-  return false;
-}
-
-/** True where a statement list is a function body or the module itself -- the two places a
- * function declaration's hoisted binding has an owner the emitter can initialise. */
-function isBodyTopLevel(parent: ts.Node): boolean {
-  if (ts.isSourceFile(parent)) {
-    return true;
-  }
-  return (
-    ts.isBlock(parent) &&
-    (ts.isFunctionDeclaration(parent.parent) ||
-      ts.isFunctionExpression(parent.parent) ||
-      ts.isArrowFunction(parent.parent))
-  );
-}
 
 function skipParens(expression: ts.Expression): ts.Expression {
   let current = expression;
