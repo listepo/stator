@@ -448,6 +448,11 @@ function expressionHasUnknown(expr: Expression): boolean {
     // dynamic -- asking an unknown value what it is is exactly how a program stops being dynamic.
     case 'typeof':
       return false;
+    // `delete` answers a boolean, but unlike `typeof` it OPERATES on the receiver: removing a key
+    // is the shape table's work, and a construct that only compiles against a dynamic receiver is
+    // exactly what this report exists to name.
+    case 'delete-prop':
+      return true;
     // Likewise a check: it is the point where an Unknown becomes concrete, so it reports the type
     // it produced, not the one it consumed. Recursing into `value` would report every narrowing
     // site as dynamic and make `explain` say the opposite of what the code does.

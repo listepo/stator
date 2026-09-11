@@ -5828,3 +5828,259 @@ emitted diagnostics is churn, not a fix.
 builtins 222/238 +5 carved; leak plateau 3040 KB; differential smoke 2 cases, 0 divergences;
 coverage exit 0. The delete-operator branch (`delete-op` worktree) was inspected and left alone —
 in-flight elsewhere, not this session's blocker.
+
+## 207. Phase 6 was finished and the plan still described it as unstarted (2026-09-09)
+
+**Contradiction.** `plan.md` §9 Task 6.2 step 1 read: *"Create `tests/differential/`. `AGENTS.md`'s
+repo map already names it ("fuzzer corpus") and the directory does not exist — the map describes the
+target state."* The directory has existed since **2026-09-02** (`c2e621b`, which also added
+`tests/bench/programs/` and `.github/workflows/nightly.yml`) and was hardened on **2026-09-03**
+(`78a5bf3`, "weight the fuzzer at its named regions, fix what that found (task 6.2)"). Notes 177,
+178 and 179 write up that work in detail. `plan.md` carried both tasks as unstruck open records with
+their full step lists for seven days, and `done.md` had no record of either — golden rule 1's "move
+the record in the same change" did not happen for the commit that landed them.
+
+**Measured at HEAD `4956428`, on the pinned Node 26.7.0:**
+
+```
+$ mise exec node -- node packages/tests/differential/run.ts --count=12
+differential: seed=1 modes=ts,js
+differential: 24 cases — 0 divergences                                    # 26 s
+
+$ mise exec node -- node packages/tests/bench/record.ts
+bench: recorded 5 programs to packages/tests/bench/results/…-darwin-arm64-….json
+# generated page: stator 22.36 ms · node v26.7.0 59.29 ms · bun 1.3.14 20.00 ms · qjs/perry/scriptc/hermes absent
+```
+
+Every step of both tasks is implemented: xorshift-only entropy, type-directed generation, the five
+weighted regions, the byte-for-byte pinned-Node oracle, delta-debugging minimizer, per-host result
+files, discovery-based competitor matrix, the `ru_maxrss` kilobytes-on-Linux/bytes-on-macOS
+normalization with the raw value kept beside it, and the weekly cron that writes the generated page
+to `$GITHUB_STEP_SUMMARY`.
+
+**One residue, found by doing the measurement the step asks for.** Task 6.3 step 7 says to measure
+the threshold before setting it. `record.ts` ships `thresholdPercent: 20` with nothing recorded
+about where 20 came from. Recording the same commit twice on this host gives geomean
+**22.358 → 21.458 ms — a 4.0% swing with no code change**. The gate is five times that, so it is
+above the only noise anyone has measured; it is not yet above a *known* floor, which wants several
+repeats on the machine that runs the weekly job. Left open in `plan.md` with its own Check rather
+than quietly called done — this is the §9 failure mode (a green that proves less than it appears to)
+applied to §9's own gate.
+
+**What the phase Check still needs.** Clause 2 is *≥1 h nightly with zero unexplained divergences*.
+The scheduled job exists and a local run is clean, but the clause passes on a nightly run's own
+output, cited. So Phase 6's four tasks are archived and the phase stays open — the distinction
+§15.2 exists to keep.
+
+**Also noticed, not fixed.** §16's version log has two `v3.9` entries and two `v3.10` entries, dated
+2026-09-04 and 2026-09-05, out of chronological order — the same collision class as notes 115 and
+130, from parallel sessions appending at once. Nothing outside `plan.md` cites a log version, and
+renumbering rewrites history other worktrees carry, so it is recorded here instead. The next log
+entry took **v4.4**, which is unambiguous.
+
+**Drive-by, found by running the harness at all: `bench:record` turned `pnpm run ci` red.**
+`tests/bench/results/` is git-ignored but was not in `biome.json`'s `files.includes` exclusions, so
+the two result files this verification produced failed `biome check --error-on-warnings` on JSON
+formatting — 96 files checked, 2 errors, both mine. Every other generated-output directory is
+already excluded there (`test262/results.json`, `test262/results-*-of-*.json`, `differential/`,
+`golden/ts|js`); `results/` was the one that was missed, which is itself evidence that nobody had
+recorded a benchmark and then linted on the same machine. One line added,
+`"!packages/tests/bench/results"`. After it: biome 94 files clean, golden **167/167**, unit
+**384/384**, `tsc --noEmit` clean on the tests project.
+
+
+## 208. `docs/VALUE.md` §4.16 is wrong about method values: the receiver has to shift (2026-09-09)
+
+**The contradiction.** §4.16 and `plan.md` §8 step 12(e) both record the method-value
+representation as *settled* (2026-09-04, note 190): "A method value is the method's own
+`JSRTClosure`, and `jsrt_arg` already answers `undefined` for the receiver a plain call does not
+supply" — no allocation, no adapter, no new struct. Implementing step 12(e) against that section
+is what showed it holds for a **zero-argument** call and for nothing else.
+
+**Measured — the pinned Node 26.7.0**, `const g = o.add; g(1, 2)` on a two-parameter method:
+
+```
+this=obj a=1 b=2          // o.add(1, 2)
+this=undefined a=1 b=2    // g(1, 2)
+```
+
+The receiver is dropped, and `a`/`b` keep their positions.
+
+**Measured — this compiler**, `stator build meth.ts -o meth.c --emit=c` on the same class:
+
+```c
+static const JSRTClosure _jsrt_closure_0 = {_jsrt_fn_0, 3, "add", NULL};
+...
+JSRT_GLOBAL(2) = jsrt_call(jsrt_closure(&_jsrt_closure_0), 3, &JSRT_GLOBAL(2));
+```
+
+Parameter 0 is the receiver, so `a` is `argv[1]` and `b` is `argv[2]`, and the closure's arity is
+**3** for a method the user wrote with two parameters. Two consequences the section does not have:
+
+1. `jsrt_call(that closure, 2, [1, 2])` binds `this = 1`, `a = 2`, `b = undefined`. Every argument
+   is off by one. The section's escape hatch — `jsrt_arg` answering `undefined` for an argument no
+   call supplied — fills from the RIGHT, and the receiver is on the left.
+2. `g.length` would answer 3 where Node answers 2, because `declaredArity` counts the receiver.
+
+**Why a call site cannot fix it locally.** `g` is a `JSRTClosure` value like any other. Nothing in
+that struct says "parameter 0 is a receiver", and a plain function's closure has no receiver
+parameter at all — so `g(1, 2)` cannot decide whether to shift. The information has to travel WITH
+the value, which is exactly the "new struct" §4.16 says is unnecessary. The cheapest shape that
+works is a flag (or a receiver-arity byte) on `JSRTClosure` plus a shift in `jsrt_call`, with
+`declaredArity` subtracting the receiver so `Function.length` stays right — not the two-slot
+`JSRTEnv` thunk the section reserves for `Function.prototype.bind`, which is a different problem
+(binding a receiver, rather than declining to).
+
+**Not fixed here.** Step 12(e)'s receiver-free constructs landed (arbitrary callee, function
+declarations in a block); its two receiver-carrying ones — **method values** and **calling a class
+field** — stay `STA1214`, and the blocker they name is this note rather than "a bound closure
+nothing here builds", which was never the obstacle. §15.4 reopening: the decision of 2026-09-04 is
+edited, not deleted, because its conclusion is right for the zero-argument case it was reasoned on.
+
+## 209. Block scoping is not modeled: a shadowed block binding shares the enclosing slot (2026-09-09)
+
+Found while landing step 12(e)'s function-declaration-in-a-block, and **not a property of that
+construct**: `let` and `const` have done it since blocks were first lowered.
+
+**Measured**, `stator build shadow.ts -o shadow.c --emit=c` on
+
+```ts
+const x = 1;
+{
+  const x = 2;
+  console.log(x);
+}
+console.log(x);
+```
+
+```c
+JSRT_GLOBAL(0) = jsrt_number(1.0);
+JSRT_GLOBAL(0) = jsrt_number(2.0);
+jsrt_print(JSRT_GLOBAL(0));
+jsrt_print(JSRT_GLOBAL(0));
+```
+
+Two bindings, one slot. The program prints `2` then `2`; the pinned Node prints `2` then `1`. No
+diagnostic — a silent wrong answer, which is the failure mode the golden suite exists to catch and
+which no fixture happened to cover.
+
+**Root cause.** HIR names are SOURCE names. `Declaration.name`, `Assignment.target` and
+`Identifier.name` are all the text the user wrote, and every consumer resolves by that text: the
+lowering's `bindings` map, the verifier's scope map, and the emitter's `bindSlot`/`slotRef`. A
+block that re-declares a visible name therefore reuses the one home that name has. `lowerBlock`
+compounds it by mutating the caller's map in place rather than copying it, so the inner binding's
+TYPE escapes the block too.
+
+**The fix is alpha-renaming at the lowering**: a block-scoped declaration whose name is already
+bound gets a fresh, unspellable HIR name, and references inside the block resolve to it. Done there
+it is correct by construction for the verifier, the passes, the capture analysis and the emitter,
+none of which would need to learn about scopes. It is not a small change — `bindings` is
+`Map<string, HType>` threaded through ~34 sites in `src/lower/index.ts` and would become a scope
+object carrying both the type and the HIR name — which is why it is a step of its own (§8 step 14)
+rather than a rider on step 12(e).
+
+**What landed instead.** Nested function declarations ship with a NARROW refusal covering exactly
+the shadowing case (`gate.ts`, `shadowsEnclosingBinding`), so this landing adds no new silent
+miscompile: `{ function outer() {} }` under an enclosing `outer` is `STA1214`, and every
+non-shadowing spelling compiles. The `let`/`const` case older than this note stays unrefused —
+gating it now would reject code the compiler has accepted since Phase 3, with the rename as the
+only replacement — and step 14 owns removing both the defect and the refusal together.
+## 210. `delete` lands by rebuilding the shape chain; a fixed shape refuses instead of shrinking (2026-09-09)
+
+**What was open.** §8 step 2a(c) carried a Check with a question inside it: the two `delete` checker
+buckets (2704 read-only delete, 2790 operand-must-be-optional) were to land "with the `delete`
+OPERATOR — lowering plus whatever answer a fixed-shape object gives when it loses a field". 2704 had
+already landed in the weak sense (plan-notes 196): dropping the checker's refusal only moved the
+program from `STA0012` to `STA1214 (DeleteExpression)`, because no `DeleteExpression` existed
+anywhere in `src/lower/`, `src/frontend/gate.ts` or the runtime. This note records the operator
+itself and, more importantly, the answer to the question the Check left open.
+
+**The answer: a fixed-shape object does not lose a field — it refuses.** `STA1108` (never) in ts
+mode, `STA1205` (not-yet, Phase 8) in js mode, and `STA2007` at run time when an Unknown receiver
+turns out to be fixed. That is the exact mirror of `STA2004` ("a statically-shaped object cannot
+grow a new property; planned for Phase 8"), it lifts with the same Phase 8 dictionary-mode escape,
+and it is the honest answer rather than a placement: a `JSRTClass` descriptor lists its fields at
+compile-time offsets, and there is no encoding for a slot that is absent. Inventing one — a
+per-field tombstone bit — would put a branch on every fixed-field read in the program to pay for a
+construct ts mode does not admit at all.
+
+**The refusal is nearly unreachable in ts mode, and that is a property of the type system, not luck.**
+TS2790 requires the operand of a `delete` to be an OPTIONAL property; and an optional property is
+precisely what `isDynamicShape`/`shapeTypeToHType` use to send an anonymous object type to the
+dynamic representation. The two rules meet: every `delete` that type-checks in ts mode already has a
+dynamic-shape receiver, so the only fixed shape `gateDelete` can still see is a class instance —
+which §1.1 has always refused permanently. `STA1108`'s old note called that "delete on a class
+field"; it is now recorded in `docs/DIAGNOSTICS.md` as exhaustive rather than exemplary.
+
+**Rejected alternative: a per-symbol deopt.** The other way to make a fixed-shape `delete` work is to
+notice the `delete` during the frontend pass and demote just that symbol's literal to a dynamic
+shape, through the existing `runtimeDynamicSymbols` channel. It works, but it means threading a
+symbol set into `objectLiteralIsDynamic` at three call sites plus the gate plus the lowering, to buy
+a construct that ts mode rejects outright and js mode will get for free from the Phase 8 dictionary
+mode. Out of proportion; recorded here so the upgrade path is not re-derived.
+
+**The removal mechanism: rebuild, not surgery.** `docs/VALUE.md` §4.10 had promised that "when
+deletion lands it gets a dictionary-mode escape, not shape surgery". Neither happened, and the third
+option is better than both. `jsrt_delete` replays the object's shape chain from the root, skipping
+the deleted key and reusing the transitions that already exist. Shapes are shared immortal metadata,
+so no node can lose a key in place; but replaying is O(keys) once and pays for itself three times
+over. Insertion order survives, because the replay walks slots in order. Two objects that deleted the
+same key from the same shape land on the SAME shape, so a shared read site's inline cache still hits
+for both — shape sharing does the work a dictionary mode would have thrown away. And stale caches
+need no invalidation at all: a `JSRTIC` is trusted by shape-POINTER compare, and the receiver now
+points somewhere else, so a stale entry simply misses. Slot compaction happens in the same walk,
+safely in place, because the write index never runs ahead of the read index.
+
+**One fixed-shape delete does have a right answer, and it exposed the gap.** `Object.freeze({x: 1})`
+builds a FIXED object, so the first frozen-delete fixture hit the `STA2007` abort instead of Node's
+`TypeError: Cannot delete property 'x' of #<Object>`. The fix is not a representation: a frozen
+property is non-configurable, so the spec's answer is to throw, and throwing needs no missing slot.
+This is the same loop closing that bucket 2540 closed for read-only assignment (plan-notes 195) —
+the refusal was never about `delete`, it was about the runtime not being able to build the answer.
+
+**An array element is refused too**, statically at the gate and as an `STA2007` panic for an Unknown
+receiver: a deleted element is a HOLE, and the dense array has no representation for one. That is the
+same gap `gateArrayLiteral` names for `[1, , 3]` and `STA2002` for a sparse write, and it lifts with
+Phase 5 rung 5, not Phase 8.
+
+**Two extractions in `jsrt_shape.c`, made by the rebuild, not for it.** `shape_links` (the
+offset-indexed fill of a shape's link array) came out of `jsrt_shape_property_order`, which now fills
+then sorts; `shape_transition` (reuse-before-allocate) came out of `store_prop`. `jsrt_delete` calls
+both. Duplication stayed at 0.9%.
+
+**Test262, measured 2026-09-09 on the whole pinned corpus (53,580 tests, Node v26.7.0), recorded
+under the plan-notes 182 rule.** Before (`ratchet.json`) → after:
+
+```text
+passed   2379 →  2372   (-7)
+failed   7276 →  3100   (-4176)
+skipped 43925 → 48108   (+4183)
+pass rate 43.3%; new skip buckets include STA1205: 10
+```
+
+**The -4176 is this change, and it is the §1.3 attribution win the Check was for.** The cause is not
+the operator but the 2790 suppression, applied to one harness file: `harness/propertyHelper.js` —
+included by a large fraction of the corpus — does `delete obj[name]` at two sites. Every test that
+included it therefore died at `STA0012`, an unattributed toolchain failure, before ever reaching
+Stator's own schedule. Those tests now compile past the checker and land in `STA12xx`, where the
+skip column can say what is actually missing. 1,233 corpus tests use a `delete` expression directly;
+6 of them now pass, which is 6 more than could pass when `delete` had no lowering at all.
+
+**The -7 is a REGRESSION and the ratchet correctly refuses it** (`FAIL ratchet: passed dropped from
+2379 to 2372`). `ratchet.json` was NOT moved. It is not this change: before today every spelling of
+`delete` produced either `STA1214` (no `DeleteExpression` case existed in the lowering) or `STA0012`
+(2790), so no passing test could have contained one, and adding a code to `JS_MODE_RUNTIME_CODES`
+only removes failures. The measurement was taken in a working copy a second session was landing
+step 12(e) into, and plan-notes 209 records that landing as adding a deliberately over-broad
+`STA1214` refusal for a block function declaration that shadows an enclosing binding — code that
+compiled (wrongly) until today. Confirmed live: `{ function outer() {} }` under an enclosing `outer`
+now answers `not-yet STA1214` in js mode, and 96 of the 159 tests in
+`test/annexB/language/function-code/` — the B.3.3 block-declaration family — now skip with a bare
+`STA1214`. **Attribution needs a re-measure in a tree with one owner**; until then the ratchet stays
+where it is, because lowering it would bank someone else's regression as this task's baseline.
+
+**Docs touched in the same change** (`AGENTS.md` golden rule 6 and the sole-allocator rule):
+`docs/DIAGNOSTICS.md` allocates `STA2007` and `STA4097` (the verifier's "delete result must be
+boolean"), narrows `STA1205`'s message and widens `STA1108`'s note; `docs/SUBSET.md` gains the
+dynamic-shape `delete` row and re-words the two class-field rows; `docs/VALUE.md` §4.10 replaces the
+sentence that is now wrong with the rebuild contract.

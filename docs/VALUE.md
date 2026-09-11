@@ -716,8 +716,22 @@ a new key takes or builds a transition and moves the object's shape. Transitions
 IC-cached: each object performs a given addition once, so a transition cache pays only across
 objects — worth building when Phase 5 measures construction-heavy dynamic code, not before.
 
-The subset has no `delete`, so shapes need no removal edges; when deletion lands it gets a
-dictionary-mode escape, not shape surgery. Keys are `const char *` with program lifetime
+`delete` removes a key by **rebuilding** the object's shape chain from the root without it
+(`jsrt_delete`) — not by adding a removal edge, and not by the dictionary-mode escape this
+section used to promise. A shape is shared immortal metadata, so no node can lose a key in
+place; replaying the surviving keys' transitions from the root instead REUSES the nodes that
+already exist, which costs O(keys) once and buys three things. Insertion order survives, because
+the replay walks slots in order. Two objects that deleted the same key from the same shape land
+on the SAME shape, so a shared read site's IC still hits for both. And stale caches need no
+invalidation: an IC is trusted by shape-POINTER compare, and the receiver now points elsewhere,
+so a stale entry simply misses. Slots compact during the same walk (the write index never runs
+ahead of the read index). The operator answers Node's boolean — `true` when the key is gone or
+was never there, `false` only after raising. A key that is not the object's to remove is answered
+where that is decided: a FROZEN property is non-configurable, so it raises Node's
+`TypeError: Cannot delete property 'x' of #<Object>`; a fixed-layout receiver and an array
+element abort with `STA2007`, the mirror of `STA2004` below — a `JSRTClass` has no way to spell a
+missing slot, and a hole has no representation at all. Where the receiver's type is known the
+frontend refuses before any of that: `STA1108` in ts mode, `STA1205` in js. Keys are `const char *` with program lifetime
 (generated C passes string literals; the shape table stores the pointer and compares by pointer
 first, `strcmp` as the backstop for one key spelled at two sites). Each receiver has a deliberate path: a dynamic object or array walks the shape table; a
 fixed-layout object reads and writes existing fields through its `JSRTClass` descriptor and
@@ -728,7 +742,10 @@ everything else `undefined`; nullish is a TypeError; a primitive write is a Type
 Pinned by `runtime/tests/print_shapes.{c,mjs}`: insertion-order printing through the chain,
 overwrite-in-place, undefined-on-miss, shared-IC reads across shape-sharing objects, the
 stale-cache miss after a transition, divergent histories landing on different shapes, and
-non-identifier keys printing quoted (`{ 'a-b': 1 }`).
+non-identifier keys printing quoted (`{ 'a-b': 1 }`). `delete` is pinned against Node instead, by
+`tests/golden/{ts,js}/delete_prop.*`: the boolean answer, the `undefined` read and the `in` result
+after removal, the print order after a re-add, one read site shared by two objects that rebuilt to
+the same shape, and the frozen `TypeError`.
 
 ## 4.11 Dates — one double behind a class pointer (Task 4.2)
 
@@ -1060,6 +1077,21 @@ gives a strict-mode call with no receiver — `this` is `undefined` — and clas
 are always strict. `const f = o.m; f()` is `jsrt_call(m_closure, 0, NULL)`. No allocation, no
 adapter, no new struct.
 
+> **CORRECTION (2026-09-09, plan-notes 208): the paragraph above is true of a call with NO
+> ARGUMENTS and of nothing else.** `jsrt_arg` fills missing arguments from the RIGHT and the
+> receiver is on the left, so `const g = o.add; g(1, 2)` compiled as `jsrt_call(add_closure, 2,
+> [1, 2])` binds `this = 1`, `a = 2`, `b = undefined`, where the pinned Node gives
+> `this = undefined, a = 1, b = 2` (both measured, plan-notes 208). Every argument is off by one.
+> The arguments have to SHIFT and slot zero has to be filled with `undefined`, and a call site
+> cannot decide that from a `JSRTClosure` value: nothing in the struct says parameter zero is a
+> receiver, and a plain function's closure has no receiver parameter at all. The information must
+> travel with the value — a flag or a receiver-arity byte on `JSRTClosure`, plus the shift in
+> `jsrt_call` — which is the "new struct" this section says is unnecessary. It is still not the
+> two-slot `bind` env below: that one INSERTS a captured receiver, this one DROPS a declared one.
+> **Method values and calling a class field therefore stay `STA1214`, naming this**, and the rest
+> of the section (identity, `this` being `undefined` rather than auto-bound, virtual dispatch in
+> value position, the `TypeError`) is unaffected and still the design.
+
 Two behaviours fall out correct rather than having to be arranged:
 
 - **Identity.** `o.m === o.m` and `p.m === o.m` are both `true`, because both read the same
@@ -1072,9 +1104,11 @@ Two behaviours fall out correct rather than having to be arranged:
 Three things this decision has to pay for, none of them a representation:
 
 - **`arity` must not count the receiver.** `declaredArity` runs over `fn.params`, whose slot zero
-  is the receiver for a method unit, so a method's closure constant subtracts one.
+  is the receiver for a method unit, so a method's closure constant has to subtract one.
   `Function.prototype.length` is not in the subset yet, so nothing observes it today — which is
-  exactly why it is cheap to get right now and a bug to inherit later.
+  exactly why it is cheap to get right now and a bug to inherit later. **Still unpaid** as of
+  2026-09-09: a two-parameter method emits `{_jsrt_fn_0, 3, "add", NULL}` (measured, plan-notes
+  208). It lands with the receiver shift above, since both are the same missing fact.
 - **A virtual method's value is the receiver's entry, not the statically named one.** Where a
   subclass overrides, `o.m` in value position loads `jsrt_method(recv, slot)` — the same choice
   `method-call` already makes between direct and virtual dispatch, made at the same place. The

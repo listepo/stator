@@ -322,6 +322,12 @@ function verifyStatement(
       // enclosing loop. That is the whole reason `isLoop` exists.
       const inner = [...enclosing, { isLoop: false, ...(stmt.label && { label: stmt.label }) }];
 
+      // One scope for the whole clause list, so its function declarations hoist across clauses
+      // too -- `case 0: f();` is legal with `function f(){}` written under a later `default:`.
+      for (const clause of stmt.clauses) {
+        hoistFunctions(clause.statements, bindings);
+      }
+
       let defaults = 0;
       for (const clause of stmt.clauses) {
         if (clause.test === undefined) {
@@ -896,6 +902,23 @@ function verifyExpression(
           span: expr.span,
           code: 'STA4055',
           message: `typeof result must be string, got '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    case 'delete-prop': {
+      verifyExpression(expr.target, problems, bindings);
+      verifyExpression(expr.key, problems, bindings);
+      // The operator answers whether the key is gone, and it answers for keys that were never
+      // there -- so the result is a boolean under every receiver, and an emitter that believed
+      // otherwise would box the answer into a slot nothing reads as one.
+      if (!hTypeEquals(expr.type, H_BOOLEAN)) {
+        problems.push({
+          kind: 'delete-prop',
+          span: expr.span,
+          code: 'STA4097',
+          message: `delete result must be boolean, got '${hTypeName(expr.type)}'`,
         });
       }
       break;

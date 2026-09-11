@@ -363,6 +363,9 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.TypeOfExpression:
       return { kind: 'accept' };
 
+    case ts.SyntaxKind.DeleteExpression:
+      return gateDelete(node as ts.DeleteExpression, typeChecker, mode);
+
     case ts.SyntaxKind.AsExpression:
       return { kind: 'accept' };
 
@@ -1167,6 +1170,50 @@ function gateUpdate(_node: ts.Node): GateResult {
   return { kind: 'accept' };
 }
 
+/** `delete o.a`, `delete o[e]`.
+ *
+ * Only the two access forms compile. `delete f()` is legal JavaScript that evaluates its operand
+ * and answers `true`, but nothing is removed, so it is a statement wearing an operator's clothes
+ * and stays on the catch-all until something asks for it.
+ *
+ * The receiver decides the rest. A FIXED shape has no encoding for a missing slot: in `ts` mode
+ * the only one that can reach here is a class field (an optional property is what sends an
+ * anonymous shape to the dynamic path, and a required one is TS2790), which §1.1 refuses
+ * permanently as STA1108; in `js` mode the same receiver waits on Phase 8's dictionary mode, the
+ * owner STA2004 already names for the symmetric "cannot grow" case. An ARRAY element needs a HOLE
+ * the dense representation cannot express -- the gap `gateArrayLiteral` names for `[1, , 3]` -- so
+ * a statically known array is refused here and an Unknown one aborts in the runtime (STA2007). */
+function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mode): GateResult {
+  let operand: ts.Expression = node.expression;
+  while (ts.isParenthesizedExpression(operand)) {
+    operand = operand.expression;
+  }
+  if (!ts.isPropertyAccessExpression(operand) && !ts.isElementAccessExpression(operand)) {
+    return notYet('delete of anything but a property access is not yet supported', 5);
+  }
+  const target = tsTypeToHType(checker.getTypeAtLocation(operand.expression), checker);
+  if (target.kind === 'object') {
+    return mode === 'ts'
+      ? {
+          kind: 'never',
+          code: 'STA1108',
+          message:
+            'delete on class fields is not supported in ts mode — classes have fixed shape at compile time',
+        }
+      : {
+          kind: 'not-yet',
+          code: 'STA1205',
+          message:
+            'delete on a statically-shaped object is not yet supported in js mode; planned for Phase 8 (dynamic tier)',
+          phase: 8,
+        };
+  }
+  if (target.kind === 'array') {
+    return notYet('delete of an array element is not yet supported', 5);
+  }
+  return { kind: 'accept' };
+}
+
 function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
   // Dynamic code generation — `eval(...)` and `Function(...)` — own dedicated codes that split by
   // mode (STA1101/STA1103 never in ts, STA1206 not-yet Phase 8 in js). Asked before anything else
@@ -1635,18 +1682,18 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     return { kind: 'accept' };
   }
 
-  // The callee must be something whose *value* the emitter can produce and call. A name or a
-  // function literal is; anything else (an index, a conditional, a call returning a call) needs
-  // constructs that have not landed. The argument count is deliberately unchecked: JavaScript
-  // drops extras and fills missing ones with `undefined`, and the calling convention does that
-  // at runtime rather than making it a gate decision.
-  if (ts.isIdentifier(callee)) {
-    return { kind: 'accept' };
-  }
-  if (ts.isFunctionExpression(callee) || ts.isArrowFunction(callee)) {
-    return { kind: 'accept' };
-  }
-  return notYet('calling an arbitrary expression is not yet supported', 5);
+  // Any expression may be the callee. `CallExpr.callee` is an ordinary Expression, the emitter
+  // evaluates it into its own rooted slot ahead of the arguments, and the verifier already requires
+  // its type to be `fn` or Unknown -- so a conditional, an element of an array of functions, or the
+  // result of another call needs nothing this arm could add. Whatever refusal the callee's own
+  // shape deserves comes from gating that expression, which the walk does anyway; deciding it a
+  // second time here is what made `(up ? inc : dec)(x)` a not-yet with no blocker behind it
+  // (plan.md §8 step 12(e)).
+  //
+  // The argument count is deliberately unchecked: JavaScript drops extras and fills missing ones
+  // with `undefined`, and the calling convention does that at runtime rather than making it a gate
+  // decision.
+  return { kind: 'accept' };
 }
 
 /** Rung 4a: functions with no captured environment. Each rejection below is a feature whose
@@ -1684,8 +1731,23 @@ function gateFunction(
   if (ts.isFunctionExpression(fn) && fn.name !== undefined) {
     return notYet('named function expressions are not yet supported', 5);
   }
-  if (ts.isFunctionDeclaration(fn) && !isBodyTopLevel(fn.parent)) {
-    return notYet('a function declaration inside a block, loop or branch is not yet supported', 5);
+  // A function declared in a block belongs to that block and is initialised when the block is
+  // entered -- which the emitter now does (plan.md §8 step 12(e)). What it still cannot do is give
+  // the block's binding a HOME of its own: HIR names are source names, so an inner `f` and an
+  // enclosing `f` are one slot and the block's declaration would outlive the block. That is block
+  // scoping, not this construct -- `{ const x = 2; }` under an outer `const x = 1` reads back as 2
+  // for the same reason (plan.md §8 step 14, plan-notes 209) -- so the refusal is narrowed to the
+  // shadowing case instead of covering every nested declaration.
+  if (
+    ts.isFunctionDeclaration(fn) &&
+    fn.name !== undefined &&
+    !isBodyTopLevel(fn.parent) &&
+    shadowsEnclosingBinding(fn, fn.name.text)
+  ) {
+    return notYet(
+      'a function declaration in a block that shadows an enclosing binding is not yet supported',
+      5,
+    );
   }
   return { kind: 'accept' };
 }
@@ -1778,6 +1840,69 @@ function gateParameter(param: ts.ParameterDeclaration): GateResult {
  * (docs/VALUE.md §4.3) -- so a reference to an enclosing function's local is no longer refused.
  * `gateIdentifier` and its declaration-site test are gone with it: every identifier the checker
  * resolves is now expressible, and the accept set matches the HIR's vocabulary again. */
+
+/** Names this node binds directly, for the shadowing test below. Deliberately over-broad rather
+ * than exact: every name it can see is a name that would share one slot, and a `not-yet` that
+ * refuses a little too much is a worse diagnostic than a miscompile is a bug. */
+function bindsName(scope: ts.Node, name: string): boolean {
+  const declares = (statements: readonly ts.Statement[]): boolean =>
+    statements.some((stmt) => {
+      if (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) {
+        return stmt.name?.text === name;
+      }
+      if (ts.isVariableStatement(stmt)) {
+        return stmt.declarationList.declarations.some(
+          (decl) => ts.isIdentifier(decl.name) && decl.name.text === name,
+        );
+      }
+      return false;
+    });
+
+  if (ts.isSourceFile(scope) || ts.isBlock(scope)) {
+    return declares(scope.statements);
+  }
+  if (ts.isCaseBlock(scope)) {
+    return scope.clauses.some((clause) => declares(clause.statements));
+  }
+  if (
+    ts.isFunctionDeclaration(scope) ||
+    ts.isFunctionExpression(scope) ||
+    ts.isArrowFunction(scope)
+  ) {
+    return scope.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === name);
+  }
+  if (ts.isCatchClause(scope)) {
+    const bound = scope.variableDeclaration?.name;
+    return bound !== undefined && ts.isIdentifier(bound) && bound.text === name;
+  }
+  if (ts.isForStatement(scope) || ts.isForInStatement(scope) || ts.isForOfStatement(scope)) {
+    const init = scope.initializer;
+    return (
+      init !== undefined &&
+      ts.isVariableDeclarationList(init) &&
+      init.declarations.some((decl) => ts.isIdentifier(decl.name) && decl.name.text === name)
+    );
+  }
+  return false;
+}
+
+/** True when `name`, declared directly in `fn`'s own block, also names something an ENCLOSING
+ * scope binds. The two would share one frame slot, so the block's declaration would leak past the
+ * block. The walk starts above that block -- and above the whole clause list for a `switch`, which
+ * is one scope, so a sibling clause's declaration is not a shadow of itself. */
+function shadowsEnclosingBinding(fn: ts.FunctionDeclaration, name: string): boolean {
+  const own =
+    ts.isCaseClause(fn.parent) || ts.isDefaultClause(fn.parent) ? fn.parent.parent : fn.parent;
+  for (let scope = own.parent; scope !== undefined; scope = scope.parent) {
+    if (bindsName(scope, name)) {
+      return true;
+    }
+    if (ts.isSourceFile(scope)) {
+      return false;
+    }
+  }
+  return false;
+}
 
 /** True where a statement list is a function body or the module itself -- the two places a
  * function declaration's hoisted binding has an owner the emitter can initialise. */

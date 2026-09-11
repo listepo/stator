@@ -293,8 +293,11 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)** and **step 12 (c)–(f)**. Step 13 was added
-and landed on 2026-09-04 (plan-notes 193).
+What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)** and **step 14**. Step 13
+was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09 (plan-notes
+209), and like 13 it is a defect in a shipped construct rather than step-12 residue. Difficulty
+(§14 legend): 2a(b) **D2 (blocked)**, 2a(c) **D4**, 12(c) **D3**, 12(d) **D5**, 12(e) **D3**,
+12(f) **D4**, 14 **D3**.
 
 ~~**Step-12 bookkeeping debt** (added 2026-09-04; closed 2026-09-08, all three sub-items in one
 bundle — evidence: done.md → Phase 5).~~ ✅
@@ -337,7 +340,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `noImplicitThis: mode === 'ts'`, **not** as a code), 2769 (`No overload matches this call`) and
    2464 (computed property name), all three waiting on step 12(c)/(d)/(e) surface. What is left after
    those is one shared blocker, not a set of buckets — see (c).
-   (c) **The error-object model, and the buckets that sat behind it** (added 2026-09-04 from the (b)
+   (c) **[D4] The error-object model, and the buckets that sat behind it** (added 2026-09-04 from the (b)
    sweep; plan-notes 194).
    ~~**Check:** an `Error` object model in the runtime — constructor, `name`/`message`, the
    `instanceof` chain for the standard subclasses — proved by a golden that CATCHES a thrown builtin
@@ -354,11 +357,14 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `jsrt_delete` — so dropping the checker's refusal moves the program from `STA0012` to
    `STA1214 (DeleteExpression)`. That is a legitimate §1.3 landing (checker lint → Stator's own
    schedule, naming the phase that owns the blocker) and **not** a claim that `delete` works; the
-   operator is step-12 residue. · **2790 `The operand of a 'delete' operator must be optional`**
+   operator is step-12 residue. · ~~**2790 `The operand of a 'delete' operator must be optional`**
    — a bucket the (b) sweep missed entirely, found by the same measurement (plan-notes 196): `delete`
    on a REQUIRED property, distinct from 2704's read-only one, a §1.2 violation whose JavaScript
    answer is a boolean, blocked on that same missing operator plus the shape question a fixed-shape
-   object losing a field would ask. · ~~**2304/2552 `Cannot find name` (1345 lines)**~~
+   object losing a field would ask.~~ ✅ **both delete buckets closed 2026-09-09** by landing the
+   operator itself (plan-notes 210; evidence in [done.md](done.md) → Phase 5 step 2a(c)), which
+   retires 2704's reclassification: `STA1214 (DeleteExpression)` is gone for every receiver the
+   checker can type. · ~~**2304/2552 `Cannot find name` (1345 lines)**~~
    ✅ **landed 2026-09-05** (plan-notes 197; evidence in [done.md](done.md) → Phase 5 step 2a(c)).
    The gate needed no change after all — its global branch is guarded by `symbol !== undefined`, so a
    symbol-less identifier already fell through to `accept`, and it was the LOWERING that manufactured
@@ -385,11 +391,17 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `tests/golden/js/iterator_receiver_error.js`. The same conversion later reached the string-length
    builtins: `repeat`/`padStart`/`padEnd` throw a catchable `RangeError` matching Node instead of
    aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets stay
-   open for the reasons above, which are not panics. **Check:** the two delete buckets (2704, 2790) land with the
-   `delete` OPERATOR — lowering plus whatever
+   open for the reasons above, which are not panics. ~~**Check:** the two delete buckets (2704, 2790)
+   land with the `delete` OPERATOR — lowering plus whatever
    answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
-   returns Node's boolean and the subsequent read answers `undefined`. Until then `STA1214
-   (DeleteExpression)` is the honest verdict and this Check is what stops it being called done.
+   returns Node's boolean and the subsequent read answers `undefined`.~~ ✅ **2026-09-09**
+   (plan-notes 210; evidence in [done.md](done.md) → Phase 5 step 2a(c), the `delete` operator) —
+   `tests/golden/{ts,js}/delete_prop.*` match Node byte-for-byte. **The open half answered itself:**
+   a fixed-shape object does not lose a field, it REFUSES — `STA1108` (never) in ts mode, `STA1205`
+   (not-yet, Phase 8) in js, and `STA2007` at run time for an Unknown receiver that turns out fixed
+   — the mirror of `STA2004`, lifted by the same dictionary-mode escape. In ts mode that refusal is
+   nearly unreachable by construction: TS2790 demands an optional property and an optional property
+   is exactly what makes a shape dynamic, so only a class field can reach `STA1108`.
    **Check:** each suppression lands with a both-modes decision fixture (the same source, `error` in
    ts and `dynamic` in js) and a golden proving js mode compiles it to Node's answer. The Test262
    ratchet moves in that commit **when a test's final classifier changes**; a harness file can carry
@@ -445,7 +457,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     the binary/unary/statement catch-alls (`describeKind`).~~ ✅ **landed 2026-09-02**
     (plan-notes 164). **Residue:** accessor compound and `#n in o` stay not-yet (families (d) /
     private).
-    (c) **Object literal forms**: shorthand, spread, method and accessor members; keys that are not
+    (c) **[D3] Object literal forms**: shorthand, spread, method and accessor members; keys that are not
     identifiers. **Shorthand, non-identifier keys, and spread landed 2026-09-03** (plan-notes 181;
     evidence in [done.md](done.md) → Phase 5 step 12c, including the LAYOUT-vs-ENUMERATION order
     split it forced into `JSRTClass::key_order`).
@@ -454,7 +466,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     forced and the fixed-shape-position refusal it opened).
     **Residue:** a spread of anything but a variable of fixed shape, methods, and computed keys
     stay `STA1214`.
-    (d) **The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
+    (d) **[D5] The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an
     ancestor also declares, constructor and method overload signatures, a derived constructor that
@@ -462,17 +474,24 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     override rules, anonymous classes, and the `extends` forms. The `this`/`super`/`new` position
     sites ride here (`this` in a static member or outside a class member; `super` on anything but
     an inherited method; `new` on anything but a named class).
-    (e) **Values that need a closure or a class object**: method values (`const f = o.m` — the
-    sites' own comments name the blocker "a bound closure nothing here builds"), a class used as a
-    value, `super` as a value, named function expressions, function declarations inside a
-    block/loop/branch, calling a class field, and calling an arbitrary expression. The
-    representation is **decided** (2026-09-04, plan-notes 190): `docs/VALUE.md` §4.16 — there is no
-    bound closure, because `const f = o.m` does not bind in JavaScript. A method value is the
-    method's own `JSRTClosure`, and `jsrt_arg` already answers `undefined` for the receiver a
-    plain call does not supply. The second closure representation this family was expected to grow
-    is reserved for `Function.prototype.bind`, which stays not-yet and, when it lands, is a
-    two-slot `JSRTEnv` and one shared thunk. Implement against that section.
-    (f) **Generics beyond monomorphization** last, because they multiply everything above:
+    (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~
+    and ~~function declarations inside a block/loop/branch~~ **landed 2026-09-09** (evidence in
+    [done.md](done.md) → Phase 5 step 12e); still open are method values (`const f = o.m`), a class
+    used as a value, `super` as a value, named function expressions, and calling a class field.
+    The representation was called **decided** in 2026-09-04 (plan-notes 190) — `docs/VALUE.md`
+    §4.16, no bound closure, because `const f = o.m` does not bind in JavaScript — and implementing
+    against that section found the hole: it is true of a **zero-argument** call only. `jsrt_arg`
+    fills missing arguments from the right and the receiver is on the left, so a method value
+    called with arguments binds every one of them off by one, and its `Function.length` counts the
+    receiver (both measured, **plan-notes 210**, and §4.16 now carries the correction). The two
+    receiver-carrying constructs — **method values** and **calling a class field** — are blocked on
+    that, not on a bound closure: a `JSRTClosure` must be able to say that its parameter zero is a
+    receiver, so `jsrt_call` can drop it and shift. That is still not `Function.prototype.bind`'s
+    two-slot `JSRTEnv` (which INSERTS a receiver where this DROPS one), which stays not-yet.
+    A class used as a value and `super` as a value are blocked on the class object instead, which
+    is family (d)'s. Named function expressions need only the self-binding of the function's own
+    name inside its body, and are unblocked.
+    (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above:
     constrained and defaulted type parameters, generic classes, generic function expressions and
     arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a
     generic call whose type arguments no argument determines.
@@ -488,6 +507,26 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     position (returned `void` in C, so the generated file did not compile) and a `for-of` binding
     the lowering and the verifier typed from two different sources. Not step 12 residue: no
     `notYet` site ever named these — they are defects in shipped constructs.
+
+14. **[D3] Block scoping — a shadowed block binding shares the enclosing slot** (plan-notes 209).
+    Like step 13, a defect in a shipped construct rather than step 12 residue: no `notYet` site
+    names it, and it predates every construct in this phase. `const x = 1; { const x = 2; }` emits
+    two writes to ONE global slot, so the outer `x` reads back as 2 where the pinned Node says 1 —
+    a silent wrong answer, measured in the note. The cause is that HIR names are SOURCE names, so
+    the lowering's `bindings` map, the verifier's scope map and the emitter's `bindSlot`/`slotRef`
+    all resolve by the text the user wrote and a re-declared name has one home; `lowerBlock`
+    compounds it by mutating the caller's map in place instead of copying it. Fix it at the
+    **lowering, by alpha-renaming**: a block-scoped declaration whose name is already bound gets a
+    fresh unspellable HIR name and references inside the block resolve to it — correct by
+    construction for the verifier, the passes, the capture analysis and the emitter, none of which
+    then learn about scopes. The size is in the threading: `bindings` is `Map<string, HType>`
+    through ~34 sites in `src/lower/index.ts` and becomes a scope carrying the HIR name too.
+    Step 12(e)'s nested function declarations already ship with a NARROW refusal for exactly the
+    shadowing case (`gate.ts`, `shadowsEnclosingBinding`), which this step removes with the defect.
+    **Check:** a golden fixture shadowing a `const`, a `let`, a parameter and a function
+    declaration in nested blocks matches the pinned Node byte-for-byte; the
+    `subset_block_function_shadow_*` rows move from `not-yet` to `static`/`dynamic`; and `gate.ts`
+    emits no `not-yet` naming a shadowed block binding.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
@@ -501,8 +540,15 @@ skipped test counted as a pass, a fuzzer that generates programs the compiler al
 benchmark of the wrong answer computed quickly. Each step names the dishonest version it exists to
 prevent.
 
-The three tasks are independent and can be built in any order (6.2 can start right after Phase 3;
-6.1 needs Phase 5 because Test262 is `.js`). The phase's Check has one clause per task.
+The tasks are independent and the phase's Check has one clause per task.
+
+**All four tasks have landed** (6.1, 6.2, 6.2a, 6.3); their evidence is in [done.md](done.md) →
+Phase 6, and the titles stay here so `§9 Task 6.N` references resolve. The phase is **not closed**:
+its Check's fuzzing clause says *≥1 h nightly with zero unexplained divergences*, and what exists is
+the scheduled job plus local runs — the clause passes on a nightly run's own output, cited here.
+Task 6.3 also carries one named residue (its regression threshold's noise floor). Test262 tracking
+is the standing output of 6.1 and does not close. Difficulty (§14 legend): the fuzzing clause is
+**D1** (cite a nightly run's own output), the noise-floor residue **D2**.
 
 ~~**Task 6.1 — Test262 runner.**~~ ✅ **landed 2026-09-03** — evidence in [done.md](done.md) → Phase 6.
 First pinned number: **2379 passed, 10,513 failed, 40,688 skipped — 18.5%** over `passed + failed`,
@@ -522,94 +568,47 @@ not history:
   `_FIXTURE.js` files — which INTERPRETING.md says are not tests — as tests with unreadable headers
   (plan-notes 176).
 
-**Task 6.2 — Differential fuzzing.** Generate random programs within the subset (grammar-based generator first, coverage-guided later) — typed programs for `ts` mode (can start right after Phase 3), untyped for `js` mode; run compiled vs pinned Node, diff outputs. Every divergence becomes a golden test.
+~~**Task 6.2 — Differential fuzzing.**~~ ✅ **built 2026-09-02, hardened 2026-09-03** — evidence in
+[done.md](done.md) → Phase 6. `packages/tests/differential/` generates type-directed programs from
+one seeded xorshift, weights the grammar at the regions the golden suite cannot enumerate, runs them
+against the pinned Node byte-for-byte, minimizes divergences, and runs an hour nightly per
+`.github/workflows/nightly.yml`. Three rules survive here because they are standing practice, not
+history:
 
-Steps (detailed 2026-09-01; plan-notes 131):
-1. **Create `tests/differential/`.** `AGENTS.md`'s repo map already names it ("fuzzer corpus") and
-   the directory does not exist — the map describes the target state. It gets `generate.ts`,
-   `minimize.ts`, `run.ts`, and `corpus/` (committed seeds that once diverged).
-2. **Determinism before generation.** A ~10-line seeded xorshift PRNG, and NO other entropy source
-   anywhere in the generator (no `Date.now`, no `Math.random`). Every run prints its seed; every
-   run is reproducible from `--seed=N` alone. A fuzzer whose findings cannot be replayed produces
-   bug reports nobody can act on, which is worse than no fuzzer.
-3. **Type-directed generation, not text generation.** Choose the type first, then build an
-   expression that inhabits it — so the program compiles **by construction**. This is the step that
-   decides whether the fuzzer is useful: a generator that emits raw JS spends its whole budget
-   rediscovering that unsupported syntax is unsupported. Consequence to hold firmly: a generated
-   program that fails to compile is a **generator bug** and the generator gets fixed — unless the
-   diagnostic is `STA4xxx` (internal error), which is a real finding — an exception reaching the
-   CLI is always a compiler bug (`AGENTS.md`'s diagnostics conventions).
-4. **Weight the grammar toward what the golden suite cannot enumerate**, because everything else is
-   already covered by fixtures: float formatting and the shortest-round-trip boundary
-   (`docs/NUMERIC.md`), the `i32` refinement's overflow edges, string indexing across surrogate
-   pairs, `Map`/`Set` key identity (`-0`, `NaN`), and — once Phase 5 lands — coercion order in `==`.
-   These are the regions where a divergence is a semantics bug rather than a typo.
-5. **Oracle.** Compile and run, then run the same source on the pinned Node from `.node-version`
-   (and only that Node — the differential ground truth is the pinned one, `AGENTS.md`'s testing
-   rules). Compare stdout **byte-for-byte** and exit status; a timeout counts
-   as a divergence (an infinite loop in emitted code is a bug, not a slow test). Never normalize
-   output to make a comparison pass — the golden-test rule (`AGENTS.md`) applies here identically.
-6. **Minimizer.** Delta-debug: drop statements, then shrink subexpressions, keeping only reductions
-   that preserve the divergence, until nothing can be removed. Report the minimized program, its
-   seed, both outputs, and the first differing byte offset.
-7. **Every divergence becomes a golden test, in the commit that fixes it.** The minimized program
-   goes to `tests/golden/ts|js` with a header comment carrying the seed and the date; the raw
-   pre-minimization program goes to `tests/differential/corpus/`. Fixing the bug without landing
-   the fixture is how the same divergence returns.
-8. **`js`-mode arm after Phase 5.** Same generator, untyped output, plus weights for `var` hoisting,
-   loose equality, and dynamic property access — the three places `js` mode can disagree with Node
-   in ways `ts` mode structurally cannot.
-9. **Nightly job.** The repo has no scheduled workflow yet; add `.github/workflows/nightly.yml`
-   with a `schedule:` cron running `--minutes=60`. Derive the starting seed from
-   `github.run_number` (**not** the clock) so any nightly run can be replayed exactly. On
-   divergence: fail the job and upload the minimized program plus both outputs as an artifact.
-
-Satisfies the Check's second clause (≥1 h nightly, zero unexplained divergences) via steps 5–9.
+- **A generated program that fails to compile is a GENERATOR bug** and the generator gets fixed —
+  unless the diagnostic is `STA4xxx` (internal error), which is a real finding: an exception
+  reaching the CLI is always a compiler bug (`AGENTS.md`'s diagnostics conventions).
+- **Never normalize output to make a comparison pass.** stdout is compared byte-for-byte against
+  the pinned Node from `.node-version` and only that Node, and a timeout counts as a divergence
+  (an infinite loop in emitted code is a bug, not a slow test) — the golden-test rule applies here
+  identically.
+- **Every divergence becomes a golden test in the commit that fixes it**, with the raw
+  pre-minimization program in `tests/differential/corpus/`. Fixing the bug without landing the
+  fixture is how the same divergence returns.
 
 ~~**Task 6.2a — Pin the ground truth's invocation.**~~ ✅ **landed 2026-09-08** — evidence in [done.md](done.md) → Phase 6.
 
-**Task 6.3 — Benchmark harness** (weekly, results committed): startup time, binary size, RSS, and a compute set (fib, nbody, JSON round-trip, string churn) vs Node, Bun, QuickJS, and — where installable — Perry/scriptc/Static Hermes. Record version, flags, and hardware with every number. **Never quote a competitor's self-published figure as a measurement.**
+~~**Task 6.3 — Benchmark harness.**~~ ✅ **built 2026-09-02, hardened 2026-09-03** — evidence in
+[done.md](done.md) → Phase 6. Five compute programs (fib, nbody, JSON round-trip, string churn, and
+the empty startup floor) verified against Node at record time so a wrong answer computed quickly
+aborts the recording; engines discovered on `PATH` with an absent one written as `"absent"`; RSS
+normalized to bytes with the raw value beside it; results appended per host; and
+`tests/bench/README.md` **generated** by the weekly cron in `nightly.yml`. Two rules survive here:
 
-Steps (detailed 2026-09-01; plan-notes 131):
-1. **Extend `tests/bench/record.ts`; do not replace it.** It already exists from Task 2.7 and
-   already gets the hard parts right — best-of-5 (the minimum is the one number a scheduling hiccup
-   cannot inflate), and a `baseline.json` that stamps host, CPU, Node, clang, and the `-O2` flag
-   string. What it measures today is only COMPILE time and binary size over `tests/golden/ts`. This
-   task adds run-time measurement, a program set, and other engines onto that existing shape.
-2. **The compute set is its own directory** (`tests/bench/programs/`): fib, nbody, JSON round-trip,
-   string churn. They are deliberately NOT golden fixtures — they run for seconds and the golden
-   suite must stay fast — but **each is verified against Node once at record time**, and a
-   mismatch aborts the recording. A benchmark that computes the wrong answer quickly is not a data
-   point, and this is the only guard against that.
-3. **Metrics per program:** startup floor (an empty program, which is what separates "our binary
-   starts fast" from "our fib is fast"), wall-time best-of-N via the existing rule, peak RSS, and
-   binary size. RSS has a portability trap worth naming in the code: `ru_maxrss` is **kilobytes on
-   Linux and bytes on macOS**. Normalize to bytes and record the raw value beside it, or the first
-   cross-platform comparison silently reports a 1000× regression.
-4. **Competitor matrix by discovery, never by assumption.** Probe `node`, `bun`, `qjs` (and
-   Perry/scriptc/Static Hermes where installable) on `PATH`; record each engine's **own** version
-   string. An engine that is absent is recorded as `"absent"` — never omitted — because an omitted
-   row and a slow row look identical in a results file six months later. `AGENTS.md`'s rule stands
-   above all of this: a competitor number that was not produced by this harness on this machine is
-   not a measurement and does not go in the file.
-5. **Results layout.** `baseline.json` stays the machine-local reference it already is; runs land in
-   `tests/bench/results/<ISO-date>-<host-id>.json`, appended, never overwritten. The "benchmark
-   page" of the Check is `tests/bench/README.md`, **generated** from the newest results file per
-   host — "auto-updates" means generated and committed by a job, not hand-maintained prose.
-6. **Weekly job**, sharing `nightly.yml` from Task 6.2 with a different cron. It uploads the results
-   file as an artifact and writes the summary to `$GITHUB_STEP_SUMMARY`. **CI does not commit to
-   `main`** — the owner's answer, 2026-09-04 (plan-notes 190), to the repo-policy question this step
-   used to leave open. So no write-scoped token and no bot commits on the default branch; step 5's
-   generated `tests/bench/README.md` is regenerated and committed by whoever runs `bench:record`,
-   which is where the machine-local rule already puts the authority. Reopening this is a plan edit.
-7. **Perf-regression gate** (§12's standing practice, which has no home until this harness exists).
-   Compare against the previous results file **for the same host** and fail on a geomean regression
-   beyond a threshold. Measure the threshold before setting it: record the same commit twice, take
-   the observed spread, and set the gate above it. A gate below the noise floor fires on noise, and
-   an alarm that fires on noise is one people learn to ignore — which costs more than having no
-   gate at all.
+- **Never quote a competitor's self-published figure as a measurement.** A number this harness did
+  not produce on this machine is not a measurement and does not go in the file.
+- **CI does not commit to `main`** — the owner's answer, 2026-09-04 (plan-notes 190). No
+  write-scoped token, no bot commits on the default branch; the generated page is regenerated and
+  committed by whoever runs `bench:record`, which is where the machine-local rule already puts the
+  authority. Reopening this is a plan edit.
 
-Satisfies the Check's third clause (benchmark page auto-updates) via steps 5–6.
+**[D2] Open residue — step 7's noise floor.** The regression gate compares the geomean against the newest
+previous result for the same host and fails above `thresholdPercent: 20`. The step requires that
+threshold to sit above a **measured** spread; what has been measured is one repeat on one host
+(22.358 → 21.458 ms, **4.0%**, same commit — done.md). **Check:** a handful of repeats of one commit
+on the machine that runs the weekly job, the observed spread recorded in `plan-notes.md`, and the
+gate set from it. A gate below the noise floor fires on noise, and an alarm that fires on noise is
+one people learn to ignore — which costs more than having no gate at all.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a).
 
@@ -653,7 +652,7 @@ its own task, with a `plan-notes.md` entry and a `SUBSET.md` row):
 | C **calling back into** a JS closure | Needs a trampoline plus a GC root for the closure that outlives the call. Task 7.2's exported functions are the supported way for C to call in |
 | Threads | Single-threaded runtime; see Task 7.2 step 6 |
 
-**Task 7.1 — Calling C from TS.** `declare` + a marker (mirroring `$SHBuiltin.extern_c`) lowers to a direct call — no boxing for primitives; ownership rules for pointers/strings documented per-signature.
+**[D4] Task 7.1 — Calling C from TS.** `declare` + a marker (mirroring `$SHBuiltin.extern_c`) lowers to a direct call — no boxing for primitives; ownership rules for pointers/strings documented per-signature.
 
 Steps (detailed 2026-09-01; plan-notes 131):
 1. **Decide the surface before writing lowering, and write it down first.** Nothing under
@@ -732,7 +731,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
    and the phase Check. At least one ASan test where C writes into a buffer the runtime owns, since
    that is the failure this design is most likely to produce and the ASan job already exists.
 
-**Task 7.2 — Exposing TS to C.** `--emit-header` generates a `.h` for exported functions (Static Hermes `--exported-unit` model); values crossing out are C ABI types where sound, `jsrt_value` otherwise.
+**[D4] Task 7.2 — Exposing TS to C.** `--emit-header` generates a `.h` for exported functions (Static Hermes `--exported-unit` model); values crossing out are C ABI types where sound, `jsrt_value` otherwise.
 
 Steps (detailed 2026-09-01; plan-notes 131):
 1. **`--emit-header` in the CLI**, reusing Task 7.1's ABI table in the other direction: an exported
@@ -778,7 +777,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
    `runtime` job (which already has clang and the archive), asserting both a successful call and
    the step-4 error path. An FFI story that is not built in CI decays within a month.
 
-**Task 7.3 — Bindings for existing headers.** Start **manual** (hand-written `declare` files for the demo libs). A libclang-driven generator (functions + scalars + structs-by-pointer only) is built only after ≥3 manual bindings exist to define its spec.
+**[D5] Task 7.3 — Bindings for existing headers.** Start **manual** (hand-written `declare` files for the demo libs). A libclang-driven generator (functions + scalars + structs-by-pointer only) is built only after ≥3 manual bindings exist to define its spec.
 
 Steps (detailed 2026-09-01; plan-notes 131):
 1. **Three manual bindings, chosen for three different shapes** — that is what makes them a spec
@@ -825,7 +824,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 ---
 
-## 11. Phase 8 — The dynamic tier (gated; `js` mode only)
+## 11. Phase 8 — The dynamic tier (gated; `js` mode only) — **[D5]**
 
 Gate: real users blocked on untyped npm dependencies or `eval`. Do not build speculatively.
 
@@ -1023,7 +1022,7 @@ Standing practices:
   cross-module inlining at `-O2`, which is precisely the hole `-flto` (rung 6) fills.
 - **Compiler throughput:** reuse the `ts.Program`/checker across builds (watch mode later); if parsing/checking exceeds the §13 tripwire, move parsing to `oxc-parser` (napi) and keep the checker for types only; re-evaluate tsgo quarterly. Measured first on 2026-09-01: the `typescript` API is 8.5% of a 111,750-line build and shrinking with scale, so this is not where the time goes (plan-notes 134).
 - **The HIR verifier's scope copying is the front end's actual ceiling** — `verifyFunction` and `verifyBlock` copy the whole enclosing binding map (`new Map(bindings)`, `src/hir/verify.ts`), which is quadratic in program size: measured 190 ms at 11k lines, 3.6 s at 45k, **21.5 s at 112k** — 82% of the front end and 41% of the whole build, against 4.5 s for everything `typescript` does. A parent-linked scope (lookup walks the chain, `set` writes to the innermost) removes the copy without changing what the verifier accepts — and makes `src/cli/build.ts`'s "it costs one tree walk" true again. Owns its own Check: the pass must still reject every HIR it rejects today (plan-notes 134).
-- **Perf-regression gate in CI** (Boa's lesson: conformance work silently taxes performance ~1–2%/release without a gate). It is specified in Task 6.3 step 7, threshold included: the gate sits above a *measured* spread, because an alarm that fires on noise costs more than no gate.
+- **Perf-regression gate in CI** (Boa's lesson: conformance work silently taxes performance ~1–2%/release without a gate). The gate is built and shipping at 20%; what is still open under Task 6.3 is the *measured* spread it must sit above, because an alarm that fires on noise costs more than no gate.
 - **Publish the conformance % and benchmarks** — the field's trust currency. Task 6.1 steps 6–8 own the number and the honesty rules that travel with it (skips counted by feature, printed beside the percentage).
 
 ---
@@ -1055,6 +1054,22 @@ Standing practices:
 | Dynamic tier (Phase 8) | QuickJS-NG fallback | +6–10 wk *if gated in* |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
+
+**Difficulty legend (`[Dn]` tags on open tasks).** The tag answers *how much has to be designed
+before anything can be written*, not how many lines it is — which is why a one-line diagnostic swap
+that needs a settled semantics decision outranks a large mechanical sweep. It is a sequencing aid,
+never a licence to cut a Check (§2's estimates rule applies unchanged).
+
+| Tag | Means | Shape |
+|---|---|---|
+| **D1** | hours | one file, existing mechanism, or citing evidence that already exists |
+| **D2** | ~a day | one mechanism end to end, fixtures included; nothing to decide first |
+| **D3** | days | crosses layers (lowering + emitter, or emitter + runtime); new fixtures in both modes |
+| **D4** | 1–2 weeks | a new mechanism **plus** a semantics question to settle before code — the answer goes in `docs/` first (§15.6) |
+| **D5** | weeks+ | a subsystem, or a family large enough that it lands in sub-parts with their own evidence |
+
+Struck-through work carries no tag — `done.md` is the record. §12's ladder keeps its own **Effort**
+column and is not re-tagged: those rows are not tasks until they are scheduled.
 
 ---
 
@@ -1157,3 +1172,39 @@ Standing practices:
   form; DIAGNOSTICS.md and SUBSET.md updated to match. Evidence: `pnpm run ci` green (subset `356 —
   327 passed, 29 expected-fail, 0 failed`; golden `165 — 165 passed`, the same 165 under ASan/UBSan;
   leak plateau 3040 KB; String.prototype 32/32). New goldens: `tests/golden/{js,ts}/string_range_error`.
+- **v4.4** (2026-09-09): **Phase 6's built tasks archived — the plan had described finished work as
+  unstarted** (plan-notes 207). Tasks **6.2** (differential fuzzing) and **6.3** (benchmark harness)
+  landed on 2026-09-02 (`c2e621b`) and were hardened on 2026-09-03 (`78a5bf3`, with plan-notes
+  177–179 writing them up), yet §9 still carried both as open records with their full step lists —
+  step 6.2.1 literally instructing an agent to create a directory that had existed for a week —
+  and `done.md` had no record of either. Both are now struck stubs pointing at `done.md`, keeping
+  only what stays **normative**: the generator-bug rule, the never-normalize rule, and
+  divergence-becomes-a-fixture for 6.2; the no-competitor-figures and no-CI-commits rules for 6.3.
+  Re-verified before archiving, on the pinned Node at `4956428`: `differential --count=12` → 24
+  cases, 0 divergences; `bench:record` → 5 programs, page generated (stator 22.36 ms · node 59.29 ·
+  bun 20.00 · four engines absent). Doing 6.3 step 7's own measurement produced the one **residue
+  left open with its own Check**: the regression gate ships at 20% against a spread measured once on
+  one host (4.0% between two recordings of the same commit), which is above the only noise anyone
+  has measured but not above a known floor. **Phase 6 stays open** — its Check's fuzzing clause
+  passes on a nightly run's own output, and the scheduled job plus a local run is not that. Also
+  recorded rather than fixed: §16 has duplicate `v3.9`/`v3.10` entries from parallel sessions
+  appending at once (nothing outside this file cites a log version).
+
+- **v4.5** (2026-09-09): **§8 step 12(e)'s receiver-free half landed, and the family's "settled"
+  representation turned out to be settled for one case only** (plan-notes 210, 209). Calling an
+  arbitrary expression and function declarations inside a block/loop/branch are struck; their
+  evidence is in [done.md](done.md) → Phase 5 step 12e. The first was a gate refusal with nothing
+  behind it — HIR, verifier and emitter were already general. The second needed the emitter to
+  initialise a hoisted binding when its BLOCK is entered rather than when the enclosing body is,
+  plus all three layers agreeing that a `switch`'s clause list is one scope. Implementing against
+  `docs/VALUE.md` §4.16 is what found the hole in it: a method value is the method's own closure
+  only for a **zero-argument** call, because `jsrt_arg` fills missing arguments from the right and
+  the receiver is on the left — `const g = o.add; g(1, 2)` binds `this = 1, a = 2, b = undefined`
+  where Node gives `this = undefined, a = 1, b = 2`, and the closure's arity counts the receiver
+  (both measured). §4.16 carries the correction; step 12(e) now names it as the blocker for method
+  values and calling a class field instead of "a bound closure nothing here builds", which was never
+  the obstacle. §8 also gains **step 14**: block scoping is not modelled at all — a shadowed block
+  binding shares the enclosing slot, so `const x = 1; { const x = 2; }` reads the outer `x` back as
+  2. That is older than this phase and independent of step 12, so it is a step like 13 rather than
+  residue; the nested-declaration landing ships with a narrow refusal for exactly the shadowing case
+  so it adds no new silent miscompile, and step 14 removes both together.

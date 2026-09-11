@@ -1249,6 +1249,13 @@ function lowerSwitch(
     return null;
   }
 
+  // The whole clause list is ONE block scope, so a function declared in any clause is bound before
+  // the first clause runs -- including a clause the dispatch jumps past. Hoisting per clause would
+  // make `case 0: return f();` an error whenever `f` is written under `default:`.
+  for (const clause of node.caseBlock.clauses) {
+    hoistFunctionDeclarations(clause.statements, checker, bindings);
+  }
+
   const clauses: SwitchClause[] = [];
   for (const clause of node.caseBlock.clauses) {
     let test: Expression | undefined;
@@ -2308,6 +2315,41 @@ function lowerExpression(
   // every other case, since a parenthesized anything can appear wherever an expression can.
   if (ts.isParenthesizedExpression(node)) {
     return lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+  }
+
+  // `delete o.a` / `delete o[e]`. The gate already refused every operand that is not one of the
+  // two access forms, and every receiver with a layout, so what arrives is a dynamic receiver and
+  // a key. The `.a` form builds its own StringLiteral: the runtime takes one key expression, and
+  // `o.a` is `o["a"]` with the quotes left out.
+  if (ts.isDeleteExpression(node)) {
+    let operand: ts.Expression = node.expression;
+    while (ts.isParenthesizedExpression(operand)) {
+      operand = operand.expression;
+    }
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    if (!ts.isPropertyAccessExpression(operand) && !ts.isElementAccessExpression(operand)) {
+      return null;
+    }
+    const target = lowerExpression(operand.expression, sourceFile, checker, bindings, diagnostics);
+    if (target === null) {
+      return null;
+    }
+    const key: Expression | null = ts.isPropertyAccessExpression(operand)
+      ? {
+          kind: 'string-literal',
+          type: H_STRING,
+          span: makeSpan(
+            operand.name.getStart(sourceFile),
+            operand.name.getWidth(sourceFile),
+            sourceFile,
+          ),
+          value: operand.name.text,
+        }
+      : lowerExpression(operand.argumentExpression, sourceFile, checker, bindings, diagnostics);
+    if (key === null) {
+      return null;
+    }
+    return { kind: 'delete-prop', type: H_BOOLEAN, span, target, key };
   }
 
   if (ts.isVoidExpression(node)) {

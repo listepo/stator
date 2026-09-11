@@ -18,6 +18,7 @@ import type {
   DateNew,
   DateOp,
   DateStaticCall,
+  DeleteProp,
   DynFieldAccess,
   DynFieldAssignment,
   DynObjectLiteral,
@@ -382,7 +383,7 @@ class Emitter {
    * Same unspecified-order argument as binarySlots: `jsrt_array_get(a(), i())` would let C run
    * `i()` first, and a collection during `i()` could free the array `a()` just produced. */
   private indexSlots: Map<
-    DynFieldAssignment | FieldAssignment | IndexAccess | IndexAssignment | UpdateExpr,
+    DeleteProp | DynFieldAssignment | FieldAssignment | IndexAccess | IndexAssignment | UpdateExpr,
     number
   > = new Map();
   /* The for-of iterable's slot. Evaluated ONCE -- `for (const x of f())` calls `f` once -- and the
@@ -833,6 +834,20 @@ class Emitter {
     return produced;
   }
 
+  /* Every place a list of statements is a SCOPE: hoist its function declarations, then run it.
+   *
+   * A module is always strict, so a function declared in a block belongs to that block and is
+   * initialized when the block is entered -- not when the enclosing function was (plan.md §8
+   * step 12(e)). Routing every block, branch, loop body and clause list through here is what makes
+   * `{ f(); function f() {} }` resolve instead of calling `undefined`, and re-running it per
+   * iteration is what gives a loop body's declaration the iteration's own captures. */
+  private emitScope(statements: readonly Statement[]): void {
+    this.emitHoistedFunctions(statements);
+    for (const stmt of statements) {
+      this.emitStatement(stmt);
+    }
+  }
+
   /* Function declarations bind at the top of their unit, not where they are written, so `f();
    * function f() {}` works. The binding is what hoists; the body is emitted once, elsewhere. */
   private emitHoistedFunctions(statements: readonly Statement[]): void {
@@ -1113,6 +1128,15 @@ class Emitter {
         this.countExpression(expr.target);
         this.countExpression(expr.index);
         break;
+      // Two rooted slots for the same reason an index access takes two: `jsrt_delete` allocates
+      // (it replays the receiver's shape chain) and can throw, so both operands must be visible to
+      // the collector across the call rather than live in C temporaries.
+      case 'delete-prop':
+        this.indexSlots.set(expr, this.slotCount);
+        this.slotCount += 2;
+        this.countExpression(expr.target);
+        this.countExpression(expr.key);
+        break;
       case 'template-literal':
         {
           const count =
@@ -1383,16 +1407,12 @@ class Emitter {
         // is a mantissa bit. `if (1)` took the else branch until this was `jsrt_truthy`.
         this.appendLine(`if (jsrt_truthy(${cond})) {`, stmt.span);
         this.indent++;
-        for (const s of stmt.consequent.statements) {
-          this.emitStatement(s);
-        }
+        this.emitScope(stmt.consequent.statements);
         this.indent--;
         if (stmt.alternate) {
           this.appendLine('} else {', stmt.span);
           this.indent++;
-          for (const s of stmt.alternate.statements) {
-            this.emitStatement(s);
-          }
+          this.emitScope(stmt.alternate.statements);
           this.indent--;
         }
         this.appendLine('}', stmt.span);
@@ -1419,9 +1439,7 @@ class Emitter {
           this.appendLine(`if (!jsrt_truthy(${cond.value})) { goto brk_${id}; }`, stmt.span);
         }
         this.emitIterEnvEnter(id, stmt.span);
-        for (const s of stmt.body.statements) {
-          this.emitStatement(s);
-        }
+        this.emitScope(stmt.body.statements);
         this.emitJumpTarget(`cont_${id}`, stmt.span);
         this.emitIterEnvCommit(id, stmt.span);
         this.indent--;
@@ -1438,9 +1456,7 @@ class Emitter {
         this.appendLine('do {', stmt.span);
         this.indent++;
         this.emitIterEnvEnter(id, stmt.span);
-        for (const s of stmt.body.statements) {
-          this.emitStatement(s);
-        }
+        this.emitScope(stmt.body.statements);
         // `continue` in a do/while jumps to the TEST, not past it -- the loop still gets to decide
         // whether to run again. Placing the target at the end of the body is what achieves that.
         this.emitJumpTarget(`cont_${id}`, stmt.span);
@@ -1492,9 +1508,7 @@ class Emitter {
           this.appendLine(`if (!jsrt_truthy(${cond.value})) { goto brk_${id}; }`, stmt.span);
         }
         this.emitIterEnvEnter(id, stmt.span);
-        for (const s of stmt.body.statements) {
-          this.emitStatement(s);
-        }
+        this.emitScope(stmt.body.statements);
         // The continue target sits BEFORE the update, which is the one thing a `for` gets wrong if
         // it is lowered naively: `continue` skips the rest of the body but must still run `i++`,
         // or the loop never terminates.
@@ -1541,16 +1555,12 @@ class Emitter {
       case 'block': {
         if (stmt.label !== undefined) {
           const id = this.enterBreakable(stmt.label);
-          for (const s of stmt.statements) {
-            this.emitStatement(s);
-          }
+          this.emitScope(stmt.statements);
           this.emitJumpTarget(`brk_${id}`, stmt.span);
           this.enclosing.pop();
           break;
         }
-        for (const s of stmt.statements) {
-          this.emitStatement(s);
-        }
+        this.emitScope(stmt.statements);
         break;
       }
 
@@ -1648,9 +1658,7 @@ class Emitter {
           this.emitArrayForOfYield(stmt, iterable, cursor);
         }
         this.emitIterEnvEnter(id, stmt.span);
-        for (const s of stmt.body.statements) {
-          this.emitStatement(s);
-        }
+        this.emitScope(stmt.body.statements);
         this.emitJumpTarget(`cont_${id}`, stmt.span);
         this.emitIterEnvCommit(id, stmt.span);
         this.indent--;
@@ -1839,9 +1847,7 @@ class Emitter {
     this.indent++;
     this.emitMapSetForOfYield(stmt, key, val);
     this.emitIterEnvEnter(id, span);
-    for (const s of stmt.body.statements) {
-      this.emitStatement(s);
-    }
+    this.emitScope(stmt.body.statements);
     this.emitJumpTarget(`cont_${id}`, span);
     this.emitIterEnvCommit(id, span);
     this.indent--;
@@ -1923,9 +1929,7 @@ class Emitter {
     this.appendLine('}', span);
     this.appendLine(`${this.slotRef(stmt.binding)} = ${item};`, span);
     this.emitIterEnvEnter(id, span);
-    for (const s of stmt.body.statements) {
-      this.emitStatement(s);
-    }
+    this.emitScope(stmt.body.statements);
     this.emitJumpTarget(`cont_${id}`, span);
     this.emitIterEnvCommit(id, span);
     this.indent--;
@@ -2301,6 +2305,13 @@ class Emitter {
     const disc = this.slotAt(slot);
     this.appendLine(`${disc} = ${this.emitExpression(stmt.discriminant)};`, stmt.span);
 
+    // The clause list is ONE block scope, not one per clause (docs on SwitchClause say so), so the
+    // function declarations of every clause hoist together and ahead of the dispatch. Hoisting
+    // per clause instead would leave a declaration uninitialized whenever the jump lands past it.
+    for (const clause of stmt.clauses) {
+      this.emitHoistedFunctions(clause.statements);
+    }
+
     let defaultIndex: number | undefined;
     stmt.clauses.forEach((clause, i) => {
       if (clause.test === undefined) {
@@ -2510,6 +2521,24 @@ class Emitter {
         }
         this.flushParts(parts, expr.span);
         return read;
+      }
+
+      case 'delete-prop': {
+        const base = this.indexSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('delete was not registered during counting');
+        }
+        const target = this.slotAt(base);
+        const key = this.slotAt(base + 1);
+        const parts: string[] = [];
+        this.sequencePart(parts, expr.target, expr.span, (v) => `${target} = ${v}`);
+        this.sequencePart(parts, expr.key, expr.span, (v) => `${key} = ${v}`);
+        this.flushParts(parts, expr.span);
+        // The answer lands in the receiver's slot before the pending check, so a delete that threw
+        // (a frozen object, a nullish receiver) jumps to the landing pad with nothing half-read.
+        this.appendLine(`${target} = jsrt_bool(jsrt_delete(${target}, ${key}));`, expr.span);
+        this.emitPendingCheck(expr.span);
+        return target;
       }
 
       case 'call': {

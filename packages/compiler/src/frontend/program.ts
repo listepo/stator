@@ -75,6 +75,13 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2552, // Cannot find name 'X'. Did you mean 'Y'?
   2540, // Cannot assign to 'X' because it is a read-only property.
   2704, // The operand of a 'delete' operator cannot be a read-only property.
+  // TypeScript refuses `delete` on a REQUIRED property because deleting one would falsify the
+  // type; JavaScript's answer is a boolean and a key that is gone. Both codes could only be
+  // dropped once the operator existed to answer them (plan.md §8 step 2a(c)): 2704's answer is the
+  // frozen-object TypeError `jsrt_delete` raises with Node's wording, and 2790's is the ordinary
+  // removal. In `ts` mode 2790 stays a refusal, and that is not an inconsistency -- it is the
+  // rule that keeps a fixed shape from being asked to lose a slot it has no encoding for.
+  2790, // The operand of a 'delete' operator must be optional.
   // The exactOptionalPropertyTypes family. The option stays ON in both modes -- turning it off is
   // program-wide and would strip the .ts half of a mixed graph of the same guarantee -- but in js
   // mode these three codes refuse ordinary JavaScript: `{ value: undefined }` for a `value?: string`

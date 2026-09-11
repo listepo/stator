@@ -49,7 +49,7 @@ const STRINGS = ['', 'a', 'hello', '\ud800', '\ud83d\udc4d', 'left\tright', '�
 // them Map/Set key edges (SameValueZero folds -0 into 0 and makes NaN equal to itself) and print
 // edges (`-0` keeps its sign, `NaN`/`Infinity` are not decimal). Kept OUT of NUMBER_EDGES because
 // arithmetic over them mostly yields NaN, which would drown the float-formatting region rather
-// than add to it (plan.md §9 Task 6.2 step 4).
+// than add to it (plan.md §9 Task 6.2; the weighted regions are recorded in done.md → Phase 6).
 const IDENTITY_EDGES = ['NaN', 'Infinity', '-Infinity', '-0', '0'] as const;
 
 // Operands from disjoint types, so `==` has to run the coercion table rather than compare directly.

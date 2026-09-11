@@ -415,6 +415,14 @@ bool jsrt_in(jsrt_value key, jsrt_value obj);
  * everything else through the property table with ToString(index) as the key. */
 jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic);
 void jsrt_dyn_index_set(jsrt_value obj, jsrt_value index, jsrt_value value, JSRTIC *ic);
+/* `delete obj[key]` (`delete o.a` is this with a literal key). Answers the operator's boolean:
+ * true when the key is gone or was never there, false only after raising. Removing a key REBUILDS
+ * the object's shape chain from the root without it -- a shape is shared metadata and cannot lose
+ * a node in place -- which is O(keys) and keeps two objects that deleted the same key on ONE shape.
+ * A key that is not the object's to remove is answered where it is decided: a frozen dynamic
+ * object raises Node's TypeError, and a fixed-shape receiver aborts (STA2007), because a layout
+ * has no representation for a missing slot. */
+bool jsrt_delete(jsrt_value obj, jsrt_value key);
 
 /* Math builtins (jsrt_math.c) — number -> number, ECMA-262 §21.3.2 exactly. Entry points
  * apply ToNumber, so js-mode calls preserve JavaScript coercion semantics. The approximated

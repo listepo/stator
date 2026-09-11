@@ -147,6 +147,28 @@ export interface TypeOf extends Node {
   readonly operand: Expression;
 }
 
+/** `delete o.a` / `delete o[e]` — the one expression that REMOVES a property rather than reading
+ * or writing one.
+ *
+ * `key` is always an expression, and for `o.a` the lowering builds the StringLiteral itself. The
+ * literal form could have passed a C string the way DynFieldAccess does, but delete is neither hot
+ * (it rebuilds the receiver's shape chain, which is already O(keys)) nor cacheable, so one node and
+ * one runtime entry point buy more than a second spelling of the same operation would.
+ *
+ * The receiver is never a fixed shape here in `ts` mode: TypeScript refuses `delete` on a required
+ * property (TS2790), and an OPTIONAL property is exactly what sends an anonymous shape to the
+ * dynamic path (`isDynamicShape`), so the two rules meet. What survives that is a class field,
+ * which §1.1 refuses permanently (STA1108). A fixed shape can still ARRIVE here through an Unknown
+ * receiver, and that is the runtime's STA2007.
+ *
+ * The `type` is always `boolean`: the operator answers whether the key is gone, and it answers
+ * `true` for a key that was never there. */
+export interface DeleteProp extends Node {
+  readonly kind: 'delete-prop';
+  readonly target: Expression;
+  readonly key: Expression;
+}
+
 /** A runtime check that a value is what the program says it is — STA2001 if it is not.
  *
  * This is golden rule 4 made executable. TypeScript's types are unsound at exactly the places this
@@ -1335,6 +1357,7 @@ export type Expression =
   | BinaryOp
   | UnaryOp
   | TypeOf
+  | DeleteProp
   | ConditionalExpr
   | UpdateExpr
   | BoundaryCheck
@@ -1716,9 +1739,12 @@ export interface TryStatement extends Node {
  * Separate from Declaration, and not sugar for `const f = function f(){}`, because the binding is
  * HOISTED: it holds the function from the moment its scope is entered, so `f(); function f(){}`
  * runs. A `const` would be in its temporal dead zone at that point. The emitter honours this by
- * initializing every function-declaration binding in the enclosing body's prologue, ahead of the
- * statements in source order — which is only sound because a FunctionExpr's value depends on
- * nothing that has run yet.
+ * initializing every function-declaration binding at the top of the STATEMENT LIST it is declared
+ * in, ahead of those statements in source order — which is only sound because a FunctionExpr's
+ * value depends on nothing that has run yet. The list, not the enclosing body: a module is always
+ * strict, so a function declared in a block belongs to that block and is initialized when the
+ * block is entered (plan.md §8 step 12(e)). A `switch`'s clause list is one such list in total,
+ * because a clause is not a scope of its own.
  *
  * INVARIANT: `type` is the function's type and equals `fn.type`; the binding and the value it
  * holds cannot disagree. */

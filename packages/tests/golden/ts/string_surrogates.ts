@@ -1,4 +1,5 @@
-// Differential finding, seed 20260915, 2026-09-03 (plan.md §9 Task 6.2 step 7; plan-notes 178).
+// Differential finding, seed 20260915, 2026-09-03 (plan.md §9 Task 6.2 — every divergence becomes
+// a golden test in the commit that fixes it; done.md → Phase 6; plan-notes 178).
 // A JS string is a sequence of UTF-16 code UNITS and a lone surrogate is a legal one, so
 // `charCodeAt(0)` here is 55296. The emitter used to write literals as raw characters into the .c
 // file, where the UTF-8 file encoding replaced the unpaired surrogate with U+FFFD and the answer

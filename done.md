@@ -1137,6 +1137,87 @@ from the Biome and CPD scan roots (plan-notes 201) — scan ownership, not a lin
 The live Check for everything still open under step 2a stays in `plan.md` §8 — this section is the
 record of what landed, not the authority on what remains.
 
+### Step 2a(c) — the `delete` operator, and the answer a fixed shape gives (2026-09-09)
+
+**The Check that closed** (`plan.md` §8 step 2a(c)): *the two delete buckets (2704, 2790) land with
+the `delete` OPERATOR — lowering plus whatever answer a fixed-shape object gives when it loses a
+field — proved by a golden where `delete o.a` returns Node's boolean and the subsequent read answers
+`undefined`.* Both halves landed; the second half answered itself. Design record: plan-notes 210.
+
+**What was there before.** Nothing. 2704 had "landed" in 2026-09-05 only as a reclassification
+(plan-notes 196): removing the checker's refusal moved the program from `STA0012` to
+`STA1214 (DeleteExpression)`, because no `DeleteExpression` case existed in `src/lower/`,
+`src/frontend/gate.ts` or the runtime. 2790 was a bucket the (b) sweep had missed entirely.
+
+**The operator, end to end.** A new HIR node `DeleteProp { target, key }` typed `H_BOOLEAN` — the key
+is always an `Expression`, so `delete o.a` and `delete o[e]` are one node, the first with a
+synthesized string literal. `gateDelete` classifies the receiver, the lowering unwraps parentheses
+and builds the pair, `verify.ts` pins the result type (`STA4097`), `rewrite.ts` recurses into both
+children, `explain.ts` reports the construct as dynamic (unlike `typeof`, `delete` operates on the
+receiver), and the emitter takes two slots and emits
+`t0 = jsrt_bool(jsrt_delete(t0, t1));` followed by the pending check. In the runtime,
+`jsrt_delete` in `runtime/src/jsrt_shape.c` REBUILDS the object's shape chain from the root without
+the key rather than editing a node — shapes are shared immortal metadata — which preserves insertion
+order, lands two objects that deleted the same key on ONE shape (so a shared read site's IC still
+hits), and invalidates stale caches for free, since an IC is trusted by shape-pointer compare. Slots
+compact in the same walk. The contract is `docs/VALUE.md` §4.10, which previously promised a
+dictionary-mode escape that this change does not need.
+
+**The open question, answered: a fixed-shape object does not lose a field — it refuses.** `STA1108`
+(never) in ts mode, `STA1205` (not-yet, Phase 8) in js mode, `STA2007` at run time for an Unknown
+receiver that turns out fixed. That is `STA2004`'s mirror image (a layout asked to GROW vs asked to
+SHRINK, the same absent encoding) and it lifts with the same Phase 8 dictionary mode. In ts mode the
+refusal is nearly unreachable by construction: TS2790 demands an optional property, and an optional
+property is exactly what sends an anonymous shape to the dynamic representation, so only a class
+field can reach `STA1108`. **One fixed-shape delete does have a right answer and takes it:** a frozen
+property is non-configurable, so `Object.freeze({x:1})` + `delete frozen.x` raises Node's
+`TypeError: Cannot delete property 'x' of #<Object>` rather than aborting — the removal that cannot
+be represented is also the one the spec forbids. An array element is refused too, at the gate and as
+`STA2007`, because a hole has no representation (Phase 5 rung 5, not Phase 8).
+
+**Suppression.** `2790` joined `JS_MODE_RUNTIME_CODES` in `src/frontend/program.ts`; `2704` was
+already there. Neither could be dropped before the operator existed, which is why the plan kept both
+open behind one Check rather than counting the reclassification as delivery.
+
+**Two extractions in `jsrt_shape.c`, forced by the rebuild:** `shape_links` (the offset-indexed link
+fill) out of `jsrt_shape_property_order`, which now fills then sorts, and `shape_transition`
+(reuse-before-allocate) out of `store_prop`. `jsrt_delete` calls both; duplication stayed at 0.9%.
+
+**Check evidence, Node v26.7.0.** `tests/golden/ts/delete_prop.ts` and
+`tests/golden/js/delete_prop.js` match Node byte-for-byte: `delete o.a` answers `true`, the
+subsequent read answers `undefined`, `in` flips, the printer drops the key, a double delete answers
+`true` twice, an absent key answers `true`, a computed `delete o[key]` works, a re-add appends at the
+END (`{ c: 3, a: 10, d: 4 }`), two objects that deleted the same key are read through ONE shared
+site, and the frozen delete's `TypeError` is caught with `e instanceof TypeError` true. Decision
+fixtures `subset_delete_property_{ts,js}` report `dynamic` in both modes, and
+`subset_delete_class_field_{ts,js}` lost their `@expected-fail` markers — they now really do report
+`error(STA1108)` and `not-yet(STA1205)`.
+
+```text
+tests 384; pass 384; fail 0
+76 clones · 0.9% duplication
+runtime: print corpus matches Node
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+golden: 172 fixtures — 172 passed, 0 failed
+builtins: 222/238 surface members landed (93%), +5 nondeterministic (proved outside golden)
+leak: 10M objects — peak RSS 3040 KB of a 65536 KB cap, 50 samples, plateau
+runtime: print corpus matches Node (ASan/UBSan)
+golden: 172 fixtures — 172 passed, 0 failed   (ASan/UBSan)
+```
+
+(The subset and golden totals include a concurrent step-12(e) landing in the same worktree; the
+`delete` fixtures are the four new subset entries and the two new goldens.)
+
+**Test262 (not part of `ci`), whole pinned corpus, measured in the same tree:** `failed` fell
+7276 → 3100 and `skipped` rose 43925 → 48108. That is the 2790 suppression reaching one harness
+file — `harness/propertyHelper.js` does `delete obj[name]`, so every test including it used to die
+at `STA0012` before Stator's own schedule could classify it. 6 of the 1,233 corpus tests that use a
+`delete` expression now pass. `passed` also fell 2379 → 2372, which the ratchet refuses; **the
+ratchet was not moved** — the drop is not attributable to this change (before today every `delete`
+was `STA1214` or `STA0012`, so no passing test could have contained one) and the measurement shares
+a working copy with the step-12(e) landing whose new shadowing refusal has exactly that shape. Full
+evidence and the re-measure condition: plan-notes 210.
+
 ### Step 3 — Lower `var`
 
 **Step 3 landed (2026-09-02).** `var` in js mode is function-scoped, hoisted, and initialized
@@ -1375,6 +1456,69 @@ The paragraph `plan.md` §8 carried since 2026-09-04, all three sub-items in one
 `CONSOLE_METHODS` table codegen emits through), negative-proofed by emptying one claim and
 watching it fail. Dashboard: 222/238, `Promise.prototype: 3/3 (100%)`. Evidence: plan-notes 206.
 
+### Step 12e — the receiver-free half: an arbitrary callee, and functions declared in a block (2026-09-09)
+
+Two of family (e)'s seven constructs. They are the two that need no receiver and no class object,
+which is why they landed together and why the other five did not: implementing against
+`docs/VALUE.md` §4.16 is what found the hole recorded as plan-notes 208.
+
+**Calling an arbitrary expression was a gate refusal with nothing behind it.** `CallExpr.callee`
+was always an ordinary `Expression`, the emitter always evaluated it into its own rooted slot ahead
+of the arguments, and the verifier already required its type to be `fn` or Unknown. Only
+`gateCall` insisted on an identifier or a function literal. The arm is gone: whatever refusal a
+callee's own shape deserves comes from gating that expression, which the walk does anyway, and
+deciding it a second time is what made `(up ? inc : dec)(x)` a not-yet. The argument count stays
+deliberately unchecked — JavaScript drops extras and fills missing ones with `undefined`, and the
+calling convention does that at runtime rather than making it a gate decision.
+
+**A function declared in a block was hoisted at the wrong level.** The lowering already bound it
+(`hoistFunctionDeclarations` runs per block) and the counting pass already gave it a slot
+(`countBindings` recurses), but the emitter only INITIALISED such bindings in a module or function
+body's prologue — so `{ f(); function f() {} }` called `undefined` and aborted with `STA2006`.
+Fixed by making the initialisation follow the scope: one `emitScope(statements)` helper does the
+hoist and then the statements, and the ten places that emitted a statement list by hand — block,
+labeled block, both arms of `if`, `while`, `do`/`while`, `for`, and the three `for-of` shapes —
+route through it. `try`/`catch`/`finally` came along for free: those emit their blocks as
+statements. Re-running the hoist per iteration is not a cost but the semantics: a loop body's
+declaration closes over that iteration's bindings, which is what `steps.map(f => f())` proves.
+
+A `switch` needed all three layers, because its clause list is ONE scope and not one per clause
+(the HIR's own `SwitchClause` doc says so): the lowering hoists across every clause before lowering
+any (`lowerSwitch`), the verifier mirrors it, and the emitter hoists all clauses before the
+dispatch — hoisting per clause would leave a declaration uninitialised whenever the jump lands past
+it. Measured on the pinned Node first: `case 0: return describe('zero');` with `function describe`
+written under `default:` prints `<zero>`, while the same declaration wrapped in a `{ }` under
+`default:` is a `ReferenceError` — the block is the scope, the clause is not.
+
+**One narrow refusal stays, and it is not this construct's.** A block declaration that reuses a
+visible name still shares the enclosing slot, because HIR names are source names — the same defect
+`{ const x = 2; }` under an outer `const x = 1` has had since blocks were lowered, measured in
+plan-notes 209 and now owned by `plan.md` §8 step 14. So `gateFunction` refuses exactly the
+shadowing case (`shadowsEnclosingBinding`, deliberately over-broad: every name an enclosing scope
+binds counts) rather than letting this landing add a silent wrong answer, and step 14 removes the
+refusal with the defect. Ground truth for the fixtures was measured **as an ES module**: a module is
+always strict, so these declarations are block-scoped and Annex B's var-scoped alias does not exist
+— the same source run as CommonJS answers differently, and measuring in the wrong goal would have
+pinned sloppy-mode semantics Stator never has.
+
+**Check.** `tests/golden/ts/call_expression.ts`, `tests/golden/ts/block_function.ts` and
+`tests/golden/js/block_function.js` match the pinned Node byte-for-byte; six new decision fixtures
+(`subset_call_arbitrary_callee_{ts,js}`, `subset_block_function_{ts,js}`,
+`subset_block_function_shadow_{ts,js}`), none of them expected-fail. Run on 2026-09-09:
+
+```
+golden: 172 fixtures — 172 passed, 0 failed
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+tests 384 / pass 384 / fail 0
+biome: Checked 94 files. No fixes applied.
+jscpd: 70 clones · 0.7% duplication
+tsc --noEmit: clean on both the compiler and the tests project
+```
+
+The C runtime was not rebuilt for this landing and needed no change: every layer touched is
+TypeScript, and `packages/tests/unit/frames.test.ts` (in the 384) is what holds the new emit path
+to the frame-vs-locals discipline.
+
 ---
 
 ## Phase 6 — Conformance and differential fuzzing (in progress)
@@ -1434,6 +1578,52 @@ Tests: `tests/unit/phase6.test.ts` (frontmatter, feature map, `scheduleSkipCode`
 `tests/subset/subset_switch_fallthrough_{js,ts}`, `tests/subset/subset_catch_binding_property_{js,ts}`,
 `tests/golden/js/mode_policy_es5.js`.
 
+### Task 6.2 — Differential fuzzing ✅ (built 2026-09-02, hardened 2026-09-03)
+
+**Check clause:** *fuzzer runs ≥1 h nightly with zero unexplained divergences.* Met by
+`.github/workflows/nightly.yml` (`--minutes=60 --seed=${{ github.run_number }}`, `0 2 * * *`);
+re-verified locally on the pinned Node at HEAD `4956428`:
+
+```
+$ mise exec node -- node packages/tests/differential/run.ts --count=12
+differential: seed=1 modes=ts,js
+differential: 24 cases — 0 divergences          # 26 s
+```
+
+**Steps 1–9 as built.** `packages/tests/differential/` holds `generate.ts`, `minimize.ts`, `run.ts`,
+`corpus/` and a git-ignored `failures/`. Entropy is one `XorShift32` class and nothing else — the
+file says so in a doc comment, and `Date.now`/`Math.random` appear nowhere in the directory, so
+`--seed=N` replays a run exactly. Generation is type-directed (`chooseType` first, then an
+expression inhabiting it), which is what makes a program that fails to compile a *generator* bug
+rather than a finding. The grammar is weighted at the five regions step 4 names —
+`NUMBER_EDGES` (i32 boundaries, `MIN_VALUE`/`MAX_VALUE`, shortest-round-trip fodder),
+`IDENTITY_EDGES` kept deliberately separate (`NaN`/`±Infinity`/`-0`/`0`: arithmetic over them
+yields `NaN` and would drown the float region), `STRINGS` carrying a lone surrogate, a surrogate
+pair and an astral character, `Map`/`Set` construction over two identity edges (SameValueZero is
+reachable only through the containers), and `COERCION_OPERANDS` for cross-type `==`. The oracle
+runs the same source on the pinned Node and compares stdout byte-for-byte with a 5 s timeout
+counted as a divergence; `minimize.ts` delta-debugs to the smallest program preserving it; a
+finding is written out as `.source`, `.min.js`, `.node.json`, `.stator.json`. The `js` arm (step 8)
+is not a separate generator: `--mode=both` splits the time budget evenly per mode.
+
+**Two defects the hardening pass fixed** (plan-notes 177, commit `78a5bf3`): TS 2367
+(*"comparison appears to be unintentional"*) was on in **js** mode, so a cross-type `==` could not
+be generated at all — a lint about intent, refusing the coercion table that js mode exists to run;
+and `--minutes=N` set ONE deadline for the whole run, so the first mode spent the entire budget and
+the second fell through to `count` cases — one, by default — and still printed `0 divergences`.
+An hour-long nightly would have fuzzed `ts` for an hour, `js` for one program, and reported a clean
+sheet for both. The arm that would have silently disappeared is `js`, which is step 8's whole
+subject.
+
+**Step 7 has been exercised once, on the fuzzer's first finding** (plan-notes 178):
+`"\ud800".charCodeAt(0)` answered `65533` where Node answers `55296`, found within seconds of the
+generator gaining the surrogate region. The runtime was correct — the **emitter** copied non-ASCII
+source characters verbatim into the generated `.c`, where writing an unpaired surrogate as UTF-8
+substitutes U+FFFD before clang ever saw it. Literals now travel as WTF-8 with every non-ASCII byte
+written as a three-digit **octal** escape (octal, not `\x`: a C hex escape consumes every hex digit
+that follows it). Landed as `tests/golden/ts/string_surrogates.ts` with the pre-minimization program
+in `tests/differential/corpus/ts-20260915.ts`, in the commit that fixed it.
+
 ### Task 6.2a — Pin the ground truth's invocation ✅ (2026-09-08)
 
 **Check clause:** *in a shell whose bare `node` is not the pinned major, `pnpm run ci`
@@ -1479,6 +1669,61 @@ only `pnpm run ci`. Drive-by in the same change: `ci.sh`'s trailing `just runtim
 no longer resolved after the `packages/*` move (no root justfile); now
 `just -f packages/runtime/justfile -d packages/runtime runtime-asan`.
 
+
+### Task 6.3 — Benchmark harness ✅ (built 2026-09-02, hardened 2026-09-03)
+
+**Check clause:** *benchmark page auto-updates.* Met. Re-verified on the pinned Node at HEAD
+`4956428` (the generated page and `baseline.json` were restored afterwards — they are machine-local
+by rule, and this host is not the recording host):
+
+```
+$ mise exec node -- node packages/tests/bench/record.ts
+bench: recorded 5 programs to packages/tests/bench/results/2026-09-09T07-23-51-394Z-darwin-arm64-….json
+
+# packages/tests/bench/README.md, generated:
+| Engine | Version | Geomean runtime (ms) |
+| stator | working tree |  22.36 |
+| node   | v26.7.0      |  59.29 |
+| bun    | 1.3.14       |  20.00 |
+| qjs / perry / scriptc / hermes | absent | — |
+```
+
+**Steps 1–7 as built.** `tests/bench/record.ts` was **extended, not replaced**: best-of-5 and the
+host/CPU/Node/clang/`-O2` stamp are the Phase-2 shape, and run-time measurement, a program set and
+other engines were added onto it. The compute set is its own directory (`tests/bench/programs/`:
+`fib`, `nbody`, `json-roundtrip`, `string-churn`, plus `startup` — the empty program that separates
+"our binary starts fast" from "our fib is fast"), deliberately outside the golden suite, and **every
+program is verified against Node at record time**: `main()` runs each on the pinned Node first and
+`measureStator` throws on a mismatch, so a benchmark that computes the wrong answer quickly aborts
+the recording instead of becoming a data point. The RSS portability trap is handled where the plan
+named it: `run()` shells `/usr/bin/time` (`-l` on darwin, `-f %M` on Linux) and returns BOTH
+`maxRssRaw` and `maxRssBytes`, converting `* 1024` on Linux only — the raw value is kept beside the
+normalized one, so the first cross-platform comparison cannot silently report a 1000× regression.
+The competitor matrix is by **discovery**: `probe()` walks `node`, `bun`, `qjs`, `perry`, `scriptc`,
+`hermes` on `PATH` and records each engine's own version string; an absent engine is written as
+`"absent"`, never omitted, because an omitted row and a slow row look identical six months later.
+Results append to `tests/bench/results/<timestamp>-<host-id>.json` (git-ignored) and the page is
+**generated** into `tests/bench/README.md`. The weekly job shares `nightly.yml` with a second cron
+(`0 3 * * 0`), uploads the results file with `if-no-files-found: error`, and writes the generated
+page itself to `$GITHUB_STEP_SUMMARY`.
+
+**Two hardening fixes** (commit `78a5bf3`): the results filename carries a full timestamp rather
+than `stamp.slice(0, 10)` — two recordings on the same day wrote the same file, so the second
+silently replaced the first and the regression gate lost the run it should have compared against,
+which step 5's "appended, never overwritten" cannot survive; and the benchmark step gained
+`set -o pipefail`, without which `tee` decides the step's exit status and a failed recording is
+still green — the same defect already fixed in `ci.yml`'s Test262 step (plan-notes 175), in the job
+that publishes the numbers.
+
+**Step 7's threshold, measured rather than assumed.** `sameHostPrevious()` compares the geomean
+against the newest previous result **for the same host id** and throws above
+`regression.thresholdPercent`, which is 20. The step requires the gate to sit above a measured
+spread, so the same commit was recorded twice on this host: geomean **22.358 ms → 21.458 ms**, a
+**4.0%** swing with no code change. The 20% gate is five times that floor. Named honestly as
+residue rather than closed: that is ONE repeat on ONE host, and a floor worth trusting wants a
+handful of repeats on the machine that actually runs the weekly job.
+
+---
 
 ## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)
 

@@ -94,7 +94,10 @@ uint32_t jsrt_shape_property_count(const JSRTShape *shape) {
   return shape == NULL || shape->key == NULL ? 0 : shape->offset + 1;
 }
 
-const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t count) {
+/* The chain flattened into slot order: `links[i]` is the shape node whose value lives in slot `i`.
+ * That IS insertion order, which both callers need before doing anything else -- enumeration sorts
+ * it, and a delete replays it. */
+static const JSRTShape **shape_links(const JSRTShape *shape, uint32_t count) {
   const JSRTShape **links =
       (const JSRTShape **)malloc((size_t)count * sizeof(const JSRTShape *));
   if (links == NULL && count > 0) {
@@ -103,6 +106,11 @@ const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t cou
   for (const JSRTShape *s = shape; s != NULL && s->key != NULL; s = s->parent) {
     links[s->offset] = s;
   }
+  return links;
+}
+
+const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t count) {
+  const JSRTShape **links = shape_links(shape, count);
   /* Stable insertion sort is sufficient for shape-sized key sets and avoids a comparator carrying
    * hidden state.  Offset order is the insertion order for non-index keys. */
   for (uint32_t i = 1; i < count; i++) {
@@ -249,6 +257,28 @@ static const JSRTShape *shape_find(const JSRTShape *shape, const char *key) {
     }
   }
   return NULL;
+}
+
+/* The child of `from` that adds `key`, reusing an existing one before allocating. Reuse before
+ * allocation is what keeps two same-history objects on ONE shape -- and it is why a delete can
+ * replay a chain minus one key and land where an object built without that key would have. */
+static JSRTShape *shape_transition(JSRTShape *from, const char *key) {
+  for (JSRTShape *s = from->transitions; s != NULL; s = s->sibling) {
+    if (s->key == key || strcmp(s->key, key) == 0) {
+      return s;
+    }
+  }
+  JSRTShape *next = (JSRTShape *)malloc(sizeof(JSRTShape));
+  if (next == NULL) {
+    jsrt_panic("out of memory: shape");
+  }
+  next->parent = from;
+  next->key = key;
+  next->offset = shape_slot_count(from);
+  next->transitions = NULL;
+  next->sibling = from->transitions;
+  from->transitions = next;
+  return next;
 }
 
 /* A loaded slot, resolved. An accessor cell becomes a call with the receiver as argument zero --
@@ -404,27 +434,8 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
     return;
   }
 
-  /* New property: take (or build) the transition. Reuse before allocation is what keeps two
-   * same-history objects on ONE shape. */
-  JSRTShape *next = NULL;
-  for (JSRTShape *s = (*o.shape)->transitions; s != NULL; s = s->sibling) {
-    if (s->key == key || strcmp(s->key, key) == 0) {
-      next = s;
-      break;
-    }
-  }
-  if (next == NULL) {
-    next = (JSRTShape *)malloc(sizeof(JSRTShape));
-    if (next == NULL) {
-      jsrt_panic("out of memory: shape");
-    }
-    next->parent = (*o.shape);
-    next->key = key;
-    next->offset = shape_slot_count((*o.shape));
-    next->transitions = NULL;
-    next->sibling = (*o.shape)->transitions;
-    (*o.shape)->transitions = next;
-  }
+  /* New property: take (or build) the transition. */
+  JSRTShape *next = shape_transition((*o.shape), key);
 
   if (next->offset >= (*o.capacity)) {
     /* Double from 4 so repeated additions stay amortized O(1). The old slots are copied, not
@@ -458,6 +469,89 @@ void jsrt_define_accessor(jsrt_value obj, const char *key, jsrt_value get, jsrt_
   cell->set = set;
   /* No IC: installation happens once per object at construction, so a cache would never hit. */
   store_prop(obj, key, JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)cell), NULL, false);
+}
+
+/* The shape rebuild. A shape node is shared metadata -- other objects sit on the same chain -- so
+ * removing a key means replaying the chain from the root without it and compacting the slots to
+ * match. `next` never runs ahead of `i`, so the compaction reads every slot before it is written.
+ * Deliberately not IC-aware: an IC is trusted by shape-pointer compare, and the object now holds a
+ * different pointer, so every cache filled against the old shape simply misses. */
+static void shape_delete(PropTable o, const JSRTShape *hit) {
+  const uint32_t count = shape_slot_count(*o.shape);
+  const JSRTShape **links = shape_links(*o.shape, count);
+  JSRTShape *shape = &shape_root;
+  uint32_t next = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    if (links[i] == hit) {
+      continue;
+    }
+    shape = shape_transition(shape, links[i]->key);
+    (*o.slots)[next++] = (*o.slots)[i];
+  }
+  free(links);
+  *o.shape = shape;
+}
+
+bool jsrt_delete(jsrt_value obj, jsrt_value key) {
+  if (jsrt_is_nullish(obj)) {
+    jsrt_throw_error(&jsrt_class_type_error, "Cannot convert undefined or null to object");
+    return false;
+  }
+  /* Owned here, unlike every other shape key: a delete only COMPARES the key -- the chain it
+   * replays carries the immortal keys the old shapes already held -- so this copy dies with the
+   * call instead of joining the table. */
+  const char *k = jsrt_shape_key(jsrt_to_string(key));
+  bool answer = true;
+  if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
+    uint32_t index = 0;
+    /* A dense array has no representation for an absent element: `delete a[1]` must leave a HOLE
+     * that `1 in a` denies and iteration skips, and `undefined` is not that (plan.md §8 step 2a(c);
+     * the same gap gateArrayLiteral names for `[1, , 3]`). `length` is non-configurable, which is
+     * a different refusal the same absence blocks from being spelled honestly. */
+    if (strcmp(k, "length") == 0 ||
+        (array_index_value(k, &index) && index < jsrt_as_array(obj)->length)) {
+      jsrt_panic("STA2007: an array element cannot be deleted; planned for Phase 5 (array holes)");
+    }
+  } else if (!has_prop_table(obj)) {
+    /* A fixed layout is slots at compile-time offsets; a missing one has no encoding. Deleting a
+     * key it never had is still `true` -- there was nothing to remove. Symmetric with STA2004,
+     * and it lifts with the same Phase 8 dictionary-mode escape.
+     *
+     * FROZEN is the one fixed-shape delete with a right answer, and it is the answer: a frozen
+     * property is non-configurable, so the spec's `delete` raises in strict mode and never has to
+     * reach a representation the layout does not have (plan.md §8 step 2a(c), bucket 2704). */
+    if (jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_has(obj, k)) {
+      if (jsrt_as_object(obj)->frozen) {
+        char msg[256];
+        snprintf(msg, sizeof msg, "Cannot delete property '%s' of #<Object>", k);
+        jsrt_throw_error(&jsrt_class_type_error, msg);
+        free((void *)k);
+        return false;
+      }
+      jsrt_panic(
+          "STA2007: a statically-shaped object cannot lose a property; planned for Phase 8");
+    }
+    free((void *)k);
+    return true;
+  }
+  const PropTable o = as_prop_table(obj, "delete");
+  const JSRTShape *hit = shape_find(*o.shape, k);
+  if (hit == NULL) {
+    /* Absent is `true` even on a frozen object: §13.5.1.2 asks [[Delete]], and deleting what is
+     * not there succeeds. Only an existing non-configurable property raises. */
+    free((void *)k);
+    return true;
+  }
+  if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "Cannot delete property '%s' of #<Object>", k);
+    jsrt_throw_error(&jsrt_class_type_error, msg);
+    answer = false;
+  } else {
+    shape_delete(o, hit);
+  }
+  free((void *)k);
+  return answer;
 }
 
 jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic) {
