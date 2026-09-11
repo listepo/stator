@@ -24,6 +24,11 @@ TypeScript is deliberately **not** on `latest`: `latest` is now 7.x (the Go port
 public compiler API plan.md §0.3 rules out. `6.0.3` is the newest stable 6.x. Re-evaluate
 quarterly and record the outcome in `plan-notes.md`.
 
+Dependabot (`.github/dependabot.yml`, plan-notes 212) proposes weekly bumps for the npm tree and
+the GitHub Actions, and cannot keep the rule above by itself: a PR from its `toolchain` group moves
+a row of this table, so it needs that row and a `plan-notes.md` line before merge. It never
+proposes a TypeScript or `@types/node` major. Node, pnpm, LLVM and just stay hand-bumped.
+
 ## Verified development host
 
 The host this bootstrap was verified on (a data point, not a requirement):

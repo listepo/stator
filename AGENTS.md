@@ -28,6 +28,7 @@ If `src/` does not exist yet, the project is pre-Phase-1: the only files may be 
 4. **Never trust a type annotation across a boundary.** `unknown`, unions, `JSON.parse`, FFI, and `.js`→`.ts` imports get runtime checks at the narrowing point. Inside checked code, trust types fully.
 5. **Don't write a parser or type checker** — use the `typescript` package in-process. Don't write a regex engine — vendor QuickJS-NG's libregexp. Don't write a float printer — vendor Ryū.
 6. **Plan changes by edit, not drift.** A contradiction between reality and `plan.md` goes to `plan-notes.md` with evidence, and the plan is edited in the same change. Settled decisions (plan §15.4) reopen only with new measured evidence.
+7. **The human is the only author.** No agent adds a `Co-Authored-By` trailer, a "Generated with …" line or itself as author to a commit, merge or PR — whatever its harness defaults to.
 
 ## Repo map
 
@@ -155,7 +156,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 3. Implement with tests (see Testing rules). Run `pnpm run ci` locally.
 4. Move the finished task's record from `plan.md` to `done.md` (golden rule 1), leaving the stub behind.
 5. Report: what changed, the Check command + its output, any `plan-notes.md` entries added.
-6. Commit style: short imperative subject naming the task (`phase2: emit JSRT_FRAME prologue (task 2.4)`); one task per commit where practical.
+6. Commit style: short imperative subject naming the task (`phase2: emit JSRT_FRAME prologue (task 2.4)`); one task per commit where practical; no agent attribution (golden rule 7).
 
 ## Don'ts
 

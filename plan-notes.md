@@ -6084,3 +6084,53 @@ where it is, because lowering it would bank someone else's regression as this ta
 boolean"), narrows `STA1205`'s message and widens `STA1108`'s note; `docs/SUBSET.md` gains the
 dynamic-shape `delete` row and re-words the two class-field rows; `docs/VALUE.md` §4.10 replaces the
 sentence that is now wrong with the rebuild contract.
+## 211. The human is the only author: no agent attribution on commits, merges or PRs (2026-09-11)
+
+**Request.** Owner-directed rule, added as `AGENTS.md` golden rule 7 (so also `CLAUDE.md`, which is
+a symlink to it): no agent adds a `Co-Authored-By` trailer, a "Generated with …" line or itself as
+author to a commit, merge or PR — whatever its harness defaults to. Workflow step 6, where an agent
+composes the commit, points at it.
+
+**Why it has to be a written rule.** The default comes from the HARNESS, not from the repo: agent
+runtimes append attribution unless told otherwise, and the history shows it — `1b98e92`, `6d9fc18`
+and `17d5680` carry a `Co-Authored-By` trailer, the five most recent commits carry none. The file
+every agent reads first is the one place that outranks a harness default for all of them at once.
+
+**Scope.** Forward-looking: this change rewrites no history, so the older trailers remain.
+`.claude/worktrees/delete-op/` is another branch's checkout with its own `AGENTS.md` copy and gets
+the rule only when that branch is rebased (plan-notes 201: nested worktrees are not parent source).
+
+## 212. Dependabot proposes npm and GitHub Actions bumps; the toolchain pins stay a recorded edit (2026-09-11)
+
+**Request.** Owner-directed: add Dependabot. `.github/dependabot.yml` asks for weekly version
+updates in two ecosystems. `npm` at `/`: Dependabot reads `pnpm-workspace.yaml`, so one entry
+covers `packages/compiler` and `packages/tests`. `github-actions` at `/` plus `/.github/actions/*`:
+`/` reads only `.github/workflows/` and a root `action.yml`, and the composite `setup` action is
+where `pnpm/action-setup` and `actions/setup-node` live. CI runs on its PRs like on any other
+(`pull_request`; no job needs a secret).
+
+**The pin rule Dependabot can't keep.** `docs/TOOLCHAIN.md` moves a pin only in the commit that
+updates its row, with the reason logged here, and Dependabot writes neither. So the four npm pins
+in that table (TypeScript, `@types/node`, Biome, cpd) form their own `toolchain` group: its PR is
+the one that needs the row and an entry here before merge, while the `libraries` group needs only
+green CI. Two majors are ignored outright. TypeScript's, because `latest` is 7.x/tsgo, which §0.3
+rules out (plan-notes 2). `@types/node`'s, because the types follow `.node-version`, the golden
+ground truth: a types-only major would let `tsc` accept calls the pinned Node doesn't have.
+
+**Cooldown: 7 days.** A release is proposed once it is a week old. The known compromised npm
+releases were pulled within hours to days, and an exact pin protects nothing if it moves to the
+bad version on day one. Security updates bypass the cooldown, but they are a repository setting —
+off, as are vulnerability alerts — not something this file turns on.
+
+**Out of reach, on purpose.** `.node-version`, `mise.toml`, `packageManager`, the vendored C
+(`pnpm run vendor:update`, plan-notes 101) and the Test262 pin stay hand-bumped.
+
+**Known risk: pnpm 12.** GitHub documents pnpm v7–v10 (dependabot-core's `main` lists v11). Its
+pnpm manager never reports a version unsupported: the updater runs `corepack prepare
+pnpm@12.3.4 --activate` and, if that fails, falls back to the pnpm already in its image. Both
+write lockfile v9.0, and CI installs with a frozen lockfile under the pinned pnpm, so a lockfile
+the pinned pnpm would not accept as-is fails the PR's CI instead of landing.
+
+**Open.** Dependabot's commits and PRs are authored by `dependabot[bot]`. Whether golden rule 7
+(plan-notes 211) reaches a bot's commit that the owner merges is the owner's call; this entry
+doesn't decide it.

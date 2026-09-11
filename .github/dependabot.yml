@@ -1,0 +1,38 @@
+# Weekly version updates; the reasoning is plan-notes 212.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: / # the pnpm workspace root covers every package
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7 # compromised npm releases were pulled within days; don't pin one on day one
+    versioning-strategy: increase # exact pins stay exact; `auto` guesses app vs library per package
+    commit-message:
+      prefix: deps
+    groups:
+      # docs/TOOLCHAIN.md pins: a PR from this group needs the row and a plan-notes.md line before
+      # merge. A dependency goes to the first group it matches, so this one stays first.
+      toolchain:
+        patterns: [typescript, "@types/node", "@biomejs/biome", cpd]
+        update-types: [minor, patch]
+      libraries:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: typescript # latest is 7.x/tsgo, ruled out by plan.md §0.3
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node" # follows the Node pin in .node-version
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/*"] # "/" alone skips the composite setup action
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]

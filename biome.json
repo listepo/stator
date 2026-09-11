@@ -14,6 +14,7 @@
       "!packages/tests/golden/ts",
       "!packages/tests/golden/js",
       "!packages/tests/differential",
+      "!packages/tests/bench/results",
       "!**/.differential-*",
       "!packages/tests/test262/corpus",
       "!packages/tests/test262/results.json",
