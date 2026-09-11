@@ -17,6 +17,15 @@
 
 import * as ts from 'typescript';
 
+/** The receiver, as the lowering names it (`RECEIVER` in `src/lower/index.ts`): parameter zero of
+ * a method, constructor or accessor, spelled with a space because no source identifier can be.
+ *
+ * It is a capture like any other -- an arrow inside a method reads it from an enclosing frame --
+ * but it has no DECLARATION node for the symbol walk below to resolve a reference to, so `this`
+ * is collected as its own kind of reference. The constant lives here because this is where the
+ * capture is discovered; the lowering imports it rather than spelling the name twice. */
+export const RECEIVER_NAME = ' this';
+
 /** Every node that opens a new `var`/parameter scope in this subset. A method, a constructor and
  * an accessor are on the list because they ARE functions -- the lowering gives each an explicit
  * receiver parameter and emits it like any other function, so a local declared in one and read by
@@ -37,7 +46,8 @@ export interface EnvCapture {
   /** The declaration this reference resolved to, by SYMBOL. The lowering uses it to spell the HIR
    * name, which is the source name only when the binding was not renamed (plan.md §8 step 14):
    * two variables named `x` in nested scopes are one string and two symbols, and this node is what
-   * tells them apart. */
+   * tells them apart. `undefined` for the RECEIVER, which is a parameter the source never
+   * declared -- see {@link RECEIVER_NAME}. */
   readonly decl: ts.Declaration | undefined;
   readonly levels: number;
   readonly index: number;
@@ -73,9 +83,25 @@ export function isFunctionLike(node: ts.Node): node is FunctionLike {
   );
 }
 
+/** The nearest enclosing function that HAS a receiver of its own: a method, a constructor, an
+ * accessor, a function declaration or expression -- everything but an arrow, which passes the
+ * receiver through. `undefined` at module level, where there is none. */
+function enclosingNonArrowFunction(node: ts.Node): FunctionLike | undefined {
+  for (let current: ts.Node | undefined = node.parent; current !== undefined;) {
+    if (isFunctionLike(current) && !ts.isArrowFunction(current)) {
+      return current;
+    }
+    if (ts.isSourceFile(current)) {
+      return undefined;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
 /** The nearest function-like ancestor, or undefined when the node lives at module level. */
 export function enclosingFunction(node: ts.Node): FunctionLike | undefined {
-  for (let current: ts.Node | undefined = node.parent; current !== undefined; ) {
+  for (let current: ts.Node | undefined = node.parent; current !== undefined;) {
     if (isFunctionLike(current)) {
       return current;
     }
@@ -158,15 +184,33 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
    * they are two bindings that need two environment slots: one name would give them one slot, and
    * the second loop's iterations would overwrite what the first loop's closures still read. The
    * name is carried alongside for the sort and for the diagnostics. */
-  const capturedByOwner = new Map<EnvOwner, Map<ts.Declaration, string>>();
+  const capturedByOwner = new Map<EnvOwner, Map<ts.Declaration | undefined, string>>();
   const references: {
-    ref: ts.Identifier;
+    ref: ts.Node;
     declFn: EnvOwner;
     name: string;
-    decl: ts.Declaration;
+    decl: ts.Declaration | undefined;
   }[] = [];
 
   const visit = (node: ts.Node): void => {
+    // `this` crossed by an ARROW. An arrow has no receiver of its own -- that is what makes it an
+    // arrow -- so a `this` inside one is a read of the nearest enclosing non-arrow function's
+    // receiver parameter, which is a cross-function reference exactly like a local variable's.
+    // Only the arrow case is a capture: inside the owner's own body the same keyword is the
+    // ordinary parameter read, and a plain nested `function`'s `this` belongs to that function
+    // (the gate refuses it, since a strict-mode plain call has no receiver).
+    if (node.kind === ts.SyntaxKind.ThisKeyword) {
+      const owner = enclosingNonArrowFunction(node);
+      if (owner !== undefined && owner !== enclosingFunction(node)) {
+        let owned = capturedByOwner.get(owner);
+        if (owned === undefined) {
+          owned = new Map();
+          capturedByOwner.set(owner, owned);
+        }
+        owned.set(undefined, RECEIVER_NAME);
+        references.push({ ref: node, declFn: owner, name: RECEIVER_NAME, decl: undefined });
+      }
+    }
     if (ts.isIdentifier(node)) {
       const decl = checker.getSymbolAtLocation(node)?.valueDeclaration;
       if (decl !== undefined && isCapturableDeclaration(decl) && !isDeclarationNameOf(node, decl)) {
@@ -197,11 +241,18 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
    * and not on the order the walk happened to encounter references in. Two same-named bindings
    * tie on the name and are ordered by position, which is what makes the order total rather than
    * dependent on the walk. */
-  const envDeclsOf = new Map<EnvOwner, ts.Declaration[]>();
+  const envDeclsOf = new Map<EnvOwner, (ts.Declaration | undefined)[]>();
   const envVarsOf = new Map<EnvOwner, string[]>();
   for (const [fn, decls] of capturedByOwner) {
     const ordered = [...decls.entries()]
-      .sort(([a, an], [b, bn]) => (an === bn ? a.getStart() - b.getStart() : an < bn ? -1 : 1))
+      .sort(([a, an], [b, bn]) => {
+        if (an !== bn) {
+          return an < bn ? -1 : 1;
+        }
+        // The receiver has no declaration node and sorts first, which is where a method's
+        // parameter zero belongs.
+        return (a?.getStart() ?? -1) - (b?.getStart() ?? -1);
+      })
       .map(([decl]) => decl);
     envDeclsOf.set(fn, ordered);
     envVarsOf.set(

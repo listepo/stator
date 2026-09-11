@@ -293,11 +293,12 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)** and **step 14**. Step 13
-was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09 (plan-notes
-209), and like 13 it is a defect in a shipped construct rather than step-12 residue. Difficulty
-(§14 legend): 2a(b) **D2 (blocked)**, 2a(c) **D4**, 12(c) **D3**, 12(d) **D5**, 12(e) **D3**,
-12(f) **D4**, 14 **D3**.
+What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)** and **steps 15–16**, the
+two shipped-construct defects the bug hunt of 2026-09-11 found and did not fix (plan-notes 223).
+Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
+(plan-notes 209) and landed on 2026-09-11 (plan-notes 216). Difficulty (§14 legend): 2a(b)
+**D2 (blocked)**, 2a(c) **D4**, 12(c) **D3**, 12(d) **D5**, 12(e) **D3**, 12(f) **D4**, 15 **D4**,
+16 **D3**.
 
 ~~**Step-12 bookkeeping debt** (added 2026-09-04; closed 2026-09-08, all three sub-items in one
 bundle — evidence: done.md → Phase 5).~~ ✅
@@ -518,6 +519,28 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     pinned Node byte-for-byte in `tests/golden/js/block_shadow.js`; the
     `subset_block_function_shadow_*` rows are `static`; `gate.ts` emits no `not-yet` naming a
     shadowed block binding (the strings are gone). TDZ remains unmodelled and is NOT claimed.
+15. **[D4] `await`/`yield` inside a per-iteration-env loop resumes into a C block** (plan-notes
+    223, open). Pre-existing, and reproduced on the pristine tree: the emitter declares the loop's
+    suspension state as C locals INSIDE the loop body (`JSRTEnv *_jsrt_saved_env_0 = _jsrt_env;`,
+    `_jsrt_iter_env_0 = NULL;`) and puts the resume label in that same block, so a resume jumps past
+    the initializers and both are indeterminate. At `-O2` clang turns the UB into `brk #1`:
+    `await` inside a `for` whose body captures the loop binding SIGTRAPs where Node prints a value.
+    `tests/golden` has no fixture that does this, which is why the suite is green. The fix belongs
+    where `try`/`finally` already solved the same problem — its completion code lives in a frame
+    slot that survives a suspension — and the loop's suspension state needs the same treatment, or a
+    per-loop re-entry that re-establishes the C locals. **Check:** a golden where an async function
+    awaits inside a loop whose body captures the binding matches the pinned Node byte-for-byte at
+    `-O2`, and the same for a generator that yields there.
+
+16. **[D3] An interface-typed value is a fixed layout whose HType is `unknown`** (plan-notes 223,
+    open). `delete` and a dynamic write read the type as "dynamic, allowed" and then abort at run
+    time (`interface O { x?: number }` + `delete o.x` → PANIC STA2007 where Node answers `true`),
+    while a field read reads it as a dynamic read and fails the verifier (`new Error(a[0]).message`
+    → STA4059 internal error where Node answers `""`). `objectLiteralIsDynamic` sends a literal to
+    the dynamic representation only for an anonymous `ObjectLiteral|TypeLiteral` symbol, and an
+    `interface` is neither. **Check:** both fixtures above match Node, and the choice is recorded:
+    an interface with an optional or index trigger is dynamic like its anonymous twin, or it is a
+    fixed `object` and every context that treats `unknown` as dynamic learns the difference.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---

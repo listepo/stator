@@ -140,7 +140,7 @@ import {
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
-import { analyzeCaptures, isFunctionLike } from './captures.ts';
+import { analyzeCaptures, isFunctionLike, RECEIVER_NAME } from './captures.ts';
 import { Scope } from './scope.ts';
 
 /* What HIR name each source declaration ended up with (plan.md §8 step 14).
@@ -1523,7 +1523,9 @@ function placeName(
 /** The parameter a method's `this` reads from. The leading space makes it unspellable in source,
  * so it can never collide with a user binding, and it is the SAME key the emitter maps to a frame
  * slot -- `this` is an ordinary identifier from here down (see ClassMethod in src/hir/nodes.ts). */
-const RECEIVER = ' this';
+/** Parameter zero of a method, constructor or accessor. Spelled once, in captures.ts, because the
+ * capture analysis has to name the same binding when an arrow reads it. */
+const RECEIVER = RECEIVER_NAME;
 const CATCH_VALUE = ' catch';
 
 let bindTempId = 0;
@@ -1844,12 +1846,45 @@ function memberAssignment(
   let write: (value: Expression) => Statement;
   const placeType = typeAt(targetNode, checker, bindings);
   if (ts.isElementAccessExpression(targetNode)) {
-    const index = hoisted(targetNode.argumentExpression, 1);
-    if (index === null) {
-      return null;
+    // `o["a-b"] = v` on a FIXED shape is `o.a = v` written the only way a key that is not an
+    // identifier can be spelled -- the same reduction the READ path makes (plan.md §8 step 12
+    // family c). Building an index node here instead made the write the one spelling of a
+    // fixed-shape property that did not compile: the verifier rejects an index write on a layout,
+    // so `o["n"] = 5` was STA4044 while the value-position `(o["n"] += 1)` -- which goes through
+    // the read path -- worked (plan-notes 222).
+    const literalKey = ts.isStringLiteral(targetNode.argumentExpression)
+      ? targetNode.argumentExpression.text
+      : undefined;
+    if (literalKey !== undefined && target.type.kind === 'object') {
+      const slot = slotOf(target, literalKey, targetNode, sourceFile, diagnostics);
+      if (slot === null) {
+        return null;
+      }
+      current = { kind: 'field-access', type: placeType, span, target, field: literalKey, slot };
+      write = (value) => ({
+        kind: 'field-assignment',
+        type: value.type,
+        span,
+        target,
+        field: literalKey,
+        slot,
+        value,
+      });
+    } else {
+      const index = hoisted(targetNode.argumentExpression, 1);
+      if (index === null) {
+        return null;
+      }
+      current = { kind: 'index-access', type: placeType, span, target, index };
+      write = (value) => ({
+        kind: 'index-assignment',
+        type: value.type,
+        span,
+        target,
+        index,
+        value,
+      });
     }
-    current = { kind: 'index-access', type: placeType, span, target, index };
-    write = (value) => ({ kind: 'index-assignment', type: value.type, span, target, index, value });
   } else if (accessorOwner(targetNode.expression, targetNode.name.text, checker) !== undefined) {
     // `o.x = v` RUNS the setter. The gate refused the compound forms, so `current` is never read
     // here -- it is built anyway so the two halves of a place stay one shape.
@@ -5181,6 +5216,8 @@ function collectSpecializations(
   }
   // A plain index rather than `shift()`: the queue only grows, and the order it grows in is the
   // order the specializations are emitted in, which keeps the output stable across runs.
+  // `failed` is set inside `walkCalls`, which this loop calls, so the read here is not stale.
+  // oxlint-disable-next-line no-unmodified-loop-condition
   for (let i = 0; i < queue.length && !failed; i++) {
     const item = queue[i];
     if (item === undefined) {

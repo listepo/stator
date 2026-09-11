@@ -114,10 +114,12 @@ function applyBinary(operator: BinaryOperator, left: Literal, right: Literal): L
     // Loose equality folds too, and correctly, for the same reason `+` does: with no object operand
     // the coercion table (docs/NUMERIC.md §6.3) has no observable steps to skip.
     case '==':
-      // biome-ignore lint/suspicious/noDoubleEquals: modelling `==` is the point of this arm.
+      // Modelling `==` is the point of this arm.
+      // oxlint-disable-next-line eqeqeq
       return left == right;
     case '!=':
-      // biome-ignore lint/suspicious/noDoubleEquals: modelling `!=` is the point of this arm.
+      // Modelling `!=` is the point of this arm.
+      // oxlint-disable-next-line eqeqeq
       return left != right;
     case '&':
       return n(left) & n(right);
@@ -153,6 +155,10 @@ function applyUnary(operator: UnaryOp['operator'], operand: Literal): Literal {
     case '-':
       return -n(operand);
     case '+':
+      // `n()` is a cast, not a conversion: it erases, and what runs is the language's unary `+`,
+      // which coerces `'5'`/`true`/`null` the way the runtime would. Dropping the operator because
+      // the cast makes the operand *look* numeric would fold `+'5'` to the string.
+      // oxlint-disable-next-line no-unnecessary-type-conversion
       return +n(operand);
     case '!':
       return !operand;

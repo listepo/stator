@@ -353,7 +353,7 @@ jsrt_value jsrt_date_utc(jsrt_value year, jsrt_value month, jsrt_value day, jsrt
  * `setUTCMonth(13)` roll into the next year rather than clamping. A setter on an Invalid Date
  * stays invalid except `setTime`, the only one that does not read the old value. */
 static jsrt_value set_fields(jsrt_value v, DateField first, const double *values, size_t count,
-                             bool local) {
+                             uint32_t supplied, bool local) {
   JSRTDate *d = as_date(v);
   const double t = reading(v, local);
   double part[8];
@@ -371,7 +371,16 @@ static jsrt_value set_fields(jsrt_value v, DateField first, const double *values
       return jsrt_number(NAN);
     }
     for (size_t i = 0; i < 8; i++) {
-      if (isnan(part[i])) {
+      /* Only the fields the CALLER did not supply come from +0 -- and "did not supply" has to be
+       * passed in, because by the time this runs an omitted argument and an explicit `undefined`
+       * have both become NaN through `or_current` (the spec reads an absent component and an
+       * undefined one the same way, so the two really are the same thing). What is NOT the same is
+       * an explicit NaN argument: ToNumber(NaN) is NaN and the result must be NaN. Without the
+       * mask, `new Date(NaN).setUTCFullYear(NaN)` recovered into year 0 and answered
+       * -62167219200000 where Node answers NaN, and `setUTCFullYear(2024)` on an Invalid Date
+       * could not recover at all, because every padded component looked supplied (plan-notes 222). */
+      const bool given = (supplied & (1u << i)) != 0;
+      if (!given && isnan(part[i])) {
         part[i] = i == F_DATE ? 1 : 0;
       }
     }
@@ -401,17 +410,25 @@ static double or_current(jsrt_value given, double current) {
  * Every setter's fields are CONTIGUOUS in `DateField` order, which is what lets `first` plus a
  * count name them. `F_DAY` (the weekday) sits inside that order and is never a setter target --
  * no shape reaches it, because a weekday is derived and not stored. */
+/* The first component of every shape is REQUIRED, so its bit is always set; each later one is
+ * supplied exactly when it is not `undefined`. The mask is what lets `set_fields` tell an omitted
+ * component from an explicit NaN. */
+#define DATE_SUPPLIED_1(f0) (1u << (f0))
+#define DATE_SUPPLIED_2(f0, f1, b) (DATE_SUPPLIED_1(f0) | ((b) != JSRT_UNDEFINED ? 1u << (f1) : 0u))
+#define DATE_SUPPLIED_3(f0, f1, f2, b, c)   (DATE_SUPPLIED_2(f0, f1, b) | ((c) != JSRT_UNDEFINED ? 1u << (f2) : 0u))
+#define DATE_SUPPLIED_4(f0, f1, f2, f3, b, c, d)   (DATE_SUPPLIED_3(f0, f1, f2, b, c) | ((d) != JSRT_UNDEFINED ? 1u << (f3) : 0u))
+
 #define DATE_SETTER_1(name, f0, local)                                                             \
   jsrt_value jsrt_date_set_##name(jsrt_value v, jsrt_value a) {                                    \
     const double values[1] = {jsrt_to_number(a)};                                                  \
-    return set_fields(v, f0, values, 1, local);                                                    \
+    return set_fields(v, f0, values, 1, DATE_SUPPLIED_1(f0), local);                               \
   }
 
 #define DATE_SETTER_2(name, f0, f1, local)                                                         \
   jsrt_value jsrt_date_set_##name(jsrt_value v, jsrt_value a, jsrt_value b) {                      \
     const double t = reading(v, local);                                                            \
     const double values[2] = {jsrt_to_number(a), or_current(b, field_of(t, f1))};                   \
-    return set_fields(v, f0, values, 2, local);                                                    \
+    return set_fields(v, f0, values, 2, DATE_SUPPLIED_2(f0, f1, b), local);                        \
   }
 
 #define DATE_SETTER_3(name, f0, f1, f2, local)                                                     \
@@ -419,7 +436,7 @@ static double or_current(jsrt_value given, double current) {
     const double t = reading(v, local);                                                            \
     const double values[3] = {jsrt_to_number(a), or_current(b, field_of(t, f1)),                    \
                               or_current(c, field_of(t, f2))};                                      \
-    return set_fields(v, f0, values, 3, local);                                                    \
+    return set_fields(v, f0, values, 3, DATE_SUPPLIED_3(f0, f1, f2, b, c), local);                 \
   }
 
 #define DATE_SETTER_4(name, f0, f1, f2, f3, local)                                                 \
@@ -428,7 +445,7 @@ static double or_current(jsrt_value given, double current) {
     const double t = reading(v, local);                                                            \
     const double values[4] = {jsrt_to_number(a), or_current(b, field_of(t, f1)),                    \
                               or_current(c, field_of(t, f2)), or_current(d, field_of(t, f3))};      \
-    return set_fields(v, f0, values, 4, local);                                                    \
+    return set_fields(v, f0, values, 4, DATE_SUPPLIED_4(f0, f1, f2, f3, b, c, d), local);          \
   }
 
 DATE_SETTER_1(utc_milliseconds, F_MILLISECONDS, false)
@@ -489,9 +506,14 @@ static void write_iso(char *out, size_t n, double t) {
 
 jsrt_value jsrt_date_to_iso_string(jsrt_value v) {
   const double t = as_date(v)->time;
-  /* §21.4.4.36 throws a RangeError. Generated C checks jsrt_pending() after this op. */
+  /* §21.4.4.36 throws a RangeError. Generated C checks jsrt_pending() after this op.
+   *
+   * A RangeError OBJECT, not a bare string: `jsrt_throw_str` pends the message alone, so
+   * `e instanceof RangeError` was false and `e.name` was undefined for the one throw in the
+   * runtime a program was most likely to catch (plan-notes 222). Node's message is exactly
+   * "Invalid time value". */
   if (isnan(t)) {
-    jsrt_throw_str("RangeError: Invalid time value");
+    jsrt_throw_error(&jsrt_class_range_error, "Invalid time value");
     return JSRT_UNDEFINED;
   }
   char text[40];

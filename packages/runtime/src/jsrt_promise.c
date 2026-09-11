@@ -95,6 +95,7 @@ jsrt_value jsrt_promise_new(void) {
   JSRTPromise *p = (JSRTPromise *)jsrt_gc_alloc(sizeof(JSRTPromise), "promise");
   p->cls = &jsrt_class_promise;
   p->state = JSRT_PROMISE_PENDING;
+  p->resolved = false;
   p->value = JSRT_UNDEFINED;
   p->first = NULL;
   p->last = NULL;
@@ -124,21 +125,10 @@ void jsrt_promise_subscribe(jsrt_value promise, JSRTSettle on_settle, void *stat
   p->last = r;
 }
 
-/* Adoption: an outer promise fulfilled WITH a promise settles when the inner one does. Registered
- * as an ordinary reaction, so it costs the same extra microtask tick the spec's job does. */
-static void adopt(void *state, jsrt_value value, bool rejected) {
-  jsrt_promise_settle((jsrt_value)(uintptr_t)state, value, rejected);
-}
-
-void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected) {
+/* The state change itself, with no [[AlreadyResolved]] test: the caller has already decided that
+ * this settlement is the one that counts. */
+static void promise_settle_now(jsrt_value promise, jsrt_value value, bool rejected) {
   JSRTPromise *p = jsrt_as_promise(promise);
-  if (p->state != JSRT_PROMISE_PENDING) {
-    return; /* already settled: the resolving functions are idempotent */
-  }
-  if (!rejected && jsrt_is_promise(value)) {
-    jsrt_promise_subscribe(value, adopt, (void *)(uintptr_t)promise);
-    return;
-  }
   p->state = rejected ? JSRT_PROMISE_REJECTED : JSRT_PROMISE_FULFILLED;
   p->value = value;
   if (rejected && p->first == NULL) {
@@ -150,6 +140,27 @@ void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected) {
   }
   p->first = NULL;
   p->last = NULL;
+}
+
+/* Adoption: an outer promise fulfilled WITH a promise settles when the inner one does. Registered
+ * as an ordinary reaction, so it costs the same extra microtask tick the spec's job does. It goes
+ * straight to the state change -- the outer promise's own [[AlreadyResolved]] was consumed by the
+ * resolve() call that adopted, and this is that resolution completing. */
+static void adopt(void *state, jsrt_value value, bool rejected) {
+  promise_settle_now((jsrt_value)(uintptr_t)state, value, rejected);
+}
+
+void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected) {
+  JSRTPromise *p = jsrt_as_promise(promise);
+  if (p->resolved) {
+    return; /* already resolved: the resolving functions are idempotent, adoption included */
+  }
+  p->resolved = true;
+  if (!rejected && jsrt_is_promise(value)) {
+    jsrt_promise_subscribe(value, adopt, (void *)(uintptr_t)promise);
+    return;
+  }
+  promise_settle_now(promise, value, rejected);
 }
 
 jsrt_value jsrt_promise_resolve(jsrt_value v) {
@@ -351,18 +362,27 @@ static jsrt_value promise_reject_fn(uint32_t argc, const jsrt_value *argv, JSRTE
 }
 
 jsrt_value jsrt_promise_construct(jsrt_value executor) {
-  jsrt_value promise = jsrt_promise_new();
+  /* Rooted: jsrt_env_new and the two jsrt_closure_new calls below all allocate, and the promise
+   * the executor resolves is otherwise reachable from nothing (plan-notes 222). The resolver pair
+   * is reachable through `env`, which the first closure is handed and the second is not -- so the
+   * ARRAY of arguments is rooted too. */
+  JSRT_FRAME(3);
+  JSRT_LOCAL(0) = jsrt_promise_new();
   if (!jsrt_is(executor, JSRT_TAG_CLOSURE)) {
     jsrt_throw_error(&jsrt_class_type_error, "Promise resolver is not a function");
+    JSRT_FRAME_POP();
     return JSRT_UNDEFINED;
   }
   JSRTEnv *env = jsrt_env_new(NULL, 1);
-  env->slots[0] = promise;
-  jsrt_value args[2] = {jsrt_closure_new(promise_resolve_fn, 1, "", env),
-                        jsrt_closure_new(promise_reject_fn, 1, "", env)};
+  env->slots[0] = JSRT_LOCAL(0);
+  JSRT_LOCAL(1) = jsrt_closure_new(promise_resolve_fn, 1, "", env);
+  JSRT_LOCAL(2) = jsrt_closure_new(promise_reject_fn, 1, "", env);
+  jsrt_value args[2] = {JSRT_LOCAL(1), JSRT_LOCAL(2)};
   JSRTCompletion done = jsrt_call_protected(executor, 2, args);
   if (done.threw) {
-    jsrt_promise_settle(promise, done.value, true);
+    jsrt_promise_settle(JSRT_LOCAL(0), done.value, true);
   }
+  const jsrt_value promise = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return promise;
 }

@@ -54,15 +54,26 @@ const JSRTClass *jsrt_error_class(const char *name) {
   return NULL;
 }
 
-/* Both strings are built BEFORE the object, so the only allocation that happens while an
- * unreferenced object is live is none. The locals are found by the collector's conservative stack
- * scan, which is how every other allocating runtime function here holds an intermediate. */
+/* Every intermediate lives in a rooted slot. A NaN-boxed local is INVISIBLE to the collector --
+ * its high bits are the box's, so it is not a pointer by any conservative test -- which is what the
+ * previous version of this function got wrong: the half-built Error sat in a C local while
+ * jsrt_string_from_utf8 and jsrt_object_new allocated, and a collection under memory pressure left
+ * `name`/`message` pointing at reclaimed strings (plan-notes 222).
+ *
+ * `message` is ToString'd here, because the slot it lands in is the string the HIR types as one:
+ * §20.5.1.1 step 3 says `undefined` becomes the EMPTY string and everything else goes through
+ * ToString, so `new Error(undefined).message.length` is 0 (it used to abort on the length
+ * assertion) and `new Error(42).message` is "42" (it used to store the number in a string slot). */
 jsrt_value jsrt_error_new(const JSRTClass *cls, jsrt_value message) {
-  const jsrt_value name = jsrt_string_from_utf8(cls->name, strlen(cls->name));
-  const jsrt_value error = jsrt_object_new(cls);
-  JSRTObject *object = jsrt_as_object(error);
-  object->fields[JSRT_ERROR_SLOT_NAME] = name;
-  object->fields[JSRT_ERROR_SLOT_MESSAGE] = message;
+  JSRT_FRAME(3);
+  JSRT_LOCAL(0) = jsrt_string_from_utf8(cls->name, strlen(cls->name));
+  JSRT_LOCAL(2) = message == JSRT_UNDEFINED ? jsrt_string_from_utf8("", 0) : jsrt_to_string(message);
+  JSRT_LOCAL(1) = jsrt_object_new(cls);
+  JSRTObject *object = jsrt_as_object(JSRT_LOCAL(1));
+  object->fields[JSRT_ERROR_SLOT_NAME] = JSRT_LOCAL(0);
+  object->fields[JSRT_ERROR_SLOT_MESSAGE] = JSRT_LOCAL(2);
+  const jsrt_value error = JSRT_LOCAL(1);
+  JSRT_FRAME_POP();
   return error;
 }
 

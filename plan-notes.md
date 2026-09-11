@@ -6416,3 +6416,184 @@ path (no order to fix, nothing can run between the evaluation and the call), and
 claims slots only in the multi-argument case; claiming them unconditionally left a frame slot
 nothing wrote, which the frame audit in `tests/unit/frames.test.ts` caught immediately. **Test:**
 `tests/golden/ts/console_assert_order.ts`.
+
+## 222. The runtime audit's memory-safety and semantics findings, and three frontend ones (2026-09-11)
+
+**Numbering note:** a parallel edit in this working tree (the `oxlint`/`oxfmt` migration,
+`.oxlintrc.json`) also cites 222. Whichever entry lands second should take the next free number and
+update its references; this one is the bug-hunt record for the runtime and frontend fixes below.
+
+Four parallel audits (runtime C, C emitter, optimization passes, frontend) were run for the bug
+hunt. The compiler-side findings are 217–221; this entry is the runtime's, plus three that came out
+of the frontend audit, and it is the batch where the pattern is the same in every case: a value that
+is LIVE but UNROOTED, or a conversion the spec requires and the runtime skipped.
+
+### Memory safety: a NaN-boxed local is not a root
+
+`docs/VALUE.md` §4.1 and `jsrt_gc.c`'s own header say it plainly — Boehm scans the stack
+conservatively, and a NaN-boxed `jsrt_value` has the box's high bits, so it is not a pointer by any
+conservative test. Every intermediate that must survive another allocation therefore belongs in a
+`JSRT_FRAME`/`JSRT_LOCAL`. Six sites held one in a plain C local instead:
+
+| Site | What broke (measured) |
+|---|---|
+| `jsrt_regexp.c` `match_array` | `s.match(re)` in a loop answered `m.length` = 49314864 / 52476976 / 71023664 across runs instead of 2 |
+| `jsrt_ops.c` `jsrt_op_add` | `(v + []).length` summed 999685 of 1000000 — whole iterations contributed 0, because the ToPrimitive of the LEFT operand was collected while the right one was built |
+| `jsrt_json.c` `parse_array`/`parse_object`/`jsrt_json_parse` | the half-built container (and the source text, held in a `Parser` struct on the C stack) outlived a collection: SIGSEGV inside `jsrt_array_set`, 2 of 3 runs of a 500k-iteration parse loop |
+| `jsrt_promise.c` `jsrt_promise_construct` | the promise the executor resolves is reachable from nothing while the env and the two resolver closures allocate |
+| `jsrt_error.c` `jsrt_error_new` | name and message were stored across `jsrt_string_from_utf8`/`jsrt_object_new` |
+| `jsrt_regexp.c` `jsrt_regexp_to_string`, `match_groups`, `jsrt_regexp_match`, `jsrt_regexp_split` | each builds a string or an array while the previous partial result is live |
+
+**Regression test:** `tests/golden/js/gc_rooting.js` — 200k `match`, 200k `parse + []`, 100k nested
+parse, all summed. It is what found the JSON one: the fixture's three loops together SIGSEGV'd 2 of
+3 runs while each loop alone passed.
+
+### Semantics the spec fixes and the runtime skipped
+
+- **`String.prototype.concat` never coerced its argument.** It is emitted as the internal
+  concatenation PRIMITIVE, which asserts both sides are strings, so `''.concat(42)`,
+  `''.concat(true)`, `''.concat(null)` and `''.concat(undefined)` all aborted in `as_string`.
+  §22.1.3.4 runs ToString per argument. The emitter now wraps the argument the same way it wraps a
+  template literal's holes. Test: `tests/golden/js/concat_coercion.js`.
+- **Promise adoption had no `[[AlreadyResolved]]`.** `new Promise((res, rej) => { res(inner);
+  rej(err) })` rejected, because the adoption branch returns with the promise still PENDING and the
+  later `reject` settled it — Node resolves to the inner value. `JSRTPromise` now carries a
+  `resolved` flag consumed by the first settlement (value, rejection, or adoption), and adoption
+  goes straight to the state change, since its own resolution was already consumed. Tests:
+  `tests/golden/js/promise_adoption.js` (adoption, double resolve, reject-then-resolve,
+  resolve-a-rejected-promise, and a 2000-iteration construction loop).
+- **Date setters could not tell an omitted component from an explicit NaN.** The `+0` recovery for
+  an Invalid Date (§21.4.4.21) overwrote every NaN field, including the caller's: `new
+  Date(NaN).setUTCFullYear(NaN)` answered `-62167219200000` (year 0) instead of NaN, and once the
+  lowering padded optional arguments with `undefined`, `setUTCFullYear(2024)` could not recover at
+  all. The setters now pass a bitmask of the components the caller actually supplied. Test:
+  `tests/golden/js/date_setter_nan.js`.
+- **`new Error(undefined).message` aborted.** The slot is a string by HIR type; the runtime stored
+  whatever it was handed, so `.message.length` asserted. The message now goes through ToString with
+  undefined → `""`. Test: `tests/golden/ts/error_message_coercion.ts`.
+- **`new Date(NaN).toISOString()` pended a bare string.** `jsrt_throw_str` pends the message alone,
+  so `e instanceof RangeError` was false and `e.name` undefined — for the one throw in the runtime a
+  program is most likely to catch. It throws a RangeError object now. Test:
+  `tests/golden/js/range_error_iso.js`.
+
+### Frontend
+
+- **`this` inside an arrow inside a method was a capture the analysis could not see (STA4072).**
+  `analyzeCaptures` collects `ts.isIdentifier` nodes and `this` is a keyword, so
+  `[1,2].map(() => this.n)` inside a method reached the emitter with no binding and threw
+  "Undefined identifier:  this". The receiver is a parameter like any other — under an unspellable
+  name — so the walk now records a `ThisKeyword` whose nearest enclosing non-arrow function is the
+  owner, with `RECEIVER_NAME` exported from `captures.ts` and imported by the lowering so the name
+  is spelled once. Tests: `tests/golden/{js,ts}/arrow_this.*`.
+- **`o["k"] = v` on a fixed shape was STA4044.** The read path already reduced a string-literal key
+  to a field access; the write path built an index node, which the verifier rejects on a layout — so
+  `o["n"] = 5` failed while `(o["n"] += 1)` compiled, and a key that is not an identifier has no
+  other spelling. `memberAssignment` now makes the same reduction. Tests:
+  `tests/golden/{js,ts}/index_assignment.*`.
+
+```text
+unit 385; pass 385; fail 0
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+golden: 194 fixtures — 194 passed, 0 failed
+runtime: print corpus matches Node
+builtins: Promise.prototype 3/3 (100%)
+```
+
+## 223. Open findings from the bug hunt that are NOT fixed, with their repros (2026-09-11)
+
+Everything below was confirmed by running Node against a Stator build. None is fixed yet; each is
+recorded here so it is not lost, and the first two are defects in shipped constructs that deserve
+plan steps of their own rather than a quiet entry.
+
+**1. `await` (or `yield`) inside a per-iteration-env loop resumes into the middle of a C block.**
+PRE-EXISTING — verified by stashing this session's work, rebuilding the runtime and reproducing on
+the pristine tree (SIGTRAP, exit 133).
+
+```js
+async function main() {
+  await Promise.resolve(1);
+  for (let i = 0; i < 3; i += 1) {
+    const p = new Promise(function (resolve) { resolve(i); });
+    if (i === 2) { console.log(await p); }
+  }
+  console.log('done');
+}
+main();
+// Node: 2 / done        Stator: SIGTRAP (-O2), works at -O0
+```
+
+The emitted C opens the loop body with `JSRTEnv *_jsrt_saved_env_0 = _jsrt_env;` and
+`JSRTEnv *_jsrt_iter_env_0 = NULL;`, and the resume label `_jsrt_res_N:` for the await sits INSIDE
+that block. Resumption jumps past those initializers, so both variables are indeterminate — clang
+at -O2 turns the resulting UB into `brk #1` (a trap), which is what the exit status is. Nothing in
+`tests/golden` awaits inside a loop with a captured binding, which is why the suite is green. The
+fix is the emitter's: either hoist the loop's suspension state into the frame/environment (the way
+`try`/`finally` already parks its completion code in a slot) or route the resume through a
+per-loop re-entry that re-establishes the C locals.
+
+**2. An interface-typed value is a fixed layout whose HType is `unknown`.** The two layers disagree,
+and which one wins depends on the operation: a `delete` or a dynamic write reads the type as
+"dynamic, allowed" and then aborts at run time, while a field read reads it as a dynamic read and
+fails the verifier.
+
+```ts
+interface O { x?: number; y?: number }
+const o: O = { x: 1, y: 2 };
+console.log(`${delete o.x}`);   // Node: true      Stator: PANIC STA2007
+```
+```js
+const a = [];
+const e = new Error(a[0]);      // `new Error(...)` is the Error INTERFACE
+console.log(e.message);         // Node: ""        Stator: STA4059 internal error
+```
+`objectLiteralIsDynamic` (`frontend/types.ts`) sends a literal to the dynamic representation only
+when its anonymous symbol is an `ObjectLiteral|TypeLiteral`, and an `interface` is neither, while
+`tsTypeToHType` types the interface `unknown`. The fix is a decision, not a patch: either an
+interface with an optional/index trigger is dynamic like its anonymous twin, or it is a fixed
+`object` and every context that reads `unknown` as "dynamic" learns the difference.
+
+**3. `{ ...o }` enumerates in the TYPE's field order, not the source object's key order.**
+
+```js
+/** @type {{y: number, x: string}} */
+const o = { x: "s", y: 2 };
+const p = { ...o };
+console.log(Object.keys(p).join(","));   // Node: x,y     Stator: y,x
+```
+
+The expansion is a compile-time field read per field of `source.type.fields`; the runtime object's
+enumeration order lives in its `JSRTClass::key_order`, which the HType does not carry. Fixing it
+means giving the type the order (or spreading through a runtime helper).
+
+**4. `fn.length` on an untyped function value answers `undefined`.**
+
+```js
+const g = (x) => x;
+function arity(fn) { return fn.length; }
+console.log(arity(g));   // Node: 1     Stator: undefined
+```
+
+A closure has no shape, so the read falls through to the shape table. `docs/VALUE.md` §4.16 also
+records that a method's closure constant currently counts the receiver in its arity — so
+implementing `length` needs that paid first, or methods would answer one too many.
+
+**5. An array method on a value the checker called an Array but that is `undefined` at run time
+SEGFAULTS** where Node throws.
+
+```js
+function add(v) { arr.push(v); }
+add(1);
+var arr = [];
+// Node: TypeError, exit 1        Stator: SIGSEGV, exit 139
+```
+
+`jsrt_as_array` unboxes the payload with no tag test, so `undefined` gives NULL. A tag check that
+panics (or throws) is the fix; it needs a `STA200x` code allocated in `docs/DIAGNOSTICS.md`.
+
+**6. Smaller, all confirmed, all still open.** `'ab'.replace(/(?<x>a)/, '[$<x>]')` prints `[$<x>]b`
+where Node prints `[a]b` (no `$<name>` branch in the replacement expander, `jsrt_regexp.c`);
+`Date.parse("2024-01-01T24:00:01Z")` answers `1704153601000` where Node answers NaN (hour 24 is
+accepted with non-zero minutes/seconds, `jsrt_date.c`); and a method call on an Unknown receiver —
+`function pushIt(a) { a.push(9); }` — panics with STA2006 where Node runs, because `jsrt_get_prop`
+walks shape tables only and never a class descriptor or a builtin prototype (plan-notes 180 records
+the primitive half as known residue).

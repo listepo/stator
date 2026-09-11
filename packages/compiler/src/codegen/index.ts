@@ -2988,9 +2988,21 @@ class Emitter {
               (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
             ) || flushed;
         });
+        // `concat` is the receiver-plus-argument form of `+`, and its argument is an arbitrary
+        // value: `''.concat(42)` is "42" because §22.1.3.4 runs ToString on each argument, while
+        // `jsrt_string_concat` is the PRIMITIVE and asserts both sides are strings -- so the
+        // conversion belongs here, exactly as it does for a template literal's holes. Without it
+        // the assertion fired on `''.concat(true)` and on every other non-string argument
+        // (plan-notes 222). One argument, so one coercion; the receiver of a method call is
+        // already a string.
+        const coercingConcat = expr.kind === 'string-op' && expr.op === 'concat';
         const operands = [
           this.slotAt(base),
-          ...expr.args.map((_, index) => this.slotAt(base + 1 + index)),
+          ...expr.args.map((_, index) =>
+            coercingConcat
+              ? `jsrt_to_string(${this.slotAt(base + 1 + index)})`
+              : this.slotAt(base + 1 + index),
+          ),
         ].join(', ');
         // A date op names its C function from the table rather than deriving it: snakeCase would
         // turn `getUTCFullYear` into `get_u_t_c_full_year`.
@@ -3351,7 +3363,7 @@ class Emitter {
     const at = this.suspendSlot(expr);
     this.appendLine(`${at} = ${this.emitExpression(expr.value)};`, expr.span);
     this.appendLine(`_jsrt_self->state = ${state};`, expr.span);
-    this.appendLine(`${parkCall}`, expr.span);
+    this.appendLine(parkCall, expr.span);
     this.appendLine('JSRT_FRAME_POP();', expr.span);
     this.appendLine('return;', expr.span);
     this.appendLine(`_jsrt_res_${state}: ;`, expr.span);

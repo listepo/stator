@@ -199,9 +199,15 @@ bool jsrt_regexp_flag(jsrt_value re_value, int letter) {
 
 jsrt_value jsrt_regexp_to_string(jsrt_value re_value) {
   const JSRTRegExp *re = jsrt_as_regexp(re_value);
-  const jsrt_value slash = jsrt_string_from_utf8("/", 1);
-  return jsrt_string_concat(jsrt_string_concat(jsrt_string_concat(slash, re->source), slash),
-                            re->flags);
+  /* Each concat allocates and the next one reads what it produced, so the partial result is rooted
+   * while the following call runs (plan-notes 222). */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = jsrt_string_concat(jsrt_string_from_utf8("/", 1), re->source);
+  JSRT_LOCAL(0) = jsrt_string_concat(JSRT_LOCAL(0), jsrt_string_from_utf8("/", 1));
+  JSRT_LOCAL(0) = jsrt_string_concat(JSRT_LOCAL(0), re->flags);
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
+  return out;
 }
 
 jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags) {
@@ -450,7 +456,9 @@ static jsrt_value match_groups(const JSRTRegExp *re, const JSString *s, const ui
   if (names == NULL) {
     return JSRT_UNDEFINED;
   }
-  const jsrt_value groups = jsrt_null_proto_new();
+  /* `group_value` builds strings below, so the object being filled must be rooted. */
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_null_proto_new();
   for (uint32_t g = 1; g < ncap; g++) {
     if (names[0] != '\0') {
       /* The key must outlive the program the way every shape key does, and these names live in the
@@ -461,10 +469,12 @@ static jsrt_value match_groups(const JSRTRegExp *re, const JSString *s, const ui
         jsrt_panic("out of memory: group name");
       }
       memcpy(key, names, n + 1);
-      jsrt_set_prop(groups, key, group_value(s, m, g), NULL);
+      jsrt_set_prop(JSRT_LOCAL(0), key, group_value(s, m, g), NULL);
     }
     names += strlen(names) + LRE_GROUP_NAME_TRAILER_LEN;
   }
+  const jsrt_value groups = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return groups;
 }
 
@@ -473,14 +483,23 @@ static jsrt_value match_groups(const JSRTRegExp *re, const JSString *s, const ui
  * That last part is the whole reason a jsrt array has a property table at all. */
 static jsrt_value match_array(const JSRTRegExp *re, const JSString *s, jsrt_value str,
                               const uint32_t *m, uint32_t ncap) {
-  const jsrt_value out = jsrt_array_new(0, NULL);
+  /* The half-built array is reachable from NOTHING: it is a local, and a NaN-boxed local is
+   * invisible to the collector (docs/VALUE.md §4.1, jsrt_gc.c's own header). Every call below --
+   * jsrt_array_push, jsrt_string_new for a group, match_groups and jsrt_set_prop -- can allocate
+   * and collect, so the array has to sit in a rooted slot for as long as it is being built.
+   * `str` is a parameter, so it is already a root. Without this, `s.match(re)` in a loop returned
+   * an array whose `length` was whatever the allocator later wrote there (measured: 49314864). */
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_array_new(0, NULL);
   for (uint32_t g = 0; g < ncap; g++) {
-    jsrt_array_push(out, group_value(s, m, g));
+    jsrt_array_push(JSRT_LOCAL(0), group_value(s, m, g));
   }
   /* Insertion order is the spec's own creation order, and it is what console.log prints. */
-  jsrt_set_prop(out, "index", jsrt_number((double)m[0]), NULL);
-  jsrt_set_prop(out, "input", str, NULL);
-  jsrt_set_prop(out, "groups", match_groups(re, s, m, ncap), NULL);
+  jsrt_set_prop(JSRT_LOCAL(0), "index", jsrt_number((double)m[0]), NULL);
+  jsrt_set_prop(JSRT_LOCAL(0), "input", str, NULL);
+  jsrt_set_prop(JSRT_LOCAL(0), "groups", match_groups(re, s, m, ncap), NULL);
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 
@@ -521,11 +540,15 @@ jsrt_value jsrt_regexp_match(jsrt_value re_value, jsrt_value str) {
     matches_free(&m);
     return JSRT_NULL;
   }
-  const jsrt_value out = jsrt_array_new(0, NULL);
+  /* Rooted while the loop builds it: group_value allocates per match. */
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; i < m.count; i++) {
-    jsrt_array_push(out, group_value(s, match_of(&m, i), 0));
+    jsrt_array_push(JSRT_LOCAL(0), group_value(s, match_of(&m, i), 0));
   }
   matches_free(&m);
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 
@@ -564,17 +587,22 @@ bool jsrt_regexp_match_all_step(jsrt_value re_value, jsrt_value str, jsrt_value 
 jsrt_value jsrt_regexp_split(jsrt_value re_value, jsrt_value str) {
   const JSString *s = subject_of(str, "split");
   const JSRTRegExp *re = jsrt_as_regexp(re_value);
-  jsrt_value out = jsrt_array_new(0, NULL);
+  /* Every push below builds a string first, so the array being filled is rooted for the whole
+   * algorithm -- including the two early returns, which pop the frame. */
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_array_new(0, NULL);
 
   /* §22.2.5.14 step 14: the empty subject answers [] when the pattern matches it and [""] when it
    * does not. It is the one asymmetry in the algorithm, and it falls out of nothing below. */
   if (s->length == 0) {
     Matches probe = scan(re, s, 0, 1, true);
     if (probe.count == 0) {
-      jsrt_array_push(out, str);
+      jsrt_array_push(JSRT_LOCAL(0), str);
     }
     matches_free(&probe);
-    return out;
+    const jsrt_value empty = JSRT_LOCAL(0);
+    JSRT_FRAME_POP();
+    return empty;
   }
 
   Matches m = scan(re, s, 0, UINT32_MAX, true);
@@ -593,16 +621,18 @@ jsrt_value jsrt_regexp_split(jsrt_value re_value, jsrt_value str) {
     if (g[1] == p) {
       continue;
     }
-    jsrt_array_push(out, jsrt_string_from_units(s->data + p, g[0] - p));
+    jsrt_array_push(JSRT_LOCAL(0), jsrt_string_from_units(s->data + p, g[0] - p));
     /* Capture groups are part of the ANSWER here, not just of the match: `'a1b'.split(/(\d)/)`
      * is ['a', '1', 'b']. */
     for (uint32_t k = 1; k < m.ncap; k++) {
-      jsrt_array_push(out, group_value(s, g, k));
+      jsrt_array_push(JSRT_LOCAL(0), group_value(s, g, k));
     }
     p = g[1];
   }
   matches_free(&m);
-  jsrt_array_push(out, jsrt_string_from_units(s->data + p, s->length - p));
+  jsrt_array_push(JSRT_LOCAL(0), jsrt_string_from_units(s->data + p, s->length - p));
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 

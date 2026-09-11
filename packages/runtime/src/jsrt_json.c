@@ -232,48 +232,64 @@ static jsrt_value parse_value(Parser *p, uint32_t depth);
 
 static jsrt_value parse_object(Parser *p, uint32_t depth) {
   p->pos++; /* consume '{' */
-  jsrt_value obj = jsrt_dynobj_new();
+  /* The half-built object is reachable from nothing else: it is a NaN-boxed local, and such a word
+   * is not a pointer by any conservative test, so the collector cannot see it. Every recursive
+   * parse below allocates, and under pressure a collection freed the object being built -- the next
+   * member write went into reclaimed memory (measured as a segfault in jsrt_array_set, from the
+   * array case of the same defect). Both intermediates live in rooted slots (plan-notes 222). */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = jsrt_dynobj_new();
   skip_ws(p);
   if (peek(p) == '}') {
     p->pos++;
-    return obj;
+    const jsrt_value empty = JSRT_LOCAL(0);
+    JSRT_FRAME_POP();
+    return empty;
   }
   for (;;) {
     skip_ws(p);
     const char *key = parse_key(p);
     skip_ws(p);
     expect(p, ':', "a missing ':' in an object");
-    jsrt_value member = parse_value(p, depth);
+    JSRT_LOCAL(1) = parse_value(p, depth);
     /* Duplicate keys: set_prop finds the live slot and overwrites — last one wins, per spec. */
-    jsrt_set_prop(obj, key, member, NULL);
+    jsrt_set_prop(JSRT_LOCAL(0), key, JSRT_LOCAL(1), NULL);
     skip_ws(p);
     if (peek(p) == ',') {
       p->pos++;
       continue;
     }
     expect(p, '}', "a missing '}' in an object");
-    return obj;
+    const jsrt_value done = JSRT_LOCAL(0);
+    JSRT_FRAME_POP();
+    return done;
   }
 }
 
 static jsrt_value parse_array(Parser *p, uint32_t depth) {
   p->pos++; /* consume '[' */
-  jsrt_value arr = jsrt_array_new(0, NULL);
+  /* Rooted for the reason parse_object gives. */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = jsrt_array_new(0, NULL);
   skip_ws(p);
   if (peek(p) == ']') {
     p->pos++;
-    return arr;
+    const jsrt_value empty = JSRT_LOCAL(0);
+    JSRT_FRAME_POP();
+    return empty;
   }
   for (;;) {
-    jsrt_value element = parse_value(p, depth);
-    jsrt_array_push(arr, element);
+    JSRT_LOCAL(1) = parse_value(p, depth);
+    jsrt_array_push(JSRT_LOCAL(0), JSRT_LOCAL(1));
     skip_ws(p);
     if (peek(p) == ',') {
       p->pos++;
       continue;
     }
     expect(p, ']', "a missing ']' in an array");
-    return arr;
+    const jsrt_value done = JSRT_LOCAL(0);
+    JSRT_FRAME_POP();
+    return done;
   }
 }
 
@@ -325,11 +341,19 @@ jsrt_value jsrt_json_parse(jsrt_value text) {
   if (!jsrt_is(text, JSRT_TAG_STRING)) {
     jsrt_panic("STA2005: JSON.parse of a value that is not a string is not yet supported");
   }
-  Parser p = {text, 0, jsrt_string_length(text)};
-  jsrt_value v = parse_value(&p, 0);
+  /* The TEXT is rooted too: the parser reads it through `Parser.text`, a plain struct on this C
+   * stack, and a NaN-boxed word there is invisible to the collector -- so a collection during a
+   * recursive parse could free the very string being scanned. The caller's own slot usually keeps
+   * it alive, but "usually" is not a rooting discipline. */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = text;
+  Parser p = {JSRT_LOCAL(0), 0, jsrt_string_length(JSRT_LOCAL(0))};
+  JSRT_LOCAL(1) = parse_value(&p, 0);
   skip_ws(&p);
   if (p.pos != p.len) {
     json_fail(&p, "trailing characters after the value");
   }
+  const jsrt_value v = JSRT_LOCAL(1);
+  JSRT_FRAME_POP();
   return v;
 }

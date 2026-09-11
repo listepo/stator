@@ -37,20 +37,30 @@ jsrt_value jsrt_to_primitive(jsrt_value v) {
 jsrt_value jsrt_op_add(jsrt_value a, jsrt_value b) {
   /* ToPrimitive BOTH, THEN ask about strings. The order is the whole operator: `[1] + [2]` is
    * "12" because the arrays become strings before the test, not after -- test first and both
-   * become NaN instead. NUMERIC.md §7 names this as the easy thing to get backwards. */
-  jsrt_value pa = jsrt_to_primitive(a);
-  jsrt_value pb = jsrt_to_primitive(b);
+   * become NaN instead. NUMERIC.md §7 names this as the easy thing to get backwards.
+   *
+   * Every ToPrimitive here can ALLOCATE (an object's ToString builds a string), and a NaN-boxed
+   * local is invisible to the collector, so each primitive that has to survive another call sits
+   * in a rooted slot. Without this, `(v + [])` inside a loop lost whole iterations: the string
+   * `pa` was collected while `pb` was being built and jsrt_string_concat read a reclaimed block
+   * (measured: 999685 of 1000000). `a` and `b` are parameters and already roots. */
+  JSRT_FRAME(4);
+  JSRT_LOCAL(0) = jsrt_to_primitive(a);
+  JSRT_LOCAL(1) = jsrt_to_primitive(b);
 
   /* If EITHER operand is a string, ToString both and concatenate. */
-  if (jsrt_is(pa, JSRT_TAG_STRING) || jsrt_is(pb, JSRT_TAG_STRING)) {
-    jsrt_value sa = jsrt_to_string(pa);
-    jsrt_value sb = jsrt_to_string(pb);
-    return jsrt_string_concat(sa, sb);
+  if (jsrt_is(JSRT_LOCAL(0), JSRT_TAG_STRING) || jsrt_is(JSRT_LOCAL(1), JSRT_TAG_STRING)) {
+    JSRT_LOCAL(2) = jsrt_to_string(JSRT_LOCAL(0));
+    JSRT_LOCAL(3) = jsrt_to_string(JSRT_LOCAL(1));
+    const jsrt_value out = jsrt_string_concat(JSRT_LOCAL(2), JSRT_LOCAL(3));
+    JSRT_FRAME_POP();
+    return out;
   }
 
   /* Otherwise, ToNumber both and add. */
-  double da = jsrt_to_number(pa);
-  double db = jsrt_to_number(pb);
+  const double da = jsrt_to_number(JSRT_LOCAL(0));
+  const double db = jsrt_to_number(JSRT_LOCAL(1));
+  JSRT_FRAME_POP();
   return jsrt_number(da + db);
 }
 

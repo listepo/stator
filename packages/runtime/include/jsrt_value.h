@@ -1158,6 +1158,11 @@ typedef struct JSRTReaction {
 typedef struct JSRTPromise {
   const JSRTClass *cls; /* &jsrt_class_promise -- prefix-shared with JSRTObject */
   uint32_t state;
+  /* §27.2.1.3.2's [[AlreadyResolved]]: the FIRST resolution -- a value, a rejection, or adopting
+   * another promise -- wins, and every later call to the resolving functions is a no-op. It cannot
+   * be read off `state`, because adoption leaves the promise PENDING while the inner one settles,
+   * which is exactly the window in which `resolve(inner); reject(x)` used to reject. */
+  bool resolved;
   jsrt_value value; /* the fulfilment value or the rejection reason; undefined while pending */
   /* Registration order is observable: reactions on one promise run in the order they subscribed,
    * so the list is appended to at `last` and drained from `first`. */
