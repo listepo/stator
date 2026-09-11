@@ -340,7 +340,7 @@ export function block(
 export function ifStmt(
   condition: Expression,
   consequent: Block,
-  alternate: Block | undefined = undefined,
+  alternate?: Block,
   type: HType = H_NUMBER,
   line = 1,
 ): IfStatement {

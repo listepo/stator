@@ -80,6 +80,9 @@ export async function pool<T, R>(
   items: readonly T[],
   work: (item: T, slot: number) => Promise<R>,
 ): Promise<R[]> {
+  // Preallocated on purpose: the pool writes every slot by index and never appends, so the length
+  // is known before the first item runs.
+  // oxlint-disable-next-line unicorn/no-new-array
   const results = new Array<R>(items.length);
   let next = 0;
   // `STATOR_TEST_JOBS=1` forces the serial order back. It is how a parallel run's report gets

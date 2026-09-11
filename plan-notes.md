@@ -6597,3 +6597,121 @@ accepted with non-zero minutes/seconds, `jsrt_date.c`); and a method call on an 
 `function pushIt(a) { a.push(9); }` — panics with STA2006 where Node runs, because `jsrt_get_prop`
 walks shape tables only and never a class descriptor or a builtin prototype (plan-notes 180 records
 the primitive half as known residue).
+
+## 224. Biome replaced by oxlint + oxfmt (2026-09-11)
+
+**Touches:** plan §4 Task 1.0 (toolchain), §15.4 rule 7, `docs/TOOLCHAIN.md`, `AGENTS.md`,
+`.github/dependabot.yml`, `packages/compiler/moon.yml`, a new `.oxlintrc.json` + `.oxfmtrc.json`,
+and the deletion of `biome.json`.
+
+**Numbering.** The runtime-audit entry in this same working tree (## 222) anticipates this migration
+and asks the later writer to move; this one landed second, so it is 224 (223 being that audit's open
+findings) and `.oxlintrc.json`'s header cites 224.
+
+**Change.** One Rust binary doing lint *and* format (`@biomejs/biome` 2.5.11, notes #19) became the
+oxc pair: `oxlint` 1.82.0 for lint, `oxfmt` 0.67.0 for format, plus `oxlint-tsgolint` 7.0.2001 — the
+`typescript-go` backend the type-aware rules run through. Lockfile package entries: 106 → 113 (the
+`@biomejs/*` tree out, the two tools' platform bindings and the tsgolint tree in). The dependency
+budget rule (AGENTS.md) is still satisfied by subtraction against the ESLint tree #19 removed; the
+one genuinely new dependency is tsgolint, and what it buys is the exhaustiveness rule below at full
+strength.
+
+**Rule parity, rule by rule.** Biome's `recommended` preset and oxlint's categories are different
+sets and no converter maps them, so the policy is written out in `.oxlintrc.json`: the whole
+`correctness` and `suspicious` categories as errors, the load-bearing rules by name, and every rule
+that is switched off carrying the count of existing findings that made it a decision.
+
+- The four load-bearing rules are enabled by name (`no-explicit-any`, `no-non-null-assertion`,
+  `consistent-type-imports`, `switch-exhaustiveness-check`) and each was **proved to still fire** on
+  a throwaway fixture violating all four (`oxlint packages/tests/unit/zz_lint_parity_probe.ts`
+  reported all four; the file was then deleted).
+- `switch-exhaustiveness-check` carries `considerDefaultExhaustiveForUnions: true`, which is the
+  semantics Biome's `useExhaustiveSwitchCases` had: a `default:` arm covers a union. Without it the
+  rule reported 11 switches that end in `default: return false;` (const-fold, DCE, inline, the HIR
+  verifier) — a *stricter* policy than the one being migrated, and one that would demand ~50-case
+  switches over the HIR's `Expression`/`Statement` kinds.
+- Three rules Biome had in `recommended` sit in oxlint's *pedantic* category and are named
+  explicitly: `eqeqeq` (Biome `noDoubleEquals`), `no-self-compare` (`noSelfCompare`), `no-fallthrough`
+  (`noFallthroughSwitchClause`). `no-fallthrough` needs `allowEmptyCase: true`: stacked `case` labels
+  with an explanatory comment between them (10 sites) are how this codebase documents a shared arm,
+  while a case with a body that falls into the next one is still an error — verified with a fixture
+  that does both.
+- `restrict-template-expressions` carries `allowNever: true`: `const _exhaustive: never = node` is
+  the exhaustiveness witness and the witness is what the STA4xxx "cannot happen" message
+  interpolates (2 sites, `hir/verify.ts`).
+- Off, with counts: `no-floating-promises` 141 (every one inside a `node:test` body — the runner
+  owns `test()`'s promise; Biome kept this rule nursery), `no-unsafe-type-assertion` 114 and
+  `no-unnecessary-type-assertion` 56 (an `as` that narrows a runtime-guarded `ts.Type` to a known
+  method name is this compiler's idiom), `no-unnecessary-condition` 87, unicorn's
+  `no-array-sort`/`no-array-reverse`/`consistent-function-scoping` 15/3/3, `no-underscore-dangle` 6
+  (`_exhaustive` is the convention, not a dangle), `no-shadow` 2, `consistent-return` 2
+  (`applyBinary`/`applyUnary` answer "not foldable" by falling out of the switch), and `dot-notation`
+  (parity: Biome's `useLiteralKeys` was off).
+- `no-unnecessary-condition` is off for a **different reason** than in notes #19: with real types it
+  reports 87 findings, not the single `noUncheckedIndexedAccess` false positive that motivated the
+  original decision. The verdict survives; its evidence is now measured instead of inferred.
+- New gate property: `reportUnusedDisableDirectives: "error"`. A suppression that stops suppressing
+  is a stale claim about the code, and this migration creates the first batch of them.
+- Type-aware linting is `options.typeAware: true`, so the gate needs `oxlint-tsgolint` installed; it
+  fails loudly rather than silently skipping those rules. tsgolint's docs ask for TypeScript 7.0+,
+  and it runs against this repo's pinned **6.0.3** tsconfigs today — re-check that at the next
+  TypeScript bump.
+
+**Suppressions translated.** Eight `biome-ignore` comments became `oxlint-disable-next-line`: five in
+`tests/unit/numeric-spec.test.ts` (the IEEE-754 claims, including the `erasing-op` one whose rule
+folds `0 * -1` to zero — the exact transform the "`0 * -1` is -0" canary forbids), one in
+`tests/test262/harness/done.js` for `$DONE`, two in `passes/constfold.ts` for the `==`/`!=` arms that
+model the operators. Leaving them was not an option: an unknown directive is just a comment, so
+every one of those claims would have become a finding.
+
+**Findings fixed, not suppressed.** The wider rule set surfaced three real ones.
+`codegen/index.ts` wrapped a string in a template literal it did not need
+(``this.appendLine(`${parkCall}`, span)``); `tests/unit/helpers.ts` made a parameter optional with
+`= undefined` where `?` says the same thing; `tests/test262/run.ts` sorted skip counts with a bare
+`.sort()`, which compares the *concatenated* `feature,count` string — it now compares features, as
+the two other sorts in that file already did. Two findings are suppressed at the site, with the
+reason on the line: `new Array<R>(n)` as a preallocated result array (`unicorn/no-new-array`), and
+the specialization loop's condition (`no-unmodified-loop-condition` cannot see the `failed` flag that
+the same loop's `walkCalls` sets).
+
+**Format parity.** `oxfmt --migrate=biome` mapped the style, and the result is that the formatter
+disagreed with Biome on **two lines of source**: a `for (…; …; )` header Biome spaced before the `)`
+(`lower/captures.ts`, two occurrences) and one 101-column line in `lower/index.ts`. Everything else
+that changed is the three `package.json` manifests, whose keys oxfmt sorts (`sortPackageJson` is on
+by default; kept).
+
+**A trap worth recording: oxfmt honours `.editorconfig`.** The first `oxfmt --check` run reported all
+86 files as misformatted. The cause was a developer `~/.editorconfig` (a .NET-era file) saying
+`end_of_line = crlf`, which oxfmt walks up to and applies. Biome defaults `formatter.useEditorconfig`
+to **false** and deliberately ignores `.editorconfig` files above a `biome.json`, "to avoid loading
+formatting settings from someone's home directory" — oxfmt has no such guard, so this is new surface
+and would have rewritten the whole tree on the next `pnpm run format`. `.oxfmtrc.json` pins
+`endOfLine: "lf"` for that reason; the pin is load-bearing for anyone whose home directory carries an
+`.editorconfig`.
+
+**Scope: the formatter's file set is the one Biome checked** (TypeScript/JavaScript/JSON, named by a
+glob in the `lint`/`format` scripts). oxfmt can also format Markdown, YAML and TOML; that is
+deliberately not enabled — `plan.md` and `plan-notes.md` are the normative record and are hand-
+wrapped, and reformatting them would bury the migration in a docs diff. Widening it is a one-line
+change in two scripts if the owner wants it.
+
+**`pnpm run lint` is two commands now** (`oxlint --deny-warnings . && oxfmt --check <glob>`), because
+one binary no longer does both: `--deny-warnings` replaces Biome's `--error-on-warnings`, and
+`pnpm run format` is `oxlint --fix` followed by `oxfmt`. The same command pair is what
+`packages/compiler/moon.yml`'s `lint` task runs.
+
+**Not rewritten:** `done.md` still quotes `biome check` output (65, 85, 94 files) from the runs that
+actually happened. It is an archive; those numbers are evidence of that day, not instructions.
+
+**Check** (`mise exec node --`, Node 26.8.2, on the migration commit with a clean tree):
+`pnpm run ci` → `stator: node v26.8.2 matches .node-version (26.7.0)`; tsc both projects clean;
+lint `Found 0 warnings and 0 errors. Finished in 1.1s on 84 files with 162 rules` + oxfmt
+`All matched files use the correct format. Finished in 14ms on 96 files`; `cpd` under the 1% gate;
+runtime built; `ℹ tests 385 / ℹ pass 385 / ℹ fail 0`; `runtime: print corpus matches Node`;
+`subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed`; `golden: 194 fixtures — 194 passed,
+0 failed`; `builtins: 222/238 surface members landed (93%)`; `leak: 10M objects — peak RSS 3040 KB
+of a 65536 KB cap, 46 samples, plateau`; ASan/UBSan runtime corpus and golden both green. The leak
+gate samples RSS with `ps`, so it cannot run under a sandbox that hides other processes — the first
+run of the chain reported `only 0 RSS samples ... FAILED` for that reason alone, and the same
+command passed once `ps` was visible. Nothing in this migration touches the runtime or that harness;
+the count is recorded so the next reader does not chase it.

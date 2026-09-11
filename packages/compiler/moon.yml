@@ -21,7 +21,7 @@ tasks:
     outputs:
       - 'dist'
   lint:
-    script: './node_modules/.bin/biome check --error-on-warnings .'
+    script: './node_modules/.bin/oxlint --deny-warnings . && ./node_modules/.bin/oxfmt --check "**/*.{ts,tsx,js,mjs,cjs,json,jsonc}"'
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true

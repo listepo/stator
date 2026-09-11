@@ -1,19 +1,15 @@
 {
   "name": "stator",
   "version": "0.0.0",
+  "private": true,
   "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries (monorepo root)",
   "license": "MIT",
   "type": "module",
-  "private": true,
-  "packageManager": "pnpm@12.3.4",
-  "engines": {
-    "node": ">=24"
-  },
   "scripts": {
     "typecheck": "tsc --noEmit -p packages/compiler/tsconfig.json && tsc --noEmit -p packages/tests/tsconfig.json",
     "build": "tsc -p packages/compiler/tsconfig.json",
-    "lint": "biome check --error-on-warnings .",
-    "format": "biome check --write .",
+    "lint": "oxlint --deny-warnings . && oxfmt --check \"**/*.{ts,tsx,js,mjs,cjs,json,jsonc}\"",
+    "format": "oxlint --fix . && oxfmt \"**/*.{ts,tsx,js,mjs,cjs,json,jsonc}\"",
     "test": "node --test \"packages/tests/unit/*.test.ts\"",
     "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include=\"packages/compiler/src/**\" --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info \"packages/tests/unit/*.test.ts\"",
     "test:subset": "node packages/tests/subset/run.ts",
@@ -33,7 +29,6 @@
     "test:builtins": "node packages/tests/golden/builtins.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.11",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "0.222.0",
     "@opentelemetry/resources": "2.11.0",
@@ -45,7 +40,14 @@
     "execa": "10.0.1",
     "ink": "7.1.1",
     "memfs": "4.69.1",
+    "oxfmt": "0.67.0",
+    "oxlint": "1.82.0",
+    "oxlint-tsgolint": "7.0.2001",
     "react": "19.2.8",
     "typescript": "6.0.3"
-  }
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@12.3.4"
 }

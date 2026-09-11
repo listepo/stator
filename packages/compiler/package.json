@@ -3,13 +3,13 @@
   "version": "0.0.0",
   "description": "Stator — an ahead-of-time compiler from TypeScript/JavaScript to native binaries",
   "license": "MIT",
-  "type": "module",
   "bin": {
     "stator": "dist/cli/main.js"
   },
   "files": [
     "dist"
   ],
+  "type": "module",
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "0.222.0",

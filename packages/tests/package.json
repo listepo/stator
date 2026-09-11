@@ -1,9 +1,9 @@
 {
   "name": "@stator/tests",
   "version": "0.0.0",
+  "private": true,
   "description": "Stator test harnesses (unit, subset, golden, differential, leak, bench, test262)",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "devDependencies": {
     "execa": "10.0.1",

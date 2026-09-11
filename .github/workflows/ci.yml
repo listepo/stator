@@ -108,7 +108,7 @@ jobs:
       - run: pnpm run dupes
 
   # The compiler itself, which is portable TypeScript -- so this is the half of the suite Windows
-  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: Biome's formatter
+  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: a formatter check
   # would be arguing with git's line-ending translation, not with the code.
   frontend:
     name: frontend (${{ matrix.platform }}/${{ matrix.arch }})

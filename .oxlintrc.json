@@ -1,0 +1,98 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  // Stator's lint policy (plan-notes 224). Written out in full rather than inherited from a preset:
+  // Biome's `recommended` and oxlint's categories are different rule sets, so "what the gate
+  // enforces" has to be readable in one file. Every rule switched off below is listed with its
+  // reason; `pnpm run lint` is expected to report zero findings.
+  "plugins": ["typescript", "unicorn", "oxc", "import", "node", "promise"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  // Type-aware rules (`switch-exhaustiveness-check` below among them) run through tsgolint, which
+  // needs `oxlint-tsgolint` installed. Without it oxlint fails loudly rather than skipping them.
+  "options": {
+    "typeAware": true,
+    // A suppression that no longer suppresses anything is a stale claim, and this migration leaves
+    // the first handful of them in the tree: fail on one instead of letting it rot.
+    "reportUnusedDisableDirectives": "error"
+  },
+  "rules": {
+    // The four load-bearing rules AGENTS.md names. All four are off by default in oxlint.
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/consistent-type-imports": "error",
+    // A `default:` arm counts as covering a union, which is what the Biome rule this replaces did;
+    // a switch that lists neither every member nor a default is an error.
+    "typescript/switch-exhaustiveness-check": [
+      "error",
+      { "considerDefaultExhaustiveForUnions": true }
+    ],
+    // `const _exhaustive: never = node` is this codebase's exhaustiveness witness, and the witness
+    // is what gets interpolated into the STA4xxx "cannot happen" message.
+    "typescript/restrict-template-expressions": ["error", { "allowNever": true }],
+    // Biome had these in `recommended`; oxlint files them under pedantic, so they are named here.
+    "eqeqeq": "error",
+    "no-self-compare": "error",
+    // Stacked `case` labels with a comment between them are how this codebase documents a shared
+    // arm; `allowEmptyCase` keeps that legal while a case that runs code and falls through stays an
+    // error.
+    "no-fallthrough": ["error", { "allowEmptyCase": true }],
+    // --- Off, with the count of existing findings that made each one a policy decision ---
+    // 141, all in `node:test` bodies: the runner owns `test()`'s promise (Biome kept this nursery).
+    "typescript/no-floating-promises": "off",
+    // 114: `as` after a runtime guard is how the lowering narrows `ts.Type` to a known method name.
+    "typescript/no-unsafe-type-assertion": "off",
+    // 56: redundant but deliberate `as` annotations that document what a guard proved.
+    "typescript/no-unnecessary-type-assertion": "off",
+    // 87, and off for the same reason Biome's `noUnnecessaryCondition` was (plan-notes 19): it
+    // reports the `?.` that `noUncheckedIndexedAccess` requires. Real types change the count, not
+    // the verdict -- re-open only with a measured false-positive list, not on a hunch.
+    "typescript/no-unnecessary-condition": "off",
+    // 15/3/3: `.sort()`/`.reverse()` on an array this code just built; `toSorted`/`toReversed` are
+    // ES2023 and these call sites mutate a local on purpose.
+    "unicorn/no-array-sort": "off",
+    "unicorn/no-array-reverse": "off",
+    "unicorn/consistent-function-scoping": "off",
+    // `_exhaustive` is the witness above; the leading underscore is the convention, not a dangle.
+    "no-underscore-dangle": "off",
+    // 2, both benign (a test helper's arrow parameter, a lowering local).
+    "no-shadow": "off",
+    // 2: `applyBinary`/`applyUnary` return `undefined` for "not foldable" through a fall-through.
+    "typescript/consistent-return": "off",
+    // `obj['key']` stays legal: Biome's `useLiteralKeys` was off, and bracket access is how the
+    // HIR names a dynamic field.
+    "typescript/dot-notation": "off"
+  },
+  "overrides": [
+    {
+      // An empty program is the measurement: `bench/programs/startup.ts` times what the runtime
+      // costs before it does anything, so the file has to stay empty.
+      "files": ["packages/tests/bench/programs/*.ts"],
+      "rules": { "unicorn/no-empty-file": "off" }
+    }
+  ],
+  // Same set Biome's `files.includes` excluded: deliberately-invalid decision fixtures, the golden
+  // corpora (each row exists twice, once per mode), generated diagrams, and the C runtime.
+  "ignorePatterns": [
+    ".claude/worktrees",
+    ".moon/cache",
+    "**/dist",
+    "coverage",
+    "packages/runtime",
+    "packages/tests/subset/subset_*",
+    "packages/tests/subset/helper_*",
+    "packages/tests/subset/cycle_partner_*",
+    "packages/tests/golden/ts",
+    "packages/tests/golden/js",
+    "packages/tests/differential",
+    "packages/tests/bench/results",
+    "**/.differential-*",
+    "packages/tests/test262/corpus",
+    "packages/tests/test262/results.json",
+    "packages/tests/test262/results-*-of-*.json",
+    "packages/tests/test262/.tmp",
+    "docs/architecture",
+    "pnpm-lock.yaml"
+  ]
+}

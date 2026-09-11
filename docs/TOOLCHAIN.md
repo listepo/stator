@@ -11,7 +11,9 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | Node | `26.7.0` | `.node-version`, `engines.node >= 24` in `package.json` |
 | TypeScript | `6.0.3` (exact) | `dependencies` in `packages/compiler/package.json` |
 | `@types/node` | `26.4.0` (exact) | `devDependencies` |
-| Biome | `2.5.11` (exact) | `devDependencies` |
+| oxlint | `1.82.0` (exact) | `devDependencies` |
+| oxlint-tsgolint | `7.0.2001` (exact) | `devDependencies`. The type-aware backend `oxlint --type-aware` runs through (plan-notes 224). |
+| oxfmt | `0.67.0` (exact) | `devDependencies` |
 | cpd (copy/paste detector) | `5.0.16` (exact) | `devDependencies` |
 | pnpm | `12.3.4` | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml` |
 | LLVM | `21.1.8` | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |

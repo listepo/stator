@@ -15,7 +15,8 @@ import test from 'node:test';
  * refuses to typecheck (TS2367). Widening to `unknown` is the narrowest way to ask the question:
  * it removes the static objection without touching the runtime comparison being tested. */
 function looseEquals(a: unknown, b: unknown): boolean {
-  // biome-ignore lint/suspicious/noDoubleEquals: the loose comparison IS the subject under test
+  // The loose comparison IS the subject under test.
+  // oxlint-disable-next-line eqeqeq
   return a == b;
 }
 
@@ -32,8 +33,8 @@ const CLAIMS: readonly (readonly [string, () => boolean, boolean])[] = [
   ['String(-0) === "0"', () => String(-0) === '0', true],
 
   // §5.2 — one NaN, and the three equality predicates disagree in two directions
-  // biome-ignore lint/suspicious/noSelfCompare: NaN failing to equal itself is the claim
-  // biome-ignore lint/correctness/useIsNan: rewriting this to Number.isNaN would delete the test
+  // NaN failing to equal itself is the claim; rewriting it to Number.isNaN would delete the test.
+  // oxlint-disable-next-line no-self-compare, use-isnan
   ['NaN !== NaN', () => Number.NaN !== Number.NaN, true],
   ['Object.is(NaN, NaN)', () => Object.is(Number.NaN, Number.NaN), true],
 
@@ -41,6 +42,8 @@ const CLAIMS: readonly (readonly [string, () => boolean, boolean])[] = [
   ['1 / 0 === Infinity', () => 1 / 0 === Number.POSITIVE_INFINITY, true],
   ['1 / 2 === 0.5', () => 1 / 2 === 0.5, true],
   ['5 % 0 is NaN', () => Number.isNaN(5 % 0), true],
+  // Both sides of the `&&` are constants on purpose: that IS the claim about `%`'s sign.
+  // oxlint-disable-next-line no-constant-binary-expression
   ['% takes the sign of the dividend', () => 5 % 3 === 2 && -5 % 3 === -2, true],
 
   // §2.3 — overflow promotes, it does not wrap
@@ -57,11 +60,13 @@ const CLAIMS: readonly (readonly [string, () => boolean, boolean])[] = [
 
   // §4.3 — shift counts are masked to 5 bits
   ['(1 << 32) === 1', () => 1 << 32 === 1, true],
+  // The shifts are constants for the same reason: the claim is that they differ.
+  // oxlint-disable-next-line no-constant-binary-expression
   ['x >> 31 differs from x >> 32', () => -1 >> 31 !== -1 >> 32 || 5 >> 31 !== 5 >> 32, true],
 
   // §6.1 — NaN makes all four relational operators false at once
-  // biome-ignore lint/suspicious/noSelfCompare: a relational operator on NaN is the claim
-  // biome-ignore lint/correctness/useIsNan: `<=` and `Number.isNaN` are not interchangeable here
+  // A relational operator on NaN is the claim; `<=` and Number.isNaN are not interchangeable here.
+  // oxlint-disable-next-line no-self-compare, use-isnan, const-comparisons
   ['NaN <= NaN', () => Number.NaN <= Number.NaN, false],
 
   // §6.3 — the loose-equality table, including the pair that surprises
@@ -77,6 +82,9 @@ const CLAIMS: readonly (readonly [string, () => boolean, boolean])[] = [
 
   // §9 — the transforms a pass must not make
   ['(0.1 + 0.2) !== 0.3', () => 0.1 + 0.2 !== 0.3, true],
+  // `0 * -1` being -0 is the canary: `erasing-op` folds `0 * x` to zero, which is the exact
+  // transform this claim exists to forbid.
+  // oxlint-disable-next-line erasing-op
   ['0 * -1 is -0 (const-fold canary)', () => Object.is(0 * -1, -0), true],
   ['-0 + 0 is +0, so x + 0 is not x', () => Object.is(-0 + 0, 0), true],
 ];

@@ -14,7 +14,7 @@ updates:
       # docs/TOOLCHAIN.md pins: a PR from this group needs the row and a plan-notes.md line before
       # merge. A dependency goes to the first group it matches, so this one stays first.
       toolchain:
-        patterns: [typescript, "@types/node", "@biomejs/biome", cpd]
+        patterns: [typescript, "@types/node", oxlint, oxlint-tsgolint, oxfmt, cpd]
         update-types: [minor, patch]
       libraries:
         patterns: ["*"]

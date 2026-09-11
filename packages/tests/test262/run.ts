@@ -485,7 +485,7 @@ function report(results: readonly Test262Result[]): void {
     skipCounts.set(category, (skipCounts.get(category) ?? 0) + 1);
   }
   const details = [...skipCounts.entries()]
-    .sort()
+    .sort((left, right) => left[0].localeCompare(right[0]))
     .map(([feature, count]) => `${feature}: ${String(count)}`)
     .join(', ');
   const rate = passed + failed === 0 ? 0 : (passed / (passed + failed)) * 100;

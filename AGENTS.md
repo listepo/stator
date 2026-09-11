@@ -23,7 +23,7 @@ If `src/` does not exist yet, the project is pre-Phase-1: the only files may be 
 
 1. **Roadmap discipline.** Work `plan.md` top-down. A task is done only when its **Check** passes, and "done" is claimed only with the Check's command output cited. No Check, no done.
    **When a task's Check passes, move its record to `done.md` in the same change** — the evidence narrative goes there, and `plan.md` keeps the task's number and title as a struck-through one-line stub pointing at it. `plan.md` shrinks as work lands; that is the point. Three things never move: anything still **normative** (the locked `tsconfig.json`, a live Check), any part of a task that has **not** landed, and the task's **number and title**, because `plan.md §N Task X.Y` is referenced from code comments and `docs/` and must keep resolving. `done.md` is an archive, never an authority — if you find yourself citing it to justify a decision, the rule you want belongs in `plan.md` or `docs/`.
-2. **The compiler is strict TypeScript.** No `any`, no non-null assertions, no `enum`/`namespace`/parameter properties (banned by `erasableSyntaxOnly`). Never weaken `tsconfig.json` or Biome rules to make code compile — fix the code.
+2. **The compiler is strict TypeScript.** No `any`, no non-null assertions, no `enum`/`namespace`/parameter properties (banned by `erasableSyntaxOnly`). Never weaken `tsconfig.json` or the oxlint rules to make code compile — fix the code.
 3. **Compile a typed subset; never statically analyze untyped JS.** Untyped code goes to the dynamic representation or the Phase-8 tier. This rule killed every project that ignored it (see plan §0.1).
 4. **Never trust a type annotation across a boundary.** `unknown`, unions, `JSON.parse`, FFI, and `.js`→`.ts` imports get runtime checks at the narrowing point. Inside checked code, trust types fully.
 5. **Don't write a parser or type checker** — use the `typescript` package in-process. Don't write a regex engine — vendor QuickJS-NG's libregexp. Don't write a float printer — vendor Ryū.
@@ -93,8 +93,8 @@ If bare `node --version` disagrees with `.node-version` (on some hosts PATH puts
 mise install                    # Node, pnpm, just, moon, LLVM clang (Unix)
 pnpm install --frozen-lockfile  # install (exact-pinned deps)
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
-pnpm run lint                   # biome check — lint + format (must be clean)
-pnpm run format                 # biome check --write (applies safe fixes + formatting)
+pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lint + format (must be clean)
+pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)
 pnpm run dupes                  # cpd copy/paste detector (fails above 1% duplication)
 pnpm run test                   # unit tests (node --test)
 pnpm run test:coverage          # unit tests + packages/compiler/src coverage table; writes coverage/lcov.info
@@ -125,7 +125,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 ## Implementation standards — TypeScript (`src/`)
 
 - `tsconfig.json` is locked (full flag list in plan §4 Task 1.0): `strict` + `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`, `erasableSyntaxOnly`, NodeNext modules.
-- Biome (`biome.json`) enforces: no `any`, no non-null assertions, exhaustive switches, type-only imports. Model discriminated unions and switch exhaustively — this is a compiler; unhandled cases are bugs.
+- oxlint (`.oxlintrc.json`, type-aware through `oxlint-tsgolint`) enforces: no `any`, no non-null assertions, exhaustive switches, type-only imports. Model discriminated unions and switch exhaustively — this is a compiler; unhandled cases are bugs.
 - Runtime dependency budget: **`typescript` only**, plus the owner-directed CLI/observability set recorded in `plan-notes.md` 187 (ink, react, dotenv, `@opentelemetry/*` behind `STATOR_OTEL`; execa is dev-only). This set may not leak below `src/cli/` (except `src/support/telemetry.ts`, which is the pipeline's only OTel seam). New dependencies (even dev) need a `plan-notes.md` entry saying what a few lines couldn't do.
 - User-facing failures are diagnostics (stable `STA` code + span + mode), never thrown stack traces. A thrown exception reaching the CLI is a compiler bug (`STA4xxx`).
 - `ts.Type` never leaks past `src/frontend/` — everything downstream speaks HType.

@@ -1,0 +1,47 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  // Stator's formatter policy (plan-notes 224). The values are the ones `biome.json` carried, so
+  // the migration changed the tool and not the style; `oxfmt --migrate=biome` produced the
+  // skeleton. Which FILES are in scope is decided by the glob in the `lint`/`format` scripts
+  // (TypeScript/JavaScript/JSON — the same set Biome checked), not here.
+  "useTabs": false,
+  "tabWidth": 2,
+  "printWidth": 100,
+  "singleQuote": true,
+  "jsxSingleQuote": false,
+  "quoteProps": "as-needed",
+  "trailingComma": "all",
+  "semi": true,
+  "arrowParens": "always",
+  "bracketSameLine": false,
+  "bracketSpacing": true,
+  // Pinned, not inherited: oxfmt reads the nearest `.editorconfig`, and a developer's own
+  // `~/.editorconfig` saying `end_of_line = crlf` would rewrite every file in the repo on the next
+  // `pnpm run format`. CI and the golden corpora read these files as text, so the repository
+  // decides the line ending, not the machine.
+  "endOfLine": "lf",
+  "insertFinalNewline": true,
+  // `sortPackageJson` stays at oxfmt's default (on): manifest keys get one canonical order. That
+  // plus two wrapped lines is the whole formatting difference the migration introduced.
+  "ignorePatterns": [
+    ".claude/worktrees",
+    ".moon/cache",
+    "**/dist",
+    "coverage",
+    "packages/runtime",
+    "packages/tests/subset/subset_*",
+    "packages/tests/subset/helper_*",
+    "packages/tests/subset/cycle_partner_*",
+    "packages/tests/golden/ts",
+    "packages/tests/golden/js",
+    "packages/tests/differential",
+    "packages/tests/bench/results",
+    "**/.differential-*",
+    "packages/tests/test262/corpus",
+    "packages/tests/test262/results.json",
+    "packages/tests/test262/results-*-of-*.json",
+    "packages/tests/test262/.tmp",
+    "docs/architecture",
+    "pnpm-lock.yaml"
+  ]
+}
