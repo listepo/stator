@@ -514,9 +514,19 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     two writes to ONE global slot, so the outer `x` reads back as 2 where the pinned Node says 1 —
     a silent wrong answer, measured in the note. The cause is that HIR names are SOURCE names, so
     the lowering's `bindings` map, the verifier's scope map and the emitter's `bindSlot`/`slotRef`
-    all resolve by the text the user wrote and a re-declared name has one home; `lowerBlock`
-    compounds it by mutating the caller's map in place instead of copying it. Fix it at the
-    **lowering, by alpha-renaming**: a block-scoped declaration whose name is already bound gets a
+    all resolve by the text the user wrote and a re-declared name has one home.
+    ~~`lowerBlock` compounds it by mutating the caller's map in place instead of copying it.~~
+    **The LEAK half landed 2026-09-11** (plan-notes 215): a block, a `for`/`for-in` header, and a
+    `switch` clause list now each lower into a COPY of the binding map, so a name stops resolving
+    where its scope ends. That was a second defect wearing the first one's clothes, and both of its
+    symptoms were live: `{ let x = 1; } console.log(typeof x)` was an internal error (STA4002 — the
+    lowering resolved a name the verifier's scoped copy could not see, and the emitter is never
+    reached), and `for (let i = 0; …) {} console.log(typeof i)` printed `number` from the loop's own
+    stale slot where Node prints `undefined` — a wrong ANSWER, not a refusal, which is the worse of
+    the two. Both now match Node, pinned by `tests/golden/{js,ts}/block_scope.*`. **What remains is
+    the shadowing half, and the copies do not touch it**: a name re-declared in a nested scope still
+    shares one slot with the outer one, because every copy carries the same source name. Fix that at
+    the **lowering, by alpha-renaming**: a block-scoped declaration whose name is already bound gets a
     fresh unspellable HIR name and references inside the block resolve to it — correct by
     construction for the verifier, the passes, the capture analysis and the emitter, none of which
     then learn about scopes. The size is in the threading: `bindings` is `Map<string, HType>`

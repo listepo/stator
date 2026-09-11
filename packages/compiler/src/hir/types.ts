@@ -270,6 +270,20 @@ export function accessorName(kind: 'get' | 'set', property: string): string {
   return `${kind} ${property}`;
 }
 
+/** The property an accessor's mangled name was built from, or `undefined` when `name` is an
+ * ordinary member. The inverse of {@link accessorName}, and it lives beside it so the two cannot
+ * drift.
+ *
+ * It exists because the mangled names are not private to the lowering: an `HObject`'s method list
+ * holds them, so every walk of that list (`type.methods` in the class table, dispatch, the
+ * verifier) meets `get x` where the source said `x`. A caller that has to answer a question about
+ * the SOURCE member -- which class implements this entry, say -- needs the name back without
+ * re-spelling the prefix, which is exactly how the class table used to lose an inherited accessor
+ * (STA4072, plan-notes 213). */
+export function accessorProperty(name: string): string | undefined {
+  return name.startsWith('get ') || name.startsWith('set ') ? name.slice(4) : undefined;
+}
+
 /** The slot a field name occupies, or `undefined` if the class has no such field. The emitter and
  * the verifier both ask this, and neither may compute it any other way: an index derived from
  * anything but this list is an index into a layout nobody allocated. */

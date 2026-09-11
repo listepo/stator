@@ -196,6 +196,12 @@ async function runCommand(command: Command): Promise<void> {
   }
 }
 
+/** A thrown value is not necessarily an `Error` (`throw "boom"` is legal JavaScript, and a
+ * rejection from a dependency can be anything). The diagnostic still has to say something. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function main(): Promise<void> {
   // .env before anything reads the environment (STATOR_OTEL, OTEL_EXPORTER_OTLP_*). dotenv never
   // overrides real environment variables, and `quiet` keeps its banner out of the byte-exact
@@ -215,7 +221,23 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    throw error;
+    // Everything else is a compiler bug, and the contract for one is a diagnostic -- never a raw
+    // Node stack trace (AGENTS.md: "A thrown exception reaching the CLI is a compiler bug"). It is
+    // reachable rather than theoretical: the TypeScript checker recurses without a depth guard, so
+    // `var yield` plus a generator method with `[yield]` as its computed key overflows the stack
+    // inside `getSemanticDiagnostics` -- plain `tsc` dies on the same file. Stator cannot fix
+    // upstream, and it must not pretend the input was fine either; naming the crash is the honest
+    // answer, and the message asks for the input so the next step can be a real fix.
+    await print(
+      [
+        {
+          text: `stator: STA4072 internal error: ${messageOf(error)} — this is a compiler bug; report it with the input that triggered it`,
+          color: INK_COLORS.error,
+        },
+      ],
+      process.stderr,
+    );
+    process.exitCode = 1;
   } finally {
     await telemetryShutdown();
   }

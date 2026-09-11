@@ -335,3 +335,34 @@ void test("a .js entry under default ts mode is STA1002 with a --mode=js hint, n
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
+void test('an exception inside the checker is STA4072, not a Node stack trace', () => {
+  // `var yield` plus a generator method whose computed key is `[yield]` makes the TypeScript
+  // checker recurse without a depth guard until the JS stack is gone (upstream: `tsc` 6.0.3 dies on
+  // the same file, Test262's generator-prop-name-yield-expr.js). Stator cannot fix that, but
+  // AGENTS.md is unambiguous about what a user sees instead: a stable STA code, never a traceback.
+  const work = mkdtempSync(join(tmpdir(), 'stator-checker-crash-'));
+  try {
+    const entry = join(work, 'entry.js');
+    writeFileSync(
+      entry,
+      'var obj = null;\n' +
+        "var yield = 'propNameViaIdentifier';\n" +
+        'var iter = (function*() {\n' +
+        '  obj = {\n' +
+        '    *[yield]() {}\n' +
+        '  };\n' +
+        '})();\n' +
+        'console.log(typeof iter);\n',
+    );
+    const { status, stderr } = stator('build', entry, '-o', join(work, 'out'), '--mode=js');
+    assert.equal(status, 1);
+    assert.match(stderr, /^stator: STA4072 internal error: /);
+    assert.match(stderr, /compiler bug/);
+    assert.doesNotMatch(stderr, /typescript\.js/, 'the upstream frame must not leak');
+    assert.doesNotMatch(stderr, /\n\s+at /, 'diagnostics must never leak a stack trace');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

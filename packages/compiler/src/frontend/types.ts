@@ -2,6 +2,7 @@ import * as ts from 'typescript';
 import type { HField, HType } from '../hir/types.ts';
 import {
   accessorName,
+  accessorProperty,
   H_BOOLEAN,
   H_DATE,
   H_NULL,
@@ -632,6 +633,17 @@ export function methodDeclaringClass(
   name: string,
   checker: ts.TypeChecker,
 ): ts.ClassDeclaration | undefined {
+  // An accessor is a method under a mangled name (`get x`), and every walk of an HType's method
+  // list meets those names -- the class table does, which is where this used to answer `undefined`
+  // and the caller fell back to the class it was asked about: the emitter then looked for an
+  // INHERITED accessor in a subclass that never declared it and threw STA4072. The walk below can
+  // only match a method declaration, so the mangled form is routed to the accessor resolver, which
+  // speaks the source name. `accessorDeclaringClass` answers the most derived declaration, which
+  // is still the implementor: an accessor override is refused at the gate, so one class declares it.
+  const property = accessorProperty(name);
+  if (property !== undefined) {
+    return accessorDeclaringClass(declaration, property, checker)?.owner;
+  }
   for (const current of ancestry(declaration, checker).toReversed()) {
     if (current.members.some((m) => ts.isMethodDeclaration(m) && instanceMethodName(m) === name)) {
       return current;

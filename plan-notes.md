@@ -6134,3 +6134,124 @@ the pinned pnpm would not accept as-is fails the PR's CI instead of landing.
 **Open.** Dependabot's commits and PRs are authored by `dependabot[bot]`. Whether golden rule 7
 (plan-notes 211) reaches a bot's commit that the owner merges is the owner's call; this entry
 doesn't decide it.
+
+## 213. An exception reaching the CLI is STA4072 — the first one was the checker's own stack overflow (2026-09-11)
+
+**Found by mining `packages/tests/test262/results.json`, not by fuzzing.** Of its 3,100 `failed`
+rows, exactly ONE is not `STA0012`: `test/language/expressions/object/method-definition/
+generator-prop-name-yield-expr.js`, whose reason is a Node crash inside
+`node_modules/.pnpm/typescript@6.0.3/…/typescript.js:61580 RangeError: Maximum call stack size
+exceeded` — the compiler process died with a stack trace instead of answering. Reproduced with the
+corpus file directly (`node packages/compiler/src/cli/main.ts build <file> --mode=js`) and then
+with a minimal 8-line program:
+
+```js
+var obj = null;
+var yield = 'propNameViaIdentifier';
+var iter = (function*() { obj = { *[yield]() {} }; })();
+console.log(typeof iter);
+```
+
+The SHAPE matters and is worth recording: the recursion is the checker's contextual typing of the
+assignment to a module-scope `var` (`getContextualTypeForAssignmentDeclaration` →
+`getTypeOfExpression` → `checkIdentifier` → `getNarrowedTypeOfSymbol` → …). Moving `obj` inside the
+generator, or dropping the `[yield]` computed key, stops it. **It is upstream, not Stator's**: plain
+`tsc 6.0.3` with the same options dies on the same file. Nothing Stator can do about the recursion.
+
+**It is a Stator bug anyway, and the reason is a written rule.** AGENTS.md: "User-facing failures
+are diagnostics (stable STA code + span + mode), never thrown stack traces. A thrown exception
+reaching the CLI is a compiler bug (STA4xxx)." `main()`'s catch handled `StatorError` and
+`BuildError` and then did `throw error` for everything else — which is the traceback path, so the
+contract had no last line of defence at all. It does now: any other exception becomes
+`STA4072 internal error: {message} — this is a compiler bug; report it with the input that
+triggered it`, exit 1, stderr, no frame ever printed.
+
+**`STA4072` is allocated in `docs/DIAGNOSTICS.md`**, in the lowering band's free tail
+(STA4038–STA4039, STA4072–STA4079 were free; the band's paragraph now reads 4073–4079), with the
+row naming the CLI as the raiser — the `STA4001` precedent (a CLI code sitting in the verifier's
+band because that is where room was). The free-range line in the same file moved with it.
+
+**Test.** `packages/tests/unit/cli.test.ts` → "an exception inside the checker is STA4072, not a
+Node stack trace": the source above is written to a temp dir, built in js mode, and asserted to
+exit 1 with `stator: STA4072 internal error: ` and `compiler bug` on stderr, plus
+`assert.doesNotMatch(stderr, /\n\s+at /)` and no `typescript.js` frame. **Test262's own results
+file is where this came from, and the corpus is 53k tests wide** — the cheapest way to hunt for
+`STA4xxx`-class failures is to cluster that file by reason and look at everything that is not
+`STA0012`, which is exactly what the one row above was.
+
+## 214. The class table lost an inherited accessor, and the emitter threw (2026-09-11)
+
+**Found by probing cross-feature combinations** (the fuzzer's grammar has no classes): a base class
+with a getter/setter, a subclass that overrides ANY method, and a read of the inherited accessor
+through the subclass. Minimal repro, js mode:
+
+```js
+class Base { describe() { return 'b'; } get double() { return 2; } }
+class Derived extends Base { describe() { return 'd'; } }
+const d = new Derived();
+console.log(d.double);
+```
+
+Before the fix: `stator: STA4072 internal error: class Derived has no method get double` (a raw
+stack trace before 213 landed, which is how the two bugs were found in the same hunt). Node prints
+`2`; a 4-level chain behaves the same way.
+
+**Cause.** The class table exists only where something is overridden, and it is built from
+`type.methods` — the HType's WHOLE method list, inherited entries included. An accessor is a method
+under a mangled name (`get x`, `accessorName` in `hir/types.ts`), so an inherited accessor is an
+entry in the subclass's table. Resolving "which class implements this entry" went through
+`methodDeclaringClass` (`frontend/types.ts`), which walks METHOD DECLARATIONS by name — a mangled
+name matches none, so it answered `undefined` and `lowerClass` fell back to `type.name`. The entry
+then named `Derived`, whose HIR `methods` list holds only its own members (the accessor's body
+belongs to `Base`), and `methodId` in `src/codegen/index.ts` threw the message above. The gate
+refuses an accessor OVERRIDE, so exactly one class in a chain ever declares a given accessor — the
+fallback could never be right.
+
+**Fix.** `accessorProperty(name)` in `hir/types.ts`, the inverse of `accessorName` and placed beside
+it so the two cannot drift, and `methodDeclaringClass` routes a mangled name to
+`accessorDeclaringClass`, which speaks source names and returns the declaring class. The most
+derived declaration is still the implementor, for the reason above.
+
+**Test.** `tests/golden/{js,ts}/inherited_accessor.*`: getter and setter in the base, a three-level
+chain with `describe` overridden at two levels (that is what forces a table), reads and writes of
+the inherited accessor from every level, a base-typed reference, and `instanceof` both ways —
+byte-for-byte against the pinned Node. Both fixtures failed to BUILD before the fix, so they are
+also the regression proof.
+
+## 215. A block is a scope: the lowering's flat binding map leaked out of it (2026-09-11)
+
+**Found by probing a block-scoped name after its block** — one probe, four symptoms, two of them
+live wrong answers. `lowerBlock` lowered its statements with the CALLER's `Map<string, HType>`,
+and so did the `for` and `for-in` headers and the `switch` clause list, so every block-scoped
+declaration stayed resolvable where its scope had ended. The verifier already copies its scope map
+per block (`verifyBlock`), so the two disagreed — and the disagreement had two faces:
+
+- `{ let x = 1; } console.log(typeof x)` — the lowering resolved `x`, the verifier did not, and the
+  result was `STA4002 internal error in identifier: identifier 'x' is not defined`. Node prints
+  `undefined`. Same for `const`, a block function declaration, `try`/`finally` blocks, a case
+  block, and `{ class C {} } console.log(typeof C)`.
+- `for (let i = 0; i < 2; i += 1) {} console.log(typeof i)` printed **`number`** where Node prints
+  `undefined` — the loop's slot still held its last value and the name still resolved to it. That is
+  a silent wrong answer, the failure mode §0 exists to prevent, and nothing in the compiler reports
+  it. `for (const x of …)` and `catch (e)` were already correct (both already lowered into a copy).
+
+**Fix.** Each scope now lowers into `new Map(bindings)`: `lowerBlock`, `lowerFor` (header, condition,
+increment, body), `lowerForIn` (its binding and its internal temporaries), and `lowerSwitch` (one
+map for the whole clause list, which is one scope — the discriminant stays in the outer scope,
+evaluated before it exists). `var` is unaffected by construction: `hoistVarDeclarations` registers
+every `var` of a function/module into the enclosing map BEFORE any block is lowered, and the copies
+inherit it, which is what keeps `{ var leaked = 'here'; } console.log(leaked)` correct.
+
+**Tests.** `tests/golden/js/block_scope.js` — the out-of-scope half (`typeof` on a `let`, a `const`,
+a block function, a block class; a caught `ReferenceError`; the `for` header; `var` surviving its
+block; switch and try/finally blocks) and `tests/golden/ts/block_scope.ts` for the half ts mode can
+express (it refuses `var` as STA1104 and refuses a read of an undeclared name as TS2304, so the ts
+twin pins sibling blocks with same-named `let`s of DIFFERENT types — the case the flat map typed
+from the second declaration — plus the `for` header and a function-scoped block). Both match Node
+byte-for-byte; the js fixture's `typeof i` line printed `number` before the fix.
+
+**This is the LEAK half of step 14, not the shadowing half.** plan.md §8 step 14 stays open and its
+text now says so: a name RE-DECLARED in a nested scope still shares one slot with the outer one,
+because every copy carries the same source name — `const x = 1; { const x = 2; }` still reads back
+`2` for the outer `x`. Alpha-renaming at the lowering is what fixes that, and these copies are
+compatible with it rather than a substitute for it.

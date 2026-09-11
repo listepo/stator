@@ -1162,6 +1162,11 @@ function lowerFor(
   diagnostics: Diagnostic[],
   label?: string,
 ): Statement | null {
+  // `for (let i = 0; ...)`: the header binding belongs to the LOOP, not to the statement list the
+  // loop sits in. Sharing the caller's map leaked it, so `typeof i` after the loop read the loop's
+  // slot and answered `"number"` where Node answers `"undefined"` (plan-notes 213) -- and the body
+  // gets its own scope on top of this one, through `lowerBody`.
+  const inner = new Map(bindings);
   let init: Statement | undefined;
   if (node.initializer !== undefined) {
     // The initializer is either a declaration list (`let i = 0`) or an expression (`i = 0`). The
@@ -1173,7 +1178,7 @@ function lowerFor(
           node.initializer,
           sourceFile,
           checker,
-          bindings,
+          inner,
           diagnostics,
         )
       : lowerExpressionAsStatement(
@@ -1181,7 +1186,7 @@ function lowerFor(
           node.initializer,
           sourceFile,
           checker,
-          bindings,
+          inner,
           diagnostics,
         );
     if (!lowered) {
@@ -1192,7 +1197,7 @@ function lowerFor(
 
   let condition: Expression | undefined;
   if (node.condition !== undefined) {
-    const lowered = lowerExpression(node.condition, sourceFile, checker, bindings, diagnostics);
+    const lowered = lowerExpression(node.condition, sourceFile, checker, inner, diagnostics);
     if (!lowered) {
       return null;
     }
@@ -1206,7 +1211,7 @@ function lowerFor(
       node.incrementor,
       sourceFile,
       checker,
-      bindings,
+      inner,
       diagnostics,
     );
     if (!lowered) {
@@ -1215,7 +1220,7 @@ function lowerFor(
     update = lowered;
   }
 
-  const body = lowerBody(node.statement, sourceFile, checker, bindings, diagnostics);
+  const body = lowerBody(node.statement, sourceFile, checker, inner, diagnostics);
   if (!body) {
     return null;
   }
@@ -1249,24 +1254,19 @@ function lowerSwitch(
     return null;
   }
 
-  // The whole clause list is ONE block scope, so a function declared in any clause is bound before
-  // the first clause runs -- including a clause the dispatch jumps past. Hoisting per clause would
-  // make `case 0: return f();` an error whenever `f` is written under `default:`.
+  // The clause list is ONE block scope (see `SwitchClause`), so it gets one map: the hoist, every
+  // clause test and every clause's statements share it, and the discriminant does not -- it is
+  // evaluated before the switch's scope exists.
+  const inner = new Map(bindings);
   for (const clause of node.caseBlock.clauses) {
-    hoistFunctionDeclarations(clause.statements, checker, bindings);
+    hoistFunctionDeclarations(clause.statements, checker, inner);
   }
 
   const clauses: SwitchClause[] = [];
   for (const clause of node.caseBlock.clauses) {
     let test: Expression | undefined;
     if (ts.isCaseClause(clause)) {
-      const lowered = lowerExpression(
-        clause.expression,
-        sourceFile,
-        checker,
-        bindings,
-        diagnostics,
-      );
+      const lowered = lowerExpression(clause.expression, sourceFile, checker, inner, diagnostics);
       if (!lowered) {
         return null;
       }
@@ -1274,7 +1274,7 @@ function lowerSwitch(
     }
     const statements: Statement[] = [];
     for (const child of clause.statements) {
-      const stmt = lowerStatement(child, sourceFile, checker, bindings, diagnostics);
+      const stmt = lowerStatement(child, sourceFile, checker, inner, diagnostics);
       if (!stmt) {
         return null;
       }
@@ -2132,8 +2132,11 @@ function lowerForIn(
   const keysName = nextBindTemp();
   const indexName = nextBindTemp();
   const keysType = hArray(H_STRING);
-  bindings.set(keysName, keysType);
-  bindings.set(indexName, H_NUMBER);
+  // The binding and the loop's own temporaries belong to the loop, not to the list it sits in --
+  // and the walk in `lowerFor`'s comment applies here for the same measured reason.
+  const inner = new Map(bindings);
+  inner.set(keysName, keysType);
+  inner.set(indexName, H_NUMBER);
   let binding: string;
   let declKind: 'let' | 'const' = 'let';
   if (ts.isVariableDeclarationList(node.initializer)) {
@@ -2153,7 +2156,7 @@ function lowerForIn(
     }
     binding = decl.name.text;
     declKind = (node.initializer.flags & ts.NodeFlags.Const) !== 0 ? 'const' : 'let';
-    bindings.set(binding, H_STRING);
+    inner.set(binding, H_STRING);
   } else if (ts.isIdentifier(node.initializer)) {
     binding = node.initializer.text;
   } else {
@@ -2169,7 +2172,7 @@ function lowerForIn(
     );
     return null;
   }
-  const body = lowerBody(node.statement, sourceFile, checker, bindings, diagnostics);
+  const body = lowerBody(node.statement, sourceFile, checker, inner, diagnostics);
   if (body === null) {
     return null;
   }
@@ -2284,10 +2287,19 @@ function lowerBlock(
   bindings: Map<string, HType>,
   diagnostics: Diagnostic[],
 ): Block | null {
-  hoistFunctionDeclarations(node.statements, checker, bindings);
+  // A block IS a scope. Sharing the enclosing map made every block-scoped declaration leak out of
+  // it, and the leak has two shapes, both wrong: a name read after its block resolved to the
+  // block's binding here and nowhere in the verifier, which reported STA4002 on correct source
+  // (`{ let x = 1; } console.log(typeof x)` -- Node answers `undefined`); and a `for` header's
+  // binding answered `typeof` from its own stale slot after the loop, a WRONG ANSWER rather than a
+  // refusal (plan-notes 213). Copying is what the verifier already does per block, which is why
+  // the two now agree; the alpha-renaming step 14 lands is what makes SHADOWING correct, and this
+  // change does not pretend to (a shadowing name still shares one slot).
+  const inner = new Map(bindings);
+  hoistFunctionDeclarations(node.statements, checker, inner);
   const statements: Statement[] = [];
   for (const child of node.statements) {
-    const stmt = lowerStatement(child, sourceFile, checker, bindings, diagnostics);
+    const stmt = lowerStatement(child, sourceFile, checker, inner, diagnostics);
     if (stmt === null) {
       return null;
     }
