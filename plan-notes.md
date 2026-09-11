@@ -6734,3 +6734,87 @@ gate samples RSS with `ps`, so it cannot run under a sandbox that hides other pr
 run of the chain reported `only 0 RSS samples ... FAILED` for that reason alone, and the same
 command passed once `ps` was visible. Nothing in this migration touches the runtime or that harness;
 the count is recorded so the next reader does not chase it.
+
+## 225. Step 16: an interface is the same type as its anonymous twin (2026-09-11)
+
+The plan's step 16 named two failures that looked unrelated and are one decision: `interface O { x?:
+number }` + `delete o.x` aborted at run time with STA2007 where Node answers `true`, and
+`new Error('x').message` inline was STA4059 (an internal error) where Node answers `"x"`. Both are
+the same disagreement — the frontend typed a value one way and the runtime represented it another —
+and both are now fixed at the two places the type is decided.
+
+**1. `isDynamicShape` accepts an INTERFACE.** `docs/SUBSET.md`'s row sends an object literal with an
+optional property to the shape table, and it said "the CONTEXTUAL type decides"; the test that
+implemented it required the symbol to be an anonymous `ObjectLiteral|TypeLiteral`, and an interface
+is `SymbolFlags.Interface`. So `const o: O = { x: 1, y: 2 }` was emitted as a FIXED layout while its
+HType was Unknown — and Unknown is what `delete` and a dynamic write read as "dynamic, allowed", so
+the gate passed and the runtime aborted against a layout that cannot lose a slot. A CLASS stays off
+that list, deliberately: a class instance has a declared layout and that layout is the point of ts
+mode. `tests/golden/ts/interface_shape.ts` is the proof (delete, `in`, a write, an anonymous twin).
+
+**2. The five standard error interfaces map to `errorHType`.** `new Error('x')` lowers to an
+`error-new` node typed `errorHType`, but `tsTypeToHType` sent the `Error` interface to Unknown — so a
+binding `const e = new Error('x')` was Unknown (reads went dynamic and happened to work, because the
+runtime's shape-table get falls back to a fixed slot) while the INLINE `new Error('x').message` had a
+concretely-typed target on a dynamic node, which the verifier rejects. The mapping is by lib
+interface name, exactly as `Date` and `RegExp` already were. **One wrinkle the first cut hit:** the
+lib declaration of `Error` carries `stack?: string`, so once interfaces counted as dynamic shapes the
+generic trigger read every Error as "can lose a key" and sent `e.message` back through the shape
+table — `isDynamicShape` therefore excludes the five interfaces explicitly, with that reason in the
+code. `tests/golden/ts/error_family.ts` is the proof.
+
+**Decision fixtures moved with the truth:** `subset_error_construct_{ts,js}` were `dynamic` and their
+own comment said "modelling the interface would make it static (plan-notes 195)" — they are `static`
+now, which is the prediction coming true rather than a fixture bent to fit.
+
+**A deliberate non-change:** `shapeTypeToHType` still refuses an interface. Making a REQUIRED-property
+interface a structural layout would type `const p: P = new C()` as `{…}` while the runtime value
+carries C's own descriptor, and a field order that differs between the two would read the wrong slot
+with no check in between — the anonymous spelling has that hazard already, and this change does not
+widen it. The optional/index case is the one whose runtime representation actually changes.
+
+```text
+golden: 197 fixtures — 197 passed, 0 failed
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+unit 385; pass 385; fail 0
+```
+
+## 226. Step 15: the loop's suspension state lives in slots, and the frame parks its environment (2026-09-11)
+
+**The defect** (plan.md §8 step 15, plan-notes 223): `await`/`yield` inside a loop whose body
+captures the loop binding SIGTRAP'd at `-O2`. The emitter declared the loop's environment state as C
+locals INSIDE the loop body and put the resume label in that same block, so a resume jumped past the
+initializers and both were indeterminate — clang turned the resulting UB into `brk #1`.
+
+**Two changes, and the second is the one that makes it work.**
+
+1. **The state is slots, not C locals.** `iterEnvSlots` claims two slots per per-iteration loop while
+   counting, and `emitIterEnvOpen/Enter/Commit` read and write them through `slotAt` — so a sync
+   unit gets frame slots and an async or generator unit gets ENVIRONMENT slots, which already
+   survive a suspension for exactly this reason (`slotAt`'s own comment says so). The slots hold a
+   raw `JSRTEnv *` bit-cast into a `jsrt_value`; that is deliberate and safe, because the collector's
+   mark procedure masks every word of a collected object and marks what looks like a pointer, so a
+   pointer in a slot is traced where a NaN-boxed VALUE would not be. Nothing reads these slots as
+   values, and the names are unspellable.
+
+2. **`_jsrt_self->env = _jsrt_env;` before every park.** The resume prologue opens with
+   `JSRTEnv *_jsrt_env = _jsrt_self->env;`, and `JSRTAsync.env` was only ever written once, by
+   `jsrt_async_start` — so a resume came back on the loop's BASE environment while the body's
+   remaining code reads and writes the iteration's CLONE. First measurement after change 1: `i` stuck
+   at 2 and the loop printing `2` forever (5,922,816 lines in two seconds). For every async unit
+   whose environment never changes this stores the pointer it already holds, which is why no fixture
+   had ever noticed the omission.
+
+**Check evidence.** `tests/golden/js/suspend_in_loop.js` — an async loop with a captured binding and
+an await in every iteration, nested loops each capturing their own binding, a `break` out of a loop
+after an await, and a generator that yields from a captured loop — byte-for-byte against the pinned
+Node, at `-O2`, which is where the trap used to be. `tests/golden/js/promise_adoption.js` regained
+the `await`-inside-a-2000-iteration-loop stress it had to drop while the defect was open; that loop
+is what brought it to light.
+
+```text
+golden: 197 fixtures — 197 passed, 0 failed
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+unit 385; pass 385; fail 0
+runtime: print corpus matches Node
+```

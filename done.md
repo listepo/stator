@@ -1218,6 +1218,81 @@ was `STA1214` or `STA0012`, so no passing test could have contained one) and the
 a working copy with the step-12(e) landing whose new shadowing refusal has exactly that shape. Full
 evidence and the re-measure condition: plan-notes 210.
 
+### Step 15 — Suspension inside a per-iteration-env loop (2026-09-11)
+
+**The Check that closed** (`plan.md` §8 step 15): *a golden where an async function awaits inside a
+loop whose body captures the binding matches the pinned Node byte-for-byte at `-O2`, and the same
+for a generator that yields there.* Both are in `tests/golden/js/suspend_in_loop.js`. Design record:
+plan-notes 226.
+
+**The defect.** The emitter declared a per-iteration loop's environment state as two C locals inside
+the loop body (`JSRTEnv *_jsrt_saved_env_0 = _jsrt_env; _jsrt_iter_env_0 = NULL;`) and put the
+`await`'s resume label in that same block, so a resume jumped PAST the initializers and both were
+indeterminate. At `-O2` clang turned the UB into `brk #1` (SIGTRAP, exit 133); at `-O0` it happened
+to work, which is why no local run caught it. Pre-existing: reproduced on the pristine tree before
+anything in this session was applied.
+
+**The fix, in two halves.**
+
+- The state is two frame SLOTS per loop rather than two C locals (`iterEnvSlots`, claimed while
+  counting). `slotAt` resolves a slot to the C frame in a sync unit and to the heap environment in
+  an async or generator one — and the environment is exactly the storage that survives a
+  suspension — so one code path serves all three unit kinds. The slots hold a raw `JSRTEnv *`
+  bit-cast into a `jsrt_value`, which the collector traces because its mark procedure masks every
+  word of a collected object and marks what looks like a pointer.
+- `emitPark` now writes `_jsrt_self->env = _jsrt_env;` before suspending. `JSRTAsync.env` had only
+  ever been written by `jsrt_async_start`, so a resume re-entered on the loop's BASE environment
+  while the body's remaining code read and wrote the iteration's CLONE. Without this half the first
+  measurement was an infinite loop — `i` stuck at its last value, 5.9M lines of output in two
+  seconds — which is the honest sign that the slots half alone was not the fix.
+
+```text
+unit 385; pass 385; fail 0
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+golden: 197 fixtures — 197 passed, 0 failed
+runtime: print corpus matches Node
+```
+
+### Step 16 — An interface is the same type as its anonymous twin (2026-09-11)
+
+**The Check that closed** (`plan.md` §8 step 16): *both fixtures match Node, and the choice is
+recorded.* The choice is the **dynamic** one: an interface with an optional property or an index
+signature is a dynamic shape, exactly like the anonymous type it is structurally identical to, and
+the five standard error interfaces are the runtime layout their constructors produce. Design record:
+plan-notes 225.
+
+**What was wrong.** Two failures that look unrelated and are one disagreement between what the
+frontend typed and what the runtime represented:
+
+- `interface O { x?: number; y?: number }; const o: O = { x: 1, y: 2 }; delete o.x` — `PANIC:
+  STA2007` where Node answers `true`. The literal was emitted as a FIXED layout (`isDynamicShape`
+  required an anonymous `ObjectLiteral|TypeLiteral` symbol; an interface is `SymbolFlags.Interface`)
+  while its HType was Unknown, and Unknown is what `delete` and dynamic writes read as
+  "dynamic, allowed" — so the gate passed and the runtime aborted against a layout that cannot lose
+  a slot.
+- `console.log(new Error('x').message)` — `STA4059` (internal error) where Node prints `x`. The
+  `error-new` node is typed `errorHType`, but `tsTypeToHType` sent the `Error` INTERFACE to Unknown
+  because of its optional `stack`, so an inline `new Error(...)` produced a dynamic read whose target
+  the lowering had concretely typed.
+
+**The fix.** `isDynamicShape` accepts `SymbolFlags.Interface` alongside the two anonymous literal
+symbols — a CLASS stays out, because a class instance's declared layout is the point of ts mode —
+and `tsTypeToHType` maps the five standard error interfaces to `errorHType`, by lib-interface name
+the way `Date` and `RegExp` already were. `isDynamicShape` excludes those five explicitly, because
+their `stack?: string` would otherwise re-route `e.message` through the shape table.
+
+**Evidence.** `tests/golden/ts/interface_shape.ts` (delete, `in`, a read after delete, a write, and
+the anonymous twin) and `tests/golden/ts/error_family.ts` (all five constructors, `.name`,
+`.message`, `instanceof`, an empty message, a caught error) — both byte-for-byte against the pinned
+Node. `subset_error_construct_{ts,js}` moved from `dynamic` to `static`, which is what their own
+comment predicted would happen when the interface was modelled (plan-notes 195).
+
+```text
+unit 385; pass 385; fail 0
+subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
+golden: 197 fixtures — 197 passed, 0 failed
+```
+
 ### Step 14 — Block scoping: alpha-renaming at the lowering (2026-09-11)
 
 **The Check that closed** (`plan.md` §8 step 14): *a golden fixture shadowing a `const`, a `let`, a

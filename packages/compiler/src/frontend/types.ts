@@ -1,4 +1,5 @@
 import * as ts from 'typescript';
+import { ERROR_CLASSES, errorHType } from '../hir/nodes.ts';
 import type { HField, HType } from '../hir/types.ts';
 import {
   accessorName,
@@ -106,6 +107,19 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
 
   if (isLibInterface(type, 'Date')) {
     return H_DATE;
+  }
+
+  /* The five standard error interfaces are their runtime LAYOUT, not an unknown. `new Error('x')`
+   * lowers to `error-new` typed `errorHType`, so a binding declared from one -- `const e = new
+   * Error('x')` -- has to have the same HType as the value it holds. It did not: the interface fell
+   * through to Unknown, so `e.message` on an INLINE `new Error('x').message` was a dynamic read
+   * whose target the lowering had concretely typed, which the verifier rejects (STA4059, plan-notes
+   * 223). Matching by name, exactly as Date and RegExp above, because the type IS that lib
+   * interface -- there is no user declaration to inspect. */
+  for (const ctor of ERROR_CLASSES) {
+    if (isLibInterface(type, ctor)) {
+      return errorHType(ctor);
+    }
   }
 
   const object = classTypeToHType(type, checker, depth);
@@ -373,12 +387,30 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
  * deoptimizes its whole shape, siblings included: `{ val: 1, get x() {…} }` resolves `val` through
  * the shape table too, because one object cannot be half a layout. */
 export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean {
+  /* The standard error interfaces are their runtime LAYOUT, not a shape (see `tsTypeToHType`), and
+   * their lib declaration carries an optional `stack` -- so the trigger below would read them as
+   * "this shape can lose a key" and send every `e.message` through the shape table, which is the
+   * STA4059 the layout mapping exists to fix (plan-notes 223). */
+  for (const ctor of ERROR_CLASSES) {
+    if (isLibInterface(type, ctor)) {
+      return false;
+    }
+  }
   const symbol = type.getSymbol();
-  const anonymous =
+  /* An INTERFACE is the same shape as its anonymous twin: `interface O { x?: number }` and
+   * `{ x?: number }` describe one type, and `docs/SUBSET.md`'s row sends a literal with an optional
+   * property to the shape table whichever spelling introduced it. Leaving the interface out made
+   * the literal a fixed layout while its HType was Unknown -- so `delete o.x` passed the gate
+   * (Unknown reads as dynamic) and then aborted at run time against a layout that cannot lose a
+   * slot (plan-notes 223). A CLASS is deliberately not on this list: a class instance has a
+   * declared layout, and that layout is the point of ts mode. */
+  const structural =
     symbol !== undefined &&
-    (symbol.flags & (ts.SymbolFlags.ObjectLiteral | ts.SymbolFlags.TypeLiteral)) !== 0;
+    (symbol.flags &
+      (ts.SymbolFlags.ObjectLiteral | ts.SymbolFlags.TypeLiteral | ts.SymbolFlags.Interface)) !==
+      0;
   if (
-    !anonymous ||
+    !structural ||
     checker.getSignaturesOfType(type, ts.SignatureKind.Call).length > 0 ||
     checker.getSignaturesOfType(type, ts.SignatureKind.Construct).length > 0
   ) {

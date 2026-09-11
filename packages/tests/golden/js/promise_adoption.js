@@ -37,17 +37,17 @@ async function main() {
   }
 
   // A promise has to SURVIVE being constructed: the executor resolves it, and the resolver pair
-  // allocates in between. The loop has no `await` of its own on purpose -- an await inside a
-  // per-iteration-env loop is a separate defect (plan-notes 223), and this fixture is about the
-  // promise, not about that.
-  let last = null;
+  // allocates in between. The `await` inside the loop is deliberate as well -- suspending inside a
+  // loop whose body captures the binding is the case the emitter used to resume into the middle of
+  // a C block (plan.md §8 step 15, plan-notes 226), and this fixture is the one that found it.
   for (let i = 0; i < 2000; i += 1) {
     const p = new Promise(function (resolve) {
       resolve(i);
     });
-    last = p;
+    if (i === 1999) {
+      console.log(await p);
+    }
   }
-  console.log(await last);
   console.log('done');
 }
 main();

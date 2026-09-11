@@ -452,6 +452,22 @@ class Emitter {
   /* Loops and switches currently open, innermost last -- the emitter's mirror of the verifier's
    * Enclosing stack, carrying the id that names this construct's C labels. */
   private enclosing: { id: number; label?: string; isLoop: boolean; iterEnv?: boolean }[] = [];
+
+  /* A per-iteration loop's SUSPENSION STATE, as two frame slots claimed while counting (plan-notes
+   * 226): the environment the loop clones from and the clone the current iteration holds. They used
+   * to be C locals declared inside the loop body, which an `await`/`yield` inside that body cannot
+   * survive -- the frame is popped at the suspension and the resume `goto` jumps PAST the
+   * initializers, leaving both indeterminate (measured: `brk #1` from clang at -O2, plan.md §8
+   * step 15). A slot is storage the unit already keeps alive across a suspension: for an
+   * async/generator unit `slotAt` resolves to the heap environment, for a sync one to the frame,
+   * and the same code serves both. The slot holds a RAW `JSRTEnv *`, which is deliberate and safe:
+   * the collector's mark procedure masks every word and marks what it finds, so a pointer in a slot
+   * is traced; only a NaN-boxed VALUE would be invisible.
+   *
+   * Keyed by the loop statement while counting and by the loop id while emitting, because the id is
+   * minted at emission time and the slots have to exist before it. */
+  private iterEnvSlots = new Map<Statement, number>();
+  private iterEnvBase = new Map<number, number>();
   private loopCount: number = 0;
   /* Labels a `goto` actually targets. C warns on a label nothing jumps to, and the runtime builds
    * with -Wall -Wextra -Werror, so an unconditional `brk_N:` after every loop would turn a plain
@@ -947,10 +963,12 @@ class Emitter {
           break;
         case 'while-statement':
         case 'do-while-statement':
+          this.countIterEnvSlots(stmt);
           this.countExpression(stmt.condition);
           this.countBindings(stmt.body.statements);
           break;
         case 'for-statement':
+          this.countIterEnvSlots(stmt);
           if (stmt.init) {
             this.countBindings([stmt.init]);
           }
@@ -997,6 +1015,7 @@ class Emitter {
           this.countExpression(stmt.value);
           break;
         case 'for-of-statement':
+          this.countIterEnvSlots(stmt);
           this.forOfSlots.set(stmt, this.slotCount);
           this.slotCount++;
           this.countExpression(stmt.iterable);
@@ -1445,7 +1464,7 @@ class Emitter {
       }
 
       case 'while-statement': {
-        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        const id = this.enterLoop(stmt);
         this.emitIterEnvOpen(id, stmt.span);
         // The condition is captured, not emitted in place: it re-runs every iteration, so any
         // statements it needs (a call and its pending check) must land INSIDE the loop, and a
@@ -1476,7 +1495,7 @@ class Emitter {
       }
 
       case 'do-while-statement': {
-        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        const id = this.enterLoop(stmt);
         this.emitIterEnvOpen(id, stmt.span);
         this.appendLine('do {', stmt.span);
         this.indent++;
@@ -1509,7 +1528,7 @@ class Emitter {
         if (stmt.init) {
           this.emitStatement(stmt.init);
         }
-        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        const id = this.enterLoop(stmt);
         this.emitIterEnvOpen(id, stmt.span);
         // An absent condition is an infinite loop, not a false one. `while (1)` rather than
         // synthesising a `true` literal, so nothing downstream has to evaluate a fake node. A
@@ -1625,7 +1644,7 @@ class Emitter {
         }
         const iterable = this.slotAt(slot);
         this.appendLine(`${iterable} = ${this.emitExpression(stmt.iterable)};`, stmt.span);
-        const id = this.enterLoop(stmt.label, stmt.perIterationEnv);
+        const id = this.enterLoop(stmt);
         this.emitIterEnvOpen(id, stmt.span);
         if (stmt.iterable.type.kind === 'iterator') {
           this.emitBoxedIteratorForOf(stmt, iterable, id);
@@ -1964,16 +1983,39 @@ class Emitter {
     this.enclosing.pop();
   }
 
-  private enterLoop(label?: string, perIterationEnv?: true): number {
+  /** Opens a loop's jump scope. `stmt` is what ties the loop to the two suspension slots counted
+   * for it (`iterEnvSlots`): the id is minted here, at emission time, and the slots had to exist
+   * before it, so the statement is the only key both passes share. */
+  private enterLoop(stmt: { label?: string; perIterationEnv?: true }): number {
     const id = this.loopCount++;
-    const iterEnv = perIterationEnv === true && this.envMap.size > 0;
+    const iterEnv = stmt.perIterationEnv === true && this.envMap.size > 0;
+    if (iterEnv) {
+      const base = this.iterEnvSlots.get(stmt as unknown as Statement);
+      if (base === undefined) {
+        throw new Error('per-iteration loop was not counted; countBindings missed a node');
+      }
+      this.iterEnvBase.set(id, base);
+    }
     this.enclosing.push({
       id,
       isLoop: true,
-      ...(label !== undefined && { label }),
+      ...(stmt.label !== undefined && { label: stmt.label }),
       ...(iterEnv && { iterEnv: true }),
     });
     return id;
+  }
+
+  /** Claims the two slots a per-iteration loop needs when it can be suspended across: nothing when
+   * the loop has no environment to clone, so an ordinary `for` pays no slot. */
+  private countIterEnvSlots(stmt: Statement): void {
+    if (!('perIterationEnv' in stmt) || !stmt.perIterationEnv) {
+      return;
+    }
+    if (this.envMap.size === 0) {
+      return;
+    }
+    this.iterEnvSlots.set(stmt, this.slotCount);
+    this.slotCount += 2;
   }
 
   private enterBreakable(label: string): number {
@@ -1993,24 +2035,41 @@ class Emitter {
     return this.inFunction ? `JSRT_FRAME_ENV(${env});` : `JSRT_GLOBALS_ENV(${env});`;
   }
 
+  /** The two slots a per-iteration loop keeps its environment state in, as lvalues. */
+  private iterEnvState(id: number): { saved: string; iter: string } {
+    const base = this.iterEnvBase.get(id);
+    if (base === undefined) {
+      throw new Error('per-iteration loop has no suspension slots; countBindings missed a node');
+    }
+    return { saved: this.slotAt(base), iter: this.slotAt(base + 1) };
+  }
+
+  /* Opening, entering, committing and closing a loop that clones its environment per iteration.
+   *
+   * The state lives in two SLOTS rather than two C locals -- see `iterEnvSlots` for why, and note
+   * what that buys: the same four emitters serve a sync unit (frame slots) and an async or
+   * generator unit (environment slots, which survive a suspension), so a loop body can `await`
+   * without a second code path. The slots hold raw `JSRTEnv *` bit-cast into `jsrt_value`; nothing
+   * reads them as values, and the collector's mark procedure traces the pointer. */
+
   private emitIterEnvOpen(id: number, span: Span): void {
     if (!this.iterEnvOf(id)) {
       return;
     }
-    this.appendLine('{', span);
-    this.indent++;
-    this.appendLine(`JSRTEnv *_jsrt_saved_env_${id} = _jsrt_env;`, span);
-    this.appendLine(`JSRTEnv *_jsrt_iter_env_${id} = NULL;`, span);
+    const { saved, iter } = this.iterEnvState(id);
+    this.appendLine(`${saved} = (jsrt_value)(uintptr_t)_jsrt_env;`, span);
+    this.appendLine(`${iter} = (jsrt_value)0;`, span);
   }
 
   private emitIterEnvEnter(id: number, span: Span): void {
     if (!this.iterEnvOf(id)) {
       return;
     }
-    this.appendLine(`if (_jsrt_saved_env_${id} != NULL) {`, span);
+    const { saved, iter } = this.iterEnvState(id);
+    this.appendLine(`if (${saved} != (jsrt_value)0) {`, span);
     this.indent++;
-    this.appendLine(`_jsrt_iter_env_${id} = jsrt_env_clone(_jsrt_saved_env_${id});`, span);
-    this.appendLine(`_jsrt_env = _jsrt_iter_env_${id};`, span);
+    this.appendLine(`_jsrt_env = jsrt_env_clone((JSRTEnv *)(uintptr_t)${saved});`, span);
+    this.appendLine(`${iter} = (jsrt_value)(uintptr_t)_jsrt_env;`, span);
     this.appendLine(this.frameEnvLine('_jsrt_env'), span);
     this.indent--;
     this.appendLine('}', span);
@@ -2020,21 +2079,22 @@ class Emitter {
     if (!this.iterEnvOf(id)) {
       return;
     }
-    this.appendLine(`if (_jsrt_iter_env_${id} != NULL) {`, span);
+    const { saved, iter } = this.iterEnvState(id);
+    this.appendLine(`if (${iter} != (jsrt_value)0) {`, span);
     this.indent++;
-    this.appendLine(`jsrt_env_copy_slots(_jsrt_saved_env_${id}, _jsrt_iter_env_${id});`, span);
-    this.appendLine(`_jsrt_env = _jsrt_saved_env_${id};`, span);
+    this.appendLine(
+      `jsrt_env_copy_slots((JSRTEnv *)(uintptr_t)${saved}, (JSRTEnv *)(uintptr_t)${iter});`,
+      span,
+    );
+    this.appendLine(`_jsrt_env = (JSRTEnv *)(uintptr_t)${saved};`, span);
     this.appendLine(this.frameEnvLine('_jsrt_env'), span);
     this.indent--;
     this.appendLine('}', span);
   }
 
-  private emitIterEnvClose(id: number, span: Span): void {
-    if (!this.iterEnvOf(id)) {
-      return;
-    }
-    this.indent--;
-    this.appendLine('}', span);
+  private emitIterEnvClose(_id: number, _span: Span): void {
+    // Nothing to close: the state is slots, not a C block's locals. The method stays because its
+    // call sites sit beside `emitJumpTarget('brk_…')` and read as the pair they are.
   }
 
   private commitIterEnvs(fromIndexInclusive: number, span: Span): void {
@@ -3363,6 +3423,13 @@ class Emitter {
     const at = this.suspendSlot(expr);
     this.appendLine(`${at} = ${this.emitExpression(expr.value)};`, expr.span);
     this.appendLine(`_jsrt_self->state = ${state};`, expr.span);
+    // The resume prologue re-reads `_jsrt_self->env`, so the CURRENT environment has to be parked
+    // there before the frame disappears -- otherwise a resume inside a per-iteration loop would
+    // come back on the loop's base environment while the body's remaining code reads and writes
+    // the iteration's clone (measured: `i` stuck at its last value and the loop never exiting,
+    // plan-notes 226). For a unit whose env never changes this stores the same pointer it already
+    // holds, which is why nothing observed it before.
+    this.appendLine('_jsrt_self->env = _jsrt_env;', expr.span);
     this.appendLine(parkCall, expr.span);
     this.appendLine('JSRT_FRAME_POP();', expr.span);
     this.appendLine('return;', expr.span);

@@ -293,12 +293,21 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)** and **steps 15–16**, the
-two shipped-construct defects the bug hunt of 2026-09-11 found and did not fix (plan-notes 223).
+What is still OPEN in this phase is **step 2a(b)/(c)** and **step 12 (c)–(f)**. The two
+shipped-construct defects the bug hunt of 2026-09-11 found (steps 15 and 16) both landed the same
+day — plan-notes 225 and 226.
 Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
-(plan-notes 209) and landed on 2026-09-11 (plan-notes 216). Difficulty (§14 legend): 2a(b)
-**D2 (blocked)**, 2a(c) **D4**, 12(c) **D3**, 12(d) **D5**, 12(e) **D3**, 12(f) **D4**, 15 **D4**,
-16 **D3**.
+(plan-notes 209) and landed on 2026-09-11 (plan-notes 216). Tags below carry both legends (§14):
+difficulty as `[Dn]`, priority as `[Pn]`, and where a task's steps disagree the task keeps the
+highest of them — which is also how the heading reads (`D2 · P1` is the lowest difficulty and the
+highest priority among the items below, not the phase's own shape). Step 2a(c) is `[D4][P0]` — it is
+the shared blocker the (b) sweep ended at, so every further suppression decision waits on the
+question it asks rather than on another bucket judgment. Step 2a(b)'s three remaining buckets are
+`[D2][P1]` and **blocked** on step 12's surface, which is why they are not P0 as well. Step 15 is
+`[D4][P1]` — a defect in a construct Stator already ships and already claims to compile, the
+`await`-in-a-loop one being a SIGTRAP at `-O2`. Step 16 was the second such defect when this tagging
+pass began and landed during it, which is why it now carries no tag (§14: struck-through work does
+not).
 
 ~~**Step-12 bookkeeping debt** (added 2026-09-04; closed 2026-09-08, all three sub-items in one
 bundle — evidence: done.md → Phase 5).~~ ✅
@@ -519,33 +528,31 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     pinned Node byte-for-byte in `tests/golden/js/block_shadow.js`; the
     `subset_block_function_shadow_*` rows are `static`; `gate.ts` emits no `not-yet` naming a
     shadowed block binding (the strings are gone). TDZ remains unmodelled and is NOT claimed.
-15. **[D4] `await`/`yield` inside a per-iteration-env loop resumes into a C block** (plan-notes
-    223, open). Pre-existing, and reproduced on the pristine tree: the emitter declares the loop's
-    suspension state as C locals INSIDE the loop body (`JSRTEnv *_jsrt_saved_env_0 = _jsrt_env;`,
-    `_jsrt_iter_env_0 = NULL;`) and puts the resume label in that same block, so a resume jumps past
-    the initializers and both are indeterminate. At `-O2` clang turns the UB into `brk #1`:
-    `await` inside a `for` whose body captures the loop binding SIGTRAPs where Node prints a value.
-    `tests/golden` has no fixture that does this, which is why the suite is green. The fix belongs
-    where `try`/`finally` already solved the same problem — its completion code lives in a frame
-    slot that survives a suspension — and the loop's suspension state needs the same treatment, or a
-    per-loop re-entry that re-establishes the C locals. **Check:** a golden where an async function
-    awaits inside a loop whose body captures the binding matches the pinned Node byte-for-byte at
-    `-O2`, and the same for a generator that yields there.
+15. ~~**[D4][P1] `await`/`yield` inside a per-iteration-env loop resumes into a C block**
+    (plan-notes 223).~~ ✅ **landed 2026-09-11** (plan-notes 226; evidence in [done.md](done.md) →
+    Phase 5 step 15). The loop's environment state lives in two frame SLOTS now — which `slotAt`
+    resolves to the heap environment in an async or generator unit, where it survives a suspension —
+    and `emitPark` writes `_jsrt_self->env = _jsrt_env;` before suspending, because the resume used
+    to come back on the loop's base environment while the body read and wrote the iteration's clone.
+    **Check:** `tests/golden/js/suspend_in_loop.js` — an async loop with a captured binding and an
+    await in every iteration, nested loops, a `break` after an await, and a generator yielding from a
+    captured loop — matches the pinned Node byte-for-byte at `-O2`, where the trap used to be.
 
-16. **[D3] An interface-typed value is a fixed layout whose HType is `unknown`** (plan-notes 223,
-    open). `delete` and a dynamic write read the type as "dynamic, allowed" and then abort at run
-    time (`interface O { x?: number }` + `delete o.x` → PANIC STA2007 where Node answers `true`),
-    while a field read reads it as a dynamic read and fails the verifier (`new Error(a[0]).message`
-    → STA4059 internal error where Node answers `""`). `objectLiteralIsDynamic` sends a literal to
-    the dynamic representation only for an anonymous `ObjectLiteral|TypeLiteral` symbol, and an
-    `interface` is neither. **Check:** both fixtures above match Node, and the choice is recorded:
-    an interface with an optional or index trigger is dynamic like its anonymous twin, or it is a
-    fixed `object` and every context that treats `unknown` as dynamic learns the difference.
+16. ~~**An interface-typed value is a fixed layout whose HType is `unknown`**
+    (plan-notes 223).~~ ✅ **landed 2026-09-11** (plan-notes 225; evidence in [done.md](done.md) →
+    Phase 5 step 16). `isDynamicShape` accepts an interface (a class deliberately still does not —
+    a class instance's declared layout is the point of ts mode), so an optional-property interface
+    takes the shape table like its anonymous twin, and the five standard error interfaces map to
+    `errorHType` in `tsTypeToHType` — with `isDynamicShape` excluding those five, whose optional
+    `stack` would otherwise route `e.message` through the shape table. **Check:**
+    `tests/golden/ts/interface_shape.ts` and `tests/golden/ts/error_family.ts` match the pinned Node
+    byte-for-byte; the recorded choice (docs/SUBSET.md, plan-notes 225) is DYNAMIC for an interface
+    with an optional property or an index signature.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
 
-## 9. Phase 6 — Conformance and differential fuzzing (starts after Phase 3; Test262 needs Phase 5; then forever)
+## 9. Phase 6 — Conformance and differential fuzzing (starts after Phase 3; Test262 needs Phase 5; then forever) — **D2 · P2**
 
 This phase produces no language features. It produces **evidence** — a conformance number, a
 divergence hunt, and measurements — and its output is only as good as its honesty, so every step
