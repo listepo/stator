@@ -33,14 +33,15 @@
  */
 
 import type {
+  Block,
   Expression,
   FunctionDeclaration,
   FunctionExpr,
   Module,
   ReturnStatement,
 } from '../hir/nodes.ts';
-import { hTypeEquals } from '../hir/types.ts';
-import { rewriteExpression, rewriteModule } from './rewrite.ts';
+import { H_UNDEFINED, hTypeEquals } from '../hir/types.ts';
+import { rewriteExpression, rewriteModule, rewriteStatements } from './rewrite.ts';
 
 export function inlineCalls(module: Module): Module {
   const bindings = bindingCounts(module);
@@ -136,7 +137,19 @@ function candidateOf(declaration: FunctionDeclaration): Candidate | null {
   }
   const params = fn.params.map((p) => ({ name: p.name, type: p.type }));
   const names = new Set(params.map((p) => p.name));
-  return freeNames(result).every((name) => names.has(name)) ? { params, result } : null;
+  if (!freeNames(result).every((name) => names.has(name))) {
+    return null;
+  }
+  // Condition 2 asks whether the body names anything but its own parameters. A nested function
+  // that REBINDS one of those names answers "no" and is not: `[1,2].map(function (x) { return x; })`
+  // inside `function shift(x) { ... }` names only `x`, but that `x` is the callback's own
+  // parameter, and substituting the argument for it turned `shift(7)` into `70` where Node says
+  // `10` (plan-notes 219). Substitution is textual over the whole result, so the only safe answer
+  // is to decline when a nested scope binds a name being substituted.
+  if (rebindsNested(result, names)) {
+    return null;
+  }
+  return { params, result };
 }
 
 /** Every identifier name in an expression. The rewriter serves as the visitor so this walk cannot
@@ -152,6 +165,38 @@ function freeNames(expr: Expression): readonly string[] {
     },
   });
   return names;
+}
+
+/** True when something nested inside `expr` declares one of `names` for itself -- a nested
+ * function's parameter, or any declaration in a nested body.
+ *
+ * Over-approximates in the direction that costs an inlining rather than a wrong answer: a
+ * declaration in a nested BLOCK counts even though it could not capture a reference outside it. */
+function rebindsNested(expr: Expression, names: ReadonlySet<string>): boolean {
+  let found = false;
+  const holder: Block = {
+    kind: 'block',
+    type: H_UNDEFINED,
+    span: expr.span,
+    statements: [
+      { kind: 'expression-statement', type: expr.type, span: expr.span, expression: expr },
+    ],
+  };
+  rewriteStatements(holder.statements, {
+    expression: (e) => {
+      if (e.kind === 'function' && e.params.some((p) => names.has(p.name))) {
+        found = true;
+      }
+      return e;
+    },
+    statement: (stmt) => {
+      if (stmt.kind === 'declaration' && names.has(stmt.name)) {
+        found = true;
+      }
+      return [stmt];
+    },
+  });
+  return found;
 }
 
 /** Duplicable and effect-free: exactly the arguments condition 3 admits. */

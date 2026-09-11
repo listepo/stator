@@ -369,17 +369,37 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
     return false;
   }
   const char *k = jsrt_shape_key(jsrt_to_string(key));
-  if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
-    if (strcmp(k, "length") == 0) {
-      return true;
-    }
-    char *end = NULL;
-    const unsigned long idx = strtoul(k, &end, 10);
-    if (end != k && end != NULL && *end == '\0' && idx < (unsigned long)jsrt_as_array(obj)->length) {
-      return true;
-    }
+  if (!jsrt_is_object(obj)) {
+    /* §13.10.1 step 6: the RIGHT operand must be an Object, and a primitive is not one -- so the
+     * answer is a TypeError, never a boolean. Two wrong answers lived here: `"length" in "abc"`
+     * reported `true` through the string branch of `jsrt_has_prop`, and any other primitive
+     * reported `false`, so a thrown error was hidden behind an ordinary value (plan-notes 220).
+     * Node's wording names both operands, so the receiver goes through ToString like the key. */
+    const char *receiver = jsrt_shape_key(jsrt_to_string(obj));
+    char message[256];
+    snprintf(message, sizeof message, "Cannot use 'in' operator to search for '%s' in %s", k,
+             receiver);
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    free((void *)receiver);
+    free((void *)k);
+    return false;
   }
-  return jsrt_has_prop(obj, k);
+  bool answer = false;
+  if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
+    /* An INDEX test, not a decimal parse: `strtoul` accepts a sign and leading zeros, so `'01' in
+     * a`, `'+1' in a` and `'-0' in a` all answered `true` where Node answers `false`. The canonical
+     * spelling `array_index_value` is the one test the rest of this file uses. */
+    uint32_t index = 0;
+    answer = strcmp(k, "length") == 0 ||
+             (array_index_value(k, &index) && index < jsrt_as_array(obj)->length);
+  }
+  if (!answer) {
+    answer = jsrt_has_prop(obj, k);
+  }
+  /* Compared only -- nothing here keeps the key, unlike a write that installs it in a shape -- so
+   * this copy dies with the call instead of joining the immortal shape table. */
+  free((void *)k);
+  return answer;
 }
 
 /* `honor_accessor` is false for exactly one caller: jsrt_define_accessor, which is INSTALLING the

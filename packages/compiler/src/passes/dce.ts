@@ -16,6 +16,7 @@
  */
 
 import type {
+  Block,
   Expression,
   FunctionDeclaration,
   Module,
@@ -102,12 +103,38 @@ function prune(stmt: Statement): readonly Statement[] {
 
     // A `do/while` runs its body once before the first test, so a false test removes the LOOP but
     // not the body -- and the body keeps its own scope, exactly as in the `if` case above.
+    //
+    // Unless the body JUMPS. `break` and `continue` name their target by position, and deleting the
+    // loop leaves them pointing at the next enclosing one: `for (const x of xs) { do { continue; }
+    // while (false); use(x); }` skipped `use` entirely instead of running it, and with nothing
+    // enclosing, `break` became an internal error. The check is deliberately coarse -- ANY jump in
+    // the body declines the rewrite, a nested loop's own `break` included (plan-notes 218).
     case 'do-while-statement':
-      return literalTruth(stmt.condition) === false ? [stmt.body] : [stmt];
+      return literalTruth(stmt.condition) === false && !containsJump(stmt.body)
+        ? [stmt.body]
+        : [stmt];
 
     default:
       return [stmt];
   }
+}
+
+/** True when this block contains a `break` or `continue` anywhere below it.
+ *
+ * Coarser than "targets this loop" on purpose: the generic walker below knows no nesting, and a
+ * nested loop's own jump declining a rewrite costs one loop that stays in the output, where the
+ * opposite mistake costs a retargeted jump. */
+function containsJump(body: Block): boolean {
+  let found = false;
+  rewriteStatements(body.statements, {
+    statement: (stmt) => {
+      if (stmt.kind === 'break-statement' || stmt.kind === 'continue-statement') {
+        found = true;
+      }
+      return [stmt];
+    },
+  });
+  return found;
 }
 
 /** Every name read as an identifier anywhere below these statements.

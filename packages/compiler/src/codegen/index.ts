@@ -167,9 +167,17 @@ function cDoubleLiteral(value: number): string {
   return /[.eE]/.test(text) ? text : `${text}.0`;
 }
 
-/** A C string literal, used for the function name `jsrt_print` reports as `[Function: name]`. */
+/** A C string literal, used for the function name `jsrt_print` reports as `[Function: name]`.
+ * `?` is escaped for the trigraph reason `escapeBytes` documents. */
 function cNameLiteral(name: string): string {
-  return `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return `"${escapeCString(name)}"`;
+}
+
+/** A C string literal's body for everything that is not a byte string: a file name in a `#line`,
+ * a `file:line` location, a reference error's name, a function's own name. Same escaping rules as
+ * `escapeBytes`, and the same trigraph rule, spelled once so the two cannot drift. */
+function escapeCString(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\?/g, '\\?');
 }
 
 /* One emitted C function. Each HIR function becomes a `_jsrt_fn_N` with a frame of its own, plus a
@@ -294,7 +302,13 @@ function wtf8Bytes(value: string): number[] {
 }
 
 /* Octal, never `\x`: a C hex escape consumes as many hex digits as follow it, so `"\xEDa"` is one
- * out-of-range character rather than two. Three octal digits are always exactly three. */
+ * out-of-range character rather than two. Three octal digits are always exactly three.
+ *
+ * `?` is escaped even though it is printable, because C11 still has TRIGRAPHS: `??!` inside a
+ * string literal is the single character `|`, and `??/` is a backslash that eats the closing quote.
+ * `console.log("a??!b")` printed `a|b` and `"x??/"` did not compile at all until this (plan-notes
+ * 217). `\?` is a plain escape for the same character, and `-std=c11` is the dialect the build
+ * pins, so the literal has to survive it. */
 function escapeBytes(bytes: readonly number[]): string {
   let result = '';
   for (const byte of bytes) {
@@ -303,6 +317,7 @@ function escapeBytes(bytes: readonly number[]): string {
     else if (byte === 0x0d) result += '\\r';
     else if (byte === 0x5c) result += '\\\\';
     else if (byte === 0x22) result += '\\"';
+    else if (byte === 0x3f) result += '\\?';
     else if (byte >= 0x20 && byte < 0x7f) result += String.fromCharCode(byte);
     else result += `\\${byte.toString(8).padStart(3, '0')}`;
   }
@@ -338,6 +353,7 @@ class Emitter {
   private callSlots: Map<
     | ArrayOp
     | CallExpr
+    | ConsoleLogCall
     | JsonParse
     | JsonStringify
     | CollectionOp
@@ -1154,6 +1170,15 @@ class Emitter {
         }
         break;
       case 'console-log':
+        // TWO OR MORE arguments get one contiguous rooted slot each, for the same reason a call
+        // takes them: C's argument order is unspecified, so each has to be evaluated -- in source
+        // order -- into a slot that outlives the next one's evaluation. Fewer than two take no
+        // slot: there is no order to fix, nothing can run between the evaluation and the call, and
+        // claiming one anyway was a frame slot nothing wrote.
+        if (expr.args.length >= 2) {
+          this.callSlots.set(expr, this.slotCount);
+          this.slotCount += expr.args.length;
+        }
         for (const arg of expr.args) {
           this.countExpression(arg);
         }
@@ -2185,8 +2210,13 @@ class Emitter {
     this.emitStatement(stmt.tryBlock);
     this.padStack.pop();
     if (!this.usedLabels.has(catchPad)) {
-      // Nothing in the try body can throw, so the catch is unreachable: emitting it would put
-      // dead C behind an unconditional goto. The body already ran under the outer pads.
+      // No operation in the try body jumped to the pad, so the catch is unreachable and emitting it
+      // would put dead C behind an unconditional goto. That is an OPTIMIZATION resting on an
+      // invariant: every runtime call that can leave a pending exception is followed by a
+      // `emitPendingCheck`, and that check is what both reports the failure and keeps this pad
+      // alive. A throwing operation without the check does not merely lose its own diagnostic --
+      // it takes the whole catch block with it, which is how `"length" in "abc"` came to print
+      // `false` instead of a caught TypeError (plan-notes 220).
       return;
     }
     const end = `_jsrt_try_end_${id}`;
@@ -2349,10 +2379,15 @@ class Emitter {
   /** The bare C call behind a console node — no value appended.
    *
    * The operand list is positional; the WIDTH picks the entry point, which is the only thing the
-   * two short forms need from it. No rooted slots: every one of these runtime functions is a
-   * formatter that allocates only its own scratch buffer, and the arguments it reads are already
-   * evaluated when it starts. Both call sites (value position and statement position) go through
-   * here so the width-to-entry-point rule is stated once. */
+   * two short forms need from it. Both call sites (value position and statement position) go
+   * through here so the width-to-entry-point rule is stated once.
+   *
+   * With TWO OR MORE arguments each one is evaluated into its own rooted slot, in source order,
+   * BEFORE the call: C evaluates function arguments in an unspecified order, so
+   * `console.assert(a[0] === 1, f(a))` ran `f` first and then read the array it had just mutated
+   * -- the assertion reported a failure Node never sees (plan-notes 221). The slots also keep
+   * every argument alive across the next one's evaluation. One argument needs neither: there is no
+   * order to fix and nothing can run between its evaluation and the call. */
   private consoleCall(expr: ConsoleLogCall): string {
     const fn = consoleEntryPoint(expr.method, expr.args.length);
     if (fn === null) {
@@ -2360,7 +2395,20 @@ class Emitter {
         `console.${expr.method} has no entry point for ${String(expr.args.length)} arguments`,
       );
     }
-    const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
+    if (expr.args.length < 2) {
+      const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
+      return `${fn}(${operands})`;
+    }
+    const base = this.callSlots.get(expr);
+    if (base === undefined) {
+      throw new Error('console arguments were not registered during counting');
+    }
+    const parts: string[] = [];
+    expr.args.forEach((arg, index) => {
+      this.sequencePart(parts, arg, expr.span, (v) => `${this.slotAt(base + index)} = ${v}`);
+    });
+    this.flushParts(parts, expr.span);
+    const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
     return `${fn}(${operands})`;
   }
 
@@ -3523,6 +3571,18 @@ class Emitter {
     const parts: string[] = [];
     this.sequencePart(parts, expr.left, expr.span, (v) => `${left} = ${v}`);
     this.sequencePart(parts, expr.right, expr.span, (v) => `${right} = ${v}`);
+    // `in` is the one binary operator whose runtime raises: the right operand must be an object
+    // (§13.10.1 step 6), so `"length" in "abc"` is a TypeError. The answer lands in the left slot
+    // before the check, exactly as `delete` does it, so a throw reaches the landing pad with the
+    // operands already sequenced and nothing half-read. Without this line the exception was set
+    // and never observed -- and `emitTryCatch` DROPPED the catch block, because nothing had jumped
+    // to its pad (plan-notes 220).
+    if (expr.operator === 'in') {
+      this.flushParts(parts, expr.span);
+      this.appendLine(`${left} = jsrt_bool(jsrt_in(${left}, ${right}));`, expr.span);
+      this.emitPendingCheck(expr.span);
+      return left;
+    }
     const result = BINARY_EMITTERS[expr.operator](left, right);
     if (parts.length === 2) {
       return `(${parts.join(', ')}, ${result})`;
@@ -3802,8 +3862,10 @@ class Emitter {
 
   /** Escapes for a C string literal. Named for the job, not for its first caller: file paths
    * and the identifier a `reference-error` carries both go through it. */
+  /** The free function of the same name: kept as a method so the emitter's many call sites read
+   * the same as they always did. */
   private escapeCString(text: string): string {
-    return text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return escapeCString(text);
   }
 }
 

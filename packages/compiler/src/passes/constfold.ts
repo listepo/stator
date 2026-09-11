@@ -138,8 +138,11 @@ function applyBinary(operator: BinaryOperator, left: Literal, right: Literal): L
     case ',':
       return right;
     case 'in':
-      // Membership is a property of an object, not of two literals.
-      return false;
+      // It does not ANSWER for two literals, it THROWS: the right operand of `in` must be an
+      // object, and no literal is one. The arm used to fold to `false`, which replaced a TypeError
+      // with an ordinary value -- `"length" in "abc"` printed `false` where Node exits 1
+      // (plan-notes 220). Declining leaves the operation to the runtime, which raises.
+      return undefined;
   }
 }
 

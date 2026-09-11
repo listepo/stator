@@ -6313,3 +6313,106 @@ unit 384/384, subset 364 (339 passed, 25 expected-fail, 0 failed), golden 177/17
 refused by the checker in ts mode, and in js mode a reference the checker resolves to a later
 declaration of the same name is lowered against whatever was visible at that point. That is a
 separate defect from shadowing and this change neither fixes nor worsens it.
+
+## 217. C trigraphs corrupted every emitted string literal containing `??` (2026-09-11)
+
+**Found by the C-emitter audit** (one of four parallel audits run for the bug hunt). The generated C
+is compiled with `-std=c11`, where trigraphs are ACTIVE, and the emitter escaped only `\n \t \r \\ "`
+and non-printables — so a `?` in string content reached the C file raw.
+
+```js
+console.log("a??!b");   // Node: a??!b     Stator: a|b     (length still 5, so it over-read)
+console.log("x??/");    // Node: x??/      Stator: clang error, "missing terminating '\"'", STA0009
+```
+
+**Fix.** `?` (0x3F) is emitted as `\?` in `escapeBytes`, and `cNameLiteral`/`escapeCString` share one
+free `escapeCString` that escapes it too, so the three spellings cannot drift. `\?` is an ordinary
+escape for the same character. **Test:** `tests/golden/{js,ts}/string_trigraph.*` — `??!`, `??/`,
+`??(`, `??-`, a trailing `??`, `????`, a `?`-bearing dynamic property key and two string literals in
+a ternary, byte-for-byte against Node (the js fixture's key needs the dynamic-object form; the ts
+twin uses a `Map`, because an index signature is not in that mode's subset).
+
+## 218. `do{…}while(false)` was rewritten to its body even when the body jumps (2026-09-11)
+
+**Found by the passes audit.** `break` and `continue` name their target by POSITION, so deleting the
+loop the dead-code pass proves dead retargets every jump inside it at the next enclosing construct —
+or at nothing.
+
+```js
+for (let j = 0; j < 2; j++) { do { continue; } while (false); console.log("after " + j); }
+// Node: after 0 / after 1      Stator: (nothing, exit 0) — the continue now skipped the print
+let i = 0; do { i++; if (i < 5) break; i += 100; } while (false); console.log(i);
+// Node: 1                      Stator: STA4029 internal error, "break has no an enclosing loop"
+```
+
+**Fix.** `dce.ts`'s `prune` declines the rewrite when `containsJump(stmt.body)` — a deliberately
+COARSE test (any jump anywhere below, a nested loop's own `break` included), because the generic
+walker knows no nesting and a declined rewrite costs one loop that stays in the output while the
+opposite mistake costs a retargeted jump. **Test:** `tests/golden/{js,ts}/do_while_abrupt.*`,
+including the labelled form and a jump-free do/while that still folds.
+
+## 219. Inlining substituted a parameter name a NESTED function rebinds (2026-09-11)
+
+**Found by the passes audit.** The inliner's condition 2 asks whether a body names anything but its
+own parameters; a nested function's parameter with the same name answers "no" and is not one.
+
+```ts
+function shift(x: number): number {
+  return [1, 2].map(function (x: number): number { return x * 10; })[0] as number;
+}
+// Node: 10     Stator: 70      (same as function f(a, b) { return (function (a) { return a*10; })(b); })
+```
+
+The substitution is textual over the whole result, so `x` was replaced inside the callback too.
+
+**Fix.** `inline.ts` declines a candidate whose result contains a nested scope that binds any name
+being substituted: `rebindsNested` walks the result as a synthetic one-statement block through the
+generic rewriter and reports a nested `function` parameter or any nested `declaration` with one of
+those names. Over-approximate on purpose — a declined inline costs nothing, a wrong one is a silent
+wrong answer. **Test:** `tests/golden/ts/inline_nested_shadow.ts`.
+
+## 220. `in` on a primitive: two wrong answers and a dropped catch block (2026-09-11)
+
+**Found by the passes audit** (`const-fold` folded `"length" in "abc"` to `false`) and then widened
+by the runtime audit's companion note and by hand while fixing it. Three defects met on one operator:
+
+1. `const-fold`'s `case 'in': return false` — with two literal operands the right one is never an
+   object, so the arm ALWAYS replaced a TypeError with an ordinary value.
+2. `jsrt_in` answered instead of raising: `"length" in "abc"` returned `true` (through the string
+   branch of `jsrt_has_prop`) and every other primitive returned `false`. §13.10.1 step 6 requires
+   an Object right operand. The array index test also used `strtoul`, which accepts `'01'`, `'+1'`,
+   `'-0'` and leading whitespace as indices where Node answers `false`; it now uses the file's own
+   `array_index_value`.
+3. **The emitter dropped the whole `catch`.** `emitTryCatch` skips emitting a handler when nothing
+   jumped to its pad — sound only while every throwing operation emits a pending check. `in` had
+   none, so `try { "length" in "abc" } catch (e) { … }` lost its catch entirely and printed `false`
+   with the exception still pending. `emitBinaryOp` now gives `in` the `delete` treatment: the
+   operands are sequenced into their slots, the answer lands in the left slot, and a pending check
+   follows it. The optimization stays, with its invariant named in the comment it rests on.
+
+**Tests.** `tests/golden/js/in_operator.js`: the four index spellings, `length`, present/absent keys
+on a fixed and a dynamic object, a computed key, and all three primitive right operands raising a
+catchable TypeError whose message matches Node's byte-for-byte. The `catch` not being dropped is
+what the fixture is really pinning.
+
+**Left alone, deliberately:** `JSON.parse("{")` still PANICS with STA2005 ("the spec throws
+SyntaxError, which builtins cannot raise yet") instead of throwing a catchable SyntaxError. That is
+the pending-exception protocol's own open item, not this operator's.
+
+## 221. `console.assert(cond, msg)` evaluated the message BEFORE the condition (2026-09-11)
+
+**Found by the C-emitter audit.** C evaluates function arguments in an unspecified order, and the
+console entry points were the one runtime call the emitter did not sequence through rooted slots.
+
+```ts
+function f(a: number[]): string { a[0] = 99; return "mutated"; }
+const a: number[] = [1];
+console.assert(a[0] === 1, f(a));   // Node: no output     Stator: "Assertion failed: mutated"
+```
+
+**Fix.** `consoleCall` sequences two-or-more arguments into contiguous rooted slots, left to right,
+before the call — the same discipline `emitExpression('call')` uses. Fewer than two keep the direct
+path (no order to fix, nothing can run between the evaluation and the call), and `countExpression`
+claims slots only in the multi-argument case; claiming them unconditionally left a frame slot
+nothing wrote, which the frame audit in `tests/unit/frames.test.ts` caught immediately. **Test:**
+`tests/golden/ts/console_assert_order.ts`.
