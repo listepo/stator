@@ -305,6 +305,7 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     // Carries a NAME, not an expression -- there is no binding to point at, which is the condition
     // it models. Nothing inside to rewrite.
     case 'reference-error':
+    case 'type-error':
       return expr;
     case 'binary-op':
     // LogicalOp's right operand may not be evaluated at all. Rewriting it is still sound -- a

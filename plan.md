@@ -488,15 +488,16 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     sites ride here (`this` in a static member or outside a class member; `super` on anything but
     an inherited method; `new` on anything but a named class).
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~,
-    ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~, and
-    ~~calling a class field~~ **landed** (evidence in [done.md](done.md) → Phase 5 step 12e); still
-    open are a class used as a value, `super` as a value, and named function expressions.
+    ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~,
+    ~~calling a class field~~, and ~~named function expressions~~ **landed** (evidence in
+    [done.md](done.md) → Phase 5 step 12e); still open are a class used as a value and `super` as a
+    value.
     Method values use the method's own `JSRTClosure` with `has_receiver` so `jsrt_call` shifts when
     the receiver is omitted (`docs/VALUE.md` §4.16, plan-notes 208, 230); that is still not
     `Function.prototype.bind`'s two-slot `JSRTEnv` (which INSERTS a receiver where this DROPS one),
     which stays not-yet. A class used as a value and `super` as a value are blocked on the class
-    object instead, which is family (d)'s. Named function expressions need only the self-binding of
-    the function's own name inside its body, and are unblocked.
+    object instead, which is family (d)'s. Named function expressions bind the function's own name
+    inside its body only (plan-notes 231).
     (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above:
     constrained and defaulted type parameters, generic classes, generic function expressions and
     arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a

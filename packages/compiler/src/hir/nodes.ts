@@ -855,6 +855,7 @@ export interface MathCall extends Node {
 export interface FunctionExpr extends Node {
   readonly kind: 'function';
   readonly name?: string;
+  readonly selfBinding?: string;
   readonly params: readonly Parameter[];
   readonly body: Block;
   /** Own bindings that something nested reads, so they live in this function's heap environment
@@ -1231,6 +1232,13 @@ export interface ReferenceErrorRead extends Node {
   readonly name: string;
 }
 
+/** Throwing `TypeError` with a fixed message. Used when assigning to a named function expression
+ * identifier, which is immutable in strict mode (plan.md §8 step 12(e)). */
+export interface TypeErrorThrow extends Node {
+  readonly kind: 'type-error';
+  readonly message: string;
+}
+
 /** `new Date(x)` for a given x -- a number of milliseconds, an ISO string, or another Date.
  *
  * Not a `NewExpr` (no descriptor, no constructor body) and not a `CollectionNew` (that one takes no
@@ -1374,6 +1382,7 @@ export type Expression =
   | DateNew
   | ErrorNew
   | ReferenceErrorRead
+  | TypeErrorThrow
   | DateOp
   | DateStaticCall
   | NumberLiteral

@@ -220,6 +220,9 @@ export function lowerSourceFile(
 /** Nesting of functions being lowered. Zero means module top-level: an `await` there makes
  * the merged program an async module (Phase 5 step 9). */
 let functionNesting = 0;
+
+/** HIR names of named-function-expression self bindings; assignment is a TypeError. */
+const immutableSelfBindings = new Set<string>();
 /** Set when an await is lowered at functionNesting === 0. Reset per lowerProgram. */
 let moduleAwaits = false;
 
@@ -1433,6 +1436,19 @@ function lowerExpressionAsStatement(
     return null;
   }
   if (assignment !== undefined) {
+    if (immutableSelfBindings.has(assignment.target)) {
+      return {
+        kind: 'expression-statement',
+        type: H_UNDEFINED,
+        span,
+        expression: {
+          kind: 'type-error',
+          type: H_UNDEFINED,
+          span,
+          message: 'Assignment to constant variable.',
+        },
+      };
+    }
     return { kind: 'assignment', type: assignment.value.type, span, ...assignment };
   }
 
@@ -4482,6 +4498,20 @@ function lowerFunction(
     }
 
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    const declared = typeAt(node, checker, bindings);
+    const type =
+      receiver === undefined
+        ? declared
+        : hFunction(
+            params.map((p) => p.type),
+            declared.kind === 'fn' ? declared.ret : H_UNDEFINED,
+          );
+    let selfBinding: string | undefined;
+    if (ts.isFunctionExpression(node) && node.name !== undefined && ts.isIdentifier(node.name)) {
+      selfBinding = inner.declare(node.name.text, type);
+      immutableSelfBindings.add(selfBinding);
+      hirNameOfDeclaration.set(node.name, selfBinding);
+    }
     const body = lowerFunctionBody(node.body, sourceFile, checker, inner, diagnostics);
     if (body === null) {
       return null;
@@ -4516,14 +4546,6 @@ function lowerFunction(
     // Without a receiver the checker's own type is the answer. With one, the emitted function has a
     // parameter the source did not write, so the type has to describe what is actually called --
     // and for a constructor the checker has no function type to offer at all.
-    const declared = typeAt(node, checker, bindings);
-    const type =
-      receiver === undefined
-        ? declared
-        : hFunction(
-            params.map((p) => p.type),
-            declared.kind === 'fn' ? declared.ret : H_UNDEFINED,
-          );
     const name = ts.isConstructorDeclaration(node)
       ? undefined
       : node.name !== undefined && ts.isIdentifier(node.name)
@@ -4534,6 +4556,7 @@ function lowerFunction(
       type,
       span,
       ...(name !== undefined && { name }),
+      ...(selfBinding !== undefined && { selfBinding }),
       params,
       body: bodyWithParams,
       isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,

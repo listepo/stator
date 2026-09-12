@@ -614,6 +614,10 @@ function verifyFunction(
   bindings: Map<string, { kind: 'let' | 'const'; type: HType }>,
 ): void {
   const inner = new Map(bindings);
+  if (fn.selfBinding !== undefined) {
+    inner.set(fn.selfBinding, { kind: 'const', type: fn.type });
+  }
+
   for (const param of fn.params) {
     inner.set(param.name, { kind: 'let', type: param.type });
     if (param.default !== undefined) {
@@ -1935,6 +1939,26 @@ function verifyExpression(
     // all -- reads that type to decide whether a check is owed. Typing it `undefined` (the C value
     // the emitter returns) would let `const n: number = undeclared` through as a static assignment
     // of the wrong type instead of a boundary, which is the bug this pins shut.
+    case 'type-error': {
+      if (!hTypeEquals(expr.type, hUnknown(false))) {
+        problems.push({
+          kind: 'type-error',
+          span: expr.span,
+          code: 'STA4020',
+          message: `type-error must have type 'unknown', got '${hTypeName(expr.type)}'`,
+        });
+      }
+      if (expr.message.length === 0) {
+        problems.push({
+          kind: 'type-error',
+          span: expr.span,
+          code: 'STA4020',
+          message: 'type-error must carry a message',
+        });
+      }
+      break;
+    }
+
     case 'reference-error': {
       if (expr.type.kind !== 'unknown') {
         problems.push({

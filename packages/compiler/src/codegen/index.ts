@@ -826,6 +826,9 @@ class Emitter {
       // lives along with the captured-binding rule.
       this.bindSlot(param.name);
     }
+    if (fn.selfBinding !== undefined) {
+      this.bindSlot(fn.selfBinding);
+    }
     for (const param of fn.params) {
       if (param.default !== undefined) {
         this.countExpression(param.default);
@@ -893,6 +896,13 @@ class Emitter {
 
   /* Function declarations bind at the top of their unit, not where they are written, so `f();
    * function f() {}` works. The binding is what hoists; the body is emitted once, elsewhere. */
+  private emitNamedFunctionSelfBinding(fn: FunctionExpr): void {
+    if (fn.selfBinding === undefined) {
+      return;
+    }
+    this.appendLine(`${this.slotRef(fn.selfBinding)} = ${this.closureValue(fn)};`, fn.span);
+  }
+
   private emitHoistedFunctions(statements: readonly Statement[]): void {
     for (const stmt of statements) {
       if (stmt.kind !== 'function-declaration') {
@@ -1420,6 +1430,7 @@ class Emitter {
       case 'identifier':
       // No slot: the name is a C string literal in the emitted call, not a rooted value.
       case 'reference-error':
+      case 'type-error':
         break;
       default: {
         const _exhaustive: never = expr;
@@ -2543,6 +2554,15 @@ class Emitter {
         return 'JSRT_UNDEFINED';
       }
 
+      case 'type-error': {
+        this.appendLine(
+          `jsrt_throw_error(&jsrt_class_type_error, "${this.escapeCString(expr.message)}");`,
+          expr.span,
+        );
+        this.emitPendingCheck(expr.span);
+        return 'JSRT_UNDEFINED';
+      }
+
       // The location is a string literal in the emitted C rather than something reconstructed at
       // failure time: the emitter is the only party that still knows where this value came from,
       // and a check that could not say where it failed would be nearly useless in a compiled
@@ -3304,6 +3324,7 @@ class Emitter {
       this.appendLine('(void)env;', fn.span);
     }
     this.emitParameterPrologue(fn);
+    this.emitNamedFunctionSelfBinding(fn);
     this.emitHoistedFunctions(fn.body.statements);
     for (const stmt of fn.body.statements) {
       this.emitStatement(stmt);
@@ -3442,6 +3463,7 @@ class Emitter {
   }
 
   private emitResumeBody(fn: FunctionExpr): void {
+    this.emitNamedFunctionSelfBinding(fn);
     this.emitHoistedFunctions(fn.body.statements);
     for (const stmt of fn.body.statements) {
       this.emitStatement(stmt);

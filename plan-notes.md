@@ -4,6 +4,18 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 231. Named function expression self-binding is lowering + emitter, not a new closure kind
+
+**Plan:** §8 step 12(e) named the construct unblocked once the function's own identifier binds
+inside its body only. **Evidence:** `lowerFunction` already set `FunctionExpr.name` from the source
+but `gateFunction` refused the spelling; no slot existed for the inner name. **Decision:**
+`FunctionExpr.selfBinding` holds the HIR name from `inner.declare`; codegen counts the slot and
+initialises it at function entry with the same `closureValue` the expression uses (static closure
+for non-capturing functions — sufficient for the recursion golden). Assignment to the inner name
+lowers to a `type-error` node; the TypeScript checker also rejects it (`STA0012`), which is stricter
+than Node's runtime `TypeError` but matches ESM/strict. **plan.md edited:** yes — struck named
+function expressions from the step-12(e) open list.
+
 ## 230. Method values landed: `has_receiver` on `JSRTClosure` and `jsrt_call` shifts (2026-09-12)
 
 **Measured — pinned Node 26.7.0**, two-parameter method `add(a, b)`:
@@ -26,7 +38,7 @@ jsrt_call(jsrt_closure(&_jsrt_closure_0), 2, &slot);  // g(1, 2): arity 2, has_r
 through field-access + ordinary `call` and needed only the `gateCall` refusal removed.
 
 **plan.md edited:** yes — §8 step 12(e) strikes method values and calling a class field; class-as-value,
-`super` as a value, and named function expressions stay open.
+`super` as a value stay open; named function expressions landed as 231.
 
 ## 229. Step 12c computed keys on object literals (2026-09-12)
 

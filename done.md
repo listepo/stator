@@ -1979,3 +1979,35 @@ their own binding. `tests/golden/{js,ts}/console_builtins.*` gained the value po
 twin asserts they COMPILE and prints `typeof`, because TypeScript types `console.log` as `void` and
 refuses it as an argument. `tests/golden/js/dyn_unknown.js` gained the evolving array, including a
 mixed-element one and an `entries()` view.
+
+### Step 12e (named function expressions) — inner self-binding (2026-09-12)
+
+The last receiver-free construct in family (e). `gateFunction` had been refusing named function
+expressions outright; the lowering already carried `FunctionExpr.name` for diagnostics and the
+emitter's C symbol, but nothing declared the inner identifier in the function's scope.
+
+**Lowering** declares the source name in the function's inner scope before the body is lowered
+(`inner.declare`), records the HIR spelling on `FunctionExpr.selfBinding`, and tracks it in
+`immutableSelfBindings` so an assignment lowers to a `type-error` node rather than a write.
+**Codegen** binds the self slot during counting and initialises it at function entry with
+`emitNamedFunctionSelfBinding` — the same closure the expression evaluates to, which is enough for
+recursion when the function captures nothing (the common case). **Verifier** registers
+`selfBinding` as `const` in the function body's binding map.
+
+Reassignment of the inner name is rejected at compile time by the TypeScript checker (`STA0012`),
+which is stricter than Node's runtime `TypeError` but matches Stator's ESM/strict pipeline; subset
+fixtures pin that refusal in both modes.
+
+**Check.** On the pinned Node (2026-09-12):
+
+```
+pnpm run typecheck   clean
+pnpm run lint        clean
+pnpm run test:subset subset: 368 fixtures — 343 passed, 25 expected-fail, 0 failed
+pnpm run test:golden golden: 199 fixtures — 199 passed, 0 failed
+```
+
+Fixtures: `tests/golden/{js,ts}/named_function_expression.*` (recursion via inner name, outer scope
+does not see it); `subset_named_function_expression_{ts,js}`; `subset_named_function_expression_assign_{ts,js}`.
+`gate.ts` emits no `not-yet` for named function expressions.
+

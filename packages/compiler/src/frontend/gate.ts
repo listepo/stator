@@ -1745,9 +1745,6 @@ function gateFunction(
   }
   // An arrow's expression body (`(x) => x * 2`) is a Block in the HIR with a single return; the
   // lowering synthesises it, so nothing is gated here beyond what the expression itself gates.
-  if (ts.isFunctionExpression(fn) && fn.name !== undefined) {
-    return notYet('named function expressions are not yet supported', 5);
-  }
   // A function declared in a block belongs to that block and is initialised when the block is
   // entered (plan.md §8 step 12(e)); a block-level `f` that shadows an enclosing `f` gets a name of
   // its own at the lowering (plan.md §8 step 14), so the narrow `shadowsEnclosingBinding` refusal
