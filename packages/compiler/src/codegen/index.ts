@@ -1241,6 +1241,9 @@ class Emitter {
         for (const entry of expr.entries) {
           this.countExpression(entry.value);
         }
+        for (const method of expr.methods) {
+          this.registerFunction(method.fn, method.name);
+        }
         break;
       // The object slot plus ONE value scratch slot, reused entry by entry: jsrt_set_prop may
       // grow the slot storage, which allocates, so the value being stored must be rooted across
@@ -3523,7 +3526,7 @@ class Emitter {
       span: expr.span,
       name,
       fields: layout.map((field) => ({ name: field.name, type: field.type, span: expr.span })),
-      methods: [],
+      methods: expr.methods,
       statics: [],
       vtable: [],
     });

@@ -344,6 +344,7 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
     return null;
   }
   const fields: HField[] = [];
+  const methods: HField[] = [];
   for (const property of checker.getPropertiesOfType(type)) {
     const at = property.valueDeclaration ?? property.declarations?.[0];
     // An ACCESSOR is not a slot: `o.x` on it must RUN the getter, and a layout would compile that
@@ -352,23 +353,30 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
     if (
       at === undefined ||
       (property.flags & ts.SymbolFlags.Optional) !== 0 ||
-      (property.flags &
-        (ts.SymbolFlags.Method | ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !==
-        0
+      (property.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !== 0
     ) {
       return null;
     }
-    fields.push({
-      name: property.name,
-      type: tsTypeToHType(checker.getTypeOfSymbolAtLocation(property, at), checker, depth + 1),
-    });
+    const declarations = property.declarations ?? [];
+    const valueType = tsTypeToHType(
+      checker.getTypeOfSymbolAtLocation(property, at),
+      checker,
+      depth + 1,
+    );
+    if (declarations.some(ts.isMethodDeclaration)) {
+      methods.push({ name: property.name, type: valueType });
+    } else if ((property.flags & ts.SymbolFlags.Method) !== 0) {
+      methods.push({ name: property.name, type: valueType });
+    } else {
+      fields.push({ name: property.name, type: valueType });
+    }
   }
-  // Zero fields is not a layout: `{}` has to grow (plan.md §8 step 4), so it is Unknown and
-  // takes the shape table. An all-required shape with at least one field stays fixed.
-  if (fields.length === 0) {
+  // Zero members is not a layout: `{}` has to grow (plan.md §8 step 4), so it is Unknown and
+  // takes the shape table. An all-required shape with at least one field or method stays fixed.
+  if (fields.length === 0 && methods.length === 0) {
     return null;
   }
-  return hObject(shapeName(fields), fields, [], []);
+  return hObject(shapeName(fields, methods), fields, methods, []);
 }
 
 /** Whether `type` is an anonymous object shape that goes to the DYNAMIC representation -- a shape
@@ -455,8 +463,15 @@ export function objectLiteralIsDynamic(
 }
 
 /** The structural name of a shape: what makes two identical literals one layout. */
-export function shapeName(fields: readonly HField[]): string {
-  return `{${fields.map((f) => `${f.name}: ${hTypeName(f.type)}`).join(', ')}}`;
+export function shapeName(
+  fields: readonly HField[],
+  methods: readonly HField[] = [],
+): string {
+  const parts = [
+    ...fields.map((f) => `${f.name}: ${hTypeName(f.type)}`),
+    ...methods.map((m) => `${m.name}: ${hTypeName(m.type)}`),
+  ];
+  return `{${parts.join(', ')}}`;
 }
 /** The instance type a class declaration declares, or `undefined` for an anonymous one. Going
  * through the name's symbol is what makes this answerable for any class in a chain, not just the

@@ -1537,7 +1537,7 @@ methods and answer "not dynamic" for both, which meant `shapeTypeToHType` built 
 `{ get at(): number }` — field `at` at slot 0 — and a read through such a type compiled to
 `jsrt_object_get` on a `JSRTDynObject`. Measured: `2e-323` where Node printed `0`. An accessor now
 joins the optional property and the index signature as a trigger; a method stays a refusal (step
-12(e)). Consequence, stated because it is a cost: an accessor deoptimizes its whole shape, siblings
+12(c) methods). Consequence, stated because it is a cost: an accessor deoptimizes its whole shape, siblings
 included — one object cannot be half a layout.
 
 **The one refusal left.** TypeScript calls `{ get at(): number }` assignable to `{ at: number }`.
@@ -1555,6 +1555,27 @@ always strict.
 **Check.** `pnpm run ci` clean: 149 golden fixtures (adds `ts/object_accessors.ts`,
 `js/object_accessors.js`), 342 subset fixtures with `subset_object_literal_accessors_{ts,js}` flipped
 out of expected-fail, and the runtime print corpus gains `print_accessors.{c,mjs}`.
+
+
+### Step 12c methods — method members on object literals ✅ (2026-09-12)
+
+`{ m() { return this.v; }, v: 1 }` and `o.m()` compile. plan-notes 227; `docs/VALUE.md` §4.5 method
+ABI; row 85 of `docs/SUBSET.md`.
+
+**The representation.** A method member does not take a slot and does not go dynamic: it rides the same
+hidden-class descriptor and method table as a class instance. `shapeTypeToHType` now collects methods
+into `HObject.methods`; lowering emits `ObjectLiteral.methods` as ordinary `ClassMethod` units with
+the literal's layout type as receiver parameter zero; codegen's `registerShape` registers those
+methods on the per-shape `JSRTClass` and `MethodCall` names the shape. No second ABI, no bound
+closure — `o.m()` is a direct method call with the receiver in argv slot zero.
+
+**What stays not-yet.** Method-as-value (`const f = o.m`) is still `STA1214` (step 12(e)): the
+method's own closure does not bind `this`, and receiver-shift in `jsrt_call` is not landed yet
+(plan-notes 210). Spread of a non-variable fixed shape and computed keys remain `STA1214` too.
+
+**Check.** `node packages/tests/subset/run.ts` — `subset_object_literal_method_{ts,js}` static, 0
+failed; `node packages/tests/golden/run.ts` — adds `ts/object_literal_method.ts`,
+`js/object_literal_method.js`, 199 passed; `node --test packages/tests/unit/*.test.ts` — 385 passed.
 
 ### Interfaces and type aliases — SUBSET row 61 delivered (2026-09-08)
 
