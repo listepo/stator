@@ -2500,6 +2500,7 @@ function lowerArrayLiteralExpression(
     result = arrayConcatExpr(result, piece, span);
   }
   return result ?? emptyArrayLiteral(literalType, span);
+}
 
 function staticObjectLiteralKey(name: ts.PropertyName): string | null {
   if (ts.isIdentifier(name) || ts.isStringLiteral(name)) {

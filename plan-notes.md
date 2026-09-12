@@ -4,6 +4,18 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 232. Method-value rewrite/emit must keep array-op args and evaluate the receiver (2026-09-12)
+
+**Plan:** §8 step 12(e) method values. **Evidence:** grouping `method-value` with `array-op` /
+`method-call` in `rewrite.ts` dropped argument walking — `MethodValue` has no `args`, so the
+shared arm only rewrote `target`. DCE's reachability walk uses that walker, so a function used
+only as `xs.filter(isBig)` was shaken out and the leftover identifier became STA4002
+(`array_callbacks.ts`). Direct `method-value` emit also skipped `expr.target`, so `new C().m`
+never constructed `C` and left an unwritten global slot (`frames.test.ts`). **Decision:** walk
+`array-op`/`method-call` args again; evaluate the receiver for side effects on a direct method
+value (comma when the target is an expression, flushed lines when it is `new`). **plan.md edited:**
+no — both surfaces were already struck through; this is a landing bugfix.
+
 ## 231. Named function expression self-binding is lowering + emitter, not a new closure kind
 
 **Plan:** §8 step 12(e) named the construct unblocked once the function's own identifier binds

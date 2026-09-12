@@ -2833,10 +2833,18 @@ class Emitter {
       }
 
       case 'method-value': {
-        const callee =
-          expr.dispatch === 'virtual'
-            ? `jsrt_method(${this.emitExpression(expr.target)}, ${expr.slot})`
-            : this.closureValue(this.methodOf(expr).fn);
+        // Virtual: the receiver picks the entry. Direct: the named closure is the value, but
+        // the receiver expression still runs -- `new C().m` must construct C even though the
+        // extracted function does not capture it.
+        if (expr.dispatch === 'virtual') {
+          return `jsrt_method(${this.emitExpression(expr.target)}, ${expr.slot})`;
+        }
+        const callee = this.closureValue(this.methodOf(expr).fn);
+        const captured = this.capture(() => this.emitExpression(expr.target));
+        if (captured.lines.length === 0) {
+          return `(${captured.value}, ${callee})`;
+        }
+        this.lines.push(...captured.lines);
         return callee;
       }
 

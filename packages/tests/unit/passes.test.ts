@@ -252,6 +252,23 @@ test('DCE never removes a declaration something still names', () => {
   );
 });
 
+test('a function used only as an array callback is not shaken out', () => {
+  const module = optimized(`
+    function isBig(x: number): boolean {
+      const big = x > 1;
+      return big;
+    }
+    const xs: number[] = [1, 2, 3];
+    console.log(xs.filter(isBig));
+  `);
+  assert.ok(
+    hirNodes(module).some(
+      (n) =>
+        n.kind === 'function-declaration' && (n as unknown as { name: string }).name === 'isBig',
+    ),
+  );
+});
+
 test('eliminateDeadCode returns its input untouched when nothing is dead', () => {
   const { module } = lowerSource('console.log(1);');
   assert.equal(eliminateDeadCode(module), module);
