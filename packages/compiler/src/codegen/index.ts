@@ -64,6 +64,7 @@ import {
   DATE_STATICS,
   errorDescriptor,
   isAccessorEntry,
+  isComputedEntry,
   REGEXP_FIELDS,
   REGEXP_OPS,
   SET_OPS,
@@ -1255,7 +1256,8 @@ class Emitter {
         const pair = expr.entries.some(
           (entry) => isAccessorEntry(entry) && entry.get !== undefined && entry.set !== undefined,
         );
-        this.slotCount += expr.entries.length === 0 ? 1 : pair ? 3 : 2;
+        const hasComputed = expr.entries.some((entry) => isComputedEntry(entry));
+        this.slotCount += expr.entries.length === 0 ? 1 : pair || hasComputed ? 3 : 2;
         for (const entry of expr.entries) {
           if (isAccessorEntry(entry)) {
             if (entry.get !== undefined) {
@@ -1264,6 +1266,11 @@ class Emitter {
             if (entry.set !== undefined) {
               this.countExpression(entry.set);
             }
+            continue;
+          }
+          if (isComputedEntry(entry)) {
+            this.countExpression(entry.key);
+            this.countExpression(entry.value);
             continue;
           }
           this.countExpression(entry.value);
@@ -2893,6 +2900,20 @@ class Emitter {
             const set = half(entry.set);
             parts.push(
               `jsrt_define_accessor(${this.slotAt(slot)}, ${cNameLiteral(entry.name)}, ${get}, ${set})`,
+            );
+            continue;
+          }
+          if (isComputedEntry(entry)) {
+            const keyScratch = this.slotAt(slot + 1);
+            const valueScratch = this.slotAt(slot + 2);
+            flushed =
+              this.sequencePart(parts, entry.key, expr.span, (v) => `${keyScratch} = ${v}`) ||
+              flushed;
+            flushed =
+              this.sequencePart(parts, entry.value, expr.span, (v) => `${valueScratch} = ${v}`) ||
+              flushed;
+            parts.push(
+              `jsrt_dyn_index_set(${this.slotAt(slot)}, ${keyScratch}, ${valueScratch}, NULL)`,
             );
             continue;
           }

@@ -474,8 +474,9 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     **Accessors landed 2026-09-04** (plan-notes 192; evidence in [done.md](done.md) → Phase 5
     step 12c accessors, including the two corrections to `docs/VALUE.md` §4.15 the implementation
     forced and the fixed-shape-position refusal it opened).
-    **Residue:** a spread of anything but a variable of fixed shape, methods, and computed keys
-    stay `STA1214`.
+    **Computed keys landed 2026-09-12** (plan-notes 227; evidence in [done.md](done.md) → Phase 5
+    step 12c computed keys).
+    **Residue:** a spread of anything but a variable of fixed shape and methods stay `STA1214`.
     (d) **[D5] The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an

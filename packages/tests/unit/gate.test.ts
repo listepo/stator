@@ -370,10 +370,10 @@ void test('an object literal is accepted exactly where its shape is a fixed slot
 });
 
 void test('every literal form that is not a fixed slot list is a not-yet', () => {
-  // A method needs a member function table the shape has no declaration to build, and a computed
-  // key needs the key set at RUNTIME. A spread whose operand is not a variable of fixed shape is
-  // the same runtime question: the expansion reads the operand once per field, so an operand with
-  // an effect would run that effect N times (plan-notes 181).
+  // A method needs a member function table the shape has no declaration to build. A spread whose
+  // operand is not a variable of fixed shape is the same runtime question: the expansion reads the
+  // operand once per field, so an operand with an effect would run that effect N times (plan-notes
+  // 181). Computed keys landed separately (plan.md §8 step 12(c)).
   assert.deepEqual(codesFor('const o = { m(): number { return 1; } };\nconsole.log(o);'), [
     'STA1214',
   ]);
@@ -383,9 +383,11 @@ void test('every literal form that is not a fixed slot list is a not-yet', () =>
     ),
     ['STA1214'],
   );
-  assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), [
-    'STA1214',
-  ]);
+});
+
+void test('object literal computed keys are accepted on the dynamic shape path', () => {
+  assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), []);
+  assert.deepEqual(codesFor('const o = { b: 1, [0]: 2 };\nconsole.log(o);'), []);
 });
 
 // plan.md §8 step 12(c): an accessor member is ACCEPTED, and it takes the shape-table path -- the

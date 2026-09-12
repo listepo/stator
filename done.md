@@ -1519,6 +1519,25 @@ next section.
 
 ### Step 12c accessors — getters and setters on object literals ✅ (2026-09-04)
 
+### Step 12c computed keys — `[expr]` on object literals ✅ (2026-09-12)
+
+Runtime computed property names on object literals take the dynamic shape path: lowering builds a
+`ComputedEntry` (`key` + `value`) and the emitter stores through `jsrt_dyn_index_set`, which
+canonicalizes the key the same way element assignment does. Compile-time string-literal computed keys
+(`{ ["x"]: 1 }`) stay on the fixed layout path via `propertyNameIsLayoutKey`. Integer index keys
+(`{ [0]: 1 }`, `{ b: 1, [0]: 2 }`) force the dynamic path so enumeration order matches Node
+(OrdinaryOwnPropertyKeys: indices first, then insertion order). `objectLiteralIsDynamic` also treats
+any literal with a runtime computed key as dynamic. Type-annotation index signatures
+(`const o: { [k: string]: number } = …`) are accepted at the gate as checker metadata only
+(`IndexSignature`), distinct from class index signatures still refused in `gateClass`.
+
+**Check** (`mise exec node --`, Node 26.8.2):
+`pnpm run typecheck` clean; `pnpm run lint` clean; `pnpm run test` → `ℹ pass 386`;
+`pnpm run test:subset` → `341 passed, 23 expected-fail, 0 failed` (both
+`subset_object_literal_dynamic_keys_*` flipped); `pnpm run test:golden` → `199 passed, 0 failed`
+(includes `object_computed_keys` js/ts with `{ b: 1, [0]: 2, [key]: 42 }` ordering).
+
+
 `{ get x() { … }, set x(v) { … } }` compiles. plan-notes 192; representation `docs/VALUE.md` §4.15;
 row 85 of `docs/SUBSET.md`.
 
