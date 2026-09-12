@@ -407,12 +407,24 @@ export interface AccessorEntry {
   readonly set: Expression | undefined;
 }
 
-/** One member of a dynamic object literal: a value or an accessor pair, in written order — the
- * order matters, because it is the order the keys are inserted and therefore printed. */
-export type DynEntry = ObjectEntry | AccessorEntry;
+/** `{ [expr]: v }` on a dynamic object literal. The key is evaluated at runtime and passed to
+ * `jsrt_dyn_index_set`, which canonicalizes it the same way an element assignment does. */
+export interface ComputedEntry {
+  readonly key: Expression;
+  readonly value: Expression;
+}
+
+/** One member of a dynamic object literal: a value, an accessor pair, or a computed key, in
+ * written order — the order matters, because it is the order the keys are inserted and therefore
+ * printed. */
+export type DynEntry = ObjectEntry | AccessorEntry | ComputedEntry;
 
 export function isAccessorEntry(entry: DynEntry): entry is AccessorEntry {
   return 'get' in entry;
+}
+
+export function isComputedEntry(entry: DynEntry): entry is ComputedEntry {
+  return 'key' in entry;
 }
 
 /** `new Map()` and `new Set()`.

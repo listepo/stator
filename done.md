@@ -1513,9 +1513,7 @@ emitter stores in source order, so the last write wins per §13.2.5.5, and `keyO
 key's first position.
 
 **Residue**, named rather than hidden: a spread of a call result, a member access, or a value with
-no fixed shape stays `STA1214`; methods in a literal stay `STA1214` (they need calling through a
-shape the declaration does not build); computed keys stay `STA1214`. Accessors landed separately —
-next section.
+no fixed shape stays `STA1214`. Methods, computed keys, and accessors landed in later 12c sections.
 
 ### Step 12c accessors — getters and setters on object literals ✅ (2026-09-04)
 
@@ -1557,6 +1555,25 @@ always strict.
 out of expected-fail, and the runtime print corpus gains `print_accessors.{c,mjs}`.
 
 
+### Step 12c computed keys — `[expr]` on object literals ✅ (2026-09-12)
+
+Runtime computed property names on object literals take the dynamic shape path: lowering builds a
+`ComputedEntry` (`key` + `value`) and the emitter stores through `jsrt_dyn_index_set`, which
+canonicalizes the key the same way element assignment does. Compile-time string-literal computed keys
+(`{ ["x"]: 1 }`) stay on the fixed layout path via `propertyNameIsLayoutKey`. Integer index keys
+(`{ [0]: 1 }`, `{ b: 1, [0]: 2 }`) force the dynamic path so enumeration order matches Node
+(OrdinaryOwnPropertyKeys: indices first, then insertion order). `objectLiteralIsDynamic` also treats
+any literal with a runtime computed key as dynamic. Type-annotation index signatures
+(`const o: { [k: string]: number } = …`) are accepted at the gate as checker metadata only
+(`IndexSignature`), distinct from class index signatures still refused in `gateClass`.
+
+**Check** (`mise exec node --`, Node 26.8.2):
+`pnpm run typecheck` clean; `pnpm run lint` clean; `pnpm run test` → `ℹ pass 386`;
+`pnpm run test:subset` → `341 passed, 23 expected-fail, 0 failed` (both
+`subset_object_literal_dynamic_keys_*` flipped); `pnpm run test:golden` → `199 passed, 0 failed`
+(includes `object_computed_keys` js/ts with `{ b: 1, [0]: 2, [key]: 42 }` ordering).
+
+
 ### Step 12c methods — method members on object literals ✅ (2026-09-12)
 
 `{ m() { return this.v; }, v: 1 }` and `o.m()` compile. plan-notes 228; `docs/VALUE.md` §4.5 method
@@ -1571,7 +1588,7 @@ closure — `o.m()` is a direct method call with the receiver in argv slot zero.
 
 **What stays not-yet.** Method-as-value (`const f = o.m`) is still `STA1214` (step 12(e)): the
 method's own closure does not bind `this`, and receiver-shift in `jsrt_call` is not landed yet
-(plan-notes 210). Spread of a non-variable fixed shape and computed keys remain `STA1214` too.
+(plan-notes 210). Spread of a non-variable fixed shape remains `STA1214` too.
 
 **Check.** `node packages/tests/subset/run.ts` — `subset_object_literal_method_{ts,js}` static, 0
 failed; `node packages/tests/golden/run.ts` — adds `ts/object_literal_method.ts`,

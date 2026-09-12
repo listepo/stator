@@ -449,10 +449,12 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     // `...x` in an array literal. gateArrayLiteral vetted the operand type; the expression
     // underneath is gated normally.
     case ts.SyntaxKind.SpreadElement:
-    // A member of a TYPE literal (`let p: { x: number }`). The enclosing TypeLiteral is a type
-    // node and skipped as one, but its members are not type nodes themselves, so the walk reaches
-    // them; they carry no runtime construct, exactly as the annotation around them does not.
+    // A member of a TYPE literal (`let p: { x: number }`, `{ [k: string]: n }`). The enclosing
+    // TypeLiteral is a type node and skipped as one, but its members are not type nodes themselves,
+    // so the walk reaches them; they carry no runtime construct, exactly as the annotation around
+    // them does not. A class index signature is refused in gateClass instead.
     case ts.SyntaxKind.PropertySignature:
+    case ts.SyntaxKind.IndexSignature:
       return { kind: 'accept' };
 
     // The members of an accepted class. gateClass already vetted the class as a whole -- these are
@@ -490,9 +492,13 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.YieldExpression:
       return gateYield(node);
 
-    // `[Symbol.iterator]` on a class method. gateClass admits that one computed name; this node
-    // is its child, reached on the way down. Any other computed name stays not-yet.
+    // `[Symbol.iterator]` on a class method, or `[key]` on an object literal member.
+    // gateObjectLiteral / gateClass vetted the enclosing literal or class; this node is their
+    // child, reached on the way down.
     case ts.SyntaxKind.ComputedPropertyName:
+      if (isObjectLiteralComputedKey(node as ts.ComputedPropertyName)) {
+        return { kind: 'accept' };
+      }
       return isGlobalSymbolIteratorName(node as ts.ComputedPropertyName, typeChecker)
         ? { kind: 'accept' }
         : notYet('a computed property name is not yet supported', 5);
@@ -1984,6 +1990,30 @@ function isLayoutKey(name: ts.PropertyName): boolean {
   return ts.isStringLiteral(name) && !isIntegerIndex(name.text);
 }
 
+function propertyNameIsLayoutKey(name: ts.PropertyName): boolean {
+  if (ts.isComputedPropertyName(name)) {
+    const expr = name.expression;
+    if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
+      return !isIntegerIndex(expr.text);
+    }
+    return false;
+  }
+  return isLayoutKey(name);
+}
+
+function isObjectLiteralComputedKey(name: ts.ComputedPropertyName): boolean {
+  const parent = name.parent;
+  if (
+    ts.isPropertyAssignment(parent) ||
+    ts.isGetAccessorDeclaration(parent) ||
+    ts.isSetAccessorDeclaration(parent)
+  ) {
+    const grand = parent.parent;
+    return grand !== undefined && ts.isObjectLiteralExpression(grand);
+  }
+  return false;
+}
+
 /** ECMA-262's array-index test on a property key: the canonical decimal spelling of a number below
  * 2^32-1. `"01"` and `"1.0"` are ordinary string keys — only the canonical form is an index. */
 function isIntegerIndex(key: string): boolean {
@@ -2034,8 +2064,8 @@ function gateObjectLiteral(
     if (!accessor && !method && !ts.isPropertyAssignment(property)) {
       return notYet('an object literal with a method member is not yet supported', 5);
     }
-    if (!isLayoutKey(property.name)) {
-      return notYet('an object literal key that is not an identifier is not yet supported', 5);
+    if (!propertyNameIsLayoutKey(property.name)) {
+      continue;
     }
   }
   // The CONTEXTUAL type decides the dynamic question, and the order matters: in

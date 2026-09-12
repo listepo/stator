@@ -449,7 +449,35 @@ export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean 
  * (an untyped parameter), which is not a shape `isDynamicShape` would recognize.
  *
  * An ACCESSOR member needs no case here: `isDynamicShape` treats one as a trigger, so a literal
- * that writes `get x()` is dynamic by its own type. */
+ * that writes `get x()` is dynamic by its own type. A computed key whose value is not known until
+ * runtime is the same: it has no layout slot until `jsrt_dyn_index_set` runs. */
+function isIntegerIndex(key: string): boolean {
+  return /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < 0xffffffff;
+}
+
+function computedKeyIsLayoutKey(name: ts.ComputedPropertyName): boolean {
+  const expr = name.expression;
+  if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
+    return !isIntegerIndex(expr.text);
+  }
+  return false;
+}
+
+function literalHasRuntimeComputedKey(literal: ts.ObjectLiteralExpression): boolean {
+  for (const property of literal.properties) {
+    if (
+      (ts.isPropertyAssignment(property) ||
+        ts.isGetAccessorDeclaration(property) ||
+        ts.isSetAccessorDeclaration(property)) &&
+      ts.isComputedPropertyName(property.name) &&
+      !computedKeyIsLayoutKey(property.name)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function objectLiteralIsDynamic(
   literal: ts.ObjectLiteralExpression,
   checker: ts.TypeChecker,
@@ -457,6 +485,7 @@ export function objectLiteralIsDynamic(
   const own = checker.getTypeAtLocation(literal);
   const contextual = checker.getContextualType(literal);
   return (
+    literalHasRuntimeComputedKey(literal) ||
     (contextual !== undefined && isDynamicShape(contextual, checker)) ||
     isDynamicShape(own, checker)
   );

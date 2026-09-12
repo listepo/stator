@@ -4,6 +4,26 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 229. Step 12c computed keys on object literals (2026-09-12)
+
+**Surface:** `{ [key]: v }` on object literals in both modes. Non-fixed-shape spread stays
+`STA1214`; methods landed as 228.
+
+**Representation:** one new HIR member, `ComputedEntry { key, value }`, emitted with
+`jsrt_dyn_index_set` — no second object representation. Static string-literal computed keys reuse the
+layout path; runtime keys and integer indices (`{ [0]: 1 }`) go dynamic so `console.log` order
+matches Node (indices first).
+
+**Gate collateral:** `IndexSignature` in a type annotation (`{ [k: string]: n }`) must be accepted
+at the walk — it is checker metadata, not a runtime construct — or the TS dynamic-keys subset fixture
+failed with STA1214 on the annotation before the literal was reached.
+
+```text
+golden: 199 fixtures — 199 passed, 0 failed
+subset: 364 fixtures — 341 passed, 23 expected-fail, 0 failed
+unit 386; pass 386; fail 0
+```
+
 ## 228. Object-literal method members use the class method table (2026-09-12)
 
 `{ m() { … } }` is not dynamic and not a slot: `isDynamicShape` still answers `false` for methods

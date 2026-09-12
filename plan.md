@@ -476,8 +476,9 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     forced and the fixed-shape-position refusal it opened).
     **Methods landed 2026-09-12** (plan-notes 228; evidence in [done.md](done.md) → Phase 5 step 12c
     methods).
-    **Residue:** a spread of anything but a variable of fixed shape and computed keys stay
-    `STA1214`.
+    **Computed keys landed 2026-09-12** (plan-notes 229; evidence in [done.md](done.md) → Phase 5
+    step 12c computed keys).
+    **Residue:** a spread of anything but a variable of fixed shape stays `STA1214`.
     (d) **[D5] The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an

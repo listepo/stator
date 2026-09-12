@@ -37,6 +37,7 @@ import {
   errorHType,
   forOfElementType,
   isAccessorEntry,
+  isComputedEntry,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -1230,6 +1231,11 @@ function verifyExpression(
           if (entry.set !== undefined) {
             verifyExpression(entry.set, problems, bindings);
           }
+          continue;
+        }
+        if (isComputedEntry(entry)) {
+          verifyExpression(entry.key, problems, bindings);
+          verifyExpression(entry.value, problems, bindings);
           continue;
         }
         verifyExpression(entry.value, problems, bindings);

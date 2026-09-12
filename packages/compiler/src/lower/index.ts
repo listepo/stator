@@ -114,6 +114,7 @@ import {
   errorHType,
   forOfElementType,
   isAccessorEntry,
+  isComputedEntry,
   isSetOperation,
   MATCH_FIELDS,
   REGEXP_FIELDS,
@@ -2482,6 +2483,18 @@ function lowerArrayLiteralExpression(
     result = arrayConcatExpr(result, piece, span);
   }
   return result ?? emptyArrayLiteral(literalType, span);
+
+function staticObjectLiteralKey(name: ts.PropertyName): string | null {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) {
+    return name.text;
+  }
+  if (ts.isComputedPropertyName(name)) {
+    const expr = name.expression;
+    if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
+      return expr.text;
+    }
+  }
+  return null;
 }
 
 function lowerExpression(
@@ -3025,7 +3038,7 @@ function lowerExpression(
         }
         const name = property.name.text;
         const half = ts.isGetAccessorDeclaration(property) ? 'get' : 'set';
-        const existing = entries.find((e) => e.name === name);
+        const existing = entries.find((e) => isAccessorEntry(e) && e.name === name);
         if (existing !== undefined && isAccessorEntry(existing)) {
           entries[entries.indexOf(existing)] =
             half === 'get' ? { ...existing, get: fn } : { ...existing, set: fn };
@@ -3036,12 +3049,7 @@ function lowerExpression(
         );
         continue;
       }
-      // An identifier or a string-literal key; the gate settled which spellings reach here, and
-      // both carry the key as `.text`, so the slot is found by the name the source wrote.
-      if (
-        !ts.isPropertyAssignment(property) ||
-        !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))
-      ) {
+      if (!ts.isPropertyAssignment(property)) {
         diagnostics.push(
           diagnosticFromNode(
             property,
@@ -3064,7 +3072,35 @@ function lowerExpression(
       if (value === null) {
         return null;
       }
-      entries.push({ name: property.name.text, value });
+      const staticKey = staticObjectLiteralKey(property.name);
+      if (staticKey !== null) {
+        entries.push({ name: staticKey, value });
+        continue;
+      }
+      if (!ts.isComputedPropertyName(property.name)) {
+        diagnostics.push(
+          diagnosticFromNode(
+            property,
+            sourceFile,
+            'STA4068',
+            'internal',
+            'ts',
+            'object literal member is not a name/value pair',
+          ),
+        );
+        return null;
+      }
+      const key = lowerExpression(
+        property.name.expression,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      if (key === null) {
+        return null;
+      }
+      entries.push({ key, value });
     }
     // The CONTEXTUAL type decides fixed-versus-dynamic, and it must be asked FIRST: in
     // `const o: { x?: number } = { x: 1 }` the literal's own type is a layout, but every later
@@ -3114,6 +3150,19 @@ function lowerExpression(
             'internal',
             'ts',
             'object literal with an accessor took the fixed-shape path',
+          ),
+        );
+        return null;
+      }
+      if (isComputedEntry(entry)) {
+        diagnostics.push(
+          diagnosticFromNode(
+            node,
+            sourceFile,
+            'STA4068',
+            'internal',
+            'ts',
+            'object literal with a computed key took the fixed-shape path',
           ),
         );
         return null;

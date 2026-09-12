@@ -382,9 +382,11 @@ void test('every literal form that is not a fixed slot list is a not-yet', () =>
     ),
     ['STA1214'],
   );
-  assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), [
-    'STA1214',
-  ]);
+});
+
+void test('object literal computed keys are accepted on the dynamic shape path', () => {
+  assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), []);
+  assert.deepEqual(codesFor('const o = { b: 1, [0]: 2 };\nconsole.log(o);'), []);
 });
 
 // plan.md §8 step 12(c): an accessor member is ACCEPTED, and it takes the shape-table path -- the

@@ -31,7 +31,7 @@ import type {
   Statement,
   SwitchClause,
 } from '../hir/nodes.ts';
-import { isAccessorEntry } from '../hir/nodes.ts';
+import { isAccessorEntry, isComputedEntry } from '../hir/nodes.ts';
 
 /** What a pass supplies. All three are called with children already rewritten; all three may return
  * their argument unchanged, and returning it by identity is how "nothing happened" is expressed.
@@ -441,13 +441,18 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     }
     case 'dyn-object-literal': {
       const entries = rewriteEach(expr.entries, (entry): DynEntry => {
-        if (!isAccessorEntry(entry)) {
-          const value = sub(entry.value);
-          return value === entry.value ? entry : { ...entry, value };
+        if (isAccessorEntry(entry)) {
+          const get = entry.get === undefined ? undefined : sub(entry.get);
+          const set = entry.set === undefined ? undefined : sub(entry.set);
+          return get === entry.get && set === entry.set ? entry : { ...entry, get, set };
         }
-        const get = entry.get === undefined ? undefined : sub(entry.get);
-        const set = entry.set === undefined ? undefined : sub(entry.set);
-        return get === entry.get && set === entry.set ? entry : { ...entry, get, set };
+        if (isComputedEntry(entry)) {
+          const key = sub(entry.key);
+          const value = sub(entry.value);
+          return key === entry.key && value === entry.value ? entry : { ...entry, key, value };
+        }
+        const value = sub(entry.value);
+        return value === entry.value ? entry : { ...entry, value };
       });
       return entries === expr.entries ? expr : { ...expr, entries };
     }
