@@ -83,10 +83,11 @@ void test('for-of and for-in report distinctly from the for loop they are not', 
 void test('index access is accepted on an array and not-yet on anything else', () => {
   assert.deepEqual(codesFor('const a: number[] = [1];\nconsole.log(a[0]);'), []);
   assert.deepEqual(codesFor("const s: string = 'ab';\nconsole.log(s[0]);"), ['STA1214']);
-  // A hole and a spread are rejected in their own right: a dense array cannot be absent, and a
-  // spread needs the iterator protocol.
+  // A hole is rejected: a dense array cannot be absent. Array spread of a typed array is accepted.
   assert.deepEqual(codesFor('const a: number[] = [1, , 3];'), ['STA1214']);
-  assert.deepEqual(codesFor('const a: number[] = [1];\nconst b: number[] = [...a];'), ['STA1214']);
+  assert.deepEqual(codesFor('const a: number[] = [1];\nconst b: number[] = [...a];'), []);
+  assert.deepEqual(codesFor('const a: number[] = [1, 2];\nconst b: number[] = [0, ...a, 3];'), []);
+  assert.deepEqual(codesFor('const s: string = "ab";\nconst c: string[] = [...s];'), ['STA1214']);
 });
 
 void test('switch, case, default and do/while are all accepted syntax', () => {

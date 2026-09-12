@@ -4,6 +4,13 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 227. Array-literal spread (Phase 5 step 12, 2026-09-12)
+
+**Evidence:** `subset_spread_operator_array_{ts,js}` pass; golden `array_spread.{ts,js}` byte-match Node; gate accepts array/tuple spread, refuses holes/string/non-array iterables.
+
+**Decision:** Lower `[lit, ...arr, lit]` to nested `array-op concat` segments — no new HIR node, reuses `jsrt_array_concat`. SUBSET.md row updated; `plan.md` had no separate Check for this construct.
+
+
 ---
 
 ## 2026-08-29 — Phase 1 Task 1.0 bootstrap

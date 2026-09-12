@@ -2404,6 +2404,86 @@ function lowerBlock(
   return block;
 }
 
+
+/** `receiver.concat(other)` as an HIR node — the lowering for array-literal spread. */
+function arrayConcatExpr(
+  target: Expression,
+  other: Expression,
+  span: Span,
+): Expression {
+  const shape = ARRAY_OPS.concat;
+  const type: HType = shape.result === 'self' ? target.type : hUnknown(false);
+  return { kind: 'array-op', type, span, op: 'concat', target, args: [other] };
+}
+
+function emptyArrayLiteral(type: HType, span: Span): ArrayLiteral {
+  return { kind: 'array-literal', type, span, elements: [] };
+}
+
+/** Fold `[a, ...b, c]` into nested `concat` calls over literal runs and spread operands. */
+function lowerArrayLiteralExpression(
+  node: ts.ArrayLiteralExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const literalType = typeAt(node, checker, bindings);
+  const hasSpread = node.elements.some((element) => ts.isSpreadElement(element));
+  if (!hasSpread) {
+    const elements: Expression[] = [];
+    for (const element of node.elements) {
+      const lowered = lowerExpression(element, sourceFile, checker, bindings, diagnostics);
+      if (lowered === null) {
+        return null;
+      }
+      elements.push(lowered);
+    }
+    return { kind: 'array-literal', type: literalType, span, elements };
+  }
+
+  const segments: Array<{ elems: Expression[] } | { spread: Expression }> = [];
+  for (const element of node.elements) {
+    if (ts.isSpreadElement(element)) {
+      const spread = lowerExpression(element.expression, sourceFile, checker, bindings, diagnostics);
+      if (spread === null) {
+        return null;
+      }
+      segments.push({ spread });
+      continue;
+    }
+    const lowered = lowerExpression(element, sourceFile, checker, bindings, diagnostics);
+    if (lowered === null) {
+      return null;
+    }
+    const last = segments[segments.length - 1];
+    if (last !== undefined && 'elems' in last) {
+      last.elems.push(lowered);
+    } else {
+      segments.push({ elems: [lowered] });
+    }
+  }
+
+  let result: Expression | null = null;
+  for (const segment of segments) {
+    const piece: Expression =
+      'elems' in segment
+        ? { kind: 'array-literal', type: literalType, span, elements: segment.elems }
+        : segment.spread;
+    if (result === null) {
+      if ('elems' in segment) {
+        result = piece;
+      } else {
+        result = arrayConcatExpr(piece, emptyArrayLiteral(literalType, span), span);
+      }
+      continue;
+    }
+    result = arrayConcatExpr(result, piece, span);
+  }
+  return result ?? emptyArrayLiteral(literalType, span);
+}
+
 function lowerExpression(
   node: ts.Expression,
   sourceFile: ts.SourceFile,
@@ -2777,24 +2857,7 @@ function lowerExpression(
   }
 
   if (ts.isArrayLiteralExpression(node)) {
-    const elements: Expression[] = [];
-    for (const element of node.elements) {
-      const lowered = lowerExpression(element, sourceFile, checker, bindings, diagnostics);
-      if (!lowered) {
-        return null;
-      }
-      elements.push(lowered);
-    }
-    const literal: ArrayLiteral = {
-      kind: 'array-literal',
-      // From the checker, not from the elements: `[1, 2]` in `const a: number[] = [1, 2]` is
-      // `number[]`, but the same literal assigned to `unknown[]` is not, and only the checker
-      // knows which context this literal sits in.
-      type: typeAt(node, checker, bindings),
-      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-      elements,
-    };
-    return literal;
+    return lowerArrayLiteralExpression(node, sourceFile, checker, bindings, diagnostics);
   }
 
   if (ts.isElementAccessExpression(node)) {

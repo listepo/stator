@@ -423,7 +423,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     }
 
     case ts.SyntaxKind.ArrayLiteralExpression:
-      return gateArrayLiteral(node as ts.ArrayLiteralExpression);
+      return gateArrayLiteral(node as ts.ArrayLiteralExpression, typeChecker);
 
     case ts.SyntaxKind.ElementAccessExpression:
       return gateElementAccess(node as ts.ElementAccessExpression, typeChecker);
@@ -446,6 +446,9 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     // `{ ...a }`. gateObjectLiteral already held the operand to a variable of fixed shape; the
     // identifier underneath is gated as the ordinary read the expansion makes of it.
     case ts.SyntaxKind.SpreadAssignment:
+    // `...x` in an array literal. gateArrayLiteral vetted the operand type; the expression
+    // underneath is gated normally.
+    case ts.SyntaxKind.SpreadElement:
     // A member of a TYPE literal (`let p: { x: number }`). The enclosing TypeLiteral is a type
     // node and skipped as one, but its members are not type nodes themselves, so the walk reaches
     // them; they carry no runtime construct, exactly as the annotation around them does not.
@@ -1924,13 +1927,30 @@ function isArrayLength(access: ts.PropertyAccessExpression, checker: ts.TypeChec
  * A hole (`[1, , 3]`) is a real hole in ECMA-262 — it is `undefined` on read but absent to
  * iteration — and the dense runtime array has no way to be absent. A spread needs the iterator
  * protocol. Both are rejected rather than approximated. */
-function gateArrayLiteral(literal: ts.ArrayLiteralExpression): GateResult {
+function gateArrayLiteral(
+  literal: ts.ArrayLiteralExpression,
+  checker: ts.TypeChecker,
+): GateResult {
   for (const element of literal.elements) {
     if (ts.isOmittedExpression(element)) {
       return notYet('a hole in an array literal is not yet supported', 5);
     }
     if (ts.isSpreadElement(element)) {
-      return notYet('spread in an array literal is not yet supported', 5);
+      const operandType = checker.getTypeAtLocation(element.expression);
+      if (isArrayOrTuple(operandType, checker)) {
+        continue;
+      }
+      if ((operandType.flags & ts.TypeFlags.StringLike) !== 0) {
+        return notYet('spread of a string in an array literal is not yet supported', 5);
+      }
+      const hir = tsTypeToHType(operandType, checker);
+      if (hir.kind === 'unknown') {
+        continue;
+      }
+      return notYet(
+        'spread in an array literal of a non-array value is not yet supported',
+        5,
+      );
     }
   }
   return { kind: 'accept' };
