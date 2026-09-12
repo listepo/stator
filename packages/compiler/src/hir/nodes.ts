@@ -356,6 +356,20 @@ export interface MethodCall extends Node {
   readonly args: readonly Expression[];
 }
 
+/** `o.m` — a method taken as a value, not called.
+ *
+ * The closure is the method's own, with `has_receiver` set so a later bare call shifts arguments
+ * correctly (docs/VALUE.md §4.16). Virtual dispatch loads the receiver's entry, not the statically
+ * named one; a direct call names the declaring class's function. */
+export interface MethodValue extends Node {
+  readonly kind: 'method-value';
+  readonly target: Expression;
+  readonly className: string;
+  readonly method: string;
+  readonly slot: number;
+  readonly dispatch: 'direct' | 'virtual';
+}
+
 /** `{ x: 1, y: f() }`.
  *
  * The same allocation a class instance is -- a descriptor pointer followed by slots -- with the
@@ -1389,6 +1403,7 @@ export type Expression =
   | InstanceOf
   | FieldAccess
   | MethodCall
+  | MethodValue
   | ObjectLiteral
   | DynObjectLiteral
   | DynFieldAccess

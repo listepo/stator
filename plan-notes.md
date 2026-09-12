@@ -4,6 +4,30 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 230. Method values landed: `has_receiver` on `JSRTClosure` and `jsrt_call` shifts (2026-09-12)
+
+**Measured — pinned Node 26.7.0**, two-parameter method `add(a, b)`:
+
+```
+3          // o.add(1, 2)
+3          // const g = o.add; g(1, 2)
+Cannot read properties of undefined (reading 'x')   // g() when body reads this.x
+```
+
+**Measured — this compiler after the landing**, `stator build method_value.ts --emit=c`:
+
+```c
+static const JSRTClosure _jsrt_closure_0 = {_jsrt_fn_0, 2, "add", NULL, true};
+...
+jsrt_call(jsrt_closure(&_jsrt_closure_0), 2, &slot);  // g(1, 2): arity 2, has_receiver true
+```
+
+`g.length` would read `closure.arity` (2), not 3. Class field call (`new Runner().run(41)`) lowers
+through field-access + ordinary `call` and needed only the `gateCall` refusal removed.
+
+**plan.md edited:** yes — §8 step 12(e) strikes method values and calling a class field; class-as-value,
+`super` as a value, and named function expressions stay open.
+
 ## 229. Step 12c computed keys on object literals (2026-09-12)
 
 **Surface:** `{ [key]: v }` on object literals in both modes. Non-fixed-shape spread stays
@@ -6855,5 +6879,6 @@ subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
 unit 385; pass 385; fail 0
 runtime: print corpus matches Node
 ```
+
 
 

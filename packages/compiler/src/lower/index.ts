@@ -83,6 +83,7 @@ import type {
   MatchField,
   MathMethod,
   MethodCall,
+  MethodValue,
   Module,
   NewExpr,
   ObjectEntry,
@@ -2759,6 +2760,47 @@ function lowerExpression(
     }
     const field = node.name.text;
     // An accessor is not a slot: reading `o.x` RUNS the getter, which is what the property means.
+    const methodOwner = declaringClassName(node.expression, field, checker);
+    if (methodOwner !== null) {
+      if (target.type.kind !== 'object') {
+        diagnostics.push(
+          diagnosticFromNode(
+            node,
+            sourceFile,
+            'STA4049',
+            'internal',
+            'ts',
+            'receiver is not an object',
+          ),
+        );
+        return null;
+      }
+      const slot = target.type.methods.findIndex((m) => m.name === field);
+      if (slot < 0) {
+        diagnostics.push(
+          diagnosticFromNode(
+            node,
+            sourceFile,
+            'STA4067',
+            'internal',
+            'ts',
+            `method '${field}' has no slot in the layout of ${hTypeName(target.type)}`,
+          ),
+        );
+        return null;
+      }
+      const value: MethodValue = {
+        kind: 'method-value',
+        type: typeAt(node, checker, bindings),
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        target,
+        className: methodOwner,
+        method: field,
+        slot,
+        dispatch: isOverridden(target.type.name, field, sourceFile, checker) ? 'virtual' : 'direct',
+      };
+      return value;
+    }
     const owner = accessorOwner(node.expression, field, checker);
     if (owner !== undefined) {
       return accessorCall(
@@ -4093,19 +4135,7 @@ function lowerExpression(
         // `Animal` is where `describe` is written. Naming the receiver's class here would make the
         // emitter look for a method that class does not own.
         const owner = declaringClassName(obj, propName, checker);
-        if (owner === null) {
-          diagnostics.push(
-            diagnosticFromNode(
-              expr,
-              sourceFile,
-              'STA4065',
-              'internal',
-              'ts',
-              `no class in the receiver's ancestry declares method '${propName}'`,
-            ),
-          );
-          return null;
-        }
+        if (owner !== null) {
         // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
         // which is sound for the same reason a field slot is: a subclass's method table begins
         // with its base's, in the base's order.
@@ -4140,6 +4170,7 @@ function lowerExpression(
           args,
         };
         return call;
+        }
       }
     }
 

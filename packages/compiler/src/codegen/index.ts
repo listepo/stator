@@ -36,6 +36,7 @@ import type {
   LogicalOp,
   MathCall,
   MethodCall,
+  MethodValue,
   Module,
   NewExpr,
   ObjectLiteral,
@@ -70,7 +71,8 @@ import {
   SET_OPS,
   stringOpCanThrow,
 } from '../hir/nodes.ts';
-import type { HField } from '../hir/types.ts';
+import type { HField } from '../hir/types.ts'
+import { RECEIVER_NAME } from '../lower/captures.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
  *
@@ -227,6 +229,14 @@ function declaredArity(fn: {
     n++;
   }
   return n;
+}
+
+function closureMeta(fn: {
+  readonly params: readonly { readonly name: string; readonly rest?: true; readonly default?: unknown }[];
+}): { readonly arity: number; readonly hasReceiver: boolean } {
+  const hasReceiver = fn.params[0]?.name === RECEIVER_NAME;
+  const params = hasReceiver ? fn.params.slice(1) : fn.params;
+  return { arity: declaredArity({ params }), hasReceiver };
 }
 
 function snakeCase(member: string): string {
@@ -545,7 +555,7 @@ class Emitter {
       );
       out.push(
         `static const JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
-          `${declaredArity(unit.fn)}, ${cNameLiteral(unit.name)}, NULL};`,
+          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? "true" : "false"}};`,
       );
     }
     if (this.functions.length > 0) {
@@ -1379,6 +1389,7 @@ class Emitter {
       // No slot: the read is a dereference with nothing allocated between evaluating the target
       // and using it, so there is no window in which the object could go unrooted.
       case 'field-access':
+      case 'method-value':
       // A match read is a property load or a header read -- same story, nothing allocated. So is
       // a regexp read: a struct field or a bit test.
       case 'match-read':
@@ -2694,7 +2705,7 @@ class Emitter {
           this.emitExpression(expr.target);
           return this.slotRef(expr.field);
         }
-        return `jsrt_object_get(${this.emitExpression(expr.target)}, ${expr.slot})`;
+        return `jsrt_object_get_field(${this.emitExpression(expr.target)}, ${expr.slot}, ${cNameLiteral(expr.field)})`;
       }
 
       case 'iterator-next': {
@@ -2799,6 +2810,14 @@ class Emitter {
         this.flushParts(parts, expr.span);
         this.emitPendingCheck(expr.span);
         return object;
+      }
+
+      case 'method-value': {
+        const callee =
+          expr.dispatch === 'virtual'
+            ? `jsrt_method(${this.emitExpression(expr.target)}, ${expr.slot})`
+            : this.closureValue(this.methodOf(expr).fn);
+        return callee;
       }
 
       case 'method-call': {
@@ -3555,7 +3574,7 @@ class Emitter {
 
   /** The one function a direct call names: the class the lowering resolved, and that class's own
    * body. `classAt` is what turns a disagreement between counting and emission into a throw. */
-  private methodOf(expr: MethodCall): ClassMethod {
+  private methodOf(expr: MethodCall | MethodValue): ClassMethod {
     const method = this.classAt(expr.className).methods.find((m) => m.name === expr.method);
     if (method === undefined) {
       throw new Error(`class ${expr.className} has no method ${expr.method}`);
@@ -3947,7 +3966,8 @@ class Emitter {
       return `jsrt_closure(&_jsrt_closure_${id})`;
     }
     const name = cNameLiteral(fn.name ?? '');
-    return `jsrt_closure_new(_jsrt_fn_${id}, ${declaredArity(fn)}, ${name}, ${this.currentEnv()})`;
+    const meta = closureMeta(fn);
+    return `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? "true" : "false"})`;
   }
 
   private appendLine(line: string, span?: Span): void {

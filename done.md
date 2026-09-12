@@ -1586,9 +1586,8 @@ the literal's layout type as receiver parameter zero; codegen's `registerShape` 
 methods on the per-shape `JSRTClass` and `MethodCall` names the shape. No second ABI, no bound
 closure — `o.m()` is a direct method call with the receiver in argv slot zero.
 
-**What stays not-yet.** Method-as-value (`const f = o.m`) is still `STA1214` (step 12(e)): the
-method's own closure does not bind `this`, and receiver-shift in `jsrt_call` is not landed yet
-(plan-notes 210). Spread of a non-variable fixed shape remains `STA1214` too.
+**What stays not-yet.** Spread of a non-variable fixed shape remains `STA1214`. Method-as-value
+(`const f = o.m`) landed in step 12(e) (plan-notes 230).
 
 **Check.** `node packages/tests/subset/run.ts` — `subset_object_literal_method_{ts,js}` static, 0
 failed; `node packages/tests/golden/run.ts` — adds `ts/object_literal_method.ts`,
@@ -1682,6 +1681,36 @@ TypeScript, and `packages/tests/unit/frames.test.ts` (in the 384) is what holds 
 to the frame-vs-locals discipline.
 
 ---
+
+### Step 12e — method values and calling a class field (2026-09-12)
+
+The receiver-carrying half of family (e). Plan-notes 208 measured the hole in §4.16: a method
+value called with arguments bound every parameter off by one because `jsrt_arg` fills from the
+right and the receiver is parameter zero on the left.
+
+**`JSRTClosure` carries `has_receiver`.** Method units emit `arity` without counting the receiver
+(`closureMeta` subtracts parameter zero) and set `has_receiver = true`. `jsrt_call` prepends
+`undefined` to `argv` when `argc == arity` (a bare method-value call) and passes `argv` through
+when `argc == arity + 1` (`o.m(a)`). Still not `Function.prototype.bind`, which INSERTS a
+captured receiver.
+
+**Compiler surface.** New HIR `method-value` loads a direct closure or `jsrt_method` for virtual
+dispatch. `gatePropertyAccess` admits `o.m` in value position; `gateCall` admits `o.field()` when
+the name is a class field. `jsrt_object_get_field` raises Node's TypeError when a method body reads
+`this` on an unbound call.
+
+**Check.** `tests/golden/{ts,js}/method_value.*`, `method_value_this_error.*`, `class_field_call.*`
+match the pinned Node byte-for-byte; decision fixtures `subset_method_value_{ts,js}` and
+`subset_class_field_call_{ts,js}` are out of expected-fail. Run on 2026-09-12:
+
+```
+runtime: print corpus matches Node
+tsc --noEmit: clean (compiler + tests)
+tests 385 / pass 385 / fail 0
+subset: 368 fixtures — 343 passed, 25 expected-fail, 0 failed
+golden: 202 passed for this landing's six fixtures; 1 unrelated pre-existing fail (array_callbacks.ts, STA4002)
+```
+
 
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 

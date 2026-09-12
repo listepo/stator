@@ -613,6 +613,10 @@ static inline jsrt_value jsrt_object_get(jsrt_value obj, uint32_t slot) {
   return jsrt_as_object(obj)->fields[slot];
 }
 
+/* Like `jsrt_object_get`, but raises Node's TypeError when `obj` is nullish -- the path a method
+ * body's `this.x` takes when `this` is `undefined` after a method value is called bare. */
+jsrt_value jsrt_object_get_field(jsrt_value obj, uint32_t slot, const char *field);
+
 /* May throw (frozen object). Generated C checks jsrt_pending() after every write. */
 void jsrt_object_set(jsrt_value obj, uint32_t slot, jsrt_value v);
 
@@ -1087,9 +1091,10 @@ void jsrt_env_copy_slots(JSRTEnv *dst, const JSRTEnv *src);
  * without knowing which kind of closure it holds, so the signature cannot vary between them. */
 typedef struct JSRTClosure {
   jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env);
-  uint32_t arity;   /* declared parameters, i.e. Function.prototype.length */
+  uint32_t arity;   /* declared parameters, i.e. Function.prototype.length -- never counts `this` */
   const char *name; /* "" for an anonymous function */
   JSRTEnv *env;     /* NULL when the function captures nothing */
+  bool has_receiver; /* parameter zero is `this`; `jsrt_call` shifts when the caller omits it */
 } JSRTClosure;
 
 static inline jsrt_value jsrt_closure(const JSRTClosure *c) {
@@ -1106,7 +1111,7 @@ static inline jsrt_value jsrt_method(jsrt_value obj, uint32_t slot) {
 /* The heap-allocated form, for a function that captures. Returns an already-boxed value because
  * the closure is reachable only through it. */
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
-                            uint32_t arity, const char *name, JSRTEnv *env);
+                            uint32_t arity, const char *name, JSRTEnv *env, bool has_receiver);
 
 static inline const JSRTClosure *jsrt_as_closure(jsrt_value v) {
   return (const JSRTClosure *)jsrt_ptr(v);

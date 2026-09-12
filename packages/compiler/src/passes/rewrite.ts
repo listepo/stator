@@ -389,6 +389,10 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     }
     case 'array-op':
     case 'method-call':
+    case 'method-value': {
+      const target = sub(expr.target);
+      return target === expr.target ? expr : { ...expr, target };
+    }
     case 'collection-op':
     case 'date-op':
     case 'regexp-op':

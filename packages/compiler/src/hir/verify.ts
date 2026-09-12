@@ -1088,6 +1088,39 @@ function verifyExpression(
       break;
     }
 
+    case 'method-value': {
+      verifyExpression(expr.target, problems, bindings);
+      if (
+        expr.target.type.kind !== 'object' ||
+        (expr.target.type.name !== expr.className &&
+          !expr.target.type.bases.includes(expr.className))
+      ) {
+        problems.push({
+          kind: 'method-value',
+          span: expr.span,
+          code: 'STA4047',
+          message: `receiver has type '${hTypeName(expr.target.type)}', not ${expr.className}`,
+        });
+      } else if (methodOf(expr.target.type, expr.method) === undefined) {
+        problems.push({
+          kind: 'method-value',
+          span: expr.span,
+          code: 'STA4047',
+          message: `${expr.className} has no method '${expr.method}'`,
+        });
+      } else if (
+        expr.dispatch === 'virtual' &&
+        expr.target.type.methods.findIndex((m) => m.name === expr.method) !== expr.slot
+      ) {
+        problems.push({
+          kind: 'method-value',
+          span: expr.span,
+          code: 'STA4047',
+          message: `method '${expr.method}' is at slot ${String(expr.target.type.methods.findIndex((m) => m.name === expr.method))}, not ${String(expr.slot)}`,
+        });
+      }
+      break;
+    }
     case 'method-call': {
       verifyExpression(expr.target, problems, bindings);
       for (const arg of expr.args) {

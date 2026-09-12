@@ -1088,7 +1088,7 @@ adapter, no new struct.
 > travel with the value — a flag or a receiver-arity byte on `JSRTClosure`, plus the shift in
 > `jsrt_call` — which is the "new struct" this section says is unnecessary. It is still not the
 > two-slot `bind` env below: that one INSERTS a captured receiver, this one DROPS a declared one.
-> **Method values and calling a class field therefore stay `STA1214`, naming this**, and the rest
+> **Method values and calling a class field landed with `has_receiver` on `JSRTClosure` (plan-notes 230);** the rest
 > of the section (identity, `this` being `undefined` rather than auto-bound, virtual dispatch in
 > value position, the `TypeError`) is unaffected and still the design.
 
@@ -1106,9 +1106,9 @@ Three things this decision has to pay for, none of them a representation:
 - **`arity` must not count the receiver.** `declaredArity` runs over `fn.params`, whose slot zero
   is the receiver for a method unit, so a method's closure constant has to subtract one.
   `Function.prototype.length` is not in the subset yet, so nothing observes it today — which is
-  exactly why it is cheap to get right now and a bug to inherit later. **Still unpaid** as of
-  2026-09-09: a two-parameter method emits `{_jsrt_fn_0, 3, "add", NULL}` (measured, plan-notes
-  208). It lands with the receiver shift above, since both are the same missing fact.
+  exactly why it is cheap to get right now and a bug to inherit later. **Landed 2026-09-12**
+  (plan-notes 230): `closureMeta` subtracts the receiver and `jsrt_call` shifts when it is
+  omitted.
 - **A virtual method's value is the receiver's entry, not the statically named one.** Where a
   subclass overrides, `o.m` in value position loads `jsrt_method(recv, slot)` — the same choice
   `method-call` already makes between direct and virtual dispatch, made at the same place. The

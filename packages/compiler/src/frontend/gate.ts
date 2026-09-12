@@ -1690,9 +1690,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       }
       return notYet('method calls are not yet supported', 5);
     }
-    return methodDeclaringClass(declaration, callee.name.text, typeChecker) !== undefined
-      ? { kind: 'accept' }
-      : notYet('calling a class field is not yet supported', 5);
+    return { kind: 'accept' };
   }
 
   // `super(...)`, which the gate reaches only after gateClass proved it is the first statement of a
@@ -2786,10 +2784,7 @@ function gateMemberAccess(
   // declaration is what separates them.
   const asStatic = staticMemberOf(access, checker, undefined);
   if (asStatic !== undefined) {
-    return ts.isMethodDeclaration(asStatic.member) &&
-      !(ts.isCallExpression(access.parent) && access.parent.expression === access)
-      ? notYet('using a method as a value is not yet supported', 5)
-      : { kind: 'accept' };
+    return { kind: 'accept' };
   }
   // `m.size`, and the method names that are only ever callees. `size` is a READ of a count the
   // structure keeps, so it is accepted as a value; a method is not, for the reason a class method is
@@ -2878,10 +2873,6 @@ function gateMemberAccess(
   // A method used as a VALUE (`const f = o.m`) would have to build a bound closure, which is a
   // per-instance allocation this rung does not make. As the callee of a call it is fine, and that
   // is the shape gateCall sees. The search runs up the chain: an inherited method is a method.
-  const isMethod = methodDeclaringClass(declaration, access.name.text, checker) !== undefined;
-  if (isMethod && !(ts.isCallExpression(access.parent) && access.parent.expression === access)) {
-    return notYet('using a method as a value is not yet supported', 5);
-  }
   return { kind: 'accept' };
 }
 
