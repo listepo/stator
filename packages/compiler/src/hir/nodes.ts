@@ -368,6 +368,8 @@ export interface MethodCall extends Node {
 export interface ObjectLiteral extends Node {
   readonly kind: 'object-literal';
   readonly entries: readonly ObjectEntry[];
+  /** Method members, lowered like a class's -- one shared function per name, receiver as param 0. */
+  readonly methods: readonly ClassMethod[];
 }
 
 export interface ObjectEntry {

@@ -6825,3 +6825,14 @@ subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
 unit 385; pass 385; fail 0
 runtime: print corpus matches Node
 ```
+
+## 227. Object-literal method members use the class method table (2026-09-12)
+
+`{ m() { … } }` is not dynamic and not a slot: `isDynamicShape` still answers `false` for methods
+(the trigger list is accessor/optional/index/empty only), and `shapeTypeToHType` now splits data
+fields from method members the way `classTypeToHType` does. Lowering adds `ObjectLiteral.methods`;
+codegen's `registerShape` copies them onto the per-literal `JSRTClass` descriptor; `declaringClassName`
+and the gate accept `o.m()` on a shape-typed receiver by naming the structural descriptor. Method-as-
+value stays `STA1214` — no receiver shift in `jsrt_call` yet (notes 210). Evidence: golden
+`object_literal_method.{ts,js}`, subset `subset_object_literal_method_{ts,js}`.
+

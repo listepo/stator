@@ -1169,6 +1169,9 @@ function verifyExpression(
       for (const entry of expr.entries) {
         verifyExpression(entry.value, problems, bindings);
       }
+      for (const method of expr.methods) {
+        verifyFunction(method.fn, problems, bindings);
+      }
       const shape = expr.type;
       if (shape.kind !== 'object') {
         problems.push({

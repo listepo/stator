@@ -431,7 +431,13 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
         const value = sub(entry.value);
         return value === entry.value ? entry : { ...entry, value };
       });
-      return entries === expr.entries ? expr : { ...expr, entries };
+      const methods = rewriteEach(expr.methods, (method): ClassMethod => {
+        const fn = rewriteFunction(method.fn, rewriter);
+        return fn === method.fn ? method : { ...method, fn };
+      });
+      return entries === expr.entries && methods === expr.methods
+        ? expr
+        : { ...expr, entries, methods };
     }
     case 'dyn-object-literal': {
       const entries = rewriteEach(expr.entries, (entry): DynEntry => {

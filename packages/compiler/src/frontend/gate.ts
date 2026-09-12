@@ -1669,10 +1669,20 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
         return notYet(`${callee.name.text} on a RegExp match is not yet supported`, 5);
       }
       // `o.m()` on an Unknown receiver: get the name through the shape table, then call.
-      return tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind ===
-        'unknown'
-        ? { kind: 'accept' }
-        : notYet('method calls are not yet supported', 5);
+      const shape = tsTypeToHType(
+        typeChecker.getTypeAtLocation(callee.expression),
+        typeChecker,
+      );
+      if (shape.kind === 'unknown') {
+        return { kind: 'accept' };
+      }
+      if (
+        shape.kind === 'object' &&
+        shape.methods.some((m) => m.name === callee.name.text)
+      ) {
+        return { kind: 'accept' };
+      }
+      return notYet('method calls are not yet supported', 5);
     }
     return methodDeclaringClass(declaration, callee.name.text, typeChecker) !== undefined
       ? { kind: 'accept' }
@@ -2017,10 +2027,11 @@ function gateObjectLiteral(
     }
     // `{ get x() {…}, set x(v) {…} }`. An accessor has no slot to lay out -- it is a get/set pair
     // in the object's slot (docs/VALUE.md §4.15) -- so it never has a fixed shape, and
-    // objectLiteralIsDynamic answers that below. A METHOD member is still not-yet: it needs the
-    // shape table to hold a callable, which is step 12's (e) family.
+    // objectLiteralIsDynamic answers that below. A METHOD member rides the same hidden-class
+    // descriptor and method table as a class instance (docs/VALUE.md §4.5).
     const accessor = ts.isGetAccessorDeclaration(property) || ts.isSetAccessorDeclaration(property);
-    if (!accessor && !ts.isPropertyAssignment(property)) {
+    const method = ts.isMethodDeclaration(property);
+    if (!accessor && !method && !ts.isPropertyAssignment(property)) {
       return notYet('an object literal with a method member is not yet supported', 5);
     }
     if (!isLayoutKey(property.name)) {
@@ -2806,9 +2817,15 @@ function gateMemberAccess(
       return { kind: 'accept' };
     }
     if (shape.kind === 'object') {
-      return shape.fields.some((f) => f.name === access.name.text)
-        ? { kind: 'accept' }
-        : notYet('a property that is not a field of the shape is not yet supported', 5);
+      if (shape.fields.some((f) => f.name === access.name.text)) {
+        return { kind: 'accept' };
+      }
+      if (shape.methods.some((m) => m.name === access.name.text)) {
+        return ts.isCallExpression(access.parent) && access.parent.expression === access
+          ? { kind: 'accept' }
+          : notYet('using a method as a value is not yet supported', 5);
+      }
+      return notYet('a property that is not a field of the shape is not yet supported', 5);
     }
     return notYet('property access is not yet supported', 5);
   }

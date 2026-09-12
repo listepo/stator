@@ -2917,6 +2917,7 @@ function lowerExpression(
   if (ts.isObjectLiteralExpression(node)) {
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
     const entries: DynEntry[] = [];
+    const methodNodes: ts.MethodDeclaration[] = [];
     for (const property of node.properties) {
       // `{ x }` is `{ x: x }`. The desugaring lives here and not in HIR: the value is the ordinary
       // identifier expression, so every later pass sees a name/value pair like any other.
@@ -2980,6 +2981,23 @@ function lowerExpression(
       // once and in the position the first half was written (docs/VALUE.md §4.15). The body is an
       // ordinary function with the receiver as parameter zero; the receiver is Unknown because the
       // gate made this literal dynamic, so `this.x` inside is a shape-table read.
+      if (ts.isMethodDeclaration(property)) {
+        if (!(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
+          diagnostics.push(
+            diagnosticFromNode(
+              property,
+              sourceFile,
+              'STA4068',
+              'internal',
+              'ts',
+              'object literal method with a key that is not a name',
+            ),
+          );
+          return null;
+        }
+        methodNodes.push(property);
+        continue;
+      }
       if (ts.isGetAccessorDeclaration(property) || ts.isSetAccessorDeclaration(property)) {
         if (!(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
           diagnostics.push(
@@ -3102,7 +3120,15 @@ function lowerExpression(
       }
       fixed.push(entry);
     }
-    const literal: ObjectLiteral = { kind: 'object-literal', type, span, entries: fixed };
+    const methods: ClassMethod[] = [];
+    for (const method of methodNodes) {
+      const fn = lowerFunction(method, sourceFile, checker, bindings, diagnostics, type);
+      if (fn === null) {
+        return null;
+      }
+      methods.push({ name: memberFunctionName(method, sourceFile), fn });
+    }
+    const literal: ObjectLiteral = { kind: 'object-literal', type, span, entries: fixed, methods };
     return literal;
   }
 
@@ -4309,7 +4335,7 @@ function lowerImportCall(
     type: resultType.kind === 'promise' ? resultType : hPromise(nsType),
     span,
     method: 'resolve',
-    arg: { kind: 'object-literal', type: nsType, span, entries },
+    arg: { kind: 'object-literal', type: nsType, span, entries, methods: [] },
   };
 }
 
@@ -4502,9 +4528,15 @@ function declaringClassName(
   checker: ts.TypeChecker,
 ): string | null {
   const declaration = classDeclarationOf(checker.getTypeAtLocation(receiver));
-  const owner =
-    declaration === undefined ? undefined : methodDeclaringClass(declaration, method, checker);
-  return owner?.name?.text ?? null;
+  if (declaration !== undefined) {
+    const owner = methodDeclaringClass(declaration, method, checker);
+    return owner?.name?.text ?? null;
+  }
+  const shape = tsTypeToHType(checker.getTypeAtLocation(receiver), checker);
+  if (shape.kind === 'object' && shape.methods.some((m) => m.name === method)) {
+    return shape.name;
+  }
+  return null;
 }
 
 /* Overriding, and the two questions it raises.

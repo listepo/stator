@@ -371,13 +371,11 @@ void test('an object literal is accepted exactly where its shape is a fixed slot
 });
 
 void test('every literal form that is not a fixed slot list is a not-yet', () => {
-  // A method needs a member function table the shape has no declaration to build, and a computed
-  // key needs the key set at RUNTIME. A spread whose operand is not a variable of fixed shape is
-  // the same runtime question: the expansion reads the operand once per field, so an operand with
-  // an effect would run that effect N times (plan-notes 181).
-  assert.deepEqual(codesFor('const o = { m(): number { return 1; } };\nconsole.log(o);'), [
-    'STA1214',
-  ]);
+  // Methods landed in step 12(c); a computed key needs the key set at RUNTIME. A spread whose
+  // operand is not a variable of fixed shape is the same runtime question: the expansion reads
+  // the operand once per field, so an operand with an effect would run that effect N times
+  // (plan-notes 181).
+  assert.deepEqual(codesFor('const o = { m(): number { return 1; } };\nconsole.log(o.m());'), []);
   assert.deepEqual(
     codesFor(
       'function f(): { x: number } {\n  return { x: 1 };\n}\nconst b = { ...f() };\nconsole.log(b.x);',
@@ -444,14 +442,14 @@ void test('compound assignment through a dynamic shape is accepted', () => {
   assert.deepEqual(codesFor(source), []);
 });
 
-void test('a method MEMBER still refuses the literal; a function-valued property is a get then a call', () => {
-  // Method SYNTAX in the literal still needs a bound method object. A function stored as data
-  // (`m?: () => number`) is an Unknown get then a call — plan.md §8 step 4 — and does not pass
-  // the receiver as `this`.
-  const method = 'const o: { x?: number } = { x: 1, m() { return 2; } } as { x?: number };';
-  assert.notDeepEqual(codesFor(method), []);
+void test('an object literal method member is accepted; method-as-value stays not-yet', () => {
+  assert.deepEqual(
+    codesFor('const o = { v: 1, m() { return this.v; } };\nconsole.log(o.m());'),
+    [],
+  );
   const call = 'const o: { x?: number; m?: () => number } = { m: () => 2 };\nconsole.log(o.m());';
   assert.deepEqual(codesFor(call), []);
+  assert.deepEqual(codesFor('const o = { m() { return 1; } };\nconst f = o.m;'), ['STA1214']);
 });
 
 void test('an Unknown receiver accepts property get, set, index, and call', () => {
