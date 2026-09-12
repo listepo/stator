@@ -325,6 +325,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     // Unreachable in practice: its type IS Unknown, so the check above already answered true.
     // Listed so the switch stays exhaustive rather than relying on that.
     case 'reference-error':
+    case 'type-error':
       return false;
     case 'binary-op':
     case 'logical-op':

@@ -487,7 +487,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~
     and ~~function declarations inside a block/loop/branch~~ **landed 2026-09-09** (evidence in
     [done.md](done.md) → Phase 5 step 12e); still open are method values (`const f = o.m`), a class
-    used as a value, `super` as a value, named function expressions, and calling a class field.
+    used as a value, `super` as a value, and calling a class field.
     The representation was called **decided** in 2026-09-04 (plan-notes 190) — `docs/VALUE.md`
     §4.16, no bound closure, because `const f = o.m` does not bind in JavaScript — and implementing
     against that section found the hole: it is true of a **zero-argument** call only. `jsrt_arg`
@@ -499,8 +499,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     receiver, so `jsrt_call` can drop it and shift. That is still not `Function.prototype.bind`'s
     two-slot `JSRTEnv` (which INSERTS a receiver where this DROPS one), which stays not-yet.
     A class used as a value and `super` as a value are blocked on the class object instead, which
-    is family (d)'s. Named function expressions need only the self-binding of the function's own
-    name inside its body, and are unblocked.
+    is family (d)'s. ~~Named function expressions~~ **landed 2026-09-12** (evidence in [done.md](done.md) → Phase 5 step 12e named function expressions).
     (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above:
     constrained and defaulted type parameters, generic classes, generic function expressions and
     arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a

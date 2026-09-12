@@ -6,6 +6,19 @@ us to record. Newest first. Every entry names the plan section it touches and sa
 
 ---
 
+## 2026-09-12 — Phase 5 step 12e named function expressions
+
+### 227. Named function expression self-binding is lowering + emitter, not a new closure kind
+**Plan:** §8 step 12(e) named the construct unblocked once the function's own identifier binds
+inside its body only. **Evidence:** `lowerFunction` already set `FunctionExpr.name` from the source
+but `gateFunction` refused the spelling; no slot existed for the inner name. **Decision:**
+`FunctionExpr.selfBinding` holds the HIR name from `inner.declare`; codegen counts the slot and
+initialises it at function entry with the same `closureValue` the expression uses (static closure
+for non-capturing functions — sufficient for the recursion golden). Assignment to the inner name
+lowers to a `type-error` node; the TypeScript checker also rejects it (`STA0012`), which is stricter
+than Node's runtime `TypeError` but matches ESM/strict. **plan.md edited:** yes — struck named
+function expressions from the step-12(e) open list.
+
 ## 2026-08-29 — Phase 1 Task 1.0 bootstrap
 
 ### 1. npm package name `stator` is taken → package `statorc`, binary stays `stator`
