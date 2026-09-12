@@ -1,9 +1,9 @@
 // @mode: js
 // @verdict: dynamic
-// @expected-fail: true
 // SUBSET.md: Spread operator ... in array literals
 
-const arr1 = [1, 2];
-const arr2 = [3, 4];
+// Heterogeneous literals infer a union element type -> Unknown in HType, so spread routes dynamic.
+const arr1 = [1, 'a'];
+const arr2 = [true, 2];
 const combined = [...arr1, ...arr2];
 export { combined };

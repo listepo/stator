@@ -1,6 +1,5 @@
 // @mode: ts
 // @verdict: static
-// @expected-fail: true
 // SUBSET.md: Spread operator ... in array literals
 
 const arr1: number[] = [1, 2];
