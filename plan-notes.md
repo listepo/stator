@@ -4,6 +4,16 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 228. Object-literal method members use the class method table (2026-09-12)
+
+`{ m() { … } }` is not dynamic and not a slot: `isDynamicShape` still answers `false` for methods
+(the trigger list is accessor/optional/index/empty only), and `shapeTypeToHType` now splits data
+fields from method members the way `classTypeToHType` does. Lowering adds `ObjectLiteral.methods`;
+codegen's `registerShape` copies them onto the per-literal `JSRTClass` descriptor; `declaringClassName`
+and the gate accept `o.m()` on a shape-typed receiver by naming the structural descriptor. Method-as-
+value stays `STA1214` — no receiver shift in `jsrt_call` yet (notes 210). Evidence: golden
+`object_literal_method.{ts,js}`, subset `subset_object_literal_method_{ts,js}`.
+
 ## 227. Array-literal spread (Phase 5 step 12, 2026-09-12)
 
 **Evidence:** `subset_spread_operator_array_{ts,js}` pass; golden `array_spread.{ts,js}` byte-match Node; gate accepts array/tuple spread, refuses holes/string/non-array iterables.
@@ -6826,13 +6836,4 @@ unit 385; pass 385; fail 0
 runtime: print corpus matches Node
 ```
 
-## 227. Object-literal method members use the class method table (2026-09-12)
-
-`{ m() { … } }` is not dynamic and not a slot: `isDynamicShape` still answers `false` for methods
-(the trigger list is accessor/optional/index/empty only), and `shapeTypeToHType` now splits data
-fields from method members the way `classTypeToHType` does. Lowering adds `ObjectLiteral.methods`;
-codegen's `registerShape` copies them onto the per-literal `JSRTClass` descriptor; `declaringClassName`
-and the gate accept `o.m()` on a shape-typed receiver by naming the structural descriptor. Method-as-
-value stays `STA1214` — no receiver shift in `jsrt_call` yet (notes 210). Evidence: golden
-`object_literal_method.{ts,js}`, subset `subset_object_literal_method_{ts,js}`.
 

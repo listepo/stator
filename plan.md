@@ -196,7 +196,7 @@ The **locked `tsconfig.json`** this phase produced is normative and lives here, 
    ```
    (`erasableSyntaxOnly` bans `enum`/`namespace`/parameter properties in our own source — required for Node's type stripping and house style anyway: use `const` objects + union types. The two `*ImportExtensions` flags are what let one source tree both run under Node's type stripping in dev — where relative imports must name the real `.ts` file — and emit runnable JS into `dist/`; see `plan-notes.md` 2026-08-29 #3.)
    A second project, `tests/tsconfig.json`, extends this one (`noEmit`, `rootDir: "."`) to cover `tests/**/*.ts`, excluding the deliberately-invalid fixture directories (`subset/subset_*`, `golden/ts`, `golden/js`, `differential`). It exists because the locked config above is `src`-only, which leaves test sources unchecked. It adds no leniency.
-   The lint/format config (`.oxlintrc.json` + `.oxfmtrc.json` — format checking folded into `lint`, warnings escalated; oxlint replaces the Biome of plan-notes 19, plan-notes 227), the `src/` skeleton (whose `build`/`explain` report honest not-implemented diagnostics), the justfile, the npm scripts, `.github/workflows/ci.yml`, and `./ci.sh` (the CI until a remote exists) are all in place — the files themselves are now the reference; AGENTS.md carries the command list.
+   The lint/format config (`.oxlintrc.json` + `.oxfmtrc.json` — format checking folded into `lint`, warnings escalated; oxlint replaces the Biome of plan-notes 19, plan-notes 224), the `src/` skeleton (whose `build`/`explain` report honest not-implemented diagnostics), the justfile, the npm scripts, `.github/workflows/ci.yml`, and `./ci.sh` (the CI until a remote exists) are all in place — the files themselves are now the reference; AGENTS.md carries the command list.
 
 ---
 
@@ -474,7 +474,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     **Accessors landed 2026-09-04** (plan-notes 192; evidence in [done.md](done.md) → Phase 5
     step 12c accessors, including the two corrections to `docs/VALUE.md` §4.15 the implementation
     forced and the fixed-shape-position refusal it opened).
-    **Methods landed 2026-09-12** (plan-notes 227; evidence in [done.md](done.md) → Phase 5 step 12c
+    **Methods landed 2026-09-12** (plan-notes 228; evidence in [done.md](done.md) → Phase 5 step 12c
     methods).
     **Residue:** a spread of anything but a variable of fixed shape and computed keys stay
     `STA1214`.

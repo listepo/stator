@@ -1559,7 +1559,7 @@ out of expected-fail, and the runtime print corpus gains `print_accessors.{c,mjs
 
 ### Step 12c methods — method members on object literals ✅ (2026-09-12)
 
-`{ m() { return this.v; }, v: 1 }` and `o.m()` compile. plan-notes 227; `docs/VALUE.md` §4.5 method
+`{ m() { return this.v; }, v: 1 }` and `o.m()` compile. plan-notes 228; `docs/VALUE.md` §4.5 method
 ABI; row 85 of `docs/SUBSET.md`.
 
 **The representation.** A method member does not take a slot and does not go dynamic: it rides the same
