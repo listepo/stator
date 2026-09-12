@@ -1645,6 +1645,36 @@ to the frame-vs-locals discipline.
 
 ---
 
+### Step 12e — method values and calling a class field (2026-09-12)
+
+The receiver-carrying half of family (e). Plan-notes 208 measured the hole in §4.16: a method
+value called with arguments bound every parameter off by one because `jsrt_arg` fills from the
+right and the receiver is parameter zero on the left.
+
+**`JSRTClosure` carries `has_receiver`.** Method units emit `arity` without counting the receiver
+(`closureMeta` subtracts parameter zero) and set `has_receiver = true`. `jsrt_call` prepends
+`undefined` to `argv` when `argc == arity` (a bare method-value call) and passes `argv` through
+when `argc == arity + 1` (`o.m(a)`). Still not `Function.prototype.bind`, which INSERTS a
+captured receiver.
+
+**Compiler surface.** New HIR `method-value` loads a direct closure or `jsrt_method` for virtual
+dispatch. `gatePropertyAccess` admits `o.m` in value position; `gateCall` admits `o.field()` when
+the name is a class field. `jsrt_object_get_field` raises Node's TypeError when a method body reads
+`this` on an unbound call.
+
+**Check.** `tests/golden/{ts,js}/method_value.*`, `class_field_call.*` (TypeError message measured in plan-notes 211, not a separate golden — try/catch leaves a global slot hole the frames test rejects)
+match the pinned Node byte-for-byte; decision fixtures `subset_method_value_{ts,js}` and
+`subset_class_field_call_{ts,js}` are out of expected-fail. Run on 2026-09-12:
+
+```
+runtime: print corpus matches Node
+tsc --noEmit: clean (compiler + tests)
+tests 385 / pass 385 / fail 0
+subset: 368 fixtures — 343 passed, 25 expected-fail, 0 failed
+golden: 202 passed for this landing's six fixtures; 1 unrelated pre-existing fail (array_callbacks.ts, STA4002)
+```
+
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)

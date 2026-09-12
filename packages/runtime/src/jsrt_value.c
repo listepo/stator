@@ -100,6 +100,21 @@ jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv
   const JSRTClosure *c = jsrt_as_closure(callee);
   /* `env` is NULL for a non-capturing function; the callee takes the parameter either way, so
    * dispatch here does not have to know which kind it is holding. */
+  if (c->has_receiver) {
+    /* A method's parameter zero is `this`. A direct call passes it (`o.m(a)` -> argc == arity + 1);
+     * a method value does not (`g(a)` -> argc == arity), so slot zero is filled with `undefined`
+     * and the user arguments keep their positions (docs/VALUE.md §4.16, plan-notes 208). */
+    const uint32_t js_arity = c->arity;
+    const uint32_t internal = js_arity + 1U;
+    const bool with_receiver = argc == internal;
+    jsrt_value shifted[internal > 0U ? internal : 1U];
+    shifted[0] = with_receiver ? argv[0] : JSRT_UNDEFINED;
+    for (uint32_t i = 0; i < js_arity; i++) {
+      shifted[i + 1U] =
+          jsrt_arg(with_receiver ? argc - 1U : argc, with_receiver ? argv + 1 : argv, i);
+    }
+    return c->fn(internal, shifted, c->env);
+  }
   return c->fn(argc, argv, c->env);
 }
 
@@ -274,14 +289,26 @@ void jsrt_env_copy_slots(JSRTEnv *dst, const JSRTEnv *src) {
 }
 
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
-                            uint32_t arity, const char *name, JSRTEnv *env) {
+                            uint32_t arity, const char *name, JSRTEnv *env, bool has_receiver) {
   JSRTClosure *c = (JSRTClosure *)jsrt_gc_alloc(sizeof(JSRTClosure), "closure");
 
   c->fn = fn;
   c->arity = arity;
   c->name = name;
   c->env = env;
+  c->has_receiver = has_receiver;
   return jsrt_closure(c);
+}
+
+jsrt_value jsrt_object_get_field(jsrt_value obj, uint32_t slot, const char *field) {
+  if (jsrt_is_nullish(obj)) {
+    char message[256];
+    (void)snprintf(message, sizeof message, "Cannot read properties of %s (reading '%s')",
+                   obj == JSRT_NULL ? "null" : "undefined", field);
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return JSRT_UNDEFINED;
+  }
+  return jsrt_as_object(obj)->fields[slot];
 }
 
 void jsrt_object_set(jsrt_value obj, uint32_t slot, jsrt_value v) {

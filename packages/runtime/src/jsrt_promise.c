@@ -375,8 +375,8 @@ jsrt_value jsrt_promise_construct(jsrt_value executor) {
   }
   JSRTEnv *env = jsrt_env_new(NULL, 1);
   env->slots[0] = JSRT_LOCAL(0);
-  JSRT_LOCAL(1) = jsrt_closure_new(promise_resolve_fn, 1, "", env);
-  JSRT_LOCAL(2) = jsrt_closure_new(promise_reject_fn, 1, "", env);
+  JSRT_LOCAL(1) = jsrt_closure_new(promise_resolve_fn, 1, "", env, false);
+  JSRT_LOCAL(2) = jsrt_closure_new(promise_reject_fn, 1, "", env, false);
   jsrt_value args[2] = {JSRT_LOCAL(1), JSRT_LOCAL(2)};
   JSRTCompletion done = jsrt_call_protected(executor, 2, args);
   if (done.threw) {

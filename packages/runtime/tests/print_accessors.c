@@ -63,8 +63,8 @@ int main(void) {
   jsrt_value obj = jsrt_dynobj_new();
   JSRT_LOCAL(0) = obj;
   jsrt_set_prop(obj, "val", num(21), NULL);
-  jsrt_define_accessor(obj, "double", jsrt_closure_new(get_double, 1, "double", NULL),
-                       jsrt_closure_new(set_double, 2, "double", NULL));
+  jsrt_define_accessor(obj, "double", jsrt_closure_new(get_double, 1, "double", NULL, false),
+                       jsrt_closure_new(set_double, 2, "double", NULL, false));
   jsrt_print(jsrt_get_prop(obj, "double", NULL)); /* 42 — the getter ran */
   jsrt_print(obj);                                /* [Getter/Setter] — it did NOT */
   jsrt_set_prop(obj, "double", num(100), NULL);   /* the setter ran, not a slot store */
@@ -77,8 +77,8 @@ int main(void) {
   /* Get-only and set-only halves print as Node's two other markers. */
   jsrt_value halves = jsrt_dynobj_new();
   JSRT_LOCAL(1) = halves;
-  jsrt_define_accessor(halves, "g", jsrt_closure_new(get_double, 1, "g", NULL), JSRT_UNDEFINED);
-  jsrt_define_accessor(halves, "s", JSRT_UNDEFINED, jsrt_closure_new(set_double, 2, "s", NULL));
+  jsrt_define_accessor(halves, "g", jsrt_closure_new(get_double, 1, "g", NULL, false), JSRT_UNDEFINED);
+  jsrt_define_accessor(halves, "s", JSRT_UNDEFINED, jsrt_closure_new(set_double, 2, "s", NULL, false));
   jsrt_set_prop(halves, "val", num(3), NULL);
   jsrt_print(halves);
   jsrt_print(jsrt_get_prop(halves, "s", NULL)); /* undefined: no getter */
@@ -90,13 +90,13 @@ int main(void) {
     env->slots[0] = num(i + 7);
     pair[i] = jsrt_dynobj_new();
     JSRT_LOCAL(2 + (uint32_t)i) = pair[i];
-    jsrt_define_accessor(pair[i], "x", jsrt_closure_new(get_captured, 1, "x", env),
+    jsrt_define_accessor(pair[i], "x", jsrt_closure_new(get_captured, 1, "x", env, false),
                          JSRT_UNDEFINED);
   }
   jsrt_print(jsrt_get_prop(pair[0], "x", NULL));
   jsrt_print(jsrt_get_prop(pair[1], "x", NULL));
 
-  jsrt_define_accessor(obj, "bad", jsrt_closure_new(fail_access, 1, "bad", NULL),
+  jsrt_define_accessor(obj, "bad", jsrt_closure_new(fail_access, 1, "bad", NULL, false),
                        JSRT_UNDEFINED);
   assert(jsrt_object_values(obj) == JSRT_UNDEFINED);
   check_access_error();

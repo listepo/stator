@@ -56,7 +56,7 @@ int main(void) {
   show(jsrt_array_new(0, NULL));
   show(jsrt_map_new());
   show(jsrt_set_new());
-  show(jsrt_closure_new(identity, 1, "identity", NULL));
+  show(jsrt_closure_new(identity, 1, "identity", NULL, false));
 
   /* The answer is itself a string, so asking twice always ends at "string". */
   show(jsrt_typeof(num(1)));
