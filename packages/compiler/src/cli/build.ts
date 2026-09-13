@@ -7,6 +7,7 @@
  * would be a consequence of the first one rather than a fact about the program.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +23,7 @@ import { optimize } from '../passes/index.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { runtimeFlavor } from '../support/features.ts';
 import { withSpan } from '../support/telemetry.ts';
-import { diagnosticLines, INK_COLORS, print } from './render.ts';
+import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -46,6 +47,43 @@ export class BuildError extends Error {
     this.code = code;
     this.name = 'BuildError';
   }
+}
+
+/** Per-async-context sink for diagnostics when several builds share one process.
+ *
+ * test262 used to spawn a fresh `node …/cli/main.ts build` per test (~0.4–1.2s) just to keep
+ * stderr isolated. In-process `build()` is ~100–160ms, but concurrent builds must not interleave
+ * ink frames on the shared stderr — and must not pay ink's ~1.6s first-import cost on every
+ * diagnostic either. When a capture store is set, emitters append plain `diagnosticLines` text;
+ * otherwise the CLI keeps printing through ink to stderr.
+ */
+interface DiagnosticCapture {
+  readonly lines: string[];
+}
+
+const diagnosticCapture = new AsyncLocalStorage<DiagnosticCapture>();
+
+/** Run `fn` with diagnostics captured as plain text (no ink). */
+export async function withDiagnosticCapture<T>(
+  fn: () => Promise<T>,
+): Promise<{ result: T; stderr: string }> {
+  const store: DiagnosticCapture = { lines: [] };
+  const result = await diagnosticCapture.run(store, fn);
+  return { result, stderr: store.lines.join('') };
+}
+
+/** Route diagnostic lines to the capture store when set, else ink → stderr. */
+async function emitDiagnosticLines(lines: readonly Line[]): Promise<void> {
+  const store = diagnosticCapture.getStore();
+  if (store !== undefined) {
+    // Empty is a no-op, matching `print`: capturing nothing must cost nothing.
+    if (lines.length === 0) {
+      return;
+    }
+    store.lines.push(`${lines.map((line) => line.text).join('\n')}\n`);
+    return;
+  }
+  await print(lines, process.stderr);
 }
 
 /** The C runtime (headers + built archive) is a sibling package. In the source tree it is
@@ -182,16 +220,13 @@ export async function compileToC(entry: string, mode: Mode): Promise<string | nu
   // bug and silently wrong generated C, and it costs one tree walk.
   const problems = withSpan('hir/verify', {}, () => verifyHir(optimized));
   if (problems.length > 0) {
-    await print(
-      [
-        ...problems.map((p) => ({
-          text: `stator: ${p.code} internal error in ${p.kind}: ${p.message}`,
-          color: INK_COLORS.error,
-        })),
-        { text: 'stator: this is a compiler bug — please report it with the input' },
-      ],
-      process.stderr,
-    );
+    await emitDiagnosticLines([
+      ...problems.map((p) => ({
+        text: `stator: ${p.code} internal error in ${p.kind}: ${p.message}`,
+        color: INK_COLORS.error,
+      })),
+      { text: 'stator: this is a compiler bug — please report it with the input' },
+    ]);
     return null;
   }
 
@@ -201,7 +236,7 @@ export async function compileToC(entry: string, mode: Mode): Promise<string | nu
 /** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are
  * both rejections — the difference is what the user should do about it, not whether it compiles. */
 async function report(diagnostics: readonly Diagnostic[]): Promise<boolean> {
-  await print(diagnosticLines(diagnostics), process.stderr);
+  await emitDiagnosticLines(diagnosticLines(diagnostics));
   return diagnostics.length > 0;
 }
 
