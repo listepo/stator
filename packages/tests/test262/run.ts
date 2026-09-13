@@ -2,7 +2,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { pool, runProcess } from '../support/parallel.ts';
+import { build, BuildError, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
+import { pool, runProcess, type ProcessResult } from '../support/parallel.ts';
 import { featureStatus } from './features.ts';
 
 export interface Test262Frontmatter {
@@ -22,9 +23,7 @@ export interface Test262Result {
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO = join(HERE, '..', '..');
 const DEFAULT_CORPUS = join(HERE, 'corpus');
-const CLI = join(REPO, 'compiler', 'src', 'cli', 'main.ts');
 const RESULTS = join(HERE, 'results.json');
 const PIN = join(HERE, 'pin.json');
 const EXECUTION_KEYS = new Set(['esid', 'features', 'includes', 'flags', 'negative', 'locale']);
@@ -39,7 +38,7 @@ const ALLOWED_FLAGS = new Set(['raw', 'onlyStrict', 'noStrict', 'module', 'async
 const ASYNC_COMPLETE = 'Test262:AsyncTestComplete';
 /** How many unexplained failures to print in full before falling back to the count alone. */
 const UNEXPLAINED_SAMPLE = 20;
-/** Wall-clock ceiling for one compile or one compiled program; a hang is a failure, not a wait. */
+/** Wall-clock ceiling for one compiled program (and a best-effort race for in-process build). */
 const PROCESS_TIMEOUT_MS = 30_000;
 const DIAGNOSTIC_ERROR_CLASSES: Readonly<Record<string, readonly string[]>> = {
   STA0012: ['SyntaxError'],
@@ -232,6 +231,17 @@ function errorClassMatches(stderr: string, type: string): boolean {
   );
 }
 
+/** Harness files repeat across tens of thousands of tests; memoize by absolute path. */
+const harnessFileCache = new Map<string, string>();
+
+function readHarnessFile(file: string): string {
+  const cached = harnessFileCache.get(file);
+  if (cached !== undefined) return cached;
+  const text = readFileSync(file, 'utf8');
+  harnessFileCache.set(file, text);
+  return text;
+}
+
 function harnessSource(root: string, path: string, metadata: Test262Frontmatter): string {
   const body = readFileSync(path, 'utf8');
   if (metadata.flags.includes('raw')) return body;
@@ -246,7 +256,39 @@ function harnessSource(root: string, path: string, metadata: Test262Frontmatter)
   const missing = files.find((file) => !existsSync(file));
   if (missing !== undefined) throw new Error(`missing harness file ${missing}`);
   const strict = metadata.flags.includes('onlyStrict') ? `'use strict';\n` : '';
-  return `${strict}${files.map((file) => readFileSync(file, 'utf8')).join('\n')}\n${body}`;
+  return `${strict}${files.map((file) => readHarnessFile(file)).join('\n')}\n${body}`;
+}
+
+/** In-process compile: same status/stderr shape as the old CLI spawn, without a fresh Node. */
+async function buildInProcess(input: string, output: string): Promise<ProcessResult> {
+  const work = async (): Promise<ProcessResult> => {
+    try {
+      const { result: status, stderr } = await withDiagnosticCapture(() =>
+        build({ entry: input, out: output, mode: 'js', emitCOnly: false, keepC: false }),
+      );
+      return { status, stdout: '', stderr };
+    } catch (error) {
+      // Mirror CLI main.ts: BuildError is status 1 with `stator: CODE message` on stderr.
+      if (error instanceof BuildError) {
+        return { status: 1, stdout: '', stderr: `stator: ${error.code} ${error.message}\n` };
+      }
+      throw error;
+    }
+  };
+  // Best-effort ceiling only: Promise.race cannot cancel the compile, but a hung build must not
+  // stall the pool forever. Slot-scoped temp files keep a timed-out build from clobbering the next.
+  return await Promise.race([
+    work(),
+    new Promise<ProcessResult>((resolve) => {
+      setTimeout(() => {
+        resolve({
+          status: null,
+          stdout: '',
+          stderr: `build timed out after ${String(PROCESS_TIMEOUT_MS)}ms`,
+        });
+      }, PROCESS_TIMEOUT_MS);
+    }),
+  ]);
 }
 
 async function execute(
@@ -256,27 +298,6 @@ async function execute(
   slot: number,
 ): Promise<Test262Result> {
   const rel = relative(root, path);
-  const unsupportedFlag = metadata.flags.find((flag) => !ALLOWED_FLAGS.has(flag));
-  if (unsupportedFlag !== undefined)
-    return {
-      path: rel,
-      verdict: 'skipped',
-      reason: `flag ${unsupportedFlag}`,
-      features: metadata.features,
-    };
-  const unsupported = metadata.features
-    .map((feature) => [feature, featureStatus(feature)] as const)
-    .find(([, status]) => status === undefined || status.kind !== 'supported');
-  if (unsupported !== undefined) {
-    const [feature, status] = unsupported;
-    if (status === undefined) throw new Error(`unmapped feature ${feature}`);
-    return {
-      path: rel,
-      verdict: 'skipped',
-      reason: status.kind === 'not-yet' ? `${status.code} (${feature})` : `never (${feature})`,
-      features: metadata.features,
-    };
-  }
   const work = join(HERE, '.tmp');
   mkdirSync(work, { recursive: true });
   // Keyed by the pool slot as well as the pid: two workers sharing one filename would compile each
@@ -284,34 +305,35 @@ async function execute(
   const input = join(work, `test-${process.pid}-${String(slot)}.js`);
   const output = join(work, `test-${process.pid}-${String(slot)}.out`);
   writeFileSync(input, harnessSource(root, path, metadata), 'utf8');
-  const build = await runProcess(
-    process.execPath,
-    [CLI, 'build', input, '-o', output, '--mode=js'],
-    { timeoutMs: PROCESS_TIMEOUT_MS },
-  );
+  const compiled = await buildInProcess(input, output);
   try {
     if (metadata.negative?.phase === 'parse' || metadata.negative?.phase === 'resolution') {
-      if (build.status === 0)
+      if (compiled.status === 0)
         return {
           path: rel,
           verdict: 'failed',
           reason: 'negative test compiled successfully',
           features: metadata.features,
         };
-      const code = diagnosticCode(build.stderr);
+      const code = diagnosticCode(compiled.stderr);
       if (code?.startsWith('STA12') === true)
         return { path: rel, verdict: 'skipped', reason: code, features: metadata.features };
       return {
         path: rel,
-        verdict: errorClassMatches(build.stderr, metadata.negative.type) ? 'passed' : 'failed',
-        reason: code ?? build.stderr.trim(),
+        verdict: errorClassMatches(compiled.stderr, metadata.negative.type) ? 'passed' : 'failed',
+        reason: code ?? compiled.stderr.trim(),
         features: metadata.features,
       };
     }
-    if (build.status !== 0) {
-      const pending = scheduleSkipCode(build.stderr);
+    if (compiled.status !== 0) {
+      const pending = scheduleSkipCode(compiled.stderr);
       return pending === undefined
-        ? { path: rel, verdict: 'failed', reason: build.stderr.trim(), features: metadata.features }
+        ? {
+            path: rel,
+            verdict: 'failed',
+            reason: compiled.stderr.trim(),
+            features: metadata.features,
+          }
         : { path: rel, verdict: 'skipped', reason: pending, features: metadata.features };
     }
     const execution = await runProcess(output, [], { timeoutMs: PROCESS_TIMEOUT_MS });
@@ -383,23 +405,66 @@ function ratchetCheck(passed: number, failed: number): string[] {
   return failures;
 }
 
-async function one(path: string, root: string, slot: number): Promise<Test262Result> {
+export type ClassifiedTest =
+  | { readonly action: 'skip'; readonly result: Test262Result }
+  | { readonly action: 'run'; readonly path: string; readonly metadata: Test262Frontmatter };
+
+/** Frontmatter + unsupported flag/feature → immediate result; else needs compile/execute.
+ *
+ * ~90% of the corpus skips after frontmatter. Doing that synchronously before the pool keeps the
+ * workers on tests that actually compile instead of spending slots on feature checks.
+ */
+export function classify(path: string, root: string): ClassifiedTest {
+  const rel = relative(root, path);
   try {
     const metadata = parseFrontmatter(readFileSync(path, 'utf8'), path);
-    return await execute(path, root, metadata, slot);
+    const unsupportedFlag = metadata.flags.find((flag) => !ALLOWED_FLAGS.has(flag));
+    if (unsupportedFlag !== undefined)
+      return {
+        action: 'skip',
+        result: {
+          path: rel,
+          verdict: 'skipped',
+          reason: `flag ${unsupportedFlag}`,
+          features: metadata.features,
+        },
+      };
+    const unsupported = metadata.features
+      .map((feature) => [feature, featureStatus(feature)] as const)
+      .find(([, status]) => status === undefined || status.kind !== 'supported');
+    if (unsupported !== undefined) {
+      const [feature, status] = unsupported;
+      if (status === undefined) throw new Error(`unmapped feature ${feature}`);
+      return {
+        action: 'skip',
+        result: {
+          path: rel,
+          verdict: 'skipped',
+          reason: status.kind === 'not-yet' ? `${status.code} (${feature})` : `never (${feature})`,
+          features: metadata.features,
+        },
+      };
+    }
+    return { action: 'run', path, metadata };
   } catch (error) {
     if (error instanceof Error && error.message.endsWith('missing /*--- frontmatter'))
       return {
-        path: relative(root, path),
-        verdict: 'skipped',
-        reason: 'missing frontmatter',
-        features: [],
+        action: 'skip',
+        result: {
+          path: rel,
+          verdict: 'skipped',
+          reason: 'missing frontmatter',
+          features: [],
+        },
       };
     return {
-      path: relative(root, path),
-      verdict: 'failed',
-      reason: error instanceof Error ? error.message : String(error),
-      features: [],
+      action: 'skip',
+      result: {
+        path: rel,
+        verdict: 'failed',
+        reason: error instanceof Error ? error.message : String(error),
+        features: [],
+      },
     };
   }
 }
@@ -535,27 +600,32 @@ function report(results: readonly Test262Result[]): void {
     process.exitCode = 1;
 }
 
+function wantPrettyResults(): boolean {
+  return process.argv.includes('--pretty-results') || process.env['STATOR_TEST262_PRETTY'] === '1';
+}
+
+function wantWriteResults(): boolean {
+  // Local scratch can skip the multi-MB results file; CI shards must still write (leave unset).
+  return process.env['STATOR_TEST262_WRITE_RESULTS'] !== '0';
+}
+
 function writeResults(
   path: string,
   corpus: string | null,
   results: readonly Test262Result[],
 ): void {
-  writeFileSync(
-    path,
-    `${JSON.stringify(
-      {
-        corpus,
-        commit: pinnedCommit(),
-        passed: results.filter((result) => result.verdict === 'passed').length,
-        failed: results.filter((result) => result.verdict === 'failed').length,
-        skipped: results.filter((result) => result.verdict === 'skipped').length,
-        results,
-      },
-      null,
-      2,
-    )}\n`,
-    'utf8',
-  );
+  if (!wantWriteResults()) return;
+  const payload = {
+    corpus,
+    commit: pinnedCommit(),
+    passed: results.filter((result) => result.verdict === 'passed').length,
+    failed: results.filter((result) => result.verdict === 'failed').length,
+    skipped: results.filter((result) => result.verdict === 'skipped').length,
+    results,
+  };
+  // Compact by default: pretty-printing ~53k results dominates local disk and CI artifact I/O.
+  const body = wantPrettyResults() ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
+  writeFileSync(path, `${body}\n`, 'utf8');
 }
 
 async function main(): Promise<void> {
@@ -583,10 +653,35 @@ async function main(): Promise<void> {
   const all = testFiles(root);
   const paths =
     shard === undefined ? all : all.filter((_, index) => index % shard.total === shard.index - 1);
-  // The shared pool (tests/support/parallel.ts): each slot pulls the next test, so a slow compile
-  // never idles the others, and results stay indexed by test rather than by completion order —
-  // which is what keeps results.json deterministic.
-  const results = await pool(paths, (path, slot) => one(path, root, slot));
+  // Phase 1: classify synchronously. Phase 2: pool only the tests that need compile/execute.
+  // Merge back in input-path order so results.json stays deterministic (pool finishes out of order).
+  const classified = paths.map((path) => classify(path, root));
+  const runItems: {
+    readonly index: number;
+    readonly path: string;
+    readonly metadata: Test262Frontmatter;
+  }[] = [];
+  for (let index = 0; index < classified.length; index += 1) {
+    const item = classified[index];
+    if (item === undefined) continue;
+    if (item.action === 'run') runItems.push({ index, path: item.path, metadata: item.metadata });
+  }
+  const runResults = await pool(runItems, (item, slot) =>
+    execute(item.path, root, item.metadata, slot),
+  );
+  // oxlint-disable-next-line unicorn/no-new-array -- preallocated; filled by index, never appended
+  const results = new Array<Test262Result>(classified.length);
+  for (let index = 0; index < classified.length; index += 1) {
+    const item = classified[index];
+    if (item === undefined) continue;
+    if (item.action === 'skip') results[index] = item.result;
+  }
+  for (let i = 0; i < runItems.length; i += 1) {
+    const item = runItems[i];
+    const result = runResults[i];
+    if (item === undefined || result === undefined) continue;
+    results[item.index] = result;
+  }
   if (shard === undefined) {
     writeResults(RESULTS, root, results);
     report(results);

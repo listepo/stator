@@ -1,9 +1,13 @@
 import { strict as assert } from 'node:assert';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { build, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
 import { generateProgram, XorShift32 } from '../differential/generate.ts';
 import { minimizeProgram } from '../differential/minimize.ts';
 import { featureStatus } from '../test262/features.ts';
-import { parseFrontmatter, scheduleSkipCode } from '../test262/run.ts';
+import { classify, parseFrontmatter, scheduleSkipCode } from '../test262/run.ts';
 
 test('differential generation is deterministic and mode-specific', () => {
   assert.equal(generateProgram(42, 'ts'), generateProgram(42, 'ts'));
@@ -79,4 +83,57 @@ test('Test262 feature mapping is explicit', () => {
   assert.equal(proxy?.kind, 'not-yet');
   assert.equal(proxy?.kind === 'not-yet' ? proxy.code : undefined, 'STA1203');
   assert.equal(featureStatus('made-up-tag'), undefined);
+});
+
+test('classify skips unsupported features and flags without compiling', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stator-classify-'));
+  const skippedFeature = join(dir, 'feat.js');
+  writeFileSync(
+    skippedFeature,
+    ['/*---', 'description: skip me', 'features: [BigInt]', '---*/', ''].join('\n'),
+    'utf8',
+  );
+  const feature = classify(skippedFeature, dir);
+  assert.equal(feature.action, 'skip');
+  if (feature.action === 'skip') {
+    assert.equal(feature.result.verdict, 'skipped');
+    assert.match(feature.result.reason ?? '', /STA1213/);
+  }
+
+  const skippedFlag = join(dir, 'flag.js');
+  writeFileSync(
+    skippedFlag,
+    ['/*---', 'description: skip me', 'flags: [CanBlockIsFalse]', '---*/', ''].join('\n'),
+    'utf8',
+  );
+  const flag = classify(skippedFlag, dir);
+  assert.equal(flag.action, 'skip');
+  if (flag.action === 'skip') {
+    assert.equal(flag.result.verdict, 'skipped');
+    assert.match(flag.result.reason ?? '', /flag CanBlockIsFalse/);
+  }
+
+  const runnable = join(dir, 'ok.js');
+  writeFileSync(
+    runnable,
+    ['/*---', 'description: run me', 'features: [Array]', '---*/', 'void 0;', ''].join('\n'),
+    'utf8',
+  );
+  const run = classify(runnable, dir);
+  assert.equal(run.action, 'run');
+  if (run.action === 'run') assert.deepEqual(run.metadata.features, ['Array']);
+});
+
+test('withDiagnosticCapture stores plain diagnostic text instead of printing via ink', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stator-capture-'));
+  const entry = join(dir, 'bad.js');
+  // `eval` is never / not-yet depending on mode; in js mode it is a not-yet diagnostic.
+  writeFileSync(entry, 'eval("1");\n', 'utf8');
+  const out = join(dir, 'out');
+  const { result, stderr } = await withDiagnosticCapture(() =>
+    build({ entry, out, mode: 'js', emitCOnly: false, keepC: false }),
+  );
+  assert.equal(result, 1);
+  assert.match(stderr, /STA12\d{2}|STA11\d{2}|eval/);
+  assert.ok(!stderr.includes('\u001b['), 'capture must not contain ANSI from ink');
 });

@@ -85,9 +85,8 @@ export async function pool<T, R>(
   // oxlint-disable-next-line unicorn/no-new-array
   const results = new Array<R>(items.length);
   let next = 0;
-  // `STATOR_TEST_JOBS=1` forces the serial order back. It is how a parallel run's report gets
-  // compared against a serial one's when a failure looks like it came from the pool itself, and a
-  // machine that must not be saturated (a shared CI box) has the same knob.
+  // `STATOR_TEST_JOBS` overrides pool width (default: os.availableParallelism()). `=1` forces
+  // serial order when comparing against a serial report or when a shared box must not be saturated.
   const requested = Number.parseInt(process.env['STATOR_TEST_JOBS'] ?? '', 10);
   const cores = Number.isFinite(requested) && requested > 0 ? requested : availableParallelism();
   const width = Math.max(1, Math.min(cores, items.length));
