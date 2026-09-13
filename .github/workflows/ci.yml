@@ -2,7 +2,8 @@ name: ci
 
 on:
   push:
-  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 # A push that supersedes an in-flight run cancels it: six platforms times five jobs is a lot of
 # runner time to spend proving something about a commit nobody is waiting on any more.
@@ -34,17 +35,16 @@ concurrency:
 jobs:
   # Test262 is intentionally separate from pnpm run ci: a missing corpus must not make the local
   # offline gate lie, while this job makes the pinned conformance number visible on every commit.
-  # The full pinned corpus is ~54k tests and costs 2-3.5 hours on one runner -- measured, not
-  # estimated: the job completed in 1h42m and 3h26m and was killed at the 2-hour ceiling three times
-  # (plan-notes 198). Four shards put each one near 50 minutes, which is what keeps the conformance
-  # number on every commit instead of moving it to a nightly.
+  # The full pinned corpus is ~54k tests. Pre-speedup wall-clock was 2-3.5h on one runner (plan-notes
+  # 198); in-process build + two-phase classify cut that sharply, and eight shards keep headroom
+  # under the 2-hour per-job ceiling so the conformance number stays on every commit.
   test262:
-    name: test262 conformance (shard ${{ matrix.shard }}/4)
+    name: test262 conformance (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -56,14 +56,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test262:fetch
       - name: Run Test262
-        run: pnpm run test262 -- --shard=${{ matrix.shard }}/4
+        # STATOR_TEST_JOBS left unset: pool width defaults to os.availableParallelism() on the runner.
+        run: pnpm run test262 -- --shard=${{ matrix.shard }}/8
       - uses: actions/upload-artifact@v4
         with:
           name: test262-shard-${{ matrix.shard }}
-          path: packages/tests/test262/results-${{ matrix.shard }}-of-4.json
+          path: packages/tests/test262/results-${{ matrix.shard }}-of-8.json
           if-no-files-found: error
 
-  # Where the run is actually judged. A shard sees a quarter of the corpus, and both gates are
+  # Where the run is actually judged. A shard sees a slice of the corpus, and both gates are
   # statements about the whole of it -- the ratchet compares corpus totals and expected-fail.txt
   # names individual tests -- so `--aggregate` reassembles the shards and applies them once.
   test262-report:
