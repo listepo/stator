@@ -4,6 +4,122 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 239. Language and library boundaries: what stays, what Zig is for, what may come later (2026-09-13)
+
+**Plan:** Phase 9 / T9.1 (the card and the Language & library boundaries table), prime directive 5,
+§2, §12, §13, §15.4. `plan.md` was edited in this change. This is a survey, not a new task list.
+
+The creator asked where another language or library makes sense, now that the memory core is Zig.
+The answer is narrow. The compiler, the emit path, and generated code do not move. Zig is T9.1
+only. Everything else below is either already settled or a §12 / tripwire candidate — not a card
+an agent may open on its own.
+
+**Keep (settled / already chosen).**
+
+| Piece | Choice | Why it stays |
+|---|---|---|
+| Compiler | TypeScript + the `typescript` API in-process | §0.3 / §15.4. Do not rewrite the compiler in another language. |
+| Emit | C; link clang + `libjsrt.a` | §0.4. A direct LLVM backend is §12 rung 6, after a measurement. |
+| Generated code | C only | `jsrt_value.h` is the codegen↔runtime contract. Zig does not emit, and generated C is never hand-edited. |
+| Rust | nowhere | Measured and rejected (dyn-dispatch, DSTs, `Rc<RefCell>`, borrow-check on megafiles). Still settled after 238. |
+| Vendored | QuickJS-NG libregexp / libunicode, fdlibm | Golden rule 5. One RegExp engine. |
+| Optional native | Boehm; ICU (intl build) | Already the default/optional split. |
+| CLI-only | ink/react, dotenv; OTel opt-in | plan-notes 187. Must not leak below `src/cli/` (except `src/support/telemetry.ts`). |
+
+**Zig (T9.1 only).** Memory core: GC glue, allocation helpers, shape tables, growable buffers in
+print/JSON. Same C ABI into `libjsrt.a`. Boehm stays; Zig calls it through the C ABI. Do **not**
+grow Zig into builtins, math, regexp, or codegen without a new plan task. Spreading Zig because
+"we already have a Zig compiler" is exactly the drift 238 was written to prevent.
+
+**Libraries worth considering later — not tasks yet.** They ride §12 or a named tripwire.
+
+| Candidate | Gate |
+|---|---|
+| Ryū C vendor | §12 ladder. Already scheduled (notes 188, 190). Number print; corpus already matches Node. |
+| mimalloc / jemalloc | §12 rung 1. Non-GC sites and the post-precise-GC backing allocator — not a global `malloc` interposition under Boehm. |
+| simdutf (or similar) | Only if UTF-16 ops profile hot on Task 6.3's harness. |
+| oxc-parser via napi | Only if the `typescript` tripwire in §13 fires (checking >30% of wall or OOM on 100k lines). Measured 2026-09-01: not tripped. |
+| LLVM `.ll` emit / LTO+PGO | §12 rung 6. Measure `-O3` / LTO / PGO on the existing C path first; a new backend is not the cheapest rung. |
+| QuickJS-NG full interpreter | Phase 8, already planned. Same commit as the vendored libregexp — a second copy is duplicate symbols. |
+
+**Do not.**
+
+- Rewrite the compiler in another language.
+- Adopt MMTk or any Rust GC without reopening §15.4 with measured evidence. Evaluating MMTk is
+  fine; adopting it is not a preference.
+- Add a second RegExp engine beside libregexp.
+- Spread Zig beyond the memory core without a new card.
+
+**Open for the creator:** `mlugg/setup-zig@v2` as a CI dependency (noted in 238). Windows never
+builds the runtime, so that job would skip the action.
+
+## 238. The runtime's memory core moves to Zig; the C11-only runtime is reopened on the creator's direction (2026-09-13)
+
+**Plan:** §15.4 (Agent execution protocol item 4: "C11 runtime" among the settled decisions), prime
+directive 5, the §2 pipeline sketch, and T9.1. `plan.md` was edited in this change.
+
+**Home of the Zig sources.** The move this entry describes lives in `.worktrees/t9-1` (branch
+`agent/t9-1`) until a follow-up PR. Main records the decision and the T9.1 card; it does not
+contain `src/*.zig` yet.
+
+**Why reopened.** §15.4 reopens a settled decision only with new measured evidence. This one was
+reopened because the creator directed it (T9.1), and this entry records it as that direction, not
+as evidence. Still settled: generated code is C, `jsrt_value.h` is the codegen↔runtime contract,
+Boehm is the collector, and Rust stays out.
+
+**What moved.** The C ABI is unchanged. Every symbol Zig defines is declared in `jsrt.h`,
+`jsrt_value.h` or the new internal `src/jsrt_mem.h`.
+
+- `jsrt_gc.c` → `jsrt_gc.zig` (the C file is deleted): the unboxing mark procedure, the chained
+  root push, `jsrt_gc_init`/`jsrt_gc_alloc`, and the malloc fallback.
+- The print and JSON growable buffers → `jsrt_buf.zig`: `JSRTBuf`, `JSRTStrVec` (console.table)
+  and `JSRTUnitBuf` (JSON.parse). The string ops have no growable buffer (each string is allocated
+  at its exact size), so nothing there moved.
+- The shape table → `jsrt_shape.zig`: the root, the chain walk, transitions, slot growth,
+  enumeration order and the delete replay. The property semantics built on it (inline caches,
+  accessors, TypeErrors, `jsrt_shape_key`) stay in `jsrt_shape.c`.
+- The allocation helpers `jsrt_value.h` declares → `jsrt_alloc.zig`: `jsrt_object_new`,
+  `jsrt_array_new` and its growth, `jsrt_env_new/clone/copy_slots`, `jsrt_closure_new`,
+  `jsrt_args_rest`, `jsrt_dynobj_new`, `jsrt_null_proto_new` and `jsrt_dynobj_new_class`.
+  Builtin-specific constructors (Map, Date, strings, promises, …) stay with their builtins.
+
+**Layouts.** Zig `@cImport`s the headers, so no struct is mirrored. There is one workaround: Zig
+0.16's translate-c derives a `slots` method from `jsrt_env_copy_slots` that collides with
+`JSRTEnv`'s flexible `slots` member, so the import renames that one declaration with `@cDefine`.
+
+**Build.**
+- The justfile builds one object, `jsrt_zig.o`, from `src/jsrt_mem.zig` and archives it with the C
+  objects in every flavor.
+- It passes Zig the C objects' own `-I`/`-D` flags; that is how `-DJSRT_HAVE_BOEHM` reaches the
+  `@cImport`.
+- Optimization is `ReleaseFast` for rel and intl and `ReleaseSafe` for asan. Zig code cannot be
+  ASan-instrumented, so its safety checks stand in, and a trap ends in `jsrt_panic`.
+- It also passes `-fPIC -mcpu=baseline` and, on macOS, clang's deployment target. Without that
+  target every program link warned that the object was built for macOS 26.6.2 while linking 26.0.
+- `zig fmt --check` is the style gate. Zig has no warnings, only errors, which is the `-Werror`
+  equivalent.
+- The archive is now rebuilt from scratch. `ar rcs` kept a stale `jsrt_gc.o` member beside the new
+  definitions of its symbols.
+
+**Toolchain.**
+- zig 0.16.0 is pinned in `mise.toml` (creator-approved; the global 0.14.1 is untouched) and listed
+  in `docs/TOOLCHAIN.md`.
+- CI installs it through `mlugg/setup-zig@v2` in the shared setup action. Windows skips that step
+  because it never builds the runtime. The action is a new third-party CI dependency and awaits the
+  creator's approval.
+
+**Measured** (arm64 macOS, zig 0.16.0, conda clang 21.1.8, Boehm 8.2.12, Node 26.7.0). The results
+are the same as the untouched tree's, before and after the move, in the worktree:
+
+```
+runtime: print corpus matches Node
+runtime: print corpus matches Node (ASan/UBSan)
+golden: 240 fixtures — 240 passed, 0 failed          // plain and STATOR_RUNTIME=asan
+subset: 434 fixtures — 413 passed, 21 expected-fail, 0 failed
+unit: tests 392, pass 392, fail 0
+leak: 10M objects — peak RSS 3024 KB of a 65536 KB cap, 33 samples, plateau
+```
+
 ## 232. Method-value rewrite/emit must keep array-op args and evaluate the receiver (2026-09-12)
 
 **Plan:** §8 step 12(e) method values. **Evidence:** grouping `method-value` with `array-op` /

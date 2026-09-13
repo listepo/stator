@@ -9,3 +9,5 @@ node = "26"
 just = "1.58.0"
 "conda:llvm" = { version = "21.1.8", os = ["linux", "macos"] }
 "conda:clang" = { version = "21.1.8", os = ["linux", "macos"] }
+# The runtime's memory core (packages/runtime/src/*.zig, plan-notes 238). Unix only, like clang.
+zig = { version = "0.16.0", os = ["linux", "macos"] }

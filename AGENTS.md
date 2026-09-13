@@ -13,7 +13,7 @@ Instructions for AI agents (and humans) working in this repository. Read this fi
 
 One pipeline; mode is a policy layer (file acceptance + diagnostic table + typing of unresolved code). Nothing below the frontend gate knows the mode existed.
 
-Pipeline: `typescript` API (parse + type-check, in-process) → mode gate → typed HIR → passes → C emitter → clang → link `libjsrt.a` (C11 runtime) → native binary. How that looks: D2 in `docs/architecture/` (gallery `docs/ARCHITECTURE.md`). `plan.md` §2 is the authority.
+Pipeline: `typescript` API (parse + type-check, in-process) → mode gate → typed HIR → passes → C emitter → clang → link `libjsrt.a` (C11 runtime + Zig memory core, plan-notes 238 / T9.1) → native binary. How that looks: D2 in `docs/architecture/` (gallery `docs/ARCHITECTURE.md`). `plan.md` §2 is the authority.
 
 ## Bootstrap awareness
 
@@ -49,7 +49,7 @@ packages/compiler/ the compiler package "statorc" — holds src/ + the locked ts
   src/passes/      monomorphize, boundary-insert, const-fold, DCE, inline
   src/codegen/     C emitter (#line source maps, JSRT_FRAME rooting discipline)
   src/support/     diagnostics engine, shared utilities
-packages/runtime/  C11 runtime (NOT an npm package) → packages/runtime/build/libjsrt.a (justfile)
+packages/runtime/  C11 + Zig memory core (plan-notes 238 / T9.1; NOT an npm package) → packages/runtime/build/libjsrt.a (justfile)
   include/jsrt_value.h   mirrors docs/VALUE.md — the codegen↔runtime contract
   vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
 packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
@@ -84,13 +84,13 @@ Gallery + captions: `docs/ARCHITECTURE.md`. Shared theme: `docs/architecture/the
 ## Commands
 
 Dev runs TS directly on the pinned Node (≥24, see `.node-version`) — no build step needed.
-`mise install` provides that Node, pnpm, just, moon, and LLVM clang 21.1.8.
+`mise install` provides that Node, pnpm, just, moon, LLVM clang 21.1.8, and Zig 0.16.0 (Unix; required for the runtime once T9.1 lands).
 If bare `node --version` disagrees with `.node-version` (on some hosts PATH puts mise's
 `node/lts` ahead of the shims, so bare `node` answers 24), prefix commands with
 `mise exec node --` — `pnpm run ci` refuses to start otherwise (plan.md Task 6.2a).
 
 ```
-mise install                    # Node, pnpm, just, moon, LLVM clang (Unix)
+mise install                    # Node, pnpm, just, moon, LLVM clang, Zig 0.16.0 (Unix)
 pnpm install --frozen-lockfile  # install (exact-pinned deps)
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lint + format (must be clean)
@@ -134,6 +134,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 ## Implementation standards — C runtime (`runtime/`)
 
 - C11, `clang -Wall -Wextra -Werror`; ASan/UBSan job in CI is mandatory and blocking. The full flag set is the rule for code we WRITE (`runtime/src/`); `runtime/vendor/` compiles with `-Wall` alone, because upstream source is not ours to fix and a warning flag is not a correctness flag (plan-notes 101). ASan/UBSan cover both.
+- T9.1 (plan-notes 238) moves the memory core to Zig 0.16.0. The Zig sources live in `.worktrees/t9-1` until a follow-up PR; do not invent a second memory core or grow Zig past that card (plan-notes 239).
 - All value access goes through `jsrt_value.h` accessors; no hand-rolled bit twiddling outside it.
 - GC rooting discipline: every generated function opens `JSRT_FRAME(n)`; locals via `JSRT_LOCAL`; frames pop on **every** exit path including landing pads. The runtime may assume it; codegen must guarantee it.
 - Generated C is never hand-edited — fix the emitter and re-emit.
