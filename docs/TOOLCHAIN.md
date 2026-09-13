@@ -6,18 +6,18 @@ that changes the pin, and note the reason in `plan-notes.md`.
 
 ## Pinned
 
-| Tool | Pin | Where pinned |
-|---|---|---|
-| Node | `26.7.0` | `.node-version`, `engines.node >= 24` in `package.json` |
-| TypeScript | `6.0.3` (exact) | `dependencies` in `packages/compiler/package.json` |
-| `@types/node` | `26.4.0` (exact) | `devDependencies` |
-| oxlint | `1.82.0` (exact) | `devDependencies` |
-| oxlint-tsgolint | `7.0.2001` (exact) | `devDependencies`. The type-aware backend `oxlint --type-aware` runs through (plan-notes 224). |
-| oxfmt | `0.67.0` (exact) | `devDependencies` |
-| cpd (copy/paste detector) | `5.0.16` (exact) | `devDependencies` |
-| pnpm | `12.3.4` | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml` |
-| LLVM | `21.1.8` | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
-| just | `1.58.0` | `mise.toml`. The runtime build (`just -f packages/runtime/justfile -d packages/runtime runtime`, `runtime-asan`, `runtime-intl`). |
+| Tool                      | Pin                | Where pinned                                                                                                                                                                                                                     |
+| ------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Node                      | `26.7.0`           | `.node-version`, `engines.node >= 24` in `package.json`                                                                                                                                                                          |
+| TypeScript                | `6.0.3` (exact)    | `dependencies` in `packages/compiler/package.json`                                                                                                                                                                               |
+| `@types/node`             | `26.4.0` (exact)   | `devDependencies`                                                                                                                                                                                                                |
+| oxlint                    | `1.82.0` (exact)   | `devDependencies`                                                                                                                                                                                                                |
+| oxlint-tsgolint           | `7.0.2001` (exact) | `devDependencies`. The type-aware backend `oxlint --type-aware` runs through (plan-notes 224).                                                                                                                                   |
+| oxfmt                     | `0.67.0` (exact)   | `devDependencies`                                                                                                                                                                                                                |
+| cpd (copy/paste detector) | `5.0.16` (exact)   | `devDependencies`                                                                                                                                                                                                                |
+| pnpm                      | `12.3.4`           | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml`                                                                                                                                                               |
+| LLVM                      | `21.1.8`           | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
+| just                      | `1.58.0`           | `mise.toml`. The runtime build (`just -f packages/runtime/justfile -d packages/runtime runtime`, `runtime-asan`, `runtime-intl`).                                                                                                |
 
 Node ≥ 24 is required because dev runs the compiler's TypeScript sources directly
 (`node packages/compiler/src/cli/main.ts`) via native type stripping — there is no build step in development.
@@ -82,6 +82,21 @@ LLVMgold plugin, and without it the probe fails and the archive is plain objects
 recipe's status line. Sanitized builds never use LTO. A probe result or Boehm status that differs
 from the last build rebuilds every object (`packages/runtime/build*/cflags.txt`).
 
+## Compile-time opt level (`STATOR_OPT` / `--opt`)
+
+The final clang link of generated C defaults to `-O2` (non-asan). Override per build:
+
+```
+STATOR_OPT=0 node packages/compiler/src/cli/main.ts build file.ts -o app   # faster iterate
+node packages/compiler/src/cli/main.ts build file.ts -o app --opt=3         # max clang opts
+```
+
+`--opt` wins over `STATOR_OPT` when both are set. ASan builds ignore this and keep `-O1 -g
+-fsanitize=…`. The release runtime archive may already record `-flto=thin` in
+`packages/runtime/build/link-flags.txt`; `extraLinkFlags()` picks that up so the generated C is
+compiled as thin-LTO bitcode too when the archive was. Full PGO / a custom LLVM backend remains
+§12 rung 6 and needs the Task 6.3 measurement gate before it is scheduled.
+
 ## Native libraries
 
 None of these come from the npm tree. Vendored sources live in the repo and build with the runtime;
@@ -89,13 +104,13 @@ system libraries are discovered at runtime-build time and recorded in `packages/
 `packages/compiler/src/cli/build.ts` reads back — so the emitted program links exactly what the archive it links was
 compiled against (plan-notes 106).
 
-| Library | Kind | Required | For | Discovery / install |
-|---|---|---|---|---|
-| QuickJS-NG `libregexp` (+ `libunicode`, `cutils.h`) | vendored, MIT | yes | the RegExp engine (golden rule 5) | `packages/runtime/vendor/quickjs-ng/` — provenance in its `VENDOR.md` |
-| fdlibm (V8 `ieee754.cc`, mechanically ported to C11) | vendored, fdlibm + BSD-3-Clause | yes | `Math.sin` and 19 siblings, bit-identical to the pinned Node's | `packages/runtime/vendor/fdlibm/` — provenance in its `VENDOR.md` |
-| libm (`-lm`) | system | yes | `floor`/`trunc`/`sqrt`/`fmod` — ToInt32, array indexing, the print path | part of libSystem on macOS (the flag is a no-op there), separate on glibc (plan-notes 122) |
-| Boehm GC (`bdw-gc`) | system | optional | the collector (`docs/VALUE.md` §4.12); without it the runtime falls back to plain `malloc`, no collection | `pkg-config --libs bdw-gc`; macOS `brew install bdw-gc`, Debian `apt install libgc-dev` |
-| ICU (`icu-uc`, `icu-i18n`) | system | optional, feature build only | `Intl` — `just -f packages/runtime/justfile -d packages/runtime runtime-intl`, into `packages/runtime/build-intl/` | `pkg-config`; macOS `brew install icu4c`, Debian `apt install libicu-dev` |
+| Library                                              | Kind                            | Required                     | For                                                                                                                | Discovery / install                                                                        |
+| ---------------------------------------------------- | ------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| QuickJS-NG `libregexp` (+ `libunicode`, `cutils.h`)  | vendored, MIT                   | yes                          | the RegExp engine (golden rule 5)                                                                                  | `packages/runtime/vendor/quickjs-ng/` — provenance in its `VENDOR.md`                      |
+| fdlibm (V8 `ieee754.cc`, mechanically ported to C11) | vendored, fdlibm + BSD-3-Clause | yes                          | `Math.sin` and 19 siblings, bit-identical to the pinned Node's                                                     | `packages/runtime/vendor/fdlibm/` — provenance in its `VENDOR.md`                          |
+| libm (`-lm`)                                         | system                          | yes                          | `floor`/`trunc`/`sqrt`/`fmod` — ToInt32, array indexing, the print path                                            | part of libSystem on macOS (the flag is a no-op there), separate on glibc (plan-notes 122) |
+| Boehm GC (`bdw-gc`)                                  | system                          | optional                     | the collector (`docs/VALUE.md` §4.12); without it the runtime falls back to plain `malloc`, no collection          | `pkg-config --libs bdw-gc`; macOS `brew install bdw-gc`, Debian `apt install libgc-dev`    |
+| ICU (`icu-uc`, `icu-i18n`)                           | system                          | optional, feature build only | `Intl` — `just -f packages/runtime/justfile -d packages/runtime runtime-intl`, into `packages/runtime/build-intl/` | `pkg-config`; macOS `brew install icu4c`, Debian `apt install libicu-dev`                  |
 
 The default archive is byte-identical whether or not ICU is installed on the host — that is why
 Intl is a separate object directory rather than a flag on the default build.
@@ -111,13 +126,13 @@ the tree byte-for-byte, so `git status` after a run is the diff the bump actuall
 
 Beyond Node/pnpm (pinned above), the build shells out to:
 
-| Tool | Used by | For |
-|---|---|---|
-| `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts` | the runtime, the emitted C, and the final link |
-| `ar` (`$AR`) | justfile | archiving `libjsrt.a` |
-| `just` | justfile | the runtime build (pinned `1.58.0` in `mise.toml`) |
-| `pkg-config` | justfile | finding bdw-gc and ICU; absent means both are simply off |
-| `diff` | `just -f packages/runtime/justfile -d packages/runtime runtime-test` | the print corpus against Node, byte-for-byte |
+| Tool            | Used by                                                              | For                                                      |
+| --------------- | -------------------------------------------------------------------- | -------------------------------------------------------- |
+| `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`                       | the runtime, the emitted C, and the final link           |
+| `ar` (`$AR`)    | justfile                                                             | archiving `libjsrt.a`                                    |
+| `just`          | justfile                                                             | the runtime build (pinned `1.58.0` in `mise.toml`)       |
+| `pkg-config`    | justfile                                                             | finding bdw-gc and ICU; absent means both are simply off |
+| `diff`          | `just -f packages/runtime/justfile -d packages/runtime runtime-test` | the print corpus against Node, byte-for-byte             |
 
 `clang` (and the rest of LLVM) is `mise install` on Unix. The other three still come from the Xcode
 command-line tools (`xcode-select --install`) on macOS and from `binutils`/`pkg-config`/
