@@ -27,6 +27,8 @@ import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
 
 type Mode = 'ts' | 'js';
 
+export type OptLevel = 0 | 1 | 2 | 3;
+
 export interface BuildOptions {
   readonly entry: string;
   readonly out: string;
@@ -35,6 +37,10 @@ export interface BuildOptions {
   readonly emitCOnly: boolean;
   /** Keep the intermediate .c next to the executable instead of deleting it. */
   readonly keepC: boolean;
+  /** clang `-O` for the final link when not under ASan. Default 2; CLI `--opt` / `STATOR_OPT`
+   * override. `0` trades runtime speed for faster iterate compiles. Full per-module `.o` cache and
+   * parallel clang are a separate follow-up — not this knob. */
+  readonly opt?: OptLevel;
 }
 
 /** Raised for conditions the USER can act on: a missing file, a missing toolchain. Anything the
@@ -159,7 +165,9 @@ export async function build(options: BuildOptions): Promise<number> {
 
   try {
     writeFileSync(cPath, c, 'utf8');
-    linkExecutable(cPath, options.out);
+    // Default -O2; STATOR_OPT=0 / --opt=0 skips most clang opts for faster iterate compiles.
+    // Per-module parallel .o cache stays a follow-up (plan.md §12).
+    linkExecutable(cPath, options.out, options.opt ?? 2);
     return 0;
   } finally {
     if (scratch !== null) {
@@ -240,13 +248,13 @@ async function report(diagnostics: readonly Diagnostic[]): Promise<boolean> {
   return diagnostics.length > 0;
 }
 
-function linkExecutable(cPath: string, out: string): void {
+function linkExecutable(cPath: string, out: string, opt: OptLevel): void {
   withSpan('link/clang', {}, () => {
-    link(cPath, out);
+    link(cPath, out, opt);
   });
 }
 
-function link(cPath: string, out: string): void {
+function link(cPath: string, out: string, opt: OptLevel): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
       'STA0011',
@@ -279,7 +287,7 @@ function link(cPath: string, out: string): void {
     cc,
     [
       '-std=c11',
-      ...(SANITIZED ? SANITIZER_FLAGS : ['-O2']),
+      ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
       ...shakeFlags,
       '-I',
       RUNTIME_INCLUDE,

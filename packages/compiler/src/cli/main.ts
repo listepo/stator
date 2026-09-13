@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as dotenvConfig } from 'dotenv';
 import { telemetryInit, telemetryShutdown, withSpanAsync } from '../support/telemetry.ts';
-import { BuildError, build } from './build.ts';
+import { BuildError, build, type OptLevel } from './build.ts';
 import { explain } from './explain.ts';
 import { INK_COLORS, print } from './render.ts';
 
@@ -12,7 +12,15 @@ type Mode = 'ts' | 'js';
 type Command =
   | { kind: 'help'; command: 'top' | 'build' | 'explain' }
   | { kind: 'version' }
-  | { kind: 'build'; entry: string; out: string; mode: Mode; emitC: boolean; keepC: boolean }
+  | {
+      kind: 'build';
+      entry: string;
+      out: string;
+      mode: Mode;
+      emitC: boolean;
+      keepC: boolean;
+      opt: OptLevel;
+    }
   | { kind: 'explain'; entry: string; mode: Mode; json: boolean };
 
 const USAGE = `stator — ahead-of-time compiler for TypeScript/JavaScript
@@ -41,6 +49,7 @@ Flags:
   --mode ts|js     strict ts (default) or dynamic js; diagnostics only
   --emit=c         stop after writing C to <out>; skip the C compiler
   --keep-c         keep the intermediate .c next to the binary
+  --opt 0|1|2|3    clang -O level (default 2; or STATOR_OPT)
 `,
   explain: `Usage:
   stator explain <entry> [--mode=ts|js] [--json]
@@ -87,6 +96,22 @@ function parseMode(raw: string): Mode {
   throw new StatorError('STA0002', `unknown mode "${raw}" (expected "ts" or "js")`);
 }
 
+function parseOpt(raw: string): OptLevel {
+  if (raw === '0' || raw === '1' || raw === '2' || raw === '3') {
+    return Number(raw) as OptLevel;
+  }
+  throw new StatorError('STA0002', `unknown opt "${raw}" (expected 0, 1, 2, or 3)`);
+}
+
+/** CLI `--opt` wins; else `STATOR_OPT`; else 2. */
+function defaultOpt(): OptLevel {
+  const env = process.env['STATOR_OPT'];
+  if (env === undefined || env === '') {
+    return 2;
+  }
+  return parseOpt(env);
+}
+
 function parse(argv: readonly string[]): Command {
   const head = argv[0];
   if (head === undefined || head === '--help' || head === '-h') {
@@ -105,6 +130,7 @@ function parse(argv: readonly string[]): Command {
   let json = false;
   let emitC = false;
   let keepC = false;
+  let opt: OptLevel | undefined;
 
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -136,6 +162,15 @@ function parse(argv: readonly string[]): Command {
       emitC = true;
     } else if (arg === '--keep-c') {
       keepC = true;
+    } else if (arg.startsWith('--opt=')) {
+      opt = parseOpt(arg.slice('--opt='.length));
+    } else if (arg === '--opt') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--opt requires a value (0, 1, 2, or 3)');
+      }
+      opt = parseOpt(next);
+      i += 1;
     } else if (arg.startsWith('-')) {
       throw new StatorError('STA0005', `unknown flag "${arg}"`);
     } else if (entry === undefined) {
@@ -152,7 +187,7 @@ function parse(argv: readonly string[]): Command {
     if (out === undefined) {
       throw new StatorError('STA0004', 'build requires -o <out>');
     }
-    return { kind: 'build', entry, out, mode, emitC, keepC };
+    return { kind: 'build', entry, out, mode, emitC, keepC, opt: opt ?? defaultOpt() };
   }
   return { kind: 'explain', entry, mode, json };
 }
@@ -188,6 +223,7 @@ async function runCommand(command: Command): Promise<void> {
         mode: command.mode,
         emitCOnly: command.emitC,
         keepC: command.keepC,
+        opt: command.opt,
       });
       return;
     case 'explain':

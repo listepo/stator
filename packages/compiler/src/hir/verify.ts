@@ -86,20 +86,55 @@ interface Enclosing {
   readonly isFunction?: boolean;
 }
 
+/** Parent-linked binding env (plan.md §12 standing practices / plan-notes 134).
+ *
+ * `verifyFunction` / `verifyBlock` used to fork with `new Map(bindings)`, copying every enclosing
+ * binding at every nested scope — quadratic in program size (measured 21.5 s verify at 112k lines,
+ * 82% of the front end). Lookup walks the parent chain; `set` writes only the innermost map.
+ * Semantics stay identical: a child shadow does not mutate the parent, and a missing name still
+ * resolves through ancestors. */
+type Binding = { kind: 'let' | 'const'; type: HType };
+
+class Scope {
+  private readonly own = new Map<string, Binding>();
+  private readonly parent: Scope | null;
+
+  private constructor(parent: Scope | null) {
+    this.parent = parent;
+  }
+
+  static root(): Scope {
+    return new Scope(null);
+  }
+
+  /** Nested block / function / catch / for-of scope. Replaces `new Map(bindings)`. */
+  child(): Scope {
+    return new Scope(this);
+  }
+
+  get(name: string): Binding | undefined {
+    return this.own.get(name) ?? this.parent?.get(name);
+  }
+
+  has(name: string): boolean {
+    return this.own.has(name) || (this.parent?.has(name) ?? false);
+  }
+
+  set(name: string, binding: Binding): void {
+    this.own.set(name, binding);
+  }
+}
+
 export function verifyHir(module: Module): readonly VerifyProblem[] {
   const problems: VerifyProblem[] = [];
-  const bindings = new Map<string, { kind: 'let' | 'const'; type: HType }>();
+  const bindings = Scope.root();
 
   verifyModule(module, problems, bindings);
 
   return problems;
 }
 
-function verifyModule(
-  module: Module,
-  problems: VerifyProblem[],
-  bindings: Map<string, { kind: 'let' | 'const'; type: HType }>,
-): void {
+function verifyModule(module: Module, problems: VerifyProblem[], bindings: Scope): void {
   // Check module itself has a type
   if (!module.type) {
     problems.push({
@@ -120,10 +155,7 @@ function verifyModule(
 /** Mirrors the lowering's hoist: a function declaration's binding exists for the whole body it is
  * declared in, not from its own line down. Without this a legal forward call is reported as an
  * undefined identifier (STA4002) by the verifier alone. */
-function hoistFunctions(
-  statements: readonly Statement[],
-  bindings: Map<string, { kind: 'let' | 'const'; type: HType }>,
-): void {
+function hoistFunctions(statements: readonly Statement[], bindings: Scope): void {
   for (const stmt of statements) {
     if (stmt.kind === 'function-declaration') {
       bindings.set(stmt.name, { kind: 'const', type: stmt.fn.type });
@@ -206,7 +238,7 @@ function checkIterable(iterable: Expression, problems: VerifyProblem[]): void {
 function verifyStatement(
   stmt: Statement,
   problems: VerifyProblem[],
-  bindings: Map<string, { kind: 'let' | 'const'; type: HType }>,
+  bindings: Scope,
   enclosing: readonly Enclosing[] = [],
 ): void {
   // Check statement has a type
@@ -279,11 +311,11 @@ function verifyStatement(
       // walking skeleton testing the boxed value's low bit instead.
 
       // Create a new scope for the if block
-      const thenBindings = new Map(bindings);
+      const thenBindings = bindings.child();
       verifyBlock(ifStmt.consequent, problems, thenBindings, enclosing);
 
       if (ifStmt.alternate) {
-        const elseBindings = new Map(bindings);
+        const elseBindings = bindings.child();
         verifyBlock(ifStmt.alternate, problems, elseBindings, enclosing);
       }
       break;
@@ -420,7 +452,7 @@ function verifyStatement(
       verifyExpression(stmt.iterable, problems, bindings);
       checkIterable(stmt.iterable, problems);
       const inner = [...enclosing, { isLoop: true, ...(stmt.label && { label: stmt.label }) }];
-      const scope = new Map(bindings);
+      const scope = bindings.child();
       scope.set(stmt.binding, {
         kind: stmt.declKind,
         type: forOfElementType(stmt.iterable.type, stmt.view),
@@ -541,7 +573,7 @@ function verifyStatement(
         // The caught value is Unknown by construction: anything can be thrown. The binding is
         // const-like -- assigning to a catch variable is legal JavaScript, but the lowering
         // declares it `let` inside the block scope, so an assignment verifies normally.
-        const scope = new Map(bindings);
+        const scope = bindings.child();
         if (stmt.catchBinding !== undefined) {
           scope.set(stmt.catchBinding, { kind: 'let', type: hUnknown(false) });
         }
@@ -581,7 +613,7 @@ function verifyStatement(
 function verifyBlock(
   block: Block,
   problems: VerifyProblem[],
-  bindings: Map<string, { kind: 'let' | 'const'; type: HType }>,
+  bindings: Scope,
   enclosing: readonly Enclosing[] = [],
 ): void {
   // Check block has a type
@@ -595,7 +627,7 @@ function verifyBlock(
   }
 
   // Create a new scope for this block
-  const blockBindings = new Map(bindings);
+  const blockBindings = bindings.child();
   hoistFunctions(block.statements, blockBindings);
   for (const stmt of block.statements) {
     verifyStatement(stmt, problems, blockBindings, enclosing);
@@ -608,12 +640,8 @@ function verifyBlock(
  * carries is the module-level bindings the gate already proved are the only outer names the body
  * can name. `enclosing` restarts at ['function'] so a `break` cannot escape into the enclosing
  * function's loop, and a `return` inside the body is recognised as in-function. */
-function verifyFunction(
-  fn: FunctionExpr,
-  problems: VerifyProblem[],
-  bindings: Map<string, { kind: 'let' | 'const'; type: HType }>,
-): void {
-  const inner = new Map(bindings);
+function verifyFunction(fn: FunctionExpr, problems: VerifyProblem[], bindings: Scope): void {
+  const inner = bindings.child();
   if (fn.selfBinding !== undefined) {
     inner.set(fn.selfBinding, { kind: 'const', type: fn.type });
   }
@@ -635,11 +663,7 @@ function verifyFunction(
   verifyBlock(fn.body, problems, inner, [{ isLoop: false, isFunction: true }]);
 }
 
-function verifyExpression(
-  expr: Expression,
-  problems: VerifyProblem[],
-  bindings: Map<string, { kind: 'let' | 'const'; type: HType }>,
-): void {
+function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings: Scope): void {
   // Check expression has a type
   if (!expr.type) {
     problems.push({

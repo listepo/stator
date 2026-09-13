@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
@@ -110,14 +111,77 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   18049, // 'x' is possibly 'null' or 'undefined'.
 ]);
 
+/** Last in-process `createProgram` result for an unchanged entry.
+ *
+ * Keyed by absolute entry path + mode + entry file mtime. v0 invalidates on entry mtime only —
+ * editing an imported dependency without touching the entry will not bust the cache. Good enough
+ * for warm second builds of the same fixture / test262 in-process loop; a watch daemon with a full
+ * dependency set is the follow-up. Custom `host` (memfs tests) always bypasses the cache. */
+interface ProgramCacheEntry {
+  readonly absEntry: string;
+  readonly mode: Mode;
+  readonly mtimeMs: number;
+  readonly result: {
+    program: ts.Program;
+    diagnostics: Diagnostic[];
+    runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
+  };
+}
+
+let programCache: ProgramCacheEntry | null = null;
+
+/** Drop the cached `ts.Program` (tests that mutate files under a reused entry need this). */
+export function clearProgramCache(): void {
+  programCache = null;
+}
+
 /** Build a ts.Program from an entry file, using Stator-owned compilerOptions.
  * Stator owns strict family + noEmit; user's tsconfig.json is ignored for these.
  * Returns the program and any diagnostics emitted during program construction.
  *
  * `host` is the seam for tests (plan-notes 187): unit suites back programs with a memfs volume
  * through it. Omitted means ts.sys against the real disk — the ONLY mode the shipped compiler
- * runs in, since every production call passes no host. */
+ * runs in, since every production call passes no host.
+ *
+ * Unchanged re-builds of the same absolute entry+mode reuse the previous `ts.Program` when the
+ * entry's mtime is unchanged (see `clearProgramCache`). */
 export function createProgram(
+  entryFile: string,
+  mode: Mode,
+  host?: ts.CompilerHost,
+): {
+  program: ts.Program;
+  diagnostics: Diagnostic[];
+  runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
+} {
+  // Custom hosts (memfs) have no meaningful disk mtime; never cache those.
+  if (host === undefined) {
+    const absEntry = resolve(entryFile).replace(/\\/g, '/');
+    let mtimeMs: number | undefined;
+    try {
+      mtimeMs = statSync(absEntry).mtimeMs;
+    } catch {
+      mtimeMs = undefined;
+    }
+    if (
+      mtimeMs !== undefined &&
+      programCache !== null &&
+      programCache.absEntry === absEntry &&
+      programCache.mode === mode &&
+      programCache.mtimeMs === mtimeMs
+    ) {
+      return programCache.result;
+    }
+    const result = createProgramUncached(entryFile, mode, host);
+    if (mtimeMs !== undefined) {
+      programCache = { absEntry, mode, mtimeMs, result };
+    }
+    return result;
+  }
+  return createProgramUncached(entryFile, mode, host);
+}
+
+function createProgramUncached(
   entryFile: string,
   mode: Mode,
   host?: ts.CompilerHost,

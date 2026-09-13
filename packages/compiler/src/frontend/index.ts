@@ -3,5 +3,5 @@
  * Filled in by plan.md §5 Task 2.2. */
 
 export { gateProgram } from './gate.ts';
-export { createProgram, printDiagnostics } from './program.ts';
+export { clearProgramCache, createProgram, printDiagnostics } from './program.ts';
 export { hasExplicitAny, isImplicitAny, tsTypeToHType } from './types.ts';
