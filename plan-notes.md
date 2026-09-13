@@ -4,6 +4,42 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 240. Phase 10 — `std` like a systems library, OS threads ↔ async, parallel host compiler (2026-09-13)
+
+**Plan:** §11b Phase 10 (T10.1–T10.3), Phase 7 out-of-scope Threads row, Language & library
+boundaries, §14 effort, §15.1 exception, §16 v4.7. `plan.md` was edited in this change.
+
+**Why.** The creator asked for (1) a low-level API like `std`, with an implementation sketch in
+the plan, (2) programs that use threads and threads that interoperate with async code, and
+(3) rewriting the compiler to use threads so compilation is faster.
+
+**How to implement (settled in the card, docs before code).**
+
+1. **`std` (T10.1).** Systems-style modules (`env` / `process` / `path` / `fs` / `time` / later
+   `sync` / `thread`), first-party `jsrt_std_*` in the C runtime, typed `std/*` imports — **not** a
+   Node compatibility layer and **not** user FFI (Phase 7). `docs/STD.md` lands before code
+   (§15.6). Promise-flavored FS waits on T10.2 so async code does not block main by accident.
+
+2. **Threads ↔ async (T10.2).** Shared-heap **OS threads** + `std/sync` + a **promise completion
+   MPSC queue** drained by the same `jsrt_run_microtasks` path Task 4.6 already owns. Main never
+   shares the drain with workers; workers post completions or `runOnMain` thunks. Rejected for
+   v0: isolate-per-worker and green-thread M:N. Test262 `SharedArrayBuffer` / `Atomics` / `Worker`
+   stay separate not-yets — native `std.thread` is the Stator API. This **reopens** Phase 7's
+   "single-threaded runtime" caveat for Stator-spawned threads only; foreign C threads calling in
+   remain undefined until 7.2 is updated.
+
+3. **Parallel compiler (T10.3).** The compiler stays TypeScript (§15.4 / note 239). "Rewrite with
+   threads" = `STATOR_COMPILE_JOBS` and a measured ladder: parallel **clang** first (often the
+   wall-time hog on small graphs), then emit, then sharded lower/verify with **one Program per
+   worker/process** because `typescript.Program` is not thread-safe. No new compiler language.
+
+**Sequencing.** Creator-directed like Phase 9: not gated on Phase 8. T10.3 is host-only and can
+start immediately. T10.2 wants threads-enabled Boehm (prefer after T9.1 GC glue is mergeable).
+T10.1's non-thread modules do not wait on Zig.
+
+**Not done in this change.** No `docs/STD.md` / `THREADS.md` yet, no runtime code, no compiler
+pool — plan + notes only.
+
 ## 239. Language and library boundaries: what stays, what Zig is for, what may come later (2026-09-13)
 
 **Plan:** Phase 9 / T9.1 (the card and the Language & library boundaries table), prime directive 5,
