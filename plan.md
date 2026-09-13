@@ -16,7 +16,7 @@
 2. **TypeScript types are unsound. Never trust an annotation without a boundary check.** `as` casts, out-of-date `.d.ts` files, bivariant method params, and `JSON.parse` all let lies into the type system. Trust types *inside* checked code; insert runtime checks wherever untyped/external values enter (Static Hermes model).
 3. **Don't write a parser. Don't write a type checker.** The compiler is TypeScript, so use the `typescript` npm package **in-process**: `ts.createProgram(...)` for parsing + module graph, `program.getTypeChecker()` for types. Lower directly from the TS AST (`ts.Node`) — no ESTree conversion layer. Do **not** build on `tsgo`/TypeScript 7's compiler API (explicitly incomplete as of the TS 7.0 RC) — re-evaluate quarterly in `plan-notes.md`.
 4. **Emit C first, LLVM IR later.** Static Hermes, Porffor, and scriptc all print C: easier debugging, `#line` source mapping for free, clang does the heavy optimization. A direct LLVM backend is a later optimization (and can be plain `.ll` text emission — no bindings needed), not a starting point.
-5. **Never emit Rust, and don't use Rust anywhere in this project.** Rust-as-target was measured and rejected (dyn-dispatch overhead, DSTs, `Rc<RefCell>` aliasing, slow borrow-check on generated megafiles). The compiler is TypeScript; the runtime is C11. One implementation language per artifact, no FFI between compiler components.
+5. **Never emit Rust, and don't use Rust anywhere in this project.** Rust-as-target was measured and rejected (dyn-dispatch overhead, DSTs, `Rc<RefCell>` aliasing, slow borrow-check on generated megafiles). The compiler is TypeScript; the runtime is **C11 with a Zig memory core** (plan-notes 238 / T9.1). Generated code stays C. The C11-only runtime was reopened on the creator's direction, not measured evidence — C11-only returns only on the same kind of direction. No FFI between compiler components. Do not grow Zig past the memory core without a new plan card.
 6. **The runtime is the moat, not the codegen.** GC, builtins coverage, strings, RegExp, and ICU are where the years go. Budget accordingly; tree-shake builtins from day 1.
 7. **Allocation dominates, not dispatch.** Boa's Cranelift JIT experiment proved it: 10× on numeric loops, <5% on allocation-bound benchmarks; GC tracing 10–16% of time, dispatch only ~13%. This ordering drives the optimization ladder (§12).
 8. **One pipeline, two modes.** A mode is a *policy layer* (which files are accepted, which constructs are errors, how untyped code is typed) over one shared pipeline. If a feature seems to require forking the pipeline per mode, the design is wrong — stop and fix the design (usually: the feature belongs to the dynamic representation or the Phase-8 tier).
@@ -76,7 +76,7 @@ entry.ts / entry.js (+ module graph)
         ▼
   C emitter (#line maps) ──► clang -O2 ──► link runtime/build/libjsrt.a ──► native binary
                                                    ▲
-        runtime/ (C11): NaN-boxed jsrt_value, Boehm GC (v0) → precise generational (§12),
+        runtime/ (C11 + Zig memory core): NaN-boxed jsrt_value, Boehm GC (v0) → precise generational (§12),
         builtins, QuickJS-NG libregexp, Ryū dtoa, optional QuickJS-NG interpreter tier
         for eval/untyped modules (Phase 8, js mode only)
 ```
@@ -90,7 +90,7 @@ value-flow views) sourced from `docs/architecture/*.d2`. It is a visualization o
 plan.md AGENTS.md plan-notes.md NICHE.md          # root (pnpm workspace + .moon/; plan-notes 204)
 docs/    ARCHITECTURE.md architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
 packages/compiler/  src/{cli,frontend,hir,lower,passes,codegen,support}  (package "statorc" + locked tsconfig)
-packages/runtime/   include/jsrt_value.h  src/  vendor/  (justfile)   → packages/runtime/build/libjsrt.a
+packages/runtime/   include/jsrt_value.h  src/ (C11 + Zig memory core, T9.1)  vendor/  (justfile)   → packages/runtime/build/libjsrt.a
 packages/tests/     unit/  subset/  golden/ts/  golden/js/  differential/  bench/  (package "@stator/tests")
 ```
 
@@ -910,6 +910,89 @@ two things that must exist before implementation is allowed to start:
 
 ---
 
+## 11a. Phase 9 — Zig memory core — **[D5 · P1]**
+
+Creator's direction (plan-notes 238): rewrite the **memory core** of the C runtime in Zig. This
+phase is **not sequenced after Phase 8** — §11 is gated on a named user and may never start;
+T9.1 proceeds independently. §15.1's top-down rule does not apply here.
+
+The Zig modules export the same C ABI and link into `libjsrt.a`. `jsrt_value.h` stays the
+codegen↔runtime contract, and generated code stays C. Boehm GC stays: Zig calls bdw-gc through
+its C ABI. Zig 0.16.0 is pinned in stator's `mise.toml`; a global 0.14.1 (if present) is
+untouched. This reopens the settled C11-runtime decision (§15.4) on the creator's direction.
+
+**Do not merge the `.worktrees/t9-1` Zig implementation from this planning change.** The
+sources stay in that worktree until a follow-up PR.
+
+### T9.1. Runtime memory core in Zig
+
+In scope:
+
+- the GC glue (`jsrt_gc.c`);
+- the allocation helpers behind `jsrt_value.h`;
+- the shape tables (`jsrt_shape.c`);
+- the growable buffers in print, JSON and string ops.
+
+Steps:
+
+1. Pin zig 0.16.0 in `mise.toml` and list it in `docs/TOOLCHAIN.md`. Teach the justfile to build
+   the Zig objects into `libjsrt.a` for both the `runtime` and `runtime-asan` flavors.
+2. Move `jsrt_gc.c` first.
+3. Move the print/JSON/string buffers.
+4. Move the shape tables.
+5. Move the allocation helpers.
+
+Every step keeps the golden fixtures and the runtime print corpus byte-identical.
+
+**Check:** `pnpm run ci` is green, including `test:runtime` and `test:asan`. No C file still
+holds moved code. `docs/TOOLCHAIN.md` lists zig.
+
+**Progress** (worktree `.worktrees/t9-1`, branch `agent/t9-1`, plan-notes 238): steps 1–5 are in
+place in that worktree. The Zig root `src/jsrt_mem.zig` builds one object, `jsrt_zig.o`, from
+`jsrt_gc.zig`, `jsrt_buf.zig`, `jsrt_shape.zig` and `jsrt_alloc.zig`, declared for C in
+`src/jsrt_mem.h`; `jsrt_gc.c` is deleted there. The string ops have no growable buffer, so
+nothing there moved. Property semantics stay in `jsrt_shape.c` and builtin-specific constructors
+stay with their builtins. Open for the creator: the `mlugg/setup-zig@v2` CI action. **Main does
+not yet contain the Zig objects** — that is a separate PR.
+
+### Language & library boundaries
+
+Normative. Agents do not invent a second compiler language, a Rust crate, or a new runtime.
+Full survey: plan-notes 239. Short form:
+
+| Layer | Choice | Status |
+|---|---|---|
+| Compiler | TypeScript + `typescript` API in-process | settled |
+| Emit / link | C; clang + `libjsrt.a` | settled |
+| Generated code | C only | settled |
+| Rust | nowhere, including MMTk | settled (§15.4) |
+| Runtime | C11 + Zig memory core (T9.1 only) | creator direction (238) |
+| Vendored | QuickJS-NG libregexp/libunicode, fdlibm | settled |
+| Optional native | Boehm; ICU (intl build) | settled |
+| CLI-only | ink/react, dotenv; OTel opt-in | settled (187) |
+
+**Zig (T9.1 only):** GC glue, alloc helpers, shape tables, growable buffers. Same C ABI into
+`libjsrt.a`. Do **not** grow Zig into builtins, math, regexp, or codegen without a new plan task.
+
+**Worth considering later — not tasks yet** (ride §12 / the named tripwire):
+
+| Candidate | When |
+|---|---|
+| Ryū C vendor | §12 ladder (already scheduled; number print) |
+| mimalloc/jemalloc | §12 rung 1, non-GC / post-precise-GC paths |
+| simdutf (or similar) | only if UTF-16 ops profile hot |
+| oxc-parser via napi | only if the `typescript` tripwire (§13) fires |
+| LLVM `.ll` emit / LTO+PGO | measure before a new backend (§12 rung 6) |
+| QuickJS-NG full interpreter | Phase 8 (already planned; same commit as libregexp) |
+
+**Do not:** rewrite the compiler in another language; adopt MMTk / a Rust GC without reopening
+§15.4 with measured evidence; add a second RegExp engine beside libregexp; spread Zig beyond
+the memory core without a new card.
+
+Open for the creator: `mlugg/setup-zig@v2` as a CI dependency (noted in 238).
+
+---
+
 ## 12. Make it better — the optimization ladder (post-MVP, in this order)
 
 Ordering rule (from the Boa deep-dive): **memory first, codegen last**. Each step: measure on the Phase-6 harness before/after; keep the change only if the geomean moves.
@@ -1070,6 +1153,7 @@ Standing practices:
 | Conformance visible (Phase 6) | Test262 dashboard, nightly fuzz, bench page | +3–4 wk, then continuous |
 | FFI (Phase 7) | SQLite demo, header gen | +4–6 wk |
 | Dynamic tier (Phase 8) | QuickJS-NG fallback | +6–10 wk *if gated in* |
+| Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | in progress in `.worktrees/t9-1` |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
 
@@ -1093,10 +1177,10 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 
 ## 15. Agent execution protocol
 
-1. Work top-down by phase; within a phase, by task order (steps are ordered by dependency). Do not start a phase before the previous phase's **Check** passes. Phase 0's tag gate requires a human; stop and ask there.
+1. Work top-down by phase; within a phase, by task order (steps are ordered by dependency). Do not start a phase before the previous phase's **Check** passes. Phase 0's tag gate requires a human; stop and ask there. **Exception:** Phase 9 / T9.1 is creator-directed and is not gated on Phase 8.
 2. Every claim of "done" cites the Check command output (test run, CI link, benchmark diff). No Check, no done. A Check must also stay re-runnable at any later HEAD: an assertion **about** HEAD (`git describe --exact-match HEAD`, "the working tree is clean", a line number) is a point-in-time observation, not a Check, and it turns finished work into work that reports itself unfinished (plan-notes 135).
 3. New facts that contradict this plan (a dependency changed, a measurement disagrees) → append to `plan-notes.md` with evidence; update this plan in the same change. The plan is living, but it changes by edit, not by drift.
-4. Decisions already made here are **settled** — re-open only with new measured evidence in `plan-notes.md`: TypeScript-strict implementation using the `typescript` API in-process; C11 runtime; emit C; no Rust anywhere; NaN-boxing + `JSRT_FRAME` rooting; UTF-16 strings; Ryū-exact number printing; `Unknown` as first-class HType; cycle-rejecting ESM-only modules; the feature × mode matrix (`docs/SUBSET.md`); `ts` as default mode; `eval` permanently rejected in `ts` mode; the locked tsconfig.
+4. Decisions already made here are **settled** — re-open only with new measured evidence in `plan-notes.md`: TypeScript-strict implementation using the `typescript` API in-process; C11 runtime with a Zig memory core (C11-only reopened on creator direction, plan-notes 238); emit C; generated code stays C; no Rust anywhere; NaN-boxing + `JSRT_FRAME` rooting; UTF-16 strings; Ryū-exact number printing; `Unknown` as first-class HType; cycle-rejecting ESM-only modules; the feature × mode matrix (`docs/SUBSET.md`); `ts` as default mode; `eval` permanently rejected in `ts` mode; the locked tsconfig.
 5. When measuring against Node/Bun/QuickJS/competitors: record version, flags, hardware, and the exact program. Never compare against a number you didn't produce.
 6. Ambiguity rule: if a task still leaves you guessing, the gap is a bug in this plan — record it in `plan-notes.md` and resolve it by editing the plan, not by inventing an undocumented convention in code.
 7. `tsconfig.json` and the oxlint rules are load-bearing. Never weaken them to make code compile — fix the code, or follow rule 3.
@@ -1226,3 +1310,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
   2. That is older than this phase and independent of step 12, so it is a step like 13 rather than
   residue; the nested-declaration landing ships with a narrow refusal for exactly the shadowing case
   so it adds no new silent miscompile, and step 14 removes both together.
+
+- **v4.6** (2026-09-13): **Phase 9 / T9.1 is now a main-tree card** (plan-notes 238, 239). The runtime is C11 with a Zig memory core — C11-only reopened on the creator's direction, not measured evidence. Generated code stays C; Rust stays forbidden. The language & library survey (239) is the standing boundary so agents do not invent a second compiler language, MMTk/Rust, or Zig past the memory core. Implementation remains in `.worktrees/t9-1` until a follow-up PR; this revision is plan/docs/notes plus the mise Zig 0.16.0 pin.

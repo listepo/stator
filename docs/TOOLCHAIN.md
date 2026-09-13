@@ -18,6 +18,7 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | pnpm                      | `12.3.4`           | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml`                                                                                                                                                               |
 | LLVM                      | `21.1.8`           | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
 | just                      | `1.58.0`           | `mise.toml`. The runtime build (`just -f packages/runtime/justfile -d packages/runtime runtime`, `runtime-asan`, `runtime-intl`).                                                                                                |
+| Zig                       | `0.16.0`           | `mise.toml` (`zig`, Unix). Required for runtime builds once T9.1 lands (plan-notes 238). Pin is in place so the task is executable; main does not yet compile `src/*.zig`. CI install via `mlugg/setup-zig@v2` awaits creator approval. |
 
 Node ≥ 24 is required because dev runs the compiler's TypeScript sources directly
 (`node packages/compiler/src/cli/main.ts`) via native type stripping — there is no build step in development.
@@ -29,7 +30,7 @@ quarterly and record the outcome in `plan-notes.md`.
 Dependabot (`.github/dependabot.yml`, plan-notes 212) proposes weekly bumps for the npm tree and
 the GitHub Actions, and cannot keep the rule above by itself: a PR from its `toolchain` group moves
 a row of this table, so it needs that row and a `plan-notes.md` line before merge. It never
-proposes a TypeScript or `@types/node` major. Node, pnpm, LLVM and just stay hand-bumped.
+proposes a TypeScript or `@types/node` major. Node, pnpm, LLVM, just and Zig stay hand-bumped.
 
 ## Verified development host
 
@@ -131,10 +132,11 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 | `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`                       | the runtime, the emitted C, and the final link           |
 | `ar` (`$AR`)    | justfile                                                             | archiving `libjsrt.a`                                    |
 | `just`          | justfile                                                             | the runtime build (pinned `1.58.0` in `mise.toml`)       |
+| `zig`           | justfile (T9.1)                                                      | memory-core objects into `libjsrt.a` (pinned `0.16.0` in `mise.toml`; required once T9.1 lands) |
 | `pkg-config`    | justfile                                                             | finding bdw-gc and ICU; absent means both are simply off |
 | `diff`          | `just -f packages/runtime/justfile -d packages/runtime runtime-test` | the print corpus against Node, byte-for-byte             |
 
-`clang` (and the rest of LLVM) is `mise install` on Unix. The other three still come from the Xcode
+`clang` (and the rest of LLVM) and `zig` 0.16.0 are `mise install` on Unix. The other three still come from the Xcode
 command-line tools (`xcode-select --install`) on macOS and from `binutils`/`pkg-config`/
 `diffutils` on Debian/Ubuntu. A missing compiler is a diagnostic with the install hint (`STA0008`),
 not a crash.
@@ -142,6 +144,8 @@ not a crash.
 ## Not yet required
 
 These arrive with the phase that needs them; do not add them to CI before that:
+
+- **`mlugg/setup-zig@v2`** — the CI install for Zig 0.16.0. The mise pin is already on main; the GitHub Action is a new third-party CI dependency and is **open for the creator** (plan-notes 238). Windows never builds the runtime, so that job would skip the action. Do not add it without approval.
 
 - **Ryū** — **NOT vendored.** Planned by Phase 2 Task 2.5 for `runtime/vendor/ryu/`; it was never fetched, and `shortest_digits()` in `runtime/src/jsrt_print.c` stands in for it with a round-trip search over `%.*e`. Correct, and slow: up to 18 `snprintf`+`strtod` pairs per number printed. See plan-notes 28 for the standing seam and plan-notes 188 for the correction: the network IS reachable, so Ryū is fetchable and simply not yet fetched — a scheduling fact, not an environmental one. **The schedule is now recorded** (owner's call, 2026-09-04, plan-notes 190): Ryū rides the §12 optimization ladder rather than becoming a task, because the corpus it would replace already matches Node byte-for-byte, so it is a pure speed change and §12's entry criterion — a measured before/after on Task 6.3's harness — applies. (This line claimed Ryū was vendored until 2026-09-01.)
 - **Test262 corpus** — fetched on demand (`pnpm run test262:fetch`) into `tests/test262/corpus/` or `$STATOR_TEST262`. The runner, pin, and ratchet are in-tree; `pnpm run test262` is a CI heartbeat, not part of `pnpm run ci`.
