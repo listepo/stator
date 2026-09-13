@@ -668,7 +668,7 @@ its own task, with a `plan-notes.md` entry and a `SUBSET.md` row):
 | Varargs (`printf`) | No sound signature; each call site is a different function type |
 | C++ symbols, name mangling, exceptions | A second ABI, not an extension of this one |
 | C **calling back into** a JS closure | Needs a trampoline plus a GC root for the closure that outlives the call. Task 7.2's exported functions are the supported way for C to call in |
-| Threads | Single-threaded runtime; see Task 7.2 step 6 |
+| Threads | v0 FFI stays single-threaded (Task 7.2 step 6); **OS threads + async bridge are Phase 10** (T10.2), which reopens this |
 
 **[D4] Task 7.1 — Calling C from TS.** `declare` + a marker (mirroring `$SHBuiltin.extern_c`) lowers to a direct call — no boxing for primitives; ownership rules for pointers/strings documented per-signature.
 
@@ -967,6 +967,8 @@ Full survey: plan-notes 239. Short form:
 | Generated code | C only | settled |
 | Rust | nowhere, including MMTk | settled (§15.4) |
 | Runtime | C11 + Zig memory core (T9.1 only) | creator direction (238) |
+| `std` + OS threads | First-party `jsrt_std_*` + `std/*` modules; threads↔async bridge | Phase 10 (240) |
+| Host compile parallelism | Same TS compiler; `STATOR_COMPILE_JOBS` / worker or process pool | Phase 10 T10.3 (240) |
 | Vendored | QuickJS-NG libregexp/libunicode, fdlibm | settled |
 | Optional native | Boehm; ICU (intl build) | settled |
 | CLI-only | ink/react, dotenv; OTel opt-in | settled (187) |
@@ -985,11 +987,176 @@ Full survey: plan-notes 239. Short form:
 | LLVM `.ll` emit / LTO+PGO | measure before a new backend (§12 rung 6) |
 | QuickJS-NG full interpreter | Phase 8 (already planned; same commit as libregexp) |
 
-**Do not:** rewrite the compiler in another language; adopt MMTk / a Rust GC without reopening
+**Do not:** rewrite the compiler in another language (parallelizing it is T10.3, not a new language); adopt MMTk / a Rust GC without reopening
 §15.4 with measured evidence; add a second RegExp engine beside libregexp; spread Zig beyond
 the memory core without a new card.
 
 Open for the creator: `mlugg/setup-zig@v2` as a CI dependency (noted in 238).
+
+---
+
+## 11b. Phase 10 — `std` library, threads ↔ async, parallel compiler — **[D5 · P1]**
+
+Creator's direction (plan-notes 240). Three related cards, one phase: a low-level **`std`**
+surface like a systems stdlib; **OS threads** that interoperate with the existing async /
+Promise machinery; and a **threaded host compiler** so compilation uses multiple cores.
+
+This phase is **not sequenced after Phase 8** — §11 is gated and may never start. T10.3
+(host-only) can start anytime. T10.1 / T10.2 need a working runtime (Phase 4 ✅) and the
+docs-first rule (§15.6). §15.1's top-down rule does not apply here (same exception shape as
+Phase 9).
+
+**Not a rewrite of the compiler into another language.** §15.4 / plan-notes 239 stay: the
+compiler remains TypeScript + the `typescript` API. "Rewrite with threads" means parallelize
+the existing pipeline (`node:worker_threads` / a process pool), not Zig/Rust/Go for codegen.
+
+**Relationship to other phases.**
+
+| Neighbor | How Phase 10 relates |
+|---|---|
+| Phase 7 FFI | `std` is **first-party** runtime C (`jsrt_std_*`), not user `declare` bindings. Phase 7's memory/string/error rules still apply when `std` calls libc. Phase 7's "single-threaded v0" is reopened **only** by T10.2 — FFI callbacks from foreign threads stay undefined until T10.2's bridge exists and 7.2's header is updated. |
+| Phase 9 / T9.1 | Threads need a **threads-enabled Boehm** and per-thread stack registration. Prefer landing T9.1's GC glue (or the equivalent C path) before stress-testing T10.2; T10.1's non-thread modules do not wait on Zig. |
+| Task 4.6 async | The resume machine, `jsrt_promise_subscribe`, and `jsrt_run_microtasks` are the async half of the bridge. Do not invent a second event loop. |
+| §12 ladder | Host compile parallelism (T10.3) is a **developer-time** win; it is not a §12 runtime rung. Measure wall time of `stator build` before/after; keep only if geomean moves. |
+| Test262 `SharedArrayBuffer` / `Atomics` / `Worker` | **Out of scope for T10.2 v0.** Those are JS-compat surfaces with their own not-yet codes. `std.thread` / `std.sync` are the Stator-native API; a later card may map SAB/Atomics onto the same primitives. |
+
+### Design: how to implement this best
+
+#### A. `std` is a typed module, backed by C — not Node polyfills
+
+1. **Ship `docs/STD.md` before any code** (§15.6). The doc freezes: module path (`std` vs
+   `@stator/std`), sync vs Promise APIs, error model (throw `Error` with `code` / `errno`, never
+   silent `-1`), and which platforms are supported (POSIX first; Windows only when CI builds
+   the runtime there).
+2. **Surface shape** (systems std, deliberately smaller than Node):
+
+   | Module | v0 contents | Notes |
+   |---|---|---|
+   | `std/env` | `get`/`set`/`has`, `args`, `cwd` | argv already exists for `main`; expose it |
+   | `std/process` | `exit`, `pid`, `abort` | no signals yet |
+   | `std/path` | `join`/`dirname`/`basename`/`isAbsolute` | pure TS or tiny C; UTF-16 ↔ bytes at the FS edge only |
+   | `std/fs` | sync read/write/stat/mkdir; Promise twins | Promise twins are thin `async` wrappers that `await` a thread-pool job (see B) once T10.2 exists; until then sync-only is honest |
+   | `std/time` | `nowMs`, `sleepMs` (sync) | timers in the microtask sense stay out until a macrotask phase exists |
+   | `std/sync` | `Mutex`, `CondVar`, `Channel` | with T10.2 |
+   | `std/thread` | `spawn`, `join`, `availableParallelism` | with T10.2 |
+
+3. **Implementation layers:** `packages/std/*.ts` (types + thin wrappers users import) →
+   compiler recognizes `std/*` as a value-import edge into runtime symbols → `runtime/src/jsrt_std_*.c`
+   (or Zig only if a later card moves buffers there — **not** by default). No second RegExp, no
+   Node `fs` semantics chase: match POSIX + document deltas in `STD.md`.
+4. **Gate:** unknown `std/foo` is a hard error; partial modules use `not-yet` codes that name
+   **Phase 10** as the blocker owner (§15.9).
+
+#### B. Threads + async: one heap, main drains the queue, threads post completions
+
+**Chosen model (settle in `docs/STD.md` + a short `docs/THREADS.md` before code):** shared-heap
+**OS threads** with explicit sync, plus a **promise completion bridge** onto the existing
+microtask queue. Rejected for v0: isolate-per-worker (heavier, worse "std" feel) and
+green-thread M:N (second scheduler beside Task 4.6).
+
+Rules that make async ↔ threads sound:
+
+1. **The main thread owns `jsrt_run_microtasks()`.** Worker threads never drain it.
+2. **`std.thread.spawn(fn, ...args)`** runs `fn` on an OS thread. `fn` must be a Stator function
+   whose environment is heap-reachable (same discipline as async/generator envs). It may use
+   `std/sync` and may call sync `std/fs`. It must not assume TLS frame state from main without
+   installing its own `JSRT_FRAME`.
+3. **`await thread.join()`** (or `thread.join(): Promise<T>`) parks on a Promise that the worker
+   fulfills/rejects by pushing a completion into a **thread-safe MPSC queue**. Main's drain
+   (already called after module body / at await boundaries) also pops that queue and settles the
+   promises — one mechanism, no second loop.
+4. **`std.async.runOnMain(fn)`** (name TBD in the doc) lets a worker schedule a thunk onto the
+   main microtask queue. That is the only supported way for a worker to touch Promise reactions
+   or non-thread-safe builtins.
+5. **Blocking I/O from async code:** prefer `await std.fs.readFile(path)` implemented as
+   spawn-join under the hood, so the main thread stays responsive. Do not block main inside an
+   async function's sync prefix.
+6. **GC:** build/link Boehm with threads; every spawn registers the thread with the collector;
+   `_Thread_local jsrt_frame_top` already exists (`docs/VALUE.md`). A thread that allocates without
+   registering is a use-after-free waiting to happen — the Check must include a multi-thread
+   allocate/collect golden.
+7. **Data races on JS objects are undefined** unless guarded by `std/sync` (same honesty as C).
+   Document it; do not pretend the runtime is data-race-free.
+
+**Out of v0 (named so they are decisions):** `SharedArrayBuffer` / `Atomics.wait` / `Worker` global;
+thread cancellation; priorities; binding a C library's own thread pool without going through
+`std.thread` (FFI 7.2 stays single-threaded until explicitly updated).
+
+#### C. Parallel compiler: keep TS, parallelize cold stages, measure
+
+Measured today: small-file `stator build` warm is often **clang-dominated**; large graphs used to
+die in `hir/verify` Map copies (parent-linked scopes fixed that). So T10.3 is **not** "thread
+everything" — it is a ladder with a measurement gate per step.
+
+| Step | What parallelizes | Constraint |
+|---|---|---|
+| C0 | Inventory + `STATOR_COMPILE_JOBS` (default `availableParallelism()`, `1` = serial) | Telemetry spans already exist; record baseline wall times on a fixed graph |
+| C1 | **Parallel clang** of independent `.c` units after emit | Safest: processes or a fixed worker pool; link stays serial |
+| C2 | **Parallel emit** per module once HIR+verify for that module is done | Shared codegen tables must be immutable or cloned per worker |
+| C3 | **Parallel lower/verify** per module | `typescript.Program` is **not** thread-safe — one Program per worker (process pool) **or** a single-threaded typecheck then sharded HIR. Prefer process pool over `worker_threads` if the API holds native state |
+| C4 | Program / parse cache stays; workers inherit immutable snapshots | Never share a mutable checker across threads |
+
+**Do not:** rewrite the compiler in Zig/Rust; put clang inside the runtime; claim a speedup
+without before/after numbers on the same machine.
+
+**Check (phase-level):** `docs/STD.md` + `docs/THREADS.md` exist; at least `std/env` + `std/path`
+compile and run; one golden shows `spawn` + `await join` interleaving with `Promise` reactions;
+`stator build` on a multi-file fixture is ≥1.5× faster wall-clock with `STATOR_COMPILE_JOBS>1`
+than with `=1` on a quiet machine (or the note explains why the floor was not met and which
+step remains). `pnpm run ci` green.
+
+---
+
+### T10.1. `std` low-level API (sans threads) — **[D4]**
+
+Steps:
+
+1. Write `docs/STD.md` (module path, error model, v0 table above). Add stub `SUBSET.md` rows /
+   diagnostics that name Phase 10.
+2. Wire `std/env` and `std/path` end-to-end (types → runtime → golden).
+3. Add `std/process` (`exit`/`pid`).
+4. Add sync `std/fs` + `std/time` (`nowMs`; sync `sleepMs` only).
+5. Promise-flavored `std/fs` APIs: either `not-yet` until T10.2, or implemented as sync under a
+   documented lie — **prefer not-yet** so async programs do not block main by accident.
+
+**Check:** goldens for env/path/process/fs sync; subset rows match; no Node polyfill dependency.
+
+### T10.2. OS threads + async bridge — **[D5]**
+
+Depends on: T10.1's docs (threads chapters), Task 4.6 machinery, threads-enabled GC.
+
+Steps:
+
+1. Write `docs/THREADS.md` — the seven rules in Design B, plus Boehm build flags.
+2. Runtime: thread registry, MPSC completion queue, `jsrt_thread_spawn` / `join` promise.
+3. `std/sync` (`Mutex`, `CondVar`, bounded `Channel`).
+4. `std/thread.spawn` / `join` / `availableParallelism`.
+5. Bridge: `await join` + `runOnMain`; golden where a worker resolves a Promise the main `await`s,
+   and an async function offloads CPU work via spawn-join.
+6. Update Phase 7 Task 7.2 step 6 text/header when foreign threads may call in **only** via the
+   bridge (or keep "undefined" until a 7.2 follow-up — record the choice in plan-notes).
+7. Stress: N threads allocating under GC; ASan/UBSan where available.
+
+**Check:** goldens byte-stable where Node has an analogue (Promise side); thread-only fixtures
+use Stator's own oracle. Multi-thread GC stress does not crash under ASan.
+
+### T10.3. Threaded / parallel host compiler — **[D4]**
+
+Independent of T10.1/T10.2. Host Node only.
+
+Steps:
+
+1. Baseline: wall time of `stator build` on a fixed multi-file fixture at `STATOR_COMPILE_JOBS=1`
+   with spans (frontend / lower / verify / emit / clang / link).
+2. C1 — parallel clang; keep if ≥1.3× on that fixture.
+3. C2 — parallel emit if emit shows in the profile.
+4. C3 — sharded lower/verify via process pool if typecheck/HIR dominate; document the Program
+   isolation choice.
+5. CI: one job runs `STATOR_COMPILE_JOBS=2` smoke so races fail the build; default CI may stay
+   serial for log readability.
+
+**Check:** documented before/after numbers in plan-notes; `STATOR_COMPILE_JOBS=1` preserves
+byte-identical emitted C for the fixture; CI green.
 
 ---
 
@@ -1154,6 +1321,7 @@ Standing practices:
 | FFI (Phase 7) | SQLite demo, header gen | +4–6 wk |
 | Dynamic tier (Phase 8) | QuickJS-NG fallback | +6–10 wk *if gated in* |
 | Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | in progress in `.worktrees/t9-1` |
+| `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
 
@@ -1177,7 +1345,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 
 ## 15. Agent execution protocol
 
-1. Work top-down by phase; within a phase, by task order (steps are ordered by dependency). Do not start a phase before the previous phase's **Check** passes. Phase 0's tag gate requires a human; stop and ask there. **Exception:** Phase 9 / T9.1 is creator-directed and is not gated on Phase 8.
+1. Work top-down by phase; within a phase, by task order (steps are ordered by dependency). Do not start a phase before the previous phase's **Check** passes. Phase 0's tag gate requires a human; stop and ask there. **Exception:** Phase 9 / T9.1 and Phase 10 (`std` / threads / parallel compiler) are creator-directed and are not gated on Phase 8.
 2. Every claim of "done" cites the Check command output (test run, CI link, benchmark diff). No Check, no done. A Check must also stay re-runnable at any later HEAD: an assertion **about** HEAD (`git describe --exact-match HEAD`, "the working tree is clean", a line number) is a point-in-time observation, not a Check, and it turns finished work into work that reports itself unfinished (plan-notes 135).
 3. New facts that contradict this plan (a dependency changed, a measurement disagrees) → append to `plan-notes.md` with evidence; update this plan in the same change. The plan is living, but it changes by edit, not by drift.
 4. Decisions already made here are **settled** — re-open only with new measured evidence in `plan-notes.md`: TypeScript-strict implementation using the `typescript` API in-process; C11 runtime with a Zig memory core (C11-only reopened on creator direction, plan-notes 238); emit C; generated code stays C; no Rust anywhere; NaN-boxing + `JSRT_FRAME` rooting; UTF-16 strings; Ryū-exact number printing; `Unknown` as first-class HType; cycle-rejecting ESM-only modules; the feature × mode matrix (`docs/SUBSET.md`); `ts` as default mode; `eval` permanently rejected in `ts` mode; the locked tsconfig.
@@ -1310,5 +1478,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
   2. That is older than this phase and independent of step 12, so it is a step like 13 rather than
   residue; the nested-declaration landing ships with a narrow refusal for exactly the shadowing case
   so it adds no new silent miscompile, and step 14 removes both together.
+
+- **v4.7** (2026-09-13): **Phase 10 card — `std`, threads↔async, parallel host compiler** (plan-notes 240). Creator-directed, not gated on Phase 8. `std` is a systems-style first-party library (docs-first), not a Node polyfill. Threads are shared-heap OS threads with a promise completion bridge onto Task 4.6's microtask queue; SAB/Atomics/Worker stay out of v0. "Rewrite the compiler with threads" means `STATOR_COMPILE_JOBS` + parallel clang/emit/lower on the existing TypeScript host — not a new compiler language. Phase 7's single-threaded FFI caveat now points here.
 
 - **v4.6** (2026-09-13): **Phase 9 / T9.1 is now a main-tree card** (plan-notes 238, 239). The runtime is C11 with a Zig memory core — C11-only reopened on the creator's direction, not measured evidence. Generated code stays C; Rust stays forbidden. The language & library survey (239) is the standing boundary so agents do not invent a second compiler language, MMTk/Rust, or Zig past the memory core. Implementation remains in `.worktrees/t9-1` until a follow-up PR; this revision is plan/docs/notes plus the mise Zig 0.16.0 pin.
