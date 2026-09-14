@@ -23,6 +23,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { nodePath } from '../support/node-path.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
@@ -91,9 +92,10 @@ async function runSampled(binary: string): Promise<Run> {
 }
 
 /** Node's own answer for the fixture: the loop must actually compute what it claims to, or a
- * runtime could pass the memory bound by not allocating at all. */
+ * runtime could pass the memory bound by not allocating at all. The oracle path, never the
+ * compiler host — see `nodePath`. */
 function expected(): string {
-  const node = spawnSync(process.execPath, [FIXTURE], { encoding: 'utf8' });
+  const node = spawnSync(nodePath(), [FIXTURE], { encoding: 'utf8' });
   if (node.status !== 0) {
     throw new Error(`node exited ${String(node.status)}: ${node.stderr.trim()}`);
   }

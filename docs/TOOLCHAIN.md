@@ -50,9 +50,9 @@ CI must run at least ubuntu-latest and macos-latest (plan.md §4 Task 1.0 step 1
 
 ```
 pnpm install --frozen-lockfile   # install exactly the pinned tree
-pnpm run ci                      # typecheck -> lint -> dupes -> unit+coverage -> runtime -> subset -> golden -> leak -> asan
-pnpm run test                    # unit tests
-pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info
+pnpm run ci                      # typecheck -> lint -> dupes -> unit -> runtime -> subset -> golden -> leak -> asan
+pnpm run test                    # unit tests (the default; coverage is on-demand, not per-run)
+pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info (only when the table is the question — ~3.4x wall time)
 pnpm run test:subset             # feature × mode decision matrix
 pnpm run test:golden             # compile + run vs the pinned Node, byte-for-byte
 pnpm run test262                 # Test262 slice against the pin in tests/test262/pin.json

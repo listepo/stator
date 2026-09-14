@@ -4,6 +4,60 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 242. In-process runners land, and expose a cross-program lowering leak (2026-09-14)
+
+**Plan:** §9 Tasks 6.6, 6.7. `plan.md` edited in this change (both struck, evidence in `done.md`).
+
+**6.6 numbers** (same host as 241; wall times from the landing runs): subset 372 fixtures
+351/21/0 in **10.6 s** (spawned baseline ~21 s — ~2×); golden 212/212 in **41.6 s** (v3.10 spawned
+baseline 44.5 s on an older tree — the spawn saving is real but clang now dominates the share).
+`test262/run.ts`'s in-process pattern transferred without new machinery; `parallel.ts` untouched.
+
+**The leak the transport exposed.** First in-process golden run: 211/212 — `js/block_scope.js`
+failed with a spurious `STA4020` on `inner += 1`, deterministic, only when compiled in the same
+process AFTER `golden/js/named_function_expression.js` (`const f = function inner() ...`).
+Root cause: `immutableSelfBindings` (`packages/compiler/src/lower/index.ts`) was never reset
+between `lowerProgram` calls (unlike `functionNesting`/`moduleAwaits` beside it), so HIR's
+name-only identifier resolution saw a ghost self-binding from the earlier program. Spawn-per-
+fixture masked it with a fresh module per process. Fix in the same change: `lowerProgram` now
+also clears `immutableSelfBindings` and resets `bindTempId` plus scope.ts's `shadowCounter` (new
+`resetShadowCounter()` export) — the counters only rename temps, but the reset restores exact
+fresh-process parity (same input → same HIR names → same C). Grep confirmed no other module-level
+`let` in `lower/` (operator tables are `const`), none in `passes/` or `codegen/`, and
+`frontend/program.ts`'s cache is keyed by entry+mode+mtime with a `clearProgramCache` escape —
+no cross-fixture poisoning there. Standing lesson for future in-process paths (T10.3 host
+parallelism especially): **module-level mutable lowering state is a latent cross-program bug**;
+any new `let` at module scope in the pipeline needs a reset beside these three or a comment
+saying why it survives reuse.
+
+**Two observations, not fixed.** (1) Raw clang `ld: duplicate symbol '_jsrt_array_new'`
+(`jsrt_value.o` vs `jsrt_zig.o` in the current `libjsrt.a`) now prints to the terminal — the old
+runner captured and discarded it per fixture. Links succeed; the archive was not rebuilt here
+(shared artifact, T9.1's tree). (2) `process.env['TZ'] = 'UTC'` is now set in the golden runner
+process itself, since in-process `build()` reads the environment directly instead of inheriting
+`PINNED_ENV` through a spawn — same pin, one layer up.
+
+**6.7 numbers:** `cli.test.ts` converted to async `execa` (mechanical) with `Promise.all` overlap
+in exactly the 3 tests issuing independent spawns (missing-entry build+explain, ts+js provenance
+explains, STA1002 explain+build); 4 build-then-run tests stay ordered (binary must exist first),
+each noted inline. No pool: max introduced concurrency is 2, a semaphore would be review surface
+without scheduling benefit — recorded here as the reason Step's pool clause was not built.
+`node --test cli.test.ts` 16/16 in **8.9 s** on a quiet box (11.4 s pre-change baseline from 241,
+measured under different load — directionally better, not a controlled A/B; the overlap itself
+saves ~2–3 spawn latencies ≈ 0.5–1 s). Spread under contention (7.6 → 30 s with a parallel clang
+storm on the box) is load, not structure — `node:test` still runs the 16 tests sequentially, so
+further wins need cross-test parallelism, not intra-test overlap.
+
+## 241. Test-speed research: Bun vs Node, and where the wall time goes (2026-09-14)
+
+Host: Darwin arm64, 16 cores, Node v26.8.2 via mise (pinned major 26; bare `node` on PATH is v24.20.0 — `mise exec node --` used throughout), Bun 1.3.14, warm FS cache. Full suites were NOT run repeatedly; subset ran whole once, everything else is 1–12-fixture/file samples.
+
+Measurements: single `explain` Node ~350 ms vs Bun ~270 ms (Bun saves ~80 ms startup per spawn); `test:subset` full (372 fixtures) Node 20.9 s vs Bun 19.8 s (−5% — the checker dominates, not startup); `tests/unit/cli.test.ts` Node 11.4 s vs `bun test` 7.15 s (−37%, best case: serial sync spawns); `diagnostics.test.ts` Node 0.38 s vs Bun 0.40 s warm (cold Bun 1.4 s); `telemetry.test.ts` Node 1.9 s vs Bun 1.28 s (passes); golden fixture breakdown ~0.38 s emit-C (frontend: TS program + gate + lower + emit) + ~0.20 s clang + ~0.06 s exec + ~0.10 s Node oracle — frontend+clang ≈ 90% of a fixture; `clang -O0` vs `-O2` identical (204 vs 201 ms) so `STATOR_OPT=0` does not buy link speed; `tsc --noEmit` ×2 = 12.5 s; `--experimental-test-coverage` = 3.4x (`passes.test.ts` 1.3 → 4.4 s); lint ~2 s, dupes ~1 s, leak 1.6 s, builtins dashboard instant.
+
+Bun compatibility blockers (why it is not adopted): (a) eight sites use `process.execPath` as BOTH compiler host and Node oracle — under Bun the golden/differential/leak ground truth silently becomes Bun, not the pinned Node (§6 Task 6.2a's whole point); (b) `scripts/check-node.mjs` fails under Bun (`v24.3.0` vs pin 26) and bypassing it removes the guardrail; (c) the lcov pipeline uses Node-only `--experimental-test-coverage` flags; `bun --test <file>` does not run `node:test` files (`bun test` does, with different flags/reporters); (d) Bun transpiles non-erasable syntax Node type-stripping refuses, weakening the `erasableSyntaxOnly` runtime guard. Works under Bun today: `execaSync`, ink/react CLI output, dotenv+OTel (`cli` 16/16, `telemetry` 3/3 under `bun test`).
+
+Decisions: Bun rejected as default runner (standing decision in §9); coverage leaves the local gate (Task 6.4 — the run has no threshold and CI keeps one lcov owner); oracle pinned explicitly (Task 6.5); spawn-per-fixture removed via the test262 in-process precedent (Task 6.6); `cli.test.ts` parallelized (Task 6.7).
+
 ## 240. Phase 10 — `std` like a systems library, OS threads ↔ async, parallel host compiler (2026-09-13)
 
 **Plan:** §11b Phase 10 (T10.1–T10.3), Phase 7 out-of-scope Threads row, Language & library

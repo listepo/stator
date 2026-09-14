@@ -628,7 +628,17 @@ on the machine that runs the weekly job, the observed spread recorded in `plan-n
 gate set from it. A gate below the noise floor fires on noise, and an alarm that fires on noise is
 one people learn to ignore — which costs more than having no gate at all.
 
-**Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a).
+~~**Task 6.4 — Plain `test` is the gate; `test:coverage` is on-demand only.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.4.
+
+~~**Task 6.5 — Pin the oracle: the ground truth is named, never inherited from the host.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.5.
+
+~~**Task 6.6 — In-process subset and golden runners.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.6 (including the lowering-leak fix, plan-notes 242).
+
+~~**Task 6.7 — `cli.test.ts` spawns in parallel.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.7 (plan-notes 242).
+
+**Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
+
+**Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
 
 ---
 
@@ -1482,3 +1492,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.7** (2026-09-13): **Phase 10 card — `std`, threads↔async, parallel host compiler** (plan-notes 240). Creator-directed, not gated on Phase 8. `std` is a systems-style first-party library (docs-first), not a Node polyfill. Threads are shared-heap OS threads with a promise completion bridge onto Task 4.6's microtask queue; SAB/Atomics/Worker stay out of v0. "Rewrite the compiler with threads" means `STATOR_COMPILE_JOBS` + parallel clang/emit/lower on the existing TypeScript host — not a new compiler language. Phase 7's single-threaded FFI caveat now points here.
 
 - **v4.6** (2026-09-13): **Phase 9 / T9.1 is now a main-tree card** (plan-notes 238, 239). The runtime is C11 with a Zig memory core — C11-only reopened on the creator's direction, not measured evidence. Generated code stays C; Rust stays forbidden. The language & library survey (239) is the standing boundary so agents do not invent a second compiler language, MMTk/Rust, or Zig past the memory core. Implementation remains in `.worktrees/t9-1` until a follow-up PR; this revision is plan/docs/notes plus the mise Zig 0.16.0 pin.
+
+- **v4.8** (2026-09-14): **test-speed cards.** §9 gains Tasks 6.4–6.7 (plain-`test` gate, oracle pin, in-process runners, parallel `cli.test.ts`) plus the standing decision that Bun is not a test runner — all from the 241 measurements. 6.4 executes immediately; 6.5→6.6→6.7 in dependency order.

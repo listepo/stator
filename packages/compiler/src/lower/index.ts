@@ -143,7 +143,7 @@ import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, isFunctionLike, RECEIVER_NAME } from './captures.ts';
-import { Scope } from './scope.ts';
+import { Scope, resetShadowCounter } from './scope.ts';
 
 /* What HIR name each source declaration ended up with (plan.md §8 step 14).
  *
@@ -239,6 +239,14 @@ export function lowerProgram(
   const statements: Statement[] = [];
   functionNesting = 0;
   moduleAwaits = false;
+  // Fresh-process parity: spawn-per-fixture callers got new module state for free, but in-process
+  // callers (golden/subset/test262 runners) reuse this module across programs. A leaked
+  // `immutableSelfBindings` entry miscompiled `block_scope.js` after `named_function_expression.js`
+  // (spurious STA4020 on `inner += 1`); the counters only rename temps, and resetting them keeps
+  // emitted C identical for identical input either way.
+  immutableSelfBindings.clear();
+  bindTempId = 0;
+  resetShadowCounter();
   const entry = files.at(-1);
   if (entry === undefined) {
     throw new Error('lowerProgram requires at least one file');

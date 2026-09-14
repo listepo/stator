@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateProgram, type DifferentialMode } from './generate.ts';
 import { minimizeProgram } from './minimize.ts';
+import { nodePath } from '../support/node-path.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
@@ -53,9 +54,11 @@ function execute(source: string, mode: DifferentialMode): { readonly node: Strea
     writeFileSync(input, source, 'utf8');
     const build = run(process.execPath, [CLI, 'build', input, '-o', output, `--mode=${mode}`]);
     if (build.status !== 0 || build.timedOut) {
-      return { node: run(process.execPath, [input]), stator: build };
+      // The oracle side: ground truth comes from `nodePath()`, while the build above stays on
+      // the compiler host (`process.execPath`).
+      return { node: run(nodePath(), [input]), stator: build };
     }
-    return { node: run(process.execPath, [input]), stator: run(output, []) };
+    return { node: run(nodePath(), [input]), stator: run(output, []) };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

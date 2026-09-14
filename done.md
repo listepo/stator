@@ -1914,6 +1914,127 @@ spread, so the same commit was recorded twice on this host: geomean **22.358 ms 
 residue rather than closed: that is ONE repeat on ONE host, and a floor worth trusting wants a
 handful of repeats on the machine that actually runs the weekly job.
 
+### Task 6.4 — Plain `test` is the gate; `test:coverage` is on-demand only ✅ (landed 2026-09-14)
+
+No new script was needed — `pnpm run test` already existed beside `test:coverage` (AGENTS.md:
+find the existing helper rather than adding a parallel one). The change is wiring + rule only:
+`package.json` `ci` runs `test` instead of `test:coverage`; `packages/tests/moon.yml` `ci` deps
+run `tests:unit` instead of `tests:coverage` (the `coverage` task itself is unchanged, still
+runnable via `moon run tests:coverage`); `AGENTS.md` Commands + Testing rules and
+`docs/TOOLCHAIN.md` Commands now state `test` is the iteration/gate default and `test:coverage`
+runs only when the coverage table is the question. `.github/workflows/ci.yml` untouched —
+linux/x64 `frontend` still owns the only lcov upload, so no artifact was dropped. Nothing gates
+on the coverage number (the run carries no threshold), which is why removing it from the local
+gate loses no signal.
+
+Check evidence (pinned Node v26.8.2 via `mise exec node --`; `mise`'s `npm:pnpm` stub is unusable
+from a raw child process on this machine — plan-notes 204 — so the exact script bodies ran under
+the pinned node rather than through the `pnpm` shim):
+
+```text
+$ node --test "packages/tests/unit/*.test.ts"   # exact body of `pnpm run test`
+ℹ tests 389
+ℹ suites 1
+ℹ pass 389
+ℹ fail 0
+ℹ duration_ms 11896.671917
+$ node --test --experimental-test-coverage --test-coverage-include="packages/compiler/src/**" packages/tests/unit/diagnostics.test.ts
+ℹ tests 5 / pass 5 / fail 0   # on-demand coverage path still works
+$ oxlint --deny-warnings .            # 0 warnings, 0 errors
+$ oxfmt --check package.json packages/tests/moon.yml   # correct format
+```
+
+(`oxfmt --check` over the wider lint glob flags 4 `.ts` files, all pre-existing and untouched by
+this change; `.md` rewording sits outside the lint glob.)
+
+### Task 6.5 — Pin the oracle: the ground truth is named, never inherited from the host ✅ (landed 2026-09-14)
+
+New `packages/tests/support/node-path.ts`: `nodePath()` returns `STATOR_NODE` when set and
+non-empty, else `process.execPath`, with the invariant in the file comment — oracle spawns MUST
+use it, compiler-host spawns keep `process.execPath`. Migrated exactly the four oracle sites
+(`golden/run.ts` `runNode`, `differential/run.ts` both oracle calls, `leak/run.ts` `expected()`,
+`bench/record.ts` oracle loop); every `CLI` build/explain spawn stays on `process.execPath`, and
+the four compiler-host-only files (`subset/run.ts`, `unit/helpers.ts`, `unit/cli.test.ts`,
+`unit/telemetry.test.ts`) are byte-identical. `scripts/check-node.mjs` stays dependency-free and
+now also probes the oracle (`spawnSync(oracle, ['--version'])`) and fails fast on probe failure
+or major mismatch, with the same fix-hint style. Nuance found during the work: Bun's `--version`
+reports `1.3.14`, not its `process.version` compat string (`v24.x`) — either way the probe fails
+fast with the pin message, so no special-casing was needed.
+
+Check evidence (pinned Node v26.8.2 via `mise exec node --`):
+
+```text
+$ node packages/tests/subset/run.ts
+subset: 372 fixtures — 351 passed, 21 expected-fail, 0 failed
+$ node packages/tests/golden/run.ts
+golden: 212 fixtures — 212 passed, 0 failed
+$ STATOR_NODE=/Users/listepo/.local/share/mise/installs/node/26/bin/node node packages/tests/subset/run.ts
+subset: 372 fixtures — 351 passed, 21 expected-fail, 0 failed     # override honored
+$ STATOR_NODE=<same> node packages/tests/golden/run.ts
+golden: 212 fixtures — 212 passed, 0 failed                      # override honored
+$ STATOR_NODE=/Users/listepo/.bun/bin/bun node scripts/check-node.mjs
+stator: node oracle /Users/listepo/.bun/bin/bun is 1.3.14, not the pinned Node (26.7.0 from .node-version) — suites diff against the pinned Node, so a run here proves nothing
+EXIT:1                                                            # fail fast, as designed
+$ node packages/tests/differential/run.ts --seed=1 --count=2 --mode=ts
+2 cases — 0 divergences                                           # smoke on a migrated oracle
+$ node packages/tests/leak/run.ts
+leak: 10M objects — peak RSS 3040 KB of a 65536 KB cap, 32 samples, plateau
+```
+
+`oxlint`, `oxfmt --check`, and `tsc --noEmit` (both projects) clean on all touched files. `bench/record.ts`
+not executed (it writes results/baseline/README side effects); its oracle line is the same one-line
+pattern, proved by the other three suites.
+
+### Task 6.6 — In-process subset and golden runners ✅ (landed 2026-09-14)
+
+`tests/subset/run.ts` calls in-process `explainFile()` instead of spawning `node main.ts explain
+--json` per fixture; `tests/golden/run.ts` compiles via in-process `build()` under
+`withDiagnosticCapture` (test262's pattern, including the `BuildError → exit 1 + stator: CODE
+msg` mapping so failure text is unchanged). The clang link still spawns (inside `build()`), both
+executes stay spawned, the oracle uses Task 6.5's `nodePath()`. `tests/support/parallel.ts`
+untouched — pool width, `STATOR_TEST_JOBS`, and fixture-indexed results unchanged. The golden
+runner sets `process.env['TZ'] = 'UTC'` in-process since no spawn carries `PINNED_ENV` anymore
+(same pin, one layer up). No new dependencies; `dupes` clean on the touched files.
+
+The landing run exposed a latent compiler defect (full story: plan-notes 242): `block_scope.js`
+failed with spurious `STA4020`, deterministically, only when compiled in-process after
+`named_function_expression.js` — `immutableSelfBindings` in `src/lower/index.ts` was never reset
+between `lowerProgram` calls. Fixed in the same change (`immutableSelfBindings.clear()` plus
+`bindTempId` and scope.ts's `shadowCounter` resets via a new `resetShadowCounter()` export —
+fresh-process parity: same input → same HIR names → same C). Two compiler lines of behavior,
+eleven of comment.
+
+Check evidence (pinned Node v26.8.2 via `mise exec node --`):
+
+```text
+$ node packages/tests/subset/run.ts
+subset: 372 fixtures — 351 passed, 21 expected-fail, 0 failed     # wall 10.6 s (spawned ~21 s)
+$ node packages/tests/golden/run.ts
+golden: 212 fixtures — 212 passed, 0 failed                      # wall 41.6 s
+```
+
+`tsc --noEmit` (both projects), `oxlint`, `oxfmt --check` clean on every touched file (the one
+`oxfmt` complaint in `lower/index.ts` is pre-existing drift in three unrelated hunks — left
+alone). Failure-path parity: an invalid directive still surfaces per fixture from the untouched
+`parseDirectives`, and the two on-disk `intl_*` fixtures still skip by default. Known residue of
+the new transport, not fixed here: raw clang `ld: duplicate symbol '_jsrt_array_new'`
+(`jsrt_value.o` vs `jsrt_zig.o` in the current archive) now reaches the terminal instead of dying
+in a per-fixture capture — links succeed; the archive belongs to T9.1's tree.
+
+### Task 6.7 — `cli.test.ts` spawns in parallel ✅ (landed 2026-09-14)
+
+Mechanical `execaSync → execa` conversion (all 16 tests; the spawn-free `bin`-name test stays
+sync), every assertion byte-identical, `NATIVE_ONLY` and per-test `mkdtempSync` dirs unchanged.
+`Promise.all` overlaps exactly the three tests with independent spawns (missing-entry
+build+explain, ts+js provenance explains, STA1002 explain+build); the four build-then-run tests
+stay ordered with an inline note each. No pool: max introduced concurrency is 2, so a semaphore
+would be review surface without scheduling benefit (plan-notes 242 records the reason the card's
+pool clause was not built).
+
+Check evidence: `node --test packages/tests/unit/cli.test.ts` → 16 pass, 0 fail, wall **8.9 s**
+on a quiet box (11.4 s pre-change baseline under different load — directionally better; the
+overlap itself is worth ~2–3 spawn latencies). `tsc`, `oxlint`, `oxfmt --check` clean.
+
 ---
 
 ## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)

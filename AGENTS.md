@@ -96,8 +96,8 @@ pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lint + format (must be clean)
 pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)
 pnpm run dupes                  # cpd copy/paste detector (fails above 1% duplication)
-pnpm run test                   # unit tests (node --test)
-pnpm run test:coverage          # unit tests + packages/compiler/src coverage table; writes coverage/lcov.info
+pnpm run test                   # unit tests (node --test) — the default; use this for iteration and the gate
+pnpm run test:coverage          # same + packages/compiler/src coverage table; writes coverage/lcov.info — ONLY when the coverage table is the question (it costs ~3.4x wall time)
 pnpm run test:subset            # decision tests → verdict matrix
 pnpm run test:golden            # compile + run vs Node, byte-for-byte
 pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-for-byte
@@ -145,6 +145,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 - **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug.
 - Every new language construct lands with: decision test(s) for both modes + at least one golden test + HIR-verifier-clean build. Non-trivial runtime code lands with a unit test.
 - Differential ground truth is the pinned Node LTS in `.node-version` — that Node, and only that Node.
+- **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (linux/x64 `frontend` job owns the lcov artifact), not on every local run.
 
 ## Diagnostics conventions
 
