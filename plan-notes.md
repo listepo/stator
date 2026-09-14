@@ -53,6 +53,17 @@ Reverted before commit (`git checkout --`). Lesson restated: plan docs are
 written by the integrator only; a number without its measurement command and
 output is fiction, and "242" numbering collided with this entry.
 
+**Addendum — main is red, nothing pushes to main (2026-09-14, same day).**
+CI auto-reverted the docs commit (`e6d5b94 ci: auto-revert 70c7109`). The CI log
+for that run proves the cause is pre-existing: `static analysis` fails at
+`oxfmt --check` (oxlint clean, 0 errors) — the same 4 untouched `src/` files
+flagged locally — and the previous five main runs failed identically, including
+on docs-only and perf PRs. A docs commit cannot fail `oxfmt --check` on `src/`.
+Consequence: pushing anything to `main` right now is an instant auto-revert, so
+the docs landing, this entry, and the WIP tree are preserved ONLY on
+`wip/phase7-ffi-impl`. Un-reddening main (run `oxfmt` on those 4 files, verify
+CI green) is a separate small task and does not belong to FFI.
+
 ## 241. Task 7.1 docs-first: the extern surface, the ABI table, and four new codes (2026-09-14)
 
 **Plan:** §10 Task 7.1 steps 1–2 (plus the policies steps 3–4 and 6–9 implement).
