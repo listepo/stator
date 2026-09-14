@@ -11,23 +11,8 @@
 
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import type {
-  Block,
-  Declaration,
-  IndexAssignment,
-  Statement,
-} from '../../compiler/src/hir/nodes.ts';
-import { lowerSource, requireInit } from './helpers.ts';
-
-function statements(code: string): readonly Statement[] {
-  const { module, diagnostics } = lowerSource(code);
-  assert.deepEqual(
-    diagnostics.map((d) => d.code),
-    [],
-    'lowering should be clean',
-  );
-  return module.statements;
-}
+import type { Block, Declaration, IndexAssignment } from '../../compiler/src/hir/nodes.ts';
+import { loweredStatements, requireInit } from './helpers.ts';
 
 /** The read-modify-write forms lower to a Block: the hoisted temporaries are declarations that must
  * scope to the assignment and not leak into the surrounding statement list. */
@@ -36,7 +21,7 @@ function readModifyWrite(code: string): {
   write: IndexAssignment;
 } {
   // The last statement: these sources declare the side-effecting helpers first.
-  const stmt = statements(code).at(-1);
+  const stmt = loweredStatements(code).at(-1);
   assert.equal(stmt?.kind, 'block', 'a hoisting compound assignment lowers to a block');
   const block = stmt as Block;
   const write = block.statements.at(-1);
@@ -48,7 +33,7 @@ function readModifyWrite(code: string): {
 }
 
 test('plain index assignment lowers with no temporaries', () => {
-  const write = statements('const a: number[] = [1]; const i: number = 0; a[i] = 9;').at(-1);
+  const write = loweredStatements('const a: number[] = [1]; const i: number = 0; a[i] = 9;').at(-1);
   assert.equal(write?.kind, 'index-assignment', 'no block, because nothing had to be hoisted');
   // Nothing is hoisted, because `a = e` performs no read: the target and index are lowered where
   // they stand and evaluated once by construction.
@@ -127,7 +112,9 @@ test('++ on an element runs ToNumber first, unlike +=', () => {
 });
 
 test('for-of binds the element type, not the indexed-read type', () => {
-  const [, loop] = statements('const a: number[] = [1]; for (const x of a) { console.log(x); }');
+  const [, loop] = loweredStatements(
+    'const a: number[] = [1]; for (const x of a) { console.log(x); }',
+  );
   assert.equal(loop?.kind, 'for-of-statement');
   // `a[0]` would be `number | undefined` here -- Unknown. Iteration cannot run past the end, so
   // the binding is the element type and stays on the static path (plan-notes 53).
@@ -139,7 +126,7 @@ test('for-of binds the element type, not the indexed-read type', () => {
 });
 
 test('an array literal takes its type from the checker, not from its elements', () => {
-  const [decl] = statements('const a: unknown[] = [1, 2];');
+  const [decl] = loweredStatements('const a: unknown[] = [1, 2];');
   assert.equal(decl?.kind, 'declaration');
   const value = requireInit(decl as Declaration);
   assert.equal(value.kind, 'array-literal');

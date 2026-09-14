@@ -33,6 +33,7 @@ import type {
 } from '../../compiler/src/hir/nodes.ts';
 import type { HType } from '../../compiler/src/hir/types.ts';
 import { H_BOOLEAN, H_NUMBER, H_STRING, H_UNDEFINED } from '../../compiler/src/hir/types.ts';
+import { verifyHir } from '../../compiler/src/hir/verify.ts';
 import { lowerSourceFile } from '../../compiler/src/lower/index.ts';
 import type { Diagnostic } from '../../compiler/src/support/diagnostics.ts';
 
@@ -146,6 +147,35 @@ export function loweredStatements(code: string): readonly Statement[] {
     diagnostics.map((d) => d.code),
     [],
     'lowering should be clean',
+  );
+  return module.statements;
+}
+
+/** Lower `source` to a module, asserting the statement count as well as a clean lowering —
+ * `loweredStatements` for tests that only need the list; this one for tests that pin the module's
+ * shape. `countMessage` names the expectation so a failure reads as spec, not scaffolding. */
+export function loweredModule(source: string, count: number, countMessage: string): Module {
+  const { module, diagnostics } = lowerSource(source);
+  assert.equal(diagnostics.length, 0, 'Should have no diagnostics');
+  assert.ok(module, 'Should produce a module');
+  assert.equal(module.statements.length, count, countMessage);
+  return module;
+}
+
+/** `loweredStatements`, plus the verifier must be clean — for sources whose shape the emitter
+ * depends on (slots, receivers, hoisting), where a lowering that verifies dirty would test a
+ * module the pipeline would never emit. */
+export function verifiedStatements(code: string): readonly Statement[] {
+  const { module, diagnostics } = lowerSource(code);
+  assert.deepEqual(
+    diagnostics.map((d) => d.code),
+    [],
+    'lowering should be clean',
+  );
+  assert.deepEqual(
+    verifyHir(module).map((p) => p.code),
+    [],
+    'HIR should verify clean',
   );
   return module.statements;
 }

@@ -28,6 +28,14 @@ function checksIn(code: string): BoundaryCheck[] {
   return nodesOf(code).filter((n): n is BoundaryCheck => n.kind === 'boundary-check');
 }
 
+/** The one shape every unknown→number edge test asserts: exactly one check, carrying the
+ * narrowed type. Tests that also pin the check's OPERAND keep that third assertion inline —
+ * it is the per-test claim, not the shared one. */
+function expectNumberCheck(checks: readonly BoundaryCheck[]): void {
+  assert.equal(checks.length, 1);
+  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+}
+
 test('a typeof guard inserts one check at the narrowed read', () => {
   const checks = checksIn(`
     function f(x: unknown): number {
@@ -38,8 +46,7 @@ test('a typeof guard inserts one check at the narrowed read', () => {
     }
     console.log(f(1));
   `);
-  assert.equal(checks.length, 1);
-  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+  expectNumberCheck(checks);
   assert.equal(checks[0]?.value.type.kind, 'unknown');
 });
 
@@ -194,8 +201,7 @@ test('an untyped value reaching an annotated binding is checked', () => {
     const n: number = produce();
     console.log(n);
   `);
-  assert.equal(checks.length, 1);
-  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+  expectNumberCheck(checks);
   assert.equal(checks[0]?.value.type.kind, 'unknown');
 });
 
@@ -209,8 +215,7 @@ test('an untyped argument reaching an annotated parameter is checked', () => {
     }
     console.log(use(produce()));
   `);
-  assert.equal(checks.length, 1);
-  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+  expectNumberCheck(checks);
 });
 
 test('an untyped value reaching an annotated return is checked', () => {
@@ -223,8 +228,7 @@ test('an untyped value reaching an annotated return is checked', () => {
     }
     console.log(use());
   `);
-  assert.equal(checks.length, 1);
-  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+  expectNumberCheck(checks);
 });
 
 test('assigning an untyped value into an annotated binding is checked', () => {
@@ -236,8 +240,7 @@ test('assigning an untyped value into an annotated binding is checked', () => {
     n = produce();
     console.log(n);
   `);
-  assert.equal(checks.length, 1);
-  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+  expectNumberCheck(checks);
 });
 
 test('a JSDoc-annotated binding in .js is the same edge', () => {
@@ -260,6 +263,5 @@ test('a JSDoc-annotated binding in .js is the same edge', () => {
   const checks = hirNodes(module.statements).filter(
     (n): n is BoundaryCheck => n.kind === 'boundary-check',
   );
-  assert.equal(checks.length, 1);
-  assert.equal(hTypeName(checks[0]?.type ?? { kind: 'unknown', fromImplicitAny: false }), 'number');
+  expectNumberCheck(checks);
 });

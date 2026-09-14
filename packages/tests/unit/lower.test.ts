@@ -2,16 +2,12 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { Declaration, FunctionExpr } from '../../compiler/src/hir/nodes.ts';
 import { verifyHir } from '../../compiler/src/hir/verify.ts';
-import { hirNodes, lowerSource, requireInit } from './helpers.ts';
+import { hirNodes, loweredModule, lowerSource, requireInit } from './helpers.ts';
 
 void test('console.log with arithmetic expression and correct precedence', () => {
-  const result = lowerSource('console.log(1 + 2 * 3);');
+  const module = loweredModule('console.log(1 + 2 * 3);', 1, 'Should have one statement');
 
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.module.statements.length, 1, 'Should have one statement');
-
-  const stmt = result.module.statements[0];
+  const stmt = module.statements[0];
   assert.ok(stmt, 'Statement should exist');
   assert.equal(stmt.kind, 'expression-statement', 'Should be an expression statement');
 
@@ -47,13 +43,9 @@ while (x < 3) {
   x = x + 1;
 }
 `;
-  const result = lowerSource(source);
+  const module = loweredModule(source, 2, 'Should have two statements');
 
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.module.statements.length, 2, 'Should have two statements');
-
-  const decl = result.module.statements[0];
+  const decl = module.statements[0];
   assert.ok(decl, 'First statement should exist');
   assert.equal(decl.kind, 'declaration', 'First statement should be a declaration');
   if (decl.kind === 'declaration') {
@@ -66,7 +58,7 @@ while (x < 3) {
     }
   }
 
-  const whileStmt = result.module.statements[1];
+  const whileStmt = module.statements[1];
   assert.ok(whileStmt, 'Second statement should exist');
   assert.equal(whileStmt.kind, 'while-statement', 'Second statement should be a while');
   if (whileStmt.kind === 'while-statement') {
@@ -103,11 +95,7 @@ let a: number = 5;
 let b: number = 3;
 console.log(a + b);
 `;
-  const result = lowerSource(source);
-
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.equal(result.module.statements.length, 3, 'Should have three statements');
+  loweredModule(source, 3, 'Should have three statements');
 });
 
 void test('if-else statement', () => {
@@ -119,13 +107,9 @@ if (x > 3) {
   console.log(2);
 }
 `;
-  const result = lowerSource(source);
+  const module = loweredModule(source, 2, 'Should have declaration and if statement');
 
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.module.statements.length, 2, 'Should have declaration and if statement');
-
-  const ifStmt = result.module.statements[1];
+  const ifStmt = module.statements[1];
   assert.ok(ifStmt, 'If statement should exist');
   assert.equal(ifStmt.kind, 'if-statement', 'Should be an if statement');
   if (ifStmt.kind === 'if-statement') {
@@ -144,13 +128,9 @@ if (x > 3) {
   }
 }
 `;
-  const result = lowerSource(source);
+  const module = loweredModule(source, 2, 'Should have declaration and if statement');
 
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.module.statements.length, 2, 'Should have declaration and if statement');
-
-  const ifStmt = result.module.statements[1];
+  const ifStmt = module.statements[1];
   assert.ok(ifStmt, 'If statement should exist');
   assert.equal(ifStmt.kind, 'if-statement', 'Should be an if statement');
 });
@@ -161,13 +141,9 @@ let x: number = 1;
 x = 2;
 console.log(x);
 `;
-  const result = lowerSource(source);
+  const module = loweredModule(source, 3, 'Should have 3 statements');
 
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.module.statements.length, 3, 'Should have 3 statements');
-
-  const assign = result.module.statements[1];
+  const assign = module.statements[1];
   assert.ok(assign, 'Assignment should exist');
   assert.equal(assign.kind, 'assignment', 'Second statement should be assignment');
   if (assign.kind === 'assignment') {
@@ -262,13 +238,9 @@ if (flag) {
   console.log(false);
 }
 `;
-  const result = lowerSource(source);
+  const module = loweredModule(source, 2, 'Should have two statements');
 
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.module.statements.length, 2, 'Should have two statements');
-
-  const ifStmt = result.module.statements[1];
+  const ifStmt = module.statements[1];
   assert.ok(ifStmt, 'If statement should exist');
   assert.equal(ifStmt.kind, 'if-statement', 'Should be an if statement');
 });
@@ -281,11 +253,7 @@ console.log(a - b);
 console.log(a / b);
 console.log(a % b);
 `;
-  const result = lowerSource(source);
-
-  assert.equal(result.diagnostics.length, 0, 'Should have no diagnostics');
-  assert.ok(result.module, 'Should produce a module');
-  assert.equal(result.module.statements.length, 5, 'Should have five statements');
+  loweredModule(source, 5, 'Should have five statements');
 });
 
 /* A binding's HType comes from the BINDING, not from what it happened to be initialized with.

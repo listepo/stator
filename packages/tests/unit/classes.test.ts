@@ -21,35 +21,17 @@ import type {
   ObjectLiteral,
   Statement,
 } from '../../compiler/src/hir/nodes.ts';
-import { verifyHir } from '../../compiler/src/hir/verify.ts';
-import { lowerSource, requireInit } from './helpers.ts';
-
-function statements(code: string): readonly Statement[] {
-  const { module, diagnostics } = lowerSource(code);
-  assert.deepEqual(
-    diagnostics.map((d) => d.code),
-    [],
-    'lowering should be clean',
-  );
-  // Every source here also has to survive the verifier: the slot a FieldAccess stores is checked
-  // against the layout it claims to index, which is the check that would catch a wrong slot.
-  assert.deepEqual(
-    verifyHir(module).map((p) => p.code),
-    [],
-    'HIR should verify clean',
-  );
-  return module.statements;
-}
+import { lowerSource, requireInit, verifiedStatements } from './helpers.ts';
 
 function classOf(code: string): ClassDeclaration {
-  const found = statements(code).find((s) => s.kind === 'class-declaration');
+  const found = verifiedStatements(code).find((s) => s.kind === 'class-declaration');
   assert.ok(found !== undefined, 'source should declare a class');
   return found;
 }
 
 /** The expression of the last expression statement — where these sources put the thing under test. */
 function lastExpression(code: string): Expression {
-  const stmt = statements(code).at(-1);
+  const stmt = verifiedStatements(code).at(-1);
   assert.equal(stmt?.kind, 'expression-statement');
   return (stmt as Extract<Statement, { kind: 'expression-statement' }>).expression;
 }
@@ -151,7 +133,7 @@ test('a method call names the class, so the emitter can call it directly', () =>
 });
 
 test('new carries the class name and the instance type, not a callee expression', () => {
-  const decl = statements(`${POINT}const p = new Point(1, 2);\n`).at(-1);
+  const decl = verifiedStatements(`${POINT}const p = new Point(1, 2);\n`).at(-1);
   assert.equal(decl?.kind, 'declaration');
   const created = (decl as Extract<Statement, { kind: 'declaration' }>).value as NewExpr;
   assert.equal(created.kind, 'new');
@@ -162,7 +144,7 @@ test('new carries the class name and the instance type, not a callee expression'
 
 test('a read-modify-write on a field evaluates the receiver once', () => {
   // `f().x += 1` must call `f` a single time; the fold names the receiver twice, so it is hoisted.
-  const stmt = statements(`${POINT}function f(): Point { return new Point(1, 2); }
+  const stmt = verifiedStatements(`${POINT}function f(): Point { return new Point(1, 2); }
 f().x += 1;
 `).at(-1);
   assert.equal(stmt?.kind, 'block', 'the temporary and the write are one statement');
@@ -175,7 +157,7 @@ f().x += 1;
 });
 
 test('a plain field assignment hoists nothing: it reads neither half', () => {
-  const stmt = statements(`${POINT}function f(): Point { return new Point(1, 2); }
+  const stmt = verifiedStatements(`${POINT}function f(): Point { return new Point(1, 2); }
 f().x = 1;
 `).at(-1);
   assert.equal(stmt?.kind, 'field-assignment', 'no block, because there is no temporary');
@@ -267,7 +249,7 @@ class Leaf extends Mid {
 `;
 
 function classNamed(code: string, name: string): ClassDeclaration {
-  const found = statements(code).find(
+  const found = verifiedStatements(code).find(
     (s): s is ClassDeclaration => s.kind === 'class-declaration' && s.name === name,
   );
   assert.ok(found !== undefined, `source should declare ${name}`);
@@ -376,7 +358,7 @@ console.log(Sub.count);
 test('writing a static is an assignment to that binding, with nothing hoisted', () => {
   // `C.count++` reads and writes a plain binding: there is no place to evaluate exactly once, so
   // it takes the identifier path rather than the read-once machinery a field write needs.
-  const stmts = statements(`${STATICS}Counter.count += 2;\n`);
+  const stmts = verifiedStatements(`${STATICS}Counter.count += 2;\n`);
   const write = stmts.at(-1);
   assert.equal(write?.kind, 'assignment');
   assert.equal((write as Extract<Statement, { kind: 'assignment' }>).target, 'Counter.count');
@@ -532,7 +514,7 @@ test('reading an accessor lowers to a call, not a field access', () => {
 
 test('writing an accessor lowers to a call taking the value, and nothing is hoisted', () => {
   // A plain `=` reads nothing, so there is no place to evaluate exactly once and no temporary.
-  const stmts = statements(`${ACCESSORS}const c = new C();\nc.value = 7;\n`);
+  const stmts = verifiedStatements(`${ACCESSORS}const c = new C();\nc.value = 7;\n`);
   const write = stmts.at(-1);
   assert.equal(write?.kind, 'expression-statement');
   const call = (write as Extract<Statement, { kind: 'expression-statement' }>).expression;
@@ -559,7 +541,7 @@ test('an object literal is entries in written order, which is what makes them sl
   const expr = lastExpression(`${LITERAL}console.log(p);\n`);
   const arg = (expr as Extract<Expression, { kind: 'console-log' }>).args[0];
   assert.equal(arg?.kind, 'identifier');
-  const decl = statements(`${LITERAL}console.log(p);\n`)[0];
+  const decl = verifiedStatements(`${LITERAL}console.log(p);\n`)[0];
   assert.equal(decl?.kind, 'declaration');
   const value = (decl as Extract<Statement, { kind: 'declaration' }>).value;
   assert.equal(value?.kind, 'object-literal');
@@ -570,14 +552,14 @@ test('an object literal is entries in written order, which is what makes them sl
 });
 
 test('the shape name is structural, so two identical literals are ONE descriptor', () => {
-  const stmts = statements(
+  const stmts = verifiedStatements(
     `const a = { x: 1, y: 'two' };\nconst b = { x: 3, y: 'four' };\nconsole.log(a.x + b.x);\n`,
   );
   assert.deepEqual(shapeNames(stmts), ['{x: number, y: string}', '{x: number, y: string}']);
 });
 
 test('a different key order is a different shape, not a permutation of the same one', () => {
-  const stmts = statements(
+  const stmts = verifiedStatements(
     `const a = { x: 1, y: 2 };\nconst b = { y: 3, x: 4 };\nconsole.log(a.x + b.x);\n`,
   );
   const names = shapeNames(stmts);
@@ -592,7 +574,7 @@ test('a field read on a literal is the same slot index a class instance would us
 });
 
 test('a nested literal is an entry value with a shape of its own', () => {
-  const decl = statements(`const t = { c: { d: 1 } };\nconsole.log(t.c.d);\n`)[0];
+  const decl = verifiedStatements(`const t = { c: { d: 1 } };\nconsole.log(t.c.d);\n`)[0];
   const value = (decl as Extract<Statement, { kind: 'declaration' }>).value as ObjectLiteral;
   const inner = value.entries[0]?.value;
   assert.ok(inner !== undefined);
@@ -602,7 +584,7 @@ test('a nested literal is an entry value with a shape of its own', () => {
 });
 
 test('an empty literal takes the dynamic path so it can grow', () => {
-  const decl = statements('const e = {};\nconsole.log(e);\n')[0];
+  const decl = verifiedStatements('const e = {};\nconsole.log(e);\n')[0];
   const value = requireInit(decl as Extract<Statement, { kind: 'declaration' }>);
   assert.equal(value.kind, 'dyn-object-literal');
   assert.deepEqual((value as { entries: readonly unknown[] }).entries, []);

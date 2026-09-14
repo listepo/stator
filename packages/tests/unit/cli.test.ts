@@ -38,6 +38,15 @@ function stator(...args: string[]): Promise<Run> {
   return spawn(process.execPath, [CLI, ...args]);
 }
 
+/** Build `entry` to `binary`, assert the build held, and run the result — the ordered pair every
+ * native test below needs. Ordered, not overlapped: the binary does not exist until the build
+ * finishes. What the RUN must prove (status, streams) stays in the test: that is the claim. */
+async function buildAndRun(entry: string, binary: string, ...buildArgs: string[]): Promise<Run> {
+  const build = await stator('build', entry, '-o', binary, ...buildArgs);
+  assert.equal(build.status, 0, build.stderr);
+  return spawn(binary, []);
+}
+
 function packageJson(): Record<string, unknown> {
   const parsed: unknown = JSON.parse(readFileSync(join(REPO, 'compiler', 'package.json'), 'utf8'));
   assert.ok(typeof parsed === 'object' && parsed !== null, 'package.json must be an object');
@@ -160,10 +169,7 @@ void test(
         'const a: { x: number } = { x: 1 };\nconst b: { x?: number } = a;\nconsole.log(b.x);\n',
       );
       const binary = join(work, 'alias');
-      // Ordered, not overlapped: the binary does not exist until the build finishes.
-      const build = await stator('build', entry, '-o', binary);
-      assert.equal(build.status, 0, build.stderr);
-      const run = await spawn(binary, []);
+      const run = await buildAndRun(entry, binary);
       assert.equal(run.status, 0, run.stderr);
       assert.equal(run.stdout, '1\n');
     } finally {
@@ -184,10 +190,7 @@ void test(
         'const a: { x: number } = { x: 1 };\nconst b: { x?: number; y?: number } = a;\nb.y = 2;\nconsole.log(b.y);\n',
       );
       const binary = join(work, 'grow');
-      // Ordered, not overlapped: the binary does not exist until the build finishes.
-      const build = await stator('build', entry, '-o', binary);
-      assert.equal(build.status, 0, build.stderr);
-      const run = await spawn(binary, []);
+      const run = await buildAndRun(entry, binary);
       assert.notEqual(run.status, 0, 'growing a fixed layout must abort, never invent a slot');
       assert.match(run.stderr, /STA2004/);
       assert.equal(run.stdout, '', 'nothing may print before the abort');
@@ -206,10 +209,7 @@ void test(
       const entry = join(work, 'call.js');
       writeFileSync(entry, 'function f(g) {\n  return g(1);\n}\nconsole.log(f(1));\n');
       const binary = join(work, 'call');
-      // Ordered, not overlapped: the binary does not exist until the build finishes.
-      const build = await stator('build', entry, '-o', binary, '--mode=js');
-      assert.equal(build.status, 0, build.stderr);
-      const run = await spawn(binary, []);
+      const run = await buildAndRun(entry, binary, '--mode=js');
       assert.notEqual(run.status, 0, 'a non-function callee must abort, never jump');
       assert.match(run.stderr, /STA2006/);
       assert.match(run.stderr, /call\.js:2/);
@@ -233,10 +233,7 @@ void test(
         'import { wrap } from "./wrap.js";\nconst factor: number = wrap("10");\nconsole.log(factor);\n',
       );
       const binary = join(work, 'main');
-      // Ordered, not overlapped: the binary does not exist until the build finishes.
-      const build = await stator('build', entry, '-o', binary, '--mode=js');
-      assert.equal(build.status, 0, build.stderr);
-      const run = await spawn(binary, []);
+      const run = await buildAndRun(entry, binary, '--mode=js');
       assert.notEqual(run.status, 0, 'a string in a number slot must abort, never print');
       assert.match(run.stderr, /STA2001/);
       assert.match(run.stderr, /main\.ts:2/);
