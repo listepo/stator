@@ -4,6 +4,45 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 245. The program cache keyed on (path, mtime): stale-hit audit + content-hash fix (2026-09-14)
+
+**Plan:** §9 Task 6.9 (landed below). `plan.md` edited in this change.
+
+Audit (subagent, read-only): `createProgram` served the cached triple (program + diagnostics +
+symbols) on (absolute path, mode, entry mtimeMs). test262 is the only reuser — thousands of
+tests through slot-keyed `.tmp/test-<pid>-<slot>.js` paths — so a repeated (path, mtime) with
+different bytes serves a stale program under the wrong test's name: silent conformance
+corruption. Not live on APFS/ext4/NTFS (inter-write gaps ~400 ms vs ns–100 ns granularity, plus
+single-entry eviction under concurrency; hit rate there is ~zero by the same token), but
+concrete on serial runs over coarse-tick filesystems (FAT32 2 s), and `clearProgramCache` has
+zero call sites. Subset/golden are safe by unique stable paths, differential/leak by process
+isolation. Fix landed: key on entry sha256 (one small read, noise vs ~380 ms frontend);
+`statSync` import gone with the mtime it served. The admitted dependency-hole (dep edit without
+entry touch) stays as documented. Lesson for T10.3: hash-keying stays correct under any
+scheduling; timestamp-keying does not.
+
+While verifying nearby: the differential runner reports DIVERGENCE on a 5 s timeout without
+re-checking after minimization — one load-induced false positive observed (identical
+node/stator outputs, 70 further cases 0 divergences). Runner honesty wart, not a compiler bug;
+not fixed here.
+
+## 244. `test:asan` anatomy: the runtime rebuild is 0.5 s — the duplicate golden pass is the cost (2026-09-14)
+
+**Plan:** §9 Task 6.8 (owner decision on the rerun policy). `plan.md` edited in this change.
+
+"Cache the runtime, rebuild only on change" needs no new mechanism — it already exists: the
+justfile compiles per object behind `stale()` (mtime + `-MMD` header deps) with a `cflags.txt`
+toolchain/flag key that wipes objects on change. Measured, no-change tree: `just runtime` 0.5 s,
+`just runtime-asan` 0.5 s (the `rm -f` + `ar rcs` from note 243 is inside that half second).
+`runtime-test-asan` is 7.0 s including its rebuild. Per-fixture ASan cost is at parity with
+release (8-fixture serial sample: 6.86 s asan vs 6.95 s release — the ~380 ms in-process frontend
+dominates; the sanitizer adds nothing at this TU size; binaries verified truly sanitized: 71 KB
+vs 1049 KB with `libclang_rt.asan`). So a full `test:asan` is ~0.5 s rebuild + ~7 s corpus +
+~45–70 s golden rerun — the duplicate PASS is >85% of the cost, and no runtime-cache work can
+move it. Task 6.8 owns the policy choice (content-hash skip vs nightly); the `rm -f` hardening
+from 243 is proven safe by the same runs (clean archives, zero duplicate-symbol warnings,
+`arrays.ts` byte-exact under both flavors, full golden-asan 212/212).
+
 ## 243. Stale `jsrt_zig.o` haunted both runtime archives; archives are now recreated (2026-09-14)
 
 **Plan:** no task — drive-by fix below task size (one recipe line + comment); `plan.md` untouched.

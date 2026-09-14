@@ -2035,6 +2035,22 @@ Check evidence: `node --test packages/tests/unit/cli.test.ts` → 16 pass, 0 fai
 on a quiet box (11.4 s pre-change baseline under different load — directionally better; the
 overlap itself is worth ~2–3 spawn latencies). `tsc`, `oxlint`, `oxfmt --check` clean.
 
+### Task 6.9 — Key the program cache on content, not mtime ✅ (landed 2026-09-14)
+
+`createProgram` (`src/frontend/program.ts`) now keys its single-entry cache on
+(path, mode, sha256 of the entry bytes) instead of (path, mode, mtimeMs); the `statSync`
+import left with the mtime it served. New `tests/unit/program-cache.test.ts` pins the mtime
+to a whole-second constant and swaps the bytes — proved red against the old key (stale hit,
+`fail 1`) and green against the hash. Debugging note kept with the test: a raw
+`statSync().mtimeMs` float does NOT round-trip through `utimesSync` (sub-millisecond
+truncation), so the first version of this test passed against the old code for the wrong
+reason; whole-second constants compare `===` exactly. Full audit in plan-notes 245 (only
+test262 reuses paths; subset/golden safe by unique paths, differential/leak by process
+isolation; the admitted dependency-hole stays).
+
+Check evidence: the new test 1/1; `test:subset` 372 — 351/21/0; unit 390/390; `tsc --noEmit`
+(both projects), `oxlint`, `oxfmt --check` clean on both touched files.
+
 ---
 
 ## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)
