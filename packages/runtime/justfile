@@ -136,7 +136,7 @@ _runtime flavor:
         ICU_LIBS="$(pkg-config --libs icu-uc icu-i18n 2>/dev/null || true)"
         if [[ -z "${ICU_LIBS// }" ]]; then
           echo 'just runtime-intl: pkg-config cannot find icu-uc/icu-i18n.' >&2
-          echo '  macOS:  brew install icu4c && export PKG_CONFIG_PATH="$(brew --prefix icu4c)/lib/pkgconfig"' >&2
+          echo '  macOS:  brew install icu4c && export PKG_CONFIG_PATH="$(brew --prefix $(brew list | grep icu4c | head -1))/lib/pkgconfig" (find the keg with `brew list | grep icu4c`, e.g. icu4c@78)' >&2
           echo '  Debian: apt install libicu-dev' >&2
           exit 1
         fi
