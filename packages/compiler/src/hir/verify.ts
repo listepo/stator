@@ -23,6 +23,8 @@ import type {
   FunctionExpr,
   Identifier,
   IfStatement,
+  MethodCall,
+  MethodValue,
   Module,
   ObjectStaticMethod,
   Span,
@@ -213,6 +215,47 @@ function checkField(
       span: target.span,
       code: 'STA4046',
       message: `field '${field}' is not slot ${String(slot)} of ${target.type.name}`,
+    });
+  }
+}
+
+/** The STA4047 receiver/method/slot check shared by method-value and method-call.
+ *
+ * The class is named on the node so the emitter can call the method directly. That name is
+ * the class DECLARING the method, which for an inherited method is an ancestor rather than
+ * the receiver's own class -- so the test is ancestry, not equality. It must still be an
+ * ancestry the receiver has, or the emitted call reads a body belonging to another class. */
+function checkMethodReceiver(expr: MethodCall | MethodValue, problems: VerifyProblem[]): void {
+  if (
+    expr.target.type.kind !== 'object' ||
+    (expr.target.type.name !== expr.className && !expr.target.type.bases.includes(expr.className))
+  ) {
+    problems.push({
+      kind: expr.kind,
+      span: expr.span,
+      code: 'STA4047',
+      message: `receiver has type '${hTypeName(expr.target.type)}', not ${expr.className}`,
+    });
+  } else if (methodOf(expr.target.type, expr.method) === undefined) {
+    problems.push({
+      kind: expr.kind,
+      span: expr.span,
+      code: 'STA4047',
+      message: `${expr.className} has no method '${expr.method}'`,
+    });
+  } else if (
+    expr.dispatch === 'virtual' &&
+    expr.target.type.methods.findIndex((m) => m.name === expr.method) !== expr.slot
+  ) {
+    // The slot is what a virtual call INDEXES, and it is resolved against the receiver's
+    // static type. Checking it against that type's own method list is the same check a field
+    // slot gets, for the same reason: an index that does not match the layout it claims to
+    // index is a wrong call, not a wrong type.
+    problems.push({
+      kind: expr.kind,
+      span: expr.span,
+      code: 'STA4047',
+      message: `method '${expr.method}' is at slot ${String(expr.target.type.methods.findIndex((m) => m.name === expr.method))}, not ${String(expr.slot)}`,
     });
   }
 }
@@ -1118,35 +1161,7 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
 
     case 'method-value': {
       verifyExpression(expr.target, problems, bindings);
-      if (
-        expr.target.type.kind !== 'object' ||
-        (expr.target.type.name !== expr.className &&
-          !expr.target.type.bases.includes(expr.className))
-      ) {
-        problems.push({
-          kind: 'method-value',
-          span: expr.span,
-          code: 'STA4047',
-          message: `receiver has type '${hTypeName(expr.target.type)}', not ${expr.className}`,
-        });
-      } else if (methodOf(expr.target.type, expr.method) === undefined) {
-        problems.push({
-          kind: 'method-value',
-          span: expr.span,
-          code: 'STA4047',
-          message: `${expr.className} has no method '${expr.method}'`,
-        });
-      } else if (
-        expr.dispatch === 'virtual' &&
-        expr.target.type.methods.findIndex((m) => m.name === expr.method) !== expr.slot
-      ) {
-        problems.push({
-          kind: 'method-value',
-          span: expr.span,
-          code: 'STA4047',
-          message: `method '${expr.method}' is at slot ${String(expr.target.type.methods.findIndex((m) => m.name === expr.method))}, not ${String(expr.slot)}`,
-        });
-      }
+      checkMethodReceiver(expr, problems);
       break;
     }
     case 'method-call': {
@@ -1154,43 +1169,7 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       for (const arg of expr.args) {
         verifyExpression(arg, problems, bindings);
       }
-      // The class is named on the node so the emitter can call the method directly. That name is
-      // the class DECLARING the method, which for an inherited method is an ancestor rather than
-      // the receiver's own class -- so the test is ancestry, not equality. It must still be an
-      // ancestry the receiver has, or the emitted call reads a body belonging to another class.
-      if (
-        expr.target.type.kind !== 'object' ||
-        (expr.target.type.name !== expr.className &&
-          !expr.target.type.bases.includes(expr.className))
-      ) {
-        problems.push({
-          kind: 'method-call',
-          span: expr.span,
-          code: 'STA4047',
-          message: `receiver has type '${hTypeName(expr.target.type)}', not ${expr.className}`,
-        });
-      } else if (methodOf(expr.target.type, expr.method) === undefined) {
-        problems.push({
-          kind: 'method-call',
-          span: expr.span,
-          code: 'STA4047',
-          message: `${expr.className} has no method '${expr.method}'`,
-        });
-      } else if (
-        expr.dispatch === 'virtual' &&
-        expr.target.type.methods.findIndex((m) => m.name === expr.method) !== expr.slot
-      ) {
-        // The slot is what a virtual call INDEXES, and it is resolved against the receiver's
-        // static type. Checking it against that type's own method list is the same check a field
-        // slot gets, for the same reason: an index that does not match the layout it claims to
-        // index is a wrong call, not a wrong type.
-        problems.push({
-          kind: 'method-call',
-          span: expr.span,
-          code: 'STA4047',
-          message: `method '${expr.method}' is at slot ${String(expr.target.type.methods.findIndex((m) => m.name === expr.method))}, not ${String(expr.slot)}`,
-        });
-      }
+      checkMethodReceiver(expr, problems);
       break;
     }
 

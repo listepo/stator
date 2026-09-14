@@ -223,6 +223,10 @@ let functionNesting = 0;
 
 /** HIR names of named-function-expression self bindings; assignment is a TypeError. */
 const immutableSelfBindings = new Set<string>();
+/** Whether the current `lowerProgram` seeded any `\u0000dynamic:` bindings. Set alongside the
+ * seeding from the same `runtimeDynamicSymbols`, so the two cannot disagree; reset per
+ * `lowerProgram` like the module state beside it (in-process callers reuse this module). */
+let hasRuntimeDynamicSymbols = false;
 /** Set when an await is lowered at functionNesting === 0. Reset per lowerProgram. */
 let moduleAwaits = false;
 
@@ -233,6 +237,7 @@ export function lowerProgram(
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
   const bindings = Scope.root();
+  hasRuntimeDynamicSymbols = runtimeDynamicSymbols.size > 0;
   for (const symbol of runtimeDynamicSymbols) {
     bindings.set(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`, hUnknown(false));
   }
@@ -953,6 +958,18 @@ function lowerBindingPattern(
   return statements;
 }
 
+/** Step 17's rule, shared by every position that can name a function (plan.md §8 step 17 and
+ * its follow-up): an anonymous function takes the SOURCE spelling of the binding it is
+ * assigned to as its display name, while the binding itself takes the HIR name. A named
+ * function expression keeps its own name, which is what Node prints for it. Applies only
+ * where the spelling is unambiguous -- a declaration, a `var` initializer, a simple
+ * identifier assignment. A chain (`x = y = () => {}`) needs no special case: the outer
+ * assignment's value is the inner assignment's HIR rather than a function literal, so only
+ * the innermost spelling applies -- which is exactly what Node prints (`y` for both). */
+function withDisplayName(value: Expression, name: string): Expression {
+  return value.kind === 'function' && value.name === undefined ? { ...value, name } : value;
+}
+
 function lowerDeclarationList(
   list: ts.VariableDeclarationList,
   at: ts.Node,
@@ -1033,10 +1050,8 @@ function lowerDeclarationList(
     // A declaration's anonymous function carries the DECLARATOR's source spelling as its display
     // name, while the binding takes the HIR name (plan.md §8 step 17): `const f = () => ...`
     // prints `[Function: f]` even when this `f` shadows an outer one, following the rule function
-    // declarations already keep (`fn.name` holds the source spelling). A named function expression
-    // keeps its own name, which is what Node prints for it.
-    const named =
-      lowered.kind === 'function' && lowered.name === undefined ? { ...lowered, name } : lowered;
+    // declarations already keep (`fn.name` holds the source spelling).
+    const named = withDisplayName(lowered, name);
     value = maybeBoundary(named, type, decl.initializer, sourceFile);
   }
 
@@ -1701,10 +1716,15 @@ function assignmentParts(
       // (plan.md §8 step 14).
       name: bindings.hirName(target),
     };
-    const value = make(current);
-    if (value === null) {
+    const raw = make(current);
+    if (raw === null) {
       return null;
     }
+    // Step 17's rule, extended to assignment: `h = () => ...` prints `[Function: h]`. Only a
+    // simple identifier target names its value -- a static member write (`C.f = ...`) keeps
+    // today's output, matching Node, which prints those anonymous. The display spelling is the
+    // target's SOURCE text, never the HIR name a shadowed binding writes under.
+    const value = ts.isIdentifier(targetNode) ? withDisplayName(raw, targetNode.text) : raw;
     return {
       target: bindings.hirName(target),
       value: maybeBoundary(value, binding, targetNode, sourceFile),
@@ -2181,10 +2201,16 @@ function lowerUpdateExpression(
   const assignOp: UpdateExpr['operator'] | undefined =
     compound ?? logical ?? (plain ? '=' : undefined);
   if (assignOp !== undefined && ts.isBinaryExpression(node)) {
-    const value = lowerExpression(node.right, sourceFile, checker, bindings, diagnostics);
-    if (value === null) {
+    const raw = lowerExpression(node.right, sourceFile, checker, bindings, diagnostics);
+    if (raw === null) {
       return null;
     }
+    // Step 17's rule, extended to assignment expressions: `console.log((h = () => ...))` prints
+    // `[Function: h]`. Only the simple `=` names its value -- a compound form never sees a bare
+    // function here -- and only a simple identifier target, for the same static-member reason
+    // the statement path states. The inner assignment of a chain is what fires (`y` in
+    // `x = y = () => {}`); the outer sees an update node, not a literal, so it cannot rename.
+    const value = plain && ts.isIdentifier(node.left) ? withDisplayName(raw, node.left.text) : raw;
     return {
       kind: 'update',
       type: typeAt(node, checker, bindings),
@@ -3746,11 +3772,11 @@ function lowerExpression(
       // DYNAMIC shape and `assign` returns a target that just GREW one, so both are Unknown outright — the same honest answer `JSON.parse` gives,
       // and every read of it is a boundary.
       if (isGlobalObject(obj, checker) && Object.hasOwn(OBJECT_STATICS, propName)) {
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
+        const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const { args, span } = prologue;
         const method = propName as ObjectStaticMethod;
         const checkerType = typeAt(node, checker, bindings);
         let type: HType;
@@ -3777,16 +3803,13 @@ function lowerExpression(
       // reads absence off the argument list and the runtime reads it off JSRT_UNDEFINED, which is
       // the same question asked one layer down.
       if (isGlobalDate(obj, checker) && Object.hasOwn(DATE_STATICS, propName)) {
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
+        const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const span = prologue.span;
         const method = propName as DateStatic;
-        const padded: Expression[] = [...args];
-        while (padded.length < DATE_STATICS[method].arity) {
-          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
-        }
+        const padded = padToArity(prologue.args, DATE_STATICS[method].arity, span);
         return { kind: 'date-static', type: H_NUMBER, span, method, args: padded };
       }
 
@@ -3796,11 +3819,11 @@ function lowerExpression(
       // Unknown by construction -- the checker types it `any` because the text is data, and the
       // honest HIR type for data nobody has checked yet is the one every use must narrow.
       if (isGlobalJson(obj, checker)) {
-        const arg = lowerOnlyArgument(node, sourceFile, checker, bindings, diagnostics);
-        if (arg === null) {
+        const prologue = lowerSoleCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const { arg, span } = prologue;
         return propName === 'parse'
           ? { kind: 'json-parse', type: hUnknown(false), span, arg }
           : { kind: 'json-stringify', type: H_STRING, span, arg };
@@ -3813,11 +3836,11 @@ function lowerExpression(
       // map to a promise (an untyped argument in js mode) the value degrades to Unknown, which
       // is what every read of the awaited result must narrow anyway.
       if (isGlobalPromise(obj, checker) && Object.hasOwn(PROMISE_STATICS, propName)) {
-        const arg = lowerOnlyArgument(node, sourceFile, checker, bindings, diagnostics);
-        if (arg === null) {
+        const prologue = lowerSoleCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const { arg, span } = prologue;
         const checkerType = typeAt(node, checker, bindings);
         const type = checkerType.kind === 'promise' ? checkerType : hPromise(hUnknown(false));
         return {
@@ -3844,10 +3867,7 @@ function lowerExpression(
           return null;
         }
         const want = propName === 'then' ? 2 : 1;
-        const args = [...given];
-        while (args.length < want) {
-          args.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
-        }
+        const args = padToArity(given, want, span);
         const checkerType = typeAt(node, checker, bindings);
         const type = checkerType.kind === 'promise' ? checkerType : hPromise(hUnknown(false));
         return {
@@ -3866,11 +3886,11 @@ function lowerExpression(
       // zero-argument forms are their identity literals, and one argument passes through: every
       // argument is typed number, and min/max of one number is that number (NaN included).
       if (isGlobalMath(obj, checker) && MATH_METHODS.has(propName)) {
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
+        const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const { args, span } = prologue;
         if (propName === 'min' || propName === 'max') {
           if (args.length === 0) {
             return {
@@ -3920,19 +3940,12 @@ function lowerExpression(
       // reads an explicitly-passed undefined. The result type comes from the table.
       if (isDateReceiver(obj, checker) && Object.hasOwn(DATE_OPS, propName)) {
         const op = propName as DateOperation;
-        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
-        if (target === null) {
+        const prologue = lowerReceiverCall(obj, node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
-          return null;
-        }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-        const padded: Expression[] = [...args];
-        while (padded.length < DATE_OPS[op].arity) {
-          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
-        }
+        const { target, span } = prologue;
+        const padded = padToArity(prologue.args, DATE_OPS[op].arity, span);
         const type = DATE_OPS[op].result === 'number' ? H_NUMBER : H_STRING;
         return { kind: 'date-op', type, span, op, target, args: padded };
       }
@@ -3941,21 +3954,17 @@ function lowerExpression(
       // table because the verifier pins it either way, and this keeps a checker that says
       // otherwise visible instead of overwritten.
       if (isRegExpReceiver(obj, checker) && Object.hasOwn(REGEXP_OPS, propName)) {
-        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
-        if (target === null) {
-          return null;
-        }
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
+        const prologue = lowerReceiverCall(obj, node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
         return {
           kind: 'regexp-op',
           type: typeAt(node, checker, bindings),
-          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+          span: prologue.span,
           op: propName as RegExpOperation,
-          target,
-          args,
+          target: prologue.target,
+          args: prologue.args,
         };
       }
 
@@ -3966,20 +3975,13 @@ function lowerExpression(
       // the same table the verifier holds it to.
       if (isStringReceiver(obj, checker) && Object.hasOwn(STRING_OPS, propName)) {
         const op = propName as StringOpName;
-        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
-        if (target === null) {
+        const prologue = lowerReceiverCall(obj, node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
-          return null;
-        }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const { target, span } = prologue;
         const shape = STRING_OPS[op];
-        const padded: Expression[] = [...args];
-        while (padded.length < shape.arity) {
-          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
-        }
+        const padded = padToArity(prologue.args, shape.arity, span);
         const checkerType = typeAt(node, checker, bindings);
         const type: HType =
           shape.result === 'element' || shape.result === 'match'
@@ -4048,20 +4050,13 @@ function lowerExpression(
       // IndexAccess rule (`pop` on an empty array really answers `undefined`).
       if (isArrayReceiver(obj, checker) && Object.hasOwn(ARRAY_OPS, propName)) {
         const op = propName as ArrayOpName;
-        const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
-        if (target === null) {
+        const prologue = lowerReceiverCall(obj, node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
           return null;
         }
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
-          return null;
-        }
-        const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+        const { target, span } = prologue;
         const shape = ARRAY_OPS[op];
-        const padded: Expression[] = [...args];
-        while (padded.length < shape.arity) {
-          padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
-        }
+        const padded = padToArity(prologue.args, shape.arity, span);
         // `mapped` keeps the checker's answer -- map's element is the callback's to choose and a
         // type-guard filter legitimately narrows below the receiver -- degrading to Unknown when
         // the answer is not an array this model can spell.
@@ -4366,10 +4361,12 @@ function lowerVarList(
       return null;
     }
     const expected = bindings.get(name);
+    // Step 17's rule, extended to `var`: `var f = () => ...` prints `[Function: f]`, exactly
+    // as the `let`/`const` form does. The spelling is the declarator's own, so a repeated
+    // `var f` that reuses the slot names it the same way.
+    const named = withDisplayName(lowered, name);
     const value =
-      expected === undefined
-        ? lowered
-        : maybeBoundary(lowered, expected, decl.initializer, sourceFile);
+      expected === undefined ? named : maybeBoundary(named, expected, decl.initializer, sourceFile);
     parts.push({
       kind: 'assignment',
       type: value.type,
@@ -5552,12 +5549,18 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType 
     if (isUnresolvableIdentifier(node, checker, bindings)) {
       return hUnknown(false);
     }
-    const symbol = checker.getSymbolAtLocation(node);
-    if (
-      symbol !== undefined &&
-      bindings.has(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`)
-    ) {
-      return hUnknown(false);
+    // Fast path: with nothing seeded the probe below always misses, so skip the symbol lookup,
+    // the qualified-name computation and the key allocation entirely (plan-notes 249: ~26% of
+    // checker time on big files). `hasRuntimeDynamicSymbols` is set from the same set the
+    // seeding loop reads, so skipping here agrees with probing there by construction.
+    if (hasRuntimeDynamicSymbols) {
+      const symbol = checker.getSymbolAtLocation(node);
+      if (
+        symbol !== undefined &&
+        bindings.has(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`)
+      ) {
+        return hUnknown(false);
+      }
     }
   }
   const type = substituteHType(tsTypeToHType(checker.getTypeAtLocation(node), checker), (name) =>
@@ -5612,6 +5615,77 @@ function lowerArguments(
     args.push(lowered);
   }
   return args;
+}
+
+/** The shared prologue of every global-static call (`Object.*`, `Date.*`, `Math.*`): the
+ * arguments lowered left to right plus the span the node hangs off. `null` when lowering
+ * failed. The namespace object itself is never lowered -- it names the table, not a value. */
+function lowerGlobalCall(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): { args: Expression[]; span: Span } | null {
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  if (args === null) {
+    return null;
+  }
+  return { args, span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile) };
+}
+
+/** The shared prologue of every single-argument namespace call (`JSON.*`, the `Promise.*`
+ * statics): the one lowered argument plus the span. `null` when lowering failed. */
+function lowerSoleCall(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): { arg: Expression; span: Span } | null {
+  const arg = lowerOnlyArgument(node, sourceFile, checker, bindings, diagnostics);
+  if (arg === null) {
+    return null;
+  }
+  return { arg, span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile) };
+}
+
+/** The shared prologue of every receiver-op call (`date-op`, `regexp-op`, `string-op`,
+ * `array-op`): the receiver first, then the arguments left to right, then the span everything
+ * hangs off. `null` when either lowering failed. `promise-method` keeps its own order (its
+ * arguments lower before the receiver), so it does not share this. */
+function lowerReceiverCall(
+  obj: ts.Expression,
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): { target: Expression; args: Expression[]; span: Span } | null {
+  const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+  if (target === null) {
+    return null;
+  }
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  if (args === null) {
+    return null;
+  }
+  return {
+    target,
+    args,
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+  };
+}
+
+/** Pads omitted trailing arguments with undefined-literals up to the table's arity. For every
+ * op in these tables the spec gives an explicitly-passed undefined the same meaning as an
+ * absent argument, which is what makes the padding observably identical to the source. */
+function padToArity(args: readonly Expression[], arity: number, span: Span): Expression[] {
+  const padded: Expression[] = [...args];
+  while (padded.length < arity) {
+    padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
+  }
+  return padded;
 }
 
 /** The operation a Map or Set method name denotes, or undefined for a name that is not one.

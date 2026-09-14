@@ -29,3 +29,19 @@ const g = function inner() {
 };
 console.log(g);
 console.log(g());
+
+// `var`-initializer and assignment-position spellings (step-17 follow-up): each names its
+// anonymous function exactly as a declaration does.
+var vf = () => 7;
+console.log(vf);
+console.log(vf());
+
+let h;
+h = () => 42;
+console.log(h);
+
+// A chain resolves to the innermost spelling, which is what Node prints for both.
+var xc, yc;
+xc = yc = () => 9;
+console.log(xc);
+console.log(yc);

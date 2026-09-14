@@ -29,3 +29,27 @@ const g = function inner(): number {
 };
 console.log(g);
 console.log(g());
+
+// Assignment-position spellings (step-17 follow-up): a simple assignment names its anonymous
+// function exactly as a declaration does, including a capturing arrow.
+let h: () => number;
+h = (): number => 42;
+console.log(h);
+console.log(h());
+
+function makeGetter(base: number): (x: number) => number {
+  let f: (x: number) => number;
+  // Captures `base`: the live heap closure still prints its spelling.
+  f = (x): number => x + base;
+  return f;
+}
+const get7 = makeGetter(7);
+console.log(get7);
+console.log(get7(10));
+
+// A chain resolves to the innermost spelling, which is what Node prints for both.
+let xc: () => number;
+let yc: () => number;
+xc = yc = (): number => 7;
+console.log(xc);
+console.log(yc);

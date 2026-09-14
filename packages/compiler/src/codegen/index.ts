@@ -2254,6 +2254,69 @@ class Emitter {
     }
   }
 
+  /* Sequences a call-shaped node's arguments left to right into consecutive rooted slots
+   * starting at `base + start`: slot `start` is the callee's -- or the receiver's, or the
+   * constructed object's -- so the first argument lands one past it. Evaluation order IS
+   * source order (each operand lands in its rooted slot before the next runs), which is why
+   * every call-shaped arm shares this loop rather than copying it. Returns whether any
+   * operand flushed, for the arms whose tail nests inline when nothing did. */
+  private sequenceArgs(
+    parts: string[],
+    args: readonly Expression[],
+    span: Span,
+    base: number,
+    start: number,
+  ): boolean {
+    let flushed = false;
+    args.forEach((arg, index) => {
+      flushed =
+        this.sequencePart(parts, arg, span, (v) => `${this.slotAt(base + start + index)} = ${v}`) ||
+        flushed;
+    });
+    return flushed;
+  }
+
+  /* The shared tail of a sequenced op that nests inline when nothing forced a flush: with no
+   * flushed statements the whole sequence -- parts plus the final computation -- is one comma
+   * expression answering `result`; otherwise the parts already left as statements and the
+   * answer is `result` itself. Arms that always land as statements (a pending check has
+   * nowhere to stand inside a comma expression) share `finishStatement` instead. */
+  private finishSequenced(parts: string[], result: string, span: Span, flushed: boolean): string {
+    if (!flushed) {
+      parts.push(result);
+      return `(${parts.join(', ')})`;
+    }
+    this.flushParts(parts, span);
+    return result;
+  }
+
+  /* Opens a call-shaped arm: the callee (or the receiver, which occupies the callee's slot)
+   * first, then the arguments left to right -- the evaluation order the language specifies,
+   * each landing in its rooted slot before the next runs. The arms that track flushing keep
+   * their own target sequencing and share only the argument half. */
+  private beginCall(
+    parts: string[],
+    first: Expression,
+    args: readonly Expression[],
+    span: Span,
+    base: number,
+  ): void {
+    this.sequencePart(parts, first, span, (v) => `${this.slotAt(base)} = ${v}`);
+    this.sequenceArgs(parts, args, span, base, 1);
+  }
+
+  /* The shared tail of a call-shaped arm that always lands as statements: `assignment`
+   * computes the answer into its rooted slot as a STATEMENT (never inside the consumer's
+   * expression), so the pending check can sit between the call and whatever consumes the
+   * result. Which arms take this tail -- always, or only when they can throw -- stays with
+   * each arm; only the landing is shared. */
+  private finishStatement(parts: string[], assignment: string, result: string, span: Span): string {
+    parts.push(assignment);
+    this.flushParts(parts, span);
+    this.emitPendingCheck(span);
+    return result;
+  }
+
   /* `goto` to a loop/switch label, routed through any finally standing between here and the
    * target. The innermost try decides: if the target construct opened BEFORE the try did, the
    * jump leaves the protected code and the finally must run first. The dispatch re-invokes this
@@ -2725,23 +2788,15 @@ class Emitter {
         // as a STATEMENT, never inside the consumer's expression, so the pending-check can sit
         // between it and whatever consumes the result -- which waits in the callee's slot.
         const parts: string[] = [];
-        this.sequencePart(parts, expr.callee, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
-        expr.args.forEach((arg, index) => {
-          this.sequencePart(
-            parts,
-            arg,
-            expr.span,
-            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
-          );
-        });
+        this.beginCall(parts, expr.callee, expr.args, expr.span, base);
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);
-        parts.push(
+        return this.finishStatement(
+          parts,
           `${this.slotAt(base)} = jsrt_call_at(${this.slotAt(base)}, ${expr.args.length}, ${argv}, ${loc})`,
+          this.slotAt(base),
+          expr.span,
         );
-        this.flushParts(parts, expr.span);
-        this.emitPendingCheck(expr.span);
-        return this.slotAt(base);
       }
 
       case 'field-access': {
@@ -2837,24 +2892,17 @@ class Emitter {
         const parts = [
           `${object} = jsrt_object_new(&_jsrt_class_${String(this.classIds.get(expr.className))})`,
         ];
-        expr.args.forEach((arg, index) => {
-          this.sequencePart(
-            parts,
-            arg,
-            expr.span,
-            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
-          );
-        });
+        this.sequenceArgs(parts, expr.args, expr.span, base, 1);
         if (cls.ctor === undefined) {
           this.flushParts(parts, expr.span);
           return object;
         }
-        parts.push(
+        return this.finishStatement(
+          parts,
           `jsrt_call(${this.closureValue(cls.ctor.fn)}, ${1 + expr.args.length}, &${object})`,
+          object,
+          expr.span,
         );
-        this.flushParts(parts, expr.span);
-        this.emitPendingCheck(expr.span);
-        return object;
       }
 
       case 'method-value': {
@@ -2881,15 +2929,7 @@ class Emitter {
         // Receiver first, then arguments left to right -- the same order and the same contiguous
         // argv as a plain call, with the receiver where the callee slot would be.
         const parts: string[] = [];
-        this.sequencePart(parts, expr.target, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
-        expr.args.forEach((arg, index) => {
-          this.sequencePart(
-            parts,
-            arg,
-            expr.span,
-            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
-          );
-        });
+        this.beginCall(parts, expr.target, expr.args, expr.span, base);
         // A direct call names the function; a virtual one loads the entry the RECEIVER's own class
         // holds at this slot. The receiver is already in its slot, so the load reads the value the
         // call is about to pass, not a second evaluation of the target expression.
@@ -2897,12 +2937,12 @@ class Emitter {
           expr.dispatch === 'virtual'
             ? `jsrt_method(${this.slotAt(base)}, ${expr.slot})`
             : this.closureValue(this.methodOf(expr).fn);
-        parts.push(
+        return this.finishStatement(
+          parts,
           `${this.slotAt(base)} = jsrt_call(${callee}, ${1 + expr.args.length}, &${this.slotAt(base)})`,
+          this.slotAt(base),
+          expr.span,
         );
-        this.flushParts(parts, expr.span);
-        this.emitPendingCheck(expr.span);
-        return this.slotAt(base);
       }
 
       // Allocate, then fill left to right. The object is in its own rooted slot first, so an entry
@@ -2933,12 +2973,7 @@ class Emitter {
               (v) => `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, ${v})`,
             ) || flushed;
         });
-        if (!flushed) {
-          parts.push(this.slotAt(slot));
-          return `(${parts.join(', ')})`;
-        }
-        this.flushParts(parts, expr.span);
-        return this.slotAt(slot);
+        return this.finishSequenced(parts, this.slotAt(slot), expr.span, flushed);
       }
 
       // Allocate, then fill left to right through the rooted scratch slot. No inline cache on
@@ -2998,12 +3033,7 @@ class Emitter {
             `jsrt_set_prop(${this.slotAt(slot)}, ${cNameLiteral(entry.name)}, ${scratch}, NULL)`,
           );
         }
-        if (!flushed) {
-          parts.push(this.slotAt(slot));
-          return `(${parts.join(', ')})`;
-        }
-        this.flushParts(parts, expr.span);
-        return this.slotAt(slot);
+        return this.finishSequenced(parts, this.slotAt(slot), expr.span, flushed);
       }
 
       case 'collection-new':
@@ -3056,17 +3086,14 @@ class Emitter {
         const leading = expr.kind === 'error-new' ? `&${errorDescriptor(expr.ctor)}, ` : '';
         const opCall = `${runtimeCall}(${leading}${this.slotAt(base)})`;
         if (expr.kind === 'json-stringify') {
-          parts.push(`${this.slotAt(base)} = ${opCall}`);
-          this.flushParts(parts, expr.span);
-          this.emitPendingCheck(expr.span);
-          return this.slotAt(base);
+          return this.finishStatement(
+            parts,
+            `${this.slotAt(base)} = ${opCall}`,
+            this.slotAt(base),
+            expr.span,
+          );
         }
-        if (!flushed) {
-          parts.push(opCall);
-          return `(${parts.join(', ')})`;
-        }
-        this.flushParts(parts, expr.span);
-        return opCall;
+        return this.finishSequenced(parts, opCall, expr.span, flushed);
       }
 
       case 'promise-construct': {
@@ -3077,10 +3104,12 @@ class Emitter {
         this.usedAsync = true;
         const parts: string[] = [];
         this.sequencePart(parts, expr.executor, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
-        parts.push(`${this.slotAt(base)} = jsrt_promise_construct(${this.slotAt(base)})`);
-        this.flushParts(parts, expr.span);
-        this.emitPendingCheck(expr.span);
-        return this.slotAt(base);
+        return this.finishStatement(
+          parts,
+          `${this.slotAt(base)} = jsrt_promise_construct(${this.slotAt(base)})`,
+          this.slotAt(base),
+          expr.span,
+        );
       }
 
       case 'promise-method': {
@@ -3090,15 +3119,7 @@ class Emitter {
         }
         this.usedAsync = true;
         const parts: string[] = [];
-        this.sequencePart(parts, expr.target, expr.span, (v) => `${this.slotAt(base)} = ${v}`);
-        expr.args.forEach((arg, index) => {
-          this.sequencePart(
-            parts,
-            arg,
-            expr.span,
-            (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
-          );
-        });
+        this.beginCall(parts, expr.target, expr.args, expr.span, base);
         const fn =
           expr.method === 'then'
             ? 'jsrt_promise_then'
@@ -3109,6 +3130,8 @@ class Emitter {
           this.slotAt(base),
           ...expr.args.map((_, index) => this.slotAt(base + 1 + index)),
         ].join(', ');
+        // No pending check: subscribing a reaction neither runs user code nor fails, so nothing
+        // can be pending here -- unlike construction, whose executor runs synchronously.
         parts.push(`${this.slotAt(base)} = ${fn}(${operands})`);
         this.flushParts(parts, expr.span);
         return this.slotAt(base);
@@ -3135,15 +3158,7 @@ class Emitter {
           expr.span,
           (v) => `${this.slotAt(base)} = ${v}`,
         );
-        expr.args.forEach((arg, index) => {
-          flushed =
-            this.sequencePart(
-              parts,
-              arg,
-              expr.span,
-              (v) => `${this.slotAt(base + 1 + index)} = ${v}`,
-            ) || flushed;
-        });
+        flushed = this.sequenceArgs(parts, expr.args, expr.span, base, 1) || flushed;
         // `concat` is the receiver-plus-argument form of `+`, and its argument is an arbitrary
         // value: `''.concat(42)` is "42" because §22.1.3.4 runs ToString on each argument, while
         // `jsrt_string_concat` is the PRIMITIVE and asserts both sides are strings -- so the
@@ -3194,17 +3209,14 @@ class Emitter {
           (expr.kind === 'date-op' && expr.op === 'toISOString') ||
           (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
         if (canThrow) {
-          parts.push(`${this.slotAt(base)} = ${opCall}`);
-          this.flushParts(parts, expr.span);
-          this.emitPendingCheck(expr.span);
-          return this.slotAt(base);
+          return this.finishStatement(
+            parts,
+            `${this.slotAt(base)} = ${opCall}`,
+            this.slotAt(base),
+            expr.span,
+          );
         }
-        if (!flushed) {
-          parts.push(opCall);
-          return `(${parts.join(', ')})`;
-        }
-        this.flushParts(parts, expr.span);
-        return opCall;
+        return this.finishSequenced(parts, opCall, expr.span, flushed);
       }
 
       // One runtime function per method, number -> number. The single-argument form nests
@@ -3233,30 +3245,18 @@ class Emitter {
           throw new Error(`${expr.kind} was not registered during counting`);
         }
         const parts: string[] = [];
-        let flushed = false;
-        expr.args.forEach((arg, index) => {
-          flushed =
-            this.sequencePart(
-              parts,
-              arg,
-              expr.span,
-              (v) => `${this.slotAt(base + index)} = ${v}`,
-            ) || flushed;
-        });
+        const flushed = this.sequenceArgs(parts, expr.args, expr.span, base, 0);
         const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
         const opCall = `${name}(${operands})`;
         if (expr.kind === 'object-static') {
-          parts.push(`${this.slotAt(base)} = ${opCall}`);
-          this.flushParts(parts, expr.span);
-          this.emitPendingCheck(expr.span);
-          return this.slotAt(base);
+          return this.finishStatement(
+            parts,
+            `${this.slotAt(base)} = ${opCall}`,
+            this.slotAt(base),
+            expr.span,
+          );
         }
-        if (!flushed) {
-          parts.push(opCall);
-          return `(${parts.join(', ')})`;
-        }
-        this.flushParts(parts, expr.span);
-        return opCall;
+        return this.finishSequenced(parts, opCall, expr.span, flushed);
       }
 
       // A suspension point, emitted where the expression sits: park the resume state, subscribe,
