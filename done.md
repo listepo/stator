@@ -2086,6 +2086,26 @@ isolation; the admitted dependency-hole stays).
 Check evidence: the new test 1/1; `test:subset` 372 — 351/21/0; unit 390/390; `tsc --noEmit`
 (both projects), `oxlint`, `oxfmt --check` clean on both touched files.
 
+### Task 6.8 — Stop paying for the duplicate ASan golden pass ✅ (landed 2026-09-14 as option (a))
+
+New `packages/tests/golden/asan-gate.ts`: stages 1–2 (`runtime-asan`, `runtime-test-asan`) run
+unconditionally, then a sha256 over the outcome-determining inputs decides whether stage 3 (the
+duplicate golden pass) runs. Two load-bearing deviations from the card, both now in-code
+comments: the gate hashes sorted member names + `ar p` member bytes, NOT the archive bytes —
+BSD `ar`'s derived `__.SYMDEF` index embeds a fresh timestamp per archival, so four no-change
+rebuilds hashed four ways with identical members (a byte-hash gate would never skip); and the
+Check's "a touch re-triggers" is redefined as content-change re-triggers (a `touch` rebuilds
+byte-identical objects, which a content gate must skip — sensitivity proven with a real comment
+change instead). Record: `packages/tests/.asan-last-green.json` (gitignored, tmp+rename, written
+only on green, never on skip/red) holding hash/commit/counts/inputs. `STATOR_ASAN_FORCE=1`
+forces full; CI sets it, so CI coverage is unchanged — the skip fires only on local iteration.
+Wiring: `package.json` + moon `asan` scripts invoke the gate; 6 unit tests cover hash/compare/
+record/force/skip-line. Counts are 214 (212 at card time + 2 step-17 goldens).
+
+Check evidence: forced full green (`runtime-asan` + corpus match + `golden: 214 — 214 passed`,
+record written); immediate rerun exits 0 in ~8 s with hash+skip evidence; comment-change
+re-triggers, `touch` correctly skips; post-restore rerun reproduces the pristine hash exactly.
+
 ---
 
 ## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)

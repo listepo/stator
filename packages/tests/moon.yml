@@ -61,7 +61,7 @@ tasks:
     deps:
       - 'runtime:build'
   asan:
-    script: 'ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-asan && ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-test-asan && ASAN_OPTIONS=detect_leaks=0 STATOR_RUNTIME=asan node packages/tests/golden/run.ts'
+    script: 'node packages/tests/golden/asan-gate.ts'
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true

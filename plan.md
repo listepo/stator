@@ -641,26 +641,8 @@ one people learn to ignore — which costs more than having no gate at all.
 
 ~~**Task 6.7 — `cli.test.ts` spawns in parallel.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.7 (plan-notes 242).
 
-**Task 6.8 — Stop paying for the duplicate ASan golden pass (or prove it free).** [D3]
+~~**Task 6.8 — Stop paying for the duplicate ASan golden pass (or prove it free).**~~ ✅ **landed 2026-09-14 as option (a)** — evidence in [done.md](done.md) → Phase 6 Task 6.8 (plan-notes 252).
 
-Measured (plan-notes 244, this host): a full `test:asan` is ~0.5 s runtime-asan no-op rebuild +
-~7 s corpus + ~45–70 s golden rerun — the duplicate PASS is >85% of the cost, and per-fixture
-ASan cost is at parity with release, so no runtime-cache work can move it (object caching via
-`stale()` + `cflags.txt` already exists and is verified). The lever is the rerun policy.
-
-Steps:
-1. Owner decision, recorded like Phase 0's gate: (a) content-hash skip — rerun the ASan golden
-   pass only when (runtime archive bytes + compiler sources + fixtures + flags) differ from the
-   last recorded green, with the hash and the skip printed as evidence, never silent; or (b) move
-   the ASan golden pass to nightly, keeping `runtime-test-asan` in the gate. (a) risks a skip
-   that hides a regression — §9's core failure mode — so its hash must cover every input that can
-   change the outcome; (b) costs at-most-a-day detection lag.
-2. Implement the chosen policy; the rejected option's reason goes to `plan-notes.md`.
-3. The CI map comment and the moon `asan` task follow the choice; local `test:asan` keeps running
-   everything — the gate a human runs stays complete.
-
-**Check:** the policy is implemented; a no-change run prints its evidence (hash match + skip, or
-the nightly pointer); a runtime-source touch re-triggers the pass; full `test:asan` green.
 
 ~~**Task 6.9 — Key the program cache on content, not mtime.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.9 (plan-notes 245).
 

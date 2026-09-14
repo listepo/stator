@@ -21,6 +21,7 @@ packages/tests/test262/results.json
 # `--shard=N/M` writes one of these per shard; `--aggregate` merges them into results.json.
 packages/tests/test262/results-*-of-*.json
 packages/tests/test262/.tmp/
+packages/tests/.asan-last-green.json
 # examples/todo demo binaries (examples/todo/README.md builds ./todo-ts, ./todo-js).
 /todo-ts
 /todo-js

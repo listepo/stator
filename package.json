@@ -20,7 +20,7 @@
     "bench:record": "node packages/tests/bench/record.ts",
     "test:runtime": "just -f packages/runtime/justfile -d packages/runtime runtime-test",
     "test:leak": "node packages/tests/leak/run.ts",
-    "test:asan": "ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-asan && ASAN_OPTIONS=detect_leaks=0 just -f packages/runtime/justfile -d packages/runtime runtime-test-asan && ASAN_OPTIONS=detect_leaks=0 STATOR_RUNTIME=asan node packages/tests/golden/run.ts",
+    "test:asan": "node packages/tests/golden/asan-gate.ts",
     "test:intl": "just -f packages/runtime/justfile -d packages/runtime runtime-intl && STATOR_RUNTIME=intl node packages/tests/golden/run.ts",
     "runtime": "just -f packages/runtime/justfile -d packages/runtime runtime",
     "vendor:update": "node packages/runtime/vendor/update.mjs",

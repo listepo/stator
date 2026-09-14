@@ -27,7 +27,7 @@ concurrency:
 #   test:golden -> runtime
 #   test:builtins-> runtime
 #   test:leak   -> runtime
-#   test:asan   -> asan
+#   test:asan   -> asan (STATOR_ASAN_FORCE=1 in CI: always the full pass, never the hash skip)
 #
 # Plus `test:intl`, which is deliberately NOT part of `pnpm run ci` (the ICU feature build is off by
 # default, plan.md Task 4.4) and therefore had no coverage at all until this job existed.
@@ -235,6 +235,8 @@ jobs:
           fi
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test:asan
+        env:
+          STATOR_ASAN_FORCE: '1'
 
   # The ICU FEATURE build (plan.md Task 4.4), which the default archive must stay byte-identical
   # without -- so it is a separate build directory, a separate archive, and a separate job.

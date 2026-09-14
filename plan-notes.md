@@ -4,6 +4,23 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 252. ASan hash-skip lands (6.8a): archive bytes lie, members don't; touch ≠ change (2026-09-14)
+
+**Plan:** §9 Task 6.8 (landed below). `plan.md` edited in this change.
+
+Two findings from the implementation, both now in-code comments. (1) Hashing `libjsrt.a`
+BYTES can never match: BSD `ar`'s derived `__.SYMDEF` index embeds a fresh timestamp per
+archival — four back-to-back no-change rebuilds hashed four ways while every member stayed
+byte-identical. The gate hashes sorted member names + `ar p` member bytes instead (the linker
+reads members + derived index, never the packaging); skip behavior validates it. (2) The
+card's Check said "a runtime-source touch re-triggers" — a `touch` does NOT (correctly: the
+rebuild is byte-identical, and a content gate must skip). Sensitivity proven with a real
+2-line comment change instead (full pass green, new record); the Check is hereby redefined as
+content-change re-triggers. Stages 1–2 stay unconditional; CI sets `STATOR_ASAN_FORCE=1`
+(always full); the record (`packages/tests/.asan-last-green.json`, gitignored, tmp+rename on
+green only) holds hash/commit/counts. Counts are 214 fixtures now (212 at card time + 2 step-17
+goldens).
+
 ## 249. Parent-linked lowering scopes land: 57.7 → 11.0 µs/line, HIR-identical (2026-09-14)
 
 **Plan:** §12 lowering-scope card (landed below). `plan.md` edited in this change.
