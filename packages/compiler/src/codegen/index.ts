@@ -71,7 +71,7 @@ import {
   SET_OPS,
   stringOpCanThrow,
 } from '../hir/nodes.ts';
-import type { HField } from '../hir/types.ts'
+import type { HField } from '../hir/types.ts';
 import { RECEIVER_NAME } from '../lower/captures.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
@@ -232,7 +232,11 @@ function declaredArity(fn: {
 }
 
 function closureMeta(fn: {
-  readonly params: readonly { readonly name: string; readonly rest?: true; readonly default?: unknown }[];
+  readonly params: readonly {
+    readonly name: string;
+    readonly rest?: true;
+    readonly default?: unknown;
+  }[];
 }): { readonly arity: number; readonly hasReceiver: boolean } {
   const hasReceiver = fn.params[0]?.name === RECEIVER_NAME;
   const params = hasReceiver ? fn.params.slice(1) : fn.params;
@@ -555,7 +559,7 @@ class Emitter {
       );
       out.push(
         `static const JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
-          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? "true" : "false"}};`,
+          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}};`,
       );
     }
     if (this.functions.length > 0) {
@@ -3997,7 +4001,7 @@ class Emitter {
     }
     const name = cNameLiteral(fn.name ?? '');
     const meta = closureMeta(fn);
-    return `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? "true" : "false"})`;
+    return `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? 'true' : 'false'})`;
   }
 
   private appendLine(line: string, span?: Span): void {

@@ -1675,17 +1675,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
         return notYet(`${callee.name.text} on a RegExp match is not yet supported`, 5);
       }
       // `o.m()` on an Unknown receiver: get the name through the shape table, then call.
-      const shape = tsTypeToHType(
-        typeChecker.getTypeAtLocation(callee.expression),
-        typeChecker,
-      );
+      const shape = tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
       if (shape.kind === 'unknown') {
         return { kind: 'accept' };
       }
-      if (
-        shape.kind === 'object' &&
-        shape.methods.some((m) => m.name === callee.name.text)
-      ) {
+      if (shape.kind === 'object' && shape.methods.some((m) => m.name === callee.name.text)) {
         return { kind: 'accept' };
       }
       return notYet('method calls are not yet supported', 5);
@@ -1938,10 +1932,7 @@ function isArrayLength(access: ts.PropertyAccessExpression, checker: ts.TypeChec
  * A hole (`[1, , 3]`) is a real hole in ECMA-262 — it is `undefined` on read but absent to
  * iteration — and the dense runtime array has no way to be absent. A spread needs the iterator
  * protocol. Both are rejected rather than approximated. */
-function gateArrayLiteral(
-  literal: ts.ArrayLiteralExpression,
-  checker: ts.TypeChecker,
-): GateResult {
+function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeChecker): GateResult {
   for (const element of literal.elements) {
     if (ts.isOmittedExpression(element)) {
       return notYet('a hole in an array literal is not yet supported', 5);
@@ -1958,10 +1949,7 @@ function gateArrayLiteral(
       if (hir.kind === 'unknown') {
         continue;
       }
-      return notYet(
-        'spread in an array literal of a non-array value is not yet supported',
-        5,
-      );
+      return notYet('spread in an array literal of a non-array value is not yet supported', 5);
     }
   }
   return { kind: 'accept' };
