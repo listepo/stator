@@ -329,8 +329,10 @@ test('provenance separates annotated signatures from inferred ones', () => {
       ['noReturn', 'inferred'],
       [
         // The arrow's parameter is annotated but its return is not, so it is `inferred` for the
-        // same reason `noReturn` is -- the shape of the declaration never enters into it.
-        '<anonymous>',
+        // same reason `noReturn` is -- the shape of the declaration never enters into it. The
+        // name is the declarator's spelling, not anonymous: a declaration's function carries it
+        // as its display name (plan.md §8 step 17).
+        'arrow',
         'inferred',
       ],
     ],

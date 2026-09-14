@@ -4,6 +4,111 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 249. The 2026-09-14 bug hunt: note 223's defects were never carded, `console` is unary, and four tooling faults (2026-09-14)
+
+**Plan:** §8 Phase 5 gains steps 18–21; §9 Phase 6 gains tasks 6.10–6.13. `plan.md` edited in this
+change.
+
+Three sweeps at HEAD on the pinned Node 26.7.0: a compiler/runtime probe over ~60 generated
+programs and over the recent step-12/13/14/15/16 families, a built-in edge-case sweep, and a
+read-only audit of `packages/tests/` + `scripts/`. Unit (390) and subset (372 — 351 passed, 21
+expected-fail, 0 failed) are green, so everything below is untested surface. The sweeps also
+surfaced one environmental hazard worth stating: another session was editing
+`packages/compiler/src/lower/index.ts` during the run, and a momentarily invalid file made every
+compile fail with Node's `ERR_INVALID_TYPESCRIPT_SYNTAX` — those were discarded, not counted.
+
+**1. Note 223's items 3–6 are still unfixed and were never in `plan.md`.** Every repro below was
+re-run at this HEAD; none is covered by a card, so `plan.md` alone cannot see the work. They become
+steps 20–21.
+
+```js
+// (3) spread enumerates in the TYPE's field order, not the object's key order
+/** @type {{y: number, x: string}} */
+const o = { x: "s", y: 2 };
+console.log(Object.keys({ ...o }).join(","));      // Node: x,y    Stator: y,x
+
+// (4) fn.length on an untyped function value
+const g = (x) => x;
+function arity(fn) { return fn.length; }
+console.log(arity(g));                             // Node: 1      Stator: undefined
+
+// (5) an array method on an `undefined` value the checker called an array
+function add(v) { arr.push(v); }
+add(1);
+var arr = [];                                      // Node: TypeError, exit 1
+console.log("after");                              // Stator: SIGSEGV, exit 139
+
+// (6a) named capture group in a replacement
+console.log("ab".replace(/(?<x>a)/, "[$<x>]"));    // Node: [a]b    Stator: [$<x>]b
+
+// (6b) ISO hour 24 with non-zero minutes/seconds
+console.log(Date.parse("2024-01-01T24:00:01Z"));   // Node: NaN     Stator: 1704153601000
+
+// (6c) a method call on an Unknown receiver
+function pushIt(a) { a.push(9); return a.length; }
+console.log(pushIt([1, 2]));                       // Node: 3       Stator: PANIC STA2006, exit 134
+```
+
+(5) and (6c) are the memory-safety/crash pair: `jsrt_as_array` unboxes with no tag test (NULL from
+`undefined`), and `jsrt_get_prop` walks shape tables only, never a class descriptor or a builtin
+prototype, so an array-typed dynamic value panics where Node runs. Both need a tag check that
+THROWS, which means codes allocated in `docs/DIAGNOSTICS.md` (the sole allocator).
+
+**2. `console`'s members are declared and implemented unary, so `console.log(a, b)` is a raw
+checker error in `ts` mode.** `Console.log/info/debug/warn/error/dir` take one argument in
+`src/frontend/lib/stator.globals.d.ts:19-29` and `CONSOLE_METHODS` (`hir/nodes.ts:981`) is
+`arity: 1, optional: 0`; the runtime entry is `jsrt_print(jsrt_value)` / `jsrt_eprint`
+(`runtime/include/jsrt_value.h:1369`). Node inspects each argument and joins with one space.
+
+```text
+console.log(1, "two", true)   Node: 1 two true    Stator ts: STA0012 "Expected 1 arguments"
+                                                    Stator js: STA1214 "console.log with 3
+                                                    arguments is not yet supported"
+console.log()                 Node: (blank line)  Stator ts: STA0012 "Expected 1 arguments"
+```
+
+In `js` mode the gate's own `notYet(..., 5)` wins because `checkJs` suppresses the arity error; in
+`ts` mode the checker's `STA0012` preempts it. Same source, two different diagnostic classes — and
+`notYet(..., 5)` names Phase 5, which owns no step for console arity. Step 18.
+
+**3. Variadic built-in argument forms name Phase 5 and no step owns them.** All confirmed at HEAD:
+`xs.push(2, 3)` and `a.unshift(…)` → `STA1214 "… with other than one argument … planned for
+Phase 5"`; insertion `splice` → `"… with other than two arguments …"`; `a.concat(b, c)` → `"concat
+with anything but one array …"`; `String.fromCharCode(65, 66)` and `[1,2,3].lastIndexOf(1, 1)` →
+the catch-all `"method calls are not yet supported"` / `"lastIndexOf with a position…"`. plan-notes
+2293 records only that insertion `splice` "waits with variadic `push`"; §8's open list is step
+2a(b)/(c) and 12(c)–(f), so the messages are a dead end the moment Phase 5 closes (§15.9). Step 19.
+
+**4. Four tooling faults.**
+
+- **The differential oracle can record a divergence it cannot reproduce.**
+  `tests/differential/run.ts` `finding()` re-executes the minimized program (`final = execute(...)`)
+  and saves/reports it without ever re-checking `sameResult(final.node, final.stator)`;
+  `sameResult` counts a timeout as a divergence, and the minimizer preserves a candidate whose
+  build timed out. Measured: `run.ts --minutes=4 --seed=1` reported `DIVERGENCE seed=58 mode=ts`,
+  but the saved `ts-58.node.json` and `ts-58.stator.json` are byte-identical, and re-running seed 58
+  three times gives 0 divergences. No runtime nondeterminism was found — normal exit and
+  `jsrt_uncaught` both flush stdio. Task 6.10.
+- **The minimizer corrupts call expressions.** `minimize.ts:24`
+  `[/\([^()\n]+\)/g, '0']` cannot tell grouping parens from call parens:
+  `console.log(0);` becomes `console.log0;`, which is the saved `failures/ts-407.min.js` and is a
+  `STA0012` today. The file's own contract says "the returned source is always a reproducer."
+  Task 6.10.
+- **The Node pin is not exact and the preflight cannot see it.** `mise.toml:6` is `node = "26"`,
+  which resolves to 26.8.2 on this host; `.node-version` is 26.7.0; `scripts/check-node.mjs`
+  compares only the major, so it prints `node v26.8.2 matches .node-version (26.7.0)` and exits 0.
+  plan.md §4 says the two files "already agree". Task 6.12.
+- **`pnpm run dupes` is red at HEAD:** `cpd .` reports `99 clones · 1.0% duplication` and exits 1
+  against `threshold: 1` (1.0158%, the report's own number). Most clones are markdown
+  (`docs/TOOLCHAIN.md` ↔ `done.md`/`plan.md`) plus repeated code blocks in
+  `codegen/index.ts`/`verify.ts`/`lower/index.ts`; `.jscpd.json` also excludes the whole
+  `packages/tests/differential/**`, so the harness is never scanned. `pnpm run ci` runs `dupes`, so
+  the gate is currently red. Task 6.11.
+
+**5. Minor, recorded not carded.** The golden runner drops both `intl_*` fixtures when
+`STATOR_RUNTIME` is not `intl` and prints no skip count, so a reader cannot tell two fixtures were
+omitted; contrast `leak/run.ts` and `test262/run.ts`, which print their skips. Task 6.13.
+
 ## 248. Verifier ceiling landed yesterday (`b5da1d1`) — the plan still claimed it; lowering is next (2026-09-14)
 
 **Plan:** §12 bullet rewritten (fixed half struck, lowering-scope card scheduled). `plan.md`

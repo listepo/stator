@@ -293,7 +293,8 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)** and **step 12 (c)–(f)**. The two
+What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, **step 17**, and
+**steps 18–21** — the last four added by the 2026-09-14 bug hunt (plan-notes 249). The two
 shipped-construct defects the bug hunt of 2026-09-11 found (steps 15 and 16) both landed the same
 day — plan-notes 225 and 226.
 Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
@@ -545,19 +546,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     `tests/golden/ts/interface_shape.ts` and `tests/golden/ts/error_family.ts` match the pinned Node
     byte-for-byte; the recorded choice (docs/SUBSET.md, plan-notes 225) is DYNAMIC for an interface
     with an optional property or an index signature.
-17. **[D2] A shadow-renamed function's display name leaks the HIR spelling into `console.log`**
-    (plan-notes 247). `module_loop_capture.ts` emits a closure display name of
-    `\0shadow:f#4` (step-14 alpha-rename) into a C string literal — a `-Wnull-character`
-    warning the in-process runner made visible (the bytes were always emitted). Unreachable in
-    that fixture (the live value is the heap closure), but a shadowed NON-capturing function's
-    printed name answers `[Function (anonymous)]` where Node prints the source name — an
-    observable divergence with no golden covering it. Fix at the lowering, following the
-    existing rule (a declaration's `fn.name` keeps the SOURCE spelling while the binding takes
-    the HIR name): a declaration whose value is an anonymous function carries the declarator's
-    source spelling as the display name, and the emitter prints the display name, never the
-    slot name.
-    **Check:** a golden fixture printing a shadowed non-capturing function and a capturing
-    arrow matches the pinned Node byte-for-byte; the culprit fixture compiles warning-free.
+17. ~~**A shadow-renamed function's display name leaks the HIR spelling into `console.log`**~~ ✅ **landed 2026-09-14** (plan-notes 247; evidence in [done.md](done.md) → Phase 5 step 17).
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---

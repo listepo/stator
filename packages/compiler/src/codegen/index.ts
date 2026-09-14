@@ -178,9 +178,27 @@ function cNameLiteral(name: string): string {
 
 /** A C string literal's body for everything that is not a byte string: a file name in a `#line`,
  * a `file:line` location, a reference error's name, a function's own name. Same escaping rules as
- * `escapeBytes`, and the same trigraph rule, spelled once so the two cannot drift. */
+ * `escapeBytes`, and the same trigraph rule, spelled once so the two cannot drift. C0 controls and
+ * DEL go out octal-escaped (defense in depth, plan.md §8 step 17): a raw NUL truncates the C
+ * string at the first byte (`-Wnull-character`), so no name reaching a literal may carry one. The
+ * display name is what restores the printed spelling; this only keeps the emitter warning-free. */
 function escapeCString(text: string): string {
-  return text.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\?/g, '\\?');
+  let result = '';
+  for (const char of text) {
+    const code = char.charCodeAt(0);
+    if (char === '\\') {
+      result += '\\\\';
+    } else if (char === '"') {
+      result += '\\"';
+    } else if (char === '?') {
+      result += '\\?';
+    } else if (code < 0x20 || code === 0x7f) {
+      result += `\\${code.toString(8).padStart(3, '0')}`;
+    } else {
+      result += char;
+    }
+  }
+  return result;
 }
 
 /* One emitted C function. Each HIR function becomes a `_jsrt_fn_N` with a frame of its own, plus a
@@ -959,9 +977,12 @@ class Emitter {
         case 'declaration':
           this.bindSlot(stmt.name);
           if (stmt.value !== undefined && stmt.value.kind === 'function') {
-            // Node names a function after the binding it is assigned to: `const mul = () => {}`
-            // prints as `[Function: mul]`, not `[Function (anonymous)]`.
-            this.registerFunction(stmt.value, stmt.name);
+            // The FUNCTION's display name, falling back to the binding's. They differ for exactly
+            // one thing: a shadow-renamed binding (`\0shadow:f#4`) whose declarator spelled `f` --
+            // the emitter prints the display name, never the slot name (plan.md §8 step 17). Node
+            // names a function after the binding it is assigned to: `const mul = () => {}` prints
+            // as `[Function: mul]`, not `[Function (anonymous)]`.
+            this.registerFunction(stmt.value, stmt.value.name ?? stmt.name);
           } else if (stmt.value !== undefined) {
             this.countExpression(stmt.value);
           }

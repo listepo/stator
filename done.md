@@ -1293,6 +1293,41 @@ subset: 364 fixtures — 339 passed, 25 expected-fail, 0 failed
 golden: 197 fixtures — 197 passed, 0 failed
 ```
 
+### Step 17 — A shadow-renamed function's display name leaks the HIR spelling (2026-09-14)
+
+**The Check that closed** (`plan.md` §8 step 17): *a golden fixture printing a shadowed
+non-capturing function and a capturing arrow matches the pinned Node byte-for-byte; the culprit
+fixture compiles warning-free.* Triage record: plan-notes 247.
+
+**What was wrong.** Step-14 alpha-renaming gives a shadowed binding an unspellable HIR name
+(`\0shadow:f#4`), and the emitter promoted that slot name to the closure's display-name C
+string — a `-Wnull-character` warning plus, whenever the value was live and printed,
+`[Function (anonymous)]` where Node prints the source name. Found because the in-process
+runner surfaces clang stderr (the old spawn runner discarded it on success); the bytes were
+always emitted. In the culprit fixture the NUL static was unreachable (the live value is the
+heap closure), but a shadowed non-capturing function printed anonymous — an observable
+divergence with no golden covering it — and capturing arrows assigned to a const had the same
+anonymous gap (the lowering never back-filled arrow names from declarators).
+
+**The fix.** At the lowering, following the rule declarations already keep (`fn.name` holds the
+SOURCE spelling while the binding takes the HIR name): a declaration whose lowered initializer
+is an anonymous function carries the declarator's source spelling as its display name, and the
+emitter prints the display name (`stmt.value.name ?? stmt.name`), never the slot name. Complement
+in the same change: `escapeCString` octal-escapes C0 controls and DEL, so no future debug name
+can reintroduce the warning (cosmetic only — the display name is the fix). One deliberate flip:
+`tests/unit/lower.test.ts` provenance for `const arrow = …` now reports `'arrow'`, toward Node.
+
+**Evidence.** New `tests/golden/{ts,js}/function_display_name.*` (shadowed non-capturing `const f`,
+shadowing+capturing `add` inside `makeAdder`, named-function-expression control) — byte-for-byte
+against the pinned Node in both modes. Culprit `module_loop_capture.ts`: clang stderr 0 bytes,
+`--emit=c` 0 NUL bytes (`{"f"}` where `{"\0shadow:f#4"}` was), output still byte-exact.
+
+```text
+unit 390; pass 390; fail 0
+subset: 372 fixtures — 351 passed, 21 expected-fail, 0 failed
+golden: 214 fixtures — 214 passed, 0 failed
+```
+
 ### Step 14 — Block scoping: alpha-renaming at the lowering (2026-09-11)
 
 **The Check that closed** (`plan.md` §8 step 14): *a golden fixture shadowing a `const`, a `let`, a

@@ -1030,7 +1030,14 @@ function lowerDeclarationList(
     if (!lowered) {
       return null;
     }
-    value = maybeBoundary(lowered, type, decl.initializer, sourceFile);
+    // A declaration's anonymous function carries the DECLARATOR's source spelling as its display
+    // name, while the binding takes the HIR name (plan.md §8 step 17): `const f = () => ...`
+    // prints `[Function: f]` even when this `f` shadows an outer one, following the rule function
+    // declarations already keep (`fn.name` holds the source spelling). A named function expression
+    // keeps its own name, which is what Node prints for it.
+    const named =
+      lowered.kind === 'function' && lowered.name === undefined ? { ...lowered, name } : lowered;
+    value = maybeBoundary(named, type, decl.initializer, sourceFile);
   }
 
   const stmt: Declaration = {
