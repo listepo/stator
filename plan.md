@@ -1332,14 +1332,13 @@ Standing practices:
 190 ms at 11k lines, 3.6 s at 45k, **21.5 s at 112k**); `b5da1d1` landed the prescribed
 parent-linked scopes, and a 2026-09-14 re-measurement on scope-hostile synthetic inputs reads
 ≤1 ms at 10.9k/44.9k/112.1k lines (plan-notes 248). `src/cli/build.ts`'s "it costs one tree
-walk" is true again. **Second ceiling, same shape one layer up, now scheduled: the lowering's
-`Scope.child()`/`functionScope()`** (`src/lower/scope.ts`) still duplicate the whole visible map
-per block and per function — per-line lower cost rises 22→33→63 µs/line across the same three
-sizes, and a shape experiment (3,200 tiny vs 460 big functions at equal ~16.1k lines: 99 vs
-24 µs/line) implicates the per-function copies. Same treatment (parent link; `set` writes
-innermost; `unitDeclared` sharing preserved) with the same Check shape: synthetic ms/line flat
-across sizes, golden byte-for-byte, `pnpm run ci` green — and HIR output identical for identical
-input. (plan-notes 248).
+walk" is true again. **Second ceiling, same shape one layer up — landed 2026-09-14.**
+The lowering's `Scope.child()`/`functionScope()` duplicated the whole visible map per block and
+per function (22→33→63 µs/line across the same three sizes); parent-linked scopes now link
+instead of copying (`unitDeclared` sharing and the declare same-scope rule preserved), reading
+15.8→12.1→11.0 µs/line with the many-tiny/few-big shape gap closed (50.6-vs-3.1 → 3.0-vs-2.9)
+and HIR output byte-identical for identical input (plan-notes 249). Check shape, met: synthetic
+ms/line flat, golden byte-for-byte, full gate green.
 - **Perf-regression gate in CI** (Boa's lesson: conformance work silently taxes performance ~1–2%/release without a gate). The gate is built and shipping at 20%; what is still open under Task 6.3 is the *measured* spread it must sit above, because an alarm that fires on noise costs more than no gate.
 - **Publish the conformance % and benchmarks** — the field's trust currency. Task 6.1 steps 6–8 own the number and the honesty rules that travel with it (skips counted by feature, printed beside the percentage).
 

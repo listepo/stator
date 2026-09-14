@@ -4,6 +4,40 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 249. Parent-linked lowering scopes land: 57.7 → 11.0 µs/line, HIR-identical (2026-09-14)
+
+**Plan:** §12 lowering-scope card (landed below). `plan.md` edited in this change.
+
+`Scope.child()`/`functionScope()` (`src/lower/scope.ts`) linked instead of copying:
+per-scope `own` maps + `parent`, chain-walking `has`/`get`/`hirName`, innermost-only `set`/`declare`.
+Two deliberate sharings preserved: `unitDeclared` stays a shared per-unit `Set` (sibling-block
+double-declaration detection needs cross-branch sharing no chain provides), and `declare()`'s
+same-scope-vs-ancestor test is own-map-vs-chain. One semantic nuance vs copies: a parent binding
+declared after a child is created is now visible in the child — every `child()`/`functionScope()`
+interleaving audited (all created immediately before use), and the identity proofs below confirm
+zero observable difference. `lower/index.ts` untouched (API unchanged); zero `jscpd` clones on
+the file. Table (synthetic inputs, loadavg ~5 both columns):
+
+| lines | before | before µs/line | after | after µs/line |
+|---|---|---|---|---|
+| 10,041 | 207 ms | 20.6 | 159 ms | 15.8 |
+| 39,966 | 1,255 ms | 31.4 | 485 ms | 12.1 |
+| 99,816 | 5,762 ms | 57.7 | 1,093 ms | 11.0 |
+| 16,002 many-tiny | 809 ms | 50.6 | 48 ms | 3.0 |
+| 15,714 few-big | 49 ms | 3.1 | 45 ms | 2.9 |
+
+Independent attribution (second subagent, single-variable OLD↔NEW A/B, `diff -rq` confirming
+only `scope.ts` differs): scope copies owned 81.9% of lower time at 4k tiny lines and 95.4% at
+16k (64.0M entries copied — exactly 16× per 4× lines, quadratic proven at 32ns/entry); every
+function paid the module map twice (`functionScope()` + body `child()`). Post-fix floor is flat
+(7.0→6.2→5.7 µs/line). HIR sha256 identical OLD↔NEW on all 10 attribution inputs, plus a
+372-fixture + shadow-torture HIR dump `cmp`-identical — two independent behavior proofs.
+Unchanged by design: the depth-driven term (chain-walks replace copies 1:1 at depth 200) and the
+newly-visible ceilings — deep-checker calls (`getSymbolAtLocation` 9µs/call at depth via
+`typeAt`, `lower/index.ts:5548-5560`) and depth-superlinear captures (`analyzeCaptures` 0.85→14.3
+ms at d1→d200, ~30% of that total), plus a `typeAt` empty-set fast path (~26% of checker time on
+big files) as the cheapest next win — candidates, not cards.
+
 ## 249. The 2026-09-14 bug hunt: note 223's defects were never carded, `console` is unary, and four tooling faults (2026-09-14)
 
 **Plan:** §8 Phase 5 gains steps 18–21; §9 Phase 6 gains tasks 6.10–6.13. `plan.md` edited in this

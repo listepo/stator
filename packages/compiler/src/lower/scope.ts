@@ -12,9 +12,9 @@
  * to the fresh name. Nothing downstream learns about scopes -- it only ever sees names that are
  * already distinct, which is what makes this correct by construction for all of them at once.
  *
- * Two facts are kept apart on purpose. `types` is what a name means; `names` is what it is CALLED
- * in the HIR. They differ only for a renamed binding, and every declaration records both, so a
- * reference can ask for the spelling without knowing whether a rename happened. */
+ * Two facts are kept apart on purpose. `ownTypes` is what a name means; `ownHirNames` is what
+ * it is CALLED in the HIR. They differ only for a renamed binding, and every declaration records
+ * both, so a reference can ask for the spelling without knowing whether a rename happened. */
 
 import type { HType } from '../hir/types.ts';
 
@@ -38,11 +38,16 @@ export function resetShadowCounter(): void {
 }
 
 export class Scope {
-  private readonly types: Map<string, HType>;
-  private readonly hirNames: Map<string, string>;
+  /** Bindings this scope itself holds. A lookup walks the parent chain; a write never leaves
+   * home, so a block's declaration cannot touch its parent's map the way a copy-then-write
+   * could only avoid by copying everything first (plan.md §12). */
+  private readonly ownTypes: Map<string, HType>;
+  private readonly ownHirNames: Map<string, string>;
   /** Names this scope itself declared, as opposed to ones it inherited. A re-declaration in the
    * SAME scope shares its home (that is `var`, and it is a duplicate function declaration, where
-   * the last one wins); a declaration that shadows an ANCESTOR's name gets a fresh one. */
+   * the last one wins); a declaration that shadows an ANCESTOR's name gets a fresh one. This is
+   * the own-map half of that distinction: `has`/`hirName` see the chain, `declaredHere` sees
+   * only this scope. */
   private readonly declaredHere: Set<string>;
 
   /** Every name declared anywhere in this FUNCTION unit so far -- shared by every block of the
@@ -57,56 +62,63 @@ export class Scope {
    * that reason (plan-notes 216). */
   private readonly unitDeclared: Set<string>;
 
-  private constructor(
-    types: Map<string, HType>,
-    hirNames: Map<string, string>,
-    declaredHere: Set<string>,
-    unitDeclared: Set<string>,
-  ) {
-    this.types = types;
-    this.hirNames = hirNames;
-    this.declaredHere = declaredHere;
+  /** The enclosing scope, or null at the module root. `child()` and `functionScope()` link here
+   * instead of duplicating the visible maps, which is what keeps per-block scope creation O(1)
+   * in the size of the program rather than O(visible bindings). */
+  private readonly parent: Scope | null;
+
+  private constructor(parent: Scope | null, unitDeclared: Set<string>) {
+    this.parent = parent;
     this.unitDeclared = unitDeclared;
+    this.ownTypes = new Map();
+    this.ownHirNames = new Map();
+    this.declaredHere = new Set();
   }
 
   /** The module scope: `bindings` used to start as a bare `new Map()`. */
   static root(): Scope {
-    return new Scope(new Map(), new Map(), new Set(), new Set());
+    return new Scope(null, new Set());
   }
 
   /** A nested BLOCK scope -- a block, a loop body, a switch's clause list, a catch clause. It
-   * inherits every visible binding, adds its own without touching the parent, and shares the
-   * unit's slot space, because the emitter gives every HIR name one slot per function either way. */
+   * sees every visible binding through the parent link, adds its own without touching the
+   * parent, and shares the unit's slot space, because the emitter gives every HIR name one slot
+   * per function either way. */
   child(): Scope {
-    return new Scope(new Map(this.types), new Map(this.hirNames), new Set(), this.unitDeclared);
+    return new Scope(this, this.unitDeclared);
   }
 
   /** A FUNCTION scope -- a nested function, a method, an accessor, the module body. Its frame (or
    * globals section) is a slot space of its own, so the unit is new even though the names are
    * inherited. */
   functionScope(): Scope {
-    return new Scope(new Map(this.types), new Map(this.hirNames), new Set(), new Set());
+    return new Scope(this, new Set());
   }
 
   has(name: string): boolean {
-    return this.types.has(name);
+    return this.ownTypes.has(name) || (this.parent?.has(name) ?? false);
   }
 
   get(name: string): HType | undefined {
-    return this.types.get(name);
+    return this.ownTypes.get(name) ?? this.parent?.get(name);
   }
 
   /** The HIR name a reference to `name` must use. The source name itself unless the binding was
-   * renamed, which is why every reference site goes through here rather than reading `name.text`. */
+   * renamed, which is why every reference site goes through here rather than reading `name.text`.
+   * The own map shadows the parent's, so a `set` in this scope hides an ancestor's rename exactly
+   * as overwriting a copied map did. */
   hirName(name: string): string {
-    return this.hirNames.get(name) ?? name;
+    return this.ownHirNames.get(name) ?? this.parent?.hirName(name) ?? name;
   }
 
   /** Declare a binding that must SHARE whatever already owns its name: a `var` (function-scoped,
-   * and the spec's "already instantiated" case), a compiler temporary, a static. Never renames. */
+   * and the spec's "already instantiated" case), a compiler temporary, a static. Never renames.
+   * Writes the innermost scope only and never walks up: a `var` hoisted into a block scope must
+   * not leak into the enclosing one, and the chain lookup is what still finds an ancestor's
+   * binding from below. */
   set(name: string, type: HType): void {
-    this.types.set(name, type);
-    this.hirNames.set(name, name);
+    this.ownTypes.set(name, type);
+    this.ownHirNames.set(name, name);
   }
 
   /** Declare a NEW binding of this scope and return the HIR name to emit it under.
@@ -116,17 +128,18 @@ export class Scope {
    * SHADOW, and that is the one case that renames: the fresh name is what gives the block's `x` a
    * slot of its own instead of overwriting the outer `x`. */
   declare(name: string, type: HType): string {
-    // A re-declaration in the same scope keeps the binding it already made (last one wins). Every
-    // other case is a second home for one name -- either a shadow of a visible binding, or a
-    // second declaration of the same name somewhere else in this unit -- and both need a name of
-    // their own or the two share a slot.
+    // A re-declaration in the same scope keeps the binding it already made (last one wins).
+    // `declaredHere` is the own-map half of that test and `has` is the chain half: a name this
+    // scope declared is same-scope even when an ancestor declares it too, and every other case
+    // with a visible binding -- or a second declaration anywhere else in this unit -- needs a
+    // name of its own or the two share a slot.
     const sameScope = this.declaredHere.has(name);
-    const secondHome = !sameScope && (this.types.has(name) || this.unitDeclared.has(name));
-    const hirName = secondHome ? shadowName(name) : this.hirName(name);
+    const secondHome = !sameScope && (this.has(name) || this.unitDeclared.has(name));
+    const hir = secondHome ? shadowName(name) : this.hirName(name);
     this.declaredHere.add(name);
     this.unitDeclared.add(name);
-    this.types.set(name, type);
-    this.hirNames.set(name, hirName);
-    return hirName;
+    this.ownTypes.set(name, type);
+    this.ownHirNames.set(name, hir);
+    return hir;
   }
 }
