@@ -2123,6 +2123,16 @@ Check evidence: seed 58 → 0 divergences, `failures/` empty; `--seed=1 --count=
 
 ### Task 6.13 — The golden runner reports its skipped `intl_*` fixtures ✅ (landed 2026-09-14)
 
+### Task 6.14 — A checker stack overflow fails its test, never its shard ✅ (landed 2026-09-14)
+
+`buildInProcess`'s catch in `tests/test262/run.ts` converts a checker-stack `RangeError`
+(`/call stack/i`; OOM rethrows) to `{ status: 1, stderr: 'stator: STA4072 … checker stack
+overflow' }`, which classifies as failed on every path — pool invariants and `finally` cleanup
+intact, zero behavior change for non-crashing tests.
+
+Check evidence: synthetic mini-corpus dies raw without the guard, reports `0 passed, 0 skipped,
+1 failed` with it; full shard 1 completes (305 passed, 6000 skipped, 393 failed of 6698,
+exit 0) where it deterministically died before; `--shard=1/200` shape unchanged (13/238/17).
 `skippedIntlCount()` in `tests/golden/run.ts` counts `intl_*` entries neither mode compiled;
 a default run now prints `golden: SKIPPED 2 intl_* fixtures (…)` beside the pass line, mirroring
 `leak: SKIPPED`. Gate unchanged (verified: default run still `214 — 214 passed, 0 failed`).

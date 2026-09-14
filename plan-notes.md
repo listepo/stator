@@ -4,6 +4,35 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 254. Batch close: test262 guard lands; dupes paydown progress; 6.12 implemented, open (2026-09-14)
+
+**Plan:** §9 Task 6.14 (landed below); 6.11 stays open; 6.12 implemented but open. `plan.md`
+edited in this change (6.14 card + landing).
+
+**6.14 (test262 guard).** `buildInProcess`'s catch converts checker-stack `RangeError` to an
+STA4072 failure (narrow `/call stack/i` match; OOM rethrows). Proof: synthetic mini-corpus dies
+raw without the guard, reports `0 passed, 0 skipped, 1 failed` with it; full shard 1 completes
+(305 passed, 6000 skipped, 393 failed of 6698, exit 0) where it deterministically died before;
+`--shard=1/200` shape unchanged (13/238/17). Ratchet refresh still needs one full green run and
+is scheduled, not done — the aggregate may still fail on stale numbers (passed 2372 < 2379).
+
+**Dupes paydown (6.11 partial).** Three agents, three layers, zero behavior change:
+compiler top-3 extractions (`checkMethodReceiver`, call-shape emitter helpers,
+`lowerReceiverCall`/`padToArity`) + display-name follow-ups (var/assignment/chain positions,
+fixtures extended append-only) + `typeAt` empty-set fast path → `cpd .` 97 → 68 clones
+(1.0% → 0.7%); CI workflow repetitions → YAML anchors (322 → 302 lines, effective-equality
+proven by parse-compare); runtime C micro-clones → same-file `static` helpers (22 → 8 entries
+in `runtime/src`, corpus re-proven below). What remains for 6.11's Check: markdown prose echo,
+test boilerplate, residual code clones, and narrowing the differential ignore — plus the
+threshold question the card leaves to the owner (do not raise it unilaterally).
+
+**6.12 (exact pin) implemented, stays open.** `mise.toml` selects exact `26.7.0` (was already
+installed — zero-download switch); `check-node.mjs` compares full versions (running, oracle,
+and a `mise.toml`-vs-`.node-version` drift regex; `engines >=24` stays a range floor by design).
+Verified: exact match prints clean, bun-oracle and drifted pins fail fast. Full suites re-run
+on the true pin: subset 372, unit 396, golden 214/214. Stays open: its Check demands green
+`pnpm run ci`, blocked by the red dupes gate and the stale ratchet — both owned elsewhere.
+
 ## 253. Differential flake fixed (6.10); intl skip line (6.13); error-code narrowing (2026-09-14)
 
 **Plan:** §9 Tasks 6.10, 6.13 (landed below). `plan.md` edited in this change.
