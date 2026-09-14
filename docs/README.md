@@ -8,6 +8,7 @@ How Stator is specified. [`plan.md`](../plan.md) is the authority for what is st
 | [MODES.md](MODES.md) | `--mode=ts` vs `--mode=js`: file acceptance, diagnostics, mixed-graph boundaries |
 | [SUBSET.md](SUBSET.md) | Feature × mode matrix (`static` / `dynamic` / `error` / `not-yet`) |
 | [DIAGNOSTICS.md](DIAGNOSTICS.md) | Sole allocator of `STA` codes — never allocate a code anywhere else |
+| [FFI.md](FFI.md) | Task 7.1 surface: `@statorExtern` declarations, the ABI table, string/error/ownership policies |
 | [VALUE.md](VALUE.md) | Codegen↔runtime contract: NaN-boxing, shapes, ICs, GC frames |
 | [NUMERIC.md](NUMERIC.md) | IEEE-754, Ryū printing, bitwise ToInt32, `**` |
 | [HIR.md](HIR.md) | Typed IR: node kinds, HType, `Unknown`, verifier invariants |
