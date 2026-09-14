@@ -7,23 +7,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Unwrap helper defined with the operations below; the bounds-checked accessors here share it
+ * rather than repeating the assert-and-cast pair. */
+static JSString *as_string(jsrt_value v);
+
 /* ============================================================================
  * String accessors — bounds-checked, required by generated C
  * ============================================================================ */
 
 uint32_t jsrt_string_length(jsrt_value v) {
-  /* Verify this is a string. */
-  assert(jsrt_is(v, JSRT_TAG_STRING));
-
-  JSString *str = (JSString *)jsrt_ptr(v);
-  return str->length;
+  return as_string(v)->length;
 }
 
 uint16_t jsrt_string_char(jsrt_value v, uint32_t i) {
-  /* Verify this is a string. */
-  assert(jsrt_is(v, JSRT_TAG_STRING));
-
-  JSString *str = (JSString *)jsrt_ptr(v);
+  JSString *str = as_string(v);
 
   /* Bounds-check the index. Generated C relies on this accessor for safety. */
   if (i >= str->length) {
@@ -112,31 +109,53 @@ static int utf8_decode(const unsigned char *bytes, size_t len, int *out_size) {
   return -1; /* Invalid UTF-8 byte. */
 }
 
+/* UTF-16 width of one decoded code point, shared by the two passes below: astral code points
+ * encode as a surrogate pair (2 units), everything else as one. */
+static uint32_t utf16_units_for(int codepoint) {
+  return codepoint <= 0xFFFF ? 1u : 2u;
+}
+
+/* Encode one decoded code point as UTF-16, advancing *out past the units written. */
+static void utf16_put(uint16_t **out, int codepoint) {
+  if (codepoint <= 0xFFFF) {
+    /* Single code unit. */
+    *(*out)++ = (uint16_t)codepoint;
+  } else {
+    /* Surrogate pair for codepoints U+10000 and above.
+     * High surrogate:  0xD800 + ((cp - 0x10000) >> 10)
+     * Low surrogate:   0xDC00 + ((cp - 0x10000) & 0x3FF) */
+    int adjusted = codepoint - 0x10000;
+    uint16_t high = 0xD800 + (uint16_t)(adjusted >> 10);
+    uint16_t low = 0xDC00 + (uint16_t)(adjusted & 0x3FF);
+    *(*out)++ = high;
+    *(*out)++ = low;
+  }
+}
+
+/* Decode the UTF-8 sequence at bytes[i] (len - i bytes remain); the code point lands in *cp
+ * and *i advances past its width. False at the end of input or at invalid UTF-8, and both
+ * passes below stop there: for v0, trailing garbage is treated as empty string (U+FFFD
+ * substitution is not implemented yet), so nothing past the first bad byte is counted. */
+static bool decode_step(const char *bytes, size_t len, size_t *i, int *cp) {
+  int consumed = 0;
+  const int codepoint =
+      utf8_decode((const unsigned char *)bytes + *i, len - *i, &consumed);
+  if (codepoint < 0) {
+    return false;
+  }
+  *cp = codepoint;
+  *i += (size_t)consumed;
+  return true;
+}
+
 jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len) {
   /* First pass: count UTF-16 code units needed. */
   uint32_t utf16_len = 0;
   size_t i = 0;
+  int codepoint = 0;
 
-  while (i < len) {
-    int codepoint;
-    int consumed;
-    codepoint = utf8_decode((const unsigned char *)bytes + i, len - i, &consumed);
-
-    if (codepoint < 0) {
-      /* Invalid UTF-8. For v0, treat as empty string or replace with U+FFFD.
-       * Here we treat as empty string for simplicity. */
-      break;
-    }
-
-    if (codepoint <= 0xFFFF) {
-      /* Single UTF-16 code unit. */
-      utf16_len++;
-    } else {
-      /* Astral plane: encode as surrogate pair (2 UTF-16 code units). */
-      utf16_len += 2;
-    }
-
-    i += (size_t)consumed;
+  while (decode_step(bytes, len, &i, &codepoint)) {
+    utf16_len += utf16_units_for(codepoint);
   }
 
   /* Allocate the JSString structure. */
@@ -149,30 +168,8 @@ jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len) {
   uint16_t *out_ptr = str->data;
   i = 0;
 
-  while (i < len) {
-    int codepoint;
-    int consumed;
-    codepoint = utf8_decode((const unsigned char *)bytes + i, len - i, &consumed);
-
-    if (codepoint < 0) {
-      break;
-    }
-
-    if (codepoint <= 0xFFFF) {
-      /* Single code unit. */
-      *out_ptr++ = (uint16_t)codepoint;
-    } else {
-      /* Surrogate pair for codepoints U+10000 and above.
-       * High surrogate:  0xD800 + ((cp - 0x10000) >> 10)
-       * Low surrogate:   0xDC00 + ((cp - 0x10000) & 0x3FF) */
-      int adjusted = codepoint - 0x10000;
-      uint16_t high = 0xD800 + (uint16_t)(adjusted >> 10);
-      uint16_t low = 0xDC00 + (uint16_t)(adjusted & 0x3FF);
-      *out_ptr++ = high;
-      *out_ptr++ = low;
-    }
-
-    i += (size_t)consumed;
+  while (decode_step(bytes, len, &i, &codepoint)) {
+    utf16_put(&out_ptr, codepoint);
   }
 
   /* Box the string into a jsrt_value. */

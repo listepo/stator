@@ -31,28 +31,35 @@ jsrt_value jsrt_array_push(jsrt_value array, jsrt_value element) {
   return jsrt_array_length(array);
 }
 
-jsrt_value jsrt_array_pop(jsrt_value array) {
-  JSRTArray *a = arr(array);
+/* Shared pop/shift core: take one element off either end, clearing the vacated slot (a
+ * conservative collector keeps scanning up to `capacity`, and a stale value would pin a dead
+ * object). False when empty, in which case both callers answer `undefined`. */
+static bool array_take(JSRTArray *a, bool from_front, jsrt_value *out) {
   if (a->length == 0) {
-    return JSRT_UNDEFINED;
+    return false;
   }
-  jsrt_value out = a->elements[a->length - 1];
-  /* Clear the vacated slot: a conservative collector keeps scanning up to `capacity`, and a stale
-   * value here would pin a dead object. */
+  *out = from_front ? a->elements[0] : a->elements[a->length - 1];
+  if (from_front) {
+    memmove(a->elements, a->elements + 1, (size_t)(a->length - 1) * sizeof(jsrt_value));
+  }
   a->elements[a->length - 1] = JSRT_UNDEFINED;
   a->length -= 1;
+  return true;
+}
+
+jsrt_value jsrt_array_pop(jsrt_value array) {
+  jsrt_value out = JSRT_UNDEFINED;
+  if (!array_take(arr(array), false, &out)) {
+    return JSRT_UNDEFINED;
+  }
   return out;
 }
 
 jsrt_value jsrt_array_shift(jsrt_value array) {
-  JSRTArray *a = arr(array);
-  if (a->length == 0) {
+  jsrt_value out = JSRT_UNDEFINED;
+  if (!array_take(arr(array), true, &out)) {
     return JSRT_UNDEFINED;
   }
-  jsrt_value out = a->elements[0];
-  memmove(a->elements, a->elements + 1, (size_t)(a->length - 1) * sizeof(jsrt_value));
-  a->elements[a->length - 1] = JSRT_UNDEFINED;
-  a->length -= 1;
   return out;
 }
 
@@ -235,6 +242,60 @@ static bool walking(jsrt_value array, uint32_t i, uint32_t len) {
   return i < len && i < arr(array)->length && !jsrt_pending();
 }
 
+/* Downward-visit existence check, walking()'s counterpart for the downward loops: an index the
+ * array no longer has is SKIPPED, never terminal -- the spec's HasProperty step, checked at
+ * visit time. array_find_downward and reduce_right share it the way every upward loop shares
+ * walking(), which is why the rule is stated here and not in either loop. */
+static bool index_present(jsrt_value array, uint32_t i) {
+  return i < arr(array)->length;
+}
+
+/* One predicate step shared by the upward and downward find walks: snapshot the element BEFORE
+ * the callback (the callback may mutate the slot; the answer is the snapshot), then report a
+ * hit with the snapshot and/or the index. */
+static bool find_test(jsrt_value array, jsrt_value cb, uint32_t i, uint32_t *index_out,
+                       jsrt_value *elem_out) {
+  jsrt_value elem = arr(array)->elements[i];
+  if (!jsrt_truthy(call_cb(cb, array, i))) {
+    return false;
+  }
+  if (index_out != NULL) {
+    *index_out = i;
+  }
+  if (elem_out != NULL) {
+    *elem_out = elem;
+  }
+  return true;
+}
+
+/* The shared find/findIndex walks, upward and downward: same entry-length + existence discipline
+ * as every other callback walk. A NULL out parameter is not written, so findIndex leaves the
+ * element behind and find leaves the index. */
+static bool array_find_upward(jsrt_value array, jsrt_value cb, uint32_t *index_out,
+                              jsrt_value *elem_out) {
+  const uint32_t len = arr(array)->length;
+  for (uint32_t i = 0; walking(array, i, len); i++) {
+    if (find_test(array, cb, i, index_out, elem_out)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool array_find_downward(jsrt_value array, jsrt_value cb, uint32_t *index_out,
+                                jsrt_value *elem_out) {
+  const uint32_t len = arr(array)->length;
+  for (uint32_t i = len; i-- > 0 && !jsrt_pending();) {
+    if (!index_present(array, i)) {
+      continue;
+    }
+    if (find_test(array, cb, i, index_out, elem_out)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 jsrt_value jsrt_array_for_each(jsrt_value array, jsrt_value cb) {
   const uint32_t len = arr(array)->length;
   for (uint32_t i = 0; walking(array, i, len); i++) {
@@ -288,12 +349,9 @@ jsrt_value jsrt_array_every(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_find(jsrt_value array, jsrt_value cb) {
-  const uint32_t len = arr(array)->length;
-  for (uint32_t i = 0; walking(array, i, len); i++) {
-    jsrt_value elem = arr(array)->elements[i];
-    if (jsrt_truthy(call_cb(cb, array, i))) {
-      return elem;
-    }
+  jsrt_value elem = JSRT_UNDEFINED;
+  if (array_find_upward(array, cb, NULL, &elem)) {
+    return elem;
   }
   return JSRT_UNDEFINED;
 }
@@ -314,11 +372,9 @@ jsrt_value jsrt_array_flat_map(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_find_index(jsrt_value array, jsrt_value cb) {
-  const uint32_t len = arr(array)->length;
-  for (uint32_t i = 0; walking(array, i, len); i++) {
-    if (jsrt_truthy(call_cb(cb, array, i))) {
-      return jsrt_number((double)i);
-    }
+  uint32_t index = 0;
+  if (array_find_upward(array, cb, &index, NULL)) {
+    return jsrt_number((double)index);
   }
   return jsrt_number(-1.0);
 }
@@ -327,12 +383,18 @@ jsrt_value jsrt_array_find_index(jsrt_value array, jsrt_value cb) {
  * different role (it becomes the seed and the loop starts at 1), and an EXPLICIT `undefined`
  * initial is an initial — so the two forms cannot share an undefined-padded signature. The
  * callback triple grows the accumulator in front: (acc, element, index, array). */
+/* One accumulator step, shared by the upward and downward loops: same argument quadruple, same
+ * call, whichever direction visits the index. */
+static jsrt_value reduce_call(jsrt_value cb, jsrt_value acc, jsrt_value array, uint32_t i) {
+  jsrt_value args[4] = {acc, arr(array)->elements[i], jsrt_number((double)i), array};
+  return jsrt_call(cb, 4, args);
+}
+
 jsrt_value jsrt_array_reduce(jsrt_value array, jsrt_value cb, jsrt_value initial) {
   const uint32_t len = arr(array)->length;
   jsrt_value acc = initial;
   for (uint32_t i = 0; walking(array, i, len); i++) {
-    jsrt_value args[4] = {acc, arr(array)->elements[i], jsrt_number((double)i), array};
-    acc = jsrt_call(cb, 4, args);
+    acc = reduce_call(cb, acc, array, i);
   }
   return acc;
 }
@@ -341,13 +403,10 @@ jsrt_value jsrt_array_reduce_right(jsrt_value array, jsrt_value cb, jsrt_value i
   const uint32_t len = arr(array)->length;
   jsrt_value acc = initial;
   for (uint32_t i = len; i-- > 0 && !jsrt_pending();) {
-    /* Downward over the ENTRY length, skipping indices the array no longer has: existence is
-     * checked at visit time, exactly the spec's HasProperty step. */
-    if (i >= arr(array)->length) {
+    if (!index_present(array, i)) {
       continue;
     }
-    jsrt_value args[4] = {acc, arr(array)->elements[i], jsrt_number((double)i), array};
-    acc = jsrt_call(cb, 4, args);
+    acc = reduce_call(cb, acc, array, i);
   }
   return acc;
 }
@@ -413,28 +472,17 @@ jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp) {
 
 /* The downward mirrors of find/findIndex, same entry-length + existence discipline. */
 jsrt_value jsrt_array_find_last(jsrt_value array, jsrt_value cb) {
-  const uint32_t len = arr(array)->length;
-  for (uint32_t i = len; i-- > 0 && !jsrt_pending();) {
-    if (i >= arr(array)->length) {
-      continue;
-    }
-    jsrt_value elem = arr(array)->elements[i];
-    if (jsrt_truthy(call_cb(cb, array, i))) {
-      return elem;
-    }
+  jsrt_value elem = JSRT_UNDEFINED;
+  if (array_find_downward(array, cb, NULL, &elem)) {
+    return elem;
   }
   return JSRT_UNDEFINED;
 }
 
 jsrt_value jsrt_array_find_last_index(jsrt_value array, jsrt_value cb) {
-  const uint32_t len = arr(array)->length;
-  for (uint32_t i = len; i-- > 0 && !jsrt_pending();) {
-    if (i >= arr(array)->length) {
-      continue;
-    }
-    if (jsrt_truthy(call_cb(cb, array, i))) {
-      return jsrt_number((double)i);
-    }
+  uint32_t index = 0;
+  if (array_find_downward(array, cb, &index, NULL)) {
+    return jsrt_number((double)index);
   }
   return jsrt_number(-1.0);
 }

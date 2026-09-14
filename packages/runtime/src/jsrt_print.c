@@ -196,6 +196,27 @@ static void buf_repeat(Buf *b, char c, size_t n) {
  * UTF-16 -> UTF-8 output
  * ============================================================================ */
 
+/* UTF-8 encoding of one resolved code point, shared by append_string (whose surrogate
+ * fixup runs first) and json_quote (whose escapes run first): the four arms are one rule,
+ * not two. */
+static void append_utf8(Buf *out, uint32_t cp) {
+  if (cp < 0x80u) {
+    buf_putc(out, (char)cp);
+  } else if (cp < 0x800u) {
+    buf_putc(out, (char)(0xC0u | (cp >> 6)));
+    buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+  } else if (cp < 0x10000u) {
+    buf_putc(out, (char)(0xE0u | (cp >> 12)));
+    buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
+    buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+  } else {
+    buf_putc(out, (char)(0xF0u | (cp >> 18)));
+    buf_putc(out, (char)(0x80u | ((cp >> 12) & 0x3Fu)));
+    buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
+    buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+  }
+}
+
 /* Appends one JSString as UTF-8. Unpaired surrogates become U+FFFD: they cannot be represented in
  * well-formed UTF-8, and a JS string is allowed to contain them. */
 static void append_string(Buf *out, const JSString *str) {
@@ -213,21 +234,7 @@ static void append_string(Buf *out, const JSString *str) {
       cp = 0xFFFDu; /* lone surrogate */
     }
 
-    if (cp < 0x80u) {
-      buf_putc(out, (char)cp);
-    } else if (cp < 0x800u) {
-      buf_putc(out, (char)(0xC0u | (cp >> 6)));
-      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
-    } else if (cp < 0x10000u) {
-      buf_putc(out, (char)(0xE0u | (cp >> 12)));
-      buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
-      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
-    } else {
-      buf_putc(out, (char)(0xF0u | (cp >> 18)));
-      buf_putc(out, (char)(0x80u | ((cp >> 12) & 0x3Fu)));
-      buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
-      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
-    }
+    append_utf8(out, cp);
   }
 }
 
@@ -250,6 +257,23 @@ static void append_string(Buf *out, const JSString *str) {
 static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent);
 static void append_key(Buf *out, const char *key);
 
+/* Node's quote choice, shared by append_quoted (UTF-16 string contents) and append_key
+ * (NUL-terminated key bytes): single quotes, unless the text contains one and no double
+ * quote, and backticks only when it contains both. The scans stay at the call sites --
+ * they walk different element types -- and only the selection is shared. */
+static char choose_quote(bool has_single, bool has_double, bool has_backtick) {
+  if (!has_single) {
+    return '\'';
+  }
+  if (!has_double) {
+    return '"';
+  }
+  if (!has_backtick) {
+    return '`';
+  }
+  return '\'';
+}
+
 /* Quoting follows Node: single quotes, unless the string contains one and no double quote, and
  * backticks only when it contains both. The quote actually chosen is then the only quote that
  * needs escaping inside. */
@@ -262,10 +286,7 @@ static void append_quoted(Buf *out, const JSString *str) {
     has_double = has_double || str->data[i] == '"';
     has_backtick = has_backtick || str->data[i] == '`';
   }
-  char quote = '\'';
-  if (has_single) {
-    quote = !has_double ? '"' : (!has_backtick ? '`' : '\'');
-  }
+  const char quote = choose_quote(has_single, has_double, has_backtick);
 
   buf_putc(out, quote);
   for (uint32_t i = 0; i < str->length; i++) {
@@ -343,6 +364,25 @@ static void inspect_scalar(Buf *out, jsrt_value v, bool quote_strings) {
   } else {
     buf_puts(out, "[object Object]");
   }
+}
+
+/* Zeroed entry buffers for the inspect layouts below (array, object, map, grouped rows):
+ * every layout allocates the same way and aborts the same way, so the check lives once. */
+static Buf *alloc_entries(size_t count) {
+  Buf *entries = (Buf *)calloc(count, sizeof(Buf));
+  if (entries == NULL) {
+    jsrt_panic("out of memory: print buffer");
+  }
+  return entries;
+}
+
+/* Release entry buffers and the vector itself. emit_braced consumes its entries; inspect_array
+ * frees both the entries and, when grouping fired, the rows. */
+static void free_entries(Buf *entries, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    buf_free(&entries[i]);
+  }
+  free(entries);
 }
 
 /* Node's groupArrayElements: above six entries, short ones are laid out in aligned columns rather
@@ -466,36 +506,55 @@ static bool fits_one_line(const Buf *entries, size_t count, size_t indent, size_
 
 /* The brace layout objects and Map/Set share: entries joined one-line inside `{ }` when the line
  * budget holds, one entry per line at indent+2 otherwise. Consumes (frees) the entry buffers. */
-static void emit_braced(Buf *out, Buf *entries, size_t count, size_t indent, size_t prefix) {
-  if (fits_one_line(entries, count, indent, prefix)) {
-    buf_puts(out, "{ ");
-    for (size_t i = 0; i < count; i++) {
-      if (i > 0) {
-        buf_puts(out, ", ");
-      }
-      buf_append(out, entries[i].data, entries[i].len);
-    }
-    buf_puts(out, " }");
-  } else {
-    buf_puts(out, "{\n");
-    for (size_t i = 0; i < count; i++) {
-      if (i > 0) {
-        buf_puts(out, ",\n");
-      }
-      buf_repeat(out, ' ', indent + 2);
-      buf_append(out, entries[i].data, entries[i].len);
-    }
-    buf_putc(out, '\n');
-    buf_repeat(out, ' ', indent);
-    buf_putc(out, '}');
-  }
 
+/* The two joins are shared by emit_braced (`{ }`) and inspect_array (`[ ]`): same separators,
+ * same indentation, only the brackets differ, which is why they arrive as parameters. */
+static void join_one_line(Buf *out, const char *open, const char *close, const Buf *entries,
+                           size_t count) {
+  buf_puts(out, open);
   for (size_t i = 0; i < count; i++) {
-    buf_free(&entries[i]);
+    if (i > 0) {
+      buf_puts(out, ", ");
+    }
+    buf_append(out, entries[i].data, entries[i].len);
   }
-  free(entries);
+  buf_puts(out, close);
 }
 
+static void join_multi_line(Buf *out, const char *open_line, char close, const Buf *entries,
+                             size_t count, size_t indent) {
+  buf_puts(out, open_line);
+  for (size_t i = 0; i < count; i++) {
+    if (i > 0) {
+      buf_puts(out, ",\n");
+    }
+    buf_repeat(out, ' ', indent + 2);
+    buf_append(out, entries[i].data, entries[i].len);
+  }
+  buf_putc(out, '\n');
+  buf_repeat(out, ' ', indent);
+  buf_putc(out, close);
+}
+
+static void emit_braced(Buf *out, Buf *entries, size_t count, size_t indent, size_t prefix) {
+  if (fits_one_line(entries, count, indent, prefix)) {
+    join_one_line(out, "{ ", " }", entries, count);
+  } else {
+    join_multi_line(out, "{\n", '}', entries, count, indent);
+  }
+
+  free_entries(entries, count);
+}
+
+
+/* The "... N more items" tail shared by inspect_array and inspect_map: same 64-byte scratch,
+ * same singular/plural rule, written into the already-counted trailing entry. */
+static void init_more_entry(Buf *entry, uint32_t remaining) {
+  char more[64];
+  snprintf(more, sizeof more, "... %u more item%s", remaining, remaining == 1 ? "" : "s");
+  buf_init(entry);
+  buf_puts(entry, more);
+}
 
 static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   if (recurse > INSPECT_MAX_DEPTH) {
@@ -518,10 +577,7 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
     return;
   }
 
-  Buf *entries = (Buf *)calloc(count, sizeof(Buf));
-  if (entries == NULL) {
-    jsrt_panic("out of memory: print buffer");
-  }
+  Buf *entries = alloc_entries(count);
   bool all_numbers = true;
   for (size_t i = 0; i < shown; i++) {
     buf_init(&entries[i]);
@@ -531,11 +587,7 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
     all_numbers = all_numbers && jsrt_is_number(a->elements[i]);
   }
   if (truncated) {
-    char more[64];
-    const uint32_t remaining = length - (uint32_t)shown;
-    snprintf(more, sizeof more, "... %u more item%s", remaining, remaining == 1 ? "" : "s");
-    buf_init(&entries[shown]);
-    buf_puts(&entries[shown], more);
+    init_more_entry(&entries[shown], length - (uint32_t)shown);
   }
   if (props > 0) {
     const JSRTShape **links = jsrt_shape_property_order(a->shape, (uint32_t)props);
@@ -554,10 +606,7 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   Buf *rows = NULL;
   size_t row_count = 0;
   if (count > 6 && props == 0) {
-    rows = (Buf *)calloc(count, sizeof(Buf));
-    if (rows == NULL) {
-      jsrt_panic("out of memory: print buffer");
-    }
+    rows = alloc_entries(count);
     row_count = group_entries(entries, shown, count, indent, all_numbers, rows);
     if (row_count > 0 && truncated) {
       buf_init(&rows[row_count]);
@@ -570,37 +619,14 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   const size_t line_count = row_count > 0 ? row_count : count;
 
   if (row_count == 0 && fits_one_line(entries, count, indent, 1 /* "[" */)) {
-    buf_puts(out, "[ ");
-    for (size_t i = 0; i < count; i++) {
-      if (i > 0) {
-        buf_puts(out, ", ");
-      }
-      buf_append(out, entries[i].data, entries[i].len);
-    }
-    buf_puts(out, " ]");
+    join_one_line(out, "[ ", " ]", entries, count);
   } else {
-    buf_puts(out, "[\n");
-    for (size_t i = 0; i < line_count; i++) {
-      if (i > 0) {
-        buf_puts(out, ",\n");
-      }
-      buf_repeat(out, ' ', indent + 2);
-      buf_append(out, lines[i].data, lines[i].len);
-    }
-    buf_putc(out, '\n');
-    buf_repeat(out, ' ', indent);
-    buf_putc(out, ']');
+    join_multi_line(out, "[\n", ']', lines, line_count, indent);
   }
 
-  for (size_t i = 0; i < count; i++) {
-    buf_free(&entries[i]);
-  }
-  free(entries);
+  free_entries(entries, count);
   if (rows != NULL) {
-    for (size_t i = 0; i < row_count; i++) {
-      buf_free(&rows[i]);
-    }
-    free(rows);
+    free_entries(rows, row_count);
   }
 }
 
@@ -645,10 +671,7 @@ static void append_key(Buf *out, const char *key) {
     has_double = has_double || key[i] == '"';
     has_backtick = has_backtick || key[i] == '`';
   }
-  char quote = '\'';
-  if (has_single) {
-    quote = !has_double ? '"' : (!has_backtick ? '`' : '\'');
-  }
+  const char quote = choose_quote(has_single, has_double, has_backtick);
   buf_putc(out, quote);
   for (size_t i = 0; key[i] != '\0'; i++) {
     if (key[i] == quote || key[i] == '\\') {
@@ -713,10 +736,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
     return;
   }
 
-  Buf *entries = (Buf *)calloc(count, sizeof(Buf));
-  if (entries == NULL) {
-    jsrt_panic("out of memory: print buffer");
-  }
+  Buf *entries = alloc_entries(count);
   size_t next = 0;
   if (dyn != NULL) {
     /* Dynamic keys follow OrdinaryOwnPropertyKeys: integer indices first, then insertion order. */
@@ -791,10 +811,7 @@ static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
     return;
   }
 
-  Buf *entries = (Buf *)calloc(count, sizeof(Buf));
-  if (entries == NULL) {
-    jsrt_panic("out of memory: print buffer");
-  }
+  Buf *entries = alloc_entries(count);
   size_t next = 0;
   for (uint32_t i = 0; i < m->used && next < shown; i++) {
     if (!m->entries[i].live) {
@@ -809,11 +826,7 @@ static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
     }
   }
   if (truncated) {
-    char more[64];
-    const uint32_t remaining = m->size - (uint32_t)shown;
-    snprintf(more, sizeof more, "... %u more item%s", remaining, remaining == 1 ? "" : "s");
-    buf_init(&entries[shown]);
-    buf_puts(&entries[shown], more);
+    init_more_entry(&entries[shown], m->size - (uint32_t)shown);
   }
 
   /* The `Map(2)` and the space in front of it are Node's `base`, measured with the brace. */
@@ -997,6 +1010,12 @@ typedef struct CountEntry {
 
 static CountEntry *counts = NULL;
 
+/* Pointer-or-content label comparison, shared by the count and timer table walks: labels are
+ * immortal shape keys, so the pointer test usually hits and strcmp is the fallback. */
+static bool labels_equal(const char *a, const char *b) {
+  return a == b || strcmp(a, b) == 0;
+}
+
 /* The label as a C string. `console.count()` with no argument counts under "default", which is
  * the literal Node prints, not a placeholder. */
 static const char *count_label(jsrt_value label) {
@@ -1005,7 +1024,7 @@ static const char *count_label(jsrt_value label) {
 
 static CountEntry *count_entry(const char *label) {
   for (CountEntry *e = counts; e != NULL; e = e->next) {
-    if (e->label == label || strcmp(e->label, label) == 0) {
+    if (labels_equal(e->label, label)) {
       return e;
     }
   }
@@ -1084,7 +1103,7 @@ static double monotonic_ms(void) {
 
 static TimerEntry *timer_entry(const char *label, bool create) {
   for (TimerEntry *e = timers; e != NULL; e = e->next) {
-    if (e->label == label || strcmp(e->label, label) == 0) {
+    if (labels_equal(e->label, label)) {
       return e;
     }
   }
@@ -1634,20 +1653,8 @@ static void json_quote(Buf *out, const JSString *str) {
       char esc[8];
       snprintf(esc, sizeof esc, "\\u%04x", cp);
       buf_puts(out, esc);
-    } else if (cp < 0x80u) {
-      buf_putc(out, (char)cp);
-    } else if (cp < 0x800u) {
-      buf_putc(out, (char)(0xC0u | (cp >> 6)));
-      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
-    } else if (cp < 0x10000u) {
-      buf_putc(out, (char)(0xE0u | (cp >> 12)));
-      buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
-      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
     } else {
-      buf_putc(out, (char)(0xF0u | (cp >> 18)));
-      buf_putc(out, (char)(0x80u | ((cp >> 12) & 0x3Fu)));
-      buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
-      buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+      append_utf8(out, cp);
     }
   }
   buf_putc(out, '"');
