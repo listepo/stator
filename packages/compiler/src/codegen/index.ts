@@ -2376,13 +2376,17 @@ class Emitter {
   }
 
   /* An extern call as statements (docs/FFI.md §§3–4, plan.md §10 Task 7.1 step 5): arguments
-   * left to right into rooted slots, string copies beside them, one direct C call, frees, the
-   * error-convention check, and the boxed result — in that order, never nested inside a
+   * left to right into rooted slots, string copies beside them, one direct C call, the boxed result, frees, and
+   * the error-convention check — in that order, never nested inside a
    * consumer's expression.
    *
    * The order is the whole design:
    * - arguments evaluate FIRST: their own pending checks run before any temporary exists, so a
    *   throwing argument unwinds with nothing to free;
+   * - the boxed result, including the `from_cstr` copy-out, is stored BEFORE the
+   *   frees: a `cstring` return may alias a borrow (`strstr` into its haystack), so
+   *   copying after freeing is a use-after-free. For non-aliasing returns the order
+   *   is unobservable;
    * - the UTF-8 copies (`jsrt_string_to_cstr`, malloc memory the caller owns) are freed BEFORE
    *   the error-convention throw: no pending check and no `goto` stands between an allocation
    *   and its free, so every exit path — landing pads included — is already clean when taken;
@@ -2433,6 +2437,35 @@ class Emitter {
     if (expr.error === 'errno') {
       this.appendLine(`int _jsrt_exe_${String(base)} = errno;`, expr.span);
     }
+    // Box the result BEFORE freeing borrows (see the order note above): the copy-out
+    // must precede the frees, while frees and the throw check still follow for every
+    // return kind. `void` calls have nothing to box and fall through to frees + check.
+    const result = expr.retKind === 'void' ? 'JSRT_UNDEFINED' : this.slotAt(base);
+    if (expr.retKind !== 'void') {
+      // A pointer result is boxed by BIT PATTERN, never by value: the raw `void *` becomes the
+      // slot's 64 bits, exactly as the loop state keeps a raw `JSRTEnv *` in a slot — the
+      // collector masks every word, so an unboxed pointer in a slot is traced, where a NaN-boxed
+      // value would be invisible. No GC allocation stands between the call and this store (the
+      // frees are libc, the errno read is an int), so no collection can observe the handle
+      // anywhere but its slot.
+      // A NULL C return never reaches the copy-out: under the `null` convention (or
+      // `errno` on a string return) the throw below handles it, so the copy is guarded
+      // and the sentinel is dead on every path that throws. A bare NULL with no
+      // convention is a contract violation and still asserts inside `from_cstr`.
+      const copyOut =
+        expr.error === 'null' || expr.error === 'errno'
+          ? `(${raw} == NULL ? JSRT_UNDEFINED : jsrt_string_from_cstr(${raw}))`
+          : `jsrt_string_from_cstr(${raw})`;
+      const boxed =
+        expr.retKind === 'number'
+          ? `jsrt_number(${raw})`
+          : expr.retKind === 'boolean'
+            ? `jsrt_bool(${raw})`
+            : expr.retKind === 'pointer'
+              ? `(jsrt_value)(uintptr_t)${raw}`
+              : copyOut;
+      this.appendLine(`${result} = ${boxed};`, expr.span);
+    }
     // Borrows freed before any throw below: the only `goto`s past this point are the
     // error-convention check's own, taken with nothing outstanding. A transferred
     // (`cstring-owned`) copy is the callee's now and is never freed here.
@@ -2467,17 +2500,6 @@ class Emitter {
       );
       this.emitPendingCheck(expr.span);
     }
-    if (expr.retKind === 'void') {
-      return 'JSRT_UNDEFINED';
-    }
-    const result = this.slotAt(base);
-    const boxed =
-      expr.retKind === 'number'
-        ? `jsrt_number(${raw})`
-        : expr.retKind === 'boolean'
-          ? `jsrt_bool(${raw})`
-          : `jsrt_string_from_cstr(${raw})`;
-    this.appendLine(`${result} = ${boxed};`, expr.span);
     return result;
   }
 
