@@ -5,20 +5,19 @@
 // (the oracle: `STATOR_NODE` when set and non-empty, else `process.execPath` — mirrors
 // `packages/tests/support/node-path.ts`, by hand because this runs pre-install), so a
 // suite that is green under any other major proves nothing about the ground truth.
-// Compare the running major AND the oracle major against the pinned major and fail fast
-// with the one-line fix. Dependency-free on purpose: this runs before anything
-// is installed, so it cannot import anything that is not Node itself.
+// Compare FULL versions, not majors: the golden and differential ground truth is the pinned
+// Node and only that Node (Task 6.5), so 26.8.2 passing as "26" does not prove 26.7.0 ran.
+// A patch-level move is a deliberate re-baseline (146 golden fixtures, the Test262 ratchet,
+// bench/baseline.json), never silent drift — plan.md §9 Task 6.12.
+// Dependency-free on purpose: this runs before anything is installed, so it cannot import
+// anything that is not Node itself.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function majorOf(version) {
-  const match = /^v?(\d+)/.exec(version.trim());
-  if (match === null) {
-    throw new Error(`cannot read a major version from "${version}"`);
-  }
-  return match[1] ?? '';
+function exactOf(version) {
+  return version.trim().replace(/^v/, '');
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -38,7 +37,7 @@ if (pinned === '') {
 }
 
 const running = process.version;
-if (majorOf(running) !== majorOf(pinned)) {
+if (exactOf(running) !== exactOf(pinned)) {
   console.error(
     `stator: node ${running} is not the pinned Node (${pinned} from .node-version) — ` +
       'suites diff against the pinned Node, so a run here proves nothing',
@@ -48,6 +47,27 @@ if (majorOf(running) !== majorOf(pinned)) {
 }
 
 console.log(`stator: node ${running} matches .node-version (${pinned})`);
+
+// `mise.toml` must select exactly what `.node-version` names: a bare `"26"` drifts with every
+// patch release and the drift is silent until a formatting byte moves. `engines` in
+// `package.json` stays a range floor (`>=24`) on purpose — it is not a pin, so there is nothing
+// to compare it against. TOML is parsed with one regex (dependency-free rule above); if the file
+// or the line is absent the check is skipped rather than failed — an environment without mise
+// still gets the exact running-vs-pinned verdict above.
+try {
+  const mise = readFileSync(join(root, 'mise.toml'), 'utf8');
+  const selected = /^node\s*=\s*"([^"]+)"/m.exec(mise)?.[1];
+  if (selected !== undefined && exactOf(selected) !== exactOf(pinned)) {
+    console.error(
+      `stator: mise.toml selects node "${selected}" but .node-version pins ${pinned} — ` +
+        'pick one pin (Task 6.12) or suites may run under a Node the ground truth never named',
+    );
+    console.error('stator: fix: set mise.toml `node` to the exact .node-version value');
+    process.exit(1);
+  }
+} catch {
+  // No mise.toml here — the running-vs-pinned verdict above is the whole preflight.
+}
 
 // The oracle is `STATOR_NODE` when set and non-empty, else the running Node — the same
 // resolution as `nodePath()`. When set to another binary, that binary IS the ground truth
@@ -64,7 +84,7 @@ if (oracle !== undefined && oracle !== '' && oracle !== process.execPath) {
     console.error('stator: fix: STATOR_NODE="$(mise exec node -- which node)" <your command>');
     process.exit(1);
   }
-  if (majorOf(oracleVersion) !== majorOf(pinned)) {
+  if (exactOf(oracleVersion) !== exactOf(pinned)) {
     console.error(
       `stator: node oracle ${oracle} is ${oracleVersion}, not the pinned Node (${pinned} from .node-version) — ` +
         'suites diff against the pinned Node, so a run here proves nothing',

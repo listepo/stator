@@ -3,7 +3,7 @@
 # Unix only: Windows CI never links the runtime, and the asdf/conda clang backends are not a
 # Windows story. ar/pkg-config/diff stay the system ones (Xcode CLT / apt); just is pinned here.
 [tools]
-node = "26"
+node = "26.7.0"
 "npm:pnpm" = "12.3.4"
 "npm:@moonrepo/cli" = "2.5.4"
 just = "1.58.0"
