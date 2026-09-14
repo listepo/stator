@@ -4,6 +4,27 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 253. Differential flake fixed (6.10); intl skip line (6.13); error-code narrowing (2026-09-14)
+
+**Plan:** §9 Tasks 6.10, 6.13 (landed below). `plan.md` edited in this change.
+
+6.10: `finding()` re-checks `sameResult` on the final minimized run and drops transients (a
+timeout finding re-runs once; the confirming run is the recorded evidence); the minimizer's
+paren rewrite no longer eats call parentheses (negative lookbehind for identifier chars).
+12 stale `failures/ts-*` artifacts deleted (all byte-identical node/stator or corrupted
+`console.log0` minimizes — verified case by case); the dir is gitignored and now empty. Seed 58:
+0 divergences; `--seed=1 --count=50 --mode=both`: 100 cases, 0 divergences. Drive-by in the same
+files: `result.error?.code` did not typecheck (`Error` has no `code`; invisible to every gate —
+the harness is excluded from tsconfigs, lint, and jscpd alike) — narrowed through `in`, proven
+with direct strict `tsc` on both harness files. 6.13: default `test:golden` prints
+`golden: SKIPPED 2 intl_* fixtures (…)`; gate unchanged.
+
+NOT fixed, deliberately: SUBSET.md's "FFI returns are still Phase 6" pointer (flagged during
+7.1 docs). The row covers boundary-checked narrowing behavior, and the done.md record behind it
+says those values "need the builtin (§7 Task 4.2) and Phase 6" — Phase 6 as the proof venue
+(differential evidence), not the feature owner. Flipping it to Phase 7 would assert an owner
+change nobody decided; left for the owner, not guessed (AGENTS.md §15.6).
+
 ## 252. ASan hash-skip lands (6.8a): archive bytes lie, members don't; touch ≠ change (2026-09-14)
 
 **Plan:** §9 Task 6.8 (landed below). `plan.md` edited in this change.

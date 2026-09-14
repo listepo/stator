@@ -20,8 +20,12 @@ export function minimizeProgram(source: string, preserves: DivergencePredicate):
     }
   }
 
+  // The parenthesised rewrite shrinks grouping parentheses only. A `(` preceded by an
+  // identifier character is a call (`console.log(0)`, `Math.trunc(x)`), and rewriting it produces
+  // `console.log0` — not a reproducer. Control-flow parentheses (`for (...)`) still match, but a
+  // broken candidate fails the predicate, so it is never accepted.
   const replacements: readonly [RegExp, string][] = [
-    [/\([^()\n]+\)/g, '0'],
+    [/(?<![A-Za-z0-9_$])\([^()\n]+\)/g, '0'],
     [/\[[^\]\n]*\]/g, '[]'],
     [/"(?:[^"\\]|\\.)*"/g, '""'],
     [/\b-?\d+(?:\.\d+)?\b/g, '0'],

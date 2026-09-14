@@ -1,4 +1,8 @@
-/* Pinned-Node differential oracle (plan.md §9 Task 6.2). */
+/* Pinned-Node differential oracle (plan.md §9 Task 6.2).
+ *
+ * A divergence is recorded only if the minimized program still diverges on re-execution, confirmed
+ * by a second run when a timeout is involved: timeouts count as divergences for the run itself, but
+ * a transient timeout under load is not a finding (plan.md §9 Task 6.10). */
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -41,7 +45,9 @@ function run(command: string, args: readonly string[], cwd?: string): Streams {
     status: result.status,
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
-    timedOut: result.error?.code === 'ETIMEDOUT',
+    // `error` is typed `Error`, which has no `code`: narrow through `in` rather than casting.
+    timedOut:
+      result.error instanceof Error && 'code' in result.error && result.error.code === 'ETIMEDOUT',
   };
 }
 
@@ -99,14 +105,31 @@ function finding(seed: number, mode: DifferentialMode, source: string): Finding 
     ) && !sameResult(result.node, result.stator);
   });
   const final = execute(minimized, mode);
+  // Never record a divergence the harness cannot reproduce. The final run above is the re-check:
+  // a transient timeout on the way here (initial build, minimization candidate) reads as agreement
+  // here, not as a finding. Timeouts stay divergences for the run itself — a hang in emitted code
+  // is a bug — so only the recorded finding needs this guard.
+  if (sameResult(final.node, final.stator)) {
+    return undefined;
+  }
+  let evidence = final;
+  if (final.node.timedOut || final.stator.timedOut) {
+    // A timeout finding reproduces only if it times out again: re-run once and drop the transient.
+    // The recorded evidence is the confirming run, not the single timed-out one.
+    const confirm = execute(minimized, mode);
+    if (sameResult(confirm.node, confirm.stator)) {
+      return undefined;
+    }
+    evidence = confirm;
+  }
   return {
     seed,
     mode,
     source,
     minimized,
-    node: final.node,
-    stator: final.stator,
-    firstDiff: firstDifference(final.node.stdout, final.stator.stdout),
+    node: evidence.node,
+    stator: evidence.stator,
+    firstDiff: firstDifference(evidence.node.stdout, evidence.stator.stdout),
   };
 }
 

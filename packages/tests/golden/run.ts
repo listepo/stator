@@ -58,6 +58,27 @@ function fixtureEntry(dir: string, name: string, mode: 'ts' | 'js'): string {
   return preferred;
 }
 
+/* Task 6.13: with the default runtime the `intl_*` fixtures never reach the pool, so a
+ * summary that counted only what ran would read as if they did not exist. Counted here
+ * instead (mirroring `leak: SKIPPED`), so a default run says what it omitted; the gate
+ * is unchanged. */
+function skippedIntlCount(): number {
+  if (INTL) {
+    return 0;
+  }
+  let skipped = 0;
+  for (const mode of ['ts', 'js'] as const) {
+    let names: string[];
+    try {
+      names = readdirSync(join(HERE, mode));
+    } catch {
+      continue;
+    }
+    skipped += names.filter((name) => name.startsWith('intl_')).length;
+  }
+  return skipped;
+}
+
 function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: string }[] {
   const dir = join(HERE, mode);
   let names: string[];
@@ -171,6 +192,12 @@ async function main(): Promise<void> {
   process.stdout.write(
     `golden: ${String(all.length)} fixtures — ${String(passed)} passed, ${String(failures.length)} failed\n`,
   );
+  const skippedIntl = skippedIntlCount();
+  if (skippedIntl > 0) {
+    process.stdout.write(
+      `golden: SKIPPED ${String(skippedIntl)} intl_* fixtures (STATOR_RUNTIME is not intl; run \`pnpm run test:intl\` to include them)\n`,
+    );
+  }
   if (failures.length > 0) {
     process.exitCode = 1;
   }

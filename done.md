@@ -2106,6 +2106,27 @@ Check evidence: forced full green (`runtime-asan` + corpus match + `golden: 214 
 record written); immediate rerun exits 0 in ~8 s with hash+skip evidence; comment-change
 re-triggers, `touch` correctly skips; post-restore rerun reproduces the pristine hash exactly.
 
+### Task 6.10 — The differential oracle never records what it cannot reproduce ✅ (landed 2026-09-14)
+
+`finding()` re-checks `sameResult` on the final minimized run and drops transients (a timeout
+finding re-runs once; the confirming run is the recorded evidence); timeouts stay divergences
+for the run itself. The minimizer's paren rewrite no longer eats call parentheses (lookbehind
+for identifier chars — `console.log(0);` survived; `(1+2)` still folds). 12 stale `failures/ts-*`
+artifacts deleted case-by-case (byte-identical node/stator outputs or corrupted `console.log0`
+minimizes); the gitignored dir is empty. Drive-by in the same files: `result.error?.code` did
+not typecheck (`Error` has no `code`; invisible to every gate — the harness is excluded from
+tsconfigs, lint, and jscpd) — narrowed through `in`, proven with direct strict `tsc` on both
+harness files.
+
+Check evidence: seed 58 → 0 divergences, `failures/` empty; `--seed=1 --count=50 --mode=both` →
+100 cases, 0 divergences; minimized outputs recompile.
+
+### Task 6.13 — The golden runner reports its skipped `intl_*` fixtures ✅ (landed 2026-09-14)
+
+`skippedIntlCount()` in `tests/golden/run.ts` counts `intl_*` entries neither mode compiled;
+a default run now prints `golden: SKIPPED 2 intl_* fixtures (…)` beside the pass line, mirroring
+`leak: SKIPPED`. Gate unchanged (verified: default run still `214 — 214 passed, 0 failed`).
+
 ---
 
 ## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)
