@@ -28,9 +28,12 @@ concurrency:
 #   test:builtins-> runtime
 #   test:leak   -> runtime
 #   test:asan   -> asan (STATOR_ASAN_FORCE=1 in CI: always the full pass, never the hash skip)
+#   test:ffi    -> ffi
 #
 # Plus `test:intl`, which is deliberately NOT part of `pnpm run ci` (the ICU feature build is off by
 # default, plan.md Task 4.4) and therefore had no coverage at all until this job existed.
+# Same for `test:ffi`: it needs clang and the built archive, so it lives in its own job and in
+# `moon run tests:ci`, not in the serial gate — which stays offline-runnable.
 
 jobs:
   # Test262 is intentionally separate from pnpm run ci: a missing corpus must not make the local
@@ -251,9 +254,29 @@ jobs:
       - *pnpm-install
       - run: pnpm run test:intl
 
+  # Its own job rather than the tail of `runtime`: FFI failures (link plumbing, boundary
+  # checks, header determinism) have different owners from runtime failures, and serializing
+  # them behind the golden/leak runs would hide which half broke. Unix only, like `runtime`:
+  # the harness links against the just/clang-built archive.
+  ffi:
+    name: ffi (${{ matrix.platform }}/${{ matrix.arch }})
+    strategy: *unix-strategy
+    runs-on: ${{ matrix.os }}
+    steps:
+      - *checkout
+      - *setup-just
+      - *setup
+      - *install-boehm
+      - *pnpm-install
+      - run: pnpm run runtime
+      - run: pnpm run test:ffi
+      # No header double-build `cmp` step: the harness reports `--emit-header` as
+      # `TODO(step-7)` until the flag exists (run.ts `emitHeaderDoubleBuild`), and there is
+      # no harness flag to invoke — inventing one here would test nothing.
+
   revert-on-failure:
     name: revert-on-failure
-    needs: [test262, test262-report, static, frontend, runtime, asan, intl]
+    needs: [test262, test262-report, static, frontend, runtime, asan, intl, ffi]
     if: >-
       always()
       && github.event_name == 'push'

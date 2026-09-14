@@ -95,3 +95,4 @@ tasks:
       - 'tests:builtins'
       - 'tests:leak'
       - 'tests:asan'
+      - 'tests:ffi'
