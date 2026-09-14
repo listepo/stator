@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { execaSync } from 'execa';
+import { BuildError, build } from '../../compiler/src/cli/build.ts';
 import { NATIVE_ONLY } from './helpers.ts';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -362,6 +363,41 @@ void test('an exception inside the checker is STA4072, not a Node stack trace', 
     assert.match(stderr, /compiler bug/);
     assert.doesNotMatch(stderr, /typescript\.js/, 'the upstream frame must not leak');
     assert.doesNotMatch(stderr, /\n\s+at /, 'diagnostics must never leak a stack trace');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
+void test('an in-process build whose checker overflows is BuildError STA4072, not a throw', async () => {
+  // Same crashing construct as the CLI test above, through the path the Test262 runner uses:
+  // `build()` in-process never passes through `main()`'s catch-all, so without `compileToC`'s own
+  // guard the RangeError escapes, kills the shard, and no artifact is uploaded.
+  const work = mkdtempSync(join(tmpdir(), 'stator-checker-crash-inprocess-'));
+  try {
+    const entry = join(work, 'entry.js');
+    writeFileSync(
+      entry,
+      'var obj = null;\n' +
+        "var yield = 'propNameViaIdentifier';\n" +
+        'var iter = (function*() {\n' +
+        '  obj = {\n' +
+        '    *[yield]() {}\n' +
+        '  };\n' +
+        '})();\n' +
+        'console.log(typeof iter);\n',
+    );
+    await assert.rejects(
+      build({ entry, out: join(work, 'out'), mode: 'js', emitCOnly: false, keepC: false }),
+      (error: unknown) => {
+        assert.ok(error instanceof BuildError);
+        assert.equal(error.code, 'STA4072');
+        assert.match(error.message, /^internal error: /);
+        assert.match(error.message, /compiler bug/);
+        assert.doesNotMatch(error.message, /typescript\.js/, 'the upstream frame must not leak');
+        return true;
+      },
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

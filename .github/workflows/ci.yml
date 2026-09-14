@@ -303,6 +303,13 @@ jobs:
             echo "Last commit is from actions bot; skip"
             exit 0
           fi
+          # A revert of a push that touched .github/ would rewrite workflow files, which the
+          # job's GITHUB_TOKEN cannot push without the `workflows` permission (and granting it
+          # would let CI push workflow changes by itself). Leave those failures to a human.
+          if git diff --name-only "$BEFORE" "$AFTER" -- .github/ | grep -q .; then
+            echo "Push touched .github/; auto-revert needs 'workflows' permission — skipping"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           parent_count=$(git rev-list --parents -n 1 "$AFTER" | awk '{print NF}')

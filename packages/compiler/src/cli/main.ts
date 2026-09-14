@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as dotenvConfig } from 'dotenv';
 import { telemetryInit, telemetryShutdown, withSpanAsync } from '../support/telemetry.ts';
-import { BuildError, build, type OptLevel } from './build.ts';
+import { BuildError, build, internalErrorMessage, type OptLevel } from './build.ts';
 import { explain } from './explain.ts';
 import { INK_COLORS, print } from './render.ts';
 
@@ -232,12 +232,6 @@ async function runCommand(command: Command): Promise<void> {
   }
 }
 
-/** A thrown value is not necessarily an `Error` (`throw "boom"` is legal JavaScript, and a
- * rejection from a dependency can be anything). The diagnostic still has to say something. */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 async function main(): Promise<void> {
   // .env before anything reads the environment (STATOR_OTEL, OTEL_EXPORTER_OTLP_*). dotenv never
   // overrides real environment variables, and `quiet` keeps its banner out of the byte-exact
@@ -267,7 +261,7 @@ async function main(): Promise<void> {
     await print(
       [
         {
-          text: `stator: STA4072 internal error: ${messageOf(error)} — this is a compiler bug; report it with the input that triggered it`,
+          text: `stator: STA4072 ${internalErrorMessage(error)}`,
           color: INK_COLORS.error,
         },
       ],

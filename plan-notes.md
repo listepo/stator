@@ -4,6 +4,85 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 242. CI run 34778195179: shard 1 died in the checker's stack overflow through the in-process path 213 missed (2026-09-14)
+
+**Plan:** §9 Task 6.1 (the Test262 heartbeat) and the CI decomposition map in
+`.github/workflows/ci.yml`. `plan.md` is NOT edited in this change — no task language changes.
+The `-7` ratchet question at the end stays with Task 6.1's owner per 210, which this note
+deliberately does not override.
+
+**What was actually red.** Three independent failures plus one consequence — and the first
+report misdescribed the first of them, so the log is the record here, not the report:
+
+1. `static analysis`: `oxlint` clean, `typecheck` clean, then `oxfmt --check` failing on four
+   files (`codegen/index.ts`, `frontend/gate.ts`, `frontend/types.ts`, `lower/index.ts`). No
+   TypeScript crash in this job — the `RangeError` never appears in its section.
+2. `test262 conformance (shard 1/8)`: `RangeError: Maximum call stack size exceeded` out of
+   `typescript@6.0.3` (`getTypeOfExpression` ↔ `getContextualTypeForObjectLiteralMethod` cycle)
+   on `test/language/expressions/object/method-definition/generator-prop-name-yield-expr.js`.
+   The shard uploaded no artifact.
+3. `test262 conformance` (aggregate): `Error: expected 8 shards under shards, found 7` — the
+   mechanical consequence of (2).
+4. `revert-on-failure`: the auto-revert commit was push-rejected (`refusing to allow a GitHub App
+   to create or update workflow '.github/workflows/ci.yml' without 'workflows' permission`).
+
+**The toolchain-pin path was investigated and rejected with measurements.** `npm view
+typescript versions`: 6.x stable is 6.0.2 and 6.0.3 only — there is no newer 6.x patch to try.
+A single-file repro (harnessed crasher through in-process `build()`, seconds to run) crashes
+identically on 6.0.2: not a patch regression. 5.9.3 (newest 5.x) has neither
+`ScriptTarget.ES2025` nor any `lib.es2025.*` file, so the pin alone breaks the own-source
+typecheck — and downgrading the program's lib to es2024 would move the whole ES2025 surface
+(`Set.prototype.union` et al.) and with it the whole-corpus ratchet. A pin change is the wrong
+fix: it trades one red gate for a conformance re-baseline. `typescript` stays at 6.0.3; no
+version changes in this change at all.
+
+**213 already characterized the crash; the hole was the in-process path.** 213 reproduced it
+down to an 8-line program, proved it upstream (`tsc` 6.0.3 dies on the same file), allocated
+`STA4072`, and guarded the CLI (`main()`'s catch-all, unit-tested). But the Test262 runner
+calls `build()` in-process and only catches `BuildError`, so the `RangeError` escaped past
+every guard, killed the shard, and cost the aggregate its input. The fix is one `try/catch` at
+the choke point every in-process caller shares: `compileToC` rethrows `BuildError` untouched
+and converts anything else to `BuildError('STA4072', …)` through a new shared
+`internalErrorMessage()` helper that `main()`'s catch-all now also uses — CLI bytes identical
+(the existing `cli.test.ts` STA4072 test still passes), `explain()` covered too since it shares
+`compileToC`. A second unit test pins the in-process half: the 8-line repro rejects with
+`BuildError` code `STA4072` and no `typescript.js` frame. The crasher now records
+`failed` with `stator: STA4072 internal error: Maximum call stack size exceeded — …` instead
+of killing its shard.
+
+**This change, whole:** the `compileToC` guard + helper (`cli/build.ts`, `cli/main.ts`), the
+in-process unit test (`tests/unit/cli.test.ts`), `oxfmt` applied to the four drifted files
+(whitespace only), `loadShards` naming the missing shard(s) in its error, and a
+skip-when-the-push-touched-`.github/` guard in `revert-on-failure` — least privilege over
+granting the job `workflows: write`, which would let CI push workflow changes by itself.
+Verified against history: the guard skips `cd62e75` (the workflow commit whose revert was
+rejected) and still reverts `70c7109` (docs-only).
+
+**Verification (Node v26.7.0, `.worktrees/ci-fix`, branch `fix/ci-ts-pin`).** `typecheck` clean,
+`lint` clean (oxlint 0/0, oxfmt clean), unit 390/390, subset 372 fixtures 0 failed, runtime
+archive builds. Shard 1 locally: exit 0, `305 passed, 6000 skipped, 393 failed of 6698`.
+Aggregate of that shard plus run 34778195179's shards 2–8 artifacts: `2372 passed, 3100
+failed, 48108 skipped` of 53,580 — exactly 210's 2026-09-09 whole-corpus measurement, same
+43.3% pass rate.
+
+**Deliberately NOT fixed here: the aggregate is still red on the `-7` ratchet** (`FAIL
+ratchet: passed dropped from 2379 to 2372`). 210 measured the same `-7`, called it a
+regression, and ruled the ratchet stays unmoved rather than bank someone else's regression as
+a baseline — that ruling still holds, and this change does not touch `ratchet.json`. What this
+note adds to 210: the 96 `test/annexB/language/function-code` skips with bare `STA1214` are
+still there post-step-14, and the family is B.3.3 sloppy-mode semantics (catch-param plus
+block-level function), which a strict-only compiler cannot pass wholesale — the pin-era
+passes were strict-coincidences that 209's soundness refusal (block-fn shadowing → `STA1214`)
+ended. Narrowing that refusal to the strict-coincident shapes is Phase-5 language work with
+its own decision tests, in `gate.ts`, owned by that area — not a rider on a CI fix, and not
+attributable in a tree with a second agent landing Phase-7 work in the main checkout (the fix
+itself was therefore built in `.worktrees/ci-fix`, rebased onto `origin/main`).
+
+**Merge warning (mechanical, not judgmental).** While the aggregate gate is red,
+`revert-on-failure` reverts ANY push to `main` — as it already did to `70c7109` (`e6d5b94`).
+Merging this branch before the `-7` lands (or the owner directs otherwise) gets this fix
+reverted by the bot. The branch is the ready-to-land mechanical half; the `-7` is the gate.
+
 ## 240. Phase 10 — `std` like a systems library, OS threads ↔ async, parallel host compiler (2026-09-13)
 
 **Plan:** §11b Phase 10 (T10.1–T10.3), Phase 7 out-of-scope Threads row, Language & library
