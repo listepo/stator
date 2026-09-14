@@ -67,7 +67,7 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 | Union types | dynamic (tagged; narrowing = runtime check) | dynamic | **Implemented (Task 3.5), by having no union at all.** The HType model has no union node, so `string \| number` IS `Unknown` — and narrowing one therefore lands on exactly the machinery an `unknown` already needed, with no separate feature. A union whose constituents all map to ONE HType is that type instead: `"a" \| "b"` is a `string`, which is what makes `typeof` usable (its own type is a union of eight string literals). Discriminated unions checking a discriminant TAG are still deferred — that needs a union the model can see the constituents of. |
 | `unknown` type | dynamic (narrowing = runtime check) | dynamic | **Implemented (Task 3.5).** A narrowed read emits `jsrt_check_number/string/boolean`, which returns the value or raises `STA2001` with a `file:line:col`. The check is per USE, not per binding: nothing proves the value did not change between two reads. An UNnarrowed `unknown` gets no check — printing one asks nothing of it — and a narrowing to a type no tag settles in constant time (an object, an array, a signature) leaves the value `unknown` on the dynamic path rather than being refused. |
 | `as` casts | dynamic (boundary-checked) | dynamic | **Implemented (Task 3.5).** A cast off an `unknown` to a checkable type emits `jsrt_check_*`. An identity cast and a widening to `unknown` assert nothing and lower to the operand alone. A cast to a type no tag settles is DROPPED rather than believed: the value stays `unknown` and every operation downstream stays on the dynamic path, which is sound and costs nothing that compiles today. The older `<T>x` spelling is not accepted — it is ambiguous with JSX and adds a second syntax for a construct that has one. |
-| `JSON.parse()`, FFI returns | dynamic (boundary-checked, always) | dynamic | **`JSON.parse` implemented (Task 4.2, tenth slice)** — see its own row below; it lands `unknown`, and the checks its uses need are exactly the ones `as` and narrowing already emit. FFI returns are Phase 7 (Task 7.1; `docs/FFI.md`) — a C return is the one boundary no check can verify (§10 of that document). |
+| `JSON.parse()`, FFI returns | dynamic (boundary-checked, always) | dynamic | **`JSON.parse` implemented (Task 4.2, tenth slice)** — see its own row below; it lands `unknown`, and the checks its uses need are exactly the ones `as` and narrowing already emit. FFI returns are still Phase 6. |
 | Generic function declarations | static (monomorphized per concrete type tuple) | static, identically — a `.js` file cannot spell a type parameter, so a js-mode generic is a `.ts` file and gets the same specializations | Specialization happens AT the lowering, so no type parameter ever enters the HIR. Instantiations are shared by HType identity, which collapses literal types for free: `box(1)` and `box(2)` are one function. Depth is capped at 16 (STA2003) — `f<T>` calling `f<T[]>` has no fixed point. |
 | Generic function used as a value, generic arrows, constrained or defaulted type parameters, explicit type arguments, generic classes | not-yet(STA1214) | not-yet(STA1214) | Each has no tuple to specialize on, or no declaration to lower a second time. A value has one identity and many instantiations; a constraint is a check the subset cannot make. |
 
@@ -197,25 +197,6 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 | `delete` on a statically-shaped object (class field, fixed literal) | error(STA1108) | not-yet(STA1205, Phase 8) | The refused REMAINDER of `delete`; the dynamic-shape case landed (see Objects & classes). A fixed layout lists its fields at compile-time offsets and has no way to spell one as missing, so the field cannot go. `ts` mode forbids it — that layout is the mode — and in practice only a class field can reach the diagnostic, since TS2790 makes every other type-correct receiver dynamic. `js` mode defers to the Phase-8 dictionary-mode escape. An Unknown receiver that turns out fixed at run time aborts with STA2007. |
 | `with` statement, sloppy mode | error(STA1109) | error(STA1109) | ESM is always strict, and `with` is illegal in strict mode — so this is not a Stator restriction, it is the language's. |
 | CommonJS `require()` | error(STA1110) | error(STA1110) | ESM is the only module system in both modes. |
-
----
-
-## Foreign functions (Phase 7)
-
-Surface frozen in `docs/FFI.md` (Task 7.1 steps 1–2); the lowering is not
-implemented. An extern-shaped call today reads as the unmodelled-global
-catch-all below — with Phase 5 attribution that belongs to Phase 7, fixed when
-the gate learns the marker.
-
-| Feature | `ts` mode | `js` mode | Notes |
-|---|---|---|---|
-| Calling C via `@statorExtern declare function` | not-yet(STA1214, Phase 7) | not-yet(STA1214, Phase 7) — dynamic at the call once landed | On landing: a direct C call, static for typed arguments; arguments arriving from untyped code get the existing boundary check (`STA2001` on mismatch). `stator explain` will mark the call an unchecked boundary (the schema field lands with the lowering). |
-| Extern signature outside the ABI table (`Unknown`, objects, arrays, closures, bare `string`) | error(STA2010) | error(STA2010) | No implicit boxing or conversion at the boundary; a bare `string` needs the `const char*` selection spelled at the declaration. |
-| Extern declaration outside a script `.d.ts` | error(STA2008) | error(STA2008) | A `.ts` ambient keeps the overload-signature `STA1214`; a module `.d.ts` or any other file is this error. |
-| Malformed `@stator*` marker | error(STA2009) | error(STA2009) | Misplaced, duplicated, unknown tag, bad C-symbol shape, `@statorAbi` naming no parameter, unknown `@statorThrows` convention. |
-| Extern that is not a plain function (generics, overloads, optional/rest, `this`) | error(STA2011) | error(STA2011) | A C prototype has no `undefined` to pad with and no body to share. |
-| Exposing TS to C (`--emit-header`) | not-yet(STA1214, Phase 7) | not-yet(STA1214, Phase 7) | Task 7.2; reuses the ABI table in reverse. No new surface is frozen here. |
-| Header-driven binding generator | not-yet(STA1214, Phase 7) | not-yet(STA1214, Phase 7) | Task 7.3; generates the §1 declarations. Manual bindings are its oracle. |
 
 ---
 

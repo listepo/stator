@@ -689,7 +689,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
    | TS type | C type | Notes |
    |---|---|---|
    | `number` | `double` | The unmarked case; no conversion |
-   | `number` + `i32` refinement | `int32_t` | Spelled per parameter with `@statorAbi x: int32_t` (docs/FFI.md §3); the call boundary range-checks and throws on non-integral or out-of-range input, so v0 needs no HType refinement — which `hir/types.ts` records as still absent (plan-notes 241 corrects this row's old parenthetical) |
+   | `number` + `i32` refinement | `int32_t` | The refinement already exists (`docs/NUMERIC.md`) |
    | `boolean` | `bool` | `<stdbool.h>` |
    | `void` | `void` | Return position only |
    | branded pointer type | `T*` | Opaque; never dereferenced by generated code |

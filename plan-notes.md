@@ -4,61 +4,6 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
-## 241. Task 7.1 docs-first: the extern surface, the ABI table, and four new codes (2026-09-14)
-
-**Plan:** §10 Task 7.1 steps 1–2 (plus the policies steps 3–4 and 6–9 implement).
-`plan.md` was edited in this change (one table cell, §10 step 2 — see the
-contradiction below). No `src/` changed; no emitter, no gate, no tests: step 10
-owns the fixtures, and fixtures asserting codes no emitter produces would be
-fiction, not coverage.
-
-**What landed.** New `docs/FFI.md` (surface + ABI + frozen policies), a
-"Foreign functions (Phase 7)" section in `docs/SUBSET.md`, `STA2008–STA2011` in
-`docs/DIAGNOSTICS.md` (the sole allocator), and an index row in `docs/README.md`.
-Also fixed a stale pointer `SUBSET.md` carried: the Types row said "FFI returns
-are still Phase 6" — Phase 6 is conformance, FFI is Phase 7.
-
-**The three sub-decisions step 1 demands, frozen in `docs/FFI.md` §1.**
-
-1. *Marker attaches to the declaration.* A `declare function` plus JSDoc
-   `@statorExtern` (with `@statorSymbol` / `@statorHeader` / `@statorLib` /
-   `@statorAbi` / `@statorThrows` carrying the symbol override, includes, link
-   libs, per-parameter C spellings, and the error convention — one tag, one job,
-   §2). Whole-file marking was rejected: a binding file may mix externs with
-   helper types, and per-declaration presence is what promotes one ambient
-   declaration. Unmarked ambient `declare` keeps today's answer.
-2. *C symbol defaults to the TS name*, overridden by `@statorSymbol`
-   (`[A-Za-z_][A-Za-z0-9_]*`). Cross-unit collisions are compile errors; the code
-   is allocated with step 5, where the whole program's symbol table first exists.
-3. *Externs live only in script (non-module) `.d.ts` files*, included with
-   `/// <reference path />` — anything else is `STA2008`. That keeps 7.3's
-   generator output a drop-in.
-
-**Measured, not assumed (pinned `typescript` 6.0.3).** A probe `.d.ts` with the
-marker tags parses with zero checker diagnostics; the tags survive on
-`node.jsDoc[].tags` of the `FunctionDeclaration` (`ts.getJSDocTags()` returns
-`[]` in this version, so step 5 reads `.jsDoc` directly). A triple-slash
-reference pulls the `.d.ts` into `createProgram` output with no diagnostics, and
-the call gates today as `STA1214` Phase 5 global catch-all — the wrong phase
-(FFI is Phase 7), recorded as drift fixed when the gate learns the marker.
-
-**Contradiction found and fixed in the same change.** Step 2's ABI row said the
-`i32` refinement "already exists (`docs/NUMERIC.md`)". `hir/types.ts` says the
-opposite on purpose ("the i32 refinement [is] still absent rather than
-stubbed"), and no lowering tracks it. Resolution, frozen in `docs/FFI.md` §3:
-`int32_t` is spelled per parameter (`@statorAbi x: int32_t`) with a
-range-checking boundary conversion, so v0 needs no HType refinement at all —
-the HType stays `number`. `plan.md` §10 step 2's cell now says that.
-
-**Companion spellings frozen the same way.** Branded pointers are
-`{ readonly __stator_brand: '<C type>' }` with the literal doubling as the C
-type name; `string` maps to nothing without `@statorAbi s: const char*` (no
-implicit UTF-16→bytes conversion); a dynamic value at a branded-pointer
-parameter is always `STA2001`; embedded-NUL truncates, invalid UTF-8 becomes
-U+FFFD, copy failure aborts; `@statorThrows` is one of four closed conventions
-with the two absolutes restated (no unwind through C, undeclared failure modes
-are binding bugs).
-
 ## 240. Phase 10 — `std` like a systems library, OS threads ↔ async, parallel host compiler (2026-09-13)
 
 **Plan:** §11b Phase 10 (T10.1–T10.3), Phase 7 out-of-scope Threads row, Language & library
