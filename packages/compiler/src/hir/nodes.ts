@@ -841,6 +841,38 @@ export interface MathCall extends Node {
   readonly args: readonly Expression[];
 }
 
+/** The C spellings an extern parameter may take (docs/FFI.md §3). `pointer` is a branded
+ * handle (`T*`); every other row is a value the boundary converts without boxing. */
+export type ExternCType = 'double' | 'int32' | 'bool' | 'cstring' | 'pointer';
+
+/** The C error convention an extern declaration opts into (docs/FFI.md §6). `none` means the
+ * return is a plain value and a failing call is not an exception. */
+export type ExternThrows = 'none' | 'nonzero' | 'negative' | 'null' | 'errno';
+
+/** A call through the FFI to a C function (docs/FFI.md).
+ *
+ * `cSymbol` is the C symbol the emitter names — the TS name by default, the `@statorSymbol`
+ * override when present. `argC` runs parallel to `args` and selects each argument's C spelling;
+ * `argBrand` names the C type at pointer positions and is `undefined` elsewhere, so the emitter
+ * never has to recover which `T*` a handle meant. `retBrand` is present exactly when `retC` is
+ * `'pointer'`, for the same reason.
+ *
+ * `type` is the result HType: `double`/`int32` answer `number`, `bool` answers `boolean`, `void`
+ * answers `undefined`, `cstring` answers `string`, and `pointer` answers the branded handle. The
+ * call is made outside any construct that could throw across the C frame. */
+export interface ExternCall extends Node {
+  readonly kind: 'extern-call';
+  readonly cSymbol: string;
+  readonly args: readonly Expression[];
+  readonly argC: readonly ExternCType[];
+  /** C type name at pointer positions, `undefined` elsewhere. Parallel to `args`. */
+  readonly argBrand: readonly (string | undefined)[];
+  readonly retC: 'double' | 'int32' | 'bool' | 'void' | 'cstring' | 'pointer';
+  /** Present if and only if `retC` is `'pointer'`. */
+  readonly retBrand?: string;
+  readonly throws: ExternThrows;
+}
+
 /** A function VALUE: a declaration, a function expression and an arrow all lower to this.
  *
  * The three spellings differ in JavaScript over `this`, `arguments` and hoisting. None of those
@@ -1430,7 +1462,8 @@ export type Expression =
   | PromiseMethodCall
   | PromiseConstruct
   | ConsoleLogCall
-  | IteratorNext;
+  | IteratorNext
+  | ExternCall;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Statements

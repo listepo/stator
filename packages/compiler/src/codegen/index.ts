@@ -71,7 +71,7 @@ import {
   SET_OPS,
   stringOpCanThrow,
 } from '../hir/nodes.ts';
-import type { HField } from '../hir/types.ts'
+import type { HField, HType } from '../hir/types.ts';
 import { RECEIVER_NAME } from '../lower/captures.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
@@ -232,7 +232,11 @@ function declaredArity(fn: {
 }
 
 function closureMeta(fn: {
-  readonly params: readonly { readonly name: string; readonly rest?: true; readonly default?: unknown }[];
+  readonly params: readonly {
+    readonly name: string;
+    readonly rest?: true;
+    readonly default?: unknown;
+  }[];
 }): { readonly arity: number; readonly hasReceiver: boolean } {
   const hasReceiver = fn.params[0]?.name === RECEIVER_NAME;
   const params = hasReceiver ? fn.params.slice(1) : fn.params;
@@ -389,6 +393,13 @@ class Emitter {
     | IteratorNext,
     number
   > = new Map();
+  /* Frame slots for an extern call's jsrt_value operands and, when the C type boxes, its result.
+   * A statically branded pointer rides no slot: its C denotation is a raw `brand*`, and a frame
+   * slot is a jsrt_value (see externArgIsRaw). Keyed by node identity, like callSlots. */
+  private externSlots: Map<ExternCallNode, number> = new Map();
+  /* Numbers the fresh C temporaries one extern call declares (`_jsrt_extc_3`): two calls in one
+   * block must not share a name. Reset per emit, never per unit, so no two emissions collide. */
+  private externTemp = 0;
 
   /* Every class declared anywhere in the file, in the order counting reached them. The index is
    * the descriptor's C identity (`_jsrt_class_N`), and the name is how NewExpr and MethodCall --
@@ -508,6 +519,8 @@ class Emitter {
     this.templateSlots.clear();
     this.switchSlots.clear();
     this.callSlots.clear();
+    this.externSlots.clear();
+    this.externTemp = 0;
     this.classes = [];
     this.classIds.clear();
     this.slotCount = 0;
@@ -546,7 +559,25 @@ class Emitter {
     const functionLines = this.emitFunctionUnits();
     const mainLines = this.emitMain(module, globalSlots);
 
-    const out: string[] = ['#include "jsrt_value.h"', '', `JSRT_GLOBALS(${globalSlots});`, ''];
+    const externInfo = collectExternInfo(module);
+    const out: string[] = ['#include "jsrt_value.h"'];
+    // Extern headers ride the TU verbatim, double quotes always (docs/FFI.md §2), deduplicated
+    // with first occurrence winning. The feature-test system headers follow: each answers what
+    // one extern call in the module can need (errno's cell, snprintf, free), and none is emitted
+    // for a module without that need, so an extern-free TU is byte-identical to before.
+    for (const header of externInfo.headers) {
+      out.push(`#include "${header}"`);
+    }
+    if (externInfo.needsErrno) {
+      out.push('#include <errno.h>');
+    }
+    if (externInfo.needsStdio) {
+      out.push('#include <stdio.h>');
+    }
+    if (externInfo.needsStdlib) {
+      out.push('#include <stdlib.h>');
+    }
+    out.push('', `JSRT_GLOBALS(${globalSlots});`, '');
     // Forward declarations ahead of every definition, so a function can call itself, or one
     // declared further down the file.
     for (const unit of this.functions) {
@@ -555,7 +586,7 @@ class Emitter {
       );
       out.push(
         `static const JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
-          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? "true" : "false"}};`,
+          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}};`,
       );
     }
     if (this.functions.length > 0) {
@@ -1123,6 +1154,13 @@ class Emitter {
   }
 
   private countExpression(expr: Expression): void {
+    // The union in hir/nodes.ts does not carry 'extern-call' yet (parallel landing): probe first
+    // so the switch below keeps its exhaustiveness witness.
+    const ext = asExternCall(expr);
+    if (ext !== undefined) {
+      this.countExternCall(ext);
+      return;
+    }
     switch (expr.kind) {
       case 'logical-op':
         this.tempSlots.set(expr, this.slotCount);
@@ -1465,6 +1503,13 @@ class Emitter {
           if (stmt.expression.method === 'table') {
             this.emitPendingCheck(stmt.span);
           }
+          break;
+        }
+        // An extern call whose value is discarded: bare, without parking a result no consumer
+        // reads (a result temp nothing reads is a clang -Wunused warning under -Werror).
+        const ext = asExternCall(stmt.expression);
+        if (ext !== undefined) {
+          this.emitExternCall(ext, true);
           break;
         }
         const expr = this.emitExpression(stmt.expression);
@@ -2222,6 +2267,20 @@ class Emitter {
     return true;
   }
 
+  /* Evaluates an operand that denotes a RAW C value rather than a jsrt_value (a statically
+   * branded pointer): like sequencePart but with no slot to land in, so a pure operand answers
+   * its expression and one with statements of its own flushes the sequence first, exactly as
+   * sequencePart does, and answers whatever its statements left behind. */
+  private sequenceRaw(parts: string[], operand: Expression, span: Span): string {
+    const captured = this.capture(() => this.emitExpression(operand));
+    if (captured.lines.length === 0) {
+      return captured.value;
+    }
+    this.flushParts(parts, span);
+    this.lines.push(...captured.lines);
+    return captured.value;
+  }
+
   private flushParts(parts: string[], span: Span): void {
     if (parts.length > 0) {
       this.appendLine(`${parts.join(', ')};`, span);
@@ -2505,6 +2564,11 @@ class Emitter {
   }
 
   private emitExpression(expr: Expression): string {
+    // Same probe as in countExpression: the union does not carry the member yet.
+    const ext = asExternCall(expr);
+    if (ext !== undefined) {
+      return this.emitExternCall(ext, false);
+    }
     switch (expr.kind) {
       case 'number-literal': {
         return `jsrt_number(${cDoubleLiteral(expr.value)})`;
@@ -3310,6 +3374,433 @@ class Emitter {
     }
   }
 
+  /* Claims the frame slots one extern call's jsrt_value operands (and result, when it boxes)
+   * occupy. Slot-taking is decided per argument by externArgIsRaw, and emission replays the same
+   * predicate, so the two cannot disagree about the layout. */
+  private countExternCall(expr: ExternCallNode): void {
+    this.checkExternArity(expr);
+    let riding = 0;
+    for (const [index, arg] of expr.args.entries()) {
+      const c = expr.argC[index];
+      if (c === undefined) {
+        throw new Error(
+          'extern call arity disagrees with its ABI arrays; the lowering built a malformed node',
+        );
+      }
+      if (!externArgIsRaw(c, arg)) {
+        riding += 1;
+      }
+    }
+    this.externSlots.set(expr, this.slotCount);
+    this.slotCount += riding + (externNeedsResultSlot(expr.retC) ? 1 : 0);
+    for (const arg of expr.args) {
+      this.countExpression(arg);
+    }
+  }
+
+  /* The ABI arrays must describe every argument exactly once: argC selects each operand's C
+   * spelling and argBrand the pointer type where one is needed. */
+  private checkExternArity(expr: ExternCallNode): void {
+    if (expr.argC.length !== expr.args.length || expr.argBrand.length !== expr.args.length) {
+      throw new Error(
+        'extern call arity disagrees with its ABI arrays; the lowering built a malformed node',
+      );
+    }
+  }
+
+  /* Rejects what the lowering should never have built, before a line is emitted: a throws
+   * convention that names no value (or the wrong kind of value), and an unbranded pointer. */
+  private checkExternCall(expr: ExternCallNode): void {
+    switch (expr.throws) {
+      case 'none':
+      case 'errno':
+        break;
+      case 'nonzero':
+      case 'negative':
+        if (expr.retC !== 'double' && expr.retC !== 'int32') {
+          throw new Error(
+            `extern throws convention '${expr.throws}' needs a numeric return; the lowering built a malformed node`,
+          );
+        }
+        break;
+      case 'null':
+        if (expr.retC !== 'pointer') {
+          throw new Error(
+            "extern throws convention 'null' needs a pointer return; the lowering built a malformed node",
+          );
+        }
+        break;
+      default: {
+        const _exhaustive: never = expr.throws;
+        throw new Error(`Unknown extern throws convention: ${_exhaustive}`);
+      }
+    }
+    if (expr.retC === 'pointer' && expr.retBrand === undefined) {
+      throw new Error('extern pointer result has no brand; the lowering built a malformed node');
+    }
+    switch (expr.retC) {
+      case 'double':
+      case 'int32':
+      case 'bool':
+      case 'void':
+      case 'cstring':
+      case 'pointer':
+        break;
+      default: {
+        const _exhaustive: never = expr.retC;
+        throw new Error(`Unknown extern return: ${_exhaustive}`);
+      }
+    }
+  }
+
+  /* A fresh C temporary for one extern call (`_jsrt_extc_3`): two calls in one block must not
+   * share a name. */
+  private externTempName(role: string): string {
+    const name = `_jsrt_ext${role}_${String(this.externTemp)}`;
+    this.externTemp += 1;
+    return name;
+  }
+
+  /* The rooted slot one extern operand was evaluated into. A raw pointer operand has none, so
+   * asking for it is a counting/emission disagreement rather than anything the program did. */
+  private externSlotText(operand: ExternArgEval): string {
+    if (operand.slot === undefined) {
+      throw new Error('extern call operand has no slot; counting and emission disagree');
+    }
+    return this.slotAt(operand.slot);
+  }
+
+  /* The C declaration a non-void extern result parks in. A brand* needs its brand from the node;
+   * the check above already refused an unbranded pointer, so reaching here without one is an
+   * emitter bug rather than a lowering one. */
+  private externResultDecl(expr: ExternCallNode, temp: string): string {
+    switch (expr.retC) {
+      case 'double':
+        return `double ${temp}`;
+      case 'int32':
+        return `int32_t ${temp}`;
+      case 'bool':
+        return `bool ${temp}`;
+      case 'cstring':
+        return `const char *${temp}`;
+      case 'pointer': {
+        const brand = expr.retBrand;
+        if (brand === undefined) {
+          throw new Error('extern pointer result lost its brand; counting and emission disagree');
+        }
+        return `${brand} *${temp}`;
+      }
+      case 'void':
+        throw new Error('extern void call declares no result; counting and emission disagree');
+      default: {
+        const _exhaustive: never = expr.retC;
+        throw new Error(`Unknown extern return: ${_exhaustive}`);
+      }
+    }
+  }
+
+  /* An extern call as its own STATEMENTS: evaluate operands, convert, call, free, check, park.
+   * The value form answers the slot (or the raw pointer temp, or JSRT_UNDEFINED for void) the
+   * consumer reads; the discard form (statement position) emits the bare call instead, so no
+   * result temp sits unread. Either way every jsrt_value the call produces lands in a frame slot
+   * exactly like other call results, and the owning frame is never popped around the call.
+   *
+   * Phase order is load-bearing. (1) Every operand evaluates left to right before any conversion
+   * runs, so a throwing conversion never preempts a later operand's own failure. (2a) Throwing
+   * conversions (int32 range, the Unknown-pointer trap) check pending immediately, before any
+   * cstring borrow exists, so a `goto` here frees nothing because nothing is allocated yet.
+   * (2b) Pure conversions and cstring borrows follow in argument order. (3) The errno snapshot
+   * sits immediately before the call: the borrows above allocate, and allocation may clobber
+   * errno. (4) The direct call. (5) Every cstring borrow is freed before any post-call pending
+   * check: the borrow ends at return, so landing pads never see the temps. */
+  private emitExternCall(expr: ExternCallNode, discard: boolean): string {
+    const span = expr.span;
+    this.checkExternCall(expr);
+    const base = this.externSlots.get(expr);
+    if (base === undefined) {
+      throw new Error('extern call was not registered during counting');
+    }
+    const loc = this.callLocation(span);
+
+    // Phase 1: operands left to right. A jsrt_value operand lands in its rooted slot before the
+    // next runs; a raw brand* pointer records its expression, with whatever statements built it
+    // flushed ahead of it.
+    const parts: string[] = [];
+    const evals: ExternArgEval[] = [];
+    let cursor = base;
+    for (const [index, arg] of expr.args.entries()) {
+      const c = expr.argC[index];
+      if (c === undefined) {
+        throw new Error(
+          'extern call arity disagrees with its ABI arrays; the lowering built a malformed node',
+        );
+      }
+      if (c === 'pointer' && !externArgIsRaw(c, arg) && arg.type.kind !== 'unknown') {
+        throw new Error(
+          `extern pointer operand has type ${arg.type.kind}; the lowering sent a non-pointer`,
+        );
+      }
+      if (externArgIsRaw(c, arg)) {
+        evals.push({
+          c,
+          slot: undefined,
+          raw: this.sequenceRaw(parts, arg, span),
+          brand: expr.argBrand[index],
+        });
+        continue;
+      }
+      const slot = cursor;
+      cursor += 1;
+      this.sequencePart(parts, arg, span, (v) => `${this.slotAt(slot)} = ${v}`);
+      evals.push({ c, slot, raw: undefined, brand: expr.argBrand[index] });
+    }
+    this.flushParts(parts, span);
+    const resultSlot = cursor;
+
+    // Phase 2a: throwing conversions in argument order, each with its pending check.
+    const callArgs: string[] = [];
+    for (const [index, operand] of evals.entries()) {
+      if (operand.c === 'int32') {
+        const temp = this.externTempName('i');
+        this.appendLine(
+          `int32_t ${temp} = jsrt_extern_int32(jsrt_to_number(${this.externSlotText(operand)}), ${loc});`,
+          span,
+        );
+        this.emitPendingCheck(span);
+        callArgs[index] = temp;
+      } else if (operand.c === 'pointer' && operand.slot !== undefined) {
+        // A dynamic value reaching a pointer parameter is always STA2001 (docs/FFI.md §4): the
+        // runtime trap throws, and the pending check below carries it to the landing pad.
+        const brand = operand.brand;
+        if (brand === undefined) {
+          throw new Error(
+            'extern pointer operand has no brand; the lowering built a malformed node',
+          );
+        }
+        const temp = this.externTempName('p');
+        this.appendLine(
+          `${brand} *${temp} = (${brand} *)jsrt_extern_pointer(${this.externSlotText(operand)}, ${loc});`,
+          span,
+        );
+        this.emitPendingCheck(span);
+        callArgs[index] = temp;
+      }
+    }
+    // Phase 2b: pure conversions and cstring borrows in argument order. Indices settled above
+    // are skipped; an index neither phase settles trips the operand assembly below rather than
+    // passing garbage to C.
+    const cstringTemps: string[] = [];
+    for (const [index, operand] of evals.entries()) {
+      if (callArgs[index] !== undefined) {
+        continue;
+      }
+      if (operand.c === 'double') {
+        callArgs[index] = `jsrt_to_number(${this.externSlotText(operand)})`;
+      } else if (operand.c === 'bool') {
+        callArgs[index] = `jsrt_truthy(${this.externSlotText(operand)})`;
+      } else if (operand.c === 'cstring') {
+        const temp = this.externTempName('c');
+        this.appendLine(
+          `char *${temp} = jsrt_extern_utf8(${this.externSlotText(operand)});`,
+          span,
+        );
+        cstringTemps.push(temp);
+        callArgs[index] = temp;
+      } else if (operand.c === 'pointer') {
+        // Statically branded handles pass with no check (docs/FFI.md §4): the operand already
+        // denotes a raw brand*, and the temp only gives the call line a stable spelling. A
+        // slot-riding pointer would have settled in phase 2a, so arriving here with one is a
+        // counting/emission disagreement, caught below as a missing raw or brand.
+        const raw = operand.raw;
+        const brand = operand.brand;
+        if (raw === undefined || brand === undefined) {
+          throw new Error(
+            'extern pointer operand lost its value or brand; counting and emission disagree',
+          );
+        }
+        const temp = this.externTempName('p');
+        this.appendLine(`${brand} *${temp} = ${raw};`, span);
+        callArgs[index] = temp;
+      }
+    }
+    const operands: string[] = [];
+    for (let index = 0; index < expr.args.length; index++) {
+      const text = callArgs[index];
+      if (text === undefined) {
+        throw new Error('extern call conversion missed an argument; counting and emission disagree');
+      }
+      operands.push(text);
+    }
+
+    // Phase 3: the errno snapshot, immediately before the call.
+    let errnoTemp: string | undefined;
+    if (expr.throws === 'errno') {
+      errnoTemp = this.externTempName('e');
+      this.appendLine(`int ${errnoTemp} = errno;`, span);
+    }
+
+    // Phase 4: the direct call. A result temp exists exactly when something later reads it: the
+    // consumer in value form, or the NULL/throws check in either form.
+    const callText = `${expr.cSymbol}(${operands.join(', ')})`;
+    const checksResult =
+      expr.retC === 'pointer' || expr.retC === 'cstring' || expr.throws !== 'none';
+    let resultTemp: string | undefined;
+    if (expr.retC === 'void') {
+      this.appendLine(`${callText};`, span);
+    } else if (!discard || checksResult) {
+      const temp = this.externTempName('r');
+      this.appendLine(`${this.externResultDecl(expr, temp)} = ${callText};`, span);
+      resultTemp = temp;
+    } else {
+      this.appendLine(`${callText};`, span);
+    }
+
+    // Phase 5: every cstring borrow ends at return.
+    for (const temp of cstringTemps) {
+      this.appendLine(`free(${temp});`, span);
+    }
+
+    // Phase 6: a NULL handle or byte string is never a usable value. With throws 'null' the
+    // convention check below reports it instead, so the generic one stands down.
+    if (
+      resultTemp !== undefined &&
+      (expr.retC === 'cstring' || (expr.retC === 'pointer' && expr.throws !== 'null'))
+    ) {
+      this.appendLine(`if (${resultTemp} == NULL) {`, span);
+      this.indent++;
+      this.appendLine(
+        `jsrt_throw_error(&${errorDescriptor('Error')}, "${this.escapeCString(expr.cSymbol)} returned NULL");`,
+        span,
+      );
+      this.appendLine(`goto ${this.currentPad()};`, span);
+      this.indent--;
+      this.appendLine('}', span);
+    }
+
+    // Phase 7: the declared error convention.
+    this.emitExternThrows(expr, resultTemp, errnoTemp, span);
+
+    // Phase 8: park a boxed result for the consumer.
+    if (discard || resultTemp === undefined) {
+      return 'JSRT_UNDEFINED';
+    }
+    const parked = this.slotAt(resultSlot);
+    switch (expr.retC) {
+      case 'double':
+        this.appendLine(`${parked} = jsrt_number(${resultTemp});`, span);
+        return parked;
+      case 'int32':
+        this.appendLine(`${parked} = jsrt_number((double)${resultTemp});`, span);
+        return parked;
+      case 'bool':
+        this.appendLine(`${parked} = jsrt_bool(${resultTemp});`, span);
+        return parked;
+      case 'cstring':
+        this.appendLine(
+          `${parked} = jsrt_string_from_utf8(${resultTemp}, strlen(${resultTemp}));`,
+          span,
+        );
+        return parked;
+      case 'pointer':
+        // Opaque C memory is invisible to the collector (docs/FFI.md §7): nothing parks it, and
+        // the consumer reads the temp itself.
+        return resultTemp;
+      case 'void':
+        return 'JSRT_UNDEFINED';
+      default: {
+        const _exhaustive: never = expr.retC;
+        throw new Error(`Unknown extern return: ${_exhaustive}`);
+      }
+    }
+  }
+
+  /* The declared error convention (docs/FFI.md §6): on fire, a catchable Error naming the symbol
+   * and the value, then the pending check every throwing call gets. */
+  private emitExternThrows(
+    expr: ExternCallNode,
+    resultTemp: string | undefined,
+    errnoTemp: string | undefined,
+    span: Span,
+  ): void {
+    switch (expr.throws) {
+      case 'none':
+        break;
+      case 'nonzero':
+      case 'negative': {
+        // Validated numeric-only above; the temp exists because checksResult held there.
+        if (resultTemp === undefined) {
+          throw new Error(
+            'extern throws convention has no value to test; counting and emission disagree',
+          );
+        }
+        const test = expr.throws === 'nonzero' ? `${resultTemp} != 0` : `${resultTemp} < 0`;
+        const message = this.externTempName('m');
+        this.appendLine(`char ${message}[128];`, span);
+        this.appendLine(`if (${test}) {`, span);
+        this.indent++;
+        // An int32_t is 32 bits but `int` may be 16: long carries it everywhere, and %g reports a
+        // double without pretending shortest-round-trip (this is an error message, not output).
+        if (expr.retC === 'double') {
+          this.appendLine(
+            `snprintf(${message}, sizeof(${message}), "${this.escapeCString(expr.cSymbol)} failed: %g", ${resultTemp});`,
+            span,
+          );
+        } else {
+          this.appendLine(
+            `snprintf(${message}, sizeof(${message}), "${this.escapeCString(expr.cSymbol)} failed: %ld", (long)${resultTemp});`,
+            span,
+          );
+        }
+        this.appendLine(`jsrt_throw_error(&${errorDescriptor('Error')}, ${message});`, span);
+        this.emitPendingCheck(span);
+        this.indent--;
+        this.appendLine('}', span);
+        break;
+      }
+      case 'null': {
+        if (resultTemp === undefined) {
+          throw new Error(
+            'extern throws convention has no value to test; counting and emission disagree',
+          );
+        }
+        this.appendLine(`if (${resultTemp} == NULL) {`, span);
+        this.indent++;
+        this.appendLine(
+          `jsrt_throw_error(&${errorDescriptor('Error')}, "${this.escapeCString(expr.cSymbol)} failed: null");`,
+          span,
+        );
+        this.emitPendingCheck(span);
+        this.indent--;
+        this.appendLine('}', span);
+        break;
+      }
+      case 'errno': {
+        if (errnoTemp === undefined) {
+          throw new Error(
+            'extern errno convention has no snapshot; counting and emission disagree',
+          );
+        }
+        const message = this.externTempName('m');
+        this.appendLine(`char ${message}[128];`, span);
+        this.appendLine(`if (${errnoTemp} != 0) {`, span);
+        this.indent++;
+        this.appendLine(
+          `snprintf(${message}, sizeof(${message}), "${this.escapeCString(expr.cSymbol)} failed: errno %d", ${errnoTemp});`,
+          span,
+        );
+        this.appendLine(`jsrt_throw_error(&${errorDescriptor('Error')}, ${message});`, span);
+        this.emitPendingCheck(span);
+        this.indent--;
+        this.appendLine('}', span);
+        break;
+      }
+      default: {
+        const _exhaustive: never = expr.throws;
+        throw new Error(`Unknown extern throws convention: ${_exhaustive}`);
+      }
+    }
+  }
+
   /* The ordinary function unit: one C function, one stack frame, one exit protocol. */
   private emitSyncUnit(unit: FunctionUnit): void {
     const { fn } = unit;
@@ -3997,7 +4488,7 @@ class Emitter {
     }
     const name = cNameLiteral(fn.name ?? '');
     const meta = closureMeta(fn);
-    return `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? "true" : "false"})`;
+    return `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? 'true' : 'false'})`;
   }
 
   private appendLine(line: string, span?: Span): void {
@@ -4025,6 +4516,151 @@ class Emitter {
 export function emitC(module: Module): string {
   const emitter = new Emitter();
   return emitter.emit(module);
+}
+
+/* The frozen ExternCall node (docs/FFI.md §3-§7; plan.md §10 Task 7.1). hir/nodes.ts does not
+ * carry the member yet — the HIR agent lands it in parallel — so the emitter mirrors the frozen
+ * shape here and narrows to it at the boundary (asExternCall). `headers`/`libs` are absent from
+ * the frozen shape but the include and link steps need them from the module walk, so they ride
+ * here as optional: present when the lowering supplies them, empty otherwise. */
+type ExternArgC = 'double' | 'int32' | 'bool' | 'cstring' | 'pointer';
+
+type ExternRetC = 'double' | 'int32' | 'bool' | 'void' | 'cstring' | 'pointer';
+
+type ExternThrows = 'none' | 'nonzero' | 'negative' | 'null' | 'errno';
+
+interface ExternCallNode {
+  readonly kind: 'extern-call';
+  readonly type: HType;
+  readonly span: Span;
+  readonly cSymbol: string;
+  readonly args: readonly Expression[];
+  readonly argC: readonly ExternArgC[];
+  readonly argBrand: readonly (string | undefined)[];
+  readonly retC: ExternRetC;
+  readonly retBrand?: string;
+  readonly throws: ExternThrows;
+  readonly headers?: readonly string[];
+  readonly libs?: readonly string[];
+}
+
+/* One evaluated extern operand: either a rooted jsrt_value slot or, for a statically branded
+ * handle, the raw brand* expression recorded for its temp. Exactly one of the two is present. */
+interface ExternArgEval {
+  readonly c: ExternArgC;
+  readonly slot: number | undefined;
+  readonly raw: string | undefined;
+  readonly brand: string | undefined;
+}
+
+/* Everything one module walk finds for the extern steps: include headers, link libraries, and
+ * which feature-test system headers the emitted TU needs. */
+interface ExternModuleInfo {
+  readonly headers: readonly string[];
+  readonly libs: readonly string[];
+  readonly needsErrno: boolean;
+  readonly needsStdio: boolean;
+  readonly needsStdlib: boolean;
+}
+
+/* Narrows an Expression to the frozen ExternCall shape. The probe goes through `kind` as a
+ * string: a `case` label or a direct literal comparison would not compile against the union
+ * while it lacks the member. */
+function asExternCall(expr: Expression): ExternCallNode | undefined {
+  if ((expr.kind as string) !== 'extern-call') {
+    return undefined;
+  }
+  return expr as unknown as ExternCallNode;
+}
+
+/* Whether an extern argument denotes a raw C pointer rather than a jsrt_value: exactly a
+ * statically branded handle at a pointer position. Count and emit both branch on this one
+ * predicate, so the slot layout they agree on cannot drift. */
+function externArgIsRaw(c: ExternArgC, arg: Expression): boolean {
+  return c === 'pointer' && arg.type.kind === 'pointer';
+}
+
+/* Whether a C return of this spelling parks a jsrt_value in the result slot. Void parks nothing,
+ * and a pointer parks nothing either: opaque C memory is invisible to the collector, so there is
+ * no rooted home for it (docs/FFI.md §7). */
+function externNeedsResultSlot(retC: ExternRetC): boolean {
+  return retC === 'double' || retC === 'int32' || retC === 'bool' || retC === 'cstring';
+}
+
+/* Runs visit on every extern call in a module subtree. Generic rather than hand-written per node
+ * kind: a traversal that names every kind silently misses each kind added after it, while plain
+ * data with string `kind` fields cannot hide from this one. HIR subtrees are trees (no cycles),
+ * and `type`/`span` subtrees can hold no calls, so they are skipped rather than walked. */
+function visitExternCalls(node: unknown, visit: (node: ExternCallNode) => void): void {
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      visitExternCalls(item, visit);
+    }
+    return;
+  }
+  if (typeof node !== 'object' || node === null) {
+    return;
+  }
+  const record = node as Record<string, unknown>;
+  if (record['kind'] === 'extern-call') {
+    visit(record as unknown as ExternCallNode);
+  }
+  for (const key of Object.keys(record)) {
+    if (key === 'type' || key === 'span') {
+      continue;
+    }
+    visitExternCalls(record[key], visit);
+  }
+}
+
+/* First-occurrence-wins insertion. Anything but a non-empty string is a malformed node from the
+ * lowering, and throwing names it rather than emitting a `#include ""` for clang to choke on. */
+function pushExternUnique(into: string[], value: unknown, what: string): void {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`extern call carries a malformed ${what}; the lowering built an invalid node`);
+  }
+  if (!into.includes(value)) {
+    into.push(value);
+  }
+}
+
+/* One walk over the module for every extern step: emitC's includes here, the link line through
+ * collectExternLink below. Link order is load-bearing for static archives, so libraries keep
+ * first-occurrence order and are never sorted (docs/FFI.md §2). */
+function collectExternInfo(module: Module): ExternModuleInfo {
+  const headers: string[] = [];
+  const libs: string[] = [];
+  let needsErrno = false;
+  let needsStdio = false;
+  let needsStdlib = false;
+  visitExternCalls(module, (node) => {
+    for (const header of node.headers ?? []) {
+      pushExternUnique(headers, header, 'header');
+    }
+    for (const lib of node.libs ?? []) {
+      pushExternUnique(libs, lib, 'library');
+    }
+    if (node.throws === 'errno') {
+      needsErrno = true;
+    }
+    if (node.throws === 'nonzero' || node.throws === 'negative' || node.throws === 'errno') {
+      needsStdio = true;
+    }
+    if (node.argC.some((c) => c === 'cstring')) {
+      needsStdlib = true;
+    }
+  });
+  return { headers, libs, needsErrno, needsStdio, needsStdlib };
+}
+
+/* The extern link surface for the build step: every header and library the module's extern calls
+ * name, order-preserving with first occurrence winning. */
+export function collectExternLink(module: Module): {
+  readonly headers: readonly string[];
+  readonly libs: readonly string[];
+} {
+  const info = collectExternInfo(module);
+  return { headers: info.headers, libs: info.libs };
 }
 
 /** The C call one Map or Set operation becomes, given its already-sequenced operands.

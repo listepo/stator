@@ -192,6 +192,17 @@ export interface HTypeParam {
   readonly name: string;
 }
 
+/** An opaque C handle: an address the generated code passes back but never dereferences.
+ *
+ * `brand` is the C type spelling (docs/FFI.md §4): `'sqlite3'` calls through `sqlite3*`. Two
+ * handles with different brands are incompatible, which is what makes a statement never a
+ * database. An address is concrete — it carries no dynamic content — so `hTypeHasUnknown` is
+ * false for it, and a dynamic value reaching one is a boundary failure (`STA2001`). */
+export interface HPointer {
+  readonly kind: 'pointer';
+  readonly brand: string;
+}
+
 export type HType =
   | HNumber
   | HString
@@ -208,7 +219,8 @@ export type HType =
   | HDate
   | HPromise
   | HObject
-  | HTypeParam;
+  | HTypeParam
+  | HPointer;
 
 export const H_NUMBER: HNumber = { kind: 'number' };
 export const H_STRING: HString = { kind: 'string' };
@@ -244,6 +256,12 @@ export function hPromise(value: HType): HPromise {
 
 export function hTypeParam(name: string): HTypeParam {
   return { kind: 'type-param', name };
+}
+
+/** An opaque handle for the C type `brand`, which must already be the spelling the emitted
+ * prototype names. Nothing constructs one in TS: handles only arrive as extern returns. */
+export function hPointer(brand: string): HPointer {
+  return { kind: 'pointer', brand };
 }
 
 export function hObject(
@@ -340,6 +358,11 @@ export function hTypeEquals(a: HType, b: HType): boolean {
   if (a.kind === 'type-param' && b.kind === 'type-param') {
     return a.name === b.name;
   }
+  // By brand, for the same reason a class is nominal: the brand IS the C type, and two C types
+  // with different spellings are different types even when both are addresses.
+  if (a.kind === 'pointer' && b.kind === 'pointer') {
+    return a.brand === b.brand;
+  }
   if (a.kind === 'fn' && b.kind === 'fn') {
     return (
       a.params.length === b.params.length &&
@@ -386,6 +409,11 @@ export function hTypeAssignable(value: HType, target: HType): boolean {
   if (value.kind === 'array' && target.kind === 'array') {
     return hTypeAssignable(value.element, target.element);
   }
+  // Brand equality, like every other kind here: a `sqlite3*` is not a usable `sqlite3_stmt*`,
+  // and an Unknown on either side stays assignable per the rule above.
+  if (value.kind === 'pointer' && target.kind === 'pointer') {
+    return value.brand === target.brand;
+  }
   return hTypeEquals(value, target);
 }
 
@@ -408,6 +436,10 @@ export function hTypeHasUnknown(t: HType): boolean {
   }
   if (t.kind === 'fn') {
     return t.params.some(hTypeHasUnknown) || hTypeHasUnknown(t.ret);
+  }
+  // An address is concrete: it carries no dynamic content, however it was obtained.
+  if (t.kind === 'pointer') {
+    return false;
   }
   // An object stops the walk, for the same reason equality does: the type can be cyclic. A field
   // whose type is Unknown makes the READ of that field dynamic, and the read is where it is seen --
@@ -433,6 +465,9 @@ export function hasTypeParam(t: HType): boolean {
       return hasTypeParam(t.key) || hasTypeParam(t.value);
     case 'fn':
       return t.params.some(hasTypeParam) || hasTypeParam(t.ret);
+    case 'pointer':
+      // A brand is a C spelling, not a type the program substitutes: nothing to walk.
+      return false;
     default:
       // An object stops the walk for the reason equality does: the type can be cyclic. A generic
       // CLASS is a separate feature the gate refuses, so no field can hold a type parameter today.
@@ -443,6 +478,10 @@ export function hasTypeParam(t: HType): boolean {
 /** Diagnostic text. Matches the names users see in TypeScript so a Stator message and a tsc
  * message describing the same value agree. */
 export function hTypeName(t: HType): string {
+  // The message names the C type: the brand is the spelling the emitted prototype used.
+  if (t.kind === 'pointer') {
+    return t.brand;
+  }
   if (t.kind === 'object' || t.kind === 'type-param') {
     return t.name;
   }

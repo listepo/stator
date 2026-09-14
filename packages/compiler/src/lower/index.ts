@@ -7,6 +7,8 @@
  */
 
 import * as ts from 'typescript';
+import { externDeclOfCall } from '../frontend/extern.ts';
+import type { ExternDecl } from '../frontend/extern.ts';
 import {
   errorCtorName,
   INSTANCEOF_BUILTINS,
@@ -71,6 +73,7 @@ import type {
   DynEntry,
   DynFieldAccess,
   Expression,
+  ExternCall,
   FieldAccess,
   FunctionDeclaration,
   FunctionExpr,
@@ -208,8 +211,9 @@ const UNARY_OPERATORS = new Map<ts.SyntaxKind, UnaryOp['operator']>([
 export function lowerSourceFile(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
+  mode: Mode = 'ts',
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
-  return lowerProgram([sourceFile], checker);
+  return lowerProgram([sourceFile], checker, new Set(), mode);
 }
 
 /* Lowers a whole program -- the module-graph files in topological order, entry LAST -- into ONE
@@ -226,10 +230,42 @@ const immutableSelfBindings = new Set<string>();
 /** Set when an await is lowered at functionNesting === 0. Reset per lowerProgram. */
 let moduleAwaits = false;
 
+/* The mode `lowerProgram` is lowering under. Module state rather than a parameter because the
+ * call-lowering path sits twenty functions deep: `functionNesting` and `moduleAwaits` above are
+ * the same trade, and the one reader (`lowerExternCall`'s arity diagnostic) needs the mode the
+ * diagnostic schema demands. Set by `lowerProgram`, defaulting to 'ts' until the CLI threads its
+ * own (build.ts / explain.ts own that call). */
+type Mode = 'ts' | 'js';
+
+let currentMode: Mode = 'ts';
+
+/* FFI extern-call integration seam (plan.md §10 Task 7.1 step 5, lowering half).
+ *
+ * The resolver is `externDeclOfCall` in `../frontend/extern.ts` (gate agent), imported above
+ * under its frozen signature
+ * `(node, checker, sourceFile, mode) → { decl: ExternDecl } | { error: Diagnostic } | null`,
+ * and the node is `ExternCall` (+ `ExternCType`, `ExternThrows`) in `../hir/nodes.ts` (HIR
+ * agent), likewise imported. Both halves landed while this branch was being built; what remains
+ * below is only the mode plumbing and the small resolution alias.
+ *
+ * Two cross-agent conflicts for the owners, found while wiring this up (neither is the
+ * lowering's to fix — ownership stays with the files named):
+ * 1. Pointer representation: `extern.ts` maps a branded handle to a nominal empty OBJECT
+ *    (`hObject(brand, [], [])`, "hir/types.ts carries no pointer kind"), while `hir/types.ts`
+ *    now carries `HPointer` and the verifier's `extern-call` case demands `type.kind ===
+ *    'pointer'` at a pointer return (STA4098). Every pointer-returning extern this branch builds
+ *    will trip that check until the two agree.
+ * 2. `extern.ts`'s `checkerOf` helper throws unconditionally, and `mapCType`'s default arm
+ *    evaluates it for every non-table HType with a defined `ts.Type` — so any branded-pointer
+ *    parameter, and every clean STA2010 refusal past that line, throws instead of mapping. At
+ *    this call site that surfaces as STA4030; through the gate it escapes uncaught. */
+type ExternResolution = ReturnType<typeof externDeclOfCall>;
+
 export function lowerProgram(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
   runtimeDynamicSymbols: ReadonlySet<ts.Symbol> = new Set(),
+  mode: Mode = 'ts',
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
   const bindings = Scope.root();
@@ -239,6 +275,7 @@ export function lowerProgram(
   const statements: Statement[] = [];
   functionNesting = 0;
   moduleAwaits = false;
+  currentMode = mode;
   const entry = files.at(-1);
   if (entry === undefined) {
     throw new Error('lowerProgram requires at least one file');
@@ -248,6 +285,15 @@ export function lowerProgram(
   try {
     for (const sourceFile of files) {
       current = sourceFile;
+      // Declaration files describe interfaces; they never execute, so there is nothing to lower.
+      // The module graph already excludes them (`pushResolved` drops declaration targets and
+      // triple-slash references create no edges at all), and the gate skips them too — this is
+      // the third guard, for direct `lowerProgram` callers and against either of the first two
+      // drifting. Without it an ambient `declare function` would hoist a binding for a value that
+      // does not exist and every statement would risk STA4031 verifier noise.
+      if (sourceFile.isDeclarationFile) {
+        continue;
+      }
       // Monomorphization runs before anything is lowered, because a specialization is a FUNCTION
       // the module contains and the module's own statements may call it. Nothing is cloned: a
       // specialization is the generic's own AST lowered a second time with a substitution in
@@ -314,6 +360,14 @@ export function lowerProgram(
         // lowering drops them here, and uses of the name are ordinary annotations the checker
         // already resolved to a shape.
         if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+          continue;
+        }
+        // A function declaration with no body binds no value and emits no code either: an
+        // ambient `declare function` or an overload signature. Both are refused by the gate
+        // before lowering; skipping here keeps a stray one from failing the whole module, the
+        // same erasure the interfaces above get. (`lowerStatement` erases one anyway on the
+        // unreachable paths that still reach it.)
+        if (ts.isFunctionDeclaration(node) && node.body === undefined) {
           continue;
         }
         const stmt = lowerStatement(node, sourceFile, checker, bindings, diagnostics);
@@ -644,6 +698,20 @@ function lowerStatement(
       );
       return null;
     }
+    // A declaration with no body binds no value and emits no code: an ambient
+    // `declare function` or an overload signature. The gate refuses both before the lowering
+    // ever sees them; erasing here (the same nothing a nested interface lowers to) keeps a
+    // stray one from failing the whole module with a body-less `null` instead of lowering what
+    // executes. The implementation signature — the one overload that HAS a body — still hoists
+    // and lowers normally.
+    if (node.body === undefined) {
+      return {
+        kind: 'block',
+        type: H_UNDEFINED,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        statements: [],
+      };
+    }
     const fn = lowerFunction(node, sourceFile, checker, bindings, diagnostics);
     if (fn === null) {
       return null;
@@ -744,6 +812,74 @@ function checkCallArgs(
     }
     return maybeBoundary(arg, expected, site, sourceFile);
   });
+}
+
+/** Lower a call to an extern C function (docs/FFI.md, plan.md §10 Task 7.1 step 5).
+ *
+ * `checkCallArgs` is deliberately not consulted: an extern callee is a C symbol, not a function
+ * value, so there is no `fn` signature to read expectations off — the declaration's parameter
+ * types are the expectations, position by position. Arity is exact (a C prototype has no
+ * `undefined` to pad with and v0 has no varargs): a mismatch is STA2011, checked BEFORE the
+ * arguments are lowered so one refusal does not cascade into arg-shapen noise. `tsc` already
+ * rejects the mismatch in ts mode; js mode needs this loud refusal because zero-padding NULL or
+ * NaN would be silent unsoundness. */
+function lowerExternCall(
+  node: ts.CallExpression,
+  decl: ExternDecl,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  if (node.arguments.length !== decl.params.length) {
+    diagnostics.push(
+      diagnosticFromNode(
+        node,
+        sourceFile,
+        'STA2011',
+        'error',
+        currentMode,
+        `extern '${decl.tsName}' expects ${String(decl.params.length)} arguments, got ${String(node.arguments.length)}`,
+      ),
+    );
+    return null;
+  }
+  const lowered = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  if (lowered === null) {
+    return null;
+  }
+  // The js-mode edge, on the ordinary call's discipline: a dynamic argument reaching an annotated
+  // parameter is wrapped in a `boundary-check` the runtime settles with STA2001. A pointer
+  // expectation is never checkable (`isCheckable` names only the three tag-testable primitives),
+  // so an Unknown there passes through unwrapped and the emitter throws STA2001 for it by
+  // construction (docs/FFI.md §4) — the verifier holds this shape either way (STA4098).
+  const args = lowered.map((arg, i) => {
+    const expected = decl.params[i];
+    const site = node.arguments[i];
+    if (expected === undefined || site === undefined) {
+      // Unreachable: the arity check above pinned the two lists to the same length, and the map
+      // runs over the lowered arguments. Returning the argument keeps the total function honest
+      // without a diagnostic no user could act on.
+      return arg;
+    }
+    return maybeBoundary(arg, expected.type, site, sourceFile);
+  });
+  // `argBrand` names the C type at pointer positions and is `undefined` elsewhere; `retBrand` is
+  // present exactly at a pointer return — the verifier restates both (STA4098), so the emitter
+  // never has to recover which `T*` a handle meant. The node type is the declaration's result.
+  const call: ExternCall = {
+    kind: 'extern-call',
+    type: decl.retType,
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    cSymbol: decl.cSymbol,
+    args,
+    argC: decl.params.map((param) => param.c),
+    argBrand: decl.params.map((param) => (param.c === 'pointer' ? param.brand : undefined)),
+    retC: decl.retC,
+    ...(decl.retBrand !== undefined && { retBrand: decl.retBrand }),
+    throws: decl.throws,
+  };
+  return call;
 }
 
 /** Wrap `value` in a BoundaryCheck when it is Unknown and `expected` is a tag the runtime
@@ -2422,13 +2558,8 @@ function lowerBlock(
   return block;
 }
 
-
 /** `receiver.concat(other)` as an HIR node — the lowering for array-literal spread. */
-function arrayConcatExpr(
-  target: Expression,
-  other: Expression,
-  span: Span,
-): Expression {
+function arrayConcatExpr(target: Expression, other: Expression, span: Span): Expression {
   const shape = ARRAY_OPS.concat;
   const type: HType = shape.result === 'self' ? target.type : hUnknown(false);
   return { kind: 'array-op', type, span, op: 'concat', target, args: [other] };
@@ -2464,7 +2595,13 @@ function lowerArrayLiteralExpression(
   const segments: Array<{ elems: Expression[] } | { spread: Expression }> = [];
   for (const element of node.elements) {
     if (ts.isSpreadElement(element)) {
-      const spread = lowerExpression(element.expression, sourceFile, checker, bindings, diagnostics);
+      const spread = lowerExpression(
+        element.expression,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
       if (spread === null) {
         return null;
       }
@@ -4153,40 +4290,40 @@ function lowerExpression(
         // emitter look for a method that class does not own.
         const owner = declaringClassName(obj, propName, checker);
         if (owner !== null) {
-        // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
-        // which is sound for the same reason a field slot is: a subclass's method table begins
-        // with its base's, in the base's order.
-        const slot = target.type.methods.findIndex((m) => m.name === propName);
-        if (slot < 0) {
-          diagnostics.push(
-            diagnosticFromNode(
-              expr,
-              sourceFile,
-              'STA4067',
-              'internal',
-              'ts',
-              `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
-            ),
-          );
-          return null;
-        }
-        const call: MethodCall = {
-          kind: 'method-call',
-          type: typeAt(node, checker, bindings),
-          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-          target,
-          className: owner,
-          method: propName,
-          slot,
-          // Skipping the override is what `super` MEANS, so this one call stays direct even where
-          // every other call to the same method is virtual.
-          dispatch:
-            !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
-              ? 'virtual'
-              : 'direct',
-          args,
-        };
-        return call;
+          // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
+          // which is sound for the same reason a field slot is: a subclass's method table begins
+          // with its base's, in the base's order.
+          const slot = target.type.methods.findIndex((m) => m.name === propName);
+          if (slot < 0) {
+            diagnostics.push(
+              diagnosticFromNode(
+                expr,
+                sourceFile,
+                'STA4067',
+                'internal',
+                'ts',
+                `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
+              ),
+            );
+            return null;
+          }
+          const call: MethodCall = {
+            kind: 'method-call',
+            type: typeAt(node, checker, bindings),
+            span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+            target,
+            className: owner,
+            method: propName,
+            slot,
+            // Skipping the override is what `super` MEANS, so this one call stays direct even where
+            // every other call to the same method is virtual.
+            dispatch:
+              !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
+                ? 'virtual'
+                : 'direct',
+            args,
+          };
+          return call;
         }
       }
     }
@@ -4198,6 +4335,35 @@ function lowerExpression(
     const specialized = specializedCallee(node, sourceFile, checker, bindings, diagnostics);
     if (specialized === null) {
       return null;
+    }
+
+    // An extern call names no value: its declaration lives in a `.d.ts` the module order never
+    // contains, so no binding exists for it and lowering the callee as a value would manufacture
+    // STA4035 (a real declaration arriving with no binding is exactly what that code reports).
+    // The resolver owns the decision — including shadowing, where the callee answers to a local
+    // binding instead — so this branch runs before the callee is lowered and a miss falls through
+    // to the ordinary path below untouched. Extern callees are bare identifiers (script-file
+    // globals), which is why this one site covers them: every property-access shape returned
+    // earlier.
+    const externResolution: ExternResolution = externDeclOfCall(
+      node,
+      checker,
+      sourceFile,
+      currentMode,
+    );
+    if (externResolution !== null) {
+      if ('error' in externResolution) {
+        diagnostics.push(externResolution.error);
+        return null;
+      }
+      return lowerExternCall(
+        node,
+        externResolution.decl,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
     }
 
     // An ordinary call's callee is evaluated as a value like any other expression -- the gate has
@@ -4248,7 +4414,15 @@ function hoistFunctionDeclarations(
   bindings: Scope,
 ): void {
   for (const statement of statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
+    // Body-less declarations (ambient `declare function`, overload signatures) bind no value —
+    // the statement arm erases them — so only the implementation signature takes a binding here.
+    // Skipping them changes nothing for overloads: same-scope re-declarations already shared one
+    // home, and the bodied signature still declares it.
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      statement.name !== undefined &&
+      statement.body !== undefined
+    ) {
       hirNameOfDeclaration.set(
         statement,
         bindings.declare(statement.name.text, typeAt(statement, checker, bindings)),

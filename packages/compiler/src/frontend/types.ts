@@ -492,10 +492,7 @@ export function objectLiteralIsDynamic(
 }
 
 /** The structural name of a shape: what makes two identical literals one layout. */
-export function shapeName(
-  fields: readonly HField[],
-  methods: readonly HField[] = [],
-): string {
+export function shapeName(fields: readonly HField[], methods: readonly HField[] = []): string {
   const parts = [
     ...fields.map((f) => `${f.name}: ${hTypeName(f.type)}`),
     ...methods.map((m) => `${m.name}: ${hTypeName(m.type)}`),

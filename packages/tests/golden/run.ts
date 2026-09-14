@@ -6,7 +6,7 @@
  * included (Ryu shortest-round-trip). A mismatch is a semantics bug: never loosen the
  * comparison to make it pass.
  */
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,6 +86,28 @@ interface Streams {
   readonly stderr: string;
 }
 
+/* Per-fixture link directives, read from the entry's own comments:
+ *   // @link: m sqlite3      extra -l flags for this fixture's link line, in order
+ *   // @extra-c: helper.c    C files from the fixture's directory, compiled with the
+ *                             generated C in the SAME clang invocation
+ * Both are optional and repeatable-as-a-list on one line; absent means neither. A missing
+ * `@extra-c` file fails the fixture's build at the CLI (`STA0007` naming the path), which the
+ * runner reports against the fixture like any other build failure. */
+interface FixtureLink {
+  readonly libs: readonly string[];
+  readonly extraC: readonly string[];
+}
+
+function fixtureLink(entry: string): FixtureLink {
+  const source = readFileSync(entry, 'utf8');
+  const words = (name: string): string[] => {
+    const line = new RegExp(`^//\\s*@${name}:\\s*(.+)$`, 'm').exec(source)?.[1]?.trim() ?? '';
+    return line === '' ? [] : line.split(/\s+/);
+  };
+  const dir = dirname(entry);
+  return { libs: words('link'), extraC: words('extra-c').map((file) => join(dir, file)) };
+}
+
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
  * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
  * compile into each other's `app`. */
@@ -93,9 +115,19 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<Streams> {
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
+    const link = fixtureLink(path);
     const build = await runProcess(
       process.execPath,
-      [CLI, 'build', path, '-o', out, `--mode=${mode}`],
+      [
+        CLI,
+        'build',
+        path,
+        '-o',
+        out,
+        `--mode=${mode}`,
+        ...link.libs.map((lib) => `--link=${lib}`),
+        ...link.extraC.map((file) => `--extra-c=${file}`),
+      ],
       { env: PINNED_ENV },
     );
     if (build.status !== 0) {

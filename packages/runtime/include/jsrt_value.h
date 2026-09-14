@@ -1364,6 +1364,22 @@ jsrt_value jsrt_check_number(jsrt_value v, const char *where);
 jsrt_value jsrt_check_string(jsrt_value v, const char *where);
 jsrt_value jsrt_check_boolean(jsrt_value v, const char *where);
 
+/* --------------------------------------------------- extern (C-from-TS) calls */
+
+/* Conversions at the extern call boundary (docs/FFI.md §5), runtime/src/jsrt_extern.c. The
+ * emitter lowers each extern parameter to one of these; failures trap with STA2001 through
+ * the boundary-check path above, carrying the baked `file:line:col` the call site passed.
+ *
+ * `jsrt_extern_utf8` answers a malloc-owned NUL-terminated UTF-8 copy the caller frees --
+ * the borrow the callee sees for the duration of the call. An embedded U+0000 truncates the
+ * copy there; a lone surrogate encodes as itself, the house rule jsrt_shape_key states.
+ * `jsrt_extern_int32` range-checks per the ABI table (docs/FFI.md §3) and throws rather
+ * than truncates. `jsrt_extern_pointer` always traps: a dynamic value cannot mint an
+ * address (docs/FFI.md §4). */
+char *jsrt_extern_utf8(jsrt_value v);
+int32_t jsrt_extern_int32(double d, const char *loc);
+void *jsrt_extern_pointer(jsrt_value v, const char *loc);
+
 /* --------------------------------------------------------------- output */
 
 void jsrt_print(jsrt_value v); /* console.log semantics: prints -0 as "-0" */

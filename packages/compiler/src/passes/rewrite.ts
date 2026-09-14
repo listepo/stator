@@ -417,6 +417,12 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       const arg = sub(expr.arg);
       return arg === expr.arg ? expr : { ...expr, arg };
     }
+    // Only `args` recurse: `cSymbol` names the C function rather than a value, and the C-spelling
+    // arrays (`argC`, `argBrand`, `retC`, `retBrand`) and `throws` are leaves describing the call.
+    case 'extern-call': {
+      const args = rewriteEach(expr.args, sub);
+      return args === expr.args ? expr : { ...expr, args };
+    }
     case 'promise-method': {
       const target = sub(expr.target);
       const args = rewriteEach(expr.args, sub);

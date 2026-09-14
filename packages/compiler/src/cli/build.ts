@@ -41,6 +41,12 @@ export interface BuildOptions {
    * override. `0` trades runtime speed for faster iterate compiles. Full per-module `.o` cache and
    * parallel clang are a separate follow-up — not this knob. */
   readonly opt?: OptLevel;
+  /** Extra libraries appended to the link line after `-ljsrt` and the runtime's recorded flags.
+   * CLI `--link=` (FFI `@statorLib` escape hatch). Order is preserved; see `dedupeLinkLibs`. */
+  readonly linkLibs?: readonly string[];
+  /** Extra C files compiled in the SAME clang invocation as the generated C (the golden harness's
+   * `@extra-c` fixtures). Paths as given; a missing file is `STA0007`. */
+  readonly extraCFiles?: readonly string[];
 }
 
 /** Raised for conditions the USER can act on: a missing file, a missing toolchain. Anything the
@@ -146,15 +152,45 @@ function extraLinkFlags(): string[] {
   return flags === '' ? [] : flags.split(/\s+/);
 }
 
+/** First-occurrence-wins union of library-name lists: `@statorLib` extern libs, then CLI
+ * `--link` libs (FFI.md §2). Link order is load-bearing for static archives, so this never
+ * sorts; a repeat later in the union is dropped, never moved. The runtime's recorded flags stay
+ * out of this — they are whole flags (`-L… -lgc -lm`), not library names. */
+function dedupeLinkLibs(...lists: readonly (readonly string[])[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const list of lists) {
+    for (const lib of list) {
+      if (!seen.has(lib)) {
+        seen.add(lib);
+        merged.push(lib);
+      }
+    }
+  }
+  return merged;
+}
+
+/** What `compileToC` hands the link: the C text, plus the extern-declared libraries in
+ * first-occurrence order for `link()` to append after the runtime's own flags. */
+export interface CompiledC {
+  readonly c: string;
+  readonly externLibs: readonly string[];
+}
+
 /** Returns the process exit code: 0 on success, 1 if the program was rejected. */
 export async function build(options: BuildOptions): Promise<number> {
-  const c = await compileToC(options.entry, options.mode);
-  if (c === null) {
+  for (const file of options.extraCFiles ?? []) {
+    if (!existsSync(file)) {
+      throw new BuildError('STA0007', `extra-c file "${file}" does not exist`);
+    }
+  }
+  const compiled = await compileToC(options.entry, options.mode);
+  if (compiled === null) {
     return 1;
   }
 
   if (options.emitCOnly) {
-    writeFileSync(options.out, c, 'utf8');
+    writeFileSync(options.out, compiled.c, 'utf8');
     return 0;
   }
 
@@ -164,10 +200,16 @@ export async function build(options: BuildOptions): Promise<number> {
   const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
 
   try {
-    writeFileSync(cPath, c, 'utf8');
+    writeFileSync(cPath, compiled.c, 'utf8');
     // Default -O2; STATOR_OPT=0 / --opt=0 skips most clang opts for faster iterate compiles.
     // Per-module parallel .o cache stays a follow-up (plan.md §12).
-    linkExecutable(cPath, options.out, options.opt ?? 2);
+    linkExecutable(
+      cPath,
+      options.out,
+      options.opt ?? 2,
+      dedupeLinkLibs(compiled.externLibs, options.linkLibs ?? []),
+      options.extraCFiles ?? [],
+    );
     return 0;
   } finally {
     if (scratch !== null) {
@@ -178,7 +220,7 @@ export async function build(options: BuildOptions): Promise<number> {
 
 /** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
  * the only path any generated C comes from. Returns null if the program was rejected. */
-export async function compileToC(entry: string, mode: Mode): Promise<string | null> {
+export async function compileToC(entry: string, mode: Mode): Promise<CompiledC | null> {
   if (!existsSync(entry)) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
@@ -238,7 +280,14 @@ export async function compileToC(entry: string, mode: Mode): Promise<string | nu
     return null;
   }
 
-  return withSpan('codegen/emit-c', {}, () => emitC(optimized));
+  return withSpan('codegen/emit-c', {}, () => ({
+    c: emitC(optimized),
+    // No extern libraries yet: the HIR carries no extern records until the step-5 lowering lands,
+    // and neither does the emitter's `collectExternLink`. When it exists this becomes
+    // `collectExternLink(optimized)` — the module is in scope here, past the verifier, which is
+    // the one place the whole program's first-occurrence order is known.
+    externLibs: [],
+  }));
 }
 
 /** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are
@@ -248,13 +297,25 @@ async function report(diagnostics: readonly Diagnostic[]): Promise<boolean> {
   return diagnostics.length > 0;
 }
 
-function linkExecutable(cPath: string, out: string, opt: OptLevel): void {
+function linkExecutable(
+  cPath: string,
+  out: string,
+  opt: OptLevel,
+  extraLibs: readonly string[],
+  extraCFiles: readonly string[],
+): void {
   withSpan('link/clang', {}, () => {
-    link(cPath, out, opt);
+    link(cPath, out, opt, extraLibs, extraCFiles);
   });
 }
 
-function link(cPath: string, out: string, opt: OptLevel): void {
+function link(
+  cPath: string,
+  out: string,
+  opt: OptLevel,
+  extraLibs: readonly string[],
+  extraCFiles: readonly string[],
+): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
       'STA0011',
@@ -292,12 +353,18 @@ function link(cPath: string, out: string, opt: OptLevel): void {
       '-I',
       RUNTIME_INCLUDE,
       cPath,
+      // Extra C sources join the SAME clang invocation as the generated C, ahead of the link
+      // flags: they are compilation inputs, not libraries, so they stand with the inputs.
+      ...extraCFiles,
       '-L',
       RUNTIME_LIB_DIR,
       '-ljsrt',
       // The archive states its own system dependencies in `link-flags.txt` (SYS_LIBS, plan-notes
       // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
       ...extraLinkFlags(),
+      // Extern-declared libraries first, then CLI `--link` libs — already merged first-wins by
+      // `dedupeLinkLibs`, so this mapping only spells the `-l` and never reorders.
+      ...extraLibs.map((lib) => `-l${lib}`),
       '-o',
       out,
     ],

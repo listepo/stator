@@ -38,6 +38,11 @@ export interface Explanation {
    * file earned a verdict before lowering ran -- a program that was rejected has no functions to
    * report, and an empty array would claim it had none. */
   readonly functions?: readonly FunctionReport[];
+  /** The C symbols of the module's extern calls, in walk order (docs/FFI.md §8). Every extern
+   * call is a boundary the compiler cannot check, so an audit enumerates them here. Absent when
+   * the module holds none — `JSON.stringify` drops an `undefined` field, which is what keeps
+   * existing decision-test comparisons passing. */
+  readonly uncheckedExtern?: readonly string[];
 }
 
 /** One function's row. `provenance` is the HIR fact (where the SIGNATURE's types came from);
@@ -143,9 +148,11 @@ export async function explainFile(entry: string, mode: Mode): Promise<Explanatio
     return { verdict: 'error', code: 'STA4021' };
   }
 
+  const extern = externSymbols(module);
   return {
     verdict: hasUnknown(module) ? 'dynamic' : 'static',
     functions: functionReports(module),
+    ...(extern === undefined ? {} : { uncheckedExtern: extern }),
   };
 }
 
@@ -188,6 +195,25 @@ function functionReports(module: Module): readonly FunctionReport[] {
       verdict: fn.provenance === 'dynamic' ? ('dynamic' as const) : ('static' as const),
     }))
     .sort((a, b) => a.line - b.line);
+}
+
+/** Every C symbol the module calls through the FFI, in walk order (docs/FFI.md §8).
+ *
+ * The walk is `rewriteModule` with an identity rewriter, the functionReports precedent: that file
+ * is the one place that enumerates HIR node kinds exhaustively, so a collector on top of it keeps
+ * reporting when a kind is added. `undefined` when the module holds no extern call, so the field
+ * stays absent and existing decision-test JSON comparisons keep passing. */
+function externSymbols(module: Module): readonly string[] | undefined {
+  const symbols: string[] = [];
+  rewriteModule(module, {
+    expression: (expr) => {
+      if (expr.kind === 'extern-call') {
+        symbols.push(expr.cSymbol);
+      }
+      return expr;
+    },
+  });
+  return symbols.length === 0 ? undefined : symbols;
 }
 
 /** null means "nothing here decides the verdict" — carry on to the typed answer. */
@@ -364,6 +390,10 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expr.params.some((p) => p.type.kind === 'unknown') || statementHasUnknown(expr.body);
     case 'call':
       return expressionHasUnknown(expr.callee) || expr.args.some(expressionHasUnknown);
+    // An extern call has no callee expression — the symbol is a name, not a value — so only the
+    // arguments can carry an Unknown.
+    case 'extern-call':
+      return expr.args.some(expressionHasUnknown);
     case 'new':
       return expr.args.some(expressionHasUnknown);
     // The object's own type stops the deep walk (hTypeHasUnknown does not recurse into a class,

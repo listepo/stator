@@ -20,6 +20,8 @@ type Command =
       emitC: boolean;
       keepC: boolean;
       opt: OptLevel;
+      linkLibs: readonly string[];
+      extraCFiles: readonly string[];
     }
   | { kind: 'explain'; entry: string; mode: Mode; json: boolean };
 
@@ -50,6 +52,8 @@ Flags:
   --emit=c         stop after writing C to <out>; skip the C compiler
   --keep-c         keep the intermediate .c next to the binary
   --opt 0|1|2|3    clang -O level (default 2; or STATOR_OPT)
+  --link <lib>     extra -l<lib>; repeatable, order kept
+  --extra-c <file> compile <file> alongside the generated C; repeatable
 `,
   explain: `Usage:
   stator explain <entry> [--mode=ts|js] [--json]
@@ -131,6 +135,8 @@ function parse(argv: readonly string[]): Command {
   let emitC = false;
   let keepC = false;
   let opt: OptLevel | undefined;
+  const linkLibs: string[] = [];
+  const extraCFiles: string[] = [];
 
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -171,6 +177,32 @@ function parse(argv: readonly string[]): Command {
       }
       opt = parseOpt(next);
       i += 1;
+    } else if (arg.startsWith('--link=')) {
+      const lib = arg.slice('--link='.length);
+      if (lib === '') {
+        throw new StatorError('STA0004', '--link requires a library name');
+      }
+      linkLibs.push(lib);
+    } else if (arg === '--link') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--link requires a library name');
+      }
+      linkLibs.push(next);
+      i += 1;
+    } else if (arg.startsWith('--extra-c=')) {
+      const file = arg.slice('--extra-c='.length);
+      if (file === '') {
+        throw new StatorError('STA0004', '--extra-c requires a file path');
+      }
+      extraCFiles.push(file);
+    } else if (arg === '--extra-c') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--extra-c requires a file path');
+      }
+      extraCFiles.push(next);
+      i += 1;
     } else if (arg.startsWith('-')) {
       throw new StatorError('STA0005', `unknown flag "${arg}"`);
     } else if (entry === undefined) {
@@ -187,7 +219,17 @@ function parse(argv: readonly string[]): Command {
     if (out === undefined) {
       throw new StatorError('STA0004', 'build requires -o <out>');
     }
-    return { kind: 'build', entry, out, mode, emitC, keepC, opt: opt ?? defaultOpt() };
+    return {
+      kind: 'build',
+      entry,
+      out,
+      mode,
+      emitC,
+      keepC,
+      opt: opt ?? defaultOpt(),
+      linkLibs,
+      extraCFiles,
+    };
   }
   return { kind: 'explain', entry, mode, json };
 }
@@ -224,6 +266,8 @@ async function runCommand(command: Command): Promise<void> {
         emitCOnly: command.emitC,
         keepC: command.keepC,
         opt: command.opt,
+        linkLibs: command.linkLibs,
+        extraCFiles: command.extraCFiles,
       });
       return;
     case 'explain':

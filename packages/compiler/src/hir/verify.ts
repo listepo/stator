@@ -55,6 +55,7 @@ import {
   hasTypeParam,
   hTypeAssignable,
   hTypeEquals,
+  hTypeHasUnknown,
   hTypeName,
   hUnknown,
   methodOf,
@@ -1416,6 +1417,90 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           code: 'STA4080',
           message: `Math.${expr.method} must return number, got ${hTypeName(expr.type)}`,
         });
+      }
+      break;
+    }
+
+    // A call through the FFI to a C function (docs/FFI.md). One code for every way the node can
+    // be malformed, the STA4053 precedent: the consequence is one thing either way, a call the C
+    // compiler cannot check whose mismatched half miscompiles silently. The result type is the
+    // retC mapping the lowering built the node from; the three parallel arrays are restated here
+    // because the emitter reads them together. Arguments at non-pointer positions must already be
+    // concrete — the lowering wraps dynamic ones in a `boundary-check` first — while Unknown is
+    // legal at a pointer position, where the emitter throws `STA2001` (docs/FFI.md §4).
+    case 'extern-call': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (expr.argC.length !== expr.args.length || expr.argBrand.length !== expr.args.length) {
+        problems.push({
+          kind: 'extern-call',
+          span: expr.span,
+          code: 'STA4098',
+          message: `extern ${expr.cSymbol} has ${String(expr.args.length)} arguments but ${String(expr.argC.length)} C spellings and ${String(expr.argBrand.length)} brands`,
+        });
+        break;
+      }
+      if ((expr.retBrand !== undefined) !== (expr.retC === 'pointer')) {
+        problems.push({
+          kind: 'extern-call',
+          span: expr.span,
+          code: 'STA4098',
+          message: `extern ${expr.cSymbol} returns ${expr.retC} but ${expr.retBrand === undefined ? 'carries no brand' : `carries brand '${expr.retBrand}'`}`,
+        });
+        break;
+      }
+      const wantRet: HType | undefined =
+        expr.retC === 'double' || expr.retC === 'int32'
+          ? H_NUMBER
+          : expr.retC === 'bool'
+            ? H_BOOLEAN
+            : expr.retC === 'void'
+              ? H_UNDEFINED
+              : expr.retC === 'cstring'
+                ? H_STRING
+                : undefined;
+      if (wantRet !== undefined) {
+        if (!hTypeEquals(expr.type, wantRet)) {
+          problems.push({
+            kind: 'extern-call',
+            span: expr.span,
+            code: 'STA4098',
+            message: `extern ${expr.cSymbol} returns ${expr.retC}, not '${hTypeName(expr.type)}'`,
+          });
+        }
+      } else if (
+        expr.retC === 'pointer' &&
+        (expr.type.kind !== 'pointer' || expr.type.brand !== expr.retBrand)
+      ) {
+        problems.push({
+          kind: 'extern-call',
+          span: expr.span,
+          code: 'STA4098',
+          message: `extern ${expr.cSymbol} returns a pointer branded '${expr.retBrand ?? ''}', not '${hTypeName(expr.type)}'`,
+        });
+      }
+      for (const [i, arg] of expr.args.entries()) {
+        const c = expr.argC[i];
+        const brand = expr.argBrand[i];
+        if (c === undefined) {
+          continue;
+        }
+        if ((brand !== undefined) !== (c === 'pointer')) {
+          problems.push({
+            kind: 'extern-call',
+            span: arg.span,
+            code: 'STA4098',
+            message: `extern ${expr.cSymbol} argument ${String(i)} is ${c} but ${brand === undefined ? 'carries no brand' : `carries brand '${brand}'`}`,
+          });
+        } else if (c !== 'pointer' && hTypeHasUnknown(arg.type)) {
+          problems.push({
+            kind: 'extern-call',
+            span: arg.span,
+            code: 'STA4098',
+            message: `extern ${expr.cSymbol} argument ${String(i)} is ${c} but has dynamic type '${hTypeName(arg.type)}'`,
+          });
+        }
       }
       break;
     }

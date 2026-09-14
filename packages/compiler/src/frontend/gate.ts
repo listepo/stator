@@ -22,6 +22,7 @@ import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromFile, diagnosticFromNode } from '../support/diagnostics.ts';
 import { intlEnabled } from '../support/features.ts';
 import { genericCallInstantiation } from './generics.ts';
+import { externDeclErrors, externDeclOfCall, hasExternMarker } from './extern.ts';
 import {
   accessorDeclaringClass,
   baseClassOf,
@@ -129,6 +130,16 @@ function visitNode(
   }
 
   // Gate specific constructs: accept the micro-subset, reject the rest
+  if (ts.isFunctionDeclaration(node)) {
+    // Task 7.1 declaration site: `.d.ts` files never reach this walk (gateProgram skips them),
+    // so a marked ambient met here lives in a `.ts`/`.js` file, where externs are STA2008.
+    // Surfaced alongside normal gating — the node is still a body-less declaration, so
+    // gateFunction's STA1214 stands (docs/FFI.md §1); this names the marker misuse rather than
+    // cascading into it.
+    for (const misplaced of externDeclErrors(node, sourceFile, mode)) {
+      diagnostics.push(misplaced);
+    }
+  }
   const gateResult = gateConstruct(node, mode, typeChecker);
   if (gateResult.kind === 'not-yet') {
     diagnostics.push(
@@ -152,6 +163,15 @@ function visitNode(
     );
     return;
   }
+  if (gateResult.kind === 'error') {
+    diagnostics.push(
+      diagnosticFromNode(node, sourceFile, gateResult.code, 'error', mode, gateResult.message),
+    );
+    // An errored construct's children add nothing: the call's callee resolves to the same
+    // declaration this error already names, so descending would only re-report it as an
+    // unmodelled global (STA1214).
+    return;
+  }
 
   // Recurse
   ts.forEachChild(node, (child) => visitNode(child, sourceFile, typeChecker, mode, diagnostics));
@@ -161,6 +181,12 @@ type GateResult =
   | { kind: 'accept' }
   /** Rejected by design and forever -- STA10xx/STA11xx, and never a phase (plan §1.3). */
   | { kind: 'never'; code: string; message: string }
+  /** A compile-time error with no phase -- STA2xxx lowering/boundary errors. Unlike `never`
+   * (rejected by design) and `not-yet` (scheduled), these name a malformed declaration the user
+   * must fix; unlike both, the diagnostic class is `error` and there is no phase to wait for.
+   * First use: the extern gate (STA2008–STA2011), whose diagnostics extern.ts builds and this arm
+   * surfaces. */
+  | { kind: 'error'; code: string; message: string }
   /** Outside the current subset but scheduled -- STA12xx, and the phase is part of the message.
    *
    * `phase` is OPTIONAL because some blockers are not phases: a build flag is not a release to
@@ -829,6 +855,17 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
       // What is left of the global surface is `Symbol` and the iterator protocol around it, which
       // is Phase 5 step 8; `globalThis` and `Reflect` are Phase 8's, and `Proxy` is a `never` the
       // ts-mode table answers before this arm is reached, so neither moves the majority.
+      // Task 7.1 runs first: the callee of an extern-marked call is not an unmodelled global —
+      // gateCall vetted the whole call, and answering STA1214 here would re-report it. Any other
+      // position (stored, compared, passed) stays on this path: there is no extern value, only
+      // an extern call.
+      if (
+        ts.isCallExpression(node.parent) &&
+        node.parent.expression === node &&
+        isExternCallee(node, typeChecker)
+      ) {
+        return { kind: 'accept' };
+      }
       return notYet(`the global '${node.text}' is not yet supported`, 5);
     }
   }
@@ -943,6 +980,21 @@ function isGlobalReference(node: ts.Identifier): boolean {
     );
   }
   return true;
+}
+
+/** Whether `node` names an extern-marked ambient: a body-less function declaration in a `.d.ts`
+ * carrying `@statorExtern`. Any one of the symbol's declarations qualifying is enough — an
+ * overload set still reports its STA2011 once, at the call, and this exemption only quiets the
+ * callee's own STA1214. */
+function isExternCallee(node: ts.Identifier, checker: ts.TypeChecker): boolean {
+  const declarations = checker.getSymbolAtLocation(node)?.declarations ?? [];
+  return declarations.some(
+    (declaration) =>
+      ts.isFunctionDeclaration(declaration) &&
+      declaration.body === undefined &&
+      declaration.getSourceFile().isDeclarationFile &&
+      hasExternMarker(declaration),
+  );
 }
 
 /** The nearest enclosing function, never the node itself: a nested `function g` lives in the scope
@@ -1224,6 +1276,17 @@ function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mo
 }
 
 function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
+  // Task 7.1: an extern-marked callee is a direct C call, not an unmodelled global. Asked before
+  // everything else so the marker owns the call, whatever the name spells: a marked declaration
+  // answers here, a malformed one reports its STA20xx here, and anything else falls through to
+  // the existing arms untouched.
+  const extern = externDeclOfCall(call, typeChecker, call.getSourceFile(), mode);
+  if (extern !== null) {
+    return 'decl' in extern
+      ? { kind: 'accept' }
+      : { kind: 'error', code: extern.error.code, message: extern.error.message };
+  }
+
   // Dynamic code generation — `eval(...)` and `Function(...)` — own dedicated codes that split by
   // mode (STA1101/STA1103 never in ts, STA1206 not-yet Phase 8 in js). Asked before anything else
   // because the identifier `eval` is also a GLOBAL, and the global catch-all would otherwise
@@ -1675,17 +1738,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
         return notYet(`${callee.name.text} on a RegExp match is not yet supported`, 5);
       }
       // `o.m()` on an Unknown receiver: get the name through the shape table, then call.
-      const shape = tsTypeToHType(
-        typeChecker.getTypeAtLocation(callee.expression),
-        typeChecker,
-      );
+      const shape = tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
       if (shape.kind === 'unknown') {
         return { kind: 'accept' };
       }
-      if (
-        shape.kind === 'object' &&
-        shape.methods.some((m) => m.name === callee.name.text)
-      ) {
+      if (shape.kind === 'object' && shape.methods.some((m) => m.name === callee.name.text)) {
         return { kind: 'accept' };
       }
       return notYet('method calls are not yet supported', 5);
@@ -1938,10 +1995,7 @@ function isArrayLength(access: ts.PropertyAccessExpression, checker: ts.TypeChec
  * A hole (`[1, , 3]`) is a real hole in ECMA-262 — it is `undefined` on read but absent to
  * iteration — and the dense runtime array has no way to be absent. A spread needs the iterator
  * protocol. Both are rejected rather than approximated. */
-function gateArrayLiteral(
-  literal: ts.ArrayLiteralExpression,
-  checker: ts.TypeChecker,
-): GateResult {
+function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeChecker): GateResult {
   for (const element of literal.elements) {
     if (ts.isOmittedExpression(element)) {
       return notYet('a hole in an array literal is not yet supported', 5);
@@ -1958,10 +2012,7 @@ function gateArrayLiteral(
       if (hir.kind === 'unknown') {
         continue;
       }
-      return notYet(
-        'spread in an array literal of a non-array value is not yet supported',
-        5,
-      );
+      return notYet('spread in an array literal of a non-array value is not yet supported', 5);
     }
   }
   return { kind: 'accept' };

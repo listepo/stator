@@ -220,7 +220,7 @@ _runtime-test flavor:
     if [[ "${FLAVOR}" == 'asan' && "$(uname -s)" == 'Darwin' && "${CC}" == 'clang' && -x /usr/bin/clang ]]; then
       CC='/usr/bin/clang'
     fi
-    CORPORA=(print_numbers print_arrays print_objects print_maps print_shapes print_typeof print_regexp print_promise print_dates print_accessors print_iterators)
+    CORPORA=(print_numbers print_arrays print_objects print_maps print_shapes print_typeof print_regexp print_promise print_dates print_accessors print_iterators print_extern)
 
     VENDOR_POSIX='{{vendor_posix}}'
     VENDOR_INC='-Ivendor/quickjs-ng -Ivendor/fdlibm'
