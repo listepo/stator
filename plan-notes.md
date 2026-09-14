@@ -7607,3 +7607,28 @@ runtime: print corpus matches Node
 
 
 
+
+## 257. Step 38: `for-in` over arrays and strings, and a both-modes checker suppression (2026-09-15)
+
+**Plan:** §8 Phase 5 step 38 lands as carded. `plan.md` unchanged (the card already orders it).
+
+The B12 panic (`jsrt_object_keys` on arrays) was the smaller half. The larger half was the
+checker's TS2407, which refuses `for-in` over a string (and over `unknown`) in BOTH modes —
+including js mode, where refusing untyped code violates §1.2. The fix:
+
+- `collect` (`jsrt_object_ops.c`) walks arrays (indices, then named extras through the array's
+  own shape table) and strings (code-unit indices) first, per OrdinaryOwnPropertyKeys.
+- The `for-in` desugar emits a new total entry, `forInKeys` (`jsrt_object_for_in_keys`): the
+  keys walk for objects/arrays/strings, an empty list for every other primitive. `Object.keys`
+  itself stays a loud STA4084 off-layout, so sharing the walk would have turned the suppressed
+  2407 on `for (const k in 5)` from a compile-time refusal into a runtime abort.
+- 2407 is suppressed through a new `BOTH_MODES_RUNTIME_CODES` set (`frontend/program.ts`),
+  not the js-only one.
+
+**The ts-mode contract tension, recorded honestly:** tsc rejects `for-in` over a string, and
+Stator ts mode now compiles it — with byte-exact Node semantics, proved by goldens in both
+modes. The §1.1 contract ("must type-check") bends here for the same reason the 2a buckets
+bent in js: 2407 is a lint-grade refusal of a program with an exact runtime answer, not a
+type error, and the ts encoding represents the answer (unlike 2790's fixed-shape delete,
+which stays refused in ts precisely because no encoding exists). If the owner wants ts to
+keep the refusal, revert the `BOTH_MODES` half to js-only in one line; the runtime stays.

@@ -2232,6 +2232,7 @@ const COLLECTION_ARITY: Readonly<Record<'map' | 'set', Readonly<Record<string, n
 const OBJECT_STATIC_SHAPES = {
   assign: { arity: 2, result: 'unknown' },
   entries: { arity: 1, result: 'array' },
+  forInKeys: { arity: 1, result: 'strings' },
   freeze: { arity: 1, result: 'unknown' },
   fromEntries: { arity: 1, result: 'unknown' },
   getOwnPropertyNames: { arity: 1, result: 'strings' },

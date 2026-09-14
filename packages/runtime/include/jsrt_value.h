@@ -651,6 +651,9 @@ jsrt_value jsrt_object_keys(jsrt_value v);
 jsrt_value jsrt_object_values(jsrt_value v);
 jsrt_value jsrt_object_entries(jsrt_value v);
 jsrt_value jsrt_object_get_own_property_names(jsrt_value v);
+/* The `for-in` desugar's total keys walk (plan.md §8 step 38): own enumerable keys for objects,
+ * arrays and strings, an empty list for every other primitive. */
+jsrt_value jsrt_object_for_in_keys(jsrt_value v);
 jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key);
 jsrt_value jsrt_object_from_entries(jsrt_value pairs);
 /* Object.assign, two-argument form. The TARGET must be a dynamic-shape object: a fixed shape's

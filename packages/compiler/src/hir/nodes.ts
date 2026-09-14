@@ -795,10 +795,17 @@ export interface ArrayOp extends Node {
  * `assign` is the one that WRITES: it copies the source's own keys onto the target and returns the
  * target, so its target argument is restricted to a dynamic shape (see OBJECT_STATICS) and its
  * result type is Unknown -- the checker answers `T & S`, an intersection this type model does not
- * carry, and every read of the merged object is therefore a boundary. */
+ * carry, and every read of the merged object is therefore a boundary.
+ *
+ * `forInKeys` is not a source-level `Object` member: it is the `for-in` desugar's private entry
+ * into the keys walk (plan.md §8 step 38). It answers exactly what `for-in` visits -- the own
+ * enumerable keys of objects, arrays and strings -- and an empty list for every other primitive,
+ * where `Object.keys` on a non-object stays a loud STA4084. Sharing the walk would turn a
+ * compile-time refusal (`for (const k in 5)`) into a runtime abort. */
 export type ObjectStaticMethod =
   | 'assign'
   | 'entries'
+  | 'forInKeys'
   | 'freeze'
   | 'fromEntries'
   | 'getOwnPropertyNames'

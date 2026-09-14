@@ -9,9 +9,11 @@
  * the string-literal keys note 181 landed: `{ b: 1, "1": 2, a: 3 }` is fixed and enumerates
  * `1,b,a`.
  *
- * Anything else at the argument position is a compiler bug — the gate restricts the argument to
- * the two object layouts — and panics as one (STA4084). */
+ * Arrays enumerate their indices first (then any named extras), strings their code-unit
+ * indices; anything else at the argument position is a compiler bug — the gate restricts the
+ * argument to the object layouts, arrays and strings — and panics as one (STA4084). */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,28 +34,74 @@ static bool is_private_field(const char *key) { return key[0] == '#'; }
 typedef enum { OBJ_KEYS, OBJ_VALUES, OBJ_ENTRIES } ObjSelect;
 
 static jsrt_value collect(jsrt_value v, ObjSelect select) {
-  if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
+  if (
+    !jsrt_is(v, JSRT_TAG_OBJECT) && !jsrt_is(v, JSRT_TAG_ARRAY) && !jsrt_is(v, JSRT_TAG_STRING)
+  ) {
     jsrt_panic("STA4084: Object.keys/values/entries on a non-object value");
   }
-  const JSRTObject *fixed = (const JSRTObject *)jsrt_ptr(v);
-  const bool dynamic = jsrt_is_dynobj(v);
-  const JSRTDynObject *dyn = (const JSRTDynObject *)jsrt_ptr(v);
+  /* Arrays and strings enumerate their index keys first (ECMA-262 OrdinaryOwnPropertyKeys:
+   * ascending indices, then string keys). `for-in` lowers to this same walk, so
+   * `for (const k in [10, 20])` answers `0 / 1` and `for (const k in "ab")` answers `0 / 1`
+   * instead of panicking (plan.md §8 step 38). Named extras on an array (today: RegExp match
+   * `index`/`input`/`groups`) ride the same shape walk as a dynamic object afterwards. */
+  const bool array = jsrt_is(v, JSRT_TAG_ARRAY);
+  const bool string = !array && jsrt_is(v, JSRT_TAG_STRING);
+  const JSRTArray *arr = array ? (const JSRTArray *)jsrt_ptr(v) : NULL;
+  const uint32_t index_count =
+      array && arr != NULL ? arr->length : (string ? jsrt_string_length(v) : 0);
+  const JSRTObject *fixed = (array || string) ? NULL : (const JSRTObject *)jsrt_ptr(v);
+  const bool dynamic = !array && !string && jsrt_is_dynobj(v);
+  const JSRTDynObject *dyn = dynamic ? (const JSRTDynObject *)jsrt_ptr(v) : NULL;
   /* The dynamic walk sorts the shape chain; the fixed walk partitions the class descriptor the
-   * same way (integer indices first, then insertion order). Both arrays are malloc-owned and die
-   * with the call; free(NULL) covers the layout that did not allocate. */
-  const uint32_t shape_count = dynamic ? jsrt_shape_property_count(dyn->shape) : 0;
-  const JSRTShape **links = dynamic ? jsrt_shape_property_order(dyn->shape, shape_count) : NULL;
+   * same way (integer indices first, then insertion order). Array extras share the dynamic
+   * layout (shape + slots on JSRTArray), so they walk through the same pointers. Both arrays
+   * are malloc-owned and die with the call; free(NULL) covers the layout that did not
+   * allocate. */
+  JSRTShape *shape =
+      dynamic && dyn != NULL ? dyn->shape : (array && arr != NULL ? arr->shape : NULL);
+  jsrt_value *slots =
+      dynamic && dyn != NULL ? dyn->slots : (array && arr != NULL ? arr->slots : NULL);
+  const uint32_t shape_count = shape == NULL ? 0 : jsrt_shape_property_count(shape);
+  const JSRTShape **links = shape == NULL ? NULL : jsrt_shape_property_order(shape, shape_count);
   uint32_t fixed_count = 0;
-  uint32_t *fixed_order = dynamic ? NULL : jsrt_fixed_key_order(fixed->cls, &fixed_count);
-  const uint32_t count = dynamic ? shape_count : fixed_count;
+  uint32_t *fixed_order =
+      (array || string || dynamic || fixed == NULL) ? NULL : jsrt_fixed_key_order(fixed->cls, &fixed_count);
+  const uint32_t count = (array || string || dynamic) ? shape_count : fixed_count;
 
   /* A getter can allocate or collect; the partially built result is not reachable from v. */
   JSRT_FRAME(2);
   JSRT_LOCAL(0) = jsrt_array_new(0, NULL);
+  /* Index keys first, ascending: array elements, then string code units (one UTF-16 unit per
+   * key, matching the indices a `for-in` over the value must visit). */
+  for (uint32_t i = 0; i < index_count; i++) {
+    char digits[12];
+    snprintf(digits, sizeof(digits), "%u", i);
+    jsrt_value value;
+    if (array && arr != NULL) {
+      value = arr->elements[i];
+    } else {
+      const uint16_t unit = jsrt_string_char(v, i);
+      value = jsrt_string_from_units(&unit, 1);
+    }
+    JSRT_LOCAL(1) = value;
+    jsrt_value item;
+    if (select == OBJ_KEYS) {
+      item = key_string(digits);
+    } else if (select == OBJ_VALUES) {
+      item = JSRT_LOCAL(1);
+    } else {
+      const jsrt_value pair[2] = {key_string(digits), JSRT_LOCAL(1)};
+      item = jsrt_array_new(2, pair);
+    }
+    JSRT_LOCAL(1) = item;
+    jsrt_array_push(JSRT_LOCAL(0), JSRT_LOCAL(1));
+  }
   for (uint32_t i = 0; i < count; i++) {
-    const uint32_t slot = dynamic ? links[i]->offset : fixed_order[i];
-    const char *key = dynamic ? links[i]->key : fixed->cls->fields[slot];
-    jsrt_value value = dynamic ? dyn->slots[slot] : fixed->fields[slot];
+    const uint32_t slot = (dynamic || array) && links != NULL ? links[i]->offset : fixed_order[i];
+    const char *key =
+        (dynamic || array) && links != NULL ? links[i]->key : fixed->cls->fields[slot];
+    jsrt_value value =
+        (dynamic || array) && links != NULL && slots != NULL ? slots[slot] : fixed->fields[slot];
     /* An accessor's value is what its getter RETURNS: Object.values and Object.entries perform a
      * [[Get]], while Object.keys needs only the key and must not call anything. jsrt_get_prop is
      * the single place that knows how to resolve a cell, so the call is spelled as a property
@@ -92,6 +140,18 @@ jsrt_value jsrt_object_keys(jsrt_value v) { return collect(v, OBJ_KEYS); }
 jsrt_value jsrt_object_values(jsrt_value v) { return collect(v, OBJ_VALUES); }
 
 jsrt_value jsrt_object_entries(jsrt_value v) { return collect(v, OBJ_ENTRIES); }
+
+/* The `for-in` desugar's private entry into the keys walk (plan.md §8 step 38): exactly what the
+ * loop visits — own enumerable keys of objects, arrays and strings — and an empty list for
+ * every other primitive, where the namespace call stays a loud STA4084. `for (const k in 5)`
+ * visits nothing in Node; aborting the compiled program for it would turn a suppressed checker
+ * refusal into a runtime crash. */
+jsrt_value jsrt_object_for_in_keys(jsrt_value v) {
+  if (jsrt_is(v, JSRT_TAG_OBJECT) || jsrt_is(v, JSRT_TAG_ARRAY) || jsrt_is(v, JSRT_TAG_STRING)) {
+    return collect(v, OBJ_KEYS);
+  }
+  return jsrt_array_new(0, NULL);
+}
 
 /* getOwnPropertyNames answers the same list as keys for every object the subset can build: both
  * layouts hold only string-keyed, enumerable own properties -- a class field and a literal

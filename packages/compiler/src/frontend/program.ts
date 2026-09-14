@@ -163,6 +163,18 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   18049, // 'x' is possibly 'null' or 'undefined'.
 ]);
 
+/** Checker refusals Stator answers with exact runtime semantics in BOTH modes, unlike the
+ * js-only set above. A `for-in` enumerates keys, and strings and arrays HAVE keys: tsc's 2407
+ * is a lint-grade refusal of programs with exact runtime answers (plan.md §8 step 38). The
+ * `for-in` desugar reads through the total `forInKeys` entry — objects, arrays and strings
+ * enumerate, every other primitive answers an empty list — so no suppressed diagnostic can
+ * resurface as a runtime abort, and a statically-unknown receiver is dynamic rather than
+ * refused (§1.2). The ts-mode contract tension (tsc rejects what Stator compiles) is recorded
+ * in plan-notes 257. */
+const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
+  2407, // The right-hand side of a 'for...in' statement must be of type 'any', an object type...
+]);
+
 /** Last in-process `createProgram` result for an unchanged entry.
  *
  * Keyed by absolute entry path + mode + entry CONTENT hash. v0 invalidates on bytes, not mtime:
@@ -337,7 +349,10 @@ function createProgramUncached(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = ts.getPreEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
-    if (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code)) {
+    if (
+      BOTH_MODES_RUNTIME_CODES.has(diag.code) ||
+      (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code))
+    ) {
       // An inferred binding that TypeScript says has an incompatible assignment must be dynamic
       // throughout lowering. The diagnostic starts at the assignment target, whose symbol is the
       // one binding the HIR verifier otherwise (correctly) keeps monomorphic. 2403 is the same

@@ -2575,7 +2575,10 @@ function lowerForIn(
     span,
     name: keysName,
     declKind: 'const',
-    value: { kind: 'object-static', type: keysType, span, method: 'keys', args: [source] },
+    // The for-in entry, not `Object.keys`: total over every primitive (empty list where the
+    // namespace call panics), so a suppressed 2407 can never surface as a runtime abort
+    // (plan.md §8 step 38).
+    value: { kind: 'object-static', type: keysType, span, method: 'forInKeys', args: [source] },
   };
   const indexDecl: Statement = {
     kind: 'declaration',
