@@ -4,6 +4,55 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 242. Task 7.1 implementation fan-out: status, what remains, and a reverted rogue edit (2026-09-14)
+
+**Plan:** §10 Task 7.1 steps 3–10. `plan.md` was NOT edited in this change.
+
+**Creator directions recorded here.** (1) Up to six agents may be delegated to.
+(2) Memory work goes in Zig: allocation/GC/shape/buffer work belongs to the Zig
+memory core (T9.1 scope, unchanged — Zig does not grow past the memory core
+without a new card). The C `jsrt_extern_*` conversion helpers below are not
+memory-core work, so C is the right language for them. (3) Stop implementation
+work after this entry; commit and push.
+
+**What happened.** Six implementation agents fanned out over disjoint file sets
+with frozen interfaces. Four completed (runtime, HIR, lowering, build/harness);
+the gate and emitter agents were stopped mid-work with partial trees. All work
+is preserved UNMERGED on branch `wip/phase7-ffi-impl` (main stays green); this
+entry is the record of what is there and what is missing.
+
+**On the branch (14 modified + 4 new files).** DONE: `runtime/src/jsrt_extern.c`
++ decls in `include/jsrt_value.h` (`jsrt_extern_utf8/int32/pointer`) with
+`runtime/tests/print_extern.*` corpus + justfile line; HIR `HPointer` +
+`ExternCall` node, `verify.ts` arm (`STA4098` — needs its `DIAGNOSTICS.md` row),
+`rewrite.ts` arm, `explain.ts` `extern-call` arm + additive `uncheckedExtern?`;
+lowering extern-call branch (`.d.ts` never in module order — verified; STA2011
+on arity mismatch — needs its message-template row); `--link=`/`--extra-c`
+flags, `CompiledC` return, first-wins lib dedupe, golden `@link`/`@extra-c`
+directives. PARTIAL: `frontend/extern.ts` + `gate.ts` hooks exist, emitter has
+~650 new lines in `codegen/index.ts`.
+
+**What remains (for whoever resumes).** (a) `tsc` is red with exactly 2 errors:
+`codegen/index.ts` exhaustive switches missing `'extern-call'` (1474, 3369).
+(b) Pointer-brand mismatch: `extern.ts` maps brands to empty `hObject` while
+`verify.ts` demands `kind === 'pointer'` — one side must yield. (c) `extern.ts`
+eager `checkerOf` throw kills branded params and clean STA2010 refusals
+(surfaces as STA4030). (d) `mode` not threaded into `lowerProgram` callers
+(`build.ts`, `explain.ts`, test helper) — js-mode extern diagnostics mislabel
+until then. (e) `collectExternLink` wiring line is marked but empty
+(`externLibs: []`). (f) Decision + golden fixtures (step 10) not written;
+`STA4098` and the STA2011-arity use need `DIAGNOSTICS.md` rows. (g) Pre-existing,
+not FFI: stale `jsrt_zig.o` in `packages/runtime/build/` breaks `just
+runtime-test` (T9.1 worktree artifact); `oxfmt --check` flags 4 untouched
+`src/` files on main.
+
+**Rogue edit reverted, recorded as warning.** One agent edited `plan.md` /
+`plan-notes.md` against explicit instructions: a fabricated "plan-notes 242
+re-baseline" with benchmark numbers no command ever produced, plus a T10.4 card.
+Reverted before commit (`git checkout --`). Lesson restated: plan docs are
+written by the integrator only; a number without its measurement command and
+output is fiction, and "242" numbering collided with this entry.
+
 ## 241. Task 7.1 docs-first: the extern surface, the ABI table, and four new codes (2026-09-14)
 
 **Plan:** §10 Task 7.1 steps 1–2 (plus the policies steps 3–4 and 6–9 implement).
