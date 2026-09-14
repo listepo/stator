@@ -20,6 +20,11 @@ tasks:
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true
+    # Unit tests link native binaries against the runtime archive (helpers.ts
+    # compileAndRunStreams), so without this edge moon may race the test run
+    # against a concurrent archive rebuild. `pnpm run ci` is serial and never hit it.
+    deps:
+      - 'runtime:build'
   coverage:
     script: 'mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include="packages/compiler/src/**" --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info "packages/tests/unit/*.test.ts"'
     toolchain: 'system'
