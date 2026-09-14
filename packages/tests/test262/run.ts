@@ -1,4 +1,14 @@
-/* Test262 conformance runner (plan.md §9 Task 6.1). */
+/* Test262 conformance runner (plan.md §9 Task 6.1).
+ *
+ * Usage: run.ts [--shard=N/M] [--filter <substring> | --filter=<substring>] [--aggregate <dir>]
+ *
+ * `--filter` is a debug affordance: it keeps only the tests whose corpus-relative path contains
+ * the substring (e.g. `--filter generators`, `--filter async-await`) and runs them as a console
+ * slice. It applies BEFORE `--shard`, so `--shard=N/M` selects every Mth test of the FILTERED
+ * set, not of the corpus. A filtered run gates nothing (no ratchet, no expected-fail.txt check),
+ * writes no result files (a slice must never pose as `results.json` or as a shard `--aggregate`
+ * would merge), and always exits 0 — inspect the counts. Combining `--filter` with `--aggregate`
+ * is a loud error for the same reason: aggregating a slice would publish it as the corpus. */
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -508,6 +518,30 @@ function shardResultsPath(index: number, total: number): string {
   return join(HERE, `results-${String(index)}-of-${String(total)}.json`);
 }
 
+/** `--filter <substring>` (or `--filter=<substring>`): debug one area without shard mechanics.
+ *
+ * Matches against the corpus-relative path (`test/language/...`), case-sensitive substring —
+ * the same spelling shape as `--shard=N/M` above. First occurrence wins; an empty or missing
+ * value is an error, never a match-everything. Returns `undefined` when no `--filter` is given.
+ */
+function parseFilter(argv: readonly string[]): string | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] ?? '';
+    if (argument === '--filter') {
+      const value = argv[index + 1];
+      if (value === undefined || value === '' || value.startsWith('--'))
+        throw new Error('--filter requires a non-empty substring argument');
+      return value;
+    }
+    if (argument.startsWith('--filter=')) {
+      const value = argument.slice('--filter='.length);
+      if (value === '') throw new Error('--filter requires a non-empty substring, got --filter=');
+      return value;
+    }
+  }
+  return undefined;
+}
+
 /** Reassemble the shards' results into the one list the gates need.
  *
  * A shard sees a slice, and every gate below is a statement about the CORPUS: the ratchet compares
@@ -645,10 +679,15 @@ function writeResults(
 }
 
 async function main(): Promise<void> {
+  const filter = parseFilter(process.argv);
   // `--aggregate <dir>` judges a sharded run and never touches the corpus: the shards did the work,
   // and this reads what they wrote. It is the only mode that can apply the gates (see loadShards).
   const aggregate = process.argv.indexOf('--aggregate');
   if (aggregate >= 0) {
+    // A filtered slice is not the corpus: merging it here would publish fewer tests as if the
+    // whole run had fewer failures. Loud error, never a silent slice (see header).
+    if (filter !== undefined)
+      throw new Error('--filter cannot be combined with --aggregate: aggregate the full shards');
     const directory = process.argv[aggregate + 1];
     if (directory === undefined) throw new Error('--aggregate requires a directory');
     const results = loadShards(directory);
@@ -658,6 +697,12 @@ async function main(): Promise<void> {
   }
   const root = corpusRoot();
   if (!existsSync(join(root, 'test'))) {
+    if (filter !== undefined) {
+      process.stdout.write(
+        `test262 filter "${filter}": 0 passed, 0 skipped (corpus missing), 0 failed of 0 — filtered debug run, gates skipped\n`,
+      );
+      return;
+    }
     process.stdout.write('test262: corpus missing — fetch with `pnpm run test262:fetch`\n');
     writeResults(RESULTS, null, []);
     process.stdout.write(
@@ -667,8 +712,14 @@ async function main(): Promise<void> {
   }
   const shard = parseShard(process.argv);
   const all = testFiles(root);
+  // The filter applies BEFORE sharding: `--shard` slices the filtered set, so the two compose and
+  // the summary below names both selectors honestly.
+  const filtered =
+    filter === undefined ? all : all.filter((path) => relative(root, path).includes(filter));
   const paths =
-    shard === undefined ? all : all.filter((_, index) => index % shard.total === shard.index - 1);
+    shard === undefined
+      ? filtered
+      : filtered.filter((_, index) => index % shard.total === shard.index - 1);
   // Phase 1: classify synchronously. Phase 2: pool only the tests that need compile/execute.
   // Merge back in input-path order so results.json stays deterministic (pool finishes out of order).
   const classified = paths.map((path) => classify(path, root));
@@ -697,6 +748,21 @@ async function main(): Promise<void> {
     const result = runResults[i];
     if (item === undefined || result === undefined) continue;
     results[item.index] = result;
+  }
+  if (filter !== undefined) {
+    // A filtered run is a debug slice: honest counts of the slice, no gates, no result files, and
+    // exit 0 — the same "a slice judges nothing" rule shards already follow (see below).
+    const passed = results.filter((result) => result.verdict === 'passed').length;
+    const failed = results.filter((result) => result.verdict === 'failed').length;
+    const skipped = results.filter((result) => result.verdict === 'skipped').length;
+    const where =
+      shard === undefined
+        ? `filter "${filter}"`
+        : `shard ${String(shard.index)}/${String(shard.total)} filter "${filter}"`;
+    process.stdout.write(
+      `test262 ${where}: ${String(passed)} passed, ${String(skipped)} skipped, ${String(failed)} failed of ${String(paths.length)} — filtered debug run, gates skipped\n`,
+    );
+    return;
   }
   if (shard === undefined) {
     writeResults(RESULTS, root, results);

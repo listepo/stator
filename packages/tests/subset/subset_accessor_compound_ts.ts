@@ -1,9 +1,8 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: Classes with getters/setters
-// `o.x += 1` is a get AND a set of one property. The machinery that evaluates a receiver exactly
-// once across a read-modify-write hoists a SLOT, which an accessor is not.
+// `o.x += 1` is a get AND a set of one property. In statement position the member place
+// machinery evaluates the receiver once into a temporary and threads it through both calls.
 
 class C {
   val: number = 0;
@@ -16,4 +15,5 @@ class C {
 }
 const c = new C();
 c.value += 1;
+c.value++;
 export const x = c.value;

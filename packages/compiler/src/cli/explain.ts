@@ -361,6 +361,18 @@ function statementHasUnknown(stmt: Statement): boolean {
 }
 
 function expressionHasUnknown(expr: Expression): boolean {
+  // An extern call is a direct C call whatever it returns: a pointer result is opaque BITS,
+  // not a dynamic value, and pointer arguments cross unboxed with no check to fail — so the
+  // call is static unless a CHECKABLE argument is dynamic (docs/FFI.md §§5, 9). The kind, not
+  // the HType, decides: every handle-typed value reads `unknown`, which would otherwise paint
+  // every honest round-trip dynamic.
+  if (expr.kind === 'extern-call') {
+    return expr.args.some(
+      (arg, index) =>
+        expr.argKinds[index] !== 'pointer' &&
+        (arg.kind === 'boundary-check' || expressionHasUnknown(arg)),
+    );
+  }
   if (hTypeHasUnknown(expr.type)) {
     return true;
   }
@@ -413,12 +425,6 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expr.params.some((p) => p.type.kind === 'unknown') || statementHasUnknown(expr.body);
     case 'call':
       return expressionHasUnknown(expr.callee) || expr.args.some(expressionHasUnknown);
-    // An extern call is `static` when every argument is statically typed and `dynamic` when a
-    // dynamic value reaches it (docs/FFI.md §5) — which is exactly what a `boundary-check`
-    // child records: the lowering wraps every Unknown argument in one, so the wrapper IS the
-    // dynamic-argument mark. Anything else dynamic inside is reported by the ordinary walk.
-    case 'extern-call':
-      return expr.args.some((arg) => arg.kind === 'boundary-check' || expressionHasUnknown(arg));
     case 'new':
       return expr.args.some(expressionHasUnknown);
     // The object's own type stops the deep walk (hTypeHasUnknown does not recurse into a class,

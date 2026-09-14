@@ -1,5 +1,7 @@
 /* Golden-test runner (plan.md §5 Task 2.6).
  *
+ * Usage: node packages/tests/golden/run.ts [--filter <substring> | --filter=<substring>]
+ *
  * Ground truth is the pinned Node in .node-version — that Node and only that Node.
  * Each fixture under tests/golden/ts|js is (a) compiled by stator and executed, and
  * (b) executed directly by Node. stdout must match BYTE-FOR-BYTE, number formatting
@@ -105,6 +107,28 @@ function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: s
     }));
 }
 
+/* `--filter <substring>` (or `--filter=<substring>`) narrows the run to fixtures whose
+ * `mode/name` contains the substring — developer iteration speed, so debugging five fixtures
+ * does not compile two hundred. Applies after the `intl_*` skip, before the pool; the summary
+ * counts what ran, and a filter that matches nothing prints the zero-line and exits 0. */
+function parseFilter(argv: readonly string[]): string | undefined {
+  let filter: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--filter') {
+      const value = argv[index + 1];
+      if (value === undefined) {
+        throw new Error('--filter requires a value');
+      }
+      filter = value;
+      index += 1;
+    } else if (arg !== undefined && arg.startsWith('--filter=')) {
+      filter = arg.slice('--filter='.length);
+    }
+  }
+  return filter;
+}
+
 /* Both streams, because console.error/warn write to STDERR in Node and the runtime mirrors
  * that — comparing stdout alone would let a wrong-stream bug pass. */
 interface Streams {
@@ -117,11 +141,12 @@ interface Streams {
  * clang); only the TypeScript-host hop goes away. Throws with the same `stator build failed: ...`
  * message the old spawn produced. */
 async function buildInProcess(entry: string, out: string, mode: 'ts' | 'js'): Promise<void> {
+  const objects = await compileFixtureC(entry, dirname(out));
   let status = 0;
   let stderr = '';
   try {
     ({ result: status, stderr } = await withDiagnosticCapture(() =>
-      build({ entry, out, mode, emitCOnly: false, keepC: false }),
+      build({ entry, out, mode, emitCOnly: false, keepC: false, linkFlags: objects }),
     ));
   } catch (error) {
     // The CLI renders a BuildError as exit 1 with `stator: CODE message` on stderr.
@@ -132,6 +157,45 @@ async function buildInProcess(entry: string, out: string, mode: 'ts' | 'js'): Pr
   if (status !== 0) {
     throw new Error(`stator build failed: ${stderr.trim()}`);
   }
+}
+
+/* A fixture directory may carry its own C sources next to the entry (plan.md §10 Task 7.1
+ * step 10): the two-function `.c` an extern golden proves the boundary against. Each one is
+ * compiled here — same C11 `-Wall -Wextra -Werror` discipline as the runtime, so a warning in
+ * fixture C fails the fixture rather than the link — and the objects ride `build()`'s
+ * `--link=` channel, which is exactly the `extraLinkFlags` consumer path step 7 exists to
+ * prove. `out` lives in the caller's pool-unique scratch directory, so the objects beside it
+ * can never collide between workers. A fixture without C sources links exactly as before. */
+async function compileFixtureC(entry: string, work: string): Promise<string[]> {
+  const dir = dirname(entry);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const sources = names.filter((name) => name.endsWith('.c')).sort();
+  const objects: string[] = [];
+  for (const source of sources) {
+    const object = join(work, `${source}.o`);
+    const cc = process.env['CC'] ?? 'clang';
+    const compiled = await runProcess(cc, [
+      '-std=c11',
+      '-O2',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-c',
+      join(dir, source),
+      '-o',
+      object,
+    ]);
+    if (compiled.status !== 0) {
+      throw new Error(`fixture C ${source} failed to compile: ${compiled.stderr.trim()}`);
+    }
+    objects.push(object);
+  }
+  return objects;
 }
 
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
@@ -173,7 +237,10 @@ async function runNode(path: string): Promise<Streams> {
 }
 
 async function main(): Promise<void> {
-  const all = [...fixtures('ts'), ...fixtures('js')];
+  const filter = parseFilter(process.argv.slice(2));
+  const all = [...fixtures('ts'), ...fixtures('js')].filter(
+    (fixture) => filter === undefined || `${fixture.mode}/${fixture.name}`.includes(filter),
+  );
 
   // One result per fixture, indexed by fixture: the pool completes out of order, and a golden
   // report whose failure order shifted run to run would be unreadable as a diff.

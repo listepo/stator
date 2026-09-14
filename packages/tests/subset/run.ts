@@ -9,6 +9,8 @@
  * Verdicts come from in-process `explainFile` (the same function the `stator explain`
  * CLI prints as `--json`). Fixtures marked expected-fail are not
  * executed — they are counted, so the corpus can land before the compiler can pass it.
+ *
+ * Usage: node packages/tests/subset/run.ts [--filter <substring> | --filter=<substring>]
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -82,10 +84,41 @@ async function explain(
     : { verdict: result.verdict, code: result.code };
 }
 
+/* `--filter` narrows the run to fixtures whose filename contains the substring (developer
+ * iteration speed: debug one fixture without running 400+). Both spellings mirror the CLI's
+ * dual `--mode` form in packages/compiler/src/cli/main.ts. Filtering happens before pooling,
+ * and the summary line reports the filtered totals honestly. A filter that matches nothing is
+ * a result, never an error. */
+function parseFilter(argv: readonly string[]): string | undefined {
+  let filter: string | undefined;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (arg.startsWith('--filter=')) {
+      filter = arg.slice('--filter='.length);
+    } else if (arg === '--filter') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new Error('--filter requires a value (substring)');
+      }
+      filter = next;
+      i += 1;
+    } else {
+      throw new Error(`unknown flag "${arg}"`);
+    }
+  }
+  return filter;
+}
+
 async function main(): Promise<void> {
-  const fixtures = readdirSync(HERE)
+  const filter = parseFilter(process.argv.slice(2));
+  const allFixtures = readdirSync(HERE)
     .filter((name) => name.startsWith('subset_'))
     .sort();
+  const fixtures =
+    filter === undefined ? allFixtures : allFixtures.filter((name) => name.includes(filter));
 
   const allocated = allocatedCodes();
 
@@ -142,8 +175,12 @@ async function main(): Promise<void> {
   for (const failure of failures) {
     process.stderr.write(`FAIL ${failure}\n`);
   }
+  const scope =
+    filter === undefined
+      ? `${String(fixtures.length)} fixtures`
+      : `${String(fixtures.length)} fixtures (filtered from ${String(allFixtures.length)})`;
   process.stdout.write(
-    `subset: ${String(fixtures.length)} fixtures — ${String(passed)} passed, ` +
+    `subset: ${scope} — ${String(passed)} passed, ` +
       `${String(expectedFail)} expected-fail, ${String(failures.length)} failed\n`,
   );
   if (failures.length > 0) {

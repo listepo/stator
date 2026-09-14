@@ -207,7 +207,7 @@ void test('a user binding that shadows a global name is a user binding', () => {
   );
 });
 
-void test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is not', () => {
+void test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is shared', () => {
   const chain = `class A {\n  n = 1;\n  m(): number {\n    return this.n;\n  }\n}\n`;
   assert.deepEqual(
     codesFor(`${chain}class B extends A {\n  k = 2;\n}\nconsole.log(new B().m());`),
@@ -225,10 +225,18 @@ void test('inheritance, overriding and super.m() are accepted; a re-declared FIE
     ),
     [],
   );
-  // A field is a SLOT, and a subclass re-declaring one would be two declarations of that slot with
-  // two initializers racing for it. Overriding solves the method problem, not this one.
+  // A field is a SLOT, and a subclass re-declaring one shares it: the base initializers run in
+  // `super(...)` and the subclass's overwrite after, which is exactly what the language does. A
+  // slot and a METHOD under one name is still refused -- reads would take the method while
+  // writes take the slot.
   assert.deepEqual(
-    codesFor(`${chain}class B extends A {\n  n = 2;\n}\nconsole.log(new B().m());`),
+    codesFor(`${chain}class B extends A {\n  override n = 2;\n}\nconsole.log(new B().m());`),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      `${chain}class B extends A {\n  override n(): number {\n    return 2;\n  }\n}\nconsole.log(new B().m());`,
+    ),
     ['STA1214'],
   );
 });
@@ -252,9 +260,10 @@ void test('super is a marker on two forms, not a value', () => {
   );
 });
 
-void test('a derived constructor must open with super(...)', () => {
-  // Not style: field initializers are inserted after the super call, and every field the base
-  // declares is unwritten until it runs. A constructor that does anything first can read them.
+void test('a derived constructor may validate before super(...)', () => {
+  // Field initializers are spliced after the super call wherever it stands, so statements before
+  // it must not read the receiver -- but validating or transforming the parameters is the shape
+  // real constructors take. A super call nested in a branch has no fixed position for them.
   const base = 'class A {\n  n: number;\n  constructor(n: number) {\n    this.n = n;\n  }\n}\n';
   assert.deepEqual(
     codesFor(
@@ -266,6 +275,12 @@ void test('a derived constructor must open with super(...)', () => {
     codesFor(
       `${base}class B extends A {\n  constructor() {\n    console.log(0);\n    super(1);\n  }\n}\nconsole.log(new B().n);`,
     ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      `${base}class B extends A {\n  constructor(n: number) {\n    if (n > 0) {\n      super(n);\n    } else {\n      super(0);\n    }\n  }\n}\nconsole.log(new B().n);`,
+    ),
     ['STA1214'],
   );
 });
@@ -273,10 +288,15 @@ void test('a derived constructor must open with super(...)', () => {
 void test('statics are accepted; what has no class object to read is not', () => {
   const cls = 'class C {\n  static n = 1;\n  static m(): number {\n    return C.n;\n  }\n}\n';
   assert.deepEqual(codesFor(`${cls}console.log(C.m());`), []);
-  // A static initialization block runs statements against the class OBJECT, and `this` inside a
-  // static is that object. There is no class object here -- a static is a plain binding.
+  // A static initialization block runs at class-definition time against the statics, which are
+  // plain bindings initialized where the class declaration sits -- so its statements lower
+  // right after it. `this` inside one is still the class object, which does not exist here.
   assert.deepEqual(
     codesFor('class C {\n  static n = 1;\n  static {\n    C.n = 2;\n  }\n}\nconsole.log(C.n);'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('class C {\n  static n = 1;\n  static {\n    this.n = 2;\n  }\n}\nconsole.log(C.n);'),
     ['STA1214'],
   );
   assert.deepEqual(
@@ -325,9 +345,9 @@ console.log(new D().d() + new D().b());
   );
 });
 
-void test('the #brand-in-object test is a not-yet, not an accepted member access', () => {
-  // `#n in o` is not a property read: it asks whether o carries the slot at all, which needs a
-  // shape test the layout has no room for while every instance of a class has every slot.
+void test('the #brand-in-object test is an instanceof against the declaring class', () => {
+  // `#n in o` is not a property read: it asks whether o carries the brand, which is exactly
+  // whether o is an instance of the class that declares it -- so it lowers to `instanceof`.
   assert.deepEqual(
     codesFor(`class C {
   #n: number = 0;
@@ -335,32 +355,39 @@ void test('the #brand-in-object test is a not-yet, not an accepted member access
 }
 console.log(C.has(new C()));
 `),
-    ['STA1214'],
+    [],
   );
 });
 
-void test('accessors are accepted; what has no place to live is not', () => {
+void test('accessors are accepted, in statement position and as statics', () => {
   const body = `  raw: number = 0;\n  get value(): number {\n    return this.raw;\n  }\n  set value(v: number) {\n    this.raw = v;\n  }\n`;
   assert.deepEqual(
     codesFor(`class C {\n${body}}\nconst c = new C();\nc.value = 1;\nconsole.log(c.value);`),
     [],
   );
-  // A read-modify-write is a get AND a set of one property, and what evaluates the receiver once
-  // across the pair hoists a slot -- which an accessor is not.
+  // A read-modify-write is a get AND a set of one property. In statement position the member
+  // place machinery evaluates the receiver once into a temporary and threads it through both
+  // calls; in value position the target lowers to the getter call, which is not an update
+  // place.
   assert.deepEqual(
     codesFor(`class C {\n${body}}\nconst c = new C();\nc.value += 1;\nconsole.log(c.value);`),
-    ['STA1214'],
+    [],
   );
   assert.deepEqual(
     codesFor(`class C {\n${body}}\nconst c = new C();\nc.value++;\nconsole.log(c.value);`),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(`class C {\n${body}}\nconst c = new C();\nconst y = c.value++;\nconsole.log(y);`),
     ['STA1214'],
   );
-  // A static accessor belongs to the class OBJECT, and a static here is one plain binding.
+  // A static accessor is a pair of plain functions under mangled static bindings: reading
+  // `C.value` runs the getter, writing it runs the setter.
   assert.deepEqual(
     codesFor(
-      'class C {\n  static raw: number = 0;\n  static get value(): number {\n    return C.raw;\n  }\n}\nconsole.log(C.value);',
+      'class C {\n  static raw: number = 0;\n  static get value(): number {\n    return C.raw;\n  }\n  static set value(v: number) {\n    C.raw = v;\n  }\n}\nC.value = 1;\nconsole.log(C.value);',
     ),
-    ['STA1214'],
+    [],
   );
 });
 
@@ -371,16 +398,15 @@ void test('an object literal is accepted exactly where its shape is a fixed slot
 });
 
 void test('every literal form that is not a fixed slot list is a not-yet', () => {
-  // Methods landed in step 12(c); a computed key needs the key set at RUNTIME. A spread whose
-  // operand is not a variable of fixed shape is the same runtime question: the expansion reads
-  // the operand once per field, so an operand with an effect would run that effect N times
-  // (plan-notes 181).
+  // Methods landed in step 12(c); a computed key needs the key set at RUNTIME. A spread of a
+  // call result landed with the spread-call-result golden (one evaluation per operand): the
+  // expansion reads the operand once, so an operand with an effect runs exactly once.
   assert.deepEqual(codesFor('const o = { m(): number { return 1; } };\nconsole.log(o.m());'), []);
   assert.deepEqual(
     codesFor(
       'function f(): { x: number } {\n  return { x: 1 };\n}\nconst b = { ...f() };\nconsole.log(b.x);',
     ),
-    ['STA1214'],
+    [],
   );
 });
 

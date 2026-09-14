@@ -137,6 +137,153 @@ newly-visible ceilings — deep-checker calls (`getSymbolAtLocation` 9µs/call a
 ms at d1→d200, ~30% of that total), plus a `typeAt` empty-set fast path (~26% of checker time on
 big files) as the cheapest next win — candidates, not cards.
 
+## 251. Runtime and js-mode findings from the 2026-09-14 bug hunt (2026-09-14)
+
+**Plan:** §8 Phase 5 gains steps 27–38. `plan.md` edited in this change.
+
+Two sweeps — runtime builtins (`packages/runtime/src/`) and js-mode/control flow — each reproduced
+every repro against the pinned Node 26.7.0. The js-mode sweep ran on a `git archive` snapshot at
+`d1c820a` because the live tree was being edited; the findings below were re-verified on the live
+tree where marked. All are untested surface (no golden covers them).
+
+### A. Runtime builtins
+
+- **A1 `ToNumber(string)` accepts `strtod` spellings.** `+"inf"`, `+"INFINITY"`, `"Inf"` → `Infinity`
+  where Node answers `NaN`; `jsrt_numeric.c` `jsrt_string_to_number` falls through to `strtod` while
+  `docs/NUMERIC.md` §6.3 says the conversion "is **not** `strtod`".
+- **A2 no `0b`/`0o`.** `+"0b101"` → Node `5`, here `NaN`; `+"0o17"` → Node `15`, here `NaN`.
+- **A3 signed hex accepted.** `+"-0x10"` → Node `NaN`, here `-16`.
+- **A4 hex overflow saturates.** `+"0xffffffffffffffff"` → Node `18446744073709552000`, here
+  `9223372036854776000` (`strtol` + `ERANGE` ignored).
+- **A5 Unicode whitespace / trailing VT → `NaN`.** `+"\u00a01"` → Node `1`, here `NaN`; `+"1\u000b"`
+  likewise.
+- **A6 256-code-unit cap.** `"1" + "0".repeat(300)` → Node `1e+300`, here `NaN`.
+- **A7 fixed-shape objects ignore `OrdinaryOwnPropertyKeys`.** `const o = { b: 1, "1": 2, a: 3 }`:
+  `Object.keys(o)` here `[ 'b', '1', 'a' ]` vs Node `[ '1', 'b', 'a' ]`, and `JSON.stringify` /
+  `console.log` follow the same order. The fixed arm uses declaration order
+  (`jsrt_object_ops.c:47`, `jsrt_print.c:736`); the dynamic path is correct, which is why
+  `JSON.parse` objects already pass. plan-notes 85's invariant ("integer-like keys cannot trigger")
+  is falsified by the string-literal keys note 181 landed.
+- **A8 quoted keys do not escape control characters.** `console.log({ "a\nb": 1 })` prints a real
+  newline and breaks the layout; `append_key` (`jsrt_print.c:635`) has no `<0x20` branch.
+- **A9 lone surrogates print as U+FFFD.** `console.log(["\ud800A"])` → Node `[ '\ud800A' ]`, here
+  `[ '\ufffdA' ]`.
+- **A10 VT escapes as `\v`, Node uses `\x0B`.** (`jsrt_print.c:286`.)
+- **A11 the depth cap abbreviates EMPTY containers.** `console.log([[[[]]]])` → Node `[ [ [ [] ] ] ]`,
+  here `[ [ [ [Array] ] ] ]`; same for `{}`, `Map(0)`, empty class instances
+  (`jsrt_print.c:501/684/776` check depth before emptiness).
+- **A12 `repeat`/`padStart`/`padEnd` cap is 2^31−1, Node's is 2^29−24 (536870888).**
+  `"ab".repeat(300000000)` → Node `RangeError`, here `600000000`. (`jsrt_string_ops.c:267/287`;
+  note 203 chose 2^31−1, which the pinned Node disagrees with.)
+- **A13 `Date.parse` leniencies.** `"2020-01-01T00:00:00.5Z"` and `"...+0530"` → Node timestamps,
+  here `NaN` (exactly-3 fractional digits and a `+HH:MM` colon are required, `jsrt_date.c:669/680`).
+- **A14 `ToString` of Map/Set/RegExp/Date is `[object Object]`.** `"" + new Map()` → Node
+  `[object Map]`; `"" + /abc/g` → Node `/abc/g`; `"" + new Date(0)` → Node the date string.
+  `jsrt_to_string` (`jsrt_print.c:1771`) has no arm for them.
+- **A15 `matchAll` iterator prints as `Iterator {}`** where Node prints
+  `Object [RegExp String Iterator] {}` (`jsrt_iterator.c:19`).
+- **A16 object literal `{ __proto__: 1 }` is an own data property.** Node treats the spelling as the
+  prototype setter: `JSON.stringify({ __proto__: 1, a: 1 })` → `{"a":1}`, here
+  `{"__proto__":1,"a":1}`.
+- **A-ICE `"5" * 1` in js mode** → `STA4011 internal error in binary-op: arithmetic operand must be
+  number, got string` (ts mode gives the proper `STA0012`).
+
+### B. js mode and control flow
+
+- **B1 `for...of` never calls IteratorClose on abrupt exit.** A `break` out of a generator's loop
+  does not run its `finally`:
+  `function* g() { try { yield 1; yield 2; } finally { console.log("closed"); } } for (const v of
+  g()) { if (v === 1) break; } console.log("after");` → Node `closed / after`, here `after`.
+  Same for `return`/`throw` out of the body, in both modes; `continue` is correct. No
+  `jsrt_iterator_close` exists and `emitBoxedIteratorForOf` (`codegen/index.ts:2014`) only closes the
+  per-iteration lexical env.
+- **B2/B3 Promise ordering.** Adoption is one microtask eager
+  (`Promise.resolve(1).then(() => Promise.resolve(2)).then(() => console.log("adopt"))` lands
+  before the third `.then` chain in Stator, after it in Node), and `finally` skips the spec's
+  pass-through wrapper (`.finally().then()` ordering differs). `jsrt_promise_settle`
+  (`jsrt_promise.c:153`) and `finally_react` (`:324`).
+- **B4 `ToString(error)` is `[object Object]`.** `` `${new Error("boom")}` `` → Node `Error: boom`,
+  here `[object Object]`; `TypeError`/`RangeError` too. Same `jsrt_to_string` gap as A14.
+- **B6 an object-literal method that captures a local or parameter SEGFAULTS.**
+  `function counter() { let n = 0; return { get() { return n; } }; } counter().get();` → exit 139
+  (Node `0`). `codegen`'s `object-literal` case emits entries only and never binds `expr.methods`; the
+  call site rebuilds the closure with `currentEnv()` (NULL at top level). Without isolation the same
+  shape returns garbage instead (`4 5 5` for Node `1 2 2`) — UB, not just a crash.
+- **B7–B10 suppressed checker diagnostics become internal errors.**
+  `const x = 5; x()` → `STA4041` (the verifier still trusts "the checker would have rejected it",
+  but js mode suppresses TS2349); `f(...arr)` on a user function → `STA4031 unexpected expression
+  kind: SpreadElement`; `c.missing` on a class instance → `STA4060 no field 'missing' on C`
+  (TS2339 suppressed); `{ a: 1, 10: 2 }` → `STA4068 object literal member is not a name/value pair`
+  (`staticObjectLiteralKey` does not handle `NumericLiteral`). Every one throws where Node answers
+  or runs.
+- **B11 a dynamic method call on a dynamic value panics `STA2006`.** `function id(v) { return v; }
+  id([1, 2, 3]).join("|")` → Node `1|2|3`, here SIGABRT. The gate explicitly accepts `o.m()` on an
+  `unknown` receiver (`gate.ts:1677-1690`) but the dynamic read has no prototype fallback. This is
+  note 223 item 6c generalized (step 20).
+- **B12 `for...in` over an array panics `STA4084`.** `for (const k in [10, 20]) console.log(k);`
+  prints `0 / 1` in Node and aborts `PANIC: STA4084: Object.keys/values/entries on a non-object
+  value` (exit 134) here, in both modes; `for...in` over an object literal is correct. The lowering
+  emits `jsrt_object_keys` (`lower/index.ts:2306`), which the runtime rejects for an array.
+
+## 250. Six miscompiles in the recently shipped object-literal / class / optional-chaining surface (2026-09-14)
+
+**Plan:** §8 Phase 5 gains steps 22–26. `plan.md` edited in this change.
+
+A sweep of the step-12/13/14/15/16 families with small Node-vs-Stator diffs; every one below was
+re-verified independently at HEAD on the pinned Node 26.7.0 (ts and js where noted). None is
+covered by a golden or decision fixture, which is why the suite is green.
+
+**1. Computed key with a literal-typed identifier: dynamic build, static read → garbage.**
+`const k = "dyn"; const o = { [k]: 1 }; console.log(o.dyn);` prints `2e-323` (uninitialised
+memory; the value changes per run) where Node prints `1`. `objectLiteralIsDynamic` /
+`computedKeyIsLayoutKey` (`frontend/types.ts:458-492`) call `[k]` runtime-dynamic without consulting
+`checker.getTypeAtLocation(key)`, while the binding's type stays a fixed shape, so construction
+emits `jsrt_dynobj_new` and the read emits `jsrt_object_get_field`. Silent wrong answer.
+
+**2. Dynamic object-literal methods are dropped.** `DynObjectLiteral` (`hir/nodes.ts:403`) has no
+`methods` field and `lower/index.ts:3176` discards the `methodNodes` it collected. Three faces:
+`const k="dyn"; const o = { [k]: 2, m() { return 1; } }; console.log(o.m());` is a compile-time
+`STA4072` internal error; with a runtime-computed key it compiles and then panics
+`STA2006 calling a non-function` (exit 134); with a computed key + method + accessor,
+`typeof o.m` is `undefined` and then the same panic.
+
+**3. Shadowed class declarations share one identity.** Classes never go through `Scope.declare`
+(`lower/index.ts:5039`), and the descriptor is keyed by source name (`codegen/index.ts:1074`), so an
+inner `class C` resolves to the outer one:
+
+```ts
+class C { m(): string { return "outer"; } }
+{ class C { m(): string { return "inner"; } } console.log(new C().m()); }
+console.log(new C().m());       // Node: inner / outer     Stator: outer / outer
+```
+
+Sibling blocks and class-in-function shadowing fail the same way; a differing member set aborts with
+`STA4072`.
+
+**4. `?.` optional chaining is accepted and compiled as a plain access.** No `questionDotToken`
+handling exists in `lower/` or `gate.ts`; the emitted access is unconditional:
+`const o: { a?: { b?: number } } = {}; console.log(o.a?.b);` answers `undefined` in Node and throws
+an uncaught `TypeError` (exit 1) in Stator, in both modes. Worse, the decision fixture
+`subset_optional_chaining_ts.ts` is `@expected-fail: true` with `@verdict: static` while the gate
+returns `dynamic`, so the runner hides the construct instead of failing on it.
+
+**5. `this` inside an arrow in a class field initializer → `STA4072 Undefined identifier: this`.**
+`enclosingNonArrowFunction` (`lower/captures.ts:89`) finds no non-arrow ancestor for a field
+initializer at module scope, so the receiver is never captured:
+`class Counter { n = 0; inc = (): number => { this.n += 1; return this.n; }; }
+console.log(new Counter().inc());` is `1` in Node and a compile-time `STA4072` in Stator.
+
+**6. `js` mode rejects duplicate object keys.** `const a = { x: 1, x: 2 }; console.log(a.x);` is
+`STA0012 [js] An object literal cannot have multiple properties with the same name.` where Node
+prints `2`. Duplicate keys are legal JS (last wins) and §1.2 says js mode never rejects untyped
+code; the diagnostic is tsc's grammar check TS1117 with no js-mode carve-out.
+
+**Tested and clean:** step-14 shadowing of `let`/`const`/parameters/functions across nested and
+sibling blocks, switch clauses, loop bodies and catch params; step-13 module-scope loop captures;
+step-15 `await`/`yield` in per-iteration loops; step-16 optional interfaces, index signatures and the
+Error interfaces; step-12 static object literals, class method values, static/spread/accessor
+members, inheritance and overrides.
+
 ## 249. The 2026-09-14 bug hunt: note 223's defects were never carded, `console` is unary, and four tooling faults (2026-09-14)
 
 **Plan:** §8 Phase 5 gains steps 18–21; §9 Phase 6 gains tasks 6.10–6.13. `plan.md` edited in this

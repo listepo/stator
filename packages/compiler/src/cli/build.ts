@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emitC } from '../codegen/index.ts';
+import { collectLinkFlags } from '../frontend/extern.ts';
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
 import { createProgram } from '../frontend/program.ts';
@@ -41,6 +42,11 @@ export interface BuildOptions {
    * override. `0` trades runtime speed for faster iterate compiles. Full per-module `.o` cache and
    * parallel clang are a separate follow-up — not this knob. */
   readonly opt?: OptLevel;
+  /** Extra clang link flags from the CLI `--link=` escape hatch (docs/FFI.md §9), in
+   * command-line order. The `.d.ts` `@statorLink` pragma flags travel inside the compiled
+   * result instead — see `compileToC` — and the link deduplicates libraries across all three
+   * sources while preserving order. */
+  readonly linkFlags?: readonly string[];
 }
 
 /** Raised for conditions the USER can act on: a missing file, a missing toolchain. Anything the
@@ -148,13 +154,13 @@ function extraLinkFlags(): string[] {
 
 /** Returns the process exit code: 0 on success, 1 if the program was rejected. */
 export async function build(options: BuildOptions): Promise<number> {
-  const c = await compileToC(options.entry, options.mode);
-  if (c === null) {
+  const compiled = await compileToC(options.entry, options.mode);
+  if (compiled === null) {
     return 1;
   }
 
   if (options.emitCOnly) {
-    writeFileSync(options.out, c, 'utf8');
+    writeFileSync(options.out, compiled.c, 'utf8');
     return 0;
   }
 
@@ -164,10 +170,13 @@ export async function build(options: BuildOptions): Promise<number> {
   const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
 
   try {
-    writeFileSync(cPath, c, 'utf8');
+    writeFileSync(cPath, compiled.c, 'utf8');
     // Default -O2; STATOR_OPT=0 / --opt=0 skips most clang opts for faster iterate compiles.
     // Per-module parallel .o cache stays a follow-up (plan.md §12).
-    linkExecutable(cPath, options.out, options.opt ?? 2);
+    linkExecutable(cPath, options.out, options.opt ?? 2, [
+      ...compiled.linkFlags,
+      ...(options.linkFlags ?? []),
+    ]);
     return 0;
   } finally {
     if (scratch !== null) {
@@ -176,9 +185,17 @@ export async function build(options: BuildOptions): Promise<number> {
   }
 }
 
+/** Source text compiled to C, plus what the link owes the extern surface: the `@statorLink`
+ * flags every extern-bearing `.d.ts` contributed (docs/FFI.md §9), in program order. The CLI
+ * `--link=` flags join them at the link, never here — one source per carrier. */
+export interface CompiledC {
+  readonly c: string;
+  readonly linkFlags: readonly string[];
+}
+
 /** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
  * the only path any generated C comes from. Returns null if the program was rejected. */
-export async function compileToC(entry: string, mode: Mode): Promise<string | null> {
+export async function compileToC(entry: string, mode: Mode): Promise<CompiledC | null> {
   if (!existsSync(entry)) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
@@ -238,7 +255,10 @@ export async function compileToC(entry: string, mode: Mode): Promise<string | nu
     return null;
   }
 
-  return withSpan('codegen/emit-c', {}, () => emitC(optimized));
+  return withSpan('codegen/emit-c', {}, () => ({
+    c: emitC(optimized),
+    linkFlags: withSpan('frontend/link-flags', {}, () => collectLinkFlags(program)),
+  }));
 }
 
 /** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are
@@ -248,13 +268,39 @@ async function report(diagnostics: readonly Diagnostic[]): Promise<boolean> {
   return diagnostics.length > 0;
 }
 
-function linkExecutable(cPath: string, out: string, opt: OptLevel): void {
+function linkExecutable(
+  cPath: string,
+  out: string,
+  opt: OptLevel,
+  externFlags: readonly string[],
+): void {
   withSpan('link/clang', {}, () => {
-    link(cPath, out, opt);
+    link(cPath, out, opt, externFlags);
   });
 }
 
-function link(cPath: string, out: string, opt: OptLevel): void {
+/** Duplicate `-l` libraries dropped, first occurrence wins, everything else verbatim in order
+ * (docs/FFI.md §9): several binding files for one library each name it, and the CLI escape
+ * hatch may repeat one — while a "helpful" sort, or any reordering at all, breaks static
+ * archives whose order is load-bearing. Only `-l` dedups: `-L` paths and object files are
+ * idempotent to repeat, and grouping flags (`-Wl,--start-group` … `--end-group`) pass
+ * through untouched for the rare circular archive. */
+export function dedupLinkLibs(flags: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const flag of flags) {
+    if (flag.startsWith('-l') && flag.length > 2) {
+      if (seen.has(flag)) {
+        continue;
+      }
+      seen.add(flag);
+    }
+    kept.push(flag);
+  }
+  return kept;
+}
+
+function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly string[]): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
       'STA0011',
@@ -297,7 +343,9 @@ function link(cPath: string, out: string, opt: OptLevel): void {
       '-ljsrt',
       // The archive states its own system dependencies in `link-flags.txt` (SYS_LIBS, plan-notes
       // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
-      ...extraLinkFlags(),
+      // Extern surface flags last, in carrier order (pragma files in program order, then the CLI
+      // escape hatch), duplicates dropped first-wins: dependents precede their dependencies.
+      ...dedupLinkLibs([...extraLinkFlags(), ...externFlags]),
       '-o',
       out,
     ],
@@ -317,6 +365,17 @@ function link(cPath: string, out: string, opt: OptLevel): void {
     throw new BuildError('STA0009', `C compiler failed to start: ${result.error.message}`);
   }
   if (result.status !== 0) {
+    // A failed link with extern flags is usually a missing library rather than a compiler
+    // bug — name the flags so the user knows where to look first.
+    if (externFlags.length > 0) {
+      throw new BuildError(
+        'STA0009',
+        `C compiler failed (exit ${result.status ?? 'signal'}) with extern link flags ` +
+          `${externFlags.join(' ')} — if a flag names a library that is not installed, install ` +
+          'it or fix the @statorLink pragma / --link= value; otherwise keep the C with ' +
+          '`--keep-c` and report it',
+      );
+    }
     throw new BuildError(
       'STA0009',
       `C compiler failed (exit ${result.status ?? 'signal'}) — this is a compiler bug; ` +

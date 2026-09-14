@@ -144,28 +144,52 @@ test('a generic used as a value is refused, not specialized', () => {
   );
 });
 
-test('a type parameter no argument determines is refused', () => {
-  // `T` appears in no parameter and in no return type, so no call ever determines it. Recovering
-  // the substitution by unification finds nothing to bind, and `unresolved` is the honest answer.
-  assert.deepEqual(
-    gateCodes(`
-      function f<T>(n: number): number { return n; }
-      console.log(f(1));
-    `),
-    ['STA1214'],
-  );
+test('a type parameter no argument determines defaults to Unknown', () => {
+  // `T` appears in no parameter and in no return type, so no call ever determines it. There is
+  // no static information at all, and `Unknown` — the dynamic representation, not a guess — is
+  // the honest tuple element: one shared specialization, exactly as inference produces when a
+  // call site leaves the parameter free.
+  const source = `
+    function f<T>(n: number): number { return n; }
+    console.log(f(1));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['f<unknown>']);
 });
 
-test('a constrained type parameter is refused', () => {
-  // A constraint is a second thing to check (does the argument satisfy it?) that the subset has no
-  // machinery for; accepting it silently would specialize on tuples the checker never approved.
-  assert.deepEqual(
-    gateCodes(`
-      function big<T extends number>(item: T): T { return item; }
-      console.log(big(1));
-    `),
-    ['STA1214'],
-  );
+test('a constrained type parameter specializes per tuple', () => {
+  // A constraint is enforced by the checker at every call site, so there is nothing for the
+  // lowering to check: monomorphization substitutes the resolved tuple exactly as for an
+  // unconstrained parameter.
+  const source = `
+    function big<T extends number>(item: T): T { return item; }
+    console.log(big(1));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['big<number>']);
+});
+
+test('a defaulted type parameter falls back to its default', () => {
+  // The default supplies the tuple element no call site wrote — the same instantiation the
+  // checker itself resolves — while an explicit argument still determines its own.
+  const source = `
+    function withDefault<T = string>(x?: T): string { return \`\${x}\`; }
+    console.log(withDefault());
+    console.log(withDefault<number>(7));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['withDefault<string>', 'withDefault<number>']);
+});
+
+test('a later default sees the earlier bindings, in order', () => {
+  // `<T, U = T[]>` called with one argument binds `T` from the argument and `U` from the
+  // default applied to it — declaration order is what makes the default's reference resolve.
+  const source = `
+    function pair<T, U = T[]>(t: T): number { return 0; }
+    console.log(pair(1));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['pair<number, number[]>']);
 });
 
 test('explicit type arguments on a non-generic call are refused', () => {
@@ -178,13 +202,37 @@ test('explicit type arguments on a non-generic call are refused', () => {
   );
 });
 
-test('a generic arrow or function expression is refused', () => {
-  // Only a DECLARATION can be specialized: the collection walk finds it by name and lowers its
-  // body once per tuple, and an expression has no declaration to go back to.
+test('a generic arrow or function expression assigned to a const specializes', () => {
+  // Only a `const` at module scope can be specialized: the variable names the specializations
+  // the way a declaration names its own. Anything else — inline, callback, `let`, nested —
+  // has no home to build a second copy for and stays refused below.
+  const source = `
+    const box = <T,>(item: T): T => item;
+    console.log(box(1));
+    console.log(box("x"));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['box<number>', 'box<string>']);
+});
+
+test('a generic arrow anywhere but a top-level const is refused', () => {
   assert.deepEqual(
     gateCodes(`
-      const box = <T,>(item: T): T => item;
+      console.log([1].map(<T,>(item: T): T => item));
+    `),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(`
+      let box = <T,>(item: T): T => item;
       console.log(box(1));
+    `),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(`
+      function f() { const box = <T,>(item: T): T => item; return box(1); }
+      console.log(f());
     `),
     ['STA1214'],
   );

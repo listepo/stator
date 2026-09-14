@@ -6,10 +6,11 @@ may cross the boundary, who owns the memory, and what the compiler promises
 7.1 steps 1–2 — the surface and the ABI table, written down **before** any
 lowering (plan §15.6).
 
-Steps 4–5 (error mapping, lowering and the emitter) have landed; step 6+ (per-signature
-GC treatment, link plumbing) have not. Sections below say where each remaining mechanism
-will hook in, but no unbuilt mechanism is claimed. §7 lists what the implementation steps
-still owe.
+Steps 4–7 have landed: error mapping, lowering and the emitter (steps 4–5), opaque
+pointer pass-through borrow-only (step 6, §6), and header/link plumbing with the `@statorLink`
+pragma and `--link=` (step 7, §9). What remains for Task 7.3 is the `T**` out-param question
+its SQLite binding will force and the ambient `CString` lib declarations (§7). Sections below
+say where each remaining mechanism hooks in, but no unbuilt mechanism is claimed.
 
 Normative companions: `docs/SUBSET.md` carries the extern rows (feature × mode
 matrix), and `docs/DIAGNOSTICS.md` is the sole allocator — every code named
@@ -94,7 +95,8 @@ lifetime belongs to the C library, not to the collector: a binding that keeps
 a pointer (a database handle, a prepared statement) uses this type, and the
 declaration's documentation says who frees it and when. The two-lifetime rule
 (borrowed for the call, or copied/transferred — §6) is per signature because
-the compiler cannot check it.
+the compiler cannot check it; for handles v0 admits only the first — §6's
+borrow-only.
 
 **`string` deliberately maps to nothing.** UTF-16 in, bytes out is a real
 conversion with a real allocation, so it is spelled at the declaration and
@@ -188,7 +190,7 @@ declare function sqliteStep(stmt: sqlite3_stmt): number;
 | *(absent)* | No convention: the return is a value, never an exception |
 | `@statorError nonzero` | Nonzero return throws |
 | `@statorError negative` | Negative return throws |
-| `@statorError null` | NULL (pointer-typed) return throws |
+| `@statorError null` | NULL (pointer-typed) return throws — a `CString` return or a branded pointer |
 | `@statorError errno` | `errno` carries the failure; it is read immediately after the call, before any other runtime call |
 
 The thrown value is an `Error` naming the TS function and the failed convention —
@@ -200,9 +202,10 @@ misspelled convention is a gate error at the declaration, not a silent
 default — a binding that invents its own convention is the failure this
 section exists to prevent. Conventions compose with return kinds only where
 the combination means something: `nonzero`/`negative` require `number`
-returns, `null` requires a `CString` return, `errno` combines with anything
-including `void` (it is read before any copy allocation); anything else is
-STA1119 naming the mismatch.
+returns, `null` requires a `CString` or branded-pointer return, `errno`
+combines with anything including `void` (it is read before any copy allocation);
+anything else is STA1119 naming the mismatch. A NULL handle throws rather than becoming a
+usable value: the check guards the call, so a failed open never yields a handle to close.
 
 Two absolutes (plan's words):
 
@@ -226,10 +229,12 @@ it: the four-verdict vocabulary (`static | dynamic | error | not-yet`,
 `docs/MODES.md` §6) is unchanged, and `tests/subset/run.ts` keeps reading
 verdict + code only. Steps 5+ have landed, so compiled calls carry the flag: `ts`-mode
 extern calls are `static` + flag (direct C calls, unboxed); `js`-mode calls are `static` +
-flag when every argument is statically typed, else `dynamic` + flag. A call that does not
-compile — a refusal, or a deferred pointer signature — carries no flag: it is not a
+flag when every argument is statically typed, else `dynamic` + flag. A handle-typed
+argument never contributes `dynamic` by itself: it crosses unboxed with no check to fail,
+so the call's mechanics are static whatever the HType says (the HIR cannot name a brand).
+A call that does not compile — a refusal — carries no flag: it is not a
 boundary, it is a refusal, and its code already names it. Refusals surface at the
-**declaration** (STA1114–21, or STA1217 for deferred table types); STA1217 additionally
+**declaration** (STA1114–21); STA1217 additionally
 surfaces at value-use and optional-call sites, which are call positions the declaration
 verdict does not cover.
 
@@ -252,10 +257,34 @@ A pointer handed to C is invisible to the collector for the duration of the
 call. The frame that owns it stays live across the call, and the callee must
 not retain it past return unless the declaration says it takes ownership —
 `CString` (borrow) versus `CStringOwned` (transfer) in §3 is this rule worked
-out for strings. The full per-signature treatment (where the frame discipline
-meets the emitter's temporaries on every exit path, landing pads included) is
-Task 7.1 step 6's, and lands with the lowering; the rule stated here is what
-that lowering must honor, not the lowering itself.
+out for strings. Opaque handles are borrow-only in v0: there is no transfer
+spelling for a branded pointer, so every one crosses untouched and unretained,
+and any use that would retain one past the call — aliasing the extern as a value,
+the optional call — stays STA1217.
+
+What the emitter guarantees, by construction rather than by audit
+(plan §10 Task 7.1 step 6):
+
+- Arguments evaluate into rooted frame slots first; the call reads each handle
+  from its slot (`jsrt_ptr`) at the call — the slot, and the frame holding it,
+  stay live across it, because frames pop only at returns and landing-pad
+  dispatch, neither of which a direct C call can reach.
+- The handle is never dereferenced and never stored anywhere but the callee's
+  parameter: generated code has no load through it and no copy beside the slot.
+- A returned handle lands in a C local and is stored to its slot by bit pattern
+  (`(jsrt_value)(uintptr_t)` — the loop state's raw-`JSRTEnv *`-in-a-slot
+  precedent, safe because the collector masks every word). No GC allocation
+  stands between receipt and rooting: the `errno` read is an int, the frees are
+  libc, and the convention throw runs only after the frees, with nothing
+  outstanding.
+
+Three positions are supported: an extern return producing a handle, a binding
+(or call argument, or return) forwarding it, and a pointer parameter consuming
+it. Everything else a program can spell with a handle — printing it, arithmetic
+on it, reading a property through it — is out of scope in v0, with behavior the
+contract does not define: the HIR cannot name a brand, so no position past the
+three can tell a handle from the value its bits resemble. Refusing those
+positions is follow-up work with its own pins, not this section.
 
 ---
 
@@ -273,7 +302,10 @@ demands it (§15.3, §15.6):
    what steps 5+ do not cover (branded pointers → step 6; extern-as-value). The landing
    added three rules the surface implies but never wrote down: exact arity (STA1119 in
    `js` mode; the checker's own arity diagnostic owns it in `ts` mode), no spread
-   (STA1119), and direct-callee-position only (STA1217 elsewhere).
+   (STA1119), and direct-callee-position only (STA1217 elsewhere). Step 6 landed
+   separately and closed the pointer deferral: brands classify as the `pointer` ABI
+   kind (borrow-only, §6), so STA1217 names only extern-as-value and optional-call
+   positions now. Step 7 landed with §9.
 2. ~~Decision fixtures in both modes for every `docs/SUBSET.md` extern row
    (extern call, each refusal kind, varargs, outside-`.d.ts`, the
    unchecked-boundary mark) — `// @expected-fail: true` until the gate lands
@@ -322,3 +354,94 @@ report.
   name collisions; `export default`/renames reuse `STA1214`.
 - **Tests:** `tests/ffi/` fixture + `main.c` byte-compare, double-build `cmp`
   determinism, collision/error-path goldens, GC-hygiene loop under Boehm, ASan job.
+
+---
+
+## 9. Headers and link flags (step 7)
+
+An extern declaration needs two things the signature does not name: a header to
+compile against and a library to link. Both arrive through one per-`.d.ts` pragma
+plus one CLI escape hatch — this section is the whole of that plumbing, and closes
+gap G6 (plan-notes 256: the pragma had no spelling and no provenance until it).
+
+### The pragma: `// @statorLink …`
+
+One marker, two forms, per declaration file:
+
+```ts
+// sqlite.d.ts
+// @statorLink: -lsqlite3
+// @statorLink #include <sqlite3.h>
+/** @statorExtern sqlite3_open_v2 */
+declare function sqliteOpenV2(filename: CString, flags: number): sqlite3;
+```
+
+- **Flags form.** Everything after the marker is verbatim clang link flags in file
+  order (`-l`, `-L`, frameworks, archives). The colon is optional —
+  `// @statorLink: -lfoo` and `// @statorLink -lfoo` are the same pragma, matching
+  the `// @directive: value` shape every other file-level directive in this repo
+  uses. Words split on whitespace; `"..."` groups across it (for paths with
+  spaces). Several lines accumulate in file order.
+- **Header form.** `#include` plus exactly one header: `<...>` as written,
+  `"..."` as written for a bare name (resolved through the link line's `-I`
+  flags like any user header), and `"..."` containing a `/` resolved against the
+  declaring file — because the generated C lives in a scratch directory where a
+  relative include would otherwise point nowhere. At most one `#include` per
+  file: one binding file wraps one library, so a second header names a second
+  binding the file does not contain.
+- **Shape rules, all permanent (`never`, STA1119 at the pragma's own line):** a
+  malformed line (bare marker, unterminated quote, unquoted or doubled `#include`,
+  any other `#directive`); a pragma in a file with no `@statorExtern`
+  declaration — flags belong to the binding they link, so a stray is refused
+  rather than linked or dropped silently; a second `#include` in one file.
+  Only `//` line comments carry the pragma (block comments and JSDoc never do),
+  and only `.d.ts` files are read — a line elsewhere is an ordinary comment.
+
+What the header DOES. The prologue emits the binding headers after the runtime
+headers (`jsrt_value.h`, then `<errno.h>`/`<stdlib.h>` when owed), and emits NO
+forward declaration for that file's symbols: the header's real prototype governs
+the call. That is what lets a binding use libc's true `size_t` signatures
+(`malloc`, `memset`, `memcmp` — the `extern_ptr` golden), where the emitter's
+`double`-based spelling would be undefined behavior. Without a header the
+emitter declares each symbol from the ABI kinds (`void *` for a handle): a
+definition that agrees at the ABI level links, and one that does not fails
+loudly at the clang line — the trust boundary fails closed, exactly as §2's
+`strlen`/`size_t` rule already required.
+
+### The escape hatch: `--link=`
+
+`stator build … --link=-lsqlite3 --link="-L/opt/x/lib"` — repeatable, in both
+`--link=X` and `--link X` forms, each value splitting on whitespace like the
+pragma. A missing or empty value is STA0004 (it almost always means an
+unexpanded `$VAR`, and an invisible no-op would hide that). The hatch joins the
+pragma flags at the link — never in the C — so a consumer can satisfy a binding
+without editing it.
+
+### Order, dedup, and the link line
+
+`linkExecutable` assembles one line: the recorded `link-flags.txt` first, then
+the pragma flags in program order (the order the user's own references and
+imports discover the bindings in — which is the order a static link reads
+them), then the CLI flags in command-line order. Duplicate `-l` libraries drop
+first-wins; everything else passes through verbatim in order — no sorting ever,
+because link order is load-bearing for static archives, and grouping flags
+(`-Wl,--start-group` … `--end-group`) cross untouched for the rare circular
+one. A link that fails with extern flags on the line reports STA0009 naming the
+flags: a missing library is a configuration error, not a compiler bug, and the
+message says where to look first.
+
+`libm` needs no plumbing: `-lm` already rides every link inside the recorded
+`link-flags.txt` (the justfile's `SYS_LIBS`), so the `extern_libm` golden calls
+`sqrt`/`fmod` with no pragma at all — the proof, not a second mechanism. The
+rule generalizes: a system library the recorded flags already provide needs no
+pragma; the pragma is for the binding's own library.
+
+### The harness side
+
+A golden fixture directory may carry its own `.c` sources next to the entry
+(plan §10 step 10): the runner compiles each with the same C11
+`-Wall -Wextra -Werror` discipline as the runtime and links the objects through
+the `--link=` channel — the `extraLinkFlags` consumer path, exercised by a test
+instead of asserted by a comment. The `extern_ptr` golden is the shape's proof:
+a two-function fixture C (sentinel identity, no header) beside real-libc
+allocation (header pragmas, true prototypes), byte-identical against Node.

@@ -1117,6 +1117,28 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       }
       expr.args.forEach((arg, index) => {
         const kind = expr.argKinds[index];
+        // A pointer argument is the one the runtime cannot check: no tag answers "is this
+        // handle honest", so `maybeBoundary` passes every pointer arg through. What the check
+        // CAN still reject is a value that is never a handle: a primitive-typed slot holds a
+        // `double`/flag/int, and `jsrt_ptr` over it is garbage by construction — the same
+        // static-mismatch STA4098 a string reaching a `double` parameter earns. Object-typed
+        // and dynamic values pass: a brand alias lowers as its literal's fixed shape while a
+        // brand interface lowers as `unknown`, so both honest spellings arrive here, and
+        // telling a true handle from a manufactured shape is the declaration's trust (the
+        // checker enforces assignability in `ts` mode; docs/FFI.md §9), not the verifier's.
+        if (kind === 'pointer') {
+          if (arg.type.kind !== 'unknown' && arg.type.kind !== 'object') {
+            problems.push({
+              kind: 'extern-call',
+              span: expr.span,
+              code: 'STA4098',
+              message:
+                `extern call '${expr.tsName}' argument ${String(index)} has type ` +
+                `'${hTypeName(arg.type)}', not an opaque handle`,
+            });
+          }
+          return;
+        }
         const want =
           kind === 'number'
             ? H_NUMBER

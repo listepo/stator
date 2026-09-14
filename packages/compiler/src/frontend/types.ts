@@ -735,10 +735,12 @@ export function accessorDeclaringClass(
   checker: ts.TypeChecker,
 ): { owner: ts.ClassDeclaration; get: boolean; set: boolean } | undefined {
   for (const current of ancestry(declaration, checker).toReversed()) {
+    // Identifiers and #private names alike: a private accessor (`get #x`) is a member function
+    // under a mangled name exactly as a public one is (plan.md §8 step 12(d)).
     const named = current.members.filter(
       (m) =>
         (ts.isGetAccessor(m) || ts.isSetAccessor(m)) &&
-        ts.isIdentifier(m.name) &&
+        (ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) &&
         m.name.text === name,
     );
     if (named.length > 0) {

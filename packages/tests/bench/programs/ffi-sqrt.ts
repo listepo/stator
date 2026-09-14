@@ -38,6 +38,7 @@
 // Owed follow-up (NOT in this file): the sibling `ffi-sqrt.d.ts` carrying the
 // `/** @statorExtern */ declare function sqrt(x: number): number;` spelling.
 
+// oxlint-disable-next-line typescript/triple-slash-reference -- sibling .d.ts include mechanism (extern_libm/main.ts spelling); import style cannot carry the ambient extern declaration.
 /// <reference path="./ffi-sqrt.d.ts" />
 
 // Scale, read off nbody.ts (200,000 sqrt-containing steps): five times that
@@ -60,7 +61,7 @@ try {
 } catch (e) {
   // Node path: `sqrt` is undeclared, so ONLY this world throws the catchable
   // ReferenceError (subset_reference_error_js.js) and re-runs below.
-  if (e instanceof Error && e.name === "ReferenceError") {
+  if (e instanceof Error && e.name === 'ReferenceError') {
     // Reset the partial sum: the try body threw partway, so acc holds a prefix
     // that must not leak into the oracle.
     acc = 0;

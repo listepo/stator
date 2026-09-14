@@ -19,6 +19,7 @@ import type {
   DateOp,
   DateStaticCall,
   DeleteProp,
+  DynEntry,
   DynFieldAccess,
   DynFieldAssignment,
   DynObjectLiteral,
@@ -268,7 +269,13 @@ function snakeCase(member: string): string {
 }
 
 function descriptorName(name: string): string {
-  return name.startsWith('{') ? '' : name;
+  if (name.startsWith('{')) {
+    return '';
+  }
+  // A specialization prints under its source name: Node shows `Box`, not `Box<number>`, and the
+  // mangled tuple is a compile-time key no identifier can spell, so stripping it cannot collide.
+  const generic = name.indexOf('<');
+  return generic < 0 ? name : name.slice(0, generic);
 }
 
 /** The structural name of a literal's shape, which is also its descriptor's identity. */
@@ -301,6 +308,77 @@ function keyOrderOf(expr: ObjectLiteral, layout: readonly HField[]): number[] | 
   // that shape is unreachable (a partial literal is a dynamic one), so identity is the safe answer.
   const identity = order.every((slot, i) => slot === i);
   return order.length !== layout.length || identity ? undefined : order;
+}
+
+/** Slots a dynamic literal reserves before any spread scratch: the object itself, plus the
+ * value scratch (and a second one for a get/set pair or a computed key). Counting starts the
+ * spread scratches after these, and emission reads them back from the same base, so the two
+ * agree exactly. */
+function dynLiteralBaseSlots(expr: DynObjectLiteral): number {
+  if (expr.entries.length === 0) {
+    return 1;
+  }
+  const pair = expr.entries.some(
+    (entry) => isAccessorEntry(entry) && entry.get !== undefined && entry.set !== undefined,
+  );
+  const hasComputed = expr.entries.some((entry) => isComputedEntry(entry));
+  return pair || hasComputed ? 3 : 2;
+}
+
+/** The grouping key for one spread's expanded reads: the spread's own source range.
+ *
+ * The lowering expands `{ ...src }` into one field read per field of src's shape, all stamped
+ * with the SpreadAssignment's own span (plan.md §8 step 12 family c). HIR is a tree, so the N
+ * reads share one source subtree -- and the passes rebuild shared subtrees into
+ * structurally-equal copies (`rewrite.ts` keeps `===` only when nothing changed; const-fold and
+ * inline specialize per occurrence). Node identity therefore does not survive optimization, but
+ * the span does: no pass synthesizes spans for rebuilt parents, so the same source range stays
+ * the same evaluation however many copies the reads became. */
+function spreadScratchKey(span: Span): string {
+  return `${span.file ?? ''}:${span.start}:${span.length}`;
+}
+
+/** One rooted scratch slot per spread the literal must evaluate once: every maximal group of
+ * field reads sharing a spread span, in first-occurrence order, whose source is not a plain
+ * identifier.
+ *
+ * An identifier source stays inline: reading a binding N times is side-effect-free, and it is
+ * also CORRECT when an entry assigns that binding (`{ ...b, y: (b = c) }` must re-read `c` for
+ * the later fields). Anything else read twice or more -- a call, a member access, a literal --
+ * would run its effect once per field without this, so the emitter evaluates it once into the
+ * scratch and reads every field out of that. A lone read needs no scratch: it already evaluates
+ * exactly once. Counting and emission both call this, so the reserved slots and the written
+ * ones agree exactly (frames.test.ts holds any gap against the counter). */
+function spreadScratches(entries: readonly DynEntry[]): readonly {
+  readonly key: string;
+  readonly target: Expression;
+}[] {
+  const groups = new Map<string, { readonly target: Expression; count: number }>();
+  const order: string[] = [];
+  for (const entry of entries) {
+    if (isAccessorEntry(entry) || isComputedEntry(entry)) {
+      continue;
+    }
+    if (entry.value.kind !== 'field-access' || entry.value.target.kind === 'identifier') {
+      continue;
+    }
+    const key = spreadScratchKey(entry.value.span);
+    const seen = groups.get(key);
+    if (seen === undefined) {
+      groups.set(key, { target: entry.value.target, count: 1 });
+      order.push(key);
+    } else {
+      groups.set(key, { target: seen.target, count: seen.count + 1 });
+    }
+  }
+  const scratches: { readonly key: string; readonly target: Expression }[] = [];
+  for (const key of order) {
+    const group = groups.get(key);
+    if (group !== undefined && group.count >= 2) {
+      scratches.push({ key, target: group.target });
+    }
+  }
+  return scratches;
 }
 
 /* A JS string is a sequence of UTF-16 CODE UNITS, and a lone surrogate is a legal one. UTF-8
@@ -431,6 +509,13 @@ class Emitter {
   private externDecls: Map<string, string> = new Map();
   private externErrno: boolean = false;
   private externStdlib: boolean = false;
+  /* `#include` headers the module's extern calls compile under (docs/FFI.md §9), in
+   * first-seen call order, deduplicated. Recorded per NODE at counting time like the errno
+   * flag, so the prologue — emitted before any unit — already knows every one. */
+  private externHeaders: string[] = [];
+  /* C symbols a binding header declares (docs/FFI.md §9): no forward declaration is emitted
+   * for these, however the headerless and header-carrying calls interleave at counting time. */
+  private externHeaderCovered: Set<string> = new Set();
 
   private classes: ClassDeclaration[] = [];
   private classIds: Map<string, number> = new Map();
@@ -558,6 +643,8 @@ class Emitter {
     this.externDecls.clear();
     this.externErrno = false;
     this.externStdlib = false;
+    this.externHeaders = [];
+    this.externHeaderCovered.clear();
     this.enclosing = [];
     this.loopCount = 0;
     this.usedLabels.clear();
@@ -585,15 +672,21 @@ class Emitter {
     const mainLines = this.emitMain(module, globalSlots);
 
     const out: string[] = ['#include "jsrt_value.h"'];
-    // The extern prologue, if the module called out (docs/FFI.md §1): `<errno.h>` only for the
-    // convention that reads it, `<stdlib.h>` only for the borrow the emitter frees, and one
-    // forward declaration per C symbol — the `#include` step 5 promises, without step 7's
-    // header/link plumbing, which a self-contained symbol never needs.
+    // The extern prologue, if the module called out (docs/FFI.md §§1, 9): `<errno.h>` only for
+    // the convention that reads it, `<stdlib.h>` only for the borrow the emitter frees, then
+    // the binding headers step 7's pragma names — runtime headers FIRST, so a binding header
+    // can rely on the standard types — and one forward declaration per C symbol without one.
+    // A symbol WITH a header gets no declaration here: the header's real prototype governs the
+    // call, and a second, `void *`-based spelling next to it would be a conflicting-types
+    // error rather than a declaration.
     if (this.externErrno) {
       out.push('#include <errno.h>');
     }
     if (this.externStdlib) {
       out.push('#include <stdlib.h>');
+    }
+    for (const header of this.externHeaders) {
+      out.push(`#include ${header}`);
     }
     out.push('', `JSRT_GLOBALS(${globalSlots});`, '');
     // Forward declarations ahead of every definition, so a function can call itself, or one
@@ -1119,14 +1212,20 @@ class Emitter {
           this.countExpression(stmt.value);
           break;
         case 'super-call':
-          // The same contiguous, rooted argv every call uses: receiver in slot zero, then the
-          // base constructor's arguments. It is a CALL, so every operand must be reachable across
-          // the allocations the later ones may perform.
-          this.callSlots.set(stmt, this.slotCount);
-          this.slotCount += 1 + stmt.args.length;
-          this.countExpression(stmt.receiver);
-          for (const arg of stmt.args) {
-            this.countExpression(arg);
+          // A base with no constructor to run emits nothing (the matching skip in the
+          // class-declaration emission): reserving argv slots for a call that never happens roots
+          // slots nothing writes. The lookup is partial on purpose -- a base the collection has
+          // not seen yet keeps the reservation, which is today's behavior, never less.
+          if (this.classes.find((c) => c.name === stmt.className)?.ctor !== undefined) {
+            // The same contiguous, rooted argv every call uses: receiver in slot zero, then the
+            // base constructor's arguments. It is a CALL, so every operand must be reachable across
+            // the allocations the later ones may perform.
+            this.callSlots.set(stmt, this.slotCount);
+            this.slotCount += 1 + stmt.args.length;
+            this.countExpression(stmt.receiver);
+            for (const arg of stmt.args) {
+              this.countExpression(arg);
+            }
           }
           break;
         case 'class-declaration':
@@ -1182,6 +1281,29 @@ class Emitter {
         }
       }
     }
+  }
+
+  /* One object-literal entry value for the counting pass. A spread's reads share one source
+   * subtree, which emission evaluates once into a scratch slot: the first read counts it and
+   * the rest count nothing, or every extra field reserves slots (a whole call frame, for a
+   * call source) that emission never writes. `spreadKeys`/`countedSpread` are the literal's
+   * own group state, built from the same `spreadScratches` the slot reservation used. */
+  private countEntryValue(
+    value: Expression,
+    spreadKeys: ReadonlySet<string>,
+    countedSpread: Set<string>,
+  ): void {
+    if (value.kind === 'field-access' && value.target.kind !== 'identifier') {
+      const key = spreadScratchKey(value.span);
+      if (spreadKeys.has(key)) {
+        if (!countedSpread.has(key)) {
+          countedSpread.add(key);
+          this.countExpression(value);
+        }
+        return;
+      }
+    }
+    this.countExpression(value);
   }
 
   private countExpression(expr: Expression): void {
@@ -1331,32 +1453,43 @@ class Emitter {
       // One rooted slot for the object itself, claimed BEFORE any entry is evaluated: an entry may
       // allocate, and the half-built object has to survive that. The shape's descriptor is
       // registered here for the same reason a class's is -- emission only ever looks one up.
-      case 'object-literal':
+      // After it, one scratch slot per spread evaluated twice or more (`spreadScratches`): the
+      // scratch is written once at the spread's position and read inline by every field, so the
+      // slots counted here and the ones emission writes agree exactly.
+      case 'object-literal': {
+        const scratches = spreadScratches(expr.entries);
         this.callSlots.set(expr, this.slotCount);
-        this.slotCount += 1;
+        this.slotCount += 1 + scratches.length;
         this.registerShape(expr);
+        // A spread's reads share one source subtree, which emission evaluates once: count it
+        // once too, or every extra field reserves a call frame nothing ever writes.
+        const spreadKeys = new Set(scratches.map(({ key }) => key));
+        const countedSpread = new Set<string>();
         for (const entry of expr.entries) {
-          this.countExpression(entry.value);
+          this.countEntryValue(entry.value, spreadKeys, countedSpread);
         }
         for (const method of expr.methods) {
           this.registerFunction(method.fn, method.name);
         }
         break;
+      }
       // The object slot plus ONE value scratch slot, reused entry by entry: jsrt_set_prop may
       // grow the slot storage, which allocates, so the value being stored must be rooted across
       // the call -- unlike jsrt_object_set, which only writes. `{}` has no entry to store and
       // therefore no scratch: a slot the emitter never writes is one the frame roots for nothing.
+      // After those, one slot per spread evaluated twice or more (`spreadScratches`), written
+      // once at the spread's position like the fixed arm's.
       case 'dyn-object-literal': {
         this.callSlots.set(expr, this.slotCount);
         // A get/set PAIR needs two scratch slots, not one: both closures are live when
         // jsrt_define_accessor is called, and building the second may allocate. One half alone
         // needs no more than an ordinary value does -- and the frame must be exactly as large as
         // what it roots, so a slot nothing writes is a test failure, not slack.
-        const pair = expr.entries.some(
-          (entry) => isAccessorEntry(entry) && entry.get !== undefined && entry.set !== undefined,
-        );
-        const hasComputed = expr.entries.some((entry) => isComputedEntry(entry));
-        this.slotCount += expr.entries.length === 0 ? 1 : pair || hasComputed ? 3 : 2;
+        const scratches = spreadScratches(expr.entries);
+        this.slotCount += dynLiteralBaseSlots(expr) + scratches.length;
+        // Like the fixed arm: a spread's shared source counts once, not once per field.
+        const spreadKeys = new Set(scratches.map(({ key }) => key));
+        const countedSpread = new Set<string>();
         for (const entry of expr.entries) {
           if (isAccessorEntry(entry)) {
             if (entry.get !== undefined) {
@@ -1372,7 +1505,7 @@ class Emitter {
             this.countExpression(entry.value);
             continue;
           }
-          this.countExpression(entry.value);
+          this.countEntryValue(entry.value, spreadKeys, countedSpread);
         }
         break;
       }
@@ -1899,15 +2032,17 @@ class Emitter {
       }
 
       case 'super-call': {
-        const base = this.callSlots.get(stmt);
-        if (base === undefined) {
-          throw new Error('super call was not registered during counting');
-        }
+        // A base with nothing to run emits nothing -- and reserves nothing at counting time, by
+        // the matching guard there -- so this check comes before the slot lookup, not after it.
         const ctor = this.classAt(stmt.className).ctor;
         // A base with nothing to run emits nothing. It can take no arguments either -- the checker
         // rejects arguments to a constructor that does not exist -- so no side effect is skipped.
         if (ctor === undefined) {
           break;
+        }
+        const base = this.callSlots.get(stmt);
+        if (base === undefined) {
+          throw new Error('super call was not registered during counting');
         }
         const parts: string[] = [];
         this.sequencePart(parts, stmt.receiver, stmt.span, (v) => `${this.slotAt(base)} = ${v}`);
@@ -2415,6 +2550,13 @@ class Emitter {
         cArgs.push(`jsrt_to_number(${slot})`);
       } else if (kind === 'boolean') {
         cArgs.push(`jsrt_as_bool(${slot})`);
+      } else if (kind === 'pointer') {
+        // Borrow-only (docs/FFI.md §9): the handle is read from its rooted slot and passed
+        // untouched — never dereferenced, never stored anywhere but the callee's parameter.
+        // The slot stays live across the call (the frame pops only at return and landing-pad
+        // dispatch, neither of which this direct call can reach), so the collector sees the
+        // handle for exactly as long as C may.
+        cArgs.push(`jsrt_ptr(${slot})`);
       } else {
         throw new Error(`extern call argument has no C passing: ${kind ?? 'missing'}`);
       }
@@ -3144,7 +3286,9 @@ class Emitter {
       }
 
       // Allocate, then fill left to right. The object is in its own rooted slot first, so an entry
-      // that allocates cannot collect the object it is being stored into.
+      // that allocates cannot collect the object it is being stored into. A spread evaluated
+      // twice or more runs once into its scratch slot at its own position in this order, and
+      // every field reads out of that (`spreadScratches`); anything else evaluates inline.
       case 'object-literal': {
         const slot = this.callSlots.get(expr);
         if (slot === undefined) {
@@ -3154,6 +3298,10 @@ class Emitter {
         const order = keyOrderOf(expr, layout);
         const name = `${shapeNameOf(expr)}${order === undefined ? '' : `#${order.join(',')}`}`;
         const id = String(this.classIds.get(name));
+        const scratches = spreadScratches(expr.entries);
+        const scratchAt = new Map(scratches.map(({ key }, index) => [key, slot + 1 + index]));
+        const scratchTarget = new Map(scratches.map(({ key, target }) => [key, target]));
+        const scratchDone = new Set<string>();
         const parts = [`${this.slotAt(slot)} = jsrt_object_new(&_jsrt_class_${id})`];
         let flushed = false;
         // Source order is the EVALUATION order (§13.2.5.5 runs the initializers left to right);
@@ -3162,6 +3310,27 @@ class Emitter {
           const target = layout.findIndex((field) => field.name === entry.name);
           if (target < 0) {
             throw new Error(`object literal key ${entry.name} is not in its own shape`);
+          }
+          if (entry.value.kind === 'field-access' && entry.value.target.kind !== 'identifier') {
+            const key = spreadScratchKey(entry.value.span);
+            const scratch = scratchAt.get(key);
+            const source = scratchTarget.get(key);
+            if (scratch !== undefined && source !== undefined) {
+              if (!scratchDone.has(key)) {
+                scratchDone.add(key);
+                flushed =
+                  this.sequencePart(
+                    parts,
+                    source,
+                    expr.span,
+                    (v) => `${this.slotAt(scratch)} = ${v}`,
+                  ) || flushed;
+              }
+              parts.push(
+                `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, jsrt_object_get_field(${this.slotAt(scratch)}, ${String(entry.value.slot)}, ${cNameLiteral(entry.name)}))`,
+              );
+              return;
+            }
           }
           flushed =
             this.sequencePart(
@@ -3176,13 +3345,20 @@ class Emitter {
 
       // Allocate, then fill left to right through the rooted scratch slot. No inline cache on
       // construction: each entry is a fresh key on a fresh object, so every store transitions --
-      // exactly the case the cache deliberately does not serve (docs/VALUE.md §4.10).
+      // exactly the case the cache deliberately does not serve (docs/VALUE.md §4.10). A spread
+      // evaluated twice or more runs once into its own scratch past the value scratch, like the
+      // fixed arm's, and every field reads out of that.
       case 'dyn-object-literal': {
         const slot = this.callSlots.get(expr);
         if (slot === undefined) {
           throw new Error('dynamic object literal was not registered during counting');
         }
         const scratch = this.slotAt(slot + 1);
+        const scratches = spreadScratches(expr.entries);
+        const base = slot + dynLiteralBaseSlots(expr);
+        const scratchAt = new Map(scratches.map(({ key }, index) => [key, base + index]));
+        const scratchTarget = new Map(scratches.map(({ key, target }) => [key, target]));
+        const scratchDone = new Set<string>();
         const parts = [`${this.slotAt(slot)} = jsrt_dynobj_new()`];
         let flushed = false;
         for (const entry of expr.entries) {
@@ -3224,6 +3400,33 @@ class Emitter {
               `jsrt_dyn_index_set(${this.slotAt(slot)}, ${keyScratch}, ${valueScratch}, NULL)`,
             );
             continue;
+          }
+          // A spread field: the source ran once into its scratch at its own position above, and
+          // this read is a pure slot load out of that -- the same shape as the fixed arm's, with
+          // `jsrt_set_prop` in place of the slot store.
+          if (entry.value.kind === 'field-access' && entry.value.target.kind !== 'identifier') {
+            const key = spreadScratchKey(entry.value.span);
+            const scratchSlot = scratchAt.get(key);
+            const source = scratchTarget.get(key);
+            if (scratchSlot !== undefined && source !== undefined) {
+              if (!scratchDone.has(key)) {
+                scratchDone.add(key);
+                flushed =
+                  this.sequencePart(
+                    parts,
+                    source,
+                    expr.span,
+                    (v) => `${this.slotAt(scratchSlot)} = ${v}`,
+                  ) || flushed;
+              }
+              parts.push(
+                `${scratch} = jsrt_object_get_field(${this.slotAt(scratchSlot)}, ${String(entry.value.slot)}, ${cNameLiteral(entry.name)})`,
+              );
+              parts.push(
+                `jsrt_set_prop(${this.slotAt(slot)}, ${cNameLiteral(entry.name)}, ${scratch}, NULL)`,
+              );
+              continue;
+            }
           }
           flushed =
             this.sequencePart(parts, entry.value, expr.span, (v) => `${scratch} = ${v}`) || flushed;
@@ -3796,7 +3999,10 @@ class Emitter {
   }
 
   /* The C type one ABI kind crosses as (docs/FFI.md §2): the forward declaration and the call
-   * read the same function so the two cannot disagree about what a kind MEANS. */
+   * read the same function so the two cannot disagree about what a kind MEANS. A pointer
+   * crosses as `void *`: every object pointer converts to and from it without a cast, so one
+   * spelling serves every brand, and a definition whose true type differs only in the pointed-to
+   * struct still links at the ABI level. */
   private externCType(kind: ExternAbiKind): string {
     switch (kind) {
       case 'number':
@@ -3806,6 +4012,8 @@ class Emitter {
       case 'cstring':
       case 'cstring-owned':
         return 'const char *';
+      case 'pointer':
+        return 'void *';
       case 'void':
         return 'void';
     }
@@ -3828,7 +4036,13 @@ class Emitter {
    * symbol. First declaration wins: the gate admits one signature per C symbol, so a second
    * spelling reaching here agrees with the first. The header flags accumulate per NODE, not
    * per symbol: one C function called plain in one place and with `@statorError errno` in
-   * another still needs `<errno.h>`, and the declaration's early return must not swallow that. */
+   * another still needs `<errno.h>`, and the declaration's early return must not swallow that.
+   *
+   * A call compiling under a binding header contributes the header but no declaration: the
+   * header declares the symbol itself, with its real prototype — and deletes a forward
+   * declaration an earlier headerless call recorded, so one symbol never gets two spellings.
+   * (Two binding files for one C symbol is user error the docs refuse; whatever order the
+   * calls arrive in, the header governs and clang judges the rest.) */
   private recordExternDecl(expr: ExternCall): void {
     if (expr.error === 'errno') {
       this.externErrno = true;
@@ -3836,7 +4050,18 @@ class Emitter {
     if (expr.argKinds.some((kind) => kind === 'cstring')) {
       this.externStdlib = true;
     }
-    if (this.externDecls.has(expr.cName)) {
+    if (expr.header !== undefined) {
+      if (!this.externHeaders.includes(expr.header)) {
+        this.externHeaders.push(expr.header);
+      }
+      // Covered means covered however the calls interleave: a headerless call before this one
+      // recorded a declaration that must go, and one after must not record a new one — the
+      // outcome cannot depend on which file counting visited first.
+      this.externHeaderCovered.add(expr.cName);
+      this.externDecls.delete(expr.cName);
+      return;
+    }
+    if (this.externHeaderCovered.has(expr.cName) || this.externDecls.has(expr.cName)) {
       return;
     }
     const params = expr.argKinds.map((kind) => this.externCType(kind)).join(', ');

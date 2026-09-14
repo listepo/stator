@@ -2,7 +2,8 @@
 
 export type DifferentialMode = 'ts' | 'js';
 
-import { pathToFileURL } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 type ValueType = 'number' | 'string' | 'boolean';
 
@@ -174,7 +175,149 @@ function dynamicProgram(random: XorShift32): string {
   ].join('\n');
 }
 
+// --- Extern-call arm (docs/FFI.md sections 1-2, 4) ---
+//
+// What it generates: `declare`d libm bindings CALLED as direct C calls — `sqrt` (plain),
+// `fmod2` (plain, two arguments), `fmodChecked` (`@statorError nonzero`) and `logChecked`
+// (`@statorError negative`) — over fuzzed doubles. The declarations live in the extern_libm
+// golden's `libm.d.ts`, pulled in with a `/// <reference path>` whose absolute path is
+// computed from this file, so the generated program stays one file (all the differential
+// `execute` writes) on any checkout. The coupling is read-only and fails loudly: a moved
+// file is a TS error, which `run.ts` reports as a generator bug, never a divergence.
+//
+// Oracle strategy (the differential runner has no `--import` shim hook — that is the golden
+// runner's mechanism, `tests/golden/run.ts` — so the mirror lives IN the program): each call
+// sits in its own try/catch. Under Stator the declaration resolves and the call is a direct
+// C call; under Node the ambient declaration erases and the call throws ReferenceError. The
+// catch dispatches on `instanceof ReferenceError` (a working instanceof in both modes,
+// docs/SUBSET.md): the ReferenceError branch re-spells the call in JS (`Math.sqrt`, `%`,
+// `Math.log` — bit-exact mirrors of libm on IEEE doubles, the same claim `node_shim.mjs`
+// makes) INCLUDING the convention check and its exact message, while the `Error` branch
+// prints Stator's own `caught: <message>`. One try per call, so a firing convention cannot
+// skip the later calls on either side. Both directions stay differentially sensitive: a
+// missing throw prints a value where the mirror prints `caught`, a spurious throw prints
+// `caught` where the mirror prints a value, and a reworded message fails the byte compare.
+//
+// Scope and exclusions, each with its reason:
+// - Plain + nonzero + negative conventions only: those are the ones Node can mirror.
+// - `void` returns: excluded — no linkable void extern exists (`extSeed` names a fake
+//   symbol decision tests never link), and a void call prints nothing, so there is no
+//   oracle signal either way.
+// - `errno` (`sqrtErrno`): excluded — C errno has no JS oracle; even the golden covers
+//   only its success path.
+// - The `null` convention (`getEnvChecked`) and the CString calls (`numOf`, `getEnv`):
+//   excluded — they need strings and the environment, the differential runner pins neither
+//   (no `PINNED_ENV`), and the string-codec edges belong to the `print_ffi_strings` corpus.
+// - Branded pointers: excluded — STA1217 (no lowering until Phase 7 step 6).
+// - Malformed externs (STA1114-21 shapes): NEVER generated — decision fixtures own those
+//   rows, and `run.ts` throws on any non-STA4xxx build failure, so a refusal here would be
+//   a generator bug by construction.
+//
+// Minimizer: no new rule needed (`minimize.ts` untouched). Statement-dropping cannot drop
+// the `/// <reference>` line — without it the ts build fails (predicate false) and the js
+// Stator side falls into the same mirror path as Node (no divergence, predicate false) —
+// and the token rewrites never rename a call callee (the identifier-char guard) while any
+// other breakage fails the predicate.
+const EXTERN_EVERY = 8;
+const EXTERN_STREAM = 0x9e3779b9;
+const EXTERN_LIBM_DTS = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'golden',
+  'ts',
+  'extern_libm',
+  'libm.d.ts',
+).replace(/\\/g, '/');
+
+// Operand doubles for the extern arm: edge literals for exactness plus the identity/print
+// spellings, which double as convention-comparison edges (NaN never fires `negative` and
+// always fires `nonzero`; -0 fires neither) on both sides of the oracle.
+function externDouble(random: XorShift32): string {
+  if (random.int(2) === 0) {
+    return numberLiteral(NUMBER_EDGES[random.int(NUMBER_EDGES.length)] ?? 0);
+  }
+  return pick(IDENTITY_EDGES, random);
+}
+
+function externProgram(random: XorShift32, mode: DifferentialMode): string {
+  const typed = mode === 'ts';
+  // `const x: number` in ts mode, `var x` in js mode — the try/catch bodies are identical.
+  const num = (name: string, value: string): string =>
+    typed ? `const ${name}: number = ${value};` : `var ${name} = ${value};`;
+  const lines = [`/// <reference path="${EXTERN_LIBM_DTS}" />`];
+  const x0 = externDouble(random);
+  lines.push(num('x0', x0));
+  lines.push('try {');
+  lines.push('  console.log(sqrt(x0));');
+  lines.push('} catch (e) {');
+  lines.push('  if (e instanceof ReferenceError) {');
+  lines.push('    console.log(Math.sqrt(x0));');
+  lines.push('  } else if (e instanceof Error) {');
+  lines.push('    console.log("caught: " + e.message);');
+  lines.push('  }');
+  lines.push('}');
+  const a0 = externDouble(random);
+  const b0 = externDouble(random);
+  lines.push(num('a0', a0));
+  lines.push(num('b0', b0));
+  lines.push('try {');
+  lines.push('  console.log(fmod2(a0, b0));');
+  lines.push('} catch (e) {');
+  lines.push('  if (e instanceof ReferenceError) {');
+  lines.push('    console.log(a0 % b0);');
+  lines.push('  } else if (e instanceof Error) {');
+  lines.push('    console.log("caught: " + e.message);');
+  lines.push('  }');
+  lines.push('}');
+  const a1 = externDouble(random);
+  const b1 = externDouble(random);
+  lines.push(num('a1', a1));
+  lines.push(num('b1', b1));
+  lines.push('try {');
+  lines.push('  console.log(fmodChecked(a1, b1));');
+  lines.push('} catch (e) {');
+  lines.push('  if (e instanceof ReferenceError) {');
+  lines.push(typed ? '    const r1: number = a1 % b1;' : '    var r1 = a1 % b1;');
+  lines.push('    if (r1 !== 0) {');
+  lines.push('      console.log("caught: extern call \'fmodChecked\' failed: nonzero return");');
+  lines.push('    } else {');
+  lines.push('      console.log(r1);');
+  lines.push('    }');
+  lines.push('  } else if (e instanceof Error) {');
+  lines.push('    console.log("caught: " + e.message);');
+  lines.push('  }');
+  lines.push('}');
+  const x1 = externDouble(random);
+  lines.push(num('x1', x1));
+  lines.push('try {');
+  lines.push('  console.log(logChecked(x1));');
+  lines.push('} catch (e) {');
+  lines.push('  if (e instanceof ReferenceError) {');
+  lines.push(typed ? '    const l1: number = Math.log(x1);' : '    var l1 = Math.log(x1);');
+  lines.push('    if (l1 < 0) {');
+  lines.push('      console.log("caught: extern call \'logChecked\' failed: negative return");');
+  lines.push('    } else {');
+  lines.push('      console.log(l1);');
+  lines.push('    }');
+  lines.push('  } else if (e instanceof Error) {');
+  lines.push('    console.log("caught: " + e.message);');
+  lines.push('  }');
+  lines.push('}');
+  return `${lines.join('\n')}\n`;
+}
+
 export function generateProgram(seed: number, mode: DifferentialMode): string {
+  // One seed in eight exercises the extern-call arm below instead of the base program. The
+  // divisor is a pure function of the seed (never a stream draw), so every other seed's program
+  // is byte-identical to before this arm landed, and seed 42 stays a base program for the
+  // phase6 unit test (42 % 8 === 2). Weight rationale: the fuzzable extern surface is four
+  // declarations times one fixed call shape each, against the much larger arithmetic, string,
+  // container and identity regions above — 1/8 keeps those dominant while hitting libm every
+  // eight seeds. The arm runs its own xorshift stream (domain-separated by xor) so its operand
+  // draws do not mirror the base stream's for the same seed.
+  if (seed % EXTERN_EVERY === 0) {
+    return externProgram(new XorShift32(seed ^ EXTERN_STREAM), mode);
+  }
   const random = new XorShift32(seed);
   return mode === 'ts' ? typedProgram(random) : dynamicProgram(random);
 }

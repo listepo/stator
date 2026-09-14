@@ -966,10 +966,12 @@ export interface CallExpr extends Node {
 
 /** One C-ABI slot of an extern signature (docs/FFI.md §2): the TS type a parameter or return
  * position held, reduced to what the generated call passes. `cstring` borrows its UTF-8 copy
- * for the call (the emitter frees it); `cstring-owned` transfers it (never freed). `void` is
- * a return position only — a `void` parameter is STA1119, and `cstring-owned` as a return is
- * STA1119, both refused where the signature is classified, never here. */
-export type ExternAbiKind = 'number' | 'boolean' | 'cstring' | 'cstring-owned' | 'void';
+ * for the call (the emitter frees it); `cstring-owned` transfers it (never freed). `pointer`
+ * is a branded opaque handle (docs/FFI.md §2 `T*`, step 6): borrow-only, passed as `void *`
+ * and never dereferenced — there is no transfer spelling in v0, so every pointer is a borrow.
+ * `void` is a return position only — a `void` parameter is STA1119, and `cstring-owned` as a
+ * return is STA1119, both refused where the signature is classified, never here. */
+export type ExternAbiKind = 'number' | 'boolean' | 'cstring' | 'cstring-owned' | 'pointer' | 'void';
 
 /** The closed `@statorError` vocabulary (docs/FFI.md §4): the only conventions a declaration
  * may opt into. A misspelling is a gate error (STA1119), never a silent default. */
@@ -988,9 +990,10 @@ export function isExternErrorConvention(name: string): name is ExternErrorConven
 
 /** Why an error convention does not fit a return kind, or `undefined` when it does
  * (docs/FFI.md §4). `nonzero`/`negative` read the return VALUE, so only a number carries one;
- * `null` reads the return POINTER, so only a `const char*` return (`cstring`) does; `errno` is
- * orthogonal to the return and fits anything, including `void`. The gate and the verifier read
- * the same matrix so the two cannot disagree about which declarations compile. */
+ * `null` reads the return POINTER, so only a `const char*` return (`cstring`) or an opaque
+ * handle (`pointer`) does; `errno` is orthogonal to the return and fits anything, including
+ * `void`. The gate and the verifier read the same matrix so the two cannot disagree about
+ * which declarations compile. */
 export function externConventionMismatch(
   ret: ExternAbiKind,
   convention: ExternErrorConvention,
@@ -999,7 +1002,7 @@ export function externConventionMismatch(
     return undefined;
   }
   if (convention === 'null') {
-    return ret === 'cstring'
+    return ret === 'cstring' || ret === 'pointer'
       ? undefined
       : `the null convention guards a pointer return, not '${ret}'`;
   }
@@ -1012,7 +1015,14 @@ export function externConventionMismatch(
  * return the program sees, and the type a checked argument narrows to at the call edge
  * (`void` is `undefined` everywhere the model meets it, so the one mapping serves parameters
  * and the return alike). The lowering, the verifier, and the gate's boundary insertion read
- * the same function so the three cannot disagree about what a kind MEANS. */
+ * the same function so the three cannot disagree about what a kind MEANS.
+ *
+ * A `pointer` is `unknown`: the HIR has no vocabulary for a brand (a TS alias, not a layout),
+ * so a handle-typed value takes the dynamic HType — while the EXTERN node still carries the
+ * `pointer` kind, which is what the emitter, the verifier, and `explain` read instead. The
+ * `unknown` here must never be given a boundary check (it is not checkable, and there is no
+ * runtime test for "is this pointer honest"), so `maybeBoundary` passes it through untouched:
+ * the bits travel from the returning call to the next call's slot with no conversion. */
 export function externKindHType(kind: ExternAbiKind): HType {
   switch (kind) {
     case 'number':
@@ -1022,6 +1032,8 @@ export function externKindHType(kind: ExternAbiKind): HType {
     case 'cstring':
     case 'cstring-owned':
       return H_STRING;
+    case 'pointer':
+      return hUnknown(false);
     case 'void':
       return H_UNDEFINED;
   }
@@ -1036,9 +1048,11 @@ export function externKindHType(kind: ExternAbiKind): HType {
  *
  * `argKinds` is parallel to `args` and carries the DECLARATION's parameter kinds: the emitter
  * unboxes each argument slot to its C type (`jsrt_to_number`, `jsrt_as_bool`,
- * `jsrt_string_to_cstr`) rather than routing anything through `jsrt_value`. The node's `type`
+ * `jsrt_string_to_cstr`, `jsrt_ptr` for an opaque handle) rather than routing anything through
+ * `jsrt_value`. The node's `type`
  * is the boxed return the program sees (`number`, `boolean`, `undefined` for `void`,
- * `string` for `cstring`), so consumers need no extern-specific rule.
+ * `string` for `cstring`, `unknown` for a `pointer` — opaque bits, not a dynamic value),
+ * so consumers need no extern-specific rule beyond `explain`'s verdict, which reads kinds.
  *
  * Arity is EXACT, unlike `CallExpr`: a C call has no missing-means-`undefined` and no
  * drop-extras — the gate refuses a mismatch (STA1119) and the verifier restates the count.
@@ -1047,7 +1061,14 @@ export function externKindHType(kind: ExternAbiKind): HType {
  * `error` is the opted-in `@statorError` convention, if any. Absent means a plain value: a
  * failing call is not an exception. Present means the emitter checks the raw C return (or
  * `errno`, read immediately after the call, before any other runtime call) and throws an
- * `Error` naming the function and the convention. */
+ * `Error` naming the function and the convention.
+ *
+ * `header` is the declaration file's `@statorLink #include` header (docs/FFI.md §9), if it
+ * names one. Present means the prologue includes that header and emits NO forward declaration
+ * for this symbol — the header's real prototype governs the call. Absent means the prologue
+ * declares the symbol from the ABI kinds (`void *` for a pointer), which links wherever the
+ * true signature agrees at the ABI level and fails loudly at the clang line where it does
+ * not. */
 export interface ExternCall extends Node {
   readonly kind: 'extern-call';
   readonly cName: string;
@@ -1056,6 +1077,7 @@ export interface ExternCall extends Node {
   readonly argKinds: readonly ExternAbiKind[];
   readonly retKind: ExternAbiKind;
   readonly error?: ExternErrorConvention;
+  readonly header?: string;
 }
 
 /** What each console method takes, and the runtime function that serves it. The five printing

@@ -204,14 +204,17 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 
 The extern surface contract lives in `docs/FFI.md` (plan §10 Task 7.1 steps
 1–2, docs-before-code); the rows below are its feature × mode projection.
-Steps 4–5 have landed: the declaration row compiles (direct C calls, error conventions,
-the explain flag), and every refusal row is a live gate verdict with decision fixtures in
-both modes. What still defers is the branded-pointer shape (`T*`, STA1217 until step 6's
-per-signature ownership) and anything steps 5+ do not cover.
+Steps 4–7 have landed: the declaration row compiles (direct C calls, error conventions,
+the explain flag), opaque pointers cross borrow-only (step 6), headers and libraries ride
+the `@statorLink` pragma plus `--link=` (step 7, `docs/FFI.md` §9), and every refusal row
+is a live gate verdict with decision fixtures in
+both modes. What still defers is extern-as-value and the optional call (STA1217), and
+anything steps 5+ do not cover.
 
 | Feature | `ts` mode | `js` mode | Notes |
 |---|---|---|---|
-| Extern function declaration (`declare` + `@statorExtern` in a `.d.ts`) and direct calls to it | static (+ unchecked-boundary flag) | static + flag when every argument is statically typed, else dynamic + flag | Marker, C-symbol override, and `.d.ts`-only rule: `docs/FFI.md` §1. Dynamic arguments get `STA2001` checks at the call. Branded-pointer (`T*`) signatures stay not-yet(STA1217, Phase 7) until step 6's per-signature ownership. |
+| Extern function declaration (`declare` + `@statorExtern` in a `.d.ts`) and direct calls to it | static (+ unchecked-boundary flag) | static + flag when every argument is statically typed, else dynamic + flag | Marker, C-symbol override, and `.d.ts`-only rule: `docs/FFI.md` §1. Dynamic arguments get `STA2001` checks at the call (a check no handle needs — pointers cross unboxed, so a handle argument never contributes `dynamic` by itself). Branded-pointer (`T*`) signatures compile borrow-only since step 6: `void *` across, never dereferenced, never retained (`docs/FFI.md` §6). |
+| `@statorLink` pragma (link flags + `#include`) and `--link=` | link configuration, not code | link configuration, not code | One spelling per `.d.ts` (`docs/FFI.md` §9): flags append in program order, the header replaces the forward declaration with the real prototype, duplicates drop first-wins. Malformed lines, stray pragmas, and second headers are error(STA1119). `libm` needs no pragma — `-lm` already rides every link. |
 | `unknown` in an extern signature | error(STA1114) | error(STA1114) | Would need boxing; refused rather than silently boxed (`docs/FFI.md` §2). |
 | Object type in an extern signature | error(STA1115) | error(STA1115) | No C layout to pass. A C-owned struct is a branded pointer; text is `CString`. |
 | Array type in an extern signature | error(STA1116) | error(STA1116) | A managed array is not a C buffer; spell pointer + length as ABI types. |
@@ -275,7 +278,7 @@ All codes in this range reused from plan.md except those listed below.
 | STA1212 | `Symbol` primitive type | both | Phase 5 | Well-known symbols as values, Symbol.for/Symbol.keyFor, and registry. `[Symbol.iterator]()` as a class method name is not this code. |
 | STA1213 | `BigInt` primitive type | both | Phase 5 | Separate numeric type with dedicated arithmetic. |
 | STA1216 | other `Promise.prototype` members; `new Promise` not arity 1 | both | Phase 5 | `then`/`catch`/`finally` and arity-1 `new Promise` landed in step 11. The code stays allocated for the rest. |
-| STA1217 | Extern function declarations and calls | both | Phase 7 | The FFI surface code (plan §10 Task 7.1 steps 1–2). Steps 4–5 landed the lowering, so it now names only what the lowering does not cover: branded-pointer (`T*`) signatures (step 6's per-signature ownership) and extern-as-value positions. The `STA1114`–`STA1121` refusals above are the design limits that stay `never` after it. |
+| STA1217 | Extern function declarations and calls | both | Phase 7 | The FFI surface code (plan §10 Task 7.1 steps 1–2). Steps 4–7 landed the lowering, the borrow-only pointer crossing (step 6), and header/link plumbing (step 7), so it now names only extern-as-value and optional-call positions — never the call itself. The `STA1114`–`STA1121` refusals above are the design limits that stay `never` after it. |
 
 `STA1102` appeared in an early draft of this matrix for eval-in-`js`-mode. It is **retired** and must never be reused — it put a "not yet" verdict inside the `STA11xx` "never" range, which is exactly the confusion the two ranges exist to prevent. See the retired-codes table in `docs/DIAGNOSTICS.md`.
 

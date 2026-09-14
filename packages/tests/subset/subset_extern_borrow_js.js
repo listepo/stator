@@ -1,10 +1,18 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1217
+// @verdict: static
 // SUBSET.md: FFI — branded-pointer parameter forwarded through a binding, called from
-// untyped code (docs/FFI.md section 2 `T*` row). The deferral is about the SIGNATURE, not
-// the caller, so the verdict matches the ts twin: no representation exists to check against.
+// untyped code (docs/FFI.md section 2 `T*` row). The JSDoc types are the free static path
+// (MODES.md): with the handle's brand spelled, the forwarding compiles exactly as the ts
+// twin — one direct C call per crossing, with the unchecked-boundary flag alongside.
 /// <reference path="./helper_extern_ptr.d.ts" />
 
-const db = { __brand: "sqlite3" };
-console.log(extDbVersion(db));
+/**
+ * @param {sqlite3} db
+ * @returns {number}
+ */
+function version(db) {
+  return extDbVersion(db);
+}
+const db = extOpenDb(2);
+console.log(version(db));
+extCloseDb(db);

@@ -20,6 +20,7 @@ type Command =
       emitC: boolean;
       keepC: boolean;
       opt: OptLevel;
+      linkFlags: readonly string[];
     }
   | { kind: 'explain'; entry: string; mode: Mode; json: boolean };
 
@@ -27,6 +28,7 @@ const USAGE = `stator — ahead-of-time compiler for TypeScript/JavaScript
 
 Usage:
   stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
+    [--opt=0|1|2|3] [--link=<flags>]...
   stator explain <entry> [--mode=ts|js] [--json]
   stator <command> --help
   stator --version
@@ -43,6 +45,7 @@ Modes:
 const COMMAND_USAGE = {
   build: `Usage:
   stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
+    [--opt=0|1|2|3] [--link=<flags>]...
 
 Flags:
   -o, --out <out>  output path: native binary, or C with --emit=c
@@ -50,6 +53,8 @@ Flags:
   --emit=c         stop after writing C to <out>; skip the C compiler
   --keep-c         keep the intermediate .c next to the binary
   --opt 0|1|2|3    clang -O level (default 2; or STATOR_OPT)
+  --link <flags>   extra clang link flags (repeatable; splits on spaces);
+                   joins the @statorLink pragma flags (docs/FFI.md)
 `,
   explain: `Usage:
   stator explain <entry> [--mode=ts|js] [--json]
@@ -112,6 +117,17 @@ function defaultOpt(): OptLevel {
   return parseOpt(env);
 }
 
+/** One `--link` value into clang flags: whitespace-separated, so `--link="-lsqlite3 -L/x"`
+ * and two `--link` occurrences spell the same line. Empty is a user error, not an empty flag:
+ * it almost always means an unexpanded `$VAR`, and an invisible no-op would hide that. */
+function splitLinkFlags(raw: string): string[] {
+  const flags = raw.split(/\s+/).filter((flag) => flag !== '');
+  if (flags.length === 0) {
+    throw new StatorError('STA0004', '--link requires a value (clang link flags)');
+  }
+  return flags;
+}
+
 function parse(argv: readonly string[]): Command {
   const head = argv[0];
   if (head === undefined || head === '--help' || head === '-h') {
@@ -131,6 +147,7 @@ function parse(argv: readonly string[]): Command {
   let emitC = false;
   let keepC = false;
   let opt: OptLevel | undefined;
+  const linkFlags: string[] = [];
 
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -171,6 +188,15 @@ function parse(argv: readonly string[]): Command {
       }
       opt = parseOpt(next);
       i += 1;
+    } else if (arg.startsWith('--link=')) {
+      linkFlags.push(...splitLinkFlags(arg.slice('--link='.length)));
+    } else if (arg === '--link') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--link requires a value (clang link flags)');
+      }
+      linkFlags.push(...splitLinkFlags(next));
+      i += 1;
     } else if (arg.startsWith('-')) {
       throw new StatorError('STA0005', `unknown flag "${arg}"`);
     } else if (entry === undefined) {
@@ -187,7 +213,7 @@ function parse(argv: readonly string[]): Command {
     if (out === undefined) {
       throw new StatorError('STA0004', 'build requires -o <out>');
     }
-    return { kind: 'build', entry, out, mode, emitC, keepC, opt: opt ?? defaultOpt() };
+    return { kind: 'build', entry, out, mode, emitC, keepC, opt: opt ?? defaultOpt(), linkFlags };
   }
   return { kind: 'explain', entry, mode, json };
 }
@@ -224,6 +250,7 @@ async function runCommand(command: Command): Promise<void> {
         emitCOnly: command.emitC,
         keepC: command.keepC,
         opt: command.opt,
+        linkFlags: command.linkFlags,
       });
       return;
     case 'explain':

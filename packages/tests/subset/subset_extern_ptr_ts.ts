@@ -1,11 +1,12 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1217
+// @verdict: static
 // SUBSET.md: FFI — branded pointer in an extern signature (docs/FFI.md section 2 `T*` row).
-// The table promises the shape, but steps 4–5 build no representation for it: the lifetime
-// belongs to the C library, so the call waits on step 6's per-signature ownership, and the
-// verdict stays not-yet rather than inventing a box.
+// Step 6 compiles it borrow-only: the handle crosses as void* in its frame slot, untouched
+// and unretained, so the call is a direct C call — static, with the unchecked-boundary flag
+// alongside (docs/FFI.md section 5).
 /// <reference path="./helper_extern_ptr.d.ts" />
 
-console.log(extDbVersion({ __brand: "sqlite3" } as sqlite3));
+const db = extOpenDb(7);
+console.log(extDbVersion(db));
+extCloseDb(db);
 export {};

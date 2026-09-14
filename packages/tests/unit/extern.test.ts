@@ -148,16 +148,16 @@ void test('every refusal kind keeps its never-code', () => {
   }
 });
 
-void test('a branded pointer defers as STA1217, not as a refusal', () => {
+void test('a branded pointer classifies as a pointer, not as a refusal', () => {
   const classified = classifyFirst(
     'type sqlite3 = { readonly __brand: "sqlite3" };\n' +
       '/** @statorExtern */\ndeclare function f(db: sqlite3): number;',
   );
-  assert.equal(classified.ok, false);
-  if (classified.ok) {
+  assert.equal(classified.ok, true);
+  if (!classified.ok) {
     throw new Error('unreachable');
   }
-  assert.equal(classified.code, 'STA1217');
+  assert.deepEqual([...classified.signature.params], ['pointer']);
 });
 
 void test('an unmarked declaration is not an extern signature', () => {
@@ -267,8 +267,9 @@ void test('bool and void externs emit unboxed C calls with matching prototypes',
     'helper.d.ts': DIRECT_HELPER,
   });
   try {
-    const c = await compileToC(entry, 'ts');
-    assert.ok(c !== null, 'a valid extern program emits C');
+    const compiled = await compileToC(entry, 'ts');
+    assert.ok(compiled !== null, 'a valid extern program emits C');
+    const c = compiled.c;
     // No portable system function spells these, so the binary cannot link — but the SHAPE is
     // fully checkable: the prototype, the unboxed argument, and the boxed result.
     assert.ok(c.includes('bool extFlag(double);'), 'bool forward declaration');
@@ -294,8 +295,9 @@ void test('a borrowed copy is freed before the throw; a transfer never is', asyn
     'helper.d.ts': DIRECT_HELPER,
   });
   try {
-    const c = await compileToC(entry, 'ts');
-    assert.ok(c !== null, 'a valid extern program emits C');
+    const compiled = await compileToC(entry, 'ts');
+    assert.ok(compiled !== null, 'a valid extern program emits C');
+    const c = compiled.c;
     assert.ok(c.includes('#include <stdlib.h>'), 'free needs stdlib, pulled in only when owed');
     const toCstr = c.indexOf('jsrt_string_to_cstr(');
     // The call, not the forward declaration: search the assignment the statement makes.
@@ -325,8 +327,9 @@ void test('the errno sequence zeroes, calls, reads immediately, then checks', as
     'helper.d.ts': DIRECT_HELPER,
   });
   try {
-    const c = await compileToC(entry, 'ts');
-    assert.ok(c !== null, 'a valid extern program emits C');
+    const compiled = await compileToC(entry, 'ts');
+    assert.ok(compiled !== null, 'a valid extern program emits C');
+    const c = compiled.c;
     assert.ok(c.includes('#include <errno.h>'), 'errno needs its header, pulled in only when owed');
     const zero = c.indexOf('errno = 0;');
     const call = c.indexOf('extErrno(jsrt_to_number(');

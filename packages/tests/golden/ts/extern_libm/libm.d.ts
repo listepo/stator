@@ -1,9 +1,11 @@
 // Extern declarations for the extern_libm golden (docs/FFI.md): system libm/libc symbols
 // whose TRUE C signatures match the ABI mapping exactly — `double f(double)`,
 // `double f(double, double)`, `double f(const char *)`, `char *f(const char *)`. A symbol
-// whose true signature differs (strlen's size_t, free's void *) cannot be spelled here: the
-// emitted forward declaration would conflict at the clang line, loudly, by design — the
-// trust boundary fails closed.
+// whose true signature differs in a non-pointer slot (strlen's size_t return) cannot be
+// spelled here: the emitted forward declaration would conflict at the clang line, loudly,
+// by design — the trust boundary fails closed. (Handles are the exception: since step 6 a
+// branded pointer crosses as `void *`, so a `void *`-shaped symbol like `free` spells
+// exactly; the `extern_ptr` golden proves that path instead.)
 
 /** Borrowed NUL-terminated UTF-8 at the FFI boundary (docs/FFI.md section 3). */
 type CString = string & { readonly __statorCstr: "CString" };
