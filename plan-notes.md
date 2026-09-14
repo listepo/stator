@@ -4,6 +4,22 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 243. Stale `jsrt_zig.o` haunted both runtime archives; archives are now recreated (2026-09-14)
+
+**Plan:** no task — drive-by fix below task size (one recipe line + comment); `plan.md` untouched.
+
+`packages/runtime/build/libjsrt.a` and `build-asan/` both carried a `jsrt_zig.o` member (32 text
+symbols, defining `T _jsrt_array_new`) with no corresponding object in `build/` and no Zig
+anywhere in the main tree or the justfile — dropped in by a past experiment. The recipe archived
+with `ar rcs` over an explicit object list, and `ar r` replaces matches but never deletes
+members, so the ghost survived every incremental rebuild and duplicated `_jsrt_array_new`
+archive-wide: an `ld: duplicate symbol` warning on EVERY link, with the linker silently picking
+one definition. Golden suites stayed green, so this was noise plus a landmine, not a live
+miscompile. Fix: the recipe `rm -f`s the archive before `ar rcs` (comment states the invariant:
+membership is exactly the object list), then both archives were rebuilt from clean — 27 members,
+no zig, zero duplicate-symbol warnings on release and ASan links, `arrays.ts` output byte-exact
+under both. `build-intl/` was already clean and was not touched.
+
 ## 242. In-process runners land, and expose a cross-program lowering leak (2026-09-14)
 
 **Plan:** §9 Tasks 6.6, 6.7. `plan.md` edited in this change (both struck, evidence in `done.md`).
