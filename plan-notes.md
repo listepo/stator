@@ -4,6 +4,61 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 248. Verifier ceiling landed yesterday (`b5da1d1`) — the plan still claimed it; lowering is next (2026-09-14)
+
+**Plan:** §12 bullet rewritten (fixed half struck, lowering-scope card scheduled). `plan.md`
+edited in this change.
+
+Re-measurement (subagent, /tmp harness driving `lowerSourceFile`/`optimize`/`verifyHir`
+directly on synthetic scope-hostile inputs, loadavg ~5): verify is ≤1 ms at 10.9k/44.9k/112.1k
+lines — down from 190 ms / 3.6 s / 21.5 s (plan-notes 134). The parent-linked scopes §12
+prescribed landed 2026-09-13 in `b5da1d1` (owner commit: verifier scopes + program cache +
+tunable -O) without a plan update; `verify.ts` carries no `new Map(bindings)` copy (only
+comments describing the old code). Same runs name the next ceiling: lowering is ~96% of the
+measured front end and scales superlinearly (22→33→63 µs/line), and a shape experiment (3,200
+tiny vs 460 big functions at equal ~16.1k lines: 99 vs 24 µs/line) implicates
+`Scope.child()`/`functionScope()` (`src/lower/scope.ts`) duplicating the visible map per block
+and per function. Absolute lower/ts-API numbers are load-inflated upper bounds; no load explains
+a 21,500× verify delta. Incidental `new Map` sweep: captures/codegen hits are one-per-owner or
+resets, benign — the two scope.ts copies are the only ceiling.
+
+## 247. `-Wnull-character`: a shadow-renamed display name reaches C string literals (2026-09-14)
+
+**Plan:** §8 new step 17 (open). `plan.md` edited in this change.
+
+Triage (subagent, read-only): exactly one fixture emits a NUL byte —
+`tests/golden/ts/module_loop_capture.ts` (offset 507 of its `--emit=c` output):
+`JSRTClosure _jsrt_closure_2 = {…, "\0shadow:f#4", …}`. Mechanism: the fixture declares `f`
+five times in one unit; the 2nd+ binding is step-14 alpha-renamed, and `codegen/index.ts:964`
+promotes the HIR slot name to the closure display name, which `cNameLiteral` → `escapeCString`
+(`:175-184`, escapes only `\ " ?`) passes through raw. All three lines predate Task 6.6 by
+days–weeks (blames `50be291`, `fa13a50`, `0b7ec7fc`) — the in-process runner only made the
+warning visible; the old spawn runner discarded clang stderr on success. Impact, honestly split:
+in the culprit fixture the NUL static is unreachable (the live value is the heap closure, name
+`""`) — cosmetic there, ASan-clean, output byte-exact. But the same sink is observably live: a
+shadowed NON-capturing function prints `[Function (anonymous)]` where Node prints the source
+name (repro in /tmp, no golden covers it), because every closure-name consumer stops at the
+first NUL. Adjacent gap, same neighborhood: capturing arrows assigned to a const also print
+anonymous where Node names them (lowering never back-fills arrow names from declarators).
+Fix direction (step 17): carry the declarator's source spelling as the display name from the
+lowering — the precedent already exists for declarations — plus optional `escapeCString`
+hardening for C0 controls as defense in depth (silences clang, does not fix the divergence).
+
+## 246. Bench noise floor, five repeats on this host: 7.4% — the 20% gate stands (2026-09-14)
+
+**Plan:** §9 Task 6.3 residue narrowed, not closed. `plan.md` edited in this change (residue text).
+
+Five full `bench:record` runs, same commit, loadavg 5.7–7.1 throughout (steady ambient load, never
+quiet): geomeans 21.809 / 22.778 / 22.281 / 22.585 / 21.215 ms — max spread **7.4%** (prior single
+repeat: 4.0%). Each geomean is already best-of-5 internally, so this is the spread of aggregates —
+the true floor of what the gate compares. `fib.ts` (~400–437 ms vs 6–24 ms for the rest) drives
+almost all of it. Recommendation, accepted: the 20% gate stands (2.7× headroom over the worst
+spread seen); tightening toward 10% would leave ~1.3× headroom with no multi-host data, and
+same-host consecutive comparison cancels most host bias by construction. Still open, narrowed:
+these five runs are THIS host, not the weekly-job machine the residue names — that confirmation
+is the remaining half of the Check. Tracked files (`baseline.json`, `README.md`) backed up and
+byte-restored; git-ignored results deleted.
+
 ## 245. The program cache keyed on (path, mtime): stale-hit audit + content-hash fix (2026-09-14)
 
 **Plan:** §9 Task 6.9 (landed below). `plan.md` edited in this change.

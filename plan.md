@@ -545,6 +545,19 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     `tests/golden/ts/interface_shape.ts` and `tests/golden/ts/error_family.ts` match the pinned Node
     byte-for-byte; the recorded choice (docs/SUBSET.md, plan-notes 225) is DYNAMIC for an interface
     with an optional property or an index signature.
+17. **[D2] A shadow-renamed function's display name leaks the HIR spelling into `console.log`**
+    (plan-notes 247). `module_loop_capture.ts` emits a closure display name of
+    `\0shadow:f#4` (step-14 alpha-rename) into a C string literal — a `-Wnull-character`
+    warning the in-process runner made visible (the bytes were always emitted). Unreachable in
+    that fixture (the live value is the heap closure), but a shadowed NON-capturing function's
+    printed name answers `[Function (anonymous)]` where Node prints the source name — an
+    observable divergence with no golden covering it. Fix at the lowering, following the
+    existing rule (a declaration's `fn.name` keeps the SOURCE spelling while the binding takes
+    the HIR name): a declaration whose value is an anonymous function carries the declarator's
+    source spelling as the display name, and the emitter prints the display name, never the
+    slot name.
+    **Check:** a golden fixture printing a shadowed non-capturing function and a capturing
+    arrow matches the pinned Node byte-for-byte; the culprit fixture compiles warning-free.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
@@ -623,7 +636,10 @@ normalized to bytes with the raw value beside it; results appended per host; and
 **[D2] Open residue — step 7's noise floor.** The regression gate compares the geomean against the newest
 previous result for the same host and fails above `thresholdPercent: 20`. The step requires that
 threshold to sit above a **measured** spread; what has been measured is one repeat on one host
-(22.358 → 21.458 ms, **4.0%**, same commit — done.md). **Check:** a handful of repeats of one commit
+(22.358 → 21.458 ms, **4.0%**, same commit — done.md) plus five repeats on a second host
+(21.215–22.778 ms, **7.4%** max spread — plan-notes 246), and the 20% gate stands on both with
+~3× headroom. Still open, narrowed: the Check names the machine that runs the weekly job, and
+neither host is it. **Check:** a handful of repeats of one commit
 on the machine that runs the weekly job, the observed spread recorded in `plan-notes.md`, and the
 gate set from it. A gate below the noise floor fires on noise, and an alarm that fires on noise is
 one people learn to ignore — which costs more than having no gate at all.
@@ -1322,7 +1338,19 @@ Standing practices:
   flags + runtime archive). Measure the trade rather than assuming it — separate TUs lose
   cross-module inlining at `-O2`, which is precisely the hole `-flto` (rung 6) fills.
 - **Compiler throughput:** reuse the `ts.Program`/checker across builds (watch mode later); if parsing/checking exceeds the §13 tripwire, move parsing to `oxc-parser` (napi) and keep the checker for types only; re-evaluate tsgo quarterly. Measured first on 2026-09-01: the `typescript` API is 8.5% of a 111,750-line build and shrinking with scale, so this is not where the time goes (plan-notes 134).
-- **The HIR verifier's scope copying is the front end's actual ceiling** — `verifyFunction` and `verifyBlock` copy the whole enclosing binding map (`new Map(bindings)`, `src/hir/verify.ts`), which is quadratic in program size: measured 190 ms at 11k lines, 3.6 s at 45k, **21.5 s at 112k** — 82% of the front end and 41% of the whole build, against 4.5 s for everything `typescript` does. A parent-linked scope (lookup walks the chain, `set` writes to the innermost) removes the copy without changing what the verifier accepts — and makes `src/cli/build.ts`'s "it costs one tree walk" true again. Owns its own Check: the pass must still reject every HIR it rejects today (plan-notes 134).
+- **The HIR verifier's scope copying WAS the front end's ceiling — fixed 2026-09-13.**
+`verifyFunction`/`verifyBlock` used to fork the whole enclosing binding map per scope (quadratic:
+190 ms at 11k lines, 3.6 s at 45k, **21.5 s at 112k**); `b5da1d1` landed the prescribed
+parent-linked scopes, and a 2026-09-14 re-measurement on scope-hostile synthetic inputs reads
+≤1 ms at 10.9k/44.9k/112.1k lines (plan-notes 248). `src/cli/build.ts`'s "it costs one tree
+walk" is true again. **Second ceiling, same shape one layer up, now scheduled: the lowering's
+`Scope.child()`/`functionScope()`** (`src/lower/scope.ts`) still duplicate the whole visible map
+per block and per function — per-line lower cost rises 22→33→63 µs/line across the same three
+sizes, and a shape experiment (3,200 tiny vs 460 big functions at equal ~16.1k lines: 99 vs
+24 µs/line) implicates the per-function copies. Same treatment (parent link; `set` writes
+innermost; `unitDeclared` sharing preserved) with the same Check shape: synthetic ms/line flat
+across sizes, golden byte-for-byte, `pnpm run ci` green — and HIR output identical for identical
+input. (plan-notes 248).
 - **Perf-regression gate in CI** (Boa's lesson: conformance work silently taxes performance ~1–2%/release without a gate). The gate is built and shipping at 20%; what is still open under Task 6.3 is the *measured* spread it must sit above, because an alarm that fires on noise costs more than no gate.
 - **Publish the conformance % and benchmarks** — the field's trust currency. Task 6.1 steps 6–8 own the number and the honesty rules that travel with it (skips counted by feature, printed beside the percentage).
 
