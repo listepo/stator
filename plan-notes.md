@@ -4,6 +4,20 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 255. Duplication gate green (6.11): extracts land, prose stays by decision (2026-09-14)
+
+**Plan:** §9 Task 6.11 (landed below). `plan.md` edited in this change.
+
+`cpd .` exits 0 at 68 clones · 0.7% (was 99 · 1.0% red): compiler top-3 extractions,
+CI YAML anchors, runtime C helpers, differential ignore narrowed to artifacts (the three
+harness sources appear in the scan), unit-test helpers extracted with all 396 tests
+preserved. Step-17's display-name follow-ups and the `typeAt` fast path rode the same
+refactor wave (own evidence in their sessions' reports; behavior proof is the green suites).
+Deliberately NOT done: markdown prose echo (TOOLCHAIN/done/plan quotations are historical
+Check evidence — rewriting the archive to satisfy the detector trades honesty for a number)
+and sub-threshold trivia; every remaining pair has a documented reason, threshold untouched
+per the card. 6.11 therefore closes by measurement + decision, not by zero clones.
+
 ## 254. Batch close: test262 guard lands; dupes paydown progress; 6.12 implemented, open (2026-09-14)
 
 **Plan:** §9 Task 6.14 (landed below); 6.11 stays open; 6.12 implemented but open. `plan.md`

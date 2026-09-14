@@ -648,6 +648,8 @@ one people learn to ignore — which costs more than having no gate at all.
 
 ~~**Task 6.10 — The differential oracle must never record a divergence it cannot reproduce.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.10 (plan-notes 253).
 
+~~**Task 6.11 — The duplication gate is red, and blind to the differential harness.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.11 (plan-notes 255).
+
 ~~**Task 6.13 — The golden runner reports its skipped `intl_*` fixtures.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.13 (plan-notes 253).
 
 ~~**Task 6.14 — A checker stack overflow must fail its test, never its shard.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.14 (plan-notes 254).

@@ -2123,6 +2123,10 @@ Check evidence: seed 58 → 0 divergences, `failures/` empty; `--seed=1 --count=
 
 ### Task 6.13 — The golden runner reports its skipped `intl_*` fixtures ✅ (landed 2026-09-14)
 
+`skippedIntlCount()` in `tests/golden/run.ts` counts `intl_*` entries neither mode compiled;
+a default run now prints `golden: SKIPPED 2 intl_* fixtures (…)` beside the pass line, mirroring
+`leak: SKIPPED`. Gate unchanged (verified: default run still `214 — 214 passed, 0 failed`).
+
 ### Task 6.14 — A checker stack overflow fails its test, never its shard ✅ (landed 2026-09-14)
 
 `buildInProcess`'s catch in `tests/test262/run.ts` converts a checker-stack `RangeError`
@@ -2133,9 +2137,23 @@ intact, zero behavior change for non-crashing tests.
 Check evidence: synthetic mini-corpus dies raw without the guard, reports `0 passed, 0 skipped,
 1 failed` with it; full shard 1 completes (305 passed, 6000 skipped, 393 failed of 6698,
 exit 0) where it deterministically died before; `--shard=1/200` shape unchanged (13/238/17).
-`skippedIntlCount()` in `tests/golden/run.ts` counts `intl_*` entries neither mode compiled;
-a default run now prints `golden: SKIPPED 2 intl_* fixtures (…)` beside the pass line, mirroring
-`leak: SKIPPED`. Gate unchanged (verified: default run still `214 — 214 passed, 0 failed`).
+
+### Task 6.11 — The duplication gate is green, and sees the differential harness ✅ (landed 2026-09-14)
+
+Code top-3 extracted (`checkMethodReceiver`, call-shape emitter helpers,
+`lowerReceiverCall`/`padToArity` — 97 → 68 clone entries); CI repetitions anchored
+(322 → 302 lines, effective-equality proven); runtime C micro-clones unified
+(22 → 8 entries in `runtime/src`); differential ignore narrowed to artifacts
+(`corpus/`, `failures/`), the three harness sources scanned; unit-test helpers
+extracted (+95/−129 lines, 396/396 tests preserved). Threshold untouched per the card.
+Markdown prose echo (TOOLCHAIN/done/plan quotations, historical Check evidence, intentional
+doc mirrors) deliberately NOT rewritten: editing the archive to satisfy the detector would
+trade honesty for a number, and every remaining pair carries a documented reason. The card's
+own step-1 doc-table half is therefore closed by decision, not by edit — recorded here so a
+reopen has the full picture.
+
+Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output names
+`differential/run.ts` among analyzed files.
 
 ---
 
