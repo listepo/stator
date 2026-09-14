@@ -58,6 +58,7 @@ Dev runs TypeScript directly on the pinned Node — no `pnpm run build` step for
 | [docs/MODES.md](docs/MODES.md) | `ts` vs `js` |
 | [docs/SUBSET.md](docs/SUBSET.md) | what compiles, what is error, what is not-yet |
 | [docs/VALUE.md](docs/VALUE.md) | NaN-boxing, shapes, GC rooting |
+| [docs/FFI.md](docs/FFI.md) | calling C from TS: extern surface, ABI table, ownership |
 | [plan.md](plan.md) | roadmap (open work only) |
 | [AGENTS.md](AGENTS.md) | conventions for humans and agents working in this repo |
 

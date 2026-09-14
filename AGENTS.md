@@ -39,7 +39,7 @@ done.md            completion record for finished tasks (archive; not normative)
 AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
-docs/              README.md (index) ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md
+docs/              README.md (index) ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md FFI.md
 .moon/             moon workspace: workspace.yml, toolchain.yml (orchestrator; plan-notes 204)
 packages/compiler/ the compiler package "statorc" — holds src/ + the locked tsconfig.json
   src/cli/         argument parsing, build/explain drivers

@@ -148,6 +148,14 @@ These are language features that Stator does not support, either by design (ESM-
 | STA1111 | both | never | .tsx and .jsx files are not supported in v1 — JSX is a post-MVP goal | Attempt to load `.jsx` or `.tsx` file |
 | STA1112 | both | never | decorators are not supported in v1 | Any `@decorator` on a class, method, accessor, property, or parameter. A v1 non-goal (plan §0 "Non-goals"), so it is a `never` code rather than a `not-yet` one: no phase promises to deliver it |
 | STA1113 | both | never | a relative import must name the file's extension (./x.ts, ./x.js) — Node ESM does not resolve extensionless specifiers | Gate. The checker resolves Bundler-style (program.ts must, to be free of package.json metadata), which accepts `./x`; Node, the differential ground truth, never does. Permanent because it is Node's own permanent rule, not a scheduling decision |
+| STA1114 | both | never | unknown in an extern signature has no C representation; use a type from the ABI table (docs/FFI.md) | Extern refusal: `unknown` would need boxing, and "no boxing for primitives" is only meaningful if the non-primitives are refused rather than silently boxed (plan §10 Task 7.1 step 2) |
+| STA1115 | both | never | object type in an extern signature has no C representation; use a branded pointer or CString (docs/FFI.md) | Extern refusal: an object has no C layout the generated call could pass. A C struct the callee owns is a branded pointer; text is `CString` |
+| STA1116 | both | never | array type in an extern signature has no C representation; pass a pointer and a length as ABI types (docs/FFI.md) | Extern refusal: a managed array is not a C buffer. The fix spells both halves in the signature |
+| STA1117 | both | never | function type in an extern signature has no C representation; v0 has no closure trampoline (docs/FFI.md) | Extern refusal. C calls back in through Task 7.2's exported functions, never through a closure passed out (plan §10 out-of-scope table) |
+| STA1118 | both | never | string in an extern signature has no direct C mapping; use CString (borrow) or CStringOwned (transfer) (docs/FFI.md) | Extern refusal: UTF-16 in, bytes out is a real conversion with a real allocation, so it is spelled at the declaration and never inferred. The two wrappers differ only in who owns the copy after return |
+| STA1119 | both | never | {kind} in an extern signature is outside the ABI table (docs/FFI.md) | Extern catch-all: struct by value, `T**` out-params, `void` as a parameter, `CStringOwned` as a return, a `void` mapping over a value-returning C function (an unmapped nonzero return must not be silently discarded), and anything else the table does not name. A future task that widens the table splits a kind out with a NEW code, never by reusing this one |
+| STA1120 | both | never | variadic extern declaration is not supported — each call site is a different function type (docs/FFI.md) | Extern refusal, permanent: `printf`-style varargs have no sound signature (plan §10 out-of-scope table) |
+| STA1121 | both | never | extern declaration is only legal in a .d.ts file; move it there (docs/FFI.md) | Extern placement: the marker (§1) is only read on declarations in declaration files, which is what makes Task 7.3's generator output a drop-in |
 
 ---
 
@@ -173,6 +181,7 @@ These are language features on the roadmap. The message names the phase that wil
 
 | STA1215 | both | not-yet | String.prototype.{op} needs the ICU feature build: rebuild with `just runtime-intl` and compile with STATOR_RUNTIME=intl | none | `localeCompare`, `toLocaleLowerCase`, `toLocaleUpperCase`. Not a scheduling deferral like the rest of this band and not permanent either: the code is written and the CHECK is a build configuration, so the message names the flag that turns it on rather than a phase. Collation and tailored casing are CLDR data (~10 MB), which the default runtime does not carry (Phase 4 Task 4.4). **The diagnostic now carries NO `phase` field** (2026-09-01, plan-notes 136): the row already said the message names a flag rather than a phase, but the object still set `phase: 4`, so the day Phase 4 closed it would have read as a promise about a finished release. Omitting the field is the no-phase sentinel (`src/support/phases.ts`) |
 | STA1216 | both | not-yet | Promise.prototype.{m} is not yet supported: use an async function, whose await and return do the same work / new Promise(executor) is not yet supported | 5 | `then`/`catch`/`finally` and arity-1 `new Promise(executor)` landed in Phase 5 step 11 (plan-notes 157). The code stays allocated for other prototype members and a constructor that is not arity 1. Never reuse. |
+| STA1217 | both | not-yet | extern functions are not yet supported; planned for Phase 7 (FFI) | 7 | **The FFI surface code** (plan §10 Task 7.1 steps 1–2): emitted for any `@statorExtern`-marked declaration until steps 5+ land the lowering. The eight `STA1114`–`STA1121` refusals are `never` codes in the `STA11xx` table — design limits of the v0 surface, not schedule — so the ranges stay disjoint per §1.3 |
 
 `STA1209` is unallocated: `STA1207`/`STA1208` are Phase 5 module features and `STA1210`+ are builtins whose residues now name Phase 5, Phase 8 or no phase at all, so the gap keeps room for a third module-level not-yet. Gaps are free; renumbering is not.
 
@@ -340,8 +349,8 @@ The following ranges are reserved for future phases:
 
 - **STA0007–STA0009**: CLI/toolchain (Phase 2+)
 - **STA0011–STA0099**: CLI/toolchain and config
-- **STA1114–STA1199**: Rejected constructs (Phase 1+ may add more as new anti-goals are clarified)
-- **STA1209, STA1217–STA1299**: Not-yet features (Phase 2+ will expand as phases land)
+- **STA1122–STA1199**: Rejected constructs (Phase 1+ may add more as new anti-goals are clarified)
+- **STA1209, STA1218–STA1299**: Not-yet features (Phase 2+ will expand as phases land)
 - **STA2007–STA2999**: Lowering and boundary errors (Phase 2 onward)
 - **STA3002–STA3999**: Module graph errors (Phase 2+)
 - **STA4038–STA4039, STA4073–STA4079, STA4098–STA4999**: Internal errors (may grow as invariants are formalized). STA4002–STA4020, STA4022–STA4029 and STA4040–STA4059 are the HIR verifier's; STA4030–STA4037 and STA4060–STA4079 are the lowering's. The gap between the verifier's first two ranges was deliberate room for each to grow without renumbering.
