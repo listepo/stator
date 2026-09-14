@@ -39,6 +39,13 @@ import {
   tsTypeToHType,
   userIteratorMethod,
 } from './types.ts';
+import {
+  classifyExternDeclaration,
+  externDeclarationOfCall,
+  externDeclarationOfSymbol,
+  isDirectCalleePosition,
+  isExternDeclaration,
+} from './extern.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -57,6 +64,11 @@ export function gateProgram(program: ts.Program, mode: Mode): Diagnostic[] {
     // to accept or defer. This covers the TypeScript libs, Stator's own globals, and any `.d.ts`
     // the user brings.
     if (sourceFile.isDeclarationFile || program.isSourceFileDefaultLibrary(sourceFile)) {
+      // The one exception is the extern surface (docs/FFI.md §1): an `@statorExtern` declaration
+      // IS the contract, so its signature is validated where it is written — refusals at the
+      // declaration's span, in the same commit that lands the call-site verdicts. Lib files carry
+      // no marker and are untouched by the walk.
+      gateExternDeclarations(sourceFile, typeChecker, mode, diagnostics);
       continue;
     }
 
@@ -776,6 +788,23 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
   ) {
     return notYet('using a generic function as a value is not yet supported', 5);
   }
+  // An extern name (docs/FFI.md §1): the call arm already decided the direct call, so the
+  // callee position accepts here and every other position is refused — an extern has no VALUE
+  // to alias, pass, or read. An import specifier only BINDS the name, so it stays on the
+  // specifier arm's verdict rather than earning a value-use refusal for being spelled.
+  if (
+    externDeclarationOfSymbol(symbol, typeChecker) !== undefined &&
+    !ts.isImportSpecifier(node.parent)
+  ) {
+    return isDirectCalleePosition(node)
+      ? { kind: 'accept' }
+      : {
+          kind: 'not-yet',
+          code: 'STA1217',
+          message: 'using an extern function as a value is not yet supported; planned for Phase 7',
+          phase: 7,
+        };
+  }
   // A global the compiler does not model -- `String`, `Number`, `parseInt`, `NaN`, `Infinity`,
   // `Math`, `globalThis`, `console` as a value, and everything else that resolves outside the
   // module being compiled. The lowering creates bindings only for declarations it lowers, so every
@@ -1223,6 +1252,158 @@ function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mo
   return { kind: 'accept' };
 }
 
+/** The extern surface inside a `.d.ts` (docs/FFI.md §1): every marked declaration is
+ * classified where it is written, so a bad signature fails at its own span rather than at some
+ * call site in another file. Unmarked declarations are skipped — the file is still skipped. */
+function gateExternDeclarations(
+  sourceFile: ts.SourceFile,
+  typeChecker: ts.TypeChecker,
+  mode: Mode,
+  diagnostics: Diagnostic[],
+): void {
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && isExternDeclaration(node)) {
+      const classified = classifyExternDeclaration(node, typeChecker);
+      if (!classified.ok) {
+        pushExternRefusal(node, classified, sourceFile, mode, diagnostics);
+      }
+    } else if (
+      ts.isVariableStatement(node) &&
+      ts.getJSDocTags(node).some((tag) => tag.tagName.text === 'statorExtern')
+    ) {
+      // The marker on something that is not a function declaration: there is no call to lower
+      // and no signature to classify, so the declaration itself is outside the table.
+      diagnostics.push(
+        diagnosticFromNode(
+          node,
+          sourceFile,
+          'STA1119',
+          'never',
+          mode,
+          '@statorExtern marks a function declaration only (docs/FFI.md)',
+        ),
+      );
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+}
+
+/** One classified extern declaration as a gate diagnostic: never-codes stay never, and the
+ * branded-pointer deferral stays not-yet (STA1217, Phase 7). Shared by the declaration walk
+ * above and the call-site arm below, so the two cannot disagree about which code a signature
+ * earns. */
+function pushExternRefusal(
+  node: ts.Node,
+  classified: { readonly code: string; readonly message: string; readonly phase?: number },
+  sourceFile: ts.SourceFile,
+  mode: Mode,
+  diagnostics: Diagnostic[],
+): void {
+  if (classified.phase === undefined) {
+    diagnostics.push(
+      diagnosticFromNode(node, sourceFile, classified.code, 'never', mode, classified.message),
+    );
+  } else {
+    diagnostics.push(
+      diagnosticFromNode(
+        node,
+        sourceFile,
+        classified.code,
+        'not-yet',
+        mode,
+        classified.message,
+        classified.phase,
+      ),
+    );
+  }
+}
+
+/** An extern call (docs/FFI.md §1): a direct C call, decided before the property-access arms
+ * because the callee is a bare identifier and the bottom fallthrough would accept it as an
+ * ordinary call to a binding that does not exist. */
+function gateExternCall(
+  call: ts.CallExpression,
+  decl: ts.FunctionDeclaration,
+  typeChecker: ts.TypeChecker,
+  mode: Mode,
+): GateResult {
+  // Placement first: the marker is only read in a `.d.ts` (docs/FFI.md §1). The DECLARATION's
+  // file decides, never the caller's — which is also what makes Task 7.3's generator output a
+  // drop-in. The declaration's own FunctionDeclaration earns the same code in gateFunction.
+  if (!decl.getSourceFile().isDeclarationFile) {
+    return {
+      kind: 'never',
+      code: 'STA1121',
+      message: 'extern declaration is only legal in a .d.ts file; move it there (docs/FFI.md)',
+    };
+  }
+  // An optional call is not a direct call: the lowering builds one unconditional C call, not a
+  // conditional one. (An extern is always defined once linked, so `?.` would be a no-op — but a
+  // no-op the call does not model is still a shape mismatch, and the identifier arm agrees.)
+  if (call.questionDotToken !== undefined) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1217',
+      message: 'an optional call to an extern function is not yet supported; planned for Phase 7',
+      phase: 7,
+    };
+  }
+  return gateExternSignature(call, decl, typeChecker, mode);
+}
+
+/** The signature and shape half of `gateExternCall`, shared with nothing else: the call must
+ * match the declared ABI tuple exactly. */
+function gateExternSignature(
+  call: ts.CallExpression,
+  decl: ts.FunctionDeclaration,
+  typeChecker: ts.TypeChecker,
+  mode: Mode,
+): GateResult {
+  // A spread's count is not its arity, and a C call's arity is exact — there is no tuple form
+  // to spread into (docs/FFI.md §2).
+  if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
+    return {
+      kind: 'never',
+      code: 'STA1119',
+      message: 'a spread argument to an extern call is outside the ABI table (docs/FFI.md)',
+    };
+  }
+  const classified = classifyExternDeclaration(decl, typeChecker);
+  if (!classified.ok) {
+    return classified.phase === undefined
+      ? { kind: 'never', code: classified.code, message: classified.message }
+      : {
+          kind: 'not-yet',
+          code: classified.code,
+          message: classified.message,
+          phase: classified.phase,
+        };
+  }
+  // A C call has no missing-means-`undefined` and no drop-extras (unlike `CallExpr`, whose
+  // arity the language leaves open): the count is exact, permanently, so a mismatch is a never
+  // rather than a schedule. In `ts` mode the checker already rejects it (arity, STA0012 — the
+  // same passthrough an ordinary mismatched call earns), so firing here too would report one
+  // mistake twice; this arm is what refuses it in `js` mode, where that diagnostic is
+  // suppressed. Either way the lowering never sees a mismatch: its exact-length indexing is
+  // guarded by an STA4031, not by trust.
+  if (mode === 'js') {
+    const want = classified.signature.params.length;
+    const got = call.arguments.length;
+    if (got !== want) {
+      const plural = want === 1 ? '' : 's';
+      return {
+        kind: 'never',
+        code: 'STA1119',
+        message:
+          `extern call '${classified.signature.tsName}' takes ${String(want)} argument${plural}, ` +
+          `not ${String(got)} — C calls have fixed arity (docs/FFI.md)`,
+      };
+    }
+  }
+  return { kind: 'accept' };
+}
+
 function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
   // Dynamic code generation — `eval(...)` and `Function(...)` — own dedicated codes that split by
   // mode (STA1101/STA1103 never in ts, STA1206 not-yet Phase 8 in js). Asked before anything else
@@ -1251,6 +1432,14 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     return notYet('explicit type arguments on a call are not yet supported', 5);
   }
   const callee = skipParens(call.expression);
+
+  // An extern call (docs/FFI.md §1): a direct C call, not a closure — decided before the
+  // property-access arms, because the callee is a bare identifier and the bottom fallthrough
+  // would accept it as an ordinary call to a binding that does not exist.
+  const externDecl = externDeclarationOfCall(call, typeChecker);
+  if (externDecl !== undefined) {
+    return gateExternCall(call, externDecl, typeChecker, mode);
+  }
 
   // Two property-access callees, each its own HIR node: `console.log`, and a method of a class
   // this subset lays out. Anything else -- a method on a built-in, on an object literal, on an
@@ -1712,6 +1901,17 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
 function gateFunction(
   fn: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction,
 ): GateResult {
+  // The extern marker outside a `.d.ts` (docs/FFI.md §1): placement is refused before the body
+  // check below, so a bodiless `declare function` with the tag reads as misplaced (STA1121)
+  // rather than as an overload. `.d.ts` files never reach this function — the program walk
+  // skips them — so no placement test is needed here, only the marker.
+  if (ts.isFunctionDeclaration(fn) && isExternDeclaration(fn)) {
+    return {
+      kind: 'never',
+      code: 'STA1121',
+      message: 'extern declaration is only legal in a .d.ts file; move it there (docs/FFI.md)',
+    };
+  }
   // A generator's asterisk is checked here as well as at YieldExpression, because a generator
   // with no `yield` in it is still a generator and still returns an iterator.
   if (

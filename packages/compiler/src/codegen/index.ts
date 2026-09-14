@@ -24,6 +24,8 @@ import type {
   DynObjectLiteral,
   EnvCapture,
   ErrorNew,
+  ExternAbiKind,
+  ExternCall,
   Expression,
   FieldAssignment,
   ForOfStatement,
@@ -396,6 +398,7 @@ class Emitter {
     | DateStaticCall
     | DynObjectLiteral
     | ErrorNew
+    | ExternCall
     | MathCall
     | MethodCall
     | NewExpr
@@ -418,6 +421,16 @@ class Emitter {
   /** Inline-cache sites allocated so far -- one static JSRTIC per dynamic property SITE
    * (docs/VALUE.md §4.10), declared at file scope with the class descriptors. Reset per emit. */
   private icCount = 0;
+
+  /* Extern C declarations the module calls (docs/FFI.md §1, plan.md §10 Task 7.1 step 5): one
+   * forward declaration per C symbol, derived from the node's own kinds at counting time — so
+   * the emitted prototype cannot drift from the call it serves. Step 7 (headers, link flags)
+   * owns the day a symbol needs more than a prototype; until then a declaration is exact and
+   * needs nothing else. `externErrno`/`externStdlib` pull in `<errno.h>`/`<stdlib.h>` only when
+   * a call in the module needs them, so an extern-free program's prologue is byte-identical. */
+  private externDecls: Map<string, string> = new Map();
+  private externErrno: boolean = false;
+  private externStdlib: boolean = false;
 
   private classes: ClassDeclaration[] = [];
   private classIds: Map<string, number> = new Map();
@@ -542,6 +555,9 @@ class Emitter {
     this.returnSlot = 0;
     this.functions = [];
     this.functionIds.clear();
+    this.externDecls.clear();
+    this.externErrno = false;
+    this.externStdlib = false;
     this.enclosing = [];
     this.loopCount = 0;
     this.usedLabels.clear();
@@ -568,7 +584,18 @@ class Emitter {
     const functionLines = this.emitFunctionUnits();
     const mainLines = this.emitMain(module, globalSlots);
 
-    const out: string[] = ['#include "jsrt_value.h"', '', `JSRT_GLOBALS(${globalSlots});`, ''];
+    const out: string[] = ['#include "jsrt_value.h"'];
+    // The extern prologue, if the module called out (docs/FFI.md §1): `<errno.h>` only for the
+    // convention that reads it, `<stdlib.h>` only for the borrow the emitter frees, and one
+    // forward declaration per C symbol — the `#include` step 5 promises, without step 7's
+    // header/link plumbing, which a self-contained symbol never needs.
+    if (this.externErrno) {
+      out.push('#include <errno.h>');
+    }
+    if (this.externStdlib) {
+      out.push('#include <stdlib.h>');
+    }
+    out.push('', `JSRT_GLOBALS(${globalSlots});`, '');
     // Forward declarations ahead of every definition, so a function can call itself, or one
     // declared further down the file.
     for (const unit of this.functions) {
@@ -629,6 +656,16 @@ class Emitter {
       out.push(`static JSRTIC _jsrt_ic_${String(i)};`);
     }
     if (this.icCount > 0) {
+      out.push('');
+    }
+    // One forward declaration per extern C symbol the module calls, derived from the kinds the
+    // counting pass recorded — argument C types left to right, `(void)` for an empty list. A
+    // duplicate C name keeps its first declaration: two inconsistent declarations of one symbol
+    // would already have failed the gate, so what survives here agrees.
+    for (const decl of this.externDecls.values()) {
+      out.push(decl);
+    }
+    if (this.externDecls.size > 0) {
       out.push('');
     }
     // Appended one line at a time, never spread: `functionLines` is the whole program's emitted
@@ -1263,6 +1300,20 @@ class Emitter {
           this.countExpression(arg);
         }
         break;
+      // An extern call takes the call layout minus the callee: there is no function value, only
+      // a C symbol, so the arguments start where a plain call keeps its callee and the result —
+      // a fresh box the call allocates — sits ahead of them for every non-`void` return. A
+      // `void` call takes no result slot: nothing is boxed, and the statement is the call.
+      case 'extern-call': {
+        const resultSlots = expr.retKind === 'void' ? 0 : 1;
+        this.callSlots.set(expr, this.slotCount);
+        this.slotCount += resultSlots + expr.args.length;
+        for (const arg of expr.args) {
+          this.countExpression(arg);
+        }
+        this.recordExternDecl(expr);
+        break;
+      }
       // `new` and a method call share the call layout: the RECEIVER occupies the slot a plain
       // call gives the callee, so `argv` still points at one contiguous run and the callee's
       // parameter zero is the object. For `new` that slot is also the result.
@@ -1490,6 +1541,13 @@ class Emitter {
           if (stmt.expression.method === 'table') {
             this.emitPendingCheck(stmt.span);
           }
+          break;
+        }
+        // An extern call already ran as its own statements (the call, the frees, the checks);
+        // what comes back is only the result slot, and a bare line for it would be the same
+        // no-op clang warns about for calls below.
+        if (stmt.expression.kind === 'extern-call') {
+          this.emitExpression(stmt.expression);
           break;
         }
         const expr = this.emitExpression(stmt.expression);
@@ -2317,6 +2375,112 @@ class Emitter {
     return result;
   }
 
+  /* An extern call as statements (docs/FFI.md §§3–4, plan.md §10 Task 7.1 step 5): arguments
+   * left to right into rooted slots, string copies beside them, one direct C call, frees, the
+   * error-convention check, and the boxed result — in that order, never nested inside a
+   * consumer's expression.
+   *
+   * The order is the whole design:
+   * - arguments evaluate FIRST: their own pending checks run before any temporary exists, so a
+   *   throwing argument unwinds with nothing to free;
+   * - the UTF-8 copies (`jsrt_string_to_cstr`, malloc memory the caller owns) are freed BEFORE
+   *   the error-convention throw: no pending check and no `goto` stands between an allocation
+   *   and its free, so every exit path — landing pads included — is already clean when taken;
+   * - the C call itself cannot set the pending cell (it runs no Stator code, and v0 has no
+   *   callback trampoline), so reaching it means no exception is in flight and none can cross
+   *   it — the never-unwind-through-C absolute, by construction rather than by audit;
+   * - `errno` is zeroed before the call and read into a C local immediately after, before the
+   *   frees: the read precedes every other runtime call, exactly as §4's sequence demands.
+   *
+   * Temporary names derive from the slot base, which counting hands out once per node: two
+   * sites never share a base, so nested extern calls cannot redeclare each other's locals. */
+  private emitExternCall(expr: ExternCall, base: number): string {
+    const argStart = expr.retKind === 'void' ? 0 : 1;
+    const parts: string[] = [];
+    this.sequenceArgs(parts, expr.args, expr.span, base, argStart);
+    this.flushParts(parts, expr.span);
+    const cArgs: string[] = [];
+    for (let index = 0; index < expr.args.length; index++) {
+      const slot = this.slotAt(base + argStart + index);
+      const kind = expr.argKinds[index];
+      if (kind === 'cstring' || kind === 'cstring-owned') {
+        const temp = `_jsrt_exc_${String(base)}_${String(index)}`;
+        this.appendLine(`char *${temp} = jsrt_string_to_cstr(${slot});`, expr.span);
+        cArgs.push(temp);
+      } else if (kind === 'number') {
+        cArgs.push(`jsrt_to_number(${slot})`);
+      } else if (kind === 'boolean') {
+        cArgs.push(`jsrt_as_bool(${slot})`);
+      } else {
+        throw new Error(`extern call argument has no C passing: ${kind ?? 'missing'}`);
+      }
+    }
+    if (expr.error === 'errno') {
+      this.appendLine('errno = 0;', expr.span);
+    }
+    const call = `${expr.cName}(${cArgs.join(', ')})`;
+    // The raw C result travels in a C local, never through a converted expression: for a
+    // `cstring` return it is the library's pointer, NULL-checked below before the copy.
+    const raw = `_jsrt_exr_${String(base)}`;
+    if (expr.retKind === 'void') {
+      this.appendLine(`${call};`, expr.span);
+    } else {
+      // `char *` for a string return (see `externCReturnType`): the library's pointer,
+      // NULL-checked below before the copy.
+      const rawType = expr.retKind === 'cstring' ? 'char *' : this.externCType(expr.retKind);
+      this.appendLine(`${rawType} ${raw} = ${call};`, expr.span);
+    }
+    if (expr.error === 'errno') {
+      this.appendLine(`int _jsrt_exe_${String(base)} = errno;`, expr.span);
+    }
+    // Borrows freed before any throw below: the only `goto`s past this point are the
+    // error-convention check's own, taken with nothing outstanding. A transferred
+    // (`cstring-owned`) copy is the callee's now and is never freed here.
+    for (let index = 0; index < expr.args.length; index++) {
+      if (expr.argKinds[index] === 'cstring') {
+        this.appendLine(`free(_jsrt_exc_${String(base)}_${String(index)});`, expr.span);
+      }
+    }
+    if (expr.error !== undefined) {
+      // The wording is step-5 lowering detail (docs/FFI.md §7): an `Error` naming the function
+      // and the failed convention, through the runtime's own literal-message throw.
+      const detail =
+        expr.error === 'nonzero'
+          ? 'nonzero return'
+          : expr.error === 'negative'
+            ? 'negative return'
+            : expr.error === 'null'
+              ? 'NULL return'
+              : 'errno set';
+      const failed =
+        expr.error === 'nonzero'
+          ? `${raw} != 0`
+          : expr.error === 'negative'
+            ? `${raw} < 0`
+            : expr.error === 'null'
+              ? `${raw} == NULL`
+              : `_jsrt_exe_${String(base)} != 0`;
+      this.appendLine(
+        `if (${failed}) { jsrt_throw_error(&jsrt_class_error, ` +
+          `"extern call '${this.escapeCString(expr.tsName)}' failed: ${detail}"); }`,
+        expr.span,
+      );
+      this.emitPendingCheck(expr.span);
+    }
+    if (expr.retKind === 'void') {
+      return 'JSRT_UNDEFINED';
+    }
+    const result = this.slotAt(base);
+    const boxed =
+      expr.retKind === 'number'
+        ? `jsrt_number(${raw})`
+        : expr.retKind === 'boolean'
+          ? `jsrt_bool(${raw})`
+          : `jsrt_string_from_cstr(${raw})`;
+    this.appendLine(`${result} = ${boxed};`, expr.span);
+    return result;
+  }
+
   /* `goto` to a loop/switch label, routed through any finally standing between here and the
    * target. The innermost try decides: if the target construct opened BEFORE the try did, the
    * jump leaves the protected code and the finally must run first. The dispatch re-invokes this
@@ -2797,6 +2961,18 @@ class Emitter {
           this.slotAt(base),
           expr.span,
         );
+      }
+
+      // An extern call: the one arm that never touches `jsrt_value` on the way out. Arguments
+      // land in rooted slots first (their own pending checks run before any temporary exists),
+      // then straight-line statements do the rest — see `emitExternCall` for the order the
+      // string lifetimes and the error conventions depend on.
+      case 'extern-call': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('extern call was not registered during counting');
+        }
+        return this.emitExternCall(expr, base);
       }
 
       case 'field-access': {
@@ -3595,6 +3771,59 @@ class Emitter {
   private callLocation(span: Span): string {
     const file = this.escapeCString(span.file ?? this.fileName);
     return `"${file}:${String(span.line)}"`;
+  }
+
+  /* The C type one ABI kind crosses as (docs/FFI.md §2): the forward declaration and the call
+   * read the same function so the two cannot disagree about what a kind MEANS. */
+  private externCType(kind: ExternAbiKind): string {
+    switch (kind) {
+      case 'number':
+        return 'double';
+      case 'boolean':
+        return 'bool';
+      case 'cstring':
+      case 'cstring-owned':
+        return 'const char *';
+      case 'void':
+        return 'void';
+    }
+  }
+
+  /* The C type an extern RETURN is declared with: the same table, except a string return is
+   * spelled `char *` rather than `const char *`. C headers declare string-returning functions
+   * mutable (`char *getenv(const char *)`), and a forward declaration that is not IDENTICAL to
+   * a visible one is a clang error — so `const char *getenv(...)` fails the build while
+   * `char *getenv(...)` links. The ABI is identical either way (a pointer), the value is
+   * copied by `jsrt_string_from_cstr` before anything can observe the spelling, and nothing
+   * the emitter writes through it mutates: the contract's `const` lives in docs/FFI.md §2,
+   * this spelling lives at the linkage line. */
+  private externCReturnType(kind: ExternAbiKind): string {
+    return kind === 'cstring' ? 'char *' : this.externCType(kind);
+  }
+
+  /** Records one extern C symbol's forward declaration, derived from the node's own kinds.
+   * Runs at COUNTING time so the prologue — emitted before any unit — already knows every
+   * symbol. First declaration wins: the gate admits one signature per C symbol, so a second
+   * spelling reaching here agrees with the first. The header flags accumulate per NODE, not
+   * per symbol: one C function called plain in one place and with `@statorError errno` in
+   * another still needs `<errno.h>`, and the declaration's early return must not swallow that. */
+  private recordExternDecl(expr: ExternCall): void {
+    if (expr.error === 'errno') {
+      this.externErrno = true;
+    }
+    if (expr.argKinds.some((kind) => kind === 'cstring')) {
+      this.externStdlib = true;
+    }
+    if (this.externDecls.has(expr.cName)) {
+      return;
+    }
+    const params = expr.argKinds.map((kind) => this.externCType(kind)).join(', ');
+    const decl =
+      `${this.externCReturnType(expr.retKind)} ${expr.cName}` +
+      `(${expr.argKinds.length === 0 ? 'void' : params});`;
+    this.externDecls.set(expr.cName, decl);
+    // A `cstring` RETURN needs no header: `jsrt_string_from_cstr` is already declared, and the
+    // `char *` result travels in a C local, never through a converted expression.
   }
 
   /** The layout is the TYPE's field order, because that is what a later `o.x` resolves against

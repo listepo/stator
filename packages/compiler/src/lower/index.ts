@@ -34,6 +34,7 @@ import {
   specializationName,
   substituteHType,
 } from '../frontend/generics.ts';
+import { classifyExternDeclaration, externDeclarationOfCall } from '../frontend/extern.ts';
 import { assertedBy, isCheckable, narrowedTo, sourceLocation } from '../frontend/narrowing.ts';
 import {
   accessorDeclaringClass,
@@ -70,6 +71,7 @@ import type {
   Declaration,
   DynEntry,
   DynFieldAccess,
+  ExternCall,
   Expression,
   FieldAccess,
   FunctionDeclaration,
@@ -113,6 +115,7 @@ import {
   DATE_OPS,
   DATE_STATICS,
   errorHType,
+  externKindHType,
   forOfElementType,
   isAccessorEntry,
   isComputedEntry,
@@ -4202,6 +4205,14 @@ function lowerExpression(
       }
     }
 
+    // An extern call (docs/FFI.md §1): a direct C call, not a closure. The gate proved the
+    // declaration is in a `.d.ts`, classified its signature, and pinned the arity — so a refusal
+    // here is the gate and the lowering disagreeing (STA4031), never a user-facing diagnostic.
+    const externDecl = externDeclarationOfCall(node, checker);
+    if (externDecl !== undefined) {
+      return lowerExternCall(node, externDecl, sourceFile, checker, bindings, diagnostics);
+    }
+
     // A call to a generic names a SPECIALIZATION, not the generic: `box(1)` is a call to
     // `box<number>`, which `collectSpecializations` has already put in `bindings` under that
     // mangled name. The callee is not lowered as an expression, because the name it would lower to
@@ -5686,6 +5697,72 @@ function padToArity(args: readonly Expression[], arity: number, span: Span): Exp
     padded.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
   }
   return padded;
+}
+
+/** An extern call (docs/FFI.md §1, plan.md §10 Task 7.1 step 5): the declaration's ABI tuple
+ * with the lowered arguments, each dynamic one wrapped in the call-edge boundary check the
+ * mixed-graph rule already owns (`maybeBoundary` — STA2001 at run time on mismatch, the
+ * existing trap doing its existing job, not a new mechanism).
+ *
+ * The gate proved three things before this runs: the declaration lives in a `.d.ts`, its
+ * signature classifies into the ABI table, and — in `js` mode — the arity is exact (in `ts`
+ * mode the checker's own arity diagnostic owns that refusal, and the build stops there). A C
+ * call has no missing-means-`undefined`, so each is re-asserted as an STA4031 rather than
+ * trusted, because a gate/lowering disagreement here would otherwise emit a C call against
+ * the wrong signature — memory corruption, not a diagnostic. The callee is never lowered as
+ * an expression: an extern has no value, so there is no binding for it. */
+function lowerExternCall(
+  node: ts.CallExpression,
+  decl: ts.FunctionDeclaration,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const fail = (message: string): null => {
+    diagnostics.push(diagnosticFromNode(node, sourceFile, 'STA4031', 'internal', 'ts', message));
+    return null;
+  };
+  const classified = classifyExternDeclaration(decl, checker);
+  if (!classified.ok) {
+    return fail(`extern call the gate refused reached the lowering (${classified.code})`);
+  }
+  // The gate refuses optional chains on externs (there is no conditional direct call); a `?.`
+  // reaching here is the same gate/lowering disagreement as a bad signature.
+  if (node.questionDotToken !== undefined) {
+    return fail('optional call to an extern function reached the lowering');
+  }
+  const signature = classified.signature;
+  if (node.arguments.length !== signature.params.length) {
+    return fail('extern call with an arity the gate refused reached the lowering');
+  }
+  const lowered = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  if (lowered === null) {
+    return null;
+  }
+  const args: Expression[] = [];
+  for (const [index, arg] of lowered.entries()) {
+    const kind = signature.params[index];
+    const site = node.arguments[index];
+    if (kind === undefined || site === undefined) {
+      return fail('extern call with an arity the gate refused reached the lowering');
+    }
+    args.push(maybeBoundary(arg, externKindHType(kind), site, sourceFile));
+  }
+  const call: ExternCall = {
+    kind: 'extern-call',
+    // `void` is `undefined` everywhere the model meets it — the same collapse `tsTypeToHType`
+    // performs — so the one mapping serves parameters and the return alike.
+    type: externKindHType(signature.ret),
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    cName: signature.cName,
+    tsName: signature.tsName,
+    args,
+    argKinds: signature.params,
+    retKind: signature.ret,
+    ...(signature.error !== undefined ? { error: signature.error } : {}),
+  };
+  return call;
 }
 
 /** The operation a Map or Set method name denotes, or undefined for a name that is not one.

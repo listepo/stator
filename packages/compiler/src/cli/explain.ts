@@ -19,6 +19,7 @@ import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
 import { createProgram } from '../frontend/program.ts';
 import type { Expression, FunctionExpr, Module, Provenance, Statement } from '../hir/nodes.ts';
+import type { ExternCall } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
 import { lowerProgram } from '../lower/index.ts';
 import { rewriteModule } from '../passes/rewrite.ts';
@@ -38,6 +39,20 @@ export interface Explanation {
    * file earned a verdict before lowering ran -- a program that was rejected has no functions to
    * report, and an empty array would claim it had none. */
   readonly functions?: readonly FunctionReport[];
+  /** Every extern call the module compiles (docs/FFI.md §5): the unchecked-boundary mark. A C
+   * return cannot be runtime-checked (§0 rule 2's one exception), so an audit enumerates these
+   * rows rather than trusting the verdict alone. The mark rides ALONGSIDE the verdict — the
+   * four-verdict vocabulary is unchanged — and is absent when the module makes no extern call,
+   * which keeps every non-extern report byte-identical. */
+  readonly externCalls?: readonly ExternCallReport[];
+}
+
+/** One unchecked boundary: the C symbol called and the source line that calls it. The TS name
+ * is the declaration's business; the audit question is which FOREIGN code runs, so the C
+ * symbol is what the row names. */
+export interface ExternCallReport {
+  readonly name: string;
+  readonly line: number;
 }
 
 /** One function's row. `provenance` is the HIR fact (where the SIGNATURE's types came from);
@@ -86,6 +101,11 @@ export async function explain(entry: string, mode: Mode, json: boolean): Promise
     // it is rather than as a contradiction.
     for (const fn of result.functions ?? []) {
       lines.push({ text: `  ${fn.line}: ${fn.name}: ${fn.verdict} (${fn.provenance})` });
+    }
+    // The unchecked-boundary mark in human form: every extern call the file compiles, so the
+    // audit `stator explain` exists to serve works on a terminal too, not only on `--json`.
+    for (const call of result.externCalls ?? []) {
+      lines.push({ text: `  unchecked boundary: extern call '${call.name}' (line ${call.line})` });
     }
     await print(lines, process.stdout);
   }
@@ -146,6 +166,32 @@ export async function explainFile(entry: string, mode: Mode): Promise<Explanatio
   return {
     verdict: hasUnknown(module) ? 'dynamic' : 'static',
     functions: functionReports(module),
+    ...externCallsField(module),
+  };
+}
+
+/** The unchecked-boundary mark (docs/FFI.md §5): one row per extern call the module compiles,
+ * in source order. Absent — not empty — when the module makes no extern call, so reports for
+ * programs without one are unchanged. A rejected program never reaches here (its verdict
+ * returned above), which is correct: a call that does not compile is not a boundary, it is a
+ * refusal, and its code already names it. */
+function externCallsField(module: Module): { externCalls?: readonly ExternCallReport[] } {
+  const found: ExternCall[] = [];
+  rewriteModule(module, {
+    expression: (expr) => {
+      if (expr.kind === 'extern-call') {
+        found.push(expr);
+      }
+      return expr;
+    },
+  });
+  if (found.length === 0) {
+    return {};
+  }
+  return {
+    externCalls: found
+      .map((call) => ({ name: call.cName, line: call.span.line }))
+      .sort((a, b) => a.line - b.line),
   };
 }
 
@@ -367,6 +413,12 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expr.params.some((p) => p.type.kind === 'unknown') || statementHasUnknown(expr.body);
     case 'call':
       return expressionHasUnknown(expr.callee) || expr.args.some(expressionHasUnknown);
+    // An extern call is `static` when every argument is statically typed and `dynamic` when a
+    // dynamic value reaches it (docs/FFI.md §5) — which is exactly what a `boundary-check`
+    // child records: the lowering wraps every Unknown argument in one, so the wrapper IS the
+    // dynamic-argument mark. Anything else dynamic inside is reported by the ordinary walk.
+    case 'extern-call':
+      return expr.args.some((arg) => arg.kind === 'boundary-check' || expressionHasUnknown(arg));
     case 'new':
       return expr.args.some(expressionHasUnknown);
     // The object's own type stops the deep walk (hTypeHasUnknown does not recurse into a class,

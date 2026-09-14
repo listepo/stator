@@ -463,6 +463,10 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     }
     case 'function':
       return rewriteFunction(expr, rewriter);
+    case 'extern-call': {
+      const args = rewriteEach(expr.args, sub);
+      return args === expr.args ? expr : { ...expr, args };
+    }
     case 'call': {
       const callee = sub(expr.callee);
       const args = rewriteEach(expr.args, sub);

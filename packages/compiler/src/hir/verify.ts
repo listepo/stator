@@ -37,6 +37,8 @@ import {
   DATE_OPS,
   DATE_STATICS,
   errorHType,
+  externConventionMismatch,
+  externKindHType,
   forOfElementType,
   isAccessorEntry,
   isComputedEntry,
@@ -1088,6 +1090,74 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           span: expr.span,
           code: 'STA4041',
           message: `callee has type '${hTypeName(expr.callee.type)}', which is not callable`,
+        });
+      }
+      break;
+    }
+
+    case 'extern-call': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      // The gate pins the arity exactly (a C call has no missing-means-`undefined`), and every
+      // `jsrt_value` argument shares one C type — so a short count or a mistyped argument is a
+      // call the generated C cannot reject and the callee reads past. STA4098 polices the four
+      // claims the direct call rests on: the count, each argument's ABI kind, the boxed result,
+      // and the error convention against the return it reads.
+      if (expr.args.length !== expr.argKinds.length) {
+        problems.push({
+          kind: 'extern-call',
+          span: expr.span,
+          code: 'STA4098',
+          message:
+            `extern call '${expr.tsName}' takes ${String(expr.argKinds.length)} arguments, ` +
+            `not ${String(expr.args.length)}`,
+        });
+        break;
+      }
+      expr.args.forEach((arg, index) => {
+        const kind = expr.argKinds[index];
+        const want =
+          kind === 'number'
+            ? H_NUMBER
+            : kind === 'boolean'
+              ? H_BOOLEAN
+              : kind === 'cstring' || kind === 'cstring-owned'
+                ? H_STRING
+                : undefined;
+        if (want !== undefined && !hTypeEquals(arg.type, want)) {
+          problems.push({
+            kind: 'extern-call',
+            span: expr.span,
+            code: 'STA4098',
+            message:
+              `extern call '${expr.tsName}' argument ${String(index)} has type ` +
+              `'${hTypeName(arg.type)}', not '${hTypeName(want)}'`,
+          });
+        }
+      });
+      const result = externKindHType(expr.retKind);
+      if (!hTypeEquals(expr.type, result)) {
+        problems.push({
+          kind: 'extern-call',
+          span: expr.span,
+          code: 'STA4098',
+          message:
+            `extern call '${expr.tsName}' results in '${hTypeName(expr.type)}', ` +
+            `not '${hTypeName(result)}'`,
+        });
+      }
+      if (
+        expr.error !== undefined &&
+        externConventionMismatch(expr.retKind, expr.error) !== undefined
+      ) {
+        problems.push({
+          kind: 'extern-call',
+          span: expr.span,
+          code: 'STA4098',
+          message:
+            `extern call '${expr.tsName}' uses the ${expr.error} convention on a ` +
+            `'${expr.retKind}' return`,
         });
       }
       break;

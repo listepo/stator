@@ -8,7 +8,7 @@
  */
 
 import type { HObject, HType } from './types.ts';
-import { H_NUMBER, H_STRING, hUnknown } from './types.ts';
+import { H_BOOLEAN, H_NUMBER, H_STRING, H_UNDEFINED, hUnknown } from './types.ts';
 
 /* jscpd:ignore-start
  *
@@ -964,6 +964,100 @@ export interface CallExpr extends Node {
   readonly args: readonly Expression[];
 }
 
+/** One C-ABI slot of an extern signature (docs/FFI.md §2): the TS type a parameter or return
+ * position held, reduced to what the generated call passes. `cstring` borrows its UTF-8 copy
+ * for the call (the emitter frees it); `cstring-owned` transfers it (never freed). `void` is
+ * a return position only — a `void` parameter is STA1119, and `cstring-owned` as a return is
+ * STA1119, both refused where the signature is classified, never here. */
+export type ExternAbiKind = 'number' | 'boolean' | 'cstring' | 'cstring-owned' | 'void';
+
+/** The closed `@statorError` vocabulary (docs/FFI.md §4): the only conventions a declaration
+ * may opt into. A misspelling is a gate error (STA1119), never a silent default. */
+export type ExternErrorConvention = 'nonzero' | 'negative' | 'null' | 'errno';
+
+export const EXTERN_ERROR_CONVENTIONS: ReadonlySet<string> = new Set([
+  'nonzero',
+  'negative',
+  'null',
+  'errno',
+]);
+
+export function isExternErrorConvention(name: string): name is ExternErrorConvention {
+  return EXTERN_ERROR_CONVENTIONS.has(name);
+}
+
+/** Why an error convention does not fit a return kind, or `undefined` when it does
+ * (docs/FFI.md §4). `nonzero`/`negative` read the return VALUE, so only a number carries one;
+ * `null` reads the return POINTER, so only a `const char*` return (`cstring`) does; `errno` is
+ * orthogonal to the return and fits anything, including `void`. The gate and the verifier read
+ * the same matrix so the two cannot disagree about which declarations compile. */
+export function externConventionMismatch(
+  ret: ExternAbiKind,
+  convention: ExternErrorConvention,
+): string | undefined {
+  if (convention === 'errno') {
+    return undefined;
+  }
+  if (convention === 'null') {
+    return ret === 'cstring'
+      ? undefined
+      : `the null convention guards a pointer return, not '${ret}'`;
+  }
+  return ret === 'number'
+    ? undefined
+    : `the ${convention} convention reads a numeric return, not '${ret}'`;
+}
+
+/** The HType a value of one ABI kind carries on the Stator side of the boundary: the boxed
+ * return the program sees, and the type a checked argument narrows to at the call edge
+ * (`void` is `undefined` everywhere the model meets it, so the one mapping serves parameters
+ * and the return alike). The lowering, the verifier, and the gate's boundary insertion read
+ * the same function so the three cannot disagree about what a kind MEANS. */
+export function externKindHType(kind: ExternAbiKind): HType {
+  switch (kind) {
+    case 'number':
+      return H_NUMBER;
+    case 'boolean':
+      return H_BOOLEAN;
+    case 'cstring':
+    case 'cstring-owned':
+      return H_STRING;
+    case 'void':
+      return H_UNDEFINED;
+  }
+}
+
+/** A call to an `@statorExtern` C function (docs/FFI.md §1, plan.md §10 Task 7.1 step 5).
+ *
+ * Not a `CallExpr`: there is no function VALUE anywhere — the callee is a C symbol, so the
+ * emitter makes a direct call instead of loading a closure, and no `jsrt_value` crosses in
+ * either direction. `cName` is the C symbol (the `@statorExtern` override, or the TS name);
+ * `tsName` is what the program spelled, and is what the error-convention throw reports.
+ *
+ * `argKinds` is parallel to `args` and carries the DECLARATION's parameter kinds: the emitter
+ * unboxes each argument slot to its C type (`jsrt_to_number`, `jsrt_as_bool`,
+ * `jsrt_string_to_cstr`) rather than routing anything through `jsrt_value`. The node's `type`
+ * is the boxed return the program sees (`number`, `boolean`, `undefined` for `void`,
+ * `string` for `cstring`), so consumers need no extern-specific rule.
+ *
+ * Arity is EXACT, unlike `CallExpr`: a C call has no missing-means-`undefined` and no
+ * drop-extras — the gate refuses a mismatch (STA1119) and the verifier restates the count.
+ * Evaluation order is arguments left to right; there is no callee to evaluate first.
+ *
+ * `error` is the opted-in `@statorError` convention, if any. Absent means a plain value: a
+ * failing call is not an exception. Present means the emitter checks the raw C return (or
+ * `errno`, read immediately after the call, before any other runtime call) and throws an
+ * `Error` naming the function and the convention. */
+export interface ExternCall extends Node {
+  readonly kind: 'extern-call';
+  readonly cName: string;
+  readonly tsName: string;
+  readonly args: readonly Expression[];
+  readonly argKinds: readonly ExternAbiKind[];
+  readonly retKind: ExternAbiKind;
+  readonly error?: ExternErrorConvention;
+}
+
 /** What each console method takes, and the runtime function that serves it. The five printing
  * methods differ only in stream and in whether a top-level string prints bare, so they share
  * `jsrt_print`/`jsrt_eprint`; the rest each have their own entry point because each carries its
@@ -1424,6 +1518,7 @@ export type Expression =
   | RegExpOp
   | FunctionExpr
   | CallExpr
+  | ExternCall
   | AwaitExpr
   | YieldExpr
   | PromiseStaticCall
