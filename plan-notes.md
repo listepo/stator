@@ -4,6 +4,24 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 256. Extern calls land (7.1 steps 4–5); audit gaps closed in docs (2026-09-14)
+
+**Plan:** §10 Task 7.1 steps 4–5 (landed below; steps 6+ open). `plan.md` edited in this change.
+
+Implementation arrived as one coherent change (extern surface reader, HIR node, gate arms,
+verifier STA4098, emitter, explain flag, libm goldens, 17 decision fixtures, 13 unit tests).
+Close-out reconciliation against the contract audit found the code sound and the docs behind
+in eight places, all fixed in `docs/FFI.md` (CString returns, exact brand rule, `any`→STA1114,
+overloads, untagged-ambient fate, STA1217 scope, convention↔return matrix verified against
+`externConventionMismatch`, §8 carved out of the sole-allocator claim), plus the MODES.md
+`externCalls` field, the DIAGNOSTICS STA1119 void-clause narrowed to the checkable form, and
+the plan step-2 table pointed at FFI.md as authoritative. Two audit findings confirmed
+non-issues by reading code: branded-pointer `null`-convention interplay is moot (pointers
+defer as STA1217 before conventions apply), and `explain`'s flag is optional-absent
+(byte-identical reports preserved). Remaining for steps 6+: link plumbing (`--link`, header
+pragma provenance — FFI.md has no step-7 section yet), ambient `CString` lib decls, `T**`,
+and the Task 7.2 STA1122–1124 allocations.
+
 ## 255. Duplication gate green (6.11): extracts land, prose stays by decision (2026-09-14)
 
 **Plan:** §9 Task 6.11 (landed below). `plan.md` edited in this change.

@@ -342,6 +342,11 @@ Consumers:
   each fixture isolates one construct, the rollup is exactly that construct's verdict.
 - **Humans and tooling** read `constructs` to audit precisely what went dynamic, and where.
 
+**Top-level `externCalls` (optional).** A module that compiles extern calls carries one row
+per call — `{ "name": "<C symbol>", "line": <source line> }`, in source order — naming the
+unchecked boundaries (`docs/FFI.md` §5). Like `code`, it is **omitted**, never empty, when the
+module makes no extern call, so reports for programs without one are byte-identical to before.
+
 ### Worked example: `ts` mode
 
 **Input file (`example.ts`):**

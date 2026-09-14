@@ -6,9 +6,10 @@ may cross the boundary, who owns the memory, and what the compiler promises
 7.1 steps 1–2 — the surface and the ABI table, written down **before** any
 lowering (plan §15.6).
 
-Steps 5+ (lowering, the emitter, per-signature GC treatment, link plumbing) are
-**not** started. Sections below say where each one's mechanism will hook in,
-but no mechanism is claimed. §7 lists what the implementation steps still owe.
+Steps 4–5 (error mapping, lowering and the emitter) have landed; step 6+ (per-signature
+GC treatment, link plumbing) have not. Sections below say where each remaining mechanism
+will hook in, but no unbuilt mechanism is claimed. §7 lists what the implementation steps
+still owe.
 
 Normative companions: `docs/SUBSET.md` carries the extern rows (feature × mode
 matrix), and `docs/DIAGNOSTICS.md` is the sole allocator — every code named
@@ -53,7 +54,12 @@ bindings exist (plan §10 Task 7.1 step 1):
    declaration files is what makes Task 7.3's generator output a drop-in, and
    it keeps the trust boundary greppable — every unchecked call site (§5) is
    declared in a file whose extension already says "this is an interface, not
-   an implementation".
+   an implementation". A `declare function` WITHOUT the tag is an ordinary
+   ambient declaration, not an extern: existing arms decide it (not-yet
+   STA1214 today), and calls to it never reach the extern call arm.
+4. **Overloads resolve to the first marked declaration.** The surface is one C
+   symbol per TS name, so overloads of an extern are a user error the arity
+   rule answers, not a second signature.
 
 ---
 
@@ -65,7 +71,7 @@ step 2):
 | TS type | C type | Notes |
 |---|---|---|
 | `number` | `double` | The unmarked case; no conversion |
-| `number` + `i32` refinement | `int32_t` | The refinement already exists (`docs/NUMERIC.md`) |
+| `number` + `i32` refinement | `int32_t` | No user spelling exists yet — until one lands, every `number` maps to `double` (`docs/NUMERIC.md`) |
 | `boolean` | `bool` | `<stdbool.h>` |
 | `void` | `void` | Return position only; a `void` parameter is STA1119 |
 | branded pointer type | `T*` | Opaque; never dereferenced by generated code (see below) |
@@ -77,6 +83,11 @@ step 2):
 ```ts
 type sqlite3 = { readonly __brand: "sqlite3" };
 ```
+
+Recognition is structural and exact: an object type (alias or interface) with
+exactly one property, named `__brand`, `readonly`, of string-literal type.
+The spelling prefix is irrelevant; a wider object is STA1115 whatever it names
+its fields.
 
 Generated code passes the pointer through and never dereferences it. Its
 lifetime belongs to the C library, not to the collector: a binding that keeps
@@ -96,7 +107,7 @@ table splits a kind out with a NEW code, never by reusing one):
 
 | Refused kind | Code | Fix |
 |---|---|---|
-| `unknown` in an extern signature | error(STA1114) | Narrow first, or pick an ABI type |
+| `unknown` in an extern signature | error(STA1114) | Narrow first, or pick an ABI type. Explicit or implicit `any` counts as `unknown` here, in both modes — dynamic is inexpressible across the boundary |
 | object type in an extern signature | error(STA1115) | Branded pointer, or `CString` for text |
 | array type in an extern signature | error(STA1116) | Pass a pointer + length as ABI types |
 | function/closure type in an extern signature | error(STA1117) | v0 has no trampoline; C calls in via Task 7.2 exports instead |
@@ -134,8 +145,9 @@ asymmetric on purpose:
 - **Out (C → TS).** A `const char*` return is **copied** into a fresh runtime
   (UTF-16) string at the boundary — never wrapped, because a wrapper's
   lifetime belongs to the C library and nothing in the runtime can track it.
-  The original pointer is never freed by the runtime either: the allocator is
-  the library's, not ours. A C function that `malloc`s its return needs an
+  Declare the return as **`CString`** (the parameter spelling works in both
+  positions; `CStringOwned` stays parameter-only). The original pointer is
+  never freed by the runtime either: the allocator is the library's, not ours. A C function that `malloc`s its return needs an
   explicit free function in the same binding, declared as its own extern; the
   binding's documentation says so.
 
@@ -179,11 +191,18 @@ declare function sqliteStep(stmt: sqlite3_stmt): number;
 | `@statorError null` | NULL (pointer-typed) return throws |
 | `@statorError errno` | `errno` carries the failure; it is read immediately after the call, before any other runtime call |
 
-The thrown value is an `Error` naming the function and the failed convention;
-its exact wording is step-5 lowering detail (§7). The vocabulary is closed: a
+The thrown value is an `Error` naming the TS function and the failed convention —
+`extern call '<tsName>' failed: <nonzero return | negative return | NULL return | errno set>` —
+raised through the runtime's own literal-message throw
+(`jsrt_throw_error(&jsrt_class_error, ...)`), so a `catch` reads `name`/`message`/`instanceof`
+like any other `Error`. The vocabulary is closed: a
 misspelled convention is a gate error at the declaration, not a silent
 default — a binding that invents its own convention is the failure this
-section exists to prevent.
+section exists to prevent. Conventions compose with return kinds only where
+the combination means something: `nonzero`/`negative` require `number`
+returns, `null` requires a `CString` return, `errno` combines with anything
+including `void` (it is read before any copy allocation); anything else is
+STA1119 naming the mismatch.
 
 Two absolutes (plan's words):
 
@@ -205,11 +224,14 @@ marks every extern call as an **unchecked boundary** so an audit can enumerate
 every one of them. The mark rides **alongside** the verdict, not instead of
 it: the four-verdict vocabulary (`static | dynamic | error | not-yet`,
 `docs/MODES.md` §6) is unchanged, and `tests/subset/run.ts` keeps reading
-verdict + code only. Until steps 5+ land, the verdict on any extern construct
-is not-yet(STA1217, Phase 7), flag included, so extern sites are auditable
-from the first gate implementation. Once landed: `ts`-mode extern calls are
-`static` + flag (direct C calls, unboxed); `js`-mode calls are `static` + flag
-when every argument is statically typed, else `dynamic` + flag.
+verdict + code only. Steps 5+ have landed, so compiled calls carry the flag: `ts`-mode
+extern calls are `static` + flag (direct C calls, unboxed); `js`-mode calls are `static` +
+flag when every argument is statically typed, else `dynamic` + flag. A call that does not
+compile — a refusal, or a deferred pointer signature — carries no flag: it is not a
+boundary, it is a refusal, and its code already names it. Refusals surface at the
+**declaration** (STA1114–21, or STA1217 for deferred table types); STA1217 additionally
+surfaces at value-use and optional-call sites, which are call positions the declaration
+verdict does not cover.
 
 This is also the honest answer to "why is FFI not available in `ts` mode's
 safety story" — it is, with the caveat printed. (`docs/MODES.md`'s rule that
@@ -242,16 +264,27 @@ that lowering must honor, not the lowering itself.
 When the implementation starts, it owes, in one change each where the plan
 demands it (§15.3, §15.6):
 
-1. Gate wiring for the marker, the eight refusal codes, and STA1217 (phase 7 —
+1. ~~Gate wiring for the marker, the eight refusal codes, and STA1217 (phase 7 —
    an open phase, so `src/support/phases.ts` needs no change; `COMPLETED_PHASES`
    lists finished phases only, and `tests/unit/phases.test.ts` already enforces
-   that no `not-yet` names one).
-2. Decision fixtures in both modes for every `docs/SUBSET.md` extern row
+   that no `not-yet` names one).~~ Landed with steps 4–5: `src/frontend/extern.ts`
+   classifies (the one reader of the surface, shared by gate and lowering), the gate
+   accepts direct calls and refuses signatures/call shapes, and STA1217 now names only
+   what steps 5+ do not cover (branded pointers → step 6; extern-as-value). The landing
+   added three rules the surface implies but never wrote down: exact arity (STA1119 in
+   `js` mode; the checker's own arity diagnostic owns it in `ts` mode), no spread
+   (STA1119), and direct-callee-position only (STA1217 elsewhere).
+2. ~~Decision fixtures in both modes for every `docs/SUBSET.md` extern row
    (extern call, each refusal kind, varargs, outside-`.d.ts`, the
    unchecked-boundary mark) — `// @expected-fail: true` until the gate lands
-   them, removed in the landing commit (AGENTS.md Testing rules).
-3. The `@statorError` throw wording, the errno-read sequence, and the
-   ambient `CString` / `CStringOwned` declarations in the stator lib.
+   them, removed in the landing commit (AGENTS.md Testing rules).~~ Landed with
+   steps 4–5 (the four step-3 `subset_extern_cstr_*` fixtures flipped to `static` in the
+   same commit) plus the `subset_extern_direct_*`/`error_*`/`value_*`/`arity_*`/`spread_*`/
+   `ptr_*`/`badconv_*`/`convmismatch_*` rows for the rules item 1 added.
+3. ~~The `@statorError` throw wording, the errno-read sequence,~~ and the ambient
+   `CString` / `CStringOwned` declarations in the stator lib. Wording and sequence landed
+   with steps 4–5 (§4 names both); the ambient lib declarations stay open for §7.3, which
+   owns the binding set — fixtures declare the brands locally until then.
 4. The `T**` out-param question Task 7.3's SQLite binding will force
    (STA1119 until then — §2).
 5. ~~`docs/README.md` index and the AGENTS.md repo map do not list this file
@@ -262,9 +295,13 @@ demands it (§15.3, §15.6):
    the proof venue (differential evidence), not the feature owner — flipping
    it would assert an undecided owner change (plan-notes 253).
 
-## 8. Task 7.2 design sketch (proposed, not approved — full text in the session report)
+## 8. Task 7.2 design sketch (non-normative appendix — proposed, not approved)
 
-Agent-drafted ahead of Task 7.2; normative only if scheduled. Core decisions:
+The sections above are the Task 7.1 contract; what follows is an agent-drafted sketch ahead
+of Task 7.2, kept here so the implementer finds it, and explicitly OUTSIDE the sole-allocator
+promise at the top of this file (its STA1122–1124 codes are proposals with no DIAGNOSTICS.md
+rows until Task 7.2 is scheduled). Normative only if scheduled; full text in the session
+report.
 
 - **Export marker is ESM `export`, no new marker.** The C-visible set is exactly the
   exported-function set (no second list to drift); header declares `stator_<unit>_<name>`.

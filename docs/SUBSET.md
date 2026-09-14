@@ -204,13 +204,14 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 
 The extern surface contract lives in `docs/FFI.md` (plan §10 Task 7.1 steps
 1–2, docs-before-code); the rows below are its feature × mode projection.
-Nothing here is implemented yet: the surface row is `not-yet`, and the refusal
-rows state the verdicts the gate will emit once it reads the marker — each
-becomes ≥1 decision fixture per mode in the landing change (Task 7.1 step 10).
+Steps 4–5 have landed: the declaration row compiles (direct C calls, error conventions,
+the explain flag), and every refusal row is a live gate verdict with decision fixtures in
+both modes. What still defers is the branded-pointer shape (`T*`, STA1217 until step 6's
+per-signature ownership) and anything steps 5+ do not cover.
 
 | Feature | `ts` mode | `js` mode | Notes |
 |---|---|---|---|
-| Extern function declaration (`declare` + `@statorExtern` in a `.d.ts`) and direct calls to it | not-yet(STA1217, Phase 7) | not-yet(STA1217, Phase 7) | Marker, C-symbol override, and `.d.ts`-only rule: `docs/FFI.md` §1. Landed verdict is `static` (+ unchecked-boundary flag) in `ts` mode; in `js` mode `static` + flag when every argument is statically typed, else `dynamic` + flag with `STA2001` checks on the dynamic arguments. |
+| Extern function declaration (`declare` + `@statorExtern` in a `.d.ts`) and direct calls to it | static (+ unchecked-boundary flag) | static + flag when every argument is statically typed, else dynamic + flag | Marker, C-symbol override, and `.d.ts`-only rule: `docs/FFI.md` §1. Dynamic arguments get `STA2001` checks at the call. Branded-pointer (`T*`) signatures stay not-yet(STA1217, Phase 7) until step 6's per-signature ownership. |
 | `unknown` in an extern signature | error(STA1114) | error(STA1114) | Would need boxing; refused rather than silently boxed (`docs/FFI.md` §2). |
 | Object type in an extern signature | error(STA1115) | error(STA1115) | No C layout to pass. A C-owned struct is a branded pointer; text is `CString`. |
 | Array type in an extern signature | error(STA1116) | error(STA1116) | A managed array is not a C buffer; spell pointer + length as ABI types. |
@@ -219,7 +220,7 @@ becomes ≥1 decision fixture per mode in the landing change (Task 7.1 step 10).
 | Any other type outside the ABI table (struct by value, `T**` out-params, `void` as a parameter, `CStringOwned` as a return, `void` over a value-returning C function) | error(STA1119) | error(STA1119) | The catch-all that keeps every diagnostic stable-coded (§1.3). A future widening splits a kind out with a NEW code. |
 | Variadic (`printf`-style) extern declaration | error(STA1120) | error(STA1120) | No sound signature — permanent, plan §10 out-of-scope table. |
 | Extern declaration outside a `.d.ts` | error(STA1121) | error(STA1121) | Keeps Task 7.3's generator output a drop-in; keeps the trust boundary greppable. |
-| `stator explain` marks extern calls as an unchecked boundary | not-yet(STA1217, Phase 7) | not-yet(STA1217, Phase 7) | The flag rides ALONGSIDE the verdict from the first gate implementation — including on the `not-yet` itself, so extern sites are auditable before they compile. The four-verdict vocabulary (`docs/MODES.md` §6) is unchanged. A C return can never be runtime-checked (§0.2 asymmetry, `docs/FFI.md` §5). |
+| `stator explain` marks extern calls as an unchecked boundary | yes (alongside the verdict) | yes (alongside the verdict) | The flag rides ALONGSIDE the verdict — `externCalls: [{name, line}]` in `--json`, an `unchecked boundary` line on the terminal. The four-verdict vocabulary (`docs/MODES.md` §6) is unchanged. A C return can never be runtime-checked (§0.2 asymmetry, `docs/FFI.md` §5). |
 
 ---
 
@@ -274,7 +275,7 @@ All codes in this range reused from plan.md except those listed below.
 | STA1212 | `Symbol` primitive type | both | Phase 5 | Well-known symbols as values, Symbol.for/Symbol.keyFor, and registry. `[Symbol.iterator]()` as a class method name is not this code. |
 | STA1213 | `BigInt` primitive type | both | Phase 5 | Separate numeric type with dedicated arithmetic. |
 | STA1216 | other `Promise.prototype` members; `new Promise` not arity 1 | both | Phase 5 | `then`/`catch`/`finally` and arity-1 `new Promise` landed in step 11. The code stays allocated for the rest. |
-| STA1217 | Extern function declarations and calls | both | Phase 7 | The FFI surface code (plan §10 Task 7.1 steps 1–2). Emitted until steps 5+ land; the `STA1114`–`STA1121` refusals above are the design limits that stay `never` after it. |
+| STA1217 | Extern function declarations and calls | both | Phase 7 | The FFI surface code (plan §10 Task 7.1 steps 1–2). Steps 4–5 landed the lowering, so it now names only what the lowering does not cover: branded-pointer (`T*`) signatures (step 6's per-signature ownership) and extern-as-value positions. The `STA1114`–`STA1121` refusals above are the design limits that stay `never` after it. |
 
 `STA1102` appeared in an early draft of this matrix for eval-in-`js`-mode. It is **retired** and must never be reused — it put a "not yet" verdict inside the `STA11xx` "never" range, which is exactly the confusion the two ranges exist to prevent. See the retired-codes table in `docs/DIAGNOSTICS.md`.
 

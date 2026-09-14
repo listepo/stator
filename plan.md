@@ -715,8 +715,11 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
    Steps 1–2 ✅ landed 2026-09-14 in `a732cd5`: `docs/FFI.md` (marker, ABI table, lifetimes, errors,
    boundary rules), `docs/SUBSET.md` FFI rows, `docs/DIAGNOSTICS.md` codes STA1114–STA1121 (never)
-   + STA1217 (not-yet Phase 7). Steps 3+ (lowering) not started.
-2. **The ABI table is the contract, and it is small on purpose.** It lives in `docs/FFI.md`:
+   + STA1217 (not-yet Phase 7). Steps 3–5 ✅ landed 2026-09-14 (runtime converters + corpus,
+   gate refusals, extern-call lowering with error mapping; evidence in [done.md](done.md) →
+   Phase 7 steps 4–5). Steps 6+ open.
+2. **The ABI table is the contract, and it is small on purpose.** It lives in `docs/FFI.md`
+   (§2 — this table below is the original sketch; the doc is authoritative where they differ):
 
    | TS type | C type | Notes |
    |---|---|---|

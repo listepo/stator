@@ -2155,6 +2155,30 @@ reopen has the full picture.
 Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output names
 `differential/run.ts` among analyzed files.
 
+## Phase 7 — FFI (in progress)
+
+### Steps 3–5 — String converters, gate refusals, extern-call lowering ✅ (landed 2026-09-14)
+
+Step 3 (runtime): `jsrt_string_to_cstr` (borrow) / `jsrt_string_from_cstr` (copy) with a strict
+maximal-subsequence U+FFFD decoder, NUL truncation on input, lone surrogates → U+FFFD (making
+`to_cstr∘from_cstr` a fixed point), `from_cstr(NULL)` asserting (NULL belongs to step 4);
+`print_ffi_strings` corpus proves all of it byte-for-byte against Node. Steps 4–5 (compiler):
+`src/frontend/extern.ts` (the one reader of the surface; `ts.Type` never leaves it), `ExternCall`
+HIR node, gate marker/placement/signature/arity/spread/value-use arms, verifier STA4098
+defense-in-depth, emitter direct calls (unboxed, temporaries freed before throws, `errno`
+zeroed pre-call and read post-call), closed `@statorError` vocabulary with the return-kind
+compatibility matrix, and `explain`'s `externCalls` audit flag. Lying declarations die at the
+clang line (conflicting types), not silently. Branded pointers defer as STA1217 (step 6 owns
+ownership); `ts` arity is the checker's, `js` arity the gate's.
+
+Check evidence: `tests/golden/{ts,js}/extern_libm/` (`sqrt`/`fmod`/`log`/`atof`/`getenv`)
+byte-exact vs Node in both modes; 17 `subset_extern_*` decision fixtures + the 4 step-3
+`subset_extern_cstr_*` flipped to `static`; 13 unit tests; full suites green (unit 409,
+subset 411, golden 216, leak plateau); targeted ASan/UBSan extern runs clean, zero sanitizer
+output. `docs/FFI.md` §§1–5 now state every implemented rule (CString returns, brand
+recognition, `any`→STA1114, overloads, untagged-ambient fate, STA1217 scope, convention
+matrix); §8 sketches Task 7.2 as a non-normative appendix.
+
 ---
 
 ## Phase 5 step 13 — Module-scope closures, and the two defects stacked in front of them (2026-09-04)
