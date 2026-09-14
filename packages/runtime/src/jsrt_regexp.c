@@ -672,11 +672,90 @@ static void out_units(Out *o, const uint16_t *src, uint32_t n) {
   o->len += n;
 }
 
+/* Decode one UTF-8 sequence of a group NAME into a code point. Names arrive in the
+ * encoding the pattern was compiled from -- CESU-8 for a non-unicode pattern, plain UTF-8
+ * otherwise -- so a surrogate half decodes as itself, exactly the unit the replacement slice
+ * below carries, and the two sides meet without a conversion allocation. */
+static bool name_step(const char **p, const char *end, uint32_t *cp) {
+  const unsigned char b0 = (unsigned char)**p;
+  if (b0 < 0x80u) {
+    *cp = b0;
+    (*p)++;
+    return true;
+  }
+  uint32_t out = 0;
+  uint32_t want = 0;
+  if ((b0 & 0xE0u) == 0xC0u) {
+    out = b0 & 0x1Fu;
+    want = 1;
+  } else if ((b0 & 0xF0u) == 0xE0u) {
+    out = b0 & 0x0Fu;
+    want = 2;
+  } else if ((b0 & 0xF8u) == 0xF0u) {
+    out = b0 & 0x07u;
+    want = 3;
+  } else {
+    return false;
+  }
+  if ((size_t)(end - *p) < (size_t)(want + 1)) {
+    return false;
+  }
+  for (uint32_t i = 0; i < want; i++) {
+    const unsigned char b = (unsigned char)(*p)[1 + i];
+    if ((b & 0xC0u) != 0x80u) {
+      return false;
+    }
+    out = (out << 6) | (b & 0x3Fu);
+  }
+  *p += want + 1;
+  *cp = out;
+  return true;
+}
+
+/* Decode one replacement-slice unit into a code point, pairing surrogates the way the
+ * language pairs them. A lone half is itself, which is what meets a CESU-8 name above. */
+static bool slice_step(const uint16_t **p, const uint16_t *end, uint32_t *cp) {
+  const uint16_t first = **p;
+  if (first >= 0xD800u && first <= 0xDBFFu && *p + 1 < end) {
+    const uint16_t second = (*p)[1];
+    if (second >= 0xDC00u && second <= 0xDFFFu) {
+      *cp = 0x10000u + ((uint32_t)(first - 0xD800u) << 10) + (uint32_t)(second - 0xDC00u);
+      *p += 2;
+      return true;
+    }
+  }
+  *cp = first;
+  (*p)++;
+  return true;
+}
+
+/* Whether a NUL-terminated group name spells the replacement slice `$<...>` named, compared as
+ * code points so an astral name meets its pair and a CESU-8 half meets its lone unit. */
+static bool group_name_matches(const char *name, const uint16_t *units, uint32_t n) {
+  const char *p = name;
+  const char *end = name + strlen(name);
+  const uint16_t *q = units;
+  const uint16_t *qend = units + n;
+  for (;;) {
+    if (p == end) {
+      return q == qend;
+    }
+    if (q == qend) {
+      return false;
+    }
+    uint32_t a = 0;
+    uint32_t b = 0;
+    if (!name_step(&p, end, &a) || !slice_step(&q, qend, &b) || a != b) {
+      return false;
+    }
+  }
+}
+
 /* §22.1.3.19 GetSubstitution over ONE match. `$$` `$&` `` $` `` `$'` are the string forms the
  * plain-pattern replace already implements; `$n`/`$nn` are the ones only a pattern with groups
  * can answer, and a number above the group count stays LITERAL, which is what makes `$1` in a
  * groupless pattern print as `$1`. */
-static void substitute(Out *o, const JSString *rep, const JSString *s, const Matches *m,
+static void substitute(Out *o, const JSRTRegExp *re, const JSString *rep, const JSString *s, const Matches *m,
                        const uint32_t *g) {
   for (uint32_t k = 0; k < rep->length; k++) {
     if (rep->data[k] != '$' || k + 1 >= rep->length) {
@@ -687,6 +766,36 @@ static void substitute(Out *o, const JSString *rep, const JSString *s, const Mat
     if (next == '$') {
       out_units(o, rep->data + k, 1);
       k++;
+    } else if (next == '<') {
+      /* `$<name>`: the name runs to the FIRST `>` whatever it holds -- `$<x-y>` and `$<>`
+       * substitute-or-empty exactly like `$<xx>` (measured on the pinned Node, plan.md §8
+       * step 21c). With no `>` at all, or a pattern declaring no named groups, the `$` is
+       * literal and scanning resumes after it, which is what keeps `$<x>` whole in a
+       * groupless pattern. An unknown or unmatched name is EMPTY, not literal. */
+      uint32_t close = k + 2;
+      while (close < rep->length && rep->data[close] != '>') {
+        close++;
+      }
+      /* NULL unless the pattern declared at least one name -- the same condition
+       * `match_groups` tests for the `groups` object. */
+      const char *names = lre_get_groupnames(re->bytecode);
+      if (close >= rep->length || names == NULL) {
+        out_units(o, rep->data + k, 1);
+        continue;
+      }
+      /* Duplicate names live on disjoint alternatives, so at most one same-named group took
+       * part in this match: the participating one wins, and a name none took part under --
+       * known or not -- appends nothing. */
+      for (uint32_t grp = 1; grp < m->ncap; grp++) {
+        if (names[0] != '\0' &&
+            group_name_matches(names, rep->data + k + 2, close - (k + 2)) &&
+            g[2 * grp] != NO_GROUP) {
+          out_units(o, s->data + g[2 * grp], g[2 * grp + 1] - g[2 * grp]);
+          break;
+        }
+        names += strlen(names) + LRE_GROUP_NAME_TRAILER_LEN;
+      }
+      k = close;
     } else if (next == '&') {
       out_units(o, s->data + g[0], g[1] - g[0]);
       k++;
@@ -759,7 +868,7 @@ jsrt_value jsrt_regexp_replace(jsrt_value re_value, jsrt_value str, jsrt_value r
   for (uint32_t i = 0; i < m.count; i++) {
     const uint32_t *g = match_of(&m, i);
     out_units(&o, s->data + tail, g[0] - tail);
-    substitute(&o, rep, s, &m, g);
+    substitute(&o, re, rep, s, &m, g);
     tail = g[1];
   }
   out_units(&o, s->data + tail, s->length - tail);

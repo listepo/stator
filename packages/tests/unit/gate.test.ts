@@ -563,14 +563,28 @@ void test('String.prototype residue stays deferred', () => {
 
 // Task 4.2, Array slice: the closed ARRAY_OPS set on an array-typed receiver, with the refusals
 // that keep the fixed-arity table honest.
-void test('the at/codePointAt/concat/identity string ops are accepted, variadic concat deferred', () => {
+void test('the at/codePointAt/concat/identity string ops are accepted', () => {
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.at(-1));'), []);
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.codePointAt(0));'), []);
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.concat("b"));'), []);
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.toString());'), []);
-  assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.concat("b", "c"));'), [
-    'STA1214',
-  ]);
+  // Variadic concat folds left into nested singles (plan.md §8 step 19).
+  assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.concat("b", "c"));'), []);
+  assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.concat());'), []);
+});
+
+void test('String.fromCharCode lands with any count; the rest of String is named', () => {
+  // Plan.md §8 step 19: the multi-code form, the single-code form (previously the catch-all),
+  // and the zero-argument empty string.
+  assert.deepEqual(codesFor('console.log(String.fromCharCode(65, 66));'), []);
+  assert.deepEqual(codesFor('console.log(String.fromCharCode(65));'), []);
+  assert.deepEqual(codesFor('console.log(String.fromCharCode());'), []);
+  // A member outside the landed set is deferred BY NAME, never by the catch-all.
+  assert.deepEqual(codesFor('console.log(String.fromCodePoint(65));'), ['STA1214']);
+  // A namespace method as a value: there is no function object to hand out.
+  assert.deepEqual(codesFor('const f = String.fromCharCode;\nconsole.log(typeof f);'), ['STA1214']);
+  // `String(x)` the converter is a different surface and stays deferred.
+  assert.deepEqual(codesFor('console.log(String(42));'), ['STA1214']);
 });
 
 void test('Array.prototype ops in the landed set are accepted', () => {
@@ -673,21 +687,39 @@ void test('Array.prototype residue stays deferred', () => {
     ),
     ['STA1214'],
   );
-  // splice's one-argument form deletes to the end -- not what a padded undefined would do.
-  assert.deepEqual(codesFor('const xs: number[] = [1, 2, 3];\nconsole.log(xs.splice(1));'), [
+  // splice's one-argument form deletes to the end, and the insertion form takes any
+  // further arguments (plan.md §8 step 19).
+  assert.deepEqual(codesFor('const xs: number[] = [1, 2, 3];\nconsole.log(xs.splice(1));'), []);
+  assert.deepEqual(
+    codesFor('const xs: number[] = [1, 2, 3];\nconsole.log(xs.splice(1, 1, 9, 8));'),
+    [],
+  );
+  // `toSpliced` keeps its two-argument form: the insertion variant is still deferred.
+  assert.deepEqual(
+    codesFor('const xs: number[] = [1, 2, 3];\nconsole.log(xs.toSpliced(1, 1, 9));'),
+    ['STA1214'],
+  );
+  // Variadic push and unshift land with any count (plan.md §8 step 19).
+  assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.push(2, 3));'), []);
+  assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.push());'), []);
+  assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.unshift(0, 1));'), []);
+  // lastIndexOf takes an optional position; a third argument stays deferred (in a real
+  // ts-mode build the checker's own arity diagnostic owns that refusal first; the gate-level
+  // truth this helper reads is the STA1214 below, which is what js mode reports end to end).
+  assert.deepEqual(
+    codesFor('const xs: number[] = [1, 2];\nconsole.log(xs.lastIndexOf(1, 0));'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('const xs: number[] = [1, 2];\nconsole.log(xs.lastIndexOf(1, 0, 0));'),
+    ['STA1214'],
+  );
+  assert.deepEqual(codesFor('const xs = [1, 2];\nconsole.log(xs.lastIndexOf(1, 0, 0));', 'js'), [
     'STA1214',
   ]);
-  // Variadic push has no node to fold into.
-  assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.push(2, 3));'), ['STA1214']);
-  // lastIndexOf gives an explicit position a DIFFERENT meaning than an absent one, so the
-  // undefined-padding that is sound everywhere else would change the answer.
-  assert.deepEqual(codesFor('const xs: number[] = [1, 2];\nconsole.log(xs.lastIndexOf(1, 0));'), [
-    'STA1214',
-  ]);
-  // concat lands as exactly one spread array.
-  assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.concat([2], [3]));'), [
-    'STA1214',
-  ]);
+  // concat takes any count: several arrays, none, and (in js mode) values.
+  assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.concat([2], [3]));'), []);
+  assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.concat());'), []);
   // Object.prototype members that are NOT table entries must stay deferred: a bare `in` test
   // would find `constructor`/`hasOwnProperty` on the prototype chain (the hasOwn bug).
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.hasOwnProperty("x"));'), [

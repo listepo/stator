@@ -12,6 +12,7 @@
  * method where that is false, `lastIndexOf` (absent `fromIndex` means `length - 1`, explicit
  * `undefined` means `0`), lands without its position argument for exactly that reason. */
 
+#include <stdarg.h>
 #include <string.h>
 
 #include "jsrt.h"
@@ -27,8 +28,40 @@ static void append(jsrt_value array, jsrt_value element) {
 }
 
 jsrt_value jsrt_array_push(jsrt_value array, jsrt_value element) {
+  if (jsrt_require_array(array, "push") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   append(array, element);
   return jsrt_array_length(array);
+}
+
+/* The variadic form (plan.md §8 step 19): `push(a, b, c)` appends in order and answers the new
+ * length, so it is `n` appends through the same public path — not a bulk copy, which would
+ * duplicate the growth discipline `append` owns. Zero arguments append nothing and answer the
+ * length unchanged (§23.1.3.20: the call still returns). The argv-array core the varargs entry
+ * and the dynamic `push` (plan.md §8 step 20) share, so one idea lives in one place whether the
+ * arguments arrived as C varargs or as a call vector. */
+static jsrt_value push_items(jsrt_value array, uint32_t n, const jsrt_value *items) {
+  for (uint32_t i = 0; i < n; i++) {
+    append(array, items[i]);
+  }
+  return jsrt_array_length(array);
+}
+
+jsrt_value jsrt_array_push_many(jsrt_value array, uint32_t n, ...) {
+  if (jsrt_require_array(array, "push") == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  /* VLA on the C stack, the `jsrt_call_at` shifted-argv precedent: the items stay reachable to a
+   * conservative collector across the allocating appends below. */
+  jsrt_value items[n > 0 ? n : 1];
+  va_list ap;
+  va_start(ap, n);
+  for (uint32_t i = 0; i < n; i++) {
+    items[i] = va_arg(ap, jsrt_value);
+  }
+  va_end(ap);
+  return push_items(array, n, items);
 }
 
 /* Shared pop/shift core: take one element off either end, clearing the vacated slot (a
@@ -49,6 +82,9 @@ static bool array_take(JSRTArray *a, bool from_front, jsrt_value *out) {
 
 jsrt_value jsrt_array_pop(jsrt_value array) {
   jsrt_value out = JSRT_UNDEFINED;
+  if (jsrt_require_array(array, "pop") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   if (!array_take(arr(array), false, &out)) {
     return JSRT_UNDEFINED;
   }
@@ -57,6 +93,9 @@ jsrt_value jsrt_array_pop(jsrt_value array) {
 
 jsrt_value jsrt_array_shift(jsrt_value array) {
   jsrt_value out = JSRT_UNDEFINED;
+  if (jsrt_require_array(array, "shift") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   if (!array_take(arr(array), true, &out)) {
     return JSRT_UNDEFINED;
   }
@@ -64,6 +103,9 @@ jsrt_value jsrt_array_shift(jsrt_value array) {
 }
 
 jsrt_value jsrt_array_unshift(jsrt_value array, jsrt_value element) {
+  if (jsrt_require_array(array, "unshift") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   /* Grow by appending (the public path owns capacity), then rotate the new slot to the front. */
   append(array, element);
   JSRTArray *a = arr(array);
@@ -72,8 +114,47 @@ jsrt_value jsrt_array_unshift(jsrt_value array, jsrt_value element) {
   return jsrt_array_length(array);
 }
 
+/* The variadic form (plan.md §8 step 19): `unshift(a, b, c)` inserts the whole run at the front
+ * IN ORDER, so it is one growth plus one rotation — not `n` single unshifts, which would reverse
+ * the run (`unshift(0)` then `unshift(1)` answers `[1, 0, ...]` where the spec answers
+ * `[0, 1, ...]`). Zero arguments answer the length unchanged. The argv-array core the varargs
+ * entry and the dynamic `unshift` (plan.md §8 step 20) share. */
+static jsrt_value unshift_items(jsrt_value array, uint32_t n, const jsrt_value *items) {
+  if (n == 0) {
+    return jsrt_array_length(array);
+  }
+  const uint32_t len = arr(array)->length;
+  for (uint32_t i = 0; i < n; i++) {
+    append(array, JSRT_UNDEFINED);
+  }
+  /* `append` may have reallocated the buffer, so the header is re-read, not reused. */
+  JSRTArray *a = arr(array);
+  memmove(a->elements + n, a->elements, (size_t)len * sizeof(jsrt_value));
+  for (uint32_t i = 0; i < n; i++) {
+    a->elements[i] = items[i];
+  }
+  return jsrt_array_length(array);
+}
+
+jsrt_value jsrt_array_unshift_many(jsrt_value array, uint32_t n, ...) {
+  if (jsrt_require_array(array, "unshift") == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  jsrt_value items[n > 0 ? n : 1];
+  va_list ap;
+  va_start(ap, n);
+  for (uint32_t i = 0; i < n; i++) {
+    items[i] = va_arg(ap, jsrt_value);
+  }
+  va_end(ap);
+  return unshift_items(array, n, items);
+}
+
 jsrt_value jsrt_array_at(jsrt_value array, jsrt_value index) {
-  const JSRTArray *a = arr(array);
+  const JSRTArray *a = jsrt_require_array(array, "at");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   double k = jsrt_int_or_inf(index, 0.0);
   if (k < 0.0) {
     k += (double)a->length;
@@ -101,7 +182,10 @@ static uint32_t search_start(jsrt_value from, uint32_t len) {
 }
 
 jsrt_value jsrt_array_index_of(jsrt_value array, jsrt_value search, jsrt_value from) {
-  const JSRTArray *a = arr(array);
+  const JSRTArray *a = jsrt_require_array(array, "indexOf");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   for (uint32_t i = search_start(from, a->length); i < a->length; i++) {
     if (jsrt_strict_equals(a->elements[i], search)) {
       return jsrt_number((double)i);
@@ -111,7 +195,10 @@ jsrt_value jsrt_array_index_of(jsrt_value array, jsrt_value search, jsrt_value f
 }
 
 jsrt_value jsrt_array_last_index_of(jsrt_value array, jsrt_value search) {
-  const JSRTArray *a = arr(array);
+  const JSRTArray *a = jsrt_require_array(array, "lastIndexOf");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   for (uint32_t i = a->length; i > 0; i--) {
     if (jsrt_strict_equals(a->elements[i - 1], search)) {
       return jsrt_number((double)(i - 1));
@@ -120,8 +207,39 @@ jsrt_value jsrt_array_last_index_of(jsrt_value array, jsrt_value search) {
   return jsrt_number(-1.0);
 }
 
+/* The two-argument form (plan.md §8 step 19): `lastIndexOf(x, from)` searches backwards from
+ * `from` (§23.1.3.16). The index is relative — a negative counts from the end — and clamped
+ * into the array: at or past the end means `length - 1`, before the start means no search
+ * (`-1`). An explicit `undefined` position truncates to `0` (only index 0 is examined), which
+ * is why absence and `undefined` cannot share one entry point. */
+jsrt_value jsrt_array_last_index_of_from(jsrt_value array, jsrt_value search, jsrt_value from) {
+  const JSRTArray *a = jsrt_require_array(array, "lastIndexOf");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  if (a->length == 0) {
+    return jsrt_number(-1.0);
+  }
+  double n = jsrt_int_or_inf(from, 0.0);
+  double k = n >= 0.0 ? n : (double)a->length + n;
+  if (k < 0.0) {
+    return jsrt_number(-1.0);
+  }
+  uint32_t i = k >= (double)a->length ? a->length : (uint32_t)k + 1;
+  while (i > 0) {
+    i--;
+    if (jsrt_strict_equals(a->elements[i], search)) {
+      return jsrt_number((double)i);
+    }
+  }
+  return jsrt_number(-1.0);
+}
+
 jsrt_value jsrt_array_includes(jsrt_value array, jsrt_value search, jsrt_value from) {
-  const JSRTArray *a = arr(array);
+  const JSRTArray *a = jsrt_require_array(array, "includes");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   for (uint32_t i = search_start(from, a->length); i < a->length; i++) {
     if (same_value_zero(a->elements[i], search)) {
       return JSRT_TRUE;
@@ -131,7 +249,10 @@ jsrt_value jsrt_array_includes(jsrt_value array, jsrt_value search, jsrt_value f
 }
 
 jsrt_value jsrt_array_slice(jsrt_value array, jsrt_value start, jsrt_value end) {
-  const JSRTArray *a = arr(array);
+  const JSRTArray *a = jsrt_require_array(array, "slice");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   uint32_t from = jsrt_relative_index(jsrt_int_or_inf(start, 0.0), a->length);
   uint32_t to = jsrt_relative_index(jsrt_int_or_inf(end, (double)a->length), a->length);
   uint32_t count = to > from ? to - from : 0;
@@ -139,10 +260,19 @@ jsrt_value jsrt_array_slice(jsrt_value array, jsrt_value start, jsrt_value end) 
 }
 
 /* One array argument, spread — `[1].concat([2, 3])` is `[1, 2, 3]` (§23.1.3.1; the gate admits
- * exactly this shape). Neither receiver is mutated. */
+ * exactly this shape). Neither receiver is mutated. A non-array `other` is APPENDED as a single
+ * element rather than refused (§23.1.3.1 step 5 spreads only spreadable values): `[1].concat(5)`
+ * is `[1, 5]` on every path, static or dynamic. */
 jsrt_value jsrt_array_concat(jsrt_value array, jsrt_value other) {
-  const JSRTArray *a = arr(array);
+  const JSRTArray *a = jsrt_require_array(array, "concat");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
+  if (!jsrt_is(other, JSRT_TAG_ARRAY)) {
+    append(out, other);
+    return out;
+  }
   const JSRTArray *b = arr(other);
   for (uint32_t i = 0; i < b->length; i++) {
     append(out, b->elements[i]);
@@ -150,8 +280,48 @@ jsrt_value jsrt_array_concat(jsrt_value array, jsrt_value other) {
   return out;
 }
 
+/* The variadic form (plan.md §8 step 19): `concat(b, c, v)` spreads each array argument and
+ * appends each non-array one as a single element (§23.1.3.1 steps 5–7, modulo
+ * `Symbol.isConcatSpreadable`, which no value here carries). Zero arguments answer a shallow
+ * copy — mutating the copy leaves the receiver alone. Neither the receiver nor any argument is
+ * mutated. The argv-array core the varargs entry and the dynamic `concat` (plan.md §8 step 20)
+ * share. */
+static jsrt_value concat_items(jsrt_value array, uint32_t n, const jsrt_value *items) {
+  const JSRTArray *a = arr(array);
+  jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
+  for (uint32_t i = 0; i < n; i++) {
+    jsrt_value item = items[i];
+    if (jsrt_is(item, JSRT_TAG_ARRAY)) {
+      const JSRTArray *b = arr(item);
+      for (uint32_t k = 0; k < b->length; k++) {
+        append(out, b->elements[k]);
+      }
+    } else {
+      append(out, item);
+    }
+  }
+  return out;
+}
+
+jsrt_value jsrt_array_concat_many(jsrt_value array, uint32_t n, ...) {
+  if (jsrt_require_array(array, "concat") == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  jsrt_value items[n > 0 ? n : 1];
+  va_list ap;
+  va_start(ap, n);
+  for (uint32_t i = 0; i < n; i++) {
+    items[i] = va_arg(ap, jsrt_value);
+  }
+  va_end(ap);
+  return concat_items(array, n, items);
+}
+
 jsrt_value jsrt_array_reverse(jsrt_value array) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "reverse");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   for (uint32_t i = 0, j = a->length; i + 1 < j; i++, j--) {
     jsrt_value tmp = a->elements[i];
     a->elements[i] = a->elements[j - 1];
@@ -161,7 +331,10 @@ jsrt_value jsrt_array_reverse(jsrt_value array) {
 }
 
 jsrt_value jsrt_array_fill(jsrt_value array, jsrt_value value, jsrt_value start, jsrt_value end) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "fill");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   uint32_t from = jsrt_relative_index(jsrt_int_or_inf(start, 0.0), a->length);
   uint32_t to = jsrt_relative_index(jsrt_int_or_inf(end, (double)a->length), a->length);
   for (uint32_t i = from; i < to; i++) {
@@ -172,7 +345,10 @@ jsrt_value jsrt_array_fill(jsrt_value array, jsrt_value value, jsrt_value start,
 
 jsrt_value jsrt_array_copy_within(jsrt_value array, jsrt_value target, jsrt_value start,
                                   jsrt_value end) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "copyWithin");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t to = jsrt_relative_index(jsrt_int_or_inf(target, 0.0), a->length);
   const uint32_t from = jsrt_relative_index(jsrt_int_or_inf(start, 0.0), a->length);
   const uint32_t last = jsrt_relative_index(jsrt_int_or_inf(end, (double)a->length), a->length);
@@ -183,15 +359,30 @@ jsrt_value jsrt_array_copy_within(jsrt_value array, jsrt_value target, jsrt_valu
   return array;
 }
 
-/* The two-argument form only: `splice(start)` deletes to the END while an explicit undefined
- * deleteCount deletes NOTHING, so the two cannot share a padded signature (the lastIndexOf rule),
- * and the insertion form is variadic. Returns the removed run. */
-jsrt_value jsrt_array_splice(jsrt_value array, jsrt_value start, jsrt_value delete_count) {
-  JSRTArray *a = arr(array);
+/* The (start, deleteCount) span both splice forms share: a relative start clamped into the
+ * array, and a delete count clamped into what remains (§23.1.3.29 steps 5–7). */
+static void splice_span(jsrt_value array, jsrt_value start, jsrt_value delete_count,
+                        uint32_t *from_out, uint32_t *count_out) {
+  const JSRTArray *a = arr(array);
   const uint32_t from = jsrt_relative_index(jsrt_int_or_inf(start, 0.0), a->length);
   const double want = jsrt_int_or_inf(delete_count, 0.0);
   const uint32_t room = a->length - from;
-  const uint32_t count = want <= 0.0 ? 0 : (want >= (double)room ? room : (uint32_t)want);
+  *from_out = from;
+  *count_out = want <= 0.0 ? 0 : (want >= (double)room ? room : (uint32_t)want);
+}
+
+/* The two-argument form: removes the span and returns it. `splice(start)` (one argument) and
+ * the insertion form ride their own entry points — an absent deleteCount deletes to the END
+ * while an explicit undefined deletes NOTHING (the lastIndexOf rule) — but all three share
+ * `splice_span` above. Returns the removed run. */
+jsrt_value jsrt_array_splice(jsrt_value array, jsrt_value start, jsrt_value delete_count) {
+  JSRTArray *a = jsrt_require_array(array, "splice");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  uint32_t from = 0;
+  uint32_t count = 0;
+  splice_span(array, start, delete_count, &from, &count);
   jsrt_value removed = jsrt_array_new(count, count > 0 ? a->elements + from : NULL);
   memmove(a->elements + from, a->elements + from + count,
           (size_t)(a->length - from - count) * sizeof(jsrt_value));
@@ -200,6 +391,67 @@ jsrt_value jsrt_array_splice(jsrt_value array, jsrt_value start, jsrt_value dele
   }
   a->length -= count;
   return removed;
+}
+
+/* The one-argument form (plan.md §8 step 19): `splice(start)` removes from `start` to the END
+ * (§23.1.3.29 step 8: an absent deleteCount means `length - start`). Implemented as the
+ * two-argument form over that count, so the removal below is one copy of the code, not two. */
+jsrt_value jsrt_array_splice_from(jsrt_value array, jsrt_value start) {
+  const JSRTArray *a = jsrt_require_array(array, "splice");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  const uint32_t from = jsrt_relative_index(jsrt_int_or_inf(start, 0.0), a->length);
+  return jsrt_array_splice(array, start, jsrt_number((double)(a->length - from)));
+}
+
+/* The insertion form (plan.md §8 step 19): `splice(start, deleteCount, ...items)` removes the
+ * span and inserts the items at `from` (§23.1.3.29 steps 9–10), answering the removed run. The
+ * tail moves once: the array first grows through the public path (which owns capacity), then
+ * the tail slides from `from + count` to `from + n` — `memmove`, because the two ranges
+ * overlap whenever the run grows or shrinks — and the items land in the gap. A shrink clears
+ * the vacated tail so the conservative scan never reads a stale value. The argv-array core the
+ * insertion entry and the dynamic `splice` (plan.md §8 step 20) share, so the form is one idea
+ * in one place whether the items arrived as C varargs or as a call vector. */
+static jsrt_value splice_insert_items(jsrt_value array, jsrt_value start, jsrt_value delete_count,
+                                      uint32_t n, const jsrt_value *items) {
+  JSRTArray *a = arr(array);
+  uint32_t from = 0;
+  uint32_t count = 0;
+  splice_span(array, start, delete_count, &from, &count);
+  const uint32_t len = a->length;
+  jsrt_value removed = jsrt_array_new(count, count > 0 ? a->elements + from : NULL);
+  const uint32_t newlen = len - count + n;
+  for (uint32_t i = len; i < newlen; i++) {
+    append(array, JSRT_UNDEFINED);
+  }
+  /* `append` may have reallocated the buffer, so the header is re-read, not reused. */
+  a = arr(array);
+  memmove(a->elements + from + n, a->elements + from + count,
+          (size_t)(len - from - count) * sizeof(jsrt_value));
+  for (uint32_t i = 0; i < n; i++) {
+    a->elements[from + i] = items[i];
+  }
+  for (uint32_t i = newlen; i < len; i++) {
+    a->elements[i] = JSRT_UNDEFINED;
+  }
+  a->length = newlen;
+  return removed;
+}
+
+jsrt_value jsrt_array_splice_insert(jsrt_value array, jsrt_value start, jsrt_value delete_count,
+                                    uint32_t n, ...) {
+  if (jsrt_require_array(array, "splice") == NULL) {
+    return JSRT_UNDEFINED;
+  }
+  jsrt_value items[n > 0 ? n : 1];
+  va_list ap;
+  va_start(ap, n);
+  for (uint32_t i = 0; i < n; i++) {
+    items[i] = va_arg(ap, jsrt_value);
+  }
+  va_end(ap);
+  return splice_insert_items(array, start, delete_count, n, items);
 }
 
 /* Depth-limited recursive flatten; `depth` already went through ToIntegerOrInfinity, so a plain
@@ -218,6 +470,9 @@ static void flatten_into(jsrt_value out, jsrt_value v, double depth) {
 }
 
 jsrt_value jsrt_array_flat(jsrt_value array, jsrt_value depth) {
+  if (jsrt_require_array(array, "flat") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   jsrt_value out = jsrt_array_new(0, NULL);
   flatten_into(out, array, jsrt_int_or_inf(depth, 1.0));
   return out;
@@ -297,6 +552,9 @@ static bool array_find_downward(jsrt_value array, jsrt_value cb, uint32_t *index
 }
 
 jsrt_value jsrt_array_for_each(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "forEach") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   for (uint32_t i = 0; walking(array, i, len); i++) {
     call_cb(cb, array, i);
@@ -305,6 +563,9 @@ jsrt_value jsrt_array_for_each(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_map(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "map") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   jsrt_value out = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; walking(array, i, len); i++) {
@@ -314,6 +575,9 @@ jsrt_value jsrt_array_map(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_filter(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "filter") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   jsrt_value out = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; walking(array, i, len); i++) {
@@ -329,6 +593,9 @@ jsrt_value jsrt_array_filter(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_some(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "some") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   for (uint32_t i = 0; walking(array, i, len); i++) {
     if (jsrt_truthy(call_cb(cb, array, i))) {
@@ -339,6 +606,9 @@ jsrt_value jsrt_array_some(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_every(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "every") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   for (uint32_t i = 0; walking(array, i, len); i++) {
     if (!jsrt_truthy(call_cb(cb, array, i))) {
@@ -349,6 +619,9 @@ jsrt_value jsrt_array_every(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_find(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "find") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   jsrt_value elem = JSRT_UNDEFINED;
   if (array_find_upward(array, cb, NULL, &elem)) {
     return elem;
@@ -358,6 +631,9 @@ jsrt_value jsrt_array_find(jsrt_value array, jsrt_value cb) {
 
 /* map, then a depth-1 flatten of each answer -- one pass, no intermediate array. */
 jsrt_value jsrt_array_flat_map(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "flatMap") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   jsrt_value out = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; walking(array, i, len); i++) {
@@ -372,6 +648,9 @@ jsrt_value jsrt_array_flat_map(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_find_index(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "findIndex") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   uint32_t index = 0;
   if (array_find_upward(array, cb, &index, NULL)) {
     return jsrt_number((double)index);
@@ -391,6 +670,9 @@ static jsrt_value reduce_call(jsrt_value cb, jsrt_value acc, jsrt_value array, u
 }
 
 jsrt_value jsrt_array_reduce(jsrt_value array, jsrt_value cb, jsrt_value initial) {
+  if (jsrt_require_array(array, "reduce") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   jsrt_value acc = initial;
   for (uint32_t i = 0; walking(array, i, len); i++) {
@@ -400,6 +682,9 @@ jsrt_value jsrt_array_reduce(jsrt_value array, jsrt_value cb, jsrt_value initial
 }
 
 jsrt_value jsrt_array_reduce_right(jsrt_value array, jsrt_value cb, jsrt_value initial) {
+  if (jsrt_require_array(array, "reduceRight") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   const uint32_t len = arr(array)->length;
   jsrt_value acc = initial;
   for (uint32_t i = len; i-- > 0 && !jsrt_pending();) {
@@ -462,7 +747,10 @@ static void sort_range(jsrt_value *elems, jsrt_value *scratch, uint32_t lo, uint
 }
 
 jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "sort");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   if (a->length >= 2) {
     jsrt_value scratch_owner = jsrt_array_new(a->length, a->elements);
     sort_range(a->elements, arr(scratch_owner)->elements, 0, a->length, cmp);
@@ -472,6 +760,9 @@ jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp) {
 
 /* The downward mirrors of find/findIndex, same entry-length + existence discipline. */
 jsrt_value jsrt_array_find_last(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "findLast") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   jsrt_value elem = JSRT_UNDEFINED;
   if (array_find_downward(array, cb, NULL, &elem)) {
     return elem;
@@ -480,6 +771,9 @@ jsrt_value jsrt_array_find_last(jsrt_value array, jsrt_value cb) {
 }
 
 jsrt_value jsrt_array_find_last_index(jsrt_value array, jsrt_value cb) {
+  if (jsrt_require_array(array, "findLastIndex") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   uint32_t index = 0;
   if (array_find_downward(array, cb, &index, NULL)) {
     return jsrt_number((double)index);
@@ -489,20 +783,29 @@ jsrt_value jsrt_array_find_last_index(jsrt_value array, jsrt_value cb) {
 
 /* The ES2023 immutable variants: a fresh copy, then the mutating op's own machinery. */
 jsrt_value jsrt_array_to_reversed(jsrt_value array) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "toReversed");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
   return jsrt_array_reverse(out);
 }
 
 jsrt_value jsrt_array_to_sorted(jsrt_value array, jsrt_value cmp) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "toSorted");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
   return jsrt_array_sort(out, cmp);
 }
 
 /* Two-argument form, same rule as splice: skipCount's padding trap is inherited. */
 jsrt_value jsrt_array_to_spliced(jsrt_value array, jsrt_value start, jsrt_value skip_count) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "toSpliced");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
   jsrt_array_splice(out, start, skip_count);
   return out;
@@ -510,6 +813,9 @@ jsrt_value jsrt_array_to_spliced(jsrt_value array, jsrt_value start, jsrt_value 
 
 /* ToString on an array IS join with the default separator (§23.1.3.36 via §23.1.3.18). */
 jsrt_value jsrt_array_to_string(jsrt_value array) {
+  if (jsrt_require_array(array, "toString") == NULL) {
+    return JSRT_UNDEFINED;
+  }
   return jsrt_array_join(array, JSRT_UNDEFINED);
 }
 
@@ -517,7 +823,10 @@ jsrt_value jsrt_array_to_string(jsrt_value array) {
  * outside the array; builtins cannot raise yet, so out-of-range aborts loudly (STA2005
  * pattern) rather than answering something the spec never returns. */
 jsrt_value jsrt_array_with(jsrt_value array, jsrt_value index, jsrt_value value) {
-  JSRTArray *a = arr(array);
+  JSRTArray *a = jsrt_require_array(array, "with");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   double rel = jsrt_int_or_inf(index, 0.0);
   if (rel < 0.0) {
     rel += (double)a->length;
@@ -530,4 +839,222 @@ jsrt_value jsrt_array_with(jsrt_value array, jsrt_value index, jsrt_value value)
   jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
   arr(out)->elements[(uint32_t)rel] = value;
   return out;
+}
+
+/* ---------------------------------------------------------------- Array.prototype as values
+ *
+ * `jsrt_get_prop` walks shape tables only, so `a.push` on an array answered `undefined` and the
+ * following call aborted STA2006 where Node runs (plan.md §8 step 20). The table below is the
+ * Array.prototype half of that gap: every method the HIR's ARRAY_OPS vocabulary can spell, with
+ * the spec's `length` (measured against Node 26.7.0 -- optional positions do not count). A hit
+ * binds a closure over the receiver; the ordinary call protocol then invokes the trampoline with
+ * user arguments only, which pads missing positions with `undefined` exactly as the lowering pads
+ * the static path -- EXCEPT the arities the static path refuses to pad, which the trampoline
+ * answers the same way the builtins do: `splice` with one argument deletes to the end
+ * (`splice_from`), `lastIndexOf` with two searches from the position (`last_index_of_from`), and
+ * the variadic `push`/`unshift`/`concat`/`splice` share their argv-array cores with the static
+ * multi-argument entries, so the two paths are one idea in one place. `reduce` without an initial
+ * stays the with-initial form, because the gate refuses the no-initial form statically too
+ * (subset_array_reduce_noinit_ts.ts). A detached method (`const p = a.push; p(9)`) pushes onto
+ * the ORIGINAL receiver -- binding at get time is the only protocol an Unknown-receiver call
+ * supports, and rebinding per call would need the receiver in argv, which it does not carry. */
+
+typedef enum {
+  ARRAY_M_AT,
+  ARRAY_M_CONCAT,
+  ARRAY_M_COPY_WITHIN,
+  ARRAY_M_ENTRIES,
+  ARRAY_M_EVERY,
+  ARRAY_M_FILL,
+  ARRAY_M_FILTER,
+  ARRAY_M_FIND,
+  ARRAY_M_FIND_INDEX,
+  ARRAY_M_FIND_LAST,
+  ARRAY_M_FIND_LAST_INDEX,
+  ARRAY_M_FLAT,
+  ARRAY_M_FLAT_MAP,
+  ARRAY_M_FOR_EACH,
+  ARRAY_M_INCLUDES,
+  ARRAY_M_INDEX_OF,
+  ARRAY_M_JOIN,
+  ARRAY_M_KEYS,
+  ARRAY_M_LAST_INDEX_OF,
+  ARRAY_M_MAP,
+  ARRAY_M_POP,
+  ARRAY_M_PUSH,
+  ARRAY_M_REDUCE,
+  ARRAY_M_REDUCE_RIGHT,
+  ARRAY_M_REVERSE,
+  ARRAY_M_SHIFT,
+  ARRAY_M_SLICE,
+  ARRAY_M_SOME,
+  ARRAY_M_SORT,
+  ARRAY_M_SPLICE,
+  ARRAY_M_TO_REVERSED,
+  ARRAY_M_TO_SORTED,
+  ARRAY_M_TO_SPLICED,
+  ARRAY_M_TO_STRING,
+  ARRAY_M_UNSHIFT,
+  ARRAY_M_VALUES,
+  ARRAY_M_WITH
+} ArrayMethod;
+
+static const struct {
+  const char *name;
+  uint8_t arity;
+  uint8_t op;
+} ARRAY_METHOD_TABLE[] = {
+    {"at", 1, ARRAY_M_AT},
+    {"concat", 1, ARRAY_M_CONCAT},
+    {"copyWithin", 2, ARRAY_M_COPY_WITHIN},
+    {"entries", 0, ARRAY_M_ENTRIES},
+    {"every", 1, ARRAY_M_EVERY},
+    {"fill", 1, ARRAY_M_FILL},
+    {"filter", 1, ARRAY_M_FILTER},
+    {"find", 1, ARRAY_M_FIND},
+    {"findIndex", 1, ARRAY_M_FIND_INDEX},
+    {"findLast", 1, ARRAY_M_FIND_LAST},
+    {"findLastIndex", 1, ARRAY_M_FIND_LAST_INDEX},
+    {"flat", 0, ARRAY_M_FLAT},
+    {"flatMap", 1, ARRAY_M_FLAT_MAP},
+    {"forEach", 1, ARRAY_M_FOR_EACH},
+    {"includes", 1, ARRAY_M_INCLUDES},
+    {"indexOf", 1, ARRAY_M_INDEX_OF},
+    {"join", 1, ARRAY_M_JOIN},
+    {"keys", 0, ARRAY_M_KEYS},
+    {"lastIndexOf", 1, ARRAY_M_LAST_INDEX_OF},
+    {"map", 1, ARRAY_M_MAP},
+    {"pop", 0, ARRAY_M_POP},
+    {"push", 1, ARRAY_M_PUSH},
+    {"reduce", 1, ARRAY_M_REDUCE},
+    {"reduceRight", 1, ARRAY_M_REDUCE_RIGHT},
+    {"reverse", 0, ARRAY_M_REVERSE},
+    {"shift", 0, ARRAY_M_SHIFT},
+    {"slice", 2, ARRAY_M_SLICE},
+    {"some", 1, ARRAY_M_SOME},
+    {"sort", 1, ARRAY_M_SORT},
+    {"splice", 2, ARRAY_M_SPLICE},
+    {"toReversed", 0, ARRAY_M_TO_REVERSED},
+    {"toSorted", 1, ARRAY_M_TO_SORTED},
+    {"toSpliced", 2, ARRAY_M_TO_SPLICED},
+    {"toString", 0, ARRAY_M_TO_STRING},
+    {"unshift", 1, ARRAY_M_UNSHIFT},
+    {"values", 0, ARRAY_M_VALUES},
+    {"with", 2, ARRAY_M_WITH},
+};
+
+/* The bound receiver and op travel in the closure's environment -- slot 0 the array (kept alive
+ * by the trace), slot 1 the op as a number -- so `jsrt_call` needs no new protocol: the
+ * trampoline reads both where a capturing function reads its bindings. `has_receiver` is false:
+ * the receiver is already bound, and a second one in argv would shift every user argument. */
+static jsrt_value array_method_call(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {
+  const jsrt_value receiver = env->slots[0];
+  const ArrayMethod op = (ArrayMethod)jsrt_to_number(env->slots[1]);
+  const jsrt_value a0 = jsrt_arg(argc, argv, 0);
+  const jsrt_value a1 = jsrt_arg(argc, argv, 1);
+  const jsrt_value a2 = jsrt_arg(argc, argv, 2);
+  switch (op) {
+    case ARRAY_M_AT:
+      return jsrt_array_at(receiver, a0);
+    case ARRAY_M_CONCAT:
+      return concat_items(receiver, argc, argv);
+    case ARRAY_M_COPY_WITHIN:
+      return jsrt_array_copy_within(receiver, a0, a1, a2);
+    case ARRAY_M_ENTRIES:
+      return jsrt_iterator_new(receiver, JSRT_ITER_ARRAY_ENTRIES);
+    case ARRAY_M_EVERY:
+      return jsrt_array_every(receiver, a0);
+    case ARRAY_M_FILL:
+      return jsrt_array_fill(receiver, a0, a1, a2);
+    case ARRAY_M_FILTER:
+      return jsrt_array_filter(receiver, a0);
+    case ARRAY_M_FIND:
+      return jsrt_array_find(receiver, a0);
+    case ARRAY_M_FIND_INDEX:
+      return jsrt_array_find_index(receiver, a0);
+    case ARRAY_M_FIND_LAST:
+      return jsrt_array_find_last(receiver, a0);
+    case ARRAY_M_FIND_LAST_INDEX:
+      return jsrt_array_find_last_index(receiver, a0);
+    case ARRAY_M_FLAT:
+      return jsrt_array_flat(receiver, a0);
+    case ARRAY_M_FLAT_MAP:
+      return jsrt_array_flat_map(receiver, a0);
+    case ARRAY_M_FOR_EACH:
+      return jsrt_array_for_each(receiver, a0);
+    case ARRAY_M_INCLUDES:
+      return jsrt_array_includes(receiver, a0, a1);
+    case ARRAY_M_INDEX_OF:
+      return jsrt_array_index_of(receiver, a0, a1);
+    case ARRAY_M_JOIN:
+      return jsrt_array_join(receiver, a0);
+    case ARRAY_M_KEYS:
+      return jsrt_iterator_new(receiver, JSRT_ITER_ARRAY_KEYS);
+    case ARRAY_M_LAST_INDEX_OF:
+      return argc >= 2 ? jsrt_array_last_index_of_from(receiver, a0, a1)
+                       : jsrt_array_last_index_of(receiver, a0);
+    case ARRAY_M_MAP:
+      return jsrt_array_map(receiver, a0);
+    case ARRAY_M_POP:
+      return jsrt_array_pop(receiver);
+    case ARRAY_M_PUSH:
+      return push_items(receiver, argc, argv);
+    case ARRAY_M_REDUCE:
+      return jsrt_array_reduce(receiver, a0, a1);
+    case ARRAY_M_REDUCE_RIGHT:
+      return jsrt_array_reduce_right(receiver, a0, a1);
+    case ARRAY_M_REVERSE:
+      return jsrt_array_reverse(receiver);
+    case ARRAY_M_SHIFT:
+      return jsrt_array_shift(receiver);
+    case ARRAY_M_SLICE:
+      return jsrt_array_slice(receiver, a0, a1);
+    case ARRAY_M_SOME:
+      return jsrt_array_some(receiver, a0);
+    case ARRAY_M_SORT:
+      return jsrt_array_sort(receiver, a0);
+    case ARRAY_M_SPLICE:
+      if (argc == 0) {
+        return jsrt_array_splice(receiver, JSRT_UNDEFINED, JSRT_UNDEFINED);
+      }
+      if (argc == 1) {
+        return jsrt_array_splice_from(receiver, a0);
+      }
+      if (argc == 2) {
+        return jsrt_array_splice(receiver, a0, a1);
+      }
+      return splice_insert_items(receiver, a0, a1, argc - 2, argv + 2);
+    case ARRAY_M_TO_REVERSED:
+      return jsrt_array_to_reversed(receiver);
+    case ARRAY_M_TO_SORTED:
+      return jsrt_array_to_sorted(receiver, a0);
+    case ARRAY_M_TO_SPLICED:
+      return jsrt_array_to_spliced(receiver, a0, a1);
+    case ARRAY_M_TO_STRING:
+      return jsrt_array_to_string(receiver);
+    case ARRAY_M_UNSHIFT:
+      return unshift_items(receiver, argc, argv);
+    case ARRAY_M_VALUES:
+      return jsrt_iterator_new(receiver, JSRT_ITER_ARRAY_VALUES);
+    case ARRAY_M_WITH:
+      return jsrt_array_with(receiver, a0, a1);
+  }
+  jsrt_panic("array method dispatch fell through its own table");
+}
+
+bool jsrt_array_method(jsrt_value array, const char *key, jsrt_value *out) {
+  if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
+    return false;
+  }
+  for (size_t i = 0; i < sizeof ARRAY_METHOD_TABLE / sizeof ARRAY_METHOD_TABLE[0]; i++) {
+    if (strcmp(ARRAY_METHOD_TABLE[i].name, key) == 0) {
+      JSRTEnv *env = jsrt_env_new(NULL, 2);
+      env->slots[0] = array;
+      env->slots[1] = jsrt_number((double)ARRAY_METHOD_TABLE[i].op);
+      *out = jsrt_closure_new(array_method_call, ARRAY_METHOD_TABLE[i].arity,
+                              ARRAY_METHOD_TABLE[i].name, env, false);
+      return true;
+    }
+  }
+  return false;
 }

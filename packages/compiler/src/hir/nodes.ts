@@ -242,6 +242,18 @@ export interface ArrayLength extends Node {
   readonly operand: Expression;
 }
 
+/** `fn.length` on a function value.
+ *
+ * The third of the length family, for the same reason the other two are separate nodes: the
+ * operand's type is known here. The answer is the closure's declared arity, which never counts
+ * a method's receiver (docs/VALUE.md §4.16) -- `jsrt_closure_arity` reads that field directly.
+ * An `Unknown`-typed receiver never reaches this node: it takes the dynamic path and answers
+ * through `jsrt_get_prop` instead (plan.md §8 step 21b). */
+export interface FunctionLength extends Node {
+  readonly kind: 'function-length';
+  readonly operand: Expression;
+}
+
 /** `[a, b, c]`. Elements are evaluated left to right, before the array exists. */
 export interface ArrayLiteral extends Node {
   readonly kind: 'array-literal';
@@ -356,6 +368,25 @@ export interface MethodCall extends Node {
   readonly args: readonly Expression[];
 }
 
+/** `o.m(a)` where `o`'s type is Unknown -- the dynamic half of a method call.
+ *
+ * A `MethodCall` would be wrong twice over: there is no `JSRTClass` method table to index, and
+ * the callee the shape table holds may be a plain closure rather than a method at all. The
+ * emitter loads the name through the shape table with a per-site cache (`jsrt_get_prop`) and
+ * passes the receiver as argument zero when -- and only when -- the loaded closure declares
+ * one (`has_receiver`, docs/VALUE.md §4.16). A plain closure is called as-is (`this` is
+ * `undefined`, as for a method value called bare); a non-function callee panics exactly as an
+ * ordinary `call` does (`STA2006` with the site's `file:line`).
+ *
+ * `target` is the receiver and is NOT in `args`; when the callee wants a receiver it becomes
+ * argument zero, which is where a method body's `this` parameter reads it from. */
+export interface DynMethodCall extends Node {
+  readonly kind: 'dyn-method-call';
+  readonly target: Expression;
+  readonly method: string;
+  readonly args: readonly Expression[];
+}
+
 /** `o.m` — a method taken as a value, not called.
  *
  * The closure is the method's own, with `has_receiver` set so a later bare call shifts arguments
@@ -389,6 +420,12 @@ export interface ObjectLiteral extends Node {
 export interface ObjectEntry {
   readonly name: string;
   readonly value: Expression;
+  /** Set on entries a `{ ...src }` expansion produced (plan.md §8 step 21a): the expansion
+   * order is the source TYPE's field order, while the result must enumerate in the SOURCE
+   * OBJECT's key order, so the emitter repairs the order at run time from exactly these
+   * entries. Only the lowering sets it -- an own value reading the same shape is
+   * indistinguishable by shape alone, and passes preserve it with the entry. */
+  readonly spread?: true;
 }
 
 /** An object literal whose type is NOT a layout — an optional property or an index signature
@@ -399,7 +436,14 @@ export interface ObjectEntry {
  * The literal's fate is decided by its CONTEXTUAL type when one exists: `const o: {x?: n} =
  * {x: 1}` must build a dynamic object even though the initializer's own type has no optional
  * property, or every later `o.x` — typed by the binding — would aim a dynamic site at a
- * fixed-shape object. `entries` is written order, evaluated left to right, exactly once. */
+ * fixed-shape object.
+ *
+ * A METHOD member is an ordinary entry whose value is the method's closure: on a dynamic object
+ * a method IS an own data property (it enumerates, `typeof o.m` is `"function"`, and two reads
+ * are `===`), with the receiver as parameter zero exactly as on the fixed path -- so a call
+ * through the shape table (`dyn-method-call`) is what passes `this`. The closure is lowered
+ * inline, at the position the method was written, which is what keeps the insertion order a
+ * separate method table could not. */
 export interface DynObjectLiteral extends Node {
   readonly kind: 'dyn-object-literal';
   readonly entries: readonly DynEntry[];
@@ -590,17 +634,40 @@ export interface StringOp extends Node {
   readonly args: readonly Expression[];
 }
 
+/** The `String` namespace calls the HIR can spell — `String.fromCharCode(...codes)`, one UTF-16
+ * unit per argument (plan.md §8 step 19). On the `MathCall` precedent: no namespace object
+ * exists at run time, each method is one runtime function, and there is no function value to
+ * bind. Variadic in the source and variadic in the node — the emitter passes the count, and
+ * the runtime (`jsrt_string_from_char_code`) coerces each argument with ToNumber then ToUint16,
+ * so every argument type is already admitted at the gate. */
+export const STRING_STATICS = {
+  fromCharCode: { result: 'string' },
+} as const satisfies Record<string, { result: 'string' }>;
+
+export type StringStaticMethod = keyof typeof STRING_STATICS;
+
+export interface StringStaticCall extends Node {
+  readonly kind: 'string-static';
+  readonly method: StringStaticMethod;
+  readonly args: readonly Expression[];
+}
+
 /** The `Array.prototype` methods the HIR can spell, with their POST-LOWERING arity and result
  * kind — the same single-vocabulary contract as `STRING_OPS`, read by the gate, the lowering, the
- * verifier, and the emitter (C names derive mechanically: `jsrt_array_` + snake_case).
+ * verifier, and the emitter (C names derive mechanically: `jsrt_array_` + snake_case, with the
+ * variadic forms calling the `_many`/`_from`/`_insert` entry points the emitter picks by count).
  *
  * The set is the non-callback surface: `map`/`filter`/`forEach` and the rest that take a function
  * wait on a protocol for the runtime to call back into compiled code. Omitted optional arguments
  * are padded with `undefined` literals where ECMA-262 makes explicit `undefined` and absent
  * indistinguishable — which is every op here EXCEPT `lastIndexOf`, whose absent `fromIndex` means
- * `length - 1` while an explicit `undefined` means `0`; it therefore lands with arity 1 and an
- * explicit position stays deferred. `push`/`unshift` land single-argument (the variadic forms have
- * no node to fold into); `concat` takes exactly one array and spreads it, per spec.
+ * `length - 1` while an explicit `undefined` means `0`; it therefore lands with arity 1..2 and an
+ * explicit position calls its own entry point. The variadic ops (`push`, `unshift`, `splice`,
+ * `concat`) land with `arity` as their MINIMUM and any larger count: `push`/`unshift` append or
+ * prepend the whole run, `splice` removes the span and inserts the run at its start (with the
+ * one-argument form deleting to the end on its own entry point, and zero arguments spelling the
+ * two-argument form over `undefined`), and `concat` spreads each array argument while appending
+ * each non-array one as a single element.
  *
  * Result kinds: `self` is the RECEIVER's array type (`slice`/`concat`/`fill`/`reverse` — the last
  * two mutate in place and return the receiver); `element` is `T | undefined` and therefore
@@ -611,9 +678,11 @@ export interface StringOp extends Node {
  * `forEach`'s only answer; `checker` is the checker's answer with NOTHING pinned — `reduce`'s
  * accumulator type is whatever the callback and initial value agreed on.
  *
- * The callback-taking ops carry `calls: true`, which is the fact that they can THROW: the runtime's
- * walks stop as soon as `jsrt_pending()` is set, and the emitter follows the op with the same
- * pending check an ordinary call gets (plan-notes 96). They hold their single argument to a
+ * The callback-taking ops carry `calls: true`: they run user code through `jsrt_call`, so
+ * the runtime's walks stop as soon as `jsrt_pending()` is set (plan-notes 96). Since plan.md §8
+ * step 20 every array op ALSO validates its receiver first (STA2008) and lands as its own
+ * statement with a pending check after it, `calls` no longer drives emission -- it records
+ * which ops can reenter compiled code. They hold their single argument to a
  * function TYPE at the gate; the runtime
  * calls it through jsrt_call, the same closure ABI compiled callers use, with the spec's
  * (element, index, array) triple — `reduce`/`reduceRight` prepend the accumulator and land in
@@ -623,7 +692,7 @@ export interface StringOp extends Node {
  * padding rule holds and both spell the ToString default -- [10, 9] stays [10, 9]. */
 export const ARRAY_OPS = {
   at: { arity: 1, result: 'element' },
-  concat: { arity: 1, result: 'self' },
+  concat: { arity: 0, result: 'self', variadic: true },
   copyWithin: { arity: 3, result: 'self' },
   every: { arity: 1, result: 'boolean', calls: true },
   fill: { arity: 3, result: 'self' },
@@ -638,10 +707,10 @@ export const ARRAY_OPS = {
   includes: { arity: 2, result: 'boolean' },
   indexOf: { arity: 2, result: 'number' },
   join: { arity: 1, result: 'string' },
-  lastIndexOf: { arity: 1, result: 'number' },
+  lastIndexOf: { arity: 1, result: 'number', maxArity: 2 },
   map: { arity: 1, result: 'mapped', calls: true },
   pop: { arity: 0, result: 'element' },
-  push: { arity: 1, result: 'number' },
+  push: { arity: 0, result: 'number', variadic: true },
   reduce: { arity: 2, result: 'checker', calls: true },
   reduceRight: { arity: 2, result: 'checker', calls: true },
   reverse: { arity: 0, result: 'self' },
@@ -649,12 +718,12 @@ export const ARRAY_OPS = {
   slice: { arity: 2, result: 'self' },
   sort: { arity: 1, result: 'self', calls: true },
   some: { arity: 1, result: 'boolean', calls: true },
-  splice: { arity: 2, result: 'self' },
+  splice: { arity: 0, result: 'self', variadic: true },
   toReversed: { arity: 0, result: 'self' },
   toSorted: { arity: 1, result: 'self' },
   toSpliced: { arity: 2, result: 'self' },
   toString: { arity: 0, result: 'string' },
-  unshift: { arity: 1, result: 'number' },
+  unshift: { arity: 0, result: 'number', variadic: true },
   with: { arity: 2, result: 'self' },
   keys: { arity: 0, result: 'iterator' },
   values: { arity: 0, result: 'iterator' },
@@ -678,14 +747,22 @@ export const ARRAY_OPS = {
      * pending check after it; the runtime's walks read the same fact as `!jsrt_pending()` in their
      * loop guards. */
     calls?: true;
+    /* Present on the ops that take any count from `arity` up: the verifier holds the node to
+     * that range instead of the exact count, the lowering passes the arguments through
+     * unpadded, and the emitter picks the runtime entry point by count. */
+    variadic?: true;
+    /* Present instead of `variadic` on the ops whose range is bounded above: the verifier holds
+     * the node to `arity..maxArity`. */
+    maxArity?: number;
   }
 >;
 
 export type ArrayOpName = keyof typeof ARRAY_OPS;
 
-/** Whether this op calls back into compiled code — and therefore whether it can THROW. The emitter
- * gives such an op its own statement and a pending check after it; every other array op is a walk
- * over the backing store that cannot unwind. */
+/** Whether this op calls back into compiled code. Every array op -- callback-taking or not --
+ * lands as its own statement with a pending check after it, because each runtime entry validates
+ * its receiver first (STA2008, plan.md §8 step 20); the runtime's walks read this same fact as
+ * `!jsrt_pending()` in their loop guards. */
 export function arrayOpCallsBack(op: ArrayOpName): boolean {
   return 'calls' in ARRAY_OPS[op];
 }
@@ -1085,6 +1162,12 @@ export interface ExternCall extends Node {
  * `jsrt_print`/`jsrt_eprint`; the rest each have their own entry point because each carries its
  * own state (the group indent, the per-label tallies) or its own output rule.
  *
+ * `log`/`info`/`debug`/`warn`/`error` are VARIADIC (plan.md §8 step 18): Node inspects every
+ * argument and joins the forms with one space, and `console.log()` prints the bare newline.
+ * Their `fn` serves the one-argument call exactly as before; any other count goes to `variadic`,
+ * which takes `(count, argv)` over the caller's rooted slots on the `jsrt_array_new` discipline.
+ * `dir` stays unary: its second argument in Node is an options object, not a second value.
+ *
  * `optional` marks a trailing argument the method may omit, and `bare` is how the omission
  * reaches the runtime. Where `bare` is ABSENT the lowering pads the argument with `undefined`,
  * which is sound only because the spec's own absent case IS undefined there: `count()` and
@@ -1098,31 +1181,49 @@ export const CONSOLE_METHODS = {
   assert: { arity: 2, optional: 1, fn: 'jsrt_console_assert', bare: 'jsrt_console_assert_bare' },
   count: { arity: 1, optional: 1, fn: 'jsrt_console_count' },
   countReset: { arity: 1, optional: 1, fn: 'jsrt_console_count_reset' },
-  debug: { arity: 1, optional: 0, fn: 'jsrt_print' },
+  debug: { arity: 1, optional: 0, fn: 'jsrt_print', variadic: 'jsrt_print_many' },
   dir: { arity: 1, optional: 0, fn: 'jsrt_console_dir' },
-  error: { arity: 1, optional: 0, fn: 'jsrt_eprint' },
+  error: { arity: 1, optional: 0, fn: 'jsrt_eprint', variadic: 'jsrt_eprint_many' },
   group: { arity: 1, optional: 1, fn: 'jsrt_console_group', bare: 'jsrt_console_group_bare' },
   groupEnd: { arity: 0, optional: 0, fn: 'jsrt_console_group_end' },
-  info: { arity: 1, optional: 0, fn: 'jsrt_print' },
-  log: { arity: 1, optional: 0, fn: 'jsrt_print' },
+  info: { arity: 1, optional: 0, fn: 'jsrt_print', variadic: 'jsrt_print_many' },
+  log: { arity: 1, optional: 0, fn: 'jsrt_print', variadic: 'jsrt_print_many' },
   table: { arity: 1, optional: 0, fn: 'jsrt_console_table' },
   time: { arity: 1, optional: 1, fn: 'jsrt_console_time' },
   timeEnd: { arity: 1, optional: 1, fn: 'jsrt_console_time_end' },
   trace: { arity: 1, optional: 1, fn: 'jsrt_console_trace', bare: 'jsrt_console_trace_bare' },
-  warn: { arity: 1, optional: 0, fn: 'jsrt_eprint' },
+  warn: { arity: 1, optional: 0, fn: 'jsrt_eprint', variadic: 'jsrt_eprint_many' },
 } as const satisfies Record<
   string,
-  { readonly arity: number; readonly optional: number; readonly fn: string; readonly bare?: string }
+  {
+    readonly arity: number;
+    readonly optional: number;
+    readonly fn: string;
+    readonly bare?: string;
+    readonly variadic?: string;
+  }
 >;
 
 export type ConsoleMethod = keyof typeof CONSOLE_METHODS;
 
+/** Whether this width reaches the method's `(count, argv)` variadic entry point rather than a
+ * positional one: any width but the declared arity on a method with `variadic`. The emitter
+ * reads this, not the table, so the width-to-entry-point rule stays next to `consoleEntryPoint`. */
+export function isConsoleVariadicWidth(method: ConsoleMethod, given: number): boolean {
+  const shape = CONSOLE_METHODS[method];
+  return 'variadic' in shape && given !== shape.arity;
+}
+
 /** The C entry point for a call of this width, or `null` if the method has no such form. A method
- * without `bare` is always called at full arity because the lowering padded it there. */
+ * without `bare` is always called at full arity because the lowering padded it there; a method
+ * with `variadic` takes any other width at its `(count, argv)` entry point. */
 export function consoleEntryPoint(method: ConsoleMethod, given: number): string | null {
   const shape = CONSOLE_METHODS[method];
   if (given === shape.arity) {
     return shape.fn;
+  }
+  if ('variadic' in shape) {
+    return shape.variadic;
   }
   return 'bare' in shape && given === shape.arity - shape.optional ? shape.bare : null;
 }
@@ -1131,7 +1232,8 @@ export function consoleEntryPoint(method: ConsoleMethod, given: number): string 
  * one function and a stream flag: `dir` suppresses the bare-string exception, `group`/`groupEnd`
  * move an indent every other console write then honours, and `count` keeps per-label tallies.
  * `args` is either the method's full arity or, for the two methods whose omitted tail is its own
- * C entry point, the arity minus its optional tail — `consoleEntryPoint` maps the width to the
+ * C entry point, the arity minus its optional tail — except on the five variadic methods, where
+ * it is any width at all — `consoleEntryPoint` maps the width to the
  * call, and nothing downstream branches on the method itself. */
 export interface ConsoleLogCall extends Node {
   readonly kind: 'console-log';
@@ -1479,6 +1581,36 @@ export interface ConditionalExpr extends Node {
   readonly alternate: Expression;
 }
 
+/** `base?.rest` — optional chaining (plan.md §8 step 24).
+ *
+ * `base` is evaluated exactly once, into a rooted frame slot. When it is nullish the node
+ * answers `undefined` and `consequent` never runs — not the accesses in it, and not the
+ * computed keys or call arguments either, which is the short-circuit the syntax promises.
+ * Otherwise `consequent` runs, reading the guarded value through `optional-base` leaves.
+ *
+ * The consequent is an ordinary expression tree built by the plain lowering arms: a `?.`
+ * guards only its own base, and every link above it — plain or optional — lowers the way it
+ * would without the guard, bottoming out at the leaf. A nested `?.` is a nested node testing
+ * its own base, which is why `a?.b?.c` answers `undefined` for a nullish `a.b` while
+ * `a?.b.c` throws there. A base whose type cannot be nullish never builds this node: the
+ * lowering emits the plain access instead, so `C?.x` and `s?.length` are today's code. */
+export interface OptionalChain extends Node {
+  readonly kind: 'optional-chain';
+  readonly base: Expression;
+  readonly consequent: Expression;
+}
+
+/** The guarded value of the enclosing `optional-chain` — the base, known non-nullish.
+ *
+ * A leaf, not a binding: it names no Scope entry and captures nothing, so capture analysis
+ * never sees it. It is only ever built where the lowering holds the base's value in the
+ * chain's frame slot, and the emitter resolves it to that slot; outside a chain it has no
+ * meaning, and the emitter refuses one. The `type` is the base's type narrowed by the
+ * non-nullish test — what the consequent's arms dispatch on. */
+export interface OptionalBase extends Node {
+  readonly kind: 'optional-base';
+}
+
 /** A place `++`/`--`/`+=`/`=` may read and write in expression position. */
 export type UpdatePlace = Identifier | IndexAccess | FieldAccess | DynFieldAccess;
 
@@ -1512,12 +1644,15 @@ export type Expression =
   | TypeOf
   | DeleteProp
   | ConditionalExpr
+  | OptionalChain
+  | OptionalBase
   | UpdateExpr
   | BoundaryCheck
   | LogicalOp
   | TemplateLiteral
   | StringLength
   | ArrayLength
+  | FunctionLength
   | ArrayLiteral
   | ArrayOp
   | JsonStringify
@@ -1528,6 +1663,7 @@ export type Expression =
   | InstanceOf
   | FieldAccess
   | MethodCall
+  | DynMethodCall
   | MethodValue
   | ObjectLiteral
   | DynObjectLiteral
@@ -1536,6 +1672,7 @@ export type Expression =
   | CollectionOp
   | MathCall
   | StringOp
+  | StringStaticCall
   | RegExpLiteral
   | RegExpOp
   | FunctionExpr

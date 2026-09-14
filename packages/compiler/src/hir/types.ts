@@ -389,6 +389,19 @@ export function hTypeAssignable(value: HType, target: HType): boolean {
   return hTypeEquals(value, target);
 }
 
+/** Can a value of this type be nullish at run time — the question optional chaining asks
+ * before guarding (plan.md §8 step 24).
+ *
+ * `undefined`, `null` and `unknown` can; every other kind cannot. `unknown` must guard because
+ * it is exactly the values the checker could not pin down, nullish ones included. A `type-param`
+ * guards for the opposite reason: no node should ever carry one (the lowering substitutes them
+ * away), so meeting one means something upstream lied, and skipping the guard would trust it. */
+export function hTypeCanBeNullish(t: HType): boolean {
+  return (
+    t.kind === 'undefined' || t.kind === 'null' || t.kind === 'unknown' || t.kind === 'type-param'
+  );
+}
+
 /** Does Unknown appear ANYWHERE in this type, however deep?
  *
  * The verdict walk asks this, and the shallow question (`t.kind === 'unknown'`) is the wrong one:

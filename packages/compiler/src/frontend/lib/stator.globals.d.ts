@@ -10,20 +10,32 @@
 
 interface Console {
   /** Maps to `jsrt_print`, which follows console.log's formatting rules, not ToString's:
-   * `-0` prints as "-0" (docs/VALUE.md §3.3). Phase 2 emits one argument.
+   * `-0` prints as "-0" (docs/VALUE.md §3.3). Variadic (plan.md §8 step 18): every argument is
+   * inspected and the forms are joined with one space; no arguments prints the bare newline.
+   * The wide form reaches `jsrt_print_many`, the one-argument call stays on `jsrt_print`.
    *
    * The array arm is `readonly unknown[]` so that every element type and every nesting depth is
    * covered by one declaration. It is a promise `jsrt_print` keeps: the runtime reproduces Node's
    * `util.inspect` for arrays, including grouping, the 80-column break and the depth cap, and
    * `runtime/tests/print_arrays.*` is the paired corpus that holds it to that byte-for-byte. */
-  log(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  log(
+    ...args: readonly (number | string | boolean | null | undefined | readonly unknown[] | object)[]
+  ): void;
   /** Same formatting as `log`, same stream: Node's `info` and `debug` are stdout aliases. */
-  info(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
-  debug(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  info(
+    ...args: readonly (number | string | boolean | null | undefined | readonly unknown[] | object)[]
+  ): void;
+  debug(
+    ...args: readonly (number | string | boolean | null | undefined | readonly unknown[] | object)[]
+  ): void;
   /** Same formatting as `log`, on STDERR — Node's split, mapped to `jsrt_eprint`. The golden
    * runner compares both streams byte-for-byte, so the split is held to Node's, not asserted. */
-  error(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
-  warn(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;
+  error(
+    ...args: readonly (number | string | boolean | null | undefined | readonly unknown[] | object)[]
+  ): void;
+  warn(
+    ...args: readonly (number | string | boolean | null | undefined | readonly unknown[] | object)[]
+  ): void;
   /** `log`'s formatting WITHOUT its one exception: a top-level string keeps its quotes, so
    * `console.dir("a")` is `'a'` where `console.log("a")` is `a`. */
   dir(value: number | string | boolean | null | undefined | readonly unknown[] | object): void;

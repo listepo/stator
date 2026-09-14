@@ -48,6 +48,7 @@ import {
   REGEXP_OPS,
   SET_OPS,
   STRING_OPS,
+  STRING_STATICS,
 } from './nodes.ts';
 import type { HType } from './types.ts';
 import {
@@ -1198,6 +1199,27 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
+    case 'function-length': {
+      verifyExpression(expr.operand, problems, bindings);
+      if (!hTypeEquals(expr.type, H_NUMBER)) {
+        problems.push({
+          kind: 'function-length',
+          span: expr.span,
+          code: 'STA4100',
+          message: `function length must have type 'number', got '${hTypeName(expr.type)}'`,
+        });
+      }
+      if (expr.operand.type.kind !== 'fn') {
+        problems.push({
+          kind: 'function-length',
+          span: expr.span,
+          code: 'STA4100',
+          message: `function length needs a function operand, got '${hTypeName(expr.operand.type)}'`,
+        });
+      }
+      break;
+    }
+
     case 'array-literal': {
       for (const element of expr.elements) {
         verifyExpression(element, problems, bindings);
@@ -1262,6 +1284,23 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
         verifyExpression(arg, problems, bindings);
       }
       checkMethodReceiver(expr, problems);
+      break;
+    }
+    case 'dyn-method-call': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      // The lowering routes only Unknown receivers here; anything else is a call the typed
+      // arms own, and building this node for one would aim a shape-table read at a layout.
+      if (expr.target.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'dyn-method-call',
+          span: expr.span,
+          code: 'STA4059',
+          message: `dynamic call of '${expr.method}' with target '${hTypeName(expr.target.type)}', not Unknown`,
+        });
+      }
       break;
     }
 
@@ -1544,10 +1583,33 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
-    // The array counterpart of the case above (STA4082): array receiver, the table's exact
-    // post-padding arity, and the table's result type — where `self` is the RECEIVER's own array
+    // The `String` namespace call (STA4099, plan.md §8 step 19): any argument count — the
+    // node is variadic, the emitter passes the count, and the runtime coerces each argument —
+    // so the only claims are membership in `STRING_STATICS` and the string result. Argument
+    // types stay unchecked for STA4081's reason: the runtime's ToNumber coercion is the honest
+    // place to settle them.
+    case 'string-static': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (!Object.hasOwn(STRING_STATICS, expr.method) || expr.type.kind !== 'string') {
+        problems.push({
+          kind: 'string-static',
+          span: expr.span,
+          code: 'STA4099',
+          message: `String.${expr.method} must return string, got '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    // The array counterpart of the case above (STA4082): array receiver, the table's
+    // post-lowering arity, and the table's result type — where `self` is the RECEIVER's own array
     // type (slice/concat/fill/reverse) and `element` is Unknown by the IndexAccess rule, so only
     // the three concrete kinds are pinned. Argument types stay unchecked for the same reason.
+    // The variadic ops (`push`, `unshift`, `splice`, `concat`) hold any count from `arity` up,
+    // and `lastIndexOf` holds `arity..maxArity` — the emitter picks the runtime entry point by
+    // count, so a short or long list is a gate bug, never a padding one.
     case 'array-op': {
       verifyExpression(expr.target, problems, bindings);
       for (const arg of expr.args) {
@@ -1575,7 +1637,13 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
                 : shape.result === 'string'
                   ? H_STRING
                   : undefined;
-      if (expr.args.length !== shape.arity) {
+      const countOk =
+        'variadic' in shape
+          ? expr.args.length >= shape.arity
+          : 'maxArity' in shape
+            ? expr.args.length >= shape.arity && expr.args.length <= shape.maxArity
+            : expr.args.length === shape.arity;
+      if (!countOk) {
         problems.push({
           kind: 'array-op',
           span: expr.span,
@@ -2010,6 +2078,23 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       verifyExpression(expr.condition, problems, bindings);
       verifyExpression(expr.consequent, problems, bindings);
       verifyExpression(expr.alternate, problems, bindings);
+      break;
+    }
+
+    // Structural, like the conditional above: the lowering owns the contract (the base is
+    // evaluated once, the consequent reads it only through the leaf), and passes preserve it
+    // through the walker. The consequent's own nodes carry whatever type rules they always
+    // did — a mistyped access inside it is reported at that node, not here.
+    case 'optional-chain': {
+      verifyExpression(expr.base, problems, bindings);
+      verifyExpression(expr.consequent, problems, bindings);
+      break;
+    }
+
+    // A leaf: nothing inside to verify. One outside a chain cannot be built by the lowering
+    // (the cut map is installed only around a consequent), and hand-built HIR reaching the
+    // emitter is refused there, where the chain's slot lives.
+    case 'optional-base': {
       break;
     }
 

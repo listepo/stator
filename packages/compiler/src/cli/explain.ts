@@ -394,6 +394,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'unary-op':
     case 'string-length':
     case 'array-length':
+    case 'function-length':
       return expressionHasUnknown(expr.operand);
     case 'conditional':
       return (
@@ -401,6 +402,14 @@ function expressionHasUnknown(expr: Expression): boolean {
         expressionHasUnknown(expr.consequent) ||
         expressionHasUnknown(expr.alternate)
       );
+    // A guarded base is still a value the chain reads: a nullishable Unknown base is the
+    // dynamic site, and the consequent's accesses report as their plain twins do.
+    case 'optional-chain':
+      return expressionHasUnknown(expr.base) || expressionHasUnknown(expr.consequent);
+    // The guarded value, read where the chain holds it. Its type is the base's narrowed by
+    // the nullish test, which the check at the top of this function has already read.
+    case 'optional-base':
+      return false;
     case 'update':
       return (
         expressionHasUnknown(expr.target) ||
@@ -442,6 +451,10 @@ function expressionHasUnknown(expr: Expression): boolean {
       return false;
     case 'method-call':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    // Dynamic by construction: the receiver is Unknown, which the check at the top of this
+    // function has already answered for the node itself; the arguments may add more.
+    case 'dyn-method-call':
+      return true;
     case 'method-value':
       return expressionHasUnknown(expr.target);
     // The answer is a boolean whatever the target is, so only the target can be dynamic. A regexp
@@ -495,6 +508,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'date-components':
     case 'date-static':
     case 'object-static':
+    case 'string-static':
       return expr.args.some(expressionHasUnknown);
     // A promise's own value type is what makes the awaited result dynamic or not, and that type
     // is on the node -- the check at the top of this function has already read it. What remains

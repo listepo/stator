@@ -210,10 +210,19 @@ void test('a call evaluates arguments left to right, and dispatches only once al
   assert.ok(secondArg < dispatch, 'dispatch comes after every argument is evaluated and rooted');
 });
 
-void test('console.log with more than one argument throws', () => {
-  const module = makeModule([exprStmt(consoleLog([num(1), num(2)]), H_NUMBER)]);
+void test('console.log at any width reaches a runtime entry point', () => {
+  // The five printing methods are variadic (plan.md §8 step 18): one argument keeps the
+  // positional entry point, and any other width takes `(count, argv)` over the rooted slots —
+  // `console.log()` is `(0, NULL)`. A width with no entry point throws instead.
+  const one = emitC(makeModule([exprStmt(consoleLog([num(1)]), H_NUMBER)]));
+  assert.match(one, /jsrt_print\(/);
+  assert.doesNotMatch(one, /jsrt_print_many\(/);
 
-  assert.throws(() => emitC(module), /console.log has no entry point for 2 arguments/);
+  const two = emitC(makeModule([exprStmt(consoleLog([num(1), num(2)]), H_NUMBER)]));
+  assert.match(two, /jsrt_print_many\(2, &/);
+
+  const none = emitC(makeModule([exprStmt(consoleLog([]), H_NUMBER)]));
+  assert.match(none, /jsrt_print_many\(0, NULL\)/);
 });
 
 void test('relational operators dispatch to the runtime and wrap in jsrt_bool', () => {

@@ -14,6 +14,7 @@
  * argument, which is what makes the padding sound. */
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -584,4 +585,26 @@ jsrt_value jsrt_string_to_lower_case(jsrt_value s) { return case_impl(s, false);
 
 jsrt_value jsrt_string_normalize(jsrt_value s, jsrt_value form) {
   return jsrt_unicode_normalize(s, form);
+}
+
+/* `String.fromCharCode(...codes)` (plan.md §8 step 19): one UTF-16 code unit per argument, each
+ * ToUint16 of its value (§22.1.2.1) — fractional parts truncate, negatives and astral codes wrap
+ * modulo 2^16, `NaN` is 0 — so a lone surrogate is legal contents, exactly as the constructor the
+ * string primitives read already tolerates. Zero arguments answer `""`. The scratch holds no
+ * GC references (plain units, not values), so it is malloc memory freed on the single exit path;
+ * the answer itself is built by `jsrt_string_from_units`, which copies. */
+jsrt_value jsrt_string_from_char_code(uint32_t n, ...) {
+  uint16_t *units = (uint16_t *)malloc((size_t)(n == 0 ? 1 : n) * sizeof(uint16_t));
+  if (units == NULL) {
+    jsrt_panic("out of memory: String.fromCharCode");
+  }
+  va_list ap;
+  va_start(ap, n);
+  for (uint32_t i = 0; i < n; i++) {
+    units[i] = (uint16_t)(jsrt_to_uint32(jsrt_to_number(va_arg(ap, jsrt_value))) & 0xFFFFu);
+  }
+  va_end(ap);
+  jsrt_value out = jsrt_string_from_units(units, n);
+  free(units);
+  return out;
 }

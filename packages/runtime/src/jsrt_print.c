@@ -946,26 +946,28 @@ static void write_grouped(const char *text, size_t len, FILE *stream) {
  * quotes, so `console.log("a")` is `a` while `console.log(["a"])` is `[ 'a' ]`. console.dir has
  * no such exception -- it inspects whatever it is given, which is the whole difference between
  * the two entry points. */
+static void print_one(Buf *out, jsrt_value v, bool bare) {
+  if (jsrt_is_date(v)) {
+    inspect_date(out, v);
+  } else if (jsrt_is_regexp(v)) {
+    inspect_regexp(out, v);
+  } else if (jsrt_is_promise(v)) {
+    inspect_promise(out, v, 0, 0);
+  } else if (jsrt_is_map_or_set(v)) {
+    inspect_map(out, v, 0, 0);
+  } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
+    inspect_object(out, v, 0, 0);
+  } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
+    inspect_array(out, v, 0, 0);
+  } else {
+    inspect_scalar(out, v, !bare);
+  }
+}
+
 static void print_to(jsrt_value v, FILE *stream, bool bare) {
   Buf out;
   buf_init(&out);
-
-  if (jsrt_is_date(v)) {
-    inspect_date(&out, v);
-  } else if (jsrt_is_regexp(v)) {
-    inspect_regexp(&out, v);
-  } else if (jsrt_is_promise(v)) {
-    inspect_promise(&out, v, 0, 0);
-  } else if (jsrt_is_map_or_set(v)) {
-    inspect_map(&out, v, 0, 0);
-  } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
-    inspect_object(&out, v, 0, 0);
-  } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
-    inspect_array(&out, v, 0, 0);
-  } else {
-    inspect_scalar(&out, v, !bare);
-  }
-
+  print_one(&out, v, bare);
   buf_putc(&out, '\n');
   write_grouped(out.data, out.len, stream);
   buf_free(&out);
@@ -976,6 +978,32 @@ void jsrt_print(jsrt_value v) { print_to(v, stdout, true); }
 /* console.error / console.warn: the same inspect form, on stderr -- Node's own split, which is
  * why the golden runner compares BOTH streams byte-for-byte. */
 void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
+
+/* The variadic console form (plan.md §8 step 18): Node inspects every argument -- each one with
+ * the bare-string exception -- and joins the forms with one space. No arguments prints the bare
+ * newline, which is what `console.log()` is. One buffer for the whole line, so a multi-line
+ * inspect still passes through `write_grouped` once and the group indent lands per line. */
+static void print_many_to(uint32_t count, const jsrt_value *args, FILE *stream) {
+  Buf out;
+  buf_init(&out);
+  for (uint32_t i = 0; i < count; i++) {
+    if (i > 0) {
+      buf_putc(&out, ' ');
+    }
+    print_one(&out, args[i], true);
+  }
+  buf_putc(&out, '\n');
+  write_grouped(out.data, out.len, stream);
+  buf_free(&out);
+}
+
+void jsrt_print_many(uint32_t count, const jsrt_value *args) {
+  print_many_to(count, args, stdout);
+}
+
+void jsrt_eprint_many(uint32_t count, const jsrt_value *args) {
+  print_many_to(count, args, stderr);
+}
 
 /* console.dir: inspect form with no bare-string exception. */
 void jsrt_console_dir(jsrt_value v) { print_to(v, stdout, false); }
@@ -1575,7 +1603,10 @@ _Noreturn void jsrt_uncaught(void) {
  * than with the other array builtins because joining IS stringification — it needs Buf and the
  * recursive ToString below. */
 jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
-  const JSRTArray *a = jsrt_as_array(array);
+  const JSRTArray *a = jsrt_require_array(array, "join");
+  if (a == NULL) {
+    return JSRT_UNDEFINED;
+  }
   Buf joined;
   buf_init(&joined);
   for (uint32_t i = 0; i < a->length; i++) {

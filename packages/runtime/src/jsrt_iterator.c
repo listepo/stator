@@ -47,6 +47,17 @@ static jsrt_value make_iter(jsrt_value target, jsrt_value extra, uint8_t kind) {
 }
 
 jsrt_value jsrt_iterator_new(jsrt_value target, uint8_t kind) {
+  /* A stored `arr.values()` on a lying receiver must throw at construction, not segfault at the
+   * first step: `array_step` unboxes the target unchecked (plan.md §8 step 20, STA2008). Only
+   * the array kinds; every other kind has its own walk and its own step. */
+  if (kind == JSRT_ITER_ARRAY_KEYS || kind == JSRT_ITER_ARRAY_VALUES ||
+      kind == JSRT_ITER_ARRAY_ENTRIES) {
+    const char *method =
+        kind == JSRT_ITER_ARRAY_KEYS ? "keys" : kind == JSRT_ITER_ARRAY_VALUES ? "values" : "entries";
+    if (jsrt_require_array(target, method) == NULL) {
+      return JSRT_UNDEFINED;
+    }
+  }
   return make_iter(target, JSRT_UNDEFINED, kind);
 }
 

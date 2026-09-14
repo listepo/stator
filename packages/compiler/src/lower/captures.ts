@@ -16,6 +16,7 @@
  * exactly where the intermediate function sits. */
 
 import * as ts from 'typescript';
+import { isStaticMember } from '../frontend/types.ts';
 
 /** The receiver, as the lowering names it (`RECEIVER` in `src/lower/index.ts`): parameter zero of
  * a method, constructor or accessor, spelled with a space because no source identifier can be.
@@ -65,9 +66,11 @@ export interface CaptureInfo {
 
 /** What can own a heap environment. Almost always a function — but the MODULE owns one too, for
  * the one kind of module-level binding the globals array cannot hold: see `isPerIterationBinding`.
- * The source file sits at the outer end of every environment chain, so a capture resolved against
- * it needs no special case in the `levels` walk — it is simply the last scope reached. */
-export type EnvOwner = FunctionLike | ts.SourceFile;
+ * And a CLASS owns one entry — the receiver — for the one kind of `this` no enclosing function
+ * owns: an arrow inside a field initializer (see `enclosingThisOwner`). The source file sits at
+ * the outer end of every environment chain, so a capture resolved against it needs no special
+ * case in the `levels` walk — it is simply the last scope reached. */
+export type EnvOwner = FunctionLike | ts.ClassLikeDeclaration | ts.SourceFile;
 
 export type CaptureMap = ReadonlyMap<EnvOwner, CaptureInfo>;
 
@@ -83,13 +86,39 @@ export function isFunctionLike(node: ts.Node): node is FunctionLike {
   );
 }
 
-/** The nearest enclosing function that HAS a receiver of its own: a method, a constructor, an
- * accessor, a function declaration or expression -- everything but an arrow, which passes the
- * receiver through. `undefined` at module level, where there is none. */
-function enclosingNonArrowFunction(node: ts.Node): FunctionLike | undefined {
+/** The scope that owns a `this` read: the nearest enclosing function that HAS a receiver of
+ * its own — a method, a constructor, an accessor, a function declaration or expression,
+ * everything but an arrow, which passes the receiver through — or, when the keyword sits in a
+ * field initializer behind arrows, the enclosing class.
+ *
+ * A field initializer runs inside the constructor (the lowering moves it there), so an arrow's
+ * `this` there reads the constructor's receiver, yet the walk finds no non-arrow function
+ * ancestor for it — the parents are the arrow, the property, the class — and the receiver was
+ * never captured (`undefined` at module level, where the old walk ended). The class stands in
+ * for the constructor because there may not be one written; `lowerClass` merges the class's
+ * receiver into whichever constructor runs the initializers, explicit or synthesized. A `this`
+ * written DIRECTLY in an initializer takes no branch here — it lowers to the constructor body's
+ * own receiver read and needs no capture — so only an arrow-crossing read names the class.
+ * A static initializer is skipped: its `this` is the class object, which the gate refuses, so
+ * there is no receiver to own. `undefined` at module level, where there is none. */
+function enclosingThisOwner(node: ts.Node): FunctionLike | ts.ClassLikeDeclaration | undefined {
+  let sawArrow = false;
   for (let current: ts.Node | undefined = node.parent; current !== undefined;) {
-    if (isFunctionLike(current) && !ts.isArrowFunction(current)) {
+    if (ts.isArrowFunction(current)) {
+      sawArrow = true;
+      current = current.parent;
+      continue;
+    }
+    if (isFunctionLike(current)) {
       return current;
+    }
+    if (
+      sawArrow &&
+      ts.isPropertyDeclaration(current) &&
+      (ts.isClassDeclaration(current.parent) || ts.isClassExpression(current.parent)) &&
+      !isStaticMember(current)
+    ) {
+      return current.parent;
     }
     if (ts.isSourceFile(current)) {
       return undefined;
@@ -103,6 +132,26 @@ function enclosingNonArrowFunction(node: ts.Node): FunctionLike | undefined {
 export function enclosingFunction(node: ts.Node): FunctionLike | undefined {
   for (let current: ts.Node | undefined = node.parent; current !== undefined;) {
     if (isFunctionLike(current)) {
+      return current;
+    }
+    if (ts.isSourceFile(current)) {
+      return undefined;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+/** The nearest ancestor that can own an environment: a function or a class. The class half
+ * exists for the field-initializer receiver (see `enclosingThisOwner`): a capture chain that
+ * starts at a class passes through arrows only, so this and `enclosingFunction` agree on every
+ * chain that does not. */
+function enclosingScope(node: ts.Node): FunctionLike | ts.ClassLikeDeclaration | undefined {
+  for (let current: ts.Node | undefined = node.parent; current !== undefined;) {
+    if (isFunctionLike(current)) {
+      return current;
+    }
+    if (ts.isClassDeclaration(current) || ts.isClassExpression(current)) {
       return current;
     }
     if (ts.isSourceFile(current)) {
@@ -200,7 +249,7 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
     // ordinary parameter read, and a plain nested `function`'s `this` belongs to that function
     // (the gate refuses it, since a strict-mode plain call has no receiver).
     if (node.kind === ts.SyntaxKind.ThisKeyword) {
-      const owner = enclosingNonArrowFunction(node);
+      const owner = enclosingThisOwner(node);
       if (owner !== undefined && owner !== enclosingFunction(node)) {
         let owned = capturedByOwner.get(owner);
         if (owned === undefined) {
@@ -209,6 +258,26 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
         }
         owned.set(undefined, RECEIVER_NAME);
         references.push({ ref: node, declFn: owner, name: RECEIVER_NAME, decl: undefined });
+        // An explicit constructor runs the field initializers, so it needs the receiver in its
+        // own environment too — the same slot the field arrows read. Recorded as owned, not as
+        // referenced: no reference points at it, so passes 3–4 leave it alone, while pass 2 lays
+        // it out first in both lists, which is what keeps the two index spaces agreeing at zero.
+        // A synthesized constructor has no node to record against; `lowerClass` merges the
+        // class's receiver into it when it builds it.
+        if (ts.isClassDeclaration(owner) || ts.isClassExpression(owner)) {
+          const ctor = owner.members.find(
+            (m): m is ts.ConstructorDeclaration =>
+              ts.isConstructorDeclaration(m) && m.body !== undefined,
+          );
+          if (ctor !== undefined) {
+            let ctorOwned = capturedByOwner.get(ctor);
+            if (ctorOwned === undefined) {
+              ctorOwned = new Map();
+              capturedByOwner.set(ctor, ctorOwned);
+            }
+            ctorOwned.set(undefined, RECEIVER_NAME);
+          }
+        }
       }
     }
     if (ts.isIdentifier(node)) {
@@ -279,12 +348,30 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
       continue;
     }
     let levels = 0;
-    for (let a = enclosingFunction(refFn); a !== undefined; a = enclosingFunction(a)) {
-      if (a === declFn) {
-        break;
+    if (ts.isClassDeclaration(declFn) || ts.isClassExpression(declFn)) {
+      // A field-initializer receiver: at run time the arrow is created inside the constructor,
+      // whose environment IS the class's, so the chain from the arrow reaches it through arrows
+      // only — and only an arrow that owns an environment of its own adds a level.
+      for (
+        let a: FunctionLike | ts.ClassLikeDeclaration | undefined = enclosingScope(refFn);
+        a !== undefined;
+        a = enclosingScope(a)
+      ) {
+        if (a === declFn) {
+          break;
+        }
+        if (isFunctionLike(a) && hasEnv(a)) {
+          levels++;
+        }
       }
-      if (hasEnv(a)) {
-        levels++;
+    } else {
+      for (let a = enclosingFunction(refFn); a !== undefined; a = enclosingFunction(a)) {
+        if (a === declFn) {
+          break;
+        }
+        if (hasEnv(a)) {
+          levels++;
+        }
       }
     }
     let own = capturesOf.get(refFn);
@@ -301,6 +388,18 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
   for (const { ref, declFn } of references) {
     const refFn = enclosingFunction(ref);
     if (refFn === undefined) {
+      continue;
+    }
+    if (ts.isClassDeclaration(declFn) || ts.isClassExpression(declFn)) {
+      // The constructor owns its environment rather than receiving one on this account, so the
+      // chain stops at the class: every arrow strictly inside it carries the incoming one.
+      for (
+        let f: FunctionLike | ts.ClassLikeDeclaration | undefined = refFn;
+        f !== undefined && f !== declFn;
+        f = enclosingScope(f)
+      ) {
+        needsEnv.add(f);
+      }
       continue;
     }
     // Stop AT the declaring function: it reaches the variable through its own environment, so it
@@ -326,6 +425,10 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
   };
   const collect = (node: ts.Node): void => {
     if (isFunctionLike(node)) {
+      record(node);
+    } else if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      // A field-initializer receiver lives here (see `enclosingThisOwner`); `lowerClass` reads
+      // it to size the constructor's environment. Usually empty, like most functions.
       record(node);
     }
     ts.forEachChild(node, collect);

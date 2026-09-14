@@ -319,7 +319,8 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'unary-op':
     case 'typeof':
     case 'string-length':
-    case 'array-length': {
+    case 'array-length':
+    case 'function-length': {
       const operand = sub(expr.operand);
       return operand === expr.operand ? expr : { ...expr, operand };
     }
@@ -338,6 +339,20 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
         ? expr
         : { ...expr, condition, consequent, alternate };
     }
+    // The consequent runs conditionally (only when the base is non-nullish), but rewriting it
+    // is still sound for the reason the logical-op case states: a rewrite replaces an
+    // expression with an equivalent one, it does not run it. A pass that MOVES work must
+    // consult the kind, like every other conditional-evaluation node.
+    case 'optional-chain': {
+      const base = sub(expr.base);
+      const consequent = sub(expr.consequent);
+      return base === expr.base && consequent === expr.consequent
+        ? expr
+        : { ...expr, base, consequent };
+    }
+    // The guarded value: a leaf with nothing inside to rewrite.
+    case 'optional-base':
+      return expr;
     case 'update': {
       const target = sub(expr.target);
       if (
@@ -394,6 +409,7 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     }
     case 'array-op':
     case 'method-call':
+    case 'dyn-method-call':
     case 'collection-op':
     case 'date-op':
     case 'regexp-op':
@@ -405,7 +421,8 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'date-components':
     case 'date-static':
     case 'math-call':
-    case 'object-static': {
+    case 'object-static':
+    case 'string-static': {
       const args = rewriteEach(expr.args, sub);
       return args === expr.args ? expr : { ...expr, args };
     }

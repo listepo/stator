@@ -37,6 +37,27 @@ export function resetShadowCounter(): void {
   shadowCounter = 0;
 }
 
+/** The tag inside a shadow HIR name: the full form is NUL + `shadow:<source>#<counter>` (see
+ * `shadowName` above). Kept as a named constant so no other module must spell the NUL byte. */
+const SHADOW_TAG = 'shadow:';
+
+/** The source name a shadow HIR name was minted for, or `undefined` when `name` is not one.
+ *
+ * No source identifier may contain U+0000, so a leading NUL is unambiguous, and the counter is
+ * cut at the last `#`. Class descriptors are keyed by HIR name (plan.md §8 step 23) but PRINT
+ * under this source name, and the override question is asked of source-level families, so both
+ * need the way back. */
+export function shadowSource(name: string): string | undefined {
+  if (name.charCodeAt(0) !== 0 || !name.startsWith(SHADOW_TAG, 1)) {
+    return undefined;
+  }
+  const hash = name.lastIndexOf('#');
+  if (hash < 1 + SHADOW_TAG.length) {
+    return undefined;
+  }
+  return name.slice(1 + SHADOW_TAG.length, hash);
+}
+
 export class Scope {
   /** Bindings this scope itself holds. A lookup walks the parent chain; a write never leaves
    * home, so a block's declaration cannot touch its parent's map the way a copy-then-write

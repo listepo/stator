@@ -20,9 +20,11 @@ import {
   isGlobalMath,
   isGlobalObject,
   isGlobalPromise,
+  isGlobalString,
   isMatchReceiver,
   isRegExpReceiver,
   isSimpleBindingPattern,
+  isSingleConstDeclarator,
   isStringReceiver,
   isVarDeclarationList,
   loopScopeOf,
@@ -33,6 +35,8 @@ import {
 } from '../frontend/gate.ts';
 import {
   classReferenceTuple,
+  genericAliasTarget,
+  genericArgumentTuple,
   genericArrowKey,
   genericCallInstantiation,
   genericNewInstantiation,
@@ -50,6 +54,7 @@ import {
   ancestry,
   baseClassOf,
   classDeclarationOf,
+  computedKeyStaticName,
   ITERATOR_METHOD_NAME,
   instanceMethodName,
   isDynamicShape,
@@ -80,11 +85,13 @@ import type {
   Declaration,
   DynEntry,
   DynFieldAccess,
+  DynMethodCall,
   ExternCall,
   Expression,
   FieldAccess,
   FunctionDeclaration,
   FunctionExpr,
+  FunctionLength,
   Identifier,
   IfStatement,
   IndexAccess,
@@ -111,6 +118,7 @@ import type {
   Statement,
   StringLength,
   StringOpName,
+  StringStaticMethod,
   SuperCall,
   SwitchClause,
   TemplateLiteral,
@@ -133,6 +141,7 @@ import {
   REGEXP_FIELDS,
   REGEXP_OPS,
   STRING_OPS,
+  STRING_STATICS,
 } from '../hir/nodes.ts';
 import type { HObject, HType } from '../hir/types.ts';
 import {
@@ -147,6 +156,7 @@ import {
   hFunction,
   hIterator,
   hPromise,
+  hTypeCanBeNullish,
   hTypeHasUnknown,
   hTypeName,
   hUnknown,
@@ -155,7 +165,7 @@ import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, isFunctionLike, RECEIVER_NAME } from './captures.ts';
-import { Scope, resetShadowCounter } from './scope.ts';
+import { Scope, resetShadowCounter, shadowSource } from './scope.ts';
 
 /* What HIR name each source declaration ended up with (plan.md §8 step 14).
  *
@@ -235,6 +245,13 @@ let functionNesting = 0;
 
 /** HIR names of named-function-expression self bindings; assignment is a TypeError. */
 const immutableSelfBindings = new Set<string>();
+/** Optional-chain cut points (plan.md §8 step 24): the TS node whose lowered value the enclosing
+ * chain holds in its frame temp, mapped to the leaf type the consequent reads it at. Installed
+ * around one consequent lowering and restored after, so nesting is a disciplined stack and
+ * nothing leaks across expressions — each TS node is lowered once, so a stale entry could only
+ * be hit by lowering the same node twice, which is the re-lowering the map exists to prevent.
+ * Cleared per `lowerProgram` with the module state beside it. */
+const optionalChainCuts = new Map<ts.Node, HType>();
 /** Whether the current `lowerProgram` seeded any `\u0000dynamic:` bindings. Set alongside the
  * seeding from the same `runtimeDynamicSymbols`, so the two cannot disagree; reset per
  * `lowerProgram` like the module state beside it (in-process callers reuse this module). */
@@ -262,6 +279,7 @@ export function lowerProgram(
   // (spurious STA4020 on `inner += 1`); the counters only rename temps, and resetting them keeps
   // emitted C identical for identical input either way.
   immutableSelfBindings.clear();
+  optionalChainCuts.clear();
   bindTempId = 0;
   resetShadowCounter();
   const entry = files.at(-1);
@@ -366,10 +384,7 @@ export function lowerProgram(
           const mine = classSpecializations.filter((spec) => spec.declaration === node);
           let failed = false;
           bindings.set(carrier.name, classSpecType(carrier, checker));
-          const ordered = [
-            carrier,
-            ...mine.filter((item) => !item.staticsOnly),
-          ];
+          const ordered = [carrier, ...mine.filter((item) => !item.staticsOnly)];
           for (const spec of ordered) {
             const lowered = lowerClassSpecialization(
               spec,
@@ -1109,6 +1124,25 @@ function lowerDeclarationList(
   }
 
   const name = decl.name.text;
+  // An alias to a generic (`const f = box`, `const g = f`) lowers to nothing: calls through it
+  // rewrite to specializations by resolved signature, and every other read is refused at the
+  // gate — so the name binds no value, exactly as a generic declaration itself binds none.
+  // Only the formation spelling is skipped (single `const`, mirroring the gate): anything else
+  // lowers as written and fails where it always did.
+  if (
+    decl.initializer !== undefined &&
+    ts.isIdentifier(decl.initializer) &&
+    isSingleConstDeclarator(decl) &&
+    genericAliasTarget(decl.initializer, checker) !== undefined
+  ) {
+    return {
+      kind: 'block',
+      type: H_UNDEFINED,
+      span: makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile),
+      statements: [],
+      flatten: true,
+    };
+  }
   // A generic arrow or function expression assigned to a `const` lowers to nothing: its
   // specializations are already above (collected by tuple), and the name itself binds no value
   // (the gate refuses reading one outside a call). Only the assigned shape reaches here — the
@@ -1656,7 +1690,7 @@ function placeName(
   const found = staticMemberOf(node, checker, false);
   return found === undefined || found.owner.name === undefined
     ? undefined
-    : staticName(found.owner.name.text, node.name.text);
+    : staticName(hirClassName(found.owner), node.name.text);
 }
 
 /** The parameter a method's `this` reads from. The leading space makes it unspellable in source,
@@ -1701,6 +1735,19 @@ function bindPatternNames(name: ts.BindingName, checker: ts.TypeChecker, binding
  * `C.count` on its base must produce the same name or one static would become two bindings. */
 function staticName(className: string, member: string): string {
   return `${className}.${member}`;
+}
+
+/** The HIR name of a class declaration: the alpha-renamed binding when the declaration shadows a
+ * visible one (plan.md §8 step 23), otherwise the source name it was declared under.
+ *
+ * Every site that names a class -- a `new`, a method call's owner, a static's prefix, an
+ * `instanceof`, a base -- resolves through the DECLARATION rather than the spelling, because two
+ * declarations may share one spelling and only the declaration knows which HIR name it got. A
+ * declaration that has not been lowered yet (a forward reference, which is TDZ the compiler does
+ * not model) falls back to the source name, which is what the descriptor will carry too: the
+ * declaration site renames only against bindings already made. */
+function hirClassName(declaration: ts.ClassDeclaration): string {
+  return hirNameOf(declaration) ?? declaration.name?.text ?? '';
 }
 
 /** Whether `o.x` must resolve through the SHAPE TABLE rather than a slot — the one question the
@@ -1958,7 +2005,7 @@ function memberAssignment(
     (ts.isGetAccessorDeclaration(staticFound.member) ||
       ts.isSetAccessorDeclaration(staticFound.member))
       ? {
-          owner: staticFound.owner.name.text,
+          owner: hirClassName(staticFound.owner),
           property: targetNode.name.text,
           halves: staticAccessorHalves(staticFound.owner, targetNode.name.text, checker),
         }
@@ -2163,8 +2210,7 @@ function memberAssignment(
     // `o.x = v` RUNS the setter. The gate refused the compound forms, so `current` is never read
     // here -- it is built anyway so the two halves of a place stay one shape.
     const field = targetNode.name.text;
-    const owner =
-      accessorOwner(targetNode.expression, field, checker, bindings, sourceFile) ?? '';
+    const owner = accessorOwner(targetNode.expression, field, checker, bindings, sourceFile) ?? '';
     // A set-only property has no read at all, which is legal and is why this is conditional: the
     // only forms that would read it are the compound ones, and the gate refused those.
     const read = hasAccessorHalf(targetNode.expression, field, 'get', checker, bindings, sourceFile)
@@ -2712,17 +2758,107 @@ function lowerArrayLiteralExpression(
   return result ?? emptyArrayLiteral(literalType, span);
 }
 
-function staticObjectLiteralKey(name: ts.PropertyName): string | null {
+function staticObjectLiteralKey(name: ts.PropertyName, checker: ts.TypeChecker): string | null {
   if (ts.isIdentifier(name) || ts.isStringLiteral(name)) {
     return name.text;
   }
+  // A numeric name is its value's spelling, not the source text: `{ 0x10: 1 }` declares `16`,
+  // exactly as the checker spells the property, so the entry and the shape agree.
+  if (ts.isNumericLiteral(name)) {
+    return String(Number(name.text));
+  }
   if (ts.isComputedPropertyName(name)) {
-    const expr = name.expression;
-    if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
-      return expr.text;
-    }
+    return computedKeyStaticName(name, checker);
   }
   return null;
+}
+
+/** A link of an optional chain: `.x`, `[k]` or `(args)`, each optionally `?.`. `new` never
+ * appears — `new a?.b()` is a grammar error — and a parenthesized chain is a closed value, so
+ * the spine walk below stops at one. */
+type ChainLink = ts.PropertyAccessExpression | ts.ElementAccessExpression | ts.CallExpression;
+
+function isChainLink(node: ts.Node): node is ChainLink {
+  return (
+    ts.isPropertyAccessExpression(node) ||
+    ts.isElementAccessExpression(node) ||
+    ts.isCallExpression(node)
+  );
+}
+
+/** The deepest `?.` on this link's `.expression` spine, or `undefined` for a chain-free link.
+ * The node's OWN `?.` counts — the returned link is the one whose base is tested — and the walk
+ * looks through `!` (which erases) but stops at parentheses (which end the chain: `(a?.b).c`
+ * throws where `a?.b.c` answers `undefined`) and at every other node. Computed keys and call
+ * arguments are never walked: they are independent roots, not links of this chain. */
+function firstOptionalLink(node: ChainLink): ChainLink | undefined {
+  let current: ts.Expression = node;
+  for (;;) {
+    if (isChainLink(current)) {
+      if (current.questionDotToken !== undefined) {
+        return current;
+      }
+      current = current.expression;
+      continue;
+    }
+    if (ts.isNonNullExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    return undefined;
+  }
+}
+
+function lowerOptionalChain(
+  node: ChainLink,
+  link: ChainLink,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  // The guarded base: everything from the first `?.`'s receiver down. Its spine holds no `?.`
+  // (this IS the first), so it lowers through the plain arms exactly once — whatever side
+  // effects it has run a single time, before the test.
+  const prefix = link.expression;
+  // A base that cannot be nullish makes the guard dead: lower plainly, which is today's code
+  // exactly (and keeps non-nullable chains — `C?.x`, `s?.length` — on their current verdicts).
+  // The type read is the checker's, not a lowering's, so nothing is evaluated and discarded.
+  if (!hTypeCanBeNullish(typeAt(prefix, checker, bindings))) {
+    return lowerExpression(node, sourceFile, checker, bindings, diagnostics, true);
+  }
+  const base = lowerExpression(prefix, sourceFile, checker, bindings, diagnostics);
+  if (base === null) {
+    return null;
+  }
+  // The consequent is the chain node lowered by the PLAIN arms — every link above the cut keeps
+  // the lowering (and the runtime behavior, including which TypeErrors it throws) it would have
+  // without the guard — with the cut bottoming out at the leaf instead of re-lowering the base.
+  // A nested `?.` on the way down builds its own node testing its own base, which is why
+  // `a?.b?.c` answers `undefined` for a nullish `a.b` while `a?.b.c` throws there. The leaf
+  // carries the base's own type deliberately: the arms above dispatch on the checker's types
+  // (which still see the union) and their nodes pin the target types they always did, so a
+  // narrowed leaf would manufacture verifier failures for nodes the plain lowering builds
+  // cleanly — while `.length` on an Unknown operand is layout-sound at run time either way.
+  const previous = optionalChainCuts.get(prefix);
+  optionalChainCuts.set(prefix, base.type);
+  const consequent = lowerExpression(node, sourceFile, checker, bindings, diagnostics, true);
+  if (previous === undefined) {
+    optionalChainCuts.delete(prefix);
+  } else {
+    optionalChainCuts.set(prefix, previous);
+  }
+  if (consequent === null) {
+    return null;
+  }
+  return {
+    kind: 'optional-chain',
+    type: typeAt(node, checker, bindings),
+    span,
+    base,
+    consequent,
+  };
 }
 
 function lowerExpression(
@@ -2731,7 +2867,19 @@ function lowerExpression(
   checker: ts.TypeChecker,
   bindings: Scope,
   diagnostics: Diagnostic[],
+  chainBypass = false,
 ): Expression | null {
+  // An optional-chain cut: this node is the guarded base the enclosing chain holds in its frame
+  // temp. Answer the leaf — re-lowering it here would evaluate the base a second time. Checked
+  // before parentheses because a cut may itself be parenthesized (`(f())?.x`).
+  const cut = optionalChainCuts.get(node);
+  if (cut !== undefined) {
+    return {
+      kind: 'optional-base',
+      type: cut,
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    };
+  }
   // Parentheses only expressed precedence, and the tree already encodes it. Unwrapping here
   // rather than modelling them is why the HIR has no grouping node -- and it must happen before
   // every other case, since a parenthesized anything can appear wherever an expression can.
@@ -2808,6 +2956,18 @@ function lowerExpression(
   const asUpdate = lowerUpdateExpression(node, sourceFile, checker, bindings, diagnostics);
   if (asUpdate !== undefined) {
     return asUpdate;
+  }
+
+  // Optional chaining `?.` (plan.md §8 step 24): any link whose spine passes through a `?.`
+  // lowers as one guarded chain. Skipped under `chainBypass` — that is the consequent path,
+  // which lowers the same node by the plain arms with the cut installed. An assignment to an
+  // optional access (`a?.b = c`) never reaches here: the checker rejects it (TS2779) and the
+  // build stops at the frontend.
+  if (!chainBypass && isChainLink(node)) {
+    const optionalLink = firstOptionalLink(node);
+    if (optionalLink !== undefined) {
+      return lowerOptionalChain(node, optionalLink, sourceFile, checker, bindings, diagnostics);
+    }
   }
 
   // `-1` parses as a prefix minus applied to the literal 1, but it is one negative number to a
@@ -2913,7 +3073,7 @@ function lowerExpression(
         // which binding the class never emitted.
         return staticAccessorCall(
           'get',
-          found.owner.name.text,
+          hirClassName(found.owner),
           node.name.text,
           [],
           typeAt(node, checker, bindings),
@@ -2924,7 +3084,7 @@ function lowerExpression(
           diagnostics,
         );
       }
-      const name = staticName(found.owner.name.text, node.name.text);
+      const name = staticName(hirClassName(found.owner), node.name.text);
       const type = bindings.get(name);
       if (type === undefined) {
         diagnostics.push(
@@ -3152,6 +3312,14 @@ function lowerExpression(
       const length: ArrayLength = { kind: 'array-length', type: H_NUMBER, span, operand };
       return length;
     }
+    // `fn.length` on a statically-typed function -- a method value (`const f = o.m`) included,
+    // whose closure already excludes the receiver from its arity (docs/VALUE.md §4.16). An
+    // Unknown-typed receiver never reaches here: it took the dynamic path above and answers
+    // through `jsrt_get_prop` (plan.md §8 step 21b).
+    if (operand.type.kind === 'fn') {
+      const length: FunctionLength = { kind: 'function-length', type: H_NUMBER, span, operand };
+      return length;
+    }
     const length: StringLength = { kind: 'string-length', type: H_NUMBER, span, operand };
     return length;
   }
@@ -3217,7 +3385,10 @@ function lowerExpression(
   if (ts.isObjectLiteralExpression(node)) {
     const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
     const entries: DynEntry[] = [];
-    const methodNodes: ts.MethodDeclaration[] = [];
+    // Methods wait with the entry count at their written position: the fixed path lowers them
+    // into the method table, while the dynamic path splices their closures back into `entries`
+    // at exactly these positions, which is what keeps the insertion order.
+    const methodNodes: { at: number; node: ts.MethodDeclaration }[] = [];
     for (const property of node.properties) {
       // `{ x }` is `{ x: x }`. The desugaring lives here and not in HIR: the value is the ordinary
       // identifier expression, so every later pass sees a name/value pair like any other.
@@ -3270,7 +3441,11 @@ function lowerExpression(
         );
         // Every read below is stamped with the spread's own span, not the operand's: the span is
         // the identity the emitter groups by, and the operand's span belongs to an expression
-        // that now evaluates once no matter how many fields read it.
+        // that now evaluates once no matter how many fields read it. Each entry is also marked
+        // `spread`: the expansion order is the TYPE's field order, while the result must
+        // enumerate in the SOURCE OBJECT's key order, so the emitter repairs the order at run
+        // time -- and only a mark tells these reads apart from an own value that happens to
+        // read the same shape (plan.md §8 step 21a).
         source.type.fields.forEach((field, slot) => {
           if (field.name.startsWith('#')) {
             return;
@@ -3283,7 +3458,7 @@ function lowerExpression(
             field: field.name,
             slot,
           };
-          entries.push({ name: field.name, value: read });
+          entries.push({ name: field.name, value: read, spread: true });
         });
         continue;
       }
@@ -3306,11 +3481,19 @@ function lowerExpression(
           );
           return null;
         }
-        methodNodes.push(property);
+        methodNodes.push({ at: entries.length, node: property });
         continue;
       }
       if (ts.isGetAccessorDeclaration(property) || ts.isSetAccessorDeclaration(property)) {
-        if (!(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
+        // A statically-known computed name resolves like a value key (`get ["x"]`, `get [k]`
+        // with `k: "x"`); a runtime one never reaches here, refused at the gate.
+        const accessorKey =
+          ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)
+            ? property.name.text
+            : ts.isComputedPropertyName(property.name)
+              ? computedKeyStaticName(property.name, checker)
+              : null;
+        if (accessorKey === null) {
           diagnostics.push(
             diagnosticFromNode(
               property,
@@ -3334,7 +3517,7 @@ function lowerExpression(
         if (fn === null) {
           return null;
         }
-        const name = property.name.text;
+        const name = accessorKey;
         const half = ts.isGetAccessorDeclaration(property) ? 'get' : 'set';
         const existing = entries.find((e) => isAccessorEntry(e) && e.name === name);
         if (existing !== undefined && isAccessorEntry(existing)) {
@@ -3370,7 +3553,7 @@ function lowerExpression(
       if (value === null) {
         return null;
       }
-      const staticKey = staticObjectLiteralKey(property.name);
+      const staticKey = staticObjectLiteralKey(property.name, checker);
       if (staticKey !== null) {
         entries.push({ name: staticKey, value });
         continue;
@@ -3405,7 +3588,62 @@ function lowerExpression(
     // read of `o` goes through the annotation -- so the object must be the dynamic one those
     // reads resolve against (same reasoning, same order, as gateObjectLiteral).
     if (objectLiteralIsDynamic(node, checker)) {
-      return { kind: 'dyn-object-literal', type: hUnknown(false), span, entries };
+      // A method on a dynamic object is an own data property holding the method's closure, with
+      // the receiver as parameter zero exactly as on the fixed path. The closures splice back
+      // into `entries` at their written positions, so the shape table records the insertion
+      // order the source wrote -- a side table could not. The receiver is Unknown because the
+      // object is dynamic, so `this.x` inside is a shape-table read, as for accessors above.
+      const ordered: DynEntry[] = [];
+      let cursor = 0;
+      for (const { at, node: methodNode } of methodNodes) {
+        for (; cursor < at; cursor++) {
+          const entry = entries[cursor];
+          if (entry === undefined) {
+            diagnostics.push(
+              diagnosticFromNode(
+                node,
+                sourceFile,
+                'STA4068',
+                'internal',
+                'ts',
+                'object literal method position is past its entries',
+              ),
+            );
+            return null;
+          }
+          ordered.push(entry);
+        }
+        const fn = lowerFunction(
+          methodNode,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+          hUnknown(false),
+        );
+        if (fn === null) {
+          return null;
+        }
+        ordered.push({ name: memberFunctionName(methodNode, sourceFile), value: fn });
+      }
+      for (; cursor < entries.length; cursor++) {
+        const entry = entries[cursor];
+        if (entry === undefined) {
+          diagnostics.push(
+            diagnosticFromNode(
+              node,
+              sourceFile,
+              'STA4068',
+              'internal',
+              'ts',
+              'object literal method position is past its entries',
+            ),
+          );
+          return null;
+        }
+        ordered.push(entry);
+      }
+      return { kind: 'dyn-object-literal', type: hUnknown(false), span, entries: ordered };
     }
     // The CONTEXTUAL type is the layout when there is one, because every later read of this object
     // goes through it: `const o: { y: number; x: string } = { x: "s", y: 2 }` resolves `o.x`
@@ -3468,7 +3706,7 @@ function lowerExpression(
       fixed.push(entry);
     }
     const methods: ClassMethod[] = [];
-    for (const method of methodNodes) {
+    for (const { node: method } of methodNodes) {
       const fn = lowerFunction(method, sourceFile, checker, bindings, diagnostics, type);
       if (fn === null) {
         return null;
@@ -3602,9 +3840,7 @@ function lowerExpression(
     // and its fields must agree too, or the constructed value would not assign to its own
     // declared type. Normalization answers both from the same tuple the name came from.
     const instanceType =
-      specialized === undefined
-        ? type
-        : normalizeClassInstance(node, type, checker, bindings);
+      specialized === undefined ? type : normalizeClassInstance(node, type, checker, bindings);
     const created: NewExpr = {
       kind: 'new',
       type: instanceType,
@@ -3813,7 +4049,8 @@ function lowerExpression(
     if (target === null) {
       return null;
     }
-    const ownerName = brandDeclaringClass(node.left, checker)?.name?.text;
+    const brandOwner = brandDeclaringClass(node.left, checker);
+    const ownerName = brandOwner === undefined ? undefined : hirClassName(brandOwner);
     if (ownerName === undefined) {
       diagnostics.push(
         diagnosticFromNode(
@@ -3880,7 +4117,7 @@ function lowerExpression(
       type: H_BOOLEAN,
       span,
       target,
-      className: declaration.name.text,
+      className: hirClassName(declaration),
     };
     return test;
   }
@@ -3988,7 +4225,9 @@ function lowerExpression(
       // the spec's own absent case IS undefined (`count()` counts under "default") the list is
       // padded here and one C entry point serves both forms; where it is not (`group`, `assert`,
       // whose explicit-undefined output differs from their omitted output) the list stays short
-      // and `consoleEntryPoint` picks the runtime function that means absence.
+      // and `consoleEntryPoint` picks the runtime function that means absence. The five variadic
+      // methods take any width at their `(count, argv)` entry point, so they are never padded —
+      // `console.log()` must reach the runtime empty, not carrying one `undefined`.
       if (
         ts.isIdentifier(obj) &&
         obj.text === 'console' &&
@@ -4002,7 +4241,7 @@ function lowerExpression(
         const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
         const shape = CONSOLE_METHODS[method];
         const args = [...given];
-        if (!('bare' in shape)) {
+        if (!('bare' in shape) && !('variadic' in shape)) {
           while (args.length < shape.arity) {
             args.push({ kind: 'undefined-literal', type: H_UNDEFINED, span });
           }
@@ -4101,6 +4340,24 @@ function lowerExpression(
           span,
           method: propName as PromiseStaticMethod,
           arg,
+        };
+      }
+
+      // `String.fromCharCode(...codes)` (plan.md §8 step 19): the one `String` namespace call.
+      // Variadic in the source and variadic in the node — the arguments lower left to right
+      // through the shared global prologue, and the emitter passes the count the runtime
+      // iterates. The gate proved the name; anything else on `String` never reaches here.
+      if (isGlobalString(obj, checker) && Object.hasOwn(STRING_STATICS, propName)) {
+        const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
+          return null;
+        }
+        return {
+          kind: 'string-static',
+          type: H_STRING,
+          span: prologue.span,
+          method: propName as StringStaticMethod,
+          args: prologue.args,
         };
       }
 
@@ -4244,6 +4501,25 @@ function lowerExpression(
           return null;
         }
         const { target, span } = prologue;
+        // Variadic `concat` folds left into nested singles (plan.md §8 step 19) — the min/max
+        // precedent, and sound for the same reason: concatenation is associative, each argument
+        // is evaluated once in source order, and the receiver is evaluated once as the
+        // innermost target. Zero arguments answer the receiver itself. One argument is the
+        // single form below, untouched.
+        if (op === 'concat' && prologue.args.length !== 1) {
+          let folded: Expression = target;
+          for (const next of prologue.args) {
+            folded = {
+              kind: 'string-op',
+              type: H_STRING,
+              span,
+              op: 'concat',
+              target: folded,
+              args: [next],
+            };
+          }
+          return folded;
+        }
         const shape = STRING_OPS[op];
         const padded = padToArity(prologue.args, shape.arity, span);
         const checkerType = typeAt(node, checker, bindings);
@@ -4487,13 +4763,28 @@ function lowerExpression(
       return null;
     }
 
+    // `o.m(a)` on an Unknown receiver: the name resolves through the shape table at run time,
+    // and the call passes the receiver when the loaded closure declares one. Every specialized
+    // arm above (arrays, collections, strings, class instances, ...) keeps priority -- what
+    // reaches here is genuinely dynamic, which the gate accepted in those exact words.
+    if (specialized === undefined) {
+      const dynCall = lowerDynMethodCall(node, expr, sourceFile, checker, bindings, diagnostics);
+      if (dynCall !== undefined) {
+        return dynCall;
+      }
+    }
+
     // An ordinary call's callee is evaluated as a value like any other expression -- the gate has
     // already restricted it to shapes whose value the emitter can produce.
     const callee = specialized ?? lowerExpression(expr, sourceFile, checker, bindings, diagnostics);
     if (callee === null) {
       return null;
     }
-    const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+    // A generic passed as an argument names a SPECIALIZATION too: `run(box, 1)` passes
+    // `box<number>`, resolved against the parameter's function type. Anything else lowers as
+    // an ordinary argument expression. Shared with the dynamic method call below, whose
+    // arguments lower exactly as an ordinary call's do.
+    const args = lowerCallArguments(node, sourceFile, checker, bindings, diagnostics);
     if (args === null) {
       return null;
     }
@@ -4519,6 +4810,93 @@ function lowerExpression(
     ),
   );
   return null;
+}
+
+/** A call's arguments, lowered left to right: spread elements as expressions, generic arguments
+ * as their specializations, everything else ordinarily. Shared by the ordinary call above and
+ * the dynamic method call below, whose arguments are the same list. */
+function lowerCallArguments(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression[] | null {
+  const args: Expression[] = [];
+  for (const argument of node.arguments) {
+    if (ts.isSpreadElement(argument)) {
+      const lowered = lowerExpression(argument, sourceFile, checker, bindings, diagnostics);
+      if (lowered === null) {
+        return null;
+      }
+      args.push(lowered);
+      continue;
+    }
+    const specializedArg = specializedArgument(
+      argument,
+      node,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
+    if (specializedArg === null) {
+      return null;
+    }
+    if (specializedArg !== undefined) {
+      args.push(specializedArg);
+      continue;
+    }
+    const lowered = lowerExpression(argument, sourceFile, checker, bindings, diagnostics);
+    if (lowered === null) {
+      return null;
+    }
+    args.push(lowered);
+  }
+  return args;
+}
+
+/** `o.m(a)` where `o`'s HIR type is Unknown.
+ *
+ * `undefined` means "not this shape" and the ordinary call path applies; `null` means a
+ * diagnostic was pushed. Every typed receiver took a specialized arm before this point, so a
+ * receiver that still has a layout here is a field holding a closure -- which the gate refuses
+ * -- and only Unknown arrives. `super` and match receivers are excluded the same way: neither
+ * is a shape-table read. */
+function lowerDynMethodCall(
+  node: ts.CallExpression,
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): DynMethodCall | null | undefined {
+  if (!ts.isPropertyAccessExpression(expr)) {
+    return undefined;
+  }
+  const obj = expr.expression;
+  if (obj.kind === ts.SyntaxKind.SuperKeyword || isMatchReceiver(obj, checker)) {
+    return undefined;
+  }
+  if (typeAt(obj, checker, bindings).kind !== 'unknown') {
+    return undefined;
+  }
+  const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+  if (target === null) {
+    return null;
+  }
+  const args = lowerCallArguments(node, sourceFile, checker, bindings, diagnostics);
+  if (args === null) {
+    return null;
+  }
+  return {
+    kind: 'dyn-method-call',
+    type: typeAt(node, checker, bindings),
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    target,
+    method: expr.name.text,
+    args,
+  };
 }
 
 /** Binds every function declared directly in `statements` before any of them is lowered.
@@ -4948,8 +5326,7 @@ function classTupleFor(
   for (let i = 0; i < parameters.length; i++) {
     const name = parameters[i]?.name.text;
     const argument = reference?.[i];
-    const fromReference =
-      argument === undefined ? undefined : substituteHType(argument, lookup);
+    const fromReference = argument === undefined ? undefined : substituteHType(argument, lookup);
     const element = fromReference ?? (name === undefined ? undefined : lookup(name));
     if (element === undefined || hasTypeParam(element)) {
       return undefined;
@@ -4973,7 +5350,10 @@ function mangleClassName(
     return null;
   }
   if (owner.typeParameters === undefined || owner.typeParameters.length === 0) {
-    return name;
+    // An ordinary (non-generic) class is reached through its binding, which a shadowing
+    // declaration renames (plan.md §8 step 23); a generic one through its mangled tuple, which
+    // the gate keeps at module scope where no shadowing exists.
+    return hirClassName(owner);
   }
   if (bindings === undefined) {
     return null;
@@ -5071,6 +5451,13 @@ function isOverridden(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
 ): boolean {
+  // A shadow HIR name is never in an override family: the gate refuses overriding in any class
+  // that is not at module scope, and only a nested class can be renamed (plan.md §8 step 23).
+  // Asking the source-level scan about it would match the OUTER family of the same spelling and
+  // misclassify the call as virtual.
+  if (shadowSource(name) !== undefined) {
+    return false;
+  }
   for (const declaration of classesIn(sourceFile)) {
     const chain = ancestry(declaration, checker);
     if (!chain.some((c) => className(c) === name)) {
@@ -5221,9 +5608,7 @@ function accessorOwner(
   const declaration =
     classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
   const found =
-    declaration === undefined
-      ? undefined
-      : accessorDeclaringClass(declaration, property, checker);
+    declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
   if (found?.owner.name?.text !== undefined) {
     return mangleClassName(found.owner, receiver, checker, bindings) ?? undefined;
   }
@@ -5263,9 +5648,7 @@ function hasAccessorHalf(
   const declaration =
     classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
   const found =
-    declaration === undefined
-      ? undefined
-      : accessorDeclaringClass(declaration, property, checker);
+    declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
   if (found !== undefined) {
     return found[half];
   }
@@ -5343,10 +5726,7 @@ function isClassInstance(node: ts.Expression, checker: ts.TypeChecker, bindings:
 /** An object layout with its member types substituted: same name, bases, and slot order —
  * only what each slot holds changes. Slot indices resolved anywhere else stay valid because
  * substitution never reorders, and assignability still reads the (unchanged) names. */
-function substituteObject(
-  type: HObject,
-  substitution: ReadonlyMap<string, HType>,
-): HObject {
+function substituteObject(type: HObject, substitution: ReadonlyMap<string, HType>): HObject {
   const lookup = (name: string): HType | undefined => substitution.get(name);
   return {
     ...type,
@@ -5450,12 +5830,42 @@ function lowerClass(
   // receiver type carries the mangled name too: every use checks a receiver against it, so a
   // declared name here would fail the specialization's own methods. Bases stay declared —
   // ancestry is a property of declarations.
+  //
+  // An ordinary declaration is ALSO a binding of its scope, declared here before anything it
+  // contains is lowered: a block that re-declares an outer class gets a HIR name of its own
+  // instead of sharing the outer descriptor (plan.md §8 step 23). `declare` (not `set`) is what
+  // makes shadowing rename. Specializations skip this -- a generic class lives at module scope
+  // by gate rule, so its source name is already unique, and the tuple lowerings share one
+  // declaration node whose HIR name belongs to the carrier.
+  if (spec === undefined) {
+    hirNameOfDeclaration.set(node, bindings.declare(node.name.text, type));
+  }
+  // The HIR identity of this declaration: the mangled tuple for a specialization, the renamed
+  // binding for a shadowing class, the source name otherwise. Every use site resolves to the
+  // same string through `hirClassName`, which is what keeps `new`, method owners, statics,
+  // `instanceof` and bases naming one descriptor.
+  const selfName =
+    spec !== undefined && !spec.staticsOnly ? spec.name : (hirNameOf(node) ?? node.name.text);
+  // The layout answers under the HIR identity too: the verifier matches every member function's
+  // receiver against the declaration's name, and every `super` against its bases, so a renamed
+  // class whose layout still spelled the source name would fail its own checks. Each base name
+  // resolves through its own declaration, which recorded its own HIR name at its own site --
+  // the base is always lowered first, source order being what makes the descriptor's forward
+  // reference to it legal.
+  const renameBase = (name: string): string => {
+    const owner = ancestry(node, checker).find((candidate) => candidate.name?.text === name);
+    const renamed = owner === undefined ? undefined : hirNameOf(owner);
+    return renamed ?? name;
+  };
   const layout = (() => {
-    if (spec === undefined || spec.staticsOnly) {
-      return type;
+    if (spec !== undefined) {
+      if (spec.staticsOnly) {
+        return type;
+      }
+      const substituted = substituteObject(type, spec.substitution);
+      return { ...substituted, name: spec.name };
     }
-    const substituted = substituteObject(type, spec.substitution);
-    return { ...substituted, name: spec.name };
+    return { ...type, name: selfName, bases: type.bases.map(renameBase) };
   })();
 
   // The slot list comes from the TYPE, not from a second walk of the members: HObject.fields is
@@ -5558,7 +5968,7 @@ function lowerClass(
   }
   for (const member of staticNodes) {
     bindings.set(
-      staticName(node.name.text, member.name.getText(sourceFile)),
+      staticName(selfName, member.name.getText(sourceFile)),
       typeAt(member, checker, bindings),
     );
   }
@@ -5570,7 +5980,7 @@ function lowerClass(
   for (const member of staticAccessors) {
     const half = ts.isGetAccessorDeclaration(member) ? 'get' : 'set';
     bindings.set(
-      staticName(node.name.text, accessorName(half, member.name.getText(sourceFile))),
+      staticName(selfName, accessorName(half, member.name.getText(sourceFile))),
       hFunction([], H_UNDEFINED),
     );
   }
@@ -5579,7 +5989,7 @@ function lowerClass(
     if (ts.isMethodDeclaration(member) && member.body === undefined) {
       continue;
     }
-    const name = staticName(node.name.text, member.name.getText(sourceFile));
+    const name = staticName(selfName, member.name.getText(sourceFile));
     const at = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
     let value: Expression | null;
     if (ts.isMethodDeclaration(member)) {
@@ -5617,7 +6027,7 @@ function lowerClass(
   // exactly as it does there.
   for (const member of staticAccessors) {
     const half = ts.isGetAccessorDeclaration(member) ? 'get' : 'set';
-    const name = staticName(node.name.text, accessorName(half, member.name.getText(sourceFile)));
+    const name = staticName(selfName, accessorName(half, member.name.getText(sourceFile)));
     const at = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
     const value = lowerFunction(member, sourceFile, checker, bindings, diagnostics);
     if (value === null) {
@@ -5653,7 +6063,15 @@ function lowerClass(
   // A derived class always needs a constructor even with nothing of its own to do, because the
   // BASE's has to run. That is JavaScript's implicit `constructor(...args) { super(...args) }`,
   // and it is why `base !== undefined` joins the two reasons a constructor was needed before.
-  const base = baseClassOf(node, checker)?.name?.text;
+  // The base is named by its own HIR identity for the same reason the class itself is: a
+  // shadowing block may have renamed it, and the descriptor reference must follow.
+  const baseDecl = baseClassOf(node, checker);
+  const base =
+    baseDecl === undefined
+      ? undefined
+      : spec === undefined
+        ? hirClassName(baseDecl)
+        : baseDecl.name?.text;
   let ctor: ClassMethod | undefined;
   // The carrier builds no constructor: it is never constructed, and its body would lower a
   // type parameter no substitution binds.
@@ -5661,9 +6079,14 @@ function lowerClass(
     (ctorNode !== undefined || initializers.length > 0 || base !== undefined) &&
     spec?.staticsOnly !== true
   ) {
+    // A field-initializer arrow reads the constructor's receiver through the class's capture
+    // entry (see `enclosingThisOwner`): an explicit constructor already carries it in its own
+    // environment, and a synthesized one is built with it here.
+    const receiverNeeded =
+      capturesFor(sourceFile, checker).get(node)?.envVars.includes(RECEIVER) ?? false;
     const fn =
       ctorNode === undefined
-        ? synthesizedConstructor(node, sourceFile, checker, layout, base)
+        ? synthesizedConstructor(node, sourceFile, checker, layout, base, receiverNeeded)
         : lowerFunction(ctorNode, sourceFile, checker, bindings, diagnostics, layout);
     if (fn === null) {
       return null;
@@ -5716,12 +6139,13 @@ function lowerClass(
   const vtable =
     spec?.staticsOnly === true
       ? []
-      : layout.methods.some((m) =>
-          isOverridden(declaredName, m.name, sourceFile, checker),
-        )
+      : layout.methods.some((m) => isOverridden(declaredName, m.name, sourceFile, checker))
         ? layout.methods.map((m) => {
+            const declaringDecl = methodDeclaringClass(node, m.name, checker);
             const declaring =
-              methodDeclaringClass(node, m.name, checker)?.name?.text ?? layout.name;
+              declaringDecl === undefined
+                ? layout.name
+                : (hirNameOf(declaringDecl) ?? declaringDecl.name?.text ?? layout.name);
             return {
               name: m.name,
               className:
@@ -5736,7 +6160,7 @@ function lowerClass(
     kind: 'class-declaration',
     type: H_UNDEFINED,
     span,
-    name: spec !== undefined && !spec.staticsOnly ? spec.name : node.name.text,
+    name: selfName,
     ...(base !== undefined && { base }),
     fields,
     ...(ctor !== undefined && { ctor }),
@@ -5874,13 +6298,18 @@ function lowerFieldInitializers(
  * implicit `constructor(...args) { super(...args) }`, so it takes the parameters it forwards. It
  * takes the NEAREST DECLARED ancestor constructor's, since an ancestor that writes none forwards
  * in exactly the same way; that keeps the synthesized arity equal to the arity every caller and
- * the checker already agree on. */
+ * the checker already agree on.
+ *
+ * `withReceiver` holds the receiver in the heap environment rather than the frame: a field
+ * initializer behind an arrow reads it as a capture (plan.md §8 step 25), and the arrows the
+ * caller prepends resolve that capture against this environment. */
 function synthesizedConstructor(
   node: ts.ClassDeclaration,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   self: HObject,
   base: string | undefined,
+  withReceiver: boolean,
 ): FunctionExpr {
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
   const forwarded =
@@ -5918,7 +6347,7 @@ function synthesizedConstructor(
     body: { kind: 'block', type: H_UNDEFINED, span, statements },
     isAsync: false,
     isGenerator: false,
-    envVars: [],
+    envVars: withReceiver ? [RECEIVER] : [],
     captures: [],
     needsEnv: false,
     // Nothing here was written, so nothing here was inferred either: every type was copied from a
@@ -6256,6 +6685,13 @@ function collectSpecializations(
       }
       if (ts.isCallExpression(node)) {
         request(node, substitution, depth);
+        // A generic passed as an argument specializes at the parameter's function type, in the
+        // same pass: spread elements have no single parameter to read.
+        for (const argument of node.arguments) {
+          if (!ts.isSpreadElement(argument)) {
+            requestArgument(argument, node, substitution, depth);
+          }
+        }
       }
       if (ts.isNewExpression(node)) {
         requestClass(node, substitution, depth);
@@ -6387,6 +6823,49 @@ function specializedClassName(
   return name;
 }
 
+/** The identifier naming the specialization a generic argument resolves to.
+ *
+ * Mirrors `specializedCallee` for argument position: `undefined` means the argument is not a
+ * passable generic (or not positional/determinable) and the ordinary path applies; `null`
+ * means it is and something went wrong, with a diagnostic already pushed. */
+function specializedArgument(
+  argument: ts.Expression,
+  outerCall: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Identifier | null | undefined {
+  const instantiation = genericArgumentTuple(argument, outerCall, checker);
+  if (instantiation === undefined) {
+    return undefined;
+  }
+  const typeArguments = instantiation.typeArguments.map((t) =>
+    substituteHType(t, (name) => bindings.get(typeParameterKey(name))),
+  );
+  const name = specializationName(instantiation.key, typeArguments);
+  const type = bindings.get(name);
+  if (type === undefined) {
+    diagnostics.push(
+      diagnosticFromNode(
+        argument,
+        sourceFile,
+        'STA4070',
+        'internal',
+        'ts',
+        `no specialization '${name}' was collected for this argument`,
+      ),
+    );
+    return null;
+  }
+  return {
+    kind: 'identifier',
+    type,
+    span: makeSpan(argument.getStart(sourceFile), argument.getWidth(sourceFile), sourceFile),
+    name,
+  };
+}
+
 /** The specialization's own function type: the generic's signature with the substitution applied. */
 function specializationType(specialization: Specialization, checker: ts.TypeChecker): HType {
   const declared = tsTypeToHType(checker.getTypeAtLocation(specialization.declaration), checker);
@@ -6480,7 +6959,49 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType 
   // implicit `any`, and the verifier compares the two for equality.
   const binding = ts.isIdentifier(node) ? bindings.get(node.text) : undefined;
   const narrowed = binding?.kind === 'unknown' && !isCheckable(type) ? binding : type;
-  return normalizeClassInstance(node, narrowed, checker, bindings);
+  const normalized = normalizeClassInstance(node, narrowed, checker, bindings);
+  return renameShadowedClass(node, normalized, checker);
+}
+
+/** A class instance whose declaration was alpha-renamed takes the HIR name.
+ *
+ * The type model spells every class by its source name, but two declarations may share one
+ * spelling while owning two descriptors (plan.md §8 step 23). The checker's type still knows
+ * which declaration this use came from, so the declaration -- not the spelling, and not the
+ * scope visible here, which a value may have crossed -- decides the rename. Bases follow their
+ * own declarations the same way. Anything but a renamed class passes through untouched, which
+ * is why no accepted program without one can observe this function at all. */
+function renameShadowedClass(node: ts.Node, type: HType, checker: ts.TypeChecker): HType {
+  if (type.kind !== 'object') {
+    return type;
+  }
+  const declaration = classDeclarationOf(checker.getTypeAtLocation(node));
+  if (declaration === undefined) {
+    return type;
+  }
+  // Only an alpha-renamed declaration rewrites anything: a generic class never records one
+  // (specializations skip the declaration site by design, and their mangled names must survive
+  // this function untouched), and neither does a declaration this use precedes (a forward
+  // reference, which is TDZ the compiler does not model -- the descriptor carries the source
+  // name there too, since the site renames only against bindings already made).
+  const hir = hirNameOf(declaration);
+  if (hir === undefined) {
+    return type;
+  }
+  // Bases are remapped even when the class itself kept its source name: a subclass declared
+  // beside its shadowed base (`class E extends B` inside the block that re-declared `B`) still
+  // descends from the RENAMED descriptor, and every receiver check reads the bases.
+  const chain = ancestry(declaration, checker);
+  const hirOf = (name: string): string => {
+    const owner = chain.find((candidate) => candidate.name?.text === name);
+    const renamed = owner === undefined ? undefined : hirNameOf(owner);
+    return renamed ?? name;
+  };
+  const bases = type.bases.map(hirOf);
+  if (hir === type.name && bases.every((base, index) => base === type.bases[index])) {
+    return type;
+  }
+  return { ...type, name: hir, bases };
 }
 
 /** An instance of a generic class, named for its tuple: `Box<number>`, not `Box`.

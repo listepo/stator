@@ -7,6 +7,7 @@ import type {
   RegExpOperation,
 } from '../hir/nodes.ts';
 import type { HType } from '../hir/types.ts';
+import { hTypeName } from '../hir/types.ts';
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
@@ -18,6 +19,7 @@ import {
   REGEXP_FIELDS,
   REGEXP_OPS,
   STRING_OPS,
+  STRING_STATICS,
 } from '../hir/nodes.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromFile, diagnosticFromNode } from '../support/diagnostics.ts';
@@ -32,6 +34,7 @@ import {
   accessorDeclaringClass,
   baseClassOf,
   classDeclarationOf,
+  computedKeyStaticName,
   hasExplicitAny,
   ITERATOR_METHOD_NAME,
   instanceMethodName,
@@ -419,7 +422,7 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return { kind: 'accept' };
 
     // Three shapes only: the callee of an accepted `console.log` (gateCall already vetted the whole
-    // call, and this node is its child), and `.length` on a string or an array.
+    // call, and this node is its child), and `.length` on a string, an array, or a function.
     case ts.SyntaxKind.PropertyAccessExpression: {
       const access = node as ts.PropertyAccessExpression;
       // `globalThis.eval` / `globalThis.Function` as VALUES — the call/`new` forms are decided
@@ -435,7 +438,8 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       if (
         isConsoleLog(access) ||
         isStringLength(access, typeChecker) ||
-        isArrayLength(access, typeChecker)
+        isArrayLength(access, typeChecker) ||
+        isFunctionLength(access, typeChecker)
       ) {
         return { kind: 'accept' };
       }
@@ -778,8 +782,11 @@ function aliasedDeclaration(
 }
 
 /** Whether a declarator is the only one in a `const` list: the one shape an alias formation
- * takes, mirroring the lowering's one-binding-per-declaration limit. */
-function isSingleConstDeclarator(declaration: ts.VariableDeclaration): boolean {
+ * takes, mirroring the lowering's one-binding-per-declaration limit.
+ *
+ * Exported: the lowering skips exactly the formations the gate accepts, so the two cannot
+ * disagree about which declarators bind nothing. */
+export function isSingleConstDeclarator(declaration: ts.VariableDeclaration): boolean {
   const list = declaration.parent;
   return (
     list !== undefined &&
@@ -840,7 +847,9 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
   // imported generic resolves through its alias, so it answers for the declaration, not the
   // specifier — except the specifier's own spelling, which merely binds the name.
   const aliased =
-    decl !== undefined && ts.isImportSpecifier(decl) ? aliasedDeclaration(symbol, typeChecker) : decl;
+    symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0
+      ? aliasedDeclaration(symbol, typeChecker)
+      : decl;
   if (
     aliased !== undefined &&
     ts.isFunctionDeclaration(aliased) &&
@@ -1049,7 +1058,8 @@ function isGlobalReference(node: ts.Identifier): boolean {
     // `Math` on the LEFT of a member access is exempt the way `console` is in `console.log`:
     // gateMemberAccess and gateCall judge the member itself, with a sharper message than a
     // blanket "the global 'Math'" — and the declaration-file test in isGlobalMath keeps a user
-    // binding named Math on the ordinary identifier path.
+    // binding named Math on the ordinary identifier path. `String` is exempt the same way for
+    // its namespace calls (`String.fromCharCode`, plan.md §8 step 19).
     return !(
       parent.name === node ||
       (parent.expression === node &&
@@ -1058,6 +1068,7 @@ function isGlobalReference(node: ts.Identifier): boolean {
           node.text === 'Math' ||
           node.text === 'Object' ||
           node.text === 'Promise' ||
+          node.text === 'String' ||
           node.text === 'JSON'))
     );
   }
@@ -1205,10 +1216,7 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
         return notYet('instanceof against anything but a class name is not yet supported', 5);
       }
       const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(bin.right));
-      if (
-        declaration?.typeParameters !== undefined &&
-        declaration.typeParameters.length > 0
-      ) {
+      if (declaration?.typeParameters !== undefined && declaration.typeParameters.length > 0) {
         return notYet('instanceof against a generic class is not yet supported', 5);
       }
       return declaration !== undefined || INSTANCEOF_BUILTINS.has(bin.right.text)
@@ -1593,6 +1601,81 @@ function gateExternSignature(
   return { kind: 'accept' };
 }
 
+/** The non-nullish constituents of a possibly-nullable type: what an optional chain's
+ * else-branch holds. A non-union is its own remainder; an all-nullish union has none, which is
+ * unreachable past the checker (no member access typechecks on one) and reads as vacuous here. */
+function nonNullishConstituents(type: ts.Type): readonly ts.Type[] {
+  if (!type.isUnion()) {
+    return [type];
+  }
+  return type.types.filter(
+    (t) => (t.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0,
+  );
+}
+
+/** The G1 half of optional chaining (plan.md §8 step 24): `o?.m()` where every static-dispatch
+ * arm declined the receiver. Returns the refusal, or `undefined` when the dynamic path the
+ * fallthrough takes is one that works — a genuinely dynamic receiver (pre-existing accept) or
+ * a plain object/interface remainder (function-valued fields read as closures). See the call
+ * site for why only a class instance or a builtin receiver is refused. */
+function optionalChainMethodReceiver(
+  callee: ts.PropertyAccessExpression,
+  typeChecker: ts.TypeChecker,
+): GateResult | undefined {
+  const live = nonNullishConstituents(typeChecker.getTypeAtLocation(callee.expression));
+  // Vacuously true on an all-nullish union (which the checker never lets through, since no
+  // member access typechecks on one): the guard below always skips, and the consequent is dead
+  // but well-formed, so accepting is both safe and unreachable.
+  if (live.every((t) => (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)) {
+    return undefined;
+  }
+  for (const constituent of live) {
+    const mapped = tsTypeToHType(constituent, typeChecker);
+    if (mapped.kind === 'unknown') {
+      continue;
+    }
+    if (mapped.kind === 'object') {
+      const declaration = constituent.getSymbol()?.valueDeclaration;
+      if (declaration === undefined || !ts.isClassDeclaration(declaration)) {
+        continue;
+      }
+    }
+    return notYet(
+      `calling '${callee.name.text}' through an optional chain on this receiver is not yet supported`,
+      5,
+    );
+  }
+  return undefined;
+}
+
+/** The G2 half of optional chaining (plan.md §8 step 24): `s?.[0]` on a string. Indexing a
+ * string (or a number, or a boolean) is the same syntax reaching a different runtime operation
+ * than an array index, and neither has an HIR node yet (gateElementAccess). Plain code never
+ * reaches the lowering with one — the checker rejects it, or the gate's non-array refusal
+ * does — but `?.` makes the nullable union legal, so the chain must refuse what the receiver
+ * cannot do. Anything else flows through unchanged: arrays, matches, dynamic and fixed shapes
+ * index the way their plain twins do. */
+function optionalChainElementReceiver(
+  access: ts.ElementAccessExpression,
+  typeChecker: ts.TypeChecker,
+): GateResult | undefined {
+  if (access.questionDotToken === undefined) {
+    return undefined;
+  }
+  const live = nonNullishConstituents(typeChecker.getTypeAtLocation(access.expression));
+  const blocked = live.find((t) => {
+    const mapped = tsTypeToHType(t, typeChecker);
+    return mapped.kind === 'string' || mapped.kind === 'number' || mapped.kind === 'boolean';
+  });
+  if (blocked === undefined) {
+    return undefined;
+  }
+  return notYet(
+    `indexing a ${hTypeName(tsTypeToHType(blocked, typeChecker))} through an optional chain is not yet supported`,
+    5,
+  );
+}
+
 function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
   // Dynamic code generation — `eval(...)` and `Function(...)` — own dedicated codes that split by
   // mode (STA1101/STA1103 never in ts, STA1206 not-yet Phase 8 in js). Asked before anything else
@@ -1610,13 +1693,9 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   // Asked first, because it is what decides whether the type arguments below are a feature or a
   // refusal: `box<string>('a')` and `box('a')` name the same specialization, and the difference
   // between them is a spelling the checker has already erased by the time it answers.
+  // Undetermined parameters are already defaulted or dynamic inside the instantiation, so there
+  // is no unresolved case left to refuse.
   const generic = genericCallInstantiation(call, typeChecker);
-  if (generic.kind === 'unresolved') {
-    return notYet(
-      'a generic call whose type arguments no argument determines is not yet supported',
-      5,
-    );
-  }
   if (generic.kind === 'not-generic' && call.typeArguments !== undefined) {
     return notYet('explicit type arguments on a call are not yet supported', 5);
   }
@@ -1643,7 +1722,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet(`a spread argument to console.${method} is not yet supported`, 5);
       }
-      if (given > shape.arity || given < shape.arity - shape.optional) {
+      // The five printing methods are variadic (plan.md §8 step 18): any width reaches the
+      // `(count, argv)` entry point, so neither bound applies — `console.log()` prints the bare
+      // newline. `dir` stays unary — its second argument in Node is an options object, not a
+      // second value.
+      if (!('variadic' in shape) && (given > shape.arity || given < shape.arity - shape.optional)) {
         return notYet(`console.${method} with ${String(given)} arguments is not yet supported`, 5);
       }
       // `console.table` is the one console method whose ARGUMENT changes the output shape. Node
@@ -1791,6 +1874,21 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       }
       return { kind: 'accept' };
     }
+    // The `String` namespace call (plan.md §8 step 19): `String.fromCharCode(...codes)` lands
+    // with any count — the node is variadic and the runtime coerces each argument — while any
+    // other member is deferred BY NAME, so a named built-in is never answered by the catch-all
+    // below. `String(x)` the converter is a different surface (the global-as-function) and is
+    // not decided here.
+    if (isGlobalString(callee.expression, typeChecker)) {
+      const method = callee.name.text;
+      if (!Object.hasOwn(STRING_STATICS, method)) {
+        return notYet(`String.${method} is not yet supported`, 5);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to String.fromCharCode is not yet supported', 5);
+      }
+      return { kind: 'accept' };
+    }
     // A method ON a promise. then/catch/finally land via jsrt_call_protected (Phase 5 step 11).
     if (
       tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind ===
@@ -1826,11 +1924,9 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet('a spread argument to a string method is not yet supported', 5);
       }
-      if (op === 'concat' && call.arguments.length !== 1) {
-        // Variadic concat has no node to fold into (the array-concat rule), and the
-        // zero-argument copy is pointless on an immutable string.
-        return notYet('concat with other than one argument is not yet supported', 5);
-      }
+      // `concat` takes any count now (plan.md §8 step 19): zero arguments answer the
+      // receiver, one the single form, and more fold left into nested singles at lowering —
+      // pure string concatenation, so no runtime entry point is involved.
       if (op === 'split' && call.arguments.length > 1) {
         return notYet('split with a limit is not yet supported', 5);
       }
@@ -1897,11 +1993,12 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       }
       return { kind: 'accept' };
     }
-    // The landed Array.prototype surface — the non-callback methods. The refusals close what the
-    // closed set cannot express: variadic `push`/`unshift` have no node to fold into,
-    // `lastIndexOf` gives an explicit position a DIFFERENT meaning than an absent one (so the
-    // padding that is sound everywhere else would change the answer), and `concat` lands as
-    // exactly one spread array argument.
+    // The landed Array.prototype surface — the non-callback methods. The variadic forms
+    // (`push`/`unshift` runs, insertion `splice`, multi-argument `concat`) land with any count
+    // (plan.md §8 step 19): the node carries the arguments and the emitter picks the runtime
+    // entry point by count. `lastIndexOf` takes one argument or two — an explicit position
+    // means something DIFFERENT than an absent one (so the padding that is sound everywhere
+    // else would change the answer), and a third argument stays deferred.
     if (
       isArrayReceiver(callee.expression, typeChecker) ||
       constraintMatches(callee.expression, typeChecker, 'array')
@@ -1913,15 +2010,12 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet('a spread argument to an array method is not yet supported', 5);
       }
-      if ((op === 'push' || op === 'unshift') && call.arguments.length !== 1) {
-        return notYet(`${op} with other than one argument is not yet supported`, 5);
+      if (op === 'lastIndexOf' && call.arguments.length > 2) {
+        return notYet('lastIndexOf with more than two arguments is not yet supported', 5);
       }
-      if (op === 'lastIndexOf' && call.arguments.length > 1) {
-        return notYet('lastIndexOf with a position is not yet supported', 5);
-      }
-      if ((op === 'splice' || op === 'toSpliced') && call.arguments.length !== 2) {
-        // splice(start) deletes to the END while an explicit undefined deleteCount deletes
-        // nothing (the lastIndexOf rule), and the insertion form is variadic.
+      if (op === 'toSpliced' && call.arguments.length !== 2) {
+        // `splice` takes any count now; `toSpliced` keeps its two-argument form — the
+        // insertion variant that returns a new array is still deferred.
         return notYet(`${op} with other than two arguments is not yet supported`, 5);
       }
       if ((op === 'sort' || op === 'toSorted') && call.arguments.length === 0) {
@@ -1947,16 +2041,6 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
             .length === 0
         ) {
           return notYet(`${op} with a non-function callback is not yet supported`, 5);
-        }
-      }
-      if (op === 'concat') {
-        const arg = call.arguments[0];
-        if (
-          call.arguments.length !== 1 ||
-          arg === undefined ||
-          !typeChecker.isArrayType(typeChecker.getTypeAtLocation(arg))
-        ) {
-          return notYet('concat with anything but one array is not yet supported', 5);
         }
       }
       return { kind: 'accept' };
@@ -2065,6 +2149,22 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       // A match array is Unknown in HIR; its methods are not the dynamic-call path.
       if (isMatchReceiver(callee.expression, typeChecker)) {
         return notYet(`${callee.name.text} on a RegExp match is not yet supported`, 5);
+      }
+      // A method call through `?.` on a receiver the static arms declined (plan.md §8 step
+      // 24): `s?.toUpperCase()` with s: string|undefined, `c?.m()` with c: C|undefined. The
+      // checker approves (the `?.` is the nullish check it wanted) and every static-dispatch
+      // arm above declined the union, so without this rule the call falls through to the
+      // Unknown-receiver accept below and the lowering aims a shape-table read at a layout —
+      // a runtime panic for typed code. A genuinely dynamic (any) receiver keeps that accept
+      // (its panic predates chains; plan.md §8 step 20 owns it), as does a plain object or
+      // interface remainder, whose function-valued fields read as closures and call cleanly.
+      // Only a class instance or a builtin receiver is refused: the two whose members the
+      // shape table does not hold.
+      if (callee.questionDotToken !== undefined) {
+        const refused = optionalChainMethodReceiver(callee, typeChecker);
+        if (refused !== undefined) {
+          return refused;
+        }
       }
       // `o.m()` on an Unknown receiver: get the name through the shape table, then call.
       const shape = tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
@@ -2377,6 +2477,20 @@ function isArrayLength(access: ts.PropertyAccessExpression, checker: ts.TypeChec
   );
 }
 
+/** `.length` on something the checker says is a function. The same reasoning as
+ * isStringLength: the syntax alone does not say which runtime function the read becomes, and
+ * accepting it on syntax alone would let a non-function through to the closure read. A CALLABLE
+ * type -- declared, inferred, or a method value's -- qualifies; a construct-only signature (a
+ * class name) does not, because a class is not a value here. An untyped receiver never reaches
+ * this test, taking the dynamic path instead (plan.md §8 step 21b). */
+function isFunctionLength(access: ts.PropertyAccessExpression, checker: ts.TypeChecker): boolean {
+  if (access.name.text !== 'length') {
+    return false;
+  }
+  const objectType = checker.getTypeAtLocation(access.expression);
+  return checker.getSignaturesOfType(objectType, ts.SignatureKind.Call).length > 0;
+}
+
 /** An array literal, minus the spellings whose elements are not simply "the elements".
  *
  * A hole (`[1, , 3]`) is a real hole in ECMA-262 — it is `undefined` on read but absent to
@@ -2423,13 +2537,12 @@ function isLayoutKey(name: ts.PropertyName): boolean {
   return ts.isStringLiteral(name) && !isIntegerIndex(name.text);
 }
 
-function propertyNameIsLayoutKey(name: ts.PropertyName): boolean {
+function propertyNameIsLayoutKey(name: ts.PropertyName, checker: ts.TypeChecker): boolean {
   if (ts.isComputedPropertyName(name)) {
-    const expr = name.expression;
-    if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
-      return !isIntegerIndex(expr.text);
-    }
-    return false;
+    // A computed key with a static name (`computedKeyStaticName`) is the name the direct
+    // spelling writes -- `[k]` with `k: "dyn"` is `dyn` -- so it answers the same way. Only a
+    // runtime key is not a name until there is a shape table to look it up in.
+    return computedKeyStaticName(name, checker) !== null;
   }
   return isLayoutKey(name);
 }
@@ -2455,10 +2568,10 @@ function isIntegerIndex(key: string): boolean {
 
 /** `{ x: 1, y: f() }`, admitted only where the shape is a layout.
  *
- * The key set must be known: a computed key is not a name until there is a shape table to look one
- * up in, a spread copies a shape this one does not know, and a method or an accessor in a literal
- * has no class to hang a member function on. A key that is merely not an IDENTIFIER is fine
- * (`isLayoutKey`) -- the printer quotes it.
+ * The key set must be known: a computed key without a static name is not a name until there is
+ * a shape table to look one up in, a spread copies a shape this one does not know, and a method or
+ * an accessor in a literal has no class to hang a member function on. A key that is merely not an
+ * IDENTIFIER is fine (`isLayoutKey`) -- the printer quotes it.
  *
  * The TYPE has to be a shape too, and that is the load-bearing check: `tsTypeToHType` refuses an
  * optional property, an index signature and anything with a call signature, so accepting a literal
@@ -2504,7 +2617,17 @@ function gateObjectLiteral(
     if (!accessor && !method && !ts.isPropertyAssignment(property)) {
       return notYet('an object literal with a method member is not yet supported', 5);
     }
-    if (!propertyNameIsLayoutKey(property.name)) {
+    // An accessor under a runtime-computed name has nowhere to go: the lowering keys accessor
+    // pairs by name, and a key known only at run time cannot be one. A statically-known
+    // computed name (`get ["x"]`, `get [k]` with `k: "x"`) resolves like a value key below.
+    if (
+      accessor &&
+      ts.isComputedPropertyName(property.name) &&
+      computedKeyStaticName(property.name, checker) === null
+    ) {
+      return notYet('an object literal accessor with a computed name is not yet supported', 5);
+    }
+    if (!propertyNameIsLayoutKey(property.name, checker)) {
       continue;
     }
   }
@@ -3621,6 +3744,19 @@ function gateMemberAccess(
     return notYet(`JSON.${member} is not yet supported`, 5);
   }
 
+  // The `String` namespace follows the same rules: `fromCharCode` exists only as a callee
+  // (there is no function value to bind), and any other member is deferred by name rather
+  // than by the catch-all below.
+  if (isGlobalString(access.expression, checker)) {
+    const member = access.name.text;
+    if (Object.hasOwn(STRING_STATICS, member)) {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' } // gateCall vets the arguments themselves
+        : notYet(`using String.${member} as a value is not yet supported`, 5);
+    }
+    return notYet(`String.${member} is not yet supported`, 5);
+  }
+
   // A String.prototype method exists only as a callee -- there is no function value to bind, the
   // same rule a collection method follows. `.length` is handled by its own node and never gets
   // here; any other string member is a real property of the real String.prototype that has not
@@ -3874,6 +4010,10 @@ function gateElementAccess(
   access: ts.ElementAccessExpression,
   checker: ts.TypeChecker,
 ): GateResult {
+  const chained = optionalChainElementReceiver(access, checker);
+  if (chained !== undefined) {
+    return chained;
+  }
   if (
     !checker.isArrayType(checker.getTypeAtLocation(access.expression)) &&
     !isMatchReceiver(access.expression, checker)
@@ -4013,6 +4153,13 @@ export const MATH_CONSTANTS: ReadonlySet<string> = new Set([
  * too, which is what the declaration-file test buys over matching the text alone. */
 export function isGlobalMath(node: ts.Expression, checker: ts.TypeChecker): boolean {
   return isGlobalNamed(node, checker, 'Math');
+}
+
+/** The `String` CONSTRUCTOR read as a namespace -- `String.fromCharCode`, and whatever lands
+ * next to it. The same declaration-file test, which is what keeps a user `class String` on the
+ * ordinary class path. */
+export function isGlobalString(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'String');
 }
 
 /** The `Object` namespace, by the same test. */

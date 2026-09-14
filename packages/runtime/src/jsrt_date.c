@@ -691,7 +691,15 @@ static double parse_iso(const char *s, size_t len) {
     /* A date-time with no offset is LOCAL time by §21.4.3.2, which slice A cannot resolve. */
     return NAN;
   }
-  if (i != len || hour > 24 || minute > 59 || second > 59) {
+  /* Hour 24 is midnight at the END of the day (§21.4.1.32): valid only with zero
+   * minutes, seconds and milliseconds, rolling into the next day through make_time's own
+   * arithmetic. Anything past it (`24:00:01`, `24:00:00.001`) is NaN, which is what makes
+   * `Date.parse("2024-01-01T24:00:01Z")` NaN while `24:00:00` answers midnight (plan.md §8
+   * step 21d). */
+  if (
+    i != len || hour > 24 || minute > 59 || second > 59 ||
+    (hour == 24 && (minute != 0 || second != 0 || milli != 0))
+  ) {
     return NAN;
   }
   const double t = make_date(make_day(year, month - 1, day), make_time(hour, minute, second, milli));

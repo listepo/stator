@@ -1,6 +1,5 @@
 // @mode: ts
-// @verdict: static
-// @expected-fail: true
+// @verdict: dynamic
 // SUBSET.md: Optional chaining ?.
 
 const obj: { x?: number } | null = { x: 42 };

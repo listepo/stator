@@ -25,10 +25,10 @@ import { tsTypeToHType } from './types.ts';
 
 /** What a call to a generic function resolves to.
  *
- * `'unresolved'` is a real answer, not a failure to compute one: a type parameter that appears in
- * no parameter and in no return type — `function f<T>(): void` — is never determined by any call,
- * and there is nothing to specialize on. The gate turns that into a `not-yet` rather than letting
- * the lowering emit a specialization with a type parameter still in it. */
+ * Every parameter binds something: unification first, then the declared default in order,
+ * then `Unknown` when nothing determines it (a parameter no argument and no return position
+ * mentions is dynamically represented, not refused). There is no unresolvable case — the
+ * tuple is always complete, which is what lets the gate and the lowering share one path. */
 export type Instantiation =
   | {
       readonly kind: 'generic';
@@ -42,7 +42,6 @@ export type Instantiation =
        * parameter where no tuple element names it. */
       readonly substitution: ReadonlyMap<string, HType>;
     }
-  | { readonly kind: 'unresolved' }
   | { readonly kind: 'not-generic' };
 
 /** The instantiation a call expression names, if its callee is generic: a function
@@ -113,9 +112,6 @@ export function genericCallInstantiation(
     })),
     substitution,
   );
-  if (typeArguments === undefined) {
-    return { kind: 'unresolved' };
-  }
   return { kind: 'generic', declaration: target, key, typeArguments, substitution };
 }
 
@@ -123,12 +119,11 @@ export function genericCallInstantiation(
  * default, in order (so a later default sees the earlier bindings), or `Unknown` when it has
  * none. See the call-site comment for why the default — a value type the checker instantiates
  * itself — and never the constraint, and why `Unknown` is the honest element when nothing
- * determines the parameter. `undefined` when a parameter binds nothing at all, which the
- * callers report as `unresolved`. */
+ * determines the parameter. Always complete: every parameter is set before it is read. */
 function finishTuple(
   parameters: readonly { readonly name: string; readonly defaultType: HType | undefined }[],
   substitution: Map<string, HType>,
-): HType[] | undefined {
+): HType[] {
   const typeArguments: HType[] = [];
   for (const parameter of parameters) {
     if (substitution.get(parameter.name) === undefined) {
@@ -139,10 +134,9 @@ function finishTuple(
           : substituteHType(parameter.defaultType, (n) => substitution.get(n)),
       );
     }
-    const bound = substitution.get(parameter.name);
-    if (bound === undefined) {
-      return undefined;
-    }
+    // Set above when missing, so this read cannot miss — but `Map.get` types force the check,
+    // and the honest `Unknown` keeps the tuple aligned whatever happens.
+    const bound = substitution.get(parameter.name) ?? hUnknown(false);
     // Nested class parameters surface here still naming the class (`Box<T>` in the tuple for a
     // `Box<number>` argument); the walker's grounding rewrites them to what the reference said.
     typeArguments.push(substituteHType(bound, (n) => substitution.get(n)));
@@ -165,7 +159,6 @@ export type ClassInstantiation =
        * ones reference arguments grounded. Specializations scope all of them. */
       readonly substitution: ReadonlyMap<string, HType>;
     }
-  | { readonly kind: 'unresolved' }
   | { readonly kind: 'not-generic' };
 
 /** The instantiation a `new` expression names, if its class is generic. */
@@ -241,9 +234,6 @@ export function genericNewInstantiation(
     })),
     substitution,
   );
-  if (typeArguments === undefined) {
-    return { kind: 'unresolved' };
-  }
   return { kind: 'generic', declaration: classDeclaration, typeArguments, substitution };
 }
 
@@ -260,12 +250,14 @@ export function genericArgumentTuple(
   argument: ts.Expression,
   outerCall: ts.CallExpression,
   checker: ts.TypeChecker,
-): {
-  readonly declaration: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
-  readonly key: string;
-  readonly typeArguments: readonly HType[];
-  readonly substitution: ReadonlyMap<string, HType>;
-} | undefined {
+):
+  | {
+      readonly declaration: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+      readonly key: string;
+      readonly typeArguments: readonly HType[];
+      readonly substitution: ReadonlyMap<string, HType>;
+    }
+  | undefined {
   if (!ts.isIdentifier(argument)) {
     return undefined;
   }
@@ -279,8 +271,7 @@ export function genericArgumentTuple(
   }
   const index = outerCall.arguments.indexOf(argument);
   const parameter = outer.getParameters()[index];
-  const parameterDeclaration =
-    parameter === undefined ? undefined : parameter.valueDeclaration;
+  const parameterDeclaration = parameter === undefined ? undefined : parameter.valueDeclaration;
   if (
     parameter === undefined ||
     parameterDeclaration === undefined ||
@@ -392,7 +383,11 @@ export function genericArrowKey(node: ts.Expression): string | undefined {
     return undefined;
   }
   const statement = list.parent;
-  if (statement === undefined || !ts.isVariableStatement(statement) || !ts.isSourceFile(statement.parent)) {
+  if (
+    statement === undefined ||
+    !ts.isVariableStatement(statement) ||
+    !ts.isSourceFile(statement.parent)
+  ) {
     return undefined;
   }
   return parent.name.text;
@@ -446,9 +441,24 @@ export function genericAliasTarget(
     if (
       !ts.isVariableDeclaration(declaration) ||
       !ts.isIdentifier(declaration.name) ||
-      declaration.initializer === undefined ||
-      !ts.isIdentifier(declaration.initializer)
+      declaration.initializer === undefined
     ) {
+      return undefined;
+    }
+    // Through an assigned generic arrow: `const j = id` aliases what `id` holds, so the chain
+    // continues at the arrow rather than stopping at the variable.
+    let init: ts.Expression = declaration.initializer;
+    while (ts.isParenthesizedExpression(init)) {
+      init = init.expression;
+    }
+    if (
+      (ts.isFunctionExpression(init) || ts.isArrowFunction(init)) &&
+      init.typeParameters !== undefined &&
+      init.typeParameters.length > 0
+    ) {
+      return genericArrowKey(declaration.initializer) === undefined ? undefined : init;
+    }
+    if (!ts.isIdentifier(init)) {
       return undefined;
     }
     const list = declaration.parent;
@@ -541,7 +551,10 @@ function declaredParamType(param: ts.Symbol, location: ts.Node, checker: ts.Type
 
 /** The ts.Types a tuple can be grounded from: every argument's type, plus the resolved
  * return type (a `make<T>(): Box<T>` binds through its answer, not its parameters). */
-function argumentTypesOf(call: ts.CallExpression | ts.NewExpression, checker: ts.TypeChecker): ts.Type[] {
+function argumentTypesOf(
+  call: ts.CallExpression | ts.NewExpression,
+  checker: ts.TypeChecker,
+): ts.Type[] {
   const args = [...(call.arguments ?? [])].map((arg) => checker.getTypeAtLocation(arg));
   const resolved = checker.getResolvedSignature(call);
   if (resolved !== undefined) {
@@ -576,11 +589,7 @@ function bindReferenceArguments(
     seen.add(type);
     const declaration = type.getSymbol()?.valueDeclaration;
     const args = (type as ts.TypeReference).typeArguments;
-    if (
-      declaration !== undefined &&
-      ts.isClassDeclaration(declaration) &&
-      args !== undefined
-    ) {
+    if (declaration !== undefined && ts.isClassDeclaration(declaration) && args !== undefined) {
       const parameters = declaration.typeParameters ?? [];
       parameters.forEach((parameter, index) => {
         const arg = args[index];

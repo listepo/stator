@@ -384,17 +384,31 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
  *
  * The line between the two paths is drawn here and nowhere else. A shape qualifies when it is
  * anonymous (interfaces stay refused: a value typed by one may be an instance of any class, and
- * Phase 5 owns that), callable in no way, has no METHODS (calling through the shape table is still
- * Phase 5), and carries one of the triggers: an ACCESSOR, an OPTIONAL property, an index signature,
- * or no properties at all. An empty `{}` has to grow (plan.md §8 step 4); an all-required anonymous
- * shape with at least one field stays on the fixed path, because making those dynamic too would
- * silently deoptimize every literal in the program.
+ * Phase 5 owns that), callable in no way, and carries one of the triggers: an ACCESSOR, an
+ * OPTIONAL property, an index signature, or no properties at all. An empty `{}` has to grow
+ * (plan.md §8 step 4); an all-required anonymous shape with at least one field stays on the
+ * fixed path, because making those dynamic too would silently deoptimize every literal in the
+ * program.
+ *
+ * A METHOD is neither a trigger nor a veto: on a fixed shape it rides the method table, and on
+ * a dynamic one it is an own data property holding the method's closure, called through the
+ * shape table (`dyn-method-call`, plan.md §8 step 22). The veto this used to carry dated from
+ * when no such call existed.
  *
  * An accessor is a trigger and not a refusal because there IS a representation for it — a get/set
  * pair in the object's slot (docs/VALUE.md §4.15) — and only the dynamic path has one. It
  * deoptimizes its whole shape, siblings included: `{ val: 1, get x() {…} }` resolves `val` through
  * the shape table too, because one object cannot be half a layout. */
 export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean {
+  /* Arrays (and tuples, which are arrays at run time) are never shape-table objects, however
+   * many methods the Array interface declares: with the method veto gone (plan.md §8 step 22 --
+   * an object literal's method is an own closure, not a refusal) an array now falls through to
+   * the index-signature trigger below and every `arr.length` lowers to a dynamic read the
+   * verifier rejects (STA4059: a dynamic target must be Unknown). This keeps step 22's method
+   * work while restoring the array path step 20's receiver checks stand on. */
+  if (checker.isArrayType(type) || checker.isTupleType(type)) {
+    return false;
+  }
   /* The standard error interfaces are their runtime LAYOUT, not a shape (see `tsTypeToHType`), and
    * their lib declaration carries an optional `stack` -- so the trigger below would read them as
    * "this shape can lose a key" and send every `e.message` through the shape table, which is the
@@ -426,9 +440,6 @@ export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean 
   }
   let trigger = false;
   for (const property of checker.getPropertiesOfType(type)) {
-    if ((property.flags & ts.SymbolFlags.Method) !== 0) {
-      return false;
-    }
     trigger =
       trigger ||
       (property.flags &
@@ -450,27 +461,52 @@ export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean 
  *
  * An ACCESSOR member needs no case here: `isDynamicShape` treats one as a trigger, so a literal
  * that writes `get x()` is dynamic by its own type. A computed key whose value is not known until
- * runtime is the same: it has no layout slot until `jsrt_dyn_index_set` runs. */
-function isIntegerIndex(key: string): boolean {
-  return /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < 0xffffffff;
-}
+ * runtime is the same: it has no layout slot until `jsrt_dyn_index_set` runs. A computed key
+ * WITH a static name (`computedKeyStaticName`) is the opposite -- it is the name the direct
+ * spelling writes, so the literal takes the same path the direct spelling does. */
 
-function computedKeyIsLayoutKey(name: ts.ComputedPropertyName): boolean {
+/** The compile-time name of a computed key, or `null` when the key is a runtime value.
+ *
+ * A string literal in source is its own name. Anything else is answered by the checker's TYPE:
+ * `const k = "dyn"` has the literal type `"dyn"`, so `[k]` is the name `dyn` -- the same key the
+ * direct spelling writes -- while `k: string` is not a name at all. A number literal answers
+ * `String(value)`, which is the spelling TypeScript itself uses for the property it declares
+ * (`const k = 0x10` declares `16`), so the resolved name always agrees with the shape the
+ * literal's type carries. A union of literals, a symbol, or anything wider is `null`: the key
+ * is genuinely not known until the program runs. */
+export function computedKeyStaticName(
+  name: ts.ComputedPropertyName,
+  checker: ts.TypeChecker,
+): string | null {
   const expr = name.expression;
   if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
-    return !isIntegerIndex(expr.text);
+    return expr.text;
   }
-  return false;
+  const type = checker.getTypeAtLocation(expr);
+  if (type.isStringLiteral()) {
+    return type.value;
+  }
+  if (type.isNumberLiteral()) {
+    return String(type.value);
+  }
+  return null;
 }
 
-function literalHasRuntimeComputedKey(literal: ts.ObjectLiteralExpression): boolean {
+function computedKeyIsLayoutKey(name: ts.ComputedPropertyName, checker: ts.TypeChecker): boolean {
+  return computedKeyStaticName(name, checker) !== null;
+}
+
+function literalHasRuntimeComputedKey(
+  literal: ts.ObjectLiteralExpression,
+  checker: ts.TypeChecker,
+): boolean {
   for (const property of literal.properties) {
     if (
       (ts.isPropertyAssignment(property) ||
         ts.isGetAccessorDeclaration(property) ||
         ts.isSetAccessorDeclaration(property)) &&
       ts.isComputedPropertyName(property.name) &&
-      !computedKeyIsLayoutKey(property.name)
+      !computedKeyIsLayoutKey(property.name, checker)
     ) {
       return true;
     }
@@ -485,7 +521,7 @@ export function objectLiteralIsDynamic(
   const own = checker.getTypeAtLocation(literal);
   const contextual = checker.getContextualType(literal);
   return (
-    literalHasRuntimeComputedKey(literal) ||
+    literalHasRuntimeComputedKey(literal, checker) ||
     (contextual !== undefined && isDynamicShape(contextual, checker)) ||
     isDynamicShape(own, checker)
   );

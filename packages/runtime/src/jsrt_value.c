@@ -141,6 +141,80 @@ jsrt_value jsrt_object_new(const JSRTClass *cls) {
 
 /* --------------------------------------------------------------- arrays */
 
+/* The STA2008 throw `jsrt_require_array` raises for a non-array receiver: Node's member-access
+ * wording for a nullish receiver (`Cannot read properties of undefined (reading 'push')`, which
+ * is where Node throws for the same program), `Array.prototype.<method> called on incompatible
+ * receiver` otherwise -- Node's message names receiver SOURCE TEXT, which compiled code no longer
+ * has, so only the nullish half can be Node-exact. The incompatible-receiver shape follows the
+ * generator/iterator precedent in jsrt_iterator.c. */
+static void throw_array_receiver(jsrt_value array, const char *method) {
+  if (jsrt_is_nullish(array)) {
+    char message[256];
+    (void)snprintf(message, sizeof message, "Cannot read properties of %s (reading '%s')",
+                    array == JSRT_NULL ? "null" : "undefined", method);
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return;
+  }
+  char message[256];
+  (void)snprintf(message, sizeof message, "Array.prototype.%s called on incompatible receiver",
+                 method);
+  jsrt_throw_error(&jsrt_class_type_error, message);
+}
+
+JSRTArray *jsrt_require_array(jsrt_value array, const char *method) {
+  if (jsrt_is(array, JSRT_TAG_ARRAY)) {
+    return jsrt_as_array(array);
+  }
+  throw_array_receiver(array, method);
+  return NULL;
+}
+
+/* Render the for-of receiver for STA2009's `X is not iterable`: the nullish words and
+ * number/boolean ToString are Node-exact; a string renders as its content (a real string never
+ * reaches here -- strings are iterable -- so this is an annotation lie, not a language path);
+ * anything else is "object", which names no value but also invents none. */
+static void iterable_name(jsrt_value value, char *buf, size_t buflen) {
+  if (value == JSRT_NULL) {
+    (void)snprintf(buf, buflen, "null");
+    return;
+  }
+  if (value == JSRT_UNDEFINED) {
+    (void)snprintf(buf, buflen, "undefined");
+    return;
+  }
+  if (jsrt_is_number(value) || jsrt_is(value, JSRT_TAG_BOOL)) {
+    const jsrt_value text = jsrt_to_string(value);
+    const uint32_t len = jsrt_string_length(text);
+    size_t i = 0;
+    for (; i < len && i + 1 < buflen; i++) {
+      buf[i] = (char)jsrt_string_char(text, i);
+    }
+    buf[i] = '\0';
+    return;
+  }
+  if (jsrt_is(value, JSRT_TAG_STRING)) {
+    const uint32_t len = jsrt_string_length(value);
+    size_t i = 0;
+    for (; i < len && i + 1 < buflen; i++) {
+      buf[i] = (char)jsrt_string_char(value, i);
+    }
+    buf[i] = '\0';
+    return;
+  }
+  (void)snprintf(buf, buflen, "object");
+}
+
+void jsrt_require_array_iterable(jsrt_value value) {
+  if (jsrt_is(value, JSRT_TAG_ARRAY)) {
+    return;
+  }
+  char name[128];
+  iterable_name(value, name, sizeof name);
+  char message[256];
+  (void)snprintf(message, sizeof message, "%s is not iterable", name);
+  jsrt_throw_error(&jsrt_class_type_error, message);
+}
+
 /* Allocation for the element buffer. Split out because the array grows: `elements` is reallocated
  * where the header is not, and both halves must come from the same allocator as everything else so
  * the collector traces the values inside. */
@@ -175,6 +249,11 @@ jsrt_value jsrt_array_new(uint32_t count, const jsrt_value *items) {
 }
 
 jsrt_value jsrt_array_length(jsrt_value array) {
+  if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
+    /* Degrades like the index paths: nullish throws Node's `(reading 'length')`, a string
+     * answers its length, anything else misses to `undefined`. */
+    return jsrt_get_prop(array, "length", NULL);
+  }
   return jsrt_number((double)jsrt_as_array(array)->length);
 }
 
@@ -195,6 +274,13 @@ static bool index_of(jsrt_value index, uint32_t *out) {
 }
 
 jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {
+  if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
+    /* A lying receiver degrades to the dynamic read, so the static and dynamic index paths
+     * agree by construction: nullish throws Node's reading-message, a primitive misses to
+     * `undefined`, a fixed shape walks its descriptor. (A string answers `undefined` here where
+     * Node answers the code unit -- the dynamic path's own gap, shared rather than doubled.) */
+    return jsrt_get_prop(array, jsrt_shape_key(jsrt_to_string(index)), NULL);
+  }
   const JSRTArray *a = jsrt_as_array(array);
   uint32_t i = 0;
   if (!index_of(index, &i) || i >= a->length) {
@@ -204,6 +290,12 @@ jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {
 }
 
 void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
+  if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
+    /* Same degradation as the read: nullish throws Node's setting-message, a primitive throws
+     * the dynamic write's TypeError, a fixed shape takes its existing-or-STA2004 path. */
+    jsrt_set_prop(array, jsrt_shape_key(jsrt_to_string(index)), element, NULL);
+    return;
+  }
   JSRTArray *a = jsrt_as_array(array);
   uint32_t i = 0;
   if (!index_of(index, &i)) {

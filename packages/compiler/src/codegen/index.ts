@@ -2,6 +2,7 @@
  * emitted line, landing-pad error propagation. Generated C is never hand-edited. */
 
 import type {
+  ArrayLength,
   ArrayLiteral,
   ArrayOp,
   AwaitExpr,
@@ -22,6 +23,7 @@ import type {
   DynEntry,
   DynFieldAccess,
   DynFieldAssignment,
+  DynMethodCall,
   DynObjectLiteral,
   EnvCapture,
   ErrorNew,
@@ -44,6 +46,7 @@ import type {
   NewExpr,
   ObjectLiteral,
   ObjectStaticCall,
+  OptionalChain,
   PromiseConstruct,
   PromiseMethodCall,
   PromiseStaticCall,
@@ -52,6 +55,7 @@ import type {
   Span,
   Statement,
   StringOp,
+  StringStaticCall,
   SuperCall,
   SwitchStatement,
   TemplateLiteral,
@@ -62,8 +66,8 @@ import type {
   YieldExpr,
 } from '../hir/nodes.ts';
 import {
-  arrayOpCallsBack,
   consoleEntryPoint,
+  isConsoleVariadicWidth,
   DATE_OPS,
   DATE_STATICS,
   errorDescriptor,
@@ -76,6 +80,7 @@ import {
 } from '../hir/nodes.ts';
 import type { HField } from '../hir/types.ts';
 import { RECEIVER_NAME } from '../lower/captures.ts';
+import { shadowSource } from '../lower/scope.ts';
 
 /** C fragment for each binary operator, given already-emitted operand expressions.
  *
@@ -272,10 +277,13 @@ function descriptorName(name: string): string {
   if (name.startsWith('{')) {
     return '';
   }
+  // A shadowed class prints under its source name: Node shows `C`, not the HIR spelling the
+  // descriptor is keyed by (plan.md §8 step 23 -- the class twin of step 17's function rule).
+  const unshadowed = shadowSource(name) ?? name;
   // A specialization prints under its source name: Node shows `Box`, not `Box<number>`, and the
   // mangled tuple is a compile-time key no identifier can spell, so stripping it cannot collide.
-  const generic = name.indexOf('<');
-  return generic < 0 ? name : name.slice(0, generic);
+  const generic = unshadowed.indexOf('<');
+  return generic < 0 ? unshadowed : unshadowed.slice(0, generic);
 }
 
 /** The structural name of a literal's shape, which is also its descriptor's identity. */
@@ -338,47 +346,80 @@ function spreadScratchKey(span: Span): string {
   return `${span.file ?? ''}:${span.start}:${span.length}`;
 }
 
-/** One rooted scratch slot per spread the literal must evaluate once: every maximal group of
- * field reads sharing a spread span, in first-occurrence order, whose source is not a plain
- * identifier.
+/** One rooted scratch slot per spread fragment with a non-trivial source: every maximal group of
+ * spread-marked field reads sharing a spread span, in first-occurrence order.
  *
- * An identifier source stays inline: reading a binding N times is side-effect-free, and it is
- * also CORRECT when an entry assigns that binding (`{ ...b, y: (b = c) }` must re-read `c` for
- * the later fields). Anything else read twice or more -- a call, a member access, a literal --
- * would run its effect once per field without this, so the emitter evaluates it once into the
- * scratch and reads every field out of that. A lone read needs no scratch: it already evaluates
- * exactly once. Counting and emission both call this, so the reserved slots and the written
- * ones agree exactly (frames.test.ts holds any gap against the counter). */
+ * The source evaluates ONCE at the fragment's position into the scratch, however many fields
+ * read it -- a call, a member access, a literal would run its effect once per field without
+ * this. An identifier source stays inline: reading a binding N times is side-effect-free, and it
+ * is also CORRECT when an entry assigns that binding (`{ ...b, y: (b = c) }` must re-read `c` for
+ * the later fields). A lone read still needs its scratch: since step 21a the order repair reads
+ * the source too, so "evaluates exactly once" is a two-reader promise, not a one-reader
+ * optimization. Only `spread`-marked entries group: an own value reading the same shape never
+ * shares the spread's span, so it can never join a fragment by accident. Counting and emission
+ * both call this, so the reserved slots and the written ones agree exactly (frames.test.ts holds
+ * any gap against the counter). */
 function spreadScratches(entries: readonly DynEntry[]): readonly {
   readonly key: string;
   readonly target: Expression;
 }[] {
-  const groups = new Map<string, { readonly target: Expression; count: number }>();
+  const groups = new Map<string, { readonly target: Expression }>();
   const order: string[] = [];
   for (const entry of entries) {
     if (isAccessorEntry(entry) || isComputedEntry(entry)) {
+      continue;
+    }
+    if (entry.spread !== true) {
       continue;
     }
     if (entry.value.kind !== 'field-access' || entry.value.target.kind === 'identifier') {
       continue;
     }
     const key = spreadScratchKey(entry.value.span);
-    const seen = groups.get(key);
-    if (seen === undefined) {
-      groups.set(key, { target: entry.value.target, count: 1 });
+    if (!groups.has(key)) {
+      groups.set(key, { target: entry.value.target });
       order.push(key);
-    } else {
-      groups.set(key, { target: seen.target, count: seen.count + 1 });
     }
   }
-  const scratches: { readonly key: string; readonly target: Expression }[] = [];
-  for (const key of order) {
+  return order.map((key) => {
     const group = groups.get(key);
-    if (group !== undefined && group.count >= 2) {
-      scratches.push({ key, target: group.target });
+    if (group === undefined) {
+      throw new Error('spread scratch group vanished during collection');
+    }
+    return { key, target: group.target };
+  });
+}
+
+/** The identifier-source spread fragments, in first-occurrence order: the value walk reads an
+ * identifier source inline per field -- evaluating it once per field is side-effect-free, and
+ * re-reading is what keeps `{ ...b, y: (b = c) }` correct -- but the order repair runs after
+ * every value, where a suspension may have intervened and a later entry may have reassigned
+ * the binding. Each source is therefore snapshotted at its own fragment's position into a
+ * rooted slot; counting reserves them past the scratch slots, and emission writes and reads
+ * them back from the same base, so the two agree exactly. */
+function spreadSnapshots(entries: readonly DynEntry[]): readonly {
+  readonly key: string;
+  readonly target: Expression;
+}[] {
+  const seen = new Set<string>();
+  const out: { readonly key: string; readonly target: Expression }[] = [];
+  for (const entry of entries) {
+    if (isAccessorEntry(entry) || isComputedEntry(entry)) {
+      continue;
+    }
+    if (entry.spread !== true) {
+      continue;
+    }
+    if (entry.value.kind !== 'field-access' || entry.value.target.kind !== 'identifier') {
+      continue;
+    }
+    const key = spreadScratchKey(entry.value.span);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push({ key, target: entry.value.target });
     }
   }
-  return scratches;
+  return out;
 }
 
 /* A JS string is a sequence of UTF-16 CODE UNITS, and a lone surrogate is a legal one. UTF-8
@@ -445,9 +486,21 @@ class Emitter {
    * two `&&`s in one expression must not share a slot: the outer one's value stays live while the
    * inner one is being evaluated. */
   private tempSlots: Map<
-    AwaitExpr | LogicalOp | YieldExpr | ConditionalExpr | UpdateExpr | DynFieldAccess,
+    | ArrayLength
+    | AwaitExpr
+    | LogicalOp
+    | YieldExpr
+    | ConditionalExpr
+    | UpdateExpr
+    | DynFieldAccess
+    | OptionalChain,
     number
   > = new Map();
+  /* The guarded base each open `optional-chain` holds in its frame temp, innermost last. An
+   * `optional-base` leaf resolves to the top: emission of a consequent always runs inside its
+   * chain's push, so a leaf names the temp whose nullish test admitted this branch. Pushed and
+   * popped synchronously around the consequent's capture, like `capture`'s own line buffer. */
+  private optionalBaseStack: string[] = [];
   /* C does not specify which operand of an operator or function call it evaluates first. Every
    * BinaryOp therefore gets two rooted slots: emitting `left` into the first before `right` into
    * the second makes the JavaScript left-to-right rule explicit, and preserves the left value if
@@ -474,6 +527,7 @@ class Emitter {
     | DateNew
     | DateOp
     | DateStaticCall
+    | DynMethodCall
     | DynObjectLiteral
     | ErrorNew
     | ExternCall
@@ -488,6 +542,7 @@ class Emitter {
     | RegExpLiteral
     | RegExpOp
     | StringOp
+    | StringStaticCall
     | SuperCall
     | IteratorNext,
     number
@@ -600,6 +655,10 @@ class Emitter {
   private iterEnvSlots = new Map<Statement, number>();
   private iterEnvBase = new Map<number, number>();
   private loopCount: number = 0;
+  /* Spread-order C locals (`_jsrt_order_N`) minted while emitting, reset per module with the
+   * rest of the emission state: the declaration opens lazily inside the literal's own
+   * statements, so the number only has to be unique within one emission. */
+  private spreadOrderCount: number = 0;
   /* Labels a `goto` actually targets. C warns on a label nothing jumps to, and the runtime builds
    * with -Wall -Wextra -Werror, so an unconditional `brk_N:` after every loop would turn a plain
    * `while` into a build failure. Every jump is emitted before its target line, so consulting this
@@ -647,6 +706,7 @@ class Emitter {
     this.externHeaderCovered.clear();
     this.enclosing = [];
     this.loopCount = 0;
+    this.spreadOrderCount = 0;
     this.usedLabels.clear();
     this.padStack = [];
     this.unwindUsed = false;
@@ -1323,7 +1383,15 @@ class Emitter {
       case 'unary-op':
       case 'typeof':
       case 'string-length':
+      case 'function-length':
+        this.countExpression(expr.operand);
+        break;
+      // One rooted slot for the answer: the length read can throw (a statically-typed array
+      // that arrives as something else degrades to the dynamic read, plan.md §8 step 20), so
+      // the call lands as a statement with a pending check after it, never nested inline.
       case 'array-length':
+        this.tempSlots.set(expr, this.slotCount);
+        this.slotCount++;
         this.countExpression(expr.operand);
         break;
       case 'conditional':
@@ -1332,6 +1400,17 @@ class Emitter {
         this.countExpression(expr.condition);
         this.countExpression(expr.consequent);
         this.countExpression(expr.alternate);
+        break;
+      // One rooted slot for the guarded base: the consequent reads it through the leaf, so it
+      // must outlive the consequent's own allocations exactly like a condition's operands do.
+      case 'optional-chain':
+        this.tempSlots.set(expr, this.slotCount);
+        this.slotCount++;
+        this.countExpression(expr.base);
+        this.countExpression(expr.consequent);
+        break;
+      // A leaf: no allocation, no slot — it resolves to the enclosing chain's temp at emission.
+      case 'optional-base':
         break;
       case 'update':
         this.tempSlots.set(expr, this.slotCount);
@@ -1438,12 +1517,15 @@ class Emitter {
       }
       // `new` and a method call share the call layout: the RECEIVER occupies the slot a plain
       // call gives the callee, so `argv` still points at one contiguous run and the callee's
-      // parameter zero is the object. For `new` that slot is also the result.
+      // parameter zero is the object. For `new` that slot is also the result. A dynamic method
+      // call is the same layout with one more slot: the loaded method lands between the
+      // receiver and the arguments, so both call shapes below read contiguous runs.
       case 'new':
       case 'method-call':
+      case 'dyn-method-call':
         this.callSlots.set(expr, this.slotCount);
-        this.slotCount += 1 + expr.args.length;
-        if (expr.kind === 'method-call') {
+        this.slotCount += (expr.kind === 'dyn-method-call' ? 2 : 1) + expr.args.length;
+        if (expr.kind === 'method-call' || expr.kind === 'dyn-method-call') {
           this.countExpression(expr.target);
         }
         for (const arg of expr.args) {
@@ -1453,13 +1535,17 @@ class Emitter {
       // One rooted slot for the object itself, claimed BEFORE any entry is evaluated: an entry may
       // allocate, and the half-built object has to survive that. The shape's descriptor is
       // registered here for the same reason a class's is -- emission only ever looks one up.
-      // After it, one scratch slot per spread evaluated twice or more (`spreadScratches`): the
+      // After it, one scratch slot per spread with a non-trivial source (`spreadScratches`): the
       // scratch is written once at the spread's position and read inline by every field, so the
       // slots counted here and the ones emission writes agree exactly.
       case 'object-literal': {
         const scratches = spreadScratches(expr.entries);
+        // Snapshots for identifier-fragment sources (spreadSnapshots): the order repair runs
+        // after every value, past any suspension, so a source a later entry reassigns would
+        // read back wrong -- each one is retained at its own fragment's position instead.
+        const snaps = spreadSnapshots(expr.entries);
         this.callSlots.set(expr, this.slotCount);
-        this.slotCount += 1 + scratches.length;
+        this.slotCount += 1 + scratches.length + snaps.length;
         this.registerShape(expr);
         // A spread's reads share one source subtree, which emission evaluates once: count it
         // once too, or every extra field reserves a call frame nothing ever writes.
@@ -1477,7 +1563,7 @@ class Emitter {
       // grow the slot storage, which allocates, so the value being stored must be rooted across
       // the call -- unlike jsrt_object_set, which only writes. `{}` has no entry to store and
       // therefore no scratch: a slot the emitter never writes is one the frame roots for nothing.
-      // After those, one slot per spread evaluated twice or more (`spreadScratches`), written
+      // After those, one slot per spread with a non-trivial source (`spreadScratches`), written
       // once at the spread's position like the fixed arm's.
       case 'dyn-object-literal': {
         this.callSlots.set(expr, this.slotCount);
@@ -1595,8 +1681,10 @@ class Emitter {
         break;
       // Numbers are immediates -- nothing to root -- so the slots exist for SEQUENCING alone:
       // `Math.pow(f(), g())` must run f before g, and C leaves argument order unspecified. A
-      // single argument has no order to fix and takes no slot at all.
+      // single argument has no order to fix and takes no slot at all. `String.fromCharCode`
+      // is the same shape: a namespace call with no receiver, one runtime function per method.
       case 'math-call':
+      case 'string-static':
         if (expr.args.length > 1) {
           this.callSlots.set(expr, this.slotCount);
           this.slotCount += expr.args.length;
@@ -1879,9 +1967,10 @@ class Emitter {
             ? `jsrt_dyn_index_set(${target}, ${index}, ${value}, NULL)`
             : `jsrt_array_set(${target}, ${index}, ${value})`;
         this.appendLine(`${set};`, stmt.span);
-        if (stmt.target.type.kind === 'unknown') {
-          this.emitPendingCheck(stmt.span);
-        }
+        // Both arms can throw: the dynamic set on a nullish receiver, the static one on a
+        // statically-typed array that arrives as something else (STA2008's degrade-to-dynamic
+        // read/write, plan.md §8 step 20).
+        this.emitPendingCheck(stmt.span);
         break;
       }
 
@@ -1892,6 +1981,14 @@ class Emitter {
         }
         const iterable = this.slotAt(slot);
         this.appendLine(`${iterable} = ${this.emitExpression(stmt.iterable)};`, stmt.span);
+        // A statically-typed array that arrives as anything else (`var` hoisting hands the loop
+        // `undefined`) used to segfault in the header read below. Validate once up front (STA2009,
+        // plan.md §8 step 20), so the sync walk and the boxed async/generator one below are both
+        // safe. Only the array kind: every other static kind has its own walk and its own step.
+        if (stmt.iterable.type.kind === 'array') {
+          this.appendLine(`jsrt_require_array_iterable(${iterable});`, stmt.span);
+          this.emitPendingCheck(stmt.span);
+        }
         const id = this.enterLoop(stmt);
         this.emitIterEnvOpen(id, stmt.span);
         if (stmt.iterable.type.kind === 'iterator') {
@@ -2453,6 +2550,63 @@ class Emitter {
    * source order (each operand lands in its rooted slot before the next runs), which is why
    * every call-shaped arm shares this loop rather than copying it. Returns whether any
    * operand flushed, for the arms whose tail nests inline when nothing did. */
+  /* The C call for an `array-op` node: the fixed-arity ops derive it mechanically
+   * (`jsrt_array_` + snake_case), while the variadic ones (plan.md §8 step 19) pick the entry
+   * point by count. The single-argument (and two-argument splice) forms keep their existing
+   * entry points; every other count calls the `_many`/`_from`/`_insert` variant with the count
+   * spliced in after the receiver. `concat` with one ARRAY argument keeps its entry point too —
+   * a single non-array (or Unknown-typed) argument rides `concat_many`, which spreads arrays
+   * and appends anything else, where the one-array function would read a non-array as one. */
+  private arrayOpCall(expr: ArrayOp, base: number): string {
+    const target = this.slotAt(base);
+    const arg = (index: number): string => this.slotAt(base + 1 + index);
+    const rest = (from: number): string =>
+      expr.args
+        .slice(from)
+        .map((_, index) => arg(from + index))
+        .join(', ');
+    if (expr.op === 'push' || expr.op === 'unshift') {
+      if (expr.args.length === 1) {
+        return `jsrt_array_${expr.op}(${target}, ${arg(0)})`;
+      }
+      const items = rest(0);
+      return items === ''
+        ? `jsrt_array_${expr.op}_many(${target}, 0)`
+        : `jsrt_array_${expr.op}_many(${target}, ${String(expr.args.length)}, ${items})`;
+    }
+    if (expr.op === 'splice') {
+      if (expr.args.length === 0) {
+        // Zero arguments spell the two-argument form over `undefined` (an absent start is 0
+        // and an absent deleteCount is 0), so the existing entry point serves unchanged.
+        return `jsrt_array_splice(${target}, JSRT_UNDEFINED, JSRT_UNDEFINED)`;
+      }
+      if (expr.args.length === 1) {
+        return `jsrt_array_splice_from(${target}, ${arg(0)})`;
+      }
+      if (expr.args.length === 2) {
+        return `jsrt_array_splice(${target}, ${arg(0)}, ${arg(1)})`;
+      }
+      return (
+        `jsrt_array_splice_insert(${target}, ${arg(0)}, ${arg(1)}, ` +
+        `${String(expr.args.length - 2)}, ${rest(2)})`
+      );
+    }
+    if (expr.op === 'concat') {
+      if (expr.args.length === 1 && expr.args[0]?.type.kind === 'array') {
+        return `jsrt_array_concat(${target}, ${arg(0)})`;
+      }
+      const items = rest(0);
+      return items === ''
+        ? `jsrt_array_concat_many(${target}, 0)`
+        : `jsrt_array_concat_many(${target}, ${String(expr.args.length)}, ${items})`;
+    }
+    if (expr.op === 'lastIndexOf' && expr.args.length === 2) {
+      return `jsrt_array_last_index_of_from(${target}, ${arg(0)}, ${arg(1)})`;
+    }
+    const operands = [target, ...expr.args.map((_, index) => arg(index))].join(', ');
+    return `jsrt_array_${snakeCase(expr.op)}(${operands})`;
+  }
+
   private sequenceArgs(
     parts: string[],
     args: readonly Expression[],
@@ -2896,17 +3050,10 @@ class Emitter {
    * -- the assertion reported a failure Node never sees (plan-notes 221). The slots also keep
    * every argument alive across the next one's evaluation. One argument needs neither: there is no
    * order to fix and nothing can run between its evaluation and the call. */
-  private consoleCall(expr: ConsoleLogCall): string {
-    const fn = consoleEntryPoint(expr.method, expr.args.length);
-    if (fn === null) {
-      throw new Error(
-        `console.${expr.method} has no entry point for ${String(expr.args.length)} arguments`,
-      );
-    }
-    if (expr.args.length < 2) {
-      const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
-      return `${fn}(${operands})`;
-    }
+  /** The first slot of a console call's contiguous rooted run, after evaluating every
+   * argument into its slot in source order. Shared by the positional and the `(count, argv)`
+   * forms, which differ only in what call string they build over the run. */
+  private consoleSlots(expr: ConsoleLogCall): number {
     const base = this.callSlots.get(expr);
     if (base === undefined) {
       throw new Error('console arguments were not registered during counting');
@@ -2916,6 +3063,32 @@ class Emitter {
       this.sequencePart(parts, arg, expr.span, (v) => `${this.slotAt(base + index)} = ${v}`);
     });
     this.flushParts(parts, expr.span);
+    return base;
+  }
+
+  private consoleCall(expr: ConsoleLogCall): string {
+    const fn = consoleEntryPoint(expr.method, expr.args.length);
+    if (fn === null) {
+      throw new Error(
+        `console.${expr.method} has no entry point for ${String(expr.args.length)} arguments`,
+      );
+    }
+    // A variadic width takes `(count, argv)` on the `jsrt_array_new` discipline: no arguments is
+    // `(0, NULL)`, and two or more evaluate into slots in source order under the same C-ordering
+    // rule as every other multi-argument call. The one-argument call keeps its positional entry
+    // point below, so its generated C is exactly what it was.
+    if (isConsoleVariadicWidth(expr.method, expr.args.length)) {
+      if (expr.args.length === 0) {
+        return `${fn}(0, NULL)`;
+      }
+      const base = this.consoleSlots(expr);
+      return `${fn}(${String(expr.args.length)}, &${this.slotAt(base)})`;
+    }
+    if (expr.args.length < 2) {
+      const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
+      return `${fn}(${operands})`;
+    }
+    const base = this.consoleSlots(expr);
     const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
     return `${fn}(${operands})`;
   }
@@ -2999,6 +3172,14 @@ class Emitter {
         return this.emitConditional(expr);
       }
 
+      case 'optional-chain': {
+        return this.emitOptionalChain(expr);
+      }
+
+      case 'optional-base': {
+        return this.emitOptionalBase();
+      }
+
       case 'update': {
         return this.emitUpdate(expr);
       }
@@ -3009,6 +3190,10 @@ class Emitter {
 
       case 'string-length': {
         return `jsrt_number((double)jsrt_string_length(${this.emitExpression(expr.operand)}))`;
+      }
+
+      case 'function-length': {
+        return `jsrt_number((double)jsrt_closure_arity(${this.emitExpression(expr.operand)}))`;
       }
 
       // Every console entry point returns `void` in C, but the call's JS value is `undefined` --
@@ -3030,8 +3215,19 @@ class Emitter {
         return this.closureValue(expr);
       }
 
-      case 'array-length':
-        return `jsrt_array_length(${this.emitExpression(expr.operand)})`;
+      case 'array-length': {
+        const slot = this.tempSlots.get(expr);
+        if (slot === undefined) {
+          throw new Error('array length was not registered during counting');
+        }
+        const result = this.slotAt(slot);
+        this.appendLine(
+          `${result} = jsrt_array_length(${this.emitExpression(expr.operand)});`,
+          expr.span,
+        );
+        this.emitPendingCheck(expr.span);
+        return result;
+      }
 
       case 'array-literal': {
         const base = this.arraySlots.get(expr);
@@ -3075,17 +3271,14 @@ class Emitter {
           expr.target.type.kind === 'unknown'
             ? `jsrt_dyn_index_get(${target}, ${index}, NULL)`
             : `jsrt_array_get(${target}, ${index})`;
-        if (expr.target.type.kind === 'unknown') {
-          this.flushParts(parts, expr.span);
-          this.appendLine(`${target} = ${read};`, expr.span);
-          this.emitPendingCheck(expr.span);
-          return target;
-        }
-        if (parts.length === 2) {
-          return `(${parts.join(', ')}, ${read})`;
-        }
+        // Both arms land as statements: the dynamic read throws on a nullish receiver, and the
+        // static one degrades to it on a statically-typed array that arrives as something else
+        // (plan.md §8 step 20). The answer reuses the receiver's slot, which is dead by then --
+        // the delete-prop discipline.
         this.flushParts(parts, expr.span);
-        return read;
+        this.appendLine(`${target} = ${read};`, expr.span);
+        this.emitPendingCheck(expr.span);
+        return target;
       }
 
       case 'delete-prop': {
@@ -3285,10 +3478,43 @@ class Emitter {
         );
       }
 
+      // A method call through the shape table: the receiver evaluates into the base slot,
+      // the arguments contiguously after it, and the loaded method lands past them, keeping the
+      // receiver-plus-arguments run contiguous for both call shapes below. One load through the
+      // site's own cache (`jsrt_get_prop` -- which may run a getter, hence the pending check
+      // before the call), then the call passes the receiver as argument zero when -- and only
+      // when -- the loaded closure declares one (`has_receiver`, docs/VALUE.md §4.16). A
+      // non-function callee panics exactly as an ordinary `call` does (`STA2006` with the site's
+      // `file:line`).
+      case 'dyn-method-call': {
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('dynamic method call was not registered during counting');
+        }
+        const method = this.slotAt(base + 1 + expr.args.length);
+        const parts: string[] = [];
+        this.beginCall(parts, expr.target, expr.args, expr.span, base);
+        parts.push(
+          `${method} = jsrt_get_prop(${this.slotAt(base)}, ${cNameLiteral(expr.method)}, &${this.icSite()})`,
+        );
+        this.flushParts(parts, expr.span);
+        this.emitPendingCheck(expr.span);
+        const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
+        const loc = this.callLocation(expr.span);
+        const withReceiver = `jsrt_call_at(${method}, ${String(1 + expr.args.length)}, &${this.slotAt(base)}, ${loc})`;
+        const withoutReceiver = `jsrt_call_at(${method}, ${String(expr.args.length)}, ${argv}, ${loc})`;
+        return this.finishStatement(
+          [],
+          `${this.slotAt(base)} = (jsrt_is(${method}, JSRT_TAG_CLOSURE) && jsrt_as_closure(${method})->has_receiver) ? ${withReceiver} : ${withoutReceiver}`,
+          this.slotAt(base),
+          expr.span,
+        );
+      }
+
       // Allocate, then fill left to right. The object is in its own rooted slot first, so an entry
-      // that allocates cannot collect the object it is being stored into. A spread evaluated
-      // twice or more runs once into its scratch slot at its own position in this order, and
-      // every field reads out of that (`spreadScratches`); anything else evaluates inline.
+      // that allocates cannot collect the object it is being stored into. A spread with a
+      // non-trivial source runs once into its scratch slot at its own position in this order,
+      // and every field reads out of that (`spreadScratches`); anything else evaluates inline.
       case 'object-literal': {
         const slot = this.callSlots.get(expr);
         if (slot === undefined) {
@@ -3302,6 +3528,24 @@ class Emitter {
         const scratchAt = new Map(scratches.map(({ key }, index) => [key, slot + 1 + index]));
         const scratchTarget = new Map(scratches.map(({ key, target }) => [key, target]));
         const scratchDone = new Set<string>();
+        // A spread copies the right values but bakes the TYPE's field order into the result, so
+        // a literal that spreads repairs its enumeration order at run time (plan.md §8 step 21a).
+        // Literals without a spread keep the compile-time descriptor untouched below.
+        const needsOrder = layout.length > 0 && expr.entries.some((entry) => entry.spread === true);
+        // Snapshot slots for identifier-fragment sources (`spreadSnapshots`, past the scratch
+        // slots): the repair runs after every value -- past any suspension, where the C frame
+        // is gone and a later entry may have reassigned the binding -- so each source is
+        // retained at its own fragment's position here in the walk instead.
+        const snaps = spreadSnapshots(expr.entries);
+        const snapAt = new Map(
+          snaps.map(({ key }, index) => [key, slot + 1 + scratches.length + index]),
+        );
+        const snapTarget = new Map(snaps.map(({ key, target }) => [key, target]));
+        const snapDone = new Set<string>();
+        const orderId = this.spreadOrderCount;
+        if (needsOrder) {
+          this.spreadOrderCount++;
+        }
         const parts = [`${this.slotAt(slot)} = jsrt_object_new(&_jsrt_class_${id})`];
         let flushed = false;
         // Source order is the EVALUATION order (§13.2.5.5 runs the initializers left to right);
@@ -3310,6 +3554,31 @@ class Emitter {
           const target = layout.findIndex((field) => field.name === entry.name);
           if (target < 0) {
             throw new Error(`object literal key ${entry.name} is not in its own shape`);
+          }
+          // An identifier spread source is snapshotted at its fragment's position: the value
+          // walk below re-reads the binding per field (correct under reassignment), but the
+          // repair runs last and must see the fragment's own value. The store is pure, so it
+          // joins the sequence at exactly this position however the parts flush around it.
+          if (
+            needsOrder &&
+            entry.spread === true &&
+            entry.value.kind === 'field-access' &&
+            entry.value.target.kind === 'identifier'
+          ) {
+            const key = spreadScratchKey(entry.value.span);
+            if (!snapDone.has(key)) {
+              snapDone.add(key);
+              const snap = snapAt.get(key);
+              const source = snapTarget.get(key);
+              if (snap === undefined || source === undefined) {
+                throw new Error('spread snapshot has no slot');
+              }
+              const rendered = this.capture(() => this.emitExpression(source));
+              if (rendered.lines.length > 0) {
+                throw new Error('spread snapshot source produced statements');
+              }
+              parts.push(`${this.slotAt(snap)} = ${rendered.value}`);
+            }
           }
           if (entry.value.kind === 'field-access' && entry.value.target.kind !== 'identifier') {
             const key = spreadScratchKey(entry.value.span);
@@ -3340,14 +3609,66 @@ class Emitter {
               (v) => `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, ${v})`,
             ) || flushed;
         });
+        if (needsOrder) {
+          // The repair runs after every value, as statements: the declaration opens here -- past
+          // any suspension, so no park can strand it indeterminate (plan.md §8 step 15) -- and
+          // every contribution reads a rooted slot (a scratch, a snapshot, or nothing at all for
+          // an own key), in fragment order. Forcing the statement form is what makes that true.
+          this.flushParts(parts, expr.span);
+          this.appendLine(`uint32_t _jsrt_order_${orderId}[${String(layout.length)}];`, expr.span);
+          this.appendLine(`uint32_t _jsrt_ordn_${orderId} = 0;`, expr.span);
+          const orderSeen = new Set<string>();
+          for (const entry of expr.entries) {
+            if (entry.spread === true) {
+              if (entry.value.kind !== 'field-access') {
+                throw new Error('spread order entry is not a field read');
+              }
+              const key = spreadScratchKey(entry.value.span);
+              if (!orderSeen.has(key)) {
+                orderSeen.add(key);
+                const scratch = scratchAt.get(key);
+                const snap = snapAt.get(key);
+                const src =
+                  scratch !== undefined
+                    ? this.slotAt(scratch)
+                    : snap !== undefined
+                      ? this.slotAt(snap)
+                      : null;
+                if (src === null) {
+                  throw new Error('spread order source has no slot');
+                }
+                this.appendLine(
+                  `jsrt_spread_order_src(_jsrt_order_${orderId}, &_jsrt_ordn_${orderId}, ${String(layout.length)}, ${this.slotAt(slot)}, ${src});`,
+                  expr.span,
+                );
+              }
+            } else {
+              const dst = layout.findIndex((field) => field.name === entry.name);
+              if (dst < 0) {
+                throw new Error(`object literal key ${entry.name} is not in its own shape`);
+              }
+              this.appendLine(
+                `jsrt_spread_order_key(_jsrt_order_${orderId}, &_jsrt_ordn_${orderId}, ${String(layout.length)}, ${String(dst)});`,
+                expr.span,
+              );
+            }
+          }
+          // The values are right; only the descriptor's key order is the type's instead of the
+          // object's. Stamp the repaired order and keep the answer in its slot for the consumer.
+          this.appendLine(
+            `${this.slotAt(slot)} = jsrt_object_set_order(${this.slotAt(slot)}, _jsrt_order_${orderId}, _jsrt_ordn_${orderId});`,
+            expr.span,
+          );
+          return this.slotAt(slot);
+        }
         return this.finishSequenced(parts, this.slotAt(slot), expr.span, flushed);
       }
 
       // Allocate, then fill left to right through the rooted scratch slot. No inline cache on
       // construction: each entry is a fresh key on a fresh object, so every store transitions --
       // exactly the case the cache deliberately does not serve (docs/VALUE.md §4.10). A spread
-      // evaluated twice or more runs once into its own scratch past the value scratch, like the
-      // fixed arm's, and every field reads out of that.
+      // with a non-trivial source runs once into its own scratch past the value scratch, like the
+      // fixed arm's, and the whole fragment copies out of that in one call.
       case 'dyn-object-literal': {
         const slot = this.callSlots.get(expr);
         if (slot === undefined) {
@@ -3401,16 +3722,26 @@ class Emitter {
             );
             continue;
           }
-          // A spread field: the source ran once into its scratch at its own position above, and
-          // this read is a pure slot load out of that -- the same shape as the fixed arm's, with
-          // `jsrt_set_prop` in place of the slot store.
-          if (entry.value.kind === 'field-access' && entry.value.target.kind !== 'identifier') {
+          // A spread fragment copies its whole source in the SOURCE's enumeration order, in one
+          // call at the fragment's position (plan.md §8 step 21a): insertion order IS enumeration
+          // order on a fresh shape table, so the fragment's keys land as the object has them, not
+          // as the type lists them. Only the fragment's FIRST entry emits the call; the rest of
+          // its entries are already copied and emit nothing. An identifier source reads inline at
+          // its position (still correct when a later entry reassigns the binding); anything else
+          // ran once into its scratch above, exactly like the fixed arm's.
+          if (!isAccessorEntry(entry) && !isComputedEntry(entry) && entry.spread === true) {
+            if (entry.value.kind !== 'field-access') {
+              throw new Error('spread entry is not a field read');
+            }
             const key = spreadScratchKey(entry.value.span);
-            const scratchSlot = scratchAt.get(key);
-            const source = scratchTarget.get(key);
-            if (scratchSlot !== undefined && source !== undefined) {
-              if (!scratchDone.has(key)) {
-                scratchDone.add(key);
+            if (!scratchDone.has(key)) {
+              scratchDone.add(key);
+              const scratchSlot = scratchAt.get(key);
+              if (scratchSlot !== undefined) {
+                const source = scratchTarget.get(key);
+                if (source === undefined) {
+                  throw new Error('spread source has no scratch target');
+                }
                 flushed =
                   this.sequencePart(
                     parts,
@@ -3418,15 +3749,24 @@ class Emitter {
                     expr.span,
                     (v) => `${this.slotAt(scratchSlot)} = ${v}`,
                   ) || flushed;
+                parts.push(
+                  `${this.slotAt(slot)} = jsrt_dynobj_spread(${this.slotAt(slot)}, ${this.slotAt(scratchSlot)})`,
+                );
+              } else {
+                if (entry.value.target.kind !== 'identifier') {
+                  throw new Error('spread source has no scratch slot');
+                }
+                const inlineSource = entry.value.target;
+                const rendered = this.capture(() => this.emitExpression(inlineSource));
+                if (rendered.lines.length > 0) {
+                  throw new Error('spread source produced statements');
+                }
+                parts.push(
+                  `${this.slotAt(slot)} = jsrt_dynobj_spread(${this.slotAt(slot)}, ${rendered.value})`,
+                );
               }
-              parts.push(
-                `${scratch} = jsrt_object_get_field(${this.slotAt(scratchSlot)}, ${String(entry.value.slot)}, ${cNameLiteral(entry.name)})`,
-              );
-              parts.push(
-                `jsrt_set_prop(${this.slotAt(slot)}, ${cNameLiteral(entry.name)}, ${scratch}, NULL)`,
-              );
-              continue;
             }
+            continue;
           }
           flushed =
             this.sequencePart(parts, entry.value, expr.span, (v) => `${scratch} = ${v}`) || flushed;
@@ -3596,17 +3936,19 @@ class Emitter {
                     REGEXP_OPS[expr.op].result === 'boolean'
                     ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
                     : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
-                  : `jsrt_${expr.kind === 'array-op' ? 'array' : 'string'}_${snakeCase(expr.op)}(${operands})`;
+                  : expr.kind === 'array-op'
+                    ? this.arrayOpCall(expr, base)
+                    : `jsrt_string_${snakeCase(expr.op)}(${operands})`;
         // An op that calls back into compiled code can throw, so it gets its own STATEMENT and a
         // pending check -- the same discipline `call` follows, and for the same reason: the check
         // has to sit between the op and whatever consumes its result, which a comma expression
         // gives it nowhere to stand. The receiver's slot takes the answer; it is dead by then.
-        const callsBack =
-          expr.kind === 'array-op'
-            ? arrayOpCallsBack(expr.op)
-            : expr.kind === 'collection-op' && expr.op === 'forEach';
+        // Every array op takes the statement tail, callback-taking or not: each entry validates
+        // its receiver first (STA2008, plan.md §8 step 20), so a statically-typed array that
+        // arrives as `undefined` throws a catchable TypeError instead of segfaulting.
         const canThrow =
-          callsBack ||
+          expr.kind === 'array-op' ||
+          (expr.kind === 'collection-op' && expr.op === 'forEach') ||
           (expr.kind === 'date-op' && expr.op === 'toISOString') ||
           (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
         if (canThrow) {
@@ -3658,6 +4000,35 @@ class Emitter {
           );
         }
         return this.finishSequenced(parts, opCall, expr.span, flushed);
+      }
+
+      // `String.fromCharCode(...codes)` (plan.md §8 step 19): the one `String` namespace call.
+      // The runtime takes the count first, then the codes, and coerces each one — so the call
+      // is `from_char_code(n, ...)` with `n` spliced in, on the math-call sequencing discipline:
+      // up to one argument nests directly, more ride rooted slots in source order. It cannot
+      // throw (allocation failure panics, it does not leave a pending exception), so the
+      // sequenced tail serves and no statement is needed.
+      case 'string-static': {
+        const name = 'jsrt_string_from_char_code';
+        if (expr.args.length <= 1) {
+          const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
+          return operands === ''
+            ? `${name}(0)`
+            : `${name}(${String(expr.args.length)}, ${operands})`;
+        }
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error(`${expr.kind} was not registered during counting`);
+        }
+        const parts: string[] = [];
+        const flushed = this.sequenceArgs(parts, expr.args, expr.span, base, 0);
+        const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
+        return this.finishSequenced(
+          parts,
+          `${name}(${String(expr.args.length)}, ${operands})`,
+          expr.span,
+          flushed,
+        );
       }
 
       // A suspension point, emitted where the expression sits: park the resume state, subscribe,
@@ -4324,6 +4695,51 @@ class Emitter {
     return temp;
   }
 
+  private emitOptionalChain(expr: OptionalChain): string {
+    const slot = this.tempSlots.get(expr);
+    if (slot === undefined) {
+      throw new Error('optional chain has no frame slot; countExpression missed a node');
+    }
+    const temp = this.slotAt(slot);
+    const base = this.emitExpression(expr.base);
+    this.optionalBaseStack.push(temp);
+    let consequent: { readonly lines: string[]; readonly value: string };
+    try {
+      consequent = this.capture(() => this.emitExpression(expr.consequent));
+    } finally {
+      this.optionalBaseStack.pop();
+    }
+    // `?.` tests nullish, NOT falsy: `0?.toString()` is `"0"` while `0 || x` is `x`. The base
+    // is evaluated once into the rooted temp; the consequent reads it through the leaf, so a
+    // nullish base skips the accesses AND the keys and arguments inside them.
+    if (consequent.lines.length === 0) {
+      return `(${temp} = ${base}, jsrt_is_nullish(${temp}) ? JSRT_UNDEFINED : (${consequent.value}))`;
+    }
+    // The consequent needed statements of its own (a call and its pending check), and it only
+    // runs when the base is non-nullish — so its statements sit inside the else branch, and the
+    // node's value is whatever `temp` holds afterwards.
+    this.appendLine(`${temp} = ${base};`, expr.span);
+    this.appendLine(`if (jsrt_is_nullish(${temp})) {`, expr.span);
+    this.indent++;
+    this.appendLine(`${temp} = JSRT_UNDEFINED;`, expr.span);
+    this.indent--;
+    this.appendLine('} else {', expr.span);
+    this.indent++;
+    this.lines.push(...consequent.lines);
+    this.appendLine(`${temp} = ${consequent.value};`, expr.span);
+    this.indent--;
+    this.appendLine('}', expr.span);
+    return temp;
+  }
+
+  private emitOptionalBase(): string {
+    const temp = this.optionalBaseStack.at(-1);
+    if (temp === undefined) {
+      throw new Error('optional-base outside an optional chain; the lowering builds one only');
+    }
+    return temp;
+  }
+
   private emitUpdate(expr: UpdateExpr): string {
     const slot = this.tempSlots.get(expr);
     if (slot === undefined) {
@@ -4395,10 +4811,11 @@ class Emitter {
       this.appendLine(`${write(result)};`, expr.span);
     } else {
       this.appendLine(`${result} = ${read};`, expr.span);
-      if (
-        place.kind === 'dyn-field-access' ||
-        (place.kind === 'index-access' && place.target.type.kind === 'unknown')
-      ) {
+      // A dynamic read throws on a nullish receiver, and a static index read degrades to it on
+      // a statically-typed array that arrives as something else (plan.md §8 step 20) -- either
+      // unwinds before the arithmetic below consumes the value. (The write has the blanket
+      // check at the end of this function.)
+      if (place.kind === 'dyn-field-access' || place.kind === 'index-access') {
         this.emitPendingCheck(expr.span);
       }
       if (op === '++' || op === '--') {

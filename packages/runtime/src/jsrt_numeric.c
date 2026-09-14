@@ -116,13 +116,142 @@ double jsrt_to_number(jsrt_value v) {
  * StringNumericLiteral grammar — NUMERIC.md §6.3
  * ============================================================================ */
 
+/* StrWhiteSpaceChar (WhiteSpace + LineTerminator): the trim set for
+ * StringNumericLiteral. This is NOT C isspace: the 0x09-0x0D range covers VT
+ * (0x0B), which an ASCII-blank set misses, and NBSP/ZWNBSP/the Zs block are
+ * trimmable here while interior ones still reject below. */
+static bool is_str_white_space(uint16_t ch) {
+  if (ch >= 0x0009 && ch <= 0x000D) {
+    return true; /* TAB LF VT FF CR */
+  }
+  if (ch >= 0x2000 && ch <= 0x200A) {
+    return true;
+  }
+  switch (ch) {
+    case 0x0020: /* SPACE */
+    case 0x00A0: /* NBSP */
+    case 0x1680:
+    case 0x2028: /* LS */
+    case 0x2029: /* PS */
+    case 0x202F:
+    case 0x205F:
+    case 0x3000:
+    case 0xFEFF: /* ZWNBSP */
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool is_hex_digit(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+/* Accumulate base-2/8 digits: exact in uint64 while it fits, then double.
+ * Hex takes the validated-strtod path below instead, which rounds correctly
+ * for huge integers. */
+static double parse_small_radix(const char *p, size_t n, unsigned base) {
+  uint64_t acc = 0;
+  size_t i = 0;
+  uint64_t limit = (UINT64_MAX - (uint64_t)(base - 1u)) / (uint64_t)base;
+  while (i < n && acc <= limit) {
+    acc = acc * (uint64_t)base + (uint64_t)(p[i] - '0');
+    i++;
+  }
+  if (i == n) {
+    return (double)acc;
+  }
+  double d = (double)acc;
+  while (i < n) {
+    d = d * (double)base + (double)(p[i] - '0');
+    i++;
+  }
+  return d;
+}
+
+/* The trimmed ASCII spelling, NUL-terminated with its length. Every branch
+ * returns; the caller owns nothing. */
+static double parse_numeric_literal(const char *buf, size_t n) {
+  const double nan = 0.0 / 0.0;
+
+  /* "Infinity" with an optional sign is the only valid spelling starting with
+   * a letter; strtod would also take inf/Inf/INFINITY/nan in any case. */
+  if (n == 8 && strncmp(buf, "Infinity", 8) == 0) {
+    return INFINITY;
+  }
+  if (n == 9 && strncmp(buf, "+Infinity", 9) == 0) {
+    return INFINITY;
+  }
+  if (n == 9 && strncmp(buf, "-Infinity", 9) == 0) {
+    return -INFINITY;
+  }
+
+  /* Unsigned non-decimal forms: no sign allowed, at least one digit, digits
+   * only. strtod reads hex itself (including hex floats like 0x1p4, which the
+   * grammar rejects), so hex is validated here and only CONVERTED by strtod;
+   * binary/octal have no strtod form and accumulate above. */
+  if (n >= 2 && buf[0] == '0' &&
+      (buf[1] == 'x' || buf[1] == 'X' || buf[1] == 'b' || buf[1] == 'B' ||
+       buf[1] == 'o' || buf[1] == 'O')) {
+    if (n == 2) {
+      return nan; /* "0x", "0b", "0o" with no digits */
+    }
+    if (buf[1] == 'x' || buf[1] == 'X') {
+      for (size_t k = 2; k < n; k++) {
+        if (!is_hex_digit(buf[k])) {
+          return nan;
+        }
+      }
+      char *endptr = NULL;
+      double val = strtod(buf, &endptr);
+      if (endptr != buf + n) {
+        return nan; /* defensive: validation consumed the whole span */
+      }
+      return val;
+    }
+    unsigned base = (buf[1] == 'b' || buf[1] == 'B') ? 2u : 8u;
+    for (size_t k = 2; k < n; k++) {
+      if (buf[k] < '0' || buf[k] >= (char)('0' + base)) {
+        return nan;
+      }
+    }
+    return parse_small_radix(buf + 2, n - 2, base);
+  }
+
+  /* A sign does not rescue a non-decimal form ("-0x10" is NaN), and strtod
+   * would read signed hex itself; likewise any other inf/nan-case spelling. */
+  size_t q = 0;
+  if (q < n && (buf[q] == '+' || buf[q] == '-')) {
+    q++;
+  }
+  if (q < n && (buf[q] == 'i' || buf[q] == 'I' || buf[q] == 'n' || buf[q] == 'N')) {
+    return nan;
+  }
+  if (q + 1 < n && buf[q] == '0' &&
+      (buf[q + 1] == 'x' || buf[q + 1] == 'X' || buf[q + 1] == 'b' ||
+       buf[q + 1] == 'B' || buf[q + 1] == 'o' || buf[q + 1] == 'O')) {
+    return nan;
+  }
+
+  /* Decimal: strtod, which must consume the entire trimmed span — it accepts
+   * no trailing garbage the way the grammar forbids, and consumes nothing for
+   * spellings like "" or "e5", both NaN. Embedded NULs end the conversion
+   * early and fail the same full-span check. */
+  char *endptr = NULL;
+  double result = strtod(buf, &endptr);
+  if (endptr == buf || endptr != buf + n) {
+    return nan;
+  }
+  return result;
+}
+
 /* Parse a string as a number using the spec's StringNumericLiteral grammar,
  * NOT strtod. Key differences:
  *   - strtod accepts trailing garbage; spec does not
  *   - strtod("") returns 0 with no characters consumed; we must check fully
  *   - "0x10" is hex (16); strtod treats it as hex but we must be specific
  *   - "Infinity" parses; strtod may not (depending on implementation)
- *   - Any non-ASCII code unit -> NaN */
+ *   - StrWhiteSpaceChar trims at both edges; any other non-ASCII unit -> NaN */
 double jsrt_string_to_number(jsrt_value s) {
   /* Verify this is a string */
   if (!jsrt_is(s, JSRT_TAG_STRING)) {
@@ -131,81 +260,45 @@ double jsrt_string_to_number(jsrt_value s) {
 
   uint32_t len = jsrt_string_length(s);
 
-  /* First pass: check for non-ASCII code units.
-   * The spec's StringNumericLiteral is ASCII-only. */
-  for (uint32_t i = 0; i < len; i++) {
-    uint16_t ch = jsrt_string_char(s, i);
-    if (ch > 127) {
-      return 0.0 / 0.0; /* NaN */
-    }
-  }
-
-  /* Convert to a C string for easier parsing.
-   * MAX_LEN is more than enough for any representable number. */
-#define MAX_LEN 256
-  char buf[MAX_LEN];
-  if (len >= MAX_LEN) {
-    return 0.0 / 0.0; /* NaN */
-  }
-
-  for (uint32_t i = 0; i < len; i++) {
-    buf[i] = (char)jsrt_string_char(s, i);
-  }
-  buf[len] = '\0';
-
-  /* Skip leading whitespace (ASCII space, tab, newline, carriage return, form feed) */
-  size_t pos = 0;
-  while (pos < len && (buf[pos] == ' ' || buf[pos] == '\t' || buf[pos] == '\n' ||
-                       buf[pos] == '\r' || buf[pos] == '\f')) {
+  /* Trim StrWhiteSpaceChar at both ends, then require ASCII in what survives:
+   * the grammars below are ASCII-only, so an interior NBSP (or any other
+   * non-ASCII unit) is NaN while an edge one was already trimmed. */
+  uint32_t pos = 0;
+  while (pos < len && is_str_white_space(jsrt_string_char(s, pos))) {
     pos++;
   }
-
-  /* Empty or all-whitespace -> 0 */
   if (pos >= len) {
-    return 0.0;
+    return 0.0; /* empty or all-whitespace */
   }
-
-  /* Trim trailing whitespace */
-  size_t end = len;
-  while (end > pos && (buf[end - 1] == ' ' || buf[end - 1] == '\t' ||
-                       buf[end - 1] == '\n' || buf[end - 1] == '\r' ||
-                       buf[end - 1] == '\f')) {
+  uint32_t end = len;
+  while (end > pos && is_str_white_space(jsrt_string_char(s, end - 1))) {
     end--;
   }
-
-  /* "Infinity" or "+Infinity" or "-Infinity" */
-  if (end - pos == 8 && strncmp(buf + pos, "Infinity", 8) == 0) {
-    return INFINITY;
-  }
-  if (end - pos == 9 && strncmp(buf + pos, "+Infinity", 9) == 0) {
-    return INFINITY;
-  }
-  if (end - pos == 9 && strncmp(buf + pos, "-Infinity", 9) == 0) {
-    return -INFINITY;
-  }
-
-  /* Hex: "0x..." or "0X..." (no sign prefix for hex) */
-  if (end - pos >= 2 && buf[pos] == '0' && (buf[pos + 1] == 'x' || buf[pos + 1] == 'X')) {
-    /* Parse hex. strtol can do this, but we need to verify no trailing garbage. */
-    char *endptr = NULL;
-    long val = strtol(buf + pos, &endptr, 16);
-    if (endptr != buf + end) {
-      /* Trailing garbage -> NaN */
+  for (uint32_t i = pos; i < end; i++) {
+    if (jsrt_string_char(s, i) > 127) {
       return 0.0 / 0.0; /* NaN */
     }
-    return (double)val;
   }
 
-  /* Decimal: parse with strtod, then verify no trailing garbage */
-  char *endptr = NULL;
-  double result = strtod(buf + pos, &endptr);
-
-  /* If strtod consumed nothing or didn't consume the entire remainder,
-   * the string is not a valid number */
-  if (endptr == buf + pos || endptr != buf + end) {
+  /* Numeric text of any length converts (a 300-digit decimal is 1e300, not
+   * NaN), so the spelling is copied to a heap buffer rather than a fixed
+   * stack one. The length guard keeps (size_t)len + 1 from wrapping malloc's
+   * argument; the NULL check is the OOM answer. */
+  if (len == UINT32_MAX) {
     return 0.0 / 0.0; /* NaN */
   }
+  size_t n = (size_t)(end - pos);
+  char *buf = (char *)malloc(n + 1);
+  if (buf == NULL) {
+    return 0.0 / 0.0; /* NaN */
+  }
+  for (uint32_t i = 0; i < (uint32_t)n; i++) {
+    buf[i] = (char)jsrt_string_char(s, pos + i);
+  }
+  buf[n] = '\0';
 
+  double result = parse_numeric_literal(buf, n);
+  free(buf);
   return result;
 }
 

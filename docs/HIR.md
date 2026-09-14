@@ -56,6 +56,7 @@ Expressions produce values; statements do not. An expression-statement wraps an 
 - `LogicalOp` — `&&`, `||`, `??`
 - `TemplateLiteral` — `` `a${x}b` ``, as `quasis` and `expressions` with the invariant `quasis.length === expressions.length + 1`
 - `StringLength` — `.length` on a string, in **UTF-16 code units** (an astral character counts twice)
+- `FunctionLength` — `.length` on a statically-typed function value: the closure's declared arity, which never counts a method's receiver (docs/VALUE.md §4.16). An `Unknown`-typed receiver never reaches this node; it takes the dynamic property path instead (plan.md §8 step 21b)
 - `ConsoleLogCall` — builtin console call. `method` names one of the eleven members of `CONSOLE_METHODS` (`src/hir/nodes.ts`), the single table the gate, the lowering, the verifier and the emitter all read: it gives each member its arity, how many trailing arguments are optional, and the C entry point the emitter calls. `args` is therefore either exactly `arity` long or, for the two members whose omitted tail is its own C entry point (`group`, `assert`), that minus its optional tail: the lowering pads an omitted optional with an `undefined` literal only where explicit `undefined` means what absence means. `consoleEntryPoint(method, width)` maps a width to the C call, and `STA4019` holds every node to a width it answers
 - `FunctionExpr` — a function expression or arrow function; `params`, a `body` Block, an
   optional `name` (a declaration's name, or the binding a function expression is assigned to, so
@@ -77,8 +78,10 @@ appears when objects land, in code nobody is looking at any more.
 
 `StringLength` is a dedicated node for the same reason `ConsoleLogCall` is: the subset admits
 exactly one property, and giving it a node keeps the gate's accept set equal to this vocabulary.
-The gate tests the *type* of the receiver, not the syntax — `arr.length` and `fn.length` are spelled
-identically and neither is representable here. General property access arrives with the object model.
+The gate tests the *type* of the receiver, not the syntax — `arr.length` and a statically-typed
+`fn.length` are spelled identically and lower to different nodes (`ArrayLength`,
+`FunctionLength`), while an untyped `fn.length` takes the dynamic property path. General
+property access arrives with the object model.
 
 `LogicalOp` is deliberately **not** a `BinaryOp`, and the separation is load-bearing rather than
 cosmetic. The two differ in both ways a compiler cares about: the right operand is evaluated
@@ -91,6 +94,21 @@ operand: the value is tested and then possibly returned, so evaluating it twice 
 its side effects, and a value the GC cannot see is a value it can collect. Nested short-circuits
 therefore need distinct slots — in `(a && b) && c` the outer operand stays live while the inner
 one is evaluated.
+
+- `OptionalChain` — `base?.rest` (plan.md §8 step 24). `base` is evaluated exactly once, into
+  its own rooted frame slot like a `LogicalOp` left operand; when it is nullish the node answers
+  `undefined` and `consequent` never runs — not the accesses in it, and not the computed keys
+  or call arguments either. Otherwise `consequent` runs, reading the guarded value through
+  `OptionalBase` leaves. The consequent is built by the plain lowering arms, so every link above
+  the cut keeps the lowering (and the TypeErrors) it would have without the guard; a nested `?.`
+  is a nested node testing its own base. A base whose type cannot be nullish never builds this
+  node — the lowering emits the plain access instead. Two links the dynamic path cannot run stay
+  at the gate (`STA1214`): a method call on a class instance or a builtin receiver, which needs
+  the dynamic method dispatch of step 20, and an index into a string, number or boolean, which
+  has no HIR node yet.
+- `OptionalBase` — the guarded value of the enclosing `OptionalChain`: a leaf resolving to the
+  chain's frame temp. It names no binding and captures nothing; outside a chain it has no
+  meaning, and the emitter refuses one.
 
 **Statement union** (current scope):
 - `Declaration` — `let` or `const` binding with required initializer. `var` is desugared by the lowering into a hoisted `let` initialized `undefined` plus an assignment at the original site (plan.md §8 step 3); it is not a third `declKind`.
@@ -164,7 +182,10 @@ layout, the printer or the verifier had to learn what an accessor is.
 no key in the emitted code — the entries ARE the slots, in written order, and the verifier's job is
 only to check that that order matches the shape's field list. Everything else a literal needs is the
 class machinery it borrows: the same allocation, the same `FieldAccess` for a read, and a descriptor
-whose name is empty so the printer omits the prefix a class instance gets.
+whose name is empty so the printer omits the prefix a class instance gets. Entries a `{ ...src }`
+expansion produced carry `spread: true`: the expansion order is the source type's field order while
+the result must enumerate in the source object's key order, so the emitter repairs the order at run
+time from exactly those entries (plan.md §8 step 21a).
 
 Task 4.1 added the dynamic residue's three nodes — `DynObjectLiteral`, `DynFieldAccess`,
 `DynFieldAssignment` — for a literal whose contextual type has an optional property or an index

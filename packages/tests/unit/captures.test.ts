@@ -10,7 +10,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import * as ts from 'typescript';
 import type { CaptureInfo, CaptureMap, EnvOwner } from '../../compiler/src/lower/captures.ts';
-import { analyzeCaptures } from '../../compiler/src/lower/captures.ts';
+import { analyzeCaptures, RECEIVER_NAME } from '../../compiler/src/lower/captures.ts';
 import { createProgram } from './helpers.ts';
 
 /** Analyze `source` and key the result by a readable name: a function declaration's own name, or,
@@ -221,4 +221,48 @@ void test('a function referring only to itself recurses without an environment',
   assert.deepEqual(fact.envVars, []);
   assert.deepEqual(fact.captures, []);
   assert.equal(fact.needsEnv, false);
+});
+
+void test('an arrow in a field initializer captures the constructor receiver from the class', () => {
+  const { named, raw } = analyze(`
+    class Counter {
+      n = 0;
+      inc = (): number => {
+        this.n += 1;
+        return this.n;
+      };
+    }
+    console.log(new Counter().inc());
+  `);
+  // The class stands in for the constructor, which is not written here: it owns the receiver
+  // the field arrow reads, and `lowerClass` merges it into the synthesized constructor.
+  assert.deepEqual(get(named, 'Counter').envVars, [RECEIVER_NAME]);
+  const arrow = [...raw.values()].find((info) =>
+    info.captures.some((c) => c.name === RECEIVER_NAME),
+  );
+  assert.notEqual(arrow, undefined);
+  assert.deepEqual(
+    arrow?.captures.map((c) => ({ name: c.name, levels: c.levels, index: c.index })),
+    [{ name: RECEIVER_NAME, levels: 0, index: 0 }],
+  );
+  assert.equal(arrow?.needsEnv, true);
+});
+
+void test('an explicit constructor carries the field-initializer receiver in its own environment', () => {
+  const { named, raw } = analyze(`
+    class Explicit {
+      v: number = 1;
+      constructor() {
+        this.v = 5;
+      }
+      get = (): number => this.v * 2;
+    }
+    console.log(new Explicit().get());
+  `);
+  assert.deepEqual(get(named, 'Explicit').envVars, [RECEIVER_NAME]);
+  // Dual-recorded so the constructor's own layout agrees with the class's at slot zero: one
+  // environment, two index spaces, both answering zero.
+  const ctor = [...raw.entries()].find(([owner]) => ts.isConstructorDeclaration(owner))?.[1];
+  assert.notEqual(ctor, undefined);
+  assert.deepEqual(ctor?.envVars, [RECEIVER_NAME]);
 });

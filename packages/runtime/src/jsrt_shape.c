@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <assert.h>
+
 const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL, NULL};
 
 /* Identical to `jsrt_class_dynamic` in every field that means anything -- the SHAPE owns the layout
@@ -313,6 +315,14 @@ static bool accessor_write(jsrt_value slot, const char *key, jsrt_value recv, js
   return true;
 }
 
+/* `fn.length` on a statically-typed function value: the declared arity, which never counts
+ * a method's receiver (docs/VALUE.md §4.16, plan.md §8 step 21b). The dynamic path answers the
+ * same field through `jsrt_get_prop` below. */
+uint32_t jsrt_closure_arity(jsrt_value v) {
+  assert(jsrt_is(v, JSRT_TAG_CLOSURE));
+  return jsrt_as_closure(v)->arity;
+}
+
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   if (jsrt_is_nullish(obj)) {
     char message[256];
@@ -323,6 +333,13 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   }
   if (jsrt_is(obj, JSRT_TAG_ARRAY) && strcmp(key, "length") == 0) {
     return jsrt_number((double)jsrt_as_array(obj)->length);
+  }
+  /* `fn.length` on a function value is its declared arity -- the closure's own field, which
+   * never counts a method's receiver (docs/VALUE.md §4.16, plan.md §8 step 21b). A closure has
+   * no shape, so without this the read falls through to the table walk and answers
+   * `undefined` where Node answers the arity. */
+  if (jsrt_is(obj, JSRT_TAG_CLOSURE) && strcmp(key, "length") == 0) {
+    return jsrt_number((double)jsrt_as_closure(obj)->arity);
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
@@ -339,6 +356,15 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   }
   const JSRTShape *hit = shape_find(*o.shape, key);
   if (hit == NULL) {
+    /* Array.prototype as values (plan.md §8 step 20): the walk above covers own properties
+     * only, so `a.push` on an array fell through to `undefined` and the call aborted STA2006
+     * where Node runs. Own properties shadow -- this asks only on a miss -- and a method hit
+     * never fills the IC, whose fast path trusts a shape match for the site's key alone while a
+     * bound method belongs to one receiver. */
+    jsrt_value method = JSRT_UNDEFINED;
+    if (jsrt_is(obj, JSRT_TAG_ARRAY) && jsrt_array_method(obj, key, &method)) {
+      return method;
+    }
     return JSRT_UNDEFINED;
   }
   if (ic != NULL) {

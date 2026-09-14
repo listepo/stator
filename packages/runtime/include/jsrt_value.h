@@ -140,6 +140,10 @@ jsrt_value jsrt_string_from_cstr(const char *s);
 /* String construction from UTF-16 code units, copied verbatim (lone surrogates included). */
 jsrt_value jsrt_string_from_units(const uint16_t *units, uint32_t len);
 
+/* `String.fromCharCode(...codes)` (plan.md §8 step 19): one UTF-16 unit per argument, each
+ * ToUint16 of its value. `n` is the count, followed by `n` jsrt_values. */
+jsrt_value jsrt_string_from_char_code(uint32_t n, ...);
+
 /* One step of String.prototype[@@iterator]: yield the code point at *index (a string of 1 or 2
  * UTF-16 units) and advance *index. Strings are immutable so the caller may bound the loop on
  * jsrt_string_length. */
@@ -324,6 +328,21 @@ typedef struct JSRTObject {
 /* Every slot starts as `undefined`, which is what a declared-but-unassigned field reads as in
  * JavaScript. The constructor body then assigns the ones it assigns. */
 jsrt_value jsrt_object_new(const JSRTClass *cls);
+
+/* Spread-order repair (plan.md §8 step 21a): a `{ ...src }` result copies the right values but
+ * bakes its type's field order into the descriptor, so these rebuild the SOURCE's order after
+ * the values land. Own keys record their result slot; each spread source contributes its keys
+ * in its own enumeration order; the finished order becomes the result's descriptor (interned,
+ * shared like every other). `order`/`count`/`cap` are caller-owned scratch of `cap` entries.
+ * The record calls return nothing (the emitter threads them as statements); the stamp and the
+ * dynamic copy answer their result for the emitter's comma chains. */
+void jsrt_spread_order_key(uint32_t *order, uint32_t *count, uint32_t cap, uint32_t slot);
+void jsrt_spread_order_src(uint32_t *order, uint32_t *count, uint32_t cap, jsrt_value dst,
+                           jsrt_value src);
+/* Stamp the finished order and answer the result for the emitter's comma chains. */
+jsrt_value jsrt_object_set_order(jsrt_value dst, const uint32_t *order, uint32_t count);
+/* One spread fragment into a dynamic result, in the source's order; answers the result. */
+jsrt_value jsrt_dynobj_spread(jsrt_value dst, jsrt_value src);
 
 /* ============================================================================
  * Dynamic objects -- the shape table (hidden classes), docs/VALUE.md §4.10
@@ -541,18 +560,25 @@ jsrt_value jsrt_string_to_locale_lower_case(jsrt_value s, jsrt_value locales);
  * (join lives in jsrt_print.c with the ToString machinery it needs). Optional positions arrive as
  * JSRT_UNDEFINED per the lowering's padding; `lastIndexOf` has no position argument because the
  * spec gives its explicit `undefined` a DIFFERENT meaning than absence. `reverse` and `fill`
- * mutate in place and return the receiver. */
+ * mutate in place and return the receiver. The variadic entry points (plan.md §8 step 19) take a
+ * count followed by that many jsrt_values: `push`/`unshift` append/prepend a run, `concat`
+ * spreads each array argument and appends each non-array one as a single element, `splice`
+ * removes a span and inserts a run in its place. */
 jsrt_value jsrt_array_push(jsrt_value array, jsrt_value element);
+jsrt_value jsrt_array_push_many(jsrt_value array, uint32_t n, ...);
 jsrt_value jsrt_array_pop(jsrt_value array);
 jsrt_value jsrt_array_shift(jsrt_value array);
 jsrt_value jsrt_array_unshift(jsrt_value array, jsrt_value element);
+jsrt_value jsrt_array_unshift_many(jsrt_value array, uint32_t n, ...);
 jsrt_value jsrt_array_at(jsrt_value array, jsrt_value index);
 jsrt_value jsrt_array_index_of(jsrt_value array, jsrt_value search, jsrt_value from);
 jsrt_value jsrt_array_last_index_of(jsrt_value array, jsrt_value search);
+jsrt_value jsrt_array_last_index_of_from(jsrt_value array, jsrt_value search, jsrt_value from);
 jsrt_value jsrt_array_includes(jsrt_value array, jsrt_value search, jsrt_value from);
 jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator);
 jsrt_value jsrt_array_slice(jsrt_value array, jsrt_value start, jsrt_value end);
 jsrt_value jsrt_array_concat(jsrt_value array, jsrt_value other);
+jsrt_value jsrt_array_concat_many(jsrt_value array, uint32_t n, ...);
 jsrt_value jsrt_array_reverse(jsrt_value array);
 jsrt_value jsrt_array_fill(jsrt_value array, jsrt_value value, jsrt_value start, jsrt_value end);
 
@@ -574,8 +600,13 @@ jsrt_value jsrt_array_reduce_right(jsrt_value array, jsrt_value cb, jsrt_value i
 jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp);
 jsrt_value jsrt_array_copy_within(jsrt_value array, jsrt_value target, jsrt_value start,
                                   jsrt_value end);
-/* Two-argument form only; returns the removed run. */
+/* The two removal forms and the insertion form (plan.md §8 step 19); each returns the
+ * removed run. `splice_from` removes from `start` to the end; `splice_insert` removes the span
+ * and inserts `n` items at its start. */
 jsrt_value jsrt_array_splice(jsrt_value array, jsrt_value start, jsrt_value delete_count);
+jsrt_value jsrt_array_splice_from(jsrt_value array, jsrt_value start);
+jsrt_value jsrt_array_splice_insert(jsrt_value array, jsrt_value start, jsrt_value delete_count,
+                                    uint32_t n, ...);
 jsrt_value jsrt_array_flat(jsrt_value array, jsrt_value depth);
 jsrt_value jsrt_array_flat_map(jsrt_value array, jsrt_value cb);
 jsrt_value jsrt_array_find_last(jsrt_value array, jsrt_value cb);
@@ -586,6 +617,16 @@ jsrt_value jsrt_array_to_spliced(jsrt_value array, jsrt_value start, jsrt_value 
 jsrt_value jsrt_array_to_string(jsrt_value array);
 /* Out-of-range index aborts (spec: RangeError; STA2005 pattern). */
 jsrt_value jsrt_array_with(jsrt_value array, jsrt_value index, jsrt_value value);
+
+/* Array.prototype as VALUES for an Unknown receiver (plan.md §8 step 20): `jsrt_get_prop` walks
+ * shape tables only, so `a.push` on an array answered `undefined` and the following call aborted
+ * STA2006 where Node runs. True when `key` names an Array.prototype method, with `*out` a bound
+ * closure over the receiver that the ordinary call protocol invokes (the receiver rides in the
+ * closure's environment, not in argv, because an Unknown-receiver call passes user arguments
+ * only). Own properties shadow: the caller walks the shape table first and asks only on a miss,
+ * and a hit here never fills the IC (the bound value is per-receiver). Only arrays: every other
+ * builtin prototype is its own step. */
+bool jsrt_array_method(jsrt_value array, const char *key, jsrt_value *out);
 
 /* Object.keys/values/entries (§20.1.2) over the two object layouts — runtime/src/jsrt_object_ops.c.
  * Fixed shapes enumerate declaration-order public identifiers (private #name slots are omitted);
@@ -1068,6 +1109,25 @@ static inline JSRTArray *jsrt_as_array(jsrt_value v) {
   return (JSRTArray *)jsrt_ptr(v);
 }
 
+/* The checked unbox every Array.prototype entry shares (plan.md §8 step 20, STA2008): a
+ * statically-typed array that arrives as something else -- `var` hoisting hands the op
+ * `undefined`, a lying annotation hands it anything -- used to reach `jsrt_as_array` above
+ * unchecked and segfault. Answers NULL with a catchable TypeError pending instead: Node's
+ * member-access wording for a nullish receiver (`Cannot read properties of undefined (reading
+ * 'push')`, which is where Node throws for the same program), `Array.prototype.<method> called
+ * on incompatible receiver` otherwise (Node's message names receiver SOURCE TEXT, which compiled
+ * code no longer has, so only the nullish half can be Node-exact). Internal helpers keep the raw
+ * unbox: they run on values a public entry already validated. */
+JSRTArray *jsrt_require_array(jsrt_value array, const char *method);
+
+/* The for-of counterpart (plan.md §8 step 20, STA2009): the sync array walk reads the header
+ * directly instead of going through an entry, so it needs the check as its own statement before
+ * the loop. Arrays pass silently; anything else leaves a catchable `X is not iterable` pending --
+ * Node-exact for a nullish receiver, best-effort past it for the same source-text reason as
+ * above. Only the array-kind operand takes this path; other static kinds have their own walks
+ * and their own steps. */
+void jsrt_require_array_iterable(jsrt_value value);
+
 /* `.length` as a Number, so the emitter never reads the struct field itself. */
 jsrt_value jsrt_array_length(jsrt_value array);
 
@@ -1140,6 +1200,10 @@ jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *ar
 static inline const JSRTClosure *jsrt_as_closure(jsrt_value v) {
   return (const JSRTClosure *)jsrt_ptr(v);
 }
+
+/* `fn.length`: the declared arity, which never counts a method's receiver (docs/VALUE.md §4.16).
+ * The typed path's direct read; the dynamic path answers through `jsrt_get_prop` instead. */
+uint32_t jsrt_closure_arity(jsrt_value v);
 
 /* JavaScript arity is not C arity: a missing argument is `undefined` and an extra one is dropped.
  * Every generated callee reads its parameters through this, so neither is ever a read past the end
@@ -1392,6 +1456,11 @@ jsrt_value jsrt_check_boolean(jsrt_value v, const char *where);
 
 void jsrt_print(jsrt_value v); /* console.log semantics: prints -0 as "-0" */
 void jsrt_eprint(jsrt_value v);      /* console.error/warn: same form, stderr */
+/* The variadic console form (plan.md §8 step 18): inspects every argument with the bare-string
+ * exception and joins the forms with one space; no arguments prints the bare newline. The argv
+ * points at the caller's rooted frame slots on the `jsrt_array_new` discipline. */
+void jsrt_print_many(uint32_t count, const jsrt_value *args); /* stdout: log/info/debug */
+void jsrt_eprint_many(uint32_t count, const jsrt_value *args); /* stderr: error/warn */
 void jsrt_console_dir(jsrt_value v); /* console.dir: inspect form, no bare-string exception */
 /* console.table: the box-drawn grid, over an array or a plain object. Anything else falls back to
  * console.log, which is Node's own rule for a value that is not a collection of rows. */

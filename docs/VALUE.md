@@ -1167,6 +1167,33 @@ rather than a stack trace, which this runtime has none of (the same deviation `j
 documents); and the `jsrt_panic` sites still abort where Node throws a catchable TypeError, because
 turning a panic into a throw changes control flow at every caller and is its own change.
 
+## 4.18 Dynamic methods are data, and the call passes the receiver conditionally (Phase 5 step 22)
+
+A method on a DYNAMIC object literal (`{ [k]: v, m() { … } }` with a runtime key, or any
+literal an accessor or optional property sends to the shape table) is an own data property
+holding the method's closure, stored in written position by `jsrt_set_prop` like any other
+value — there is no method table to index, so there is nothing else it could be. The closure
+keeps the method ABI (receiver as parameter zero, §4.5), which is what makes `o.m === o.m`
+true and `typeof o.m` `"function"`, exactly as for a fixed literal.
+
+The call (`dyn-method-call` in HIR, only ever built for an Unknown receiver) evaluates the
+receiver, the arguments, then the name through the site's own cache, in that order. The
+receiver occupies the call's slot zero with the arguments contiguously after it — the same
+layout a direct method call passes — and the emitted site calls with the receiver when, and
+only when, the loaded value is a closure that declares one:
+
+```c
+slot = (jsrt_is(m, JSRT_TAG_CLOSURE) && jsrt_as_closure(m)->has_receiver)
+  ? jsrt_call_at(m, 1 + argc, &slot_recv, loc)
+  : jsrt_call_at(m, argc, &slot_recv + 1, loc);
+```
+
+A plain closure is therefore called as-is (`this` is `undefined`, as for a method value
+called bare, §4.16), and a non-function callee panics exactly as an ordinary call does
+(`STA2006` with the site's `file:line`). A computed VALUE key with a statically-known name
+(`[k]` with `k: "dyn"`) never reaches any of this: it is the name the direct spelling
+writes, and the literal takes the fixed path (§4.5) like the direct spelling does.
+
 ## 5. What Phase 2 actually implements
 
 The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap

@@ -104,6 +104,14 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2375, // Type 'X' is not assignable to type 'Y' with 'exactOptionalPropertyTypes: true' (target's properties).
   2379, // Argument of type 'X' is not assignable to parameter of type 'Y' with 'exactOptionalPropertyTypes: true'.
   2412, // Type 'X' is not assignable to type 'Y' with 'exactOptionalPropertyTypes: true' (the target).
+  // Duplicate data-property keys in an object literal are legal JavaScript — last wins — and
+  // §1.2 says js mode never rejects untyped code; the diagnostic is tsc's grammar check, not a
+  // type error (plan.md §8 step 26). The lowering pushes one entry per written property and the
+  // emitter stores in source order into one slot, so the last write wins on its own; the verifier
+  // covers the shape by name, not by position. ts mode keeps the refusal (STA0012). Duplicate
+  // METHODS, duplicate accessors, and mixed property/accessor duplicates are different checker
+  // codes (2300, 1118, 1119) and stay refused in both modes.
+  1117, // An object literal cannot have multiple properties with the same name.
   // The possibly-null family: 3855 of Task 6.1's 10,513 Test262 failures, the largest bucket by a
   // factor of three, and every one of them ordinary JavaScript that runs (plan-notes 176, 180).
   // `xs[i].toFixed(2)` is how JavaScript indexes an array; the spec's answer for the miss is a
