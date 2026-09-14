@@ -155,7 +155,17 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<Streams> {
 async function runNode(path: string): Promise<Streams> {
   // The oracle, never the host: the compiler runs in-process on this host while ground truth
   // comes from the pinned Node (or `STATOR_NODE`).
-  const result = await runProcess(nodePath(), [path], { env: PINNED_ENV });
+  //
+  // FFI fixtures (`extern_*` directories) cannot run under Node as written: an ambient
+  // `declare function` erases to nothing, so the call would be a `ReferenceError`. Their
+  // `node_shim.mjs` preloads the same bindings Node-side (the C library's own semantics in
+  // JS — `Math.sqrt` for `sqrt`, the convention check re-spelled for the `@statorError`
+  // cases) via `--import`, which runs before the entry and is invisible to Stator (nothing
+  // imports it, so it never enters the module graph). What the comparison still proves is
+  // the observable contract: same calls, same values, same caught messages, byte-for-byte.
+  const shim = join(dirname(path), 'node_shim.mjs');
+  const args = existsSync(shim) ? ['--import', shim, path] : [path];
+  const result = await runProcess(nodePath(), args, { env: PINNED_ENV });
   if (result.status !== 0) {
     throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);
   }
