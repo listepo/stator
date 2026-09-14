@@ -212,8 +212,10 @@ function geomean(measurements: readonly ProgramMeasurement[]): number {
 }
 
 function main(): void {
+  // ffi-sqrt follow-up: sibling declarations (ffi-sqrt.d.ts) are not runnable
+  // programs — exclude *.d.ts so only runnable *.ts entries are collected.
   const programs = readdirSync(PROGRAMS)
-    .filter((file) => file.endsWith('.ts'))
+    .filter((file) => file.endsWith('.ts') && !file.endsWith('.d.ts'))
     .sort();
   const expected = new Map<string, string>();
   for (const program of programs) {
