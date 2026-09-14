@@ -154,3 +154,120 @@
   iteration), but `stator explain`'s per-construct verdict table should say
   whether the flag attaches to the declaration, the call site, or both.
   Minor; noted while marking, not blocking.
+
+// --- string.d.ts (appended 2026-09-14) ---
+//
+// Second binding round, part 1: C strings (`string.h`). Same convention as
+// above: one bullet per forcing declaration. Gate fates cite
+// `packages/compiler/src/frontend/extern.ts` (classification order: params
+// left to right, then return, then convention) and `src/hir/nodes.ts` (the
+// convention/return matrix).
+
+- **`size_t` has no width spelling in either direction.** Forced by `cStrlen`
+  (returns C `size_t`, `_string.h:96`) and `cStrncmp`'s `n` (`_string.h:101`).
+  The binding writes `number` (`double`), which holds every `size_t` exactly
+  only to 2^53 — above that it is a precision lie of the `sqlite3_int64`
+  family (sqlite3.d.ts refusal 5), but refusing `size_t` would refuse
+  `strlen`, the most innocent function in libc. REQUIREMENT: the generator
+  spec must fix the `size_t` rule (refine-and-document like `i32`? a `SizeT`
+  brand? refuse above 2^53 at runtime?), not leave each binding widening
+  silently.
+- **Three-way comparison returns collide with the `negative` vocabulary.**
+  Forced by `cStrcmp` / `cStrncmp` (`_string.h:89,101`): "negative / zero /
+  positive" is ordering DATA, and `@statorError negative` ("negative return
+  throws") compiles against the same `number` return a comparison yields —
+  the gate's matrix (`nodes.ts:1006-1008`) would accept the tag. The binding
+  declares NO tag (plain value; caller compares against 0), but nothing stops
+  a future reader — or a generator heuristic — from inferring `negative`
+  from "returns int". REQUIREMENT: the generator must never infer a
+  convention from a C return type; ordering returns need a documented
+  "comparisons are always plain values" rule.
+- **Counted functions measure the UTF-8 copy, not the JS string.** Forced by
+  `cStrncmp`'s `n`: the bound counts bytes of the NUL-terminated copy §3
+  allocates, so JS `.length` (UTF-16 units) is the wrong `n` for non-ASCII
+  input — and embedded NULs (§3: truncated at the first NUL) make even the
+  byte length over-long. REQUIREMENT: the call convention for counted string
+  functions must define `n` as "bytes of the encoded copy" and say who
+  computes it (caller? generated glue?), not leave a bare `number` the
+  caller guesses.
+- **The companion free lives in another file.** Forced by `cStrdup`
+  (`_string.h:141`): FFI.md §3 (lines 150-152) demands "an explicit free
+  function in the same binding", and the free is `cFree` in stdlib.d.ts —
+  same binding round, sibling file. If "same binding" means same FILE, this
+  binding violates §3 as written; if it means the binding set, §3 should say
+  so. REQUIREMENT: fix the scope of "same binding" (file? package? module
+  graph?) before the generator checks — or emits — the companion.
+- **`strdup` is the second error-composition instance.** Forced by `cStrdup`
+  (`@statorError null`): failure is "NULL return AND detail in errno
+  (ENOMEM)" — the `stat` shape exactly (stat bullet above). Declared `null`
+  (throw, errno value lost), consistent with `posixStat` but still lossy;
+  stacking `null, errno` is refused by the gate (single-tag rule).
+  REQUIREMENT: same as the stat bullet (stacked tags with read order, or
+  errno-reads-on-failure-value); two instances now, so the rule pays twice.
+- **Static-buffer functions are a third ownership flavor.** Forced by
+  `cStrerror` (`_string.h:95`): the source is neither handle-owned
+  (`errmsg` / `column_text` — invalidated by the next call ON THAT HANDLE)
+  nor allocated (`strdup`) — it is a shared static buffer invalidated by the
+  next `strerror` call IN THE PROCESS, and POSIX does not require
+  `strerror` to be thread-safe. The binding copies at the boundary (same
+  template) and refuses the reentrant spelling (`strerror_r`, string.d.ts
+  refusal 4). REQUIREMENT: the per-signature ownership comment needs a third
+  template ("shared static; invalidated process-wide; not thread-safe"), or
+  a reader files it under the handle-owned one and misjudges the hazard.
+
+// --- stdlib.d.ts (appended 2026-09-14) ---
+//
+// Second binding round, part 2: the deallocator (`free`). Expected verdicts
+// for the round: accepts (`cStrlen`, `cStrcmp`, `cStrncmp`, `cStrdup`,
+// `cStrerror`), one deferral (`cFree`), STA1119s (all refusals).
+
+- **The binding's only declaration defers.** Forced by `cFree`
+  (`_malloc.h:56`): `HeapBlock` is a well-formed branded pointer (table
+  type, docs/FFI.md §2), so the landed gate answers not-yet STA1217 (step 6
+  ownership, `extern.ts:233-244`), not a never-code — the file's single
+  declaration is correct-by-construction and uncompilable until step 6.
+  `void` here is the genuine C `void` return, so §4's value-to-`void`
+  absolute does not touch it. REQUIREMENT: none for the generator (the
+  deferral IS the design); noted so the round's expected verdicts read
+  "deferred", not "failed" — and so step 6 knows `free` is its first
+  customer.
+- **Use-after-free / double-free is the second consume-semantics instance.**
+  Forced by `cFree`: after `free` the TS-side `HeapBlock` is dangling and a
+  second `cFree` on it is undefined behavior, yet nothing (types, lint,
+  runtime) stops either — the `sqliteClose` shape exactly (`free(NULL)`'s
+  no-op is the only benign case, and it needs no spelling). REQUIREMENT:
+  same as the close bullet (ownership comment states post-success
+  invalidity; affinity/consume stays out of v0).
+- **Allocator returns have no spelling from either side.** Forced by the
+  `malloc`-as-`CStringOwned` refusal (stdlib.d.ts refusal 2,
+  `_malloc.h:54`): `void*` has no ABI row (STA1119 catch-all), AND the only
+  ownership-carrying return spelling is refused as parameter-only (STA1119,
+  `extern.ts:221-229`) — so an allocating return is refused twice, with no
+  path between the refusals. REQUIREMENT: a future allocator-return kind
+  (an `Owned<T>` brand? a return-transfer row?) or allocators stay refused
+  permanently; the two STA1119s must not be read as "pick the other one".
+
+// --- Gaps found in FFI.md, second round (appended 2026-09-14; doc silent,
+// nothing invented) ---
+
+- **No `size_t` row in the ABI table.** §2's table (lines 71-80) maps
+  `number` → `double` and notes the `i32` refinement, but `size_t` (the
+  `strlen` return, every counted bound) appears nowhere: silent on width,
+  signedness, and the >2^53 story. REQUIREMENT: add the row or the refusal
+  before the generator meets `string.h`.
+- **"One convention per declaration" is gate behavior without a doc line.**
+  The gate refuses stacked tags (`extern.ts:347-353`), but §4 (lines
+  179-205) says only "one of a closed set" — never "at most one tag". Both
+  the stat round and this round's `strdup` hit it. REQUIREMENT: write the
+  single-tag rule — or the stacking order — into §4.
+- **§3's out-direction names handles and allocators, not static buffers.**
+  Lines 145-152 cover handle-owned pointers and malloc'd returns; the
+  shared-static family (`strerror`, and by the same shape `asctime`,
+  `inet_ntoa`, `ctime`) is silent — no invalidation template, no
+  thread-safety caveat. REQUIREMENT: a static-buffer paragraph in §3 (copy
+  + process-wide invalidation + reentrant-alternative pointer).
+- **`void` returns get half a paragraph.** §4's second absolute (lines
+  207-214) refuses value-to-`void` mappings (STA1119) — which implies
+  genuinely-`void` functions (`free`) are fine — but no positive sentence
+  says so; a cautious generator could refuse `cFree`'s shape. Minor; one
+  sentence in §4.

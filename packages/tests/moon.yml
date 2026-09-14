@@ -65,6 +65,13 @@ tasks:
       runFromWorkspaceRoot: true
     deps:
       - 'runtime:build'
+  ffi:
+    script: 'node packages/tests/ffi/run.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    deps:
+      - 'runtime:build'
   asan:
     script: 'node packages/tests/golden/asan-gate.ts'
     toolchain: 'system'

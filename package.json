@@ -21,6 +21,7 @@
     "test:runtime": "just -f packages/runtime/justfile -d packages/runtime runtime-test",
     "test:leak": "node packages/tests/leak/run.ts",
     "test:asan": "node packages/tests/golden/asan-gate.ts",
+    "test:ffi": "node packages/tests/ffi/run.ts",
     "test:intl": "just -f packages/runtime/justfile -d packages/runtime runtime-intl && STATOR_RUNTIME=intl node packages/tests/golden/run.ts",
     "runtime": "just -f packages/runtime/justfile -d packages/runtime runtime",
     "vendor:update": "node packages/runtime/vendor/update.mjs",
