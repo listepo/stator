@@ -10,7 +10,7 @@
  * would merge), and always exits 0 — inspect the counts. Combining `--filter` with `--aggregate`
  * is a loud error for the same reason: aggregating a slice would publish it as the corpus. */
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build, BuildError, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
 import { pool, runProcess, type ProcessResult } from '../support/parallel.ts';
@@ -560,10 +560,19 @@ function loadShards(directory: string): Test262Result[] {
   if (totals.size !== 1)
     throw new Error(`shards disagree on the divisor: ${[...totals].join(', ')}`);
   const [total] = [...totals];
-  if (files.length !== total)
-    throw new Error(
-      `expected ${String(total)} shards under ${directory}, found ${String(files.length)}`,
+  if (files.length !== total) {
+    // Name the missing shard(s): a dead shard uploads no artifact, and "found 7" alone does not
+    // say which slice of the corpus the merged number is silently missing.
+    const present = new Set(
+      files.map((file) => Number(/^results-(\d+)-of-\d+\.json$/.exec(basename(file))?.[1])),
     );
+    const missing: number[] = [];
+    for (let shard = 1; shard <= (total ?? 0); shard += 1)
+      if (!present.has(shard)) missing.push(shard);
+    throw new Error(
+      `expected ${String(total)} shards under ${directory}, found ${String(files.length)} (missing shard(s): ${missing.join(', ')})`,
+    );
+  }
   const merged: Test262Result[] = [];
   const seen = new Set<string>();
   for (const file of files) {
