@@ -27,7 +27,7 @@
 // Unused ownership half: nothing here takes `CStringOwned` (no callee
 // retains a string); repeated here so the file is a drop-in without
 // cross-file references.
-type CString = string & { readonly __statorCstr: "CString" };
+type CString = string & { readonly __statorCstr: 'CString' };
 
 // --- Length and comparison: pure `CString` borrows. ---
 //

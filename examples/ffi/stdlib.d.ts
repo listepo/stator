@@ -23,7 +23,7 @@
 // Borrowed NUL-terminated UTF-8 at the FFI boundary (docs/FFI.md §3).
 // Unused in this binding (`free` takes no strings); repeated here so the
 // file is a drop-in without cross-file references.
-type CString = string & { readonly __statorCstr: "CString" };
+type CString = string & { readonly __statorCstr: 'CString' };
 
 /** Opaque heap block (`void*`). Lifetime belongs to the C allocator: born
  *  in `malloc` / `calloc` / `realloc` / `strdup` (all refused below — v0
@@ -31,7 +31,7 @@ type CString = string & { readonly __statorCstr: "CString" };
  *  dereferences it (docs/FFI.md §2). `free` is also the first binding
  *  whose C parameter is `void*`: the TS side cannot spell `void*` (no ABI
  *  row), so the binding names the ownership instead — this brand. */
-type HeapBlock = { readonly __brand: "heap_block" };
+type HeapBlock = { readonly __brand: 'heap_block' };
 
 // --- The deallocator. ---
 //

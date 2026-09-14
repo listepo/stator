@@ -16,7 +16,7 @@
 // Borrowed NUL-terminated UTF-8 at the FFI boundary (docs/FFI.md §3).
 // Unused in this binding (libm takes no strings); repeated here so the file
 // is a drop-in without cross-file references.
-type CString = string & { readonly __statorCstr: "CString" };
+type CString = string & { readonly __statorCstr: 'CString' };
 
 /** @statorExtern sqrt */
 declare function libmSqrt(x: number): number;

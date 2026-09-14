@@ -15,17 +15,17 @@
 // exists yet (Task 7.1 step 7 unstarted) — see NOTES.md ("no link pragma").
 
 // Borrowed NUL-terminated UTF-8 at the FFI boundary (docs/FFI.md §3).
-type CString = string & { readonly __statorCstr: "CString" };
+type CString = string & { readonly __statorCstr: 'CString' };
 
 /** Opaque database connection handle (`sqlite3*`). Lifetime belongs to the
  *  C library: created by `sqlite3_open_v2`, destroyed by `sqlite3_close*`.
  *  Never dereferenced by generated code (docs/FFI.md §2). */
-type SqliteDb = { readonly __brand: "sqlite3" };
+type SqliteDb = { readonly __brand: 'sqlite3' };
 
 /** Opaque prepared-statement handle (`sqlite3_stmt*`). Lifetime belongs to
  *  the C library: created by `sqlite3_prepare_v2`, destroyed by
  *  `sqlite3_finalize`. Never dereferenced by generated code. */
-type SqliteStmt = { readonly __brand: "sqlite3_stmt" };
+type SqliteStmt = { readonly __brand: 'sqlite3_stmt' };
 
 // --- Version: pure scalars, no handle needed. ---
 

@@ -16,7 +16,7 @@
 // (Task 7.1 step 7 unstarted) — see NOTES.md ("no link pragma").
 
 // Borrowed NUL-terminated UTF-8 at the FFI boundary (docs/FFI.md §3).
-type CString = string & { readonly __statorCstr: "CString" };
+type CString = string & { readonly __statorCstr: 'CString' };
 
 /** Opaque `struct stat` buffer (`struct stat*`). The caller allocates the
  *  storage; the callee fills it. Generated code never dereferences it and
@@ -25,7 +25,7 @@ type CString = string & { readonly __statorCstr: "CString" };
  *  would need to emit real field access is recorded in NOTES.md
  *  ("stat offsets"). Lifetime: stack/frame-owned on the TS side for the
  *  duration of the call; the callee retains nothing. */
-type StatBuf = { readonly __brand: "stat_buf" };
+type StatBuf = { readonly __brand: 'stat_buf' };
 
 // Ownership: `path` is a `CString` borrow (freed after return; the callee
 // retains nothing). `buf` is borrowed for the call; filled, not retained.
