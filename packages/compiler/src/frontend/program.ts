@@ -84,6 +84,13 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // removal. In `ts` mode 2790 stays a refusal, and that is not an inconsistency -- it is the
   // rule that keeps a fixed shape from being asked to lose a slot it has no encoding for.
   2790, // The operand of a 'delete' operator must be optional.
+  // A computed key of object, boolean, `null` or `undefined` type is ordinary JavaScript: the key
+  // coerces via ToPropertyKey at run time (`{}` becomes "[object Object]", `true` becomes "true").
+  // The literal takes the dynamic path on exactly that condition (`literalHasRuntimeComputedKey`
+  // in frontend/types.ts) and the emitter stores through `jsrt_dyn_index_set`, which stringifies
+  // the key. Class computed members stay refused by gateClass's own `STA1214` arm (plan.md §8
+  // step 12(d)), which this suppression never reaches.
+  2464, // A computed property name must be of type 'string', 'number', 'symbol', or 'any'.
   // The exactOptionalPropertyTypes family. The option stays ON in both modes -- turning it off is
   // program-wide and would strip the .ts half of a mixed graph of the same guarantee -- but in js
   // mode these three codes refuse ordinary JavaScript: `{ value: undefined }` for a `value?: string`
