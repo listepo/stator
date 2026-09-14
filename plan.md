@@ -722,6 +722,10 @@ Steps (detailed 2026-09-01; plan-notes 131):
    spelled when it differs from the TS name, and whether an extern declaration is legal outside a
    `.d.ts` (recommend no — keeping it in declaration files is what makes 7.3's generator's output a
    drop-in).
+
+   Steps 1–2 ✅ landed 2026-09-14 in `a732cd5`: `docs/FFI.md` (marker, ABI table, lifetimes, errors,
+   boundary rules), `docs/SUBSET.md` FFI rows, `docs/DIAGNOSTICS.md` codes STA1114–STA1121 (never)
+   + STA1217 (not-yet Phase 7). Steps 3+ (lowering) not started.
 2. **The ABI table is the contract, and it is small on purpose.** It lives in `docs/FFI.md`:
 
    | TS type | C type | Notes |
@@ -962,7 +966,7 @@ untouched. This reopens the settled C11-runtime decision (§15.4) on the creator
 **Do not merge the `.worktrees/t9-1` Zig implementation from this planning change.** The
 sources stay in that worktree until a follow-up PR.
 
-### T9.1. Runtime memory core in Zig
+### T9.1. Runtime memory core in Zig — **[D3]**
 
 In scope:
 
