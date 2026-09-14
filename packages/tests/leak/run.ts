@@ -1,5 +1,6 @@
 /* The GC hygiene test (plan.md §7 Task 4.5): compile a loop that allocates ten million objects and
- * watch the process's RSS while it runs.
+ * watch the process's RSS while it runs, then do the same for the FFI string-conversion loop
+ * (strings.ts) — one watcher, one cap, one plateau rule, a row per loop in FIXTURES below.
  *
  * This is the one test that can tell whether the rooting discipline is doing its job END TO END.
  * The frame audit (tests/unit/frames.test.ts) proves the emitted C declares the slots it writes;
@@ -28,7 +29,31 @@ import { nodePath } from '../support/node-path.ts';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
 const CLI = join(REPO, 'compiler', 'src', 'cli', 'main.ts');
-const FIXTURE = join(HERE, 'objects.ts');
+
+/** One allocation loop this test watches. `objects` is the original Task 4.5 corpus; `strings`
+ * is the FFI conversion loop (see strings.ts). Every row shares the sampling, the cap, and the
+ * plateau rule below — the per-iteration byte arithmetic that keeps each outcome ≥5x clear of
+ * the cap lives in the fixture headers. */
+interface LeakFixture {
+  /** Entry file, relative to this directory. */
+  readonly file: string;
+  /** Report label: the objects row keeps today's `leak: 10M objects — ...` line byte-for-byte. */
+  readonly label: string;
+  /** Extra Node arguments ahead of the entry for the oracle run. The strings loop calls an
+   * extern the Stator side lowers to a direct C call; under Node that name needs its JS mirror
+   * preloaded — the golden runner's `--import node_shim.mjs` pattern, pointed at the landed shim
+   * whose bindings the fixture's declarations already match. */
+  readonly nodeArgs: readonly string[];
+}
+
+const FIXTURES: readonly LeakFixture[] = [
+  { file: 'objects.ts', label: '10M objects', nodeArgs: [] },
+  {
+    file: 'strings.ts',
+    label: '10M FFI strings',
+    nodeArgs: ['--import', join(HERE, '..', 'golden', 'ts', 'extern_strstr', 'node_shim.mjs')],
+  },
+];
 
 /** A runtime that never collects needs ~320 MB for this fixture; one that does needs a few. */
 const RSS_CAP_KB = 64 * 1024;
@@ -41,8 +66,8 @@ function collecting(): boolean {
   return existsSync(flags) && readFileSync(flags, 'utf8').includes('-lgc');
 }
 
-function compile(out: string): void {
-  const build = spawnSync(process.execPath, [CLI, 'build', FIXTURE, '-o', out], {
+function compile(fixture: LeakFixture, out: string): void {
+  const build = spawnSync(process.execPath, [CLI, 'build', join(HERE, fixture.file), '-o', out], {
     encoding: 'utf8',
   });
   if (build.status !== 0) {
@@ -94,15 +119,17 @@ async function runSampled(binary: string): Promise<Run> {
 /** Node's own answer for the fixture: the loop must actually compute what it claims to, or a
  * runtime could pass the memory bound by not allocating at all. The oracle path, never the
  * compiler host — see `nodePath`. */
-function expected(): string {
-  const node = spawnSync(nodePath(), [FIXTURE], { encoding: 'utf8' });
+function expected(fixture: LeakFixture): string {
+  const node = spawnSync(nodePath(), [...fixture.nodeArgs, join(HERE, fixture.file)], {
+    encoding: 'utf8',
+  });
   if (node.status !== 0) {
     throw new Error(`node exited ${String(node.status)}: ${node.stderr.trim()}`);
   }
   return node.stdout;
 }
 
-async function main(): Promise<void> {
+async function main(fixture: LeakFixture): Promise<void> {
   if (!collecting()) {
     process.stdout.write(
       'leak: SKIPPED — the runtime was built without Boehm (plain malloc, no collection). ' +
@@ -116,7 +143,7 @@ async function main(): Promise<void> {
   let run: Run;
   try {
     const binary = join(work, 'leak');
-    compile(binary);
+    compile(fixture, binary);
     run = await runSampled(binary);
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -126,9 +153,9 @@ async function main(): Promise<void> {
   if (run.status !== 0) {
     problems.push(`the compiled program exited ${String(run.status)}`);
   }
-  if (run.stdout !== expected()) {
+  if (run.stdout !== expected(fixture)) {
     problems.push(
-      `stdout ${JSON.stringify(run.stdout)} is not Node's ${JSON.stringify(expected())}`,
+      `stdout ${JSON.stringify(run.stdout)} is not Node's ${JSON.stringify(expected(fixture))}`,
     );
   }
   if (run.samples.length < 3) {
@@ -163,7 +190,7 @@ async function main(): Promise<void> {
     process.stderr.write(`FAIL leak: ${problem}\n`);
   }
   process.stdout.write(
-    `leak: 10M objects — peak RSS ${String(peak)} KB of a ${String(RSS_CAP_KB)} KB cap, ` +
+    `leak: ${fixture.label} — peak RSS ${String(peak)} KB of a ${String(RSS_CAP_KB)} KB cap, ` +
       `${String(run.samples.length)} samples, ${problems.length === 0 ? 'plateau' : 'FAILED'}\n`,
   );
   if (problems.length > 0) {
@@ -171,4 +198,6 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+for (const fixture of FIXTURES) {
+  await main(fixture);
+}
