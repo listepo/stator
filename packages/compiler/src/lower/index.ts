@@ -2437,13 +2437,8 @@ function lowerBlock(
   return block;
 }
 
-
 /** `receiver.concat(other)` as an HIR node — the lowering for array-literal spread. */
-function arrayConcatExpr(
-  target: Expression,
-  other: Expression,
-  span: Span,
-): Expression {
+function arrayConcatExpr(target: Expression, other: Expression, span: Span): Expression {
   const shape = ARRAY_OPS.concat;
   const type: HType = shape.result === 'self' ? target.type : hUnknown(false);
   return { kind: 'array-op', type, span, op: 'concat', target, args: [other] };
@@ -2479,7 +2474,13 @@ function lowerArrayLiteralExpression(
   const segments: Array<{ elems: Expression[] } | { spread: Expression }> = [];
   for (const element of node.elements) {
     if (ts.isSpreadElement(element)) {
-      const spread = lowerExpression(element.expression, sourceFile, checker, bindings, diagnostics);
+      const spread = lowerExpression(
+        element.expression,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
       if (spread === null) {
         return null;
       }
@@ -4168,40 +4169,40 @@ function lowerExpression(
         // emitter look for a method that class does not own.
         const owner = declaringClassName(obj, propName, checker);
         if (owner !== null) {
-        // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
-        // which is sound for the same reason a field slot is: a subclass's method table begins
-        // with its base's, in the base's order.
-        const slot = target.type.methods.findIndex((m) => m.name === propName);
-        if (slot < 0) {
-          diagnostics.push(
-            diagnosticFromNode(
-              expr,
-              sourceFile,
-              'STA4067',
-              'internal',
-              'ts',
-              `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
-            ),
-          );
-          return null;
-        }
-        const call: MethodCall = {
-          kind: 'method-call',
-          type: typeAt(node, checker, bindings),
-          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-          target,
-          className: owner,
-          method: propName,
-          slot,
-          // Skipping the override is what `super` MEANS, so this one call stays direct even where
-          // every other call to the same method is virtual.
-          dispatch:
-            !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
-              ? 'virtual'
-              : 'direct',
-          args,
-        };
-        return call;
+          // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
+          // which is sound for the same reason a field slot is: a subclass's method table begins
+          // with its base's, in the base's order.
+          const slot = target.type.methods.findIndex((m) => m.name === propName);
+          if (slot < 0) {
+            diagnostics.push(
+              diagnosticFromNode(
+                expr,
+                sourceFile,
+                'STA4067',
+                'internal',
+                'ts',
+                `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
+              ),
+            );
+            return null;
+          }
+          const call: MethodCall = {
+            kind: 'method-call',
+            type: typeAt(node, checker, bindings),
+            span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+            target,
+            className: owner,
+            method: propName,
+            slot,
+            // Skipping the override is what `super` MEANS, so this one call stays direct even where
+            // every other call to the same method is virtual.
+            dispatch:
+              !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
+                ? 'virtual'
+                : 'direct',
+            args,
+          };
+          return call;
         }
       }
     }
