@@ -143,7 +143,7 @@ import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, isFunctionLike, RECEIVER_NAME } from './captures.ts';
-import { Scope, resetShadowCounter } from './scope.ts';
+import { Scope } from './scope.ts';
 
 /* What HIR name each source declaration ended up with (plan.md §8 step 14).
  *
@@ -239,14 +239,6 @@ export function lowerProgram(
   const statements: Statement[] = [];
   functionNesting = 0;
   moduleAwaits = false;
-  // Fresh-process parity: spawn-per-fixture callers got new module state for free, but in-process
-  // callers (golden/subset/test262 runners) reuse this module across programs. A leaked
-  // `immutableSelfBindings` entry miscompiled `block_scope.js` after `named_function_expression.js`
-  // (spurious STA4020 on `inner += 1`); the counters only rename temps, and resetting them keeps
-  // emitted C identical for identical input either way.
-  immutableSelfBindings.clear();
-  bindTempId = 0;
-  resetShadowCounter();
   const entry = files.at(-1);
   if (entry === undefined) {
     throw new Error('lowerProgram requires at least one file');
@@ -1030,14 +1022,7 @@ function lowerDeclarationList(
     if (!lowered) {
       return null;
     }
-    // A declaration's anonymous function carries the DECLARATOR's source spelling as its display
-    // name, while the binding takes the HIR name (plan.md §8 step 17): `const f = () => ...`
-    // prints `[Function: f]` even when this `f` shadows an outer one, following the rule function
-    // declarations already keep (`fn.name` holds the source spelling). A named function expression
-    // keeps its own name, which is what Node prints for it.
-    const named =
-      lowered.kind === 'function' && lowered.name === undefined ? { ...lowered, name } : lowered;
-    value = maybeBoundary(named, type, decl.initializer, sourceFile);
+    value = maybeBoundary(lowered, type, decl.initializer, sourceFile);
   }
 
   const stmt: Declaration = {

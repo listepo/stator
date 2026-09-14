@@ -76,7 +76,7 @@ tasks:
       - 'compiler:dupes'
       - 'tests:typecheck'
       - 'runtime:build'
-      - 'tests:unit'
+      - 'tests:coverage'
       - 'tests:runtime-corpus'
       - 'tests:subset'
       - 'tests:golden'

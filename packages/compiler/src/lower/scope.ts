@@ -30,13 +30,6 @@ function shadowName(source: string): string {
   return `\u0000shadow:${source}#${String(shadowCounter)}`;
 }
 
-/** Reset per-program naming state. `lowerProgram` calls this so an in-process caller compiling
- * several programs in one process (golden/subset/test262 runners) sees the same names as
- * spawn-per-fixture callers, for whom the module state was fresh every time. */
-export function resetShadowCounter(): void {
-  shadowCounter = 0;
-}
-
 export class Scope {
   private readonly types: Map<string, HType>;
   private readonly hirNames: Map<string, string>;

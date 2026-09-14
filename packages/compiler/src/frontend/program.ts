@@ -1,5 +1,4 @@
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
@@ -114,16 +113,14 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
 
 /** Last in-process `createProgram` result for an unchanged entry.
  *
- * Keyed by absolute entry path + mode + entry CONTENT hash. v0 invalidates on bytes, not mtime:
- * test262 stages thousands of tests through a handful of slot-reused temp paths, so (path, mtime)
- * can repeat for different contents on a coarse-tick filesystem and serve a stale program under
- * the wrong test's name (plan-notes 245). A dep edit without an entry touch still does not bust
- * the cache — no runner does that mid-run; a watch daemon with a full dependency set is the
- * follow-up. Custom `host` (memfs tests) always bypasses the cache. */
+ * Keyed by absolute entry path + mode + entry file mtime. v0 invalidates on entry mtime only —
+ * editing an imported dependency without touching the entry will not bust the cache. Good enough
+ * for warm second builds of the same fixture / test262 in-process loop; a watch daemon with a full
+ * dependency set is the follow-up. Custom `host` (memfs tests) always bypasses the cache. */
 interface ProgramCacheEntry {
   readonly absEntry: string;
   readonly mode: Mode;
-  readonly contentHash: string;
+  readonly mtimeMs: number;
   readonly result: {
     program: ts.Program;
     diagnostics: Diagnostic[];
@@ -147,7 +144,7 @@ export function clearProgramCache(): void {
  * runs in, since every production call passes no host.
  *
  * Unchanged re-builds of the same absolute entry+mode reuse the previous `ts.Program` when the
- * entry's bytes are unchanged (see `clearProgramCache`). */
+ * entry's mtime is unchanged (see `clearProgramCache`). */
 export function createProgram(
   entryFile: string,
   mode: Mode,
@@ -160,26 +157,24 @@ export function createProgram(
   // Custom hosts (memfs) have no meaningful disk mtime; never cache those.
   if (host === undefined) {
     const absEntry = resolve(entryFile).replace(/\\/g, '/');
-    // Hash, not mtime: one small-file read is noise against a ~380 ms frontend, and it closes
-    // the stale-hit hole for slot-reused temp paths airtightly instead of by timestamp luck.
-    let contentHash: string | undefined;
+    let mtimeMs: number | undefined;
     try {
-      contentHash = createHash('sha256').update(readFileSync(absEntry)).digest('hex');
+      mtimeMs = statSync(absEntry).mtimeMs;
     } catch {
-      contentHash = undefined;
+      mtimeMs = undefined;
     }
     if (
-      contentHash !== undefined &&
+      mtimeMs !== undefined &&
       programCache !== null &&
       programCache.absEntry === absEntry &&
       programCache.mode === mode &&
-      programCache.contentHash === contentHash
+      programCache.mtimeMs === mtimeMs
     ) {
       return programCache.result;
     }
     const result = createProgramUncached(entryFile, mode, host);
-    if (contentHash !== undefined) {
-      programCache = { absEntry, mode, contentHash, result };
+    if (mtimeMs !== undefined) {
+      programCache = { absEntry, mode, mtimeMs, result };
     }
     return result;
   }

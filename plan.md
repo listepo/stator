@@ -293,8 +293,7 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, **step 17**, and
-**steps 18–21** — the last four added by the 2026-09-14 bug hunt (plan-notes 249). The two
+What is still OPEN in this phase is **step 2a(b)/(c)** and **step 12 (c)–(f)**. The two
 shipped-construct defects the bug hunt of 2026-09-11 found (steps 15 and 16) both landed the same
 day — plan-notes 225 and 226.
 Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
@@ -546,7 +545,6 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     `tests/golden/ts/interface_shape.ts` and `tests/golden/ts/error_family.ts` match the pinned Node
     byte-for-byte; the recorded choice (docs/SUBSET.md, plan-notes 225) is DYNAMIC for an interface
     with an optional property or an index signature.
-17. ~~**A shadow-renamed function's display name leaks the HIR spelling into `console.log`**~~ ✅ **landed 2026-09-14** (plan-notes 247; evidence in [done.md](done.md) → Phase 5 step 17).
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
@@ -625,48 +623,12 @@ normalized to bytes with the raw value beside it; results appended per host; and
 **[D2] Open residue — step 7's noise floor.** The regression gate compares the geomean against the newest
 previous result for the same host and fails above `thresholdPercent: 20`. The step requires that
 threshold to sit above a **measured** spread; what has been measured is one repeat on one host
-(22.358 → 21.458 ms, **4.0%**, same commit — done.md) plus five repeats on a second host
-(21.215–22.778 ms, **7.4%** max spread — plan-notes 246), and the 20% gate stands on both with
-~3× headroom. Still open, narrowed: the Check names the machine that runs the weekly job, and
-neither host is it. **Check:** a handful of repeats of one commit
+(22.358 → 21.458 ms, **4.0%**, same commit — done.md). **Check:** a handful of repeats of one commit
 on the machine that runs the weekly job, the observed spread recorded in `plan-notes.md`, and the
 gate set from it. A gate below the noise floor fires on noise, and an alarm that fires on noise is
 one people learn to ignore — which costs more than having no gate at all.
 
-~~**Task 6.4 — Plain `test` is the gate; `test:coverage` is on-demand only.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.4.
-
-~~**Task 6.5 — Pin the oracle: the ground truth is named, never inherited from the host.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.5.
-
-~~**Task 6.6 — In-process subset and golden runners.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.6 (including the lowering-leak fix, plan-notes 242).
-
-~~**Task 6.7 — `cli.test.ts` spawns in parallel.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.7 (plan-notes 242).
-
-**Task 6.8 — Stop paying for the duplicate ASan golden pass (or prove it free).** [D3]
-
-Measured (plan-notes 244, this host): a full `test:asan` is ~0.5 s runtime-asan no-op rebuild +
-~7 s corpus + ~45–70 s golden rerun — the duplicate PASS is >85% of the cost, and per-fixture
-ASan cost is at parity with release, so no runtime-cache work can move it (object caching via
-`stale()` + `cflags.txt` already exists and is verified). The lever is the rerun policy.
-
-Steps:
-1. Owner decision, recorded like Phase 0's gate: (a) content-hash skip — rerun the ASan golden
-   pass only when (runtime archive bytes + compiler sources + fixtures + flags) differ from the
-   last recorded green, with the hash and the skip printed as evidence, never silent; or (b) move
-   the ASan golden pass to nightly, keeping `runtime-test-asan` in the gate. (a) risks a skip
-   that hides a regression — §9's core failure mode — so its hash must cover every input that can
-   change the outcome; (b) costs at-most-a-day detection lag.
-2. Implement the chosen policy; the rejected option's reason goes to `plan-notes.md`.
-3. The CI map comment and the moon `asan` task follow the choice; local `test:asan` keeps running
-   everything — the gate a human runs stays complete.
-
-**Check:** the policy is implemented; a no-change run prints its evidence (hash match + skip, or
-the nightly pointer); a runtime-source touch re-triggers the pass; full `test:asan` green.
-
-~~**Task 6.9 — Key the program cache on content, not mtime.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.9 (plan-notes 245).
-
-**Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
-
-**Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
+**Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a).
 
 ---
 
@@ -1327,19 +1289,7 @@ Standing practices:
   flags + runtime archive). Measure the trade rather than assuming it — separate TUs lose
   cross-module inlining at `-O2`, which is precisely the hole `-flto` (rung 6) fills.
 - **Compiler throughput:** reuse the `ts.Program`/checker across builds (watch mode later); if parsing/checking exceeds the §13 tripwire, move parsing to `oxc-parser` (napi) and keep the checker for types only; re-evaluate tsgo quarterly. Measured first on 2026-09-01: the `typescript` API is 8.5% of a 111,750-line build and shrinking with scale, so this is not where the time goes (plan-notes 134).
-- **The HIR verifier's scope copying WAS the front end's ceiling — fixed 2026-09-13.**
-`verifyFunction`/`verifyBlock` used to fork the whole enclosing binding map per scope (quadratic:
-190 ms at 11k lines, 3.6 s at 45k, **21.5 s at 112k**); `b5da1d1` landed the prescribed
-parent-linked scopes, and a 2026-09-14 re-measurement on scope-hostile synthetic inputs reads
-≤1 ms at 10.9k/44.9k/112.1k lines (plan-notes 248). `src/cli/build.ts`'s "it costs one tree
-walk" is true again. **Second ceiling, same shape one layer up, now scheduled: the lowering's
-`Scope.child()`/`functionScope()`** (`src/lower/scope.ts`) still duplicate the whole visible map
-per block and per function — per-line lower cost rises 22→33→63 µs/line across the same three
-sizes, and a shape experiment (3,200 tiny vs 460 big functions at equal ~16.1k lines: 99 vs
-24 µs/line) implicates the per-function copies. Same treatment (parent link; `set` writes
-innermost; `unitDeclared` sharing preserved) with the same Check shape: synthetic ms/line flat
-across sizes, golden byte-for-byte, `pnpm run ci` green — and HIR output identical for identical
-input. (plan-notes 248).
+- **The HIR verifier's scope copying is the front end's actual ceiling** — `verifyFunction` and `verifyBlock` copy the whole enclosing binding map (`new Map(bindings)`, `src/hir/verify.ts`), which is quadratic in program size: measured 190 ms at 11k lines, 3.6 s at 45k, **21.5 s at 112k** — 82% of the front end and 41% of the whole build, against 4.5 s for everything `typescript` does. A parent-linked scope (lookup walks the chain, `set` writes to the innermost) removes the copy without changing what the verifier accepts — and makes `src/cli/build.ts`'s "it costs one tree walk" true again. Owns its own Check: the pass must still reject every HIR it rejects today (plan-notes 134).
 - **Perf-regression gate in CI** (Boa's lesson: conformance work silently taxes performance ~1–2%/release without a gate). The gate is built and shipping at 20%; what is still open under Task 6.3 is the *measured* spread it must sit above, because an alarm that fires on noise costs more than no gate.
 - **Publish the conformance % and benchmarks** — the field's trust currency. Task 6.1 steps 6–8 own the number and the honesty rules that travel with it (skips counted by feature, printed beside the percentage).
 
@@ -1532,5 +1482,3 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.7** (2026-09-13): **Phase 10 card — `std`, threads↔async, parallel host compiler** (plan-notes 240). Creator-directed, not gated on Phase 8. `std` is a systems-style first-party library (docs-first), not a Node polyfill. Threads are shared-heap OS threads with a promise completion bridge onto Task 4.6's microtask queue; SAB/Atomics/Worker stay out of v0. "Rewrite the compiler with threads" means `STATOR_COMPILE_JOBS` + parallel clang/emit/lower on the existing TypeScript host — not a new compiler language. Phase 7's single-threaded FFI caveat now points here.
 
 - **v4.6** (2026-09-13): **Phase 9 / T9.1 is now a main-tree card** (plan-notes 238, 239). The runtime is C11 with a Zig memory core — C11-only reopened on the creator's direction, not measured evidence. Generated code stays C; Rust stays forbidden. The language & library survey (239) is the standing boundary so agents do not invent a second compiler language, MMTk/Rust, or Zig past the memory core. Implementation remains in `.worktrees/t9-1` until a follow-up PR; this revision is plan/docs/notes plus the mise Zig 0.16.0 pin.
-
-- **v4.8** (2026-09-14): **test-speed cards.** §9 gains Tasks 6.4–6.7 (plain-`test` gate, oracle pin, in-process runners, parallel `cli.test.ts`) plus the standing decision that Bun is not a test runner — all from the 241 measurements. 6.4 executes immediately; 6.5→6.6→6.7 in dependency order.

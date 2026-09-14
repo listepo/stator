@@ -13,7 +13,6 @@ import {
 import { arch, cpus, hostname, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { nodePath } from '../support/node-path.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
@@ -217,9 +216,7 @@ function main(): void {
     .sort();
   const expected = new Map<string, string>();
   for (const program of programs) {
-    // The benchmark oracle: ground truth output comes from `nodePath()`, while the stator
-    // build in `measureStator` stays on the compiler host (`process.execPath`).
-    const result = run(nodePath(), [join(PROGRAMS, program)]);
+    const result = run(process.execPath, [join(PROGRAMS, program)]);
     if (result.status !== 0)
       throw new Error(`Node benchmark oracle failed for ${program}: ${result.stderr.trim()}`);
     expected.set(program, result.stdout);

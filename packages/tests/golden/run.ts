@@ -11,10 +11,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool, runProcess } from '../support/parallel.ts';
-import { nodePath } from '../support/node-path.ts';
-import { build, BuildError, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = join(HERE, '..', '..');
+const CLI = join(REPO, 'compiler', 'src', 'cli', 'main.ts');
 
 /* Every fixture runs with `TZ` PINNED (plan.md §7 Task 4.2, Date step 8). Without it a local-time
  * fixture asserts what the machine's time zone happens to be, which is not a property of the
@@ -28,11 +28,6 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * Applied to BOTH sides, and to the build too so a compile-time constant fold can never see a
  * different zone from the run that checks it. */
 const PINNED_ENV = { ...process.env, TZ: 'UTC' };
-
-/* In-process `build()` reads the process environment directly — there is no spawn to carry
- * `PINNED_ENV` — so the pin has to hold here too, for the same reason: a compile-time constant
- * fold must never see a different zone from the run that checks it. */
-process.env['TZ'] = 'UTC';
 
 /* Fixtures named `intl_*` exercise the ICU feature build (Task 4.4), which is off by default and
  * may be absent on a machine entirely. They are SKIPPED unless this run links that archive, so
@@ -91,28 +86,6 @@ interface Streams {
   readonly stderr: string;
 }
 
-/* In-process compile (plan.md §9 Task 6.6): `build()` under `withDiagnosticCapture` — the
- * test262 runner's pattern. The clang link still happens, inside `build()` itself (which spawns
- * clang); only the TypeScript-host hop goes away. Throws with the same `stator build failed: ...`
- * message the old spawn produced. */
-async function buildInProcess(entry: string, out: string, mode: 'ts' | 'js'): Promise<void> {
-  let status = 0;
-  let stderr = '';
-  try {
-    ({ result: status, stderr } = await withDiagnosticCapture(() =>
-      build({ entry, out, mode, emitCOnly: false, keepC: false }),
-    ));
-  } catch (error) {
-    // The CLI renders a BuildError as exit 1 with `stator: CODE message` on stderr.
-    if (!(error instanceof BuildError)) throw error;
-    status = 1;
-    stderr = `stator: ${error.code} ${error.message}\n`;
-  }
-  if (status !== 0) {
-    throw new Error(`stator build failed: ${stderr.trim()}`);
-  }
-}
-
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
  * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
  * compile into each other's `app`. */
@@ -120,7 +93,14 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<Streams> {
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
-    await buildInProcess(path, out, mode);
+    const build = await runProcess(
+      process.execPath,
+      [CLI, 'build', path, '-o', out, `--mode=${mode}`],
+      { env: PINNED_ENV },
+    );
+    if (build.status !== 0) {
+      throw new Error(`stator build failed: ${build.stderr.trim()}`);
+    }
     const exec = await runProcess(out, [], { env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
@@ -132,9 +112,7 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<Streams> {
 }
 
 async function runNode(path: string): Promise<Streams> {
-  // The oracle, never the host: the compiler runs in-process on this host while ground truth
-  // comes from the pinned Node (or `STATOR_NODE`).
-  const result = await runProcess(nodePath(), [path], { env: PINNED_ENV });
+  const result = await runProcess(process.execPath, [path], { env: PINNED_ENV });
   if (result.status !== 0) {
     throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);
   }

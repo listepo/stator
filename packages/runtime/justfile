@@ -203,11 +203,6 @@ _runtime flavor:
       fi
     done
 
-    # Recreated, never incrementally updated: `ar r` replaces matching members but keeps
-    # stale ones, so an object removed from the source list (or dropped in by an experiment)
-    # would haunt every later link — a stale `jsrt_zig.o` once duplicated `_jsrt_array_new`
-    # archive-wide.
-    rm -f "${DIR}/libjsrt.a"
     ${AR} rcs "${DIR}/libjsrt.a" "${objs[@]}"
     # Recorded on the PHONY-equivalent recipe rather than the archive: installing bdw-gc changes
     # the answer without changing a .c file, and an archive compiled WITH Boehm linked WITHOUT

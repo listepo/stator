@@ -6,15 +6,13 @@
  *   // @code: STA1101          (required for error/not-yet)
  *   // @expected-fail: true    (pre-implementation; reported, never hidden)
  *
- * Verdicts come from in-process `explainFile` (the same function the `stator explain`
- * CLI prints as `--json`). Fixtures marked expected-fail are not
+ * Verdicts come from `stator explain --json`. Fixtures marked expected-fail are not
  * executed — they are counted, so the corpus can land before the compiler can pass it.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { explainFile } from '../../compiler/src/cli/explain.ts';
-import { pool } from '../support/parallel.ts';
+import { pool, runProcess } from '../support/parallel.ts';
 
 type Verdict = 'static' | 'dynamic' | 'error' | 'not-yet';
 
@@ -27,6 +25,7 @@ interface Directives {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
+const CLI = join(REPO, 'compiler', 'src', 'cli', 'main.ts');
 
 const VERDICTS: readonly string[] = ['static', 'dynamic', 'error', 'not-yet'];
 
@@ -71,15 +70,26 @@ async function explain(
   file: string,
   mode: 'ts' | 'js',
 ): Promise<{ verdict: string; code?: string }> {
-  // In-process (plan.md §9 Task 6.6): one `explainFile` call instead of a fresh
-  // `node …/cli/main.ts explain --json` spawn per fixture. The `explain` CLI always
-  // exits 0 with the verdict as the answer — a refusal is a result, not a throw — and
-  // `explainFile` preserves that: rejections come back as a verdict, and only a missing
-  // entry throws (which the caller reports per fixture, as the spawn failure was).
-  const result = await explainFile(file, mode);
-  return result.code === undefined
-    ? { verdict: result.verdict }
-    : { verdict: result.verdict, code: result.code };
+  const result = await runProcess(process.execPath, [
+    CLI,
+    'explain',
+    file,
+    `--mode=${mode}`,
+    '--json',
+  ]);
+  if (result.status !== 0) {
+    throw new Error(`stator explain failed (${String(result.status)}): ${result.stderr.trim()}`);
+  }
+  const parsed: unknown = JSON.parse(result.stdout);
+  if (typeof parsed !== 'object' || parsed === null || !('verdict' in parsed)) {
+    throw new Error(`stator explain --json returned no "verdict": ${result.stdout.trim()}`);
+  }
+  const { verdict } = parsed;
+  if (typeof verdict !== 'string') {
+    throw new Error('stator explain --json: "verdict" is not a string');
+  }
+  const code = 'code' in parsed && typeof parsed.code === 'string' ? parsed.code : undefined;
+  return code === undefined ? { verdict } : { verdict, code };
 }
 
 async function main(): Promise<void> {

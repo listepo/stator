@@ -180,10 +180,8 @@ function functionReports(module: Module): readonly FunctionReport[] {
   });
   return found
     .map((fn) => ({
-      // A bare arrow has no name of its own and the binding it is assigned to is a
-      // different node, so the line is what identifies it — except a declaration-assigned
-      // arrow, whose declarator spelling the lowering back-fills as the display name (step 17).
-      // Reporting a guessed name beyond that would be worse than none.
+      // An arrow has no name of its own and the binding it is assigned to is a different node, so
+      // the line is what identifies it. Reporting a guessed name would be worse than none.
       name: fn.name ?? '<anonymous>',
       line: fn.span.line,
       provenance: fn.provenance,
