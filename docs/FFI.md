@@ -147,6 +147,12 @@ Two stated answers, not accidents:
 - **Invalid UTF-8 (out).** Bytes that are not well-formed UTF-8 decode to
   U+FFFD (replacement character), one per maximal invalid subsequence — the
   rule Node's `Buffer.toString('utf8')` applies.
+- **Lone surrogates (in).** Each lone surrogate encodes as U+FFFD (standard
+  UTF-8, not WTF-8) — which makes `to_cstr∘from_cstr` a fixed point, proved by
+  the `print_ffi_strings` corpus.
+- **NULL returns.** `from_cstr(NULL)` asserts: a NULL return belongs to the
+  step-4 `@statorError null` convention, which must guard the call — the
+  converter never sees one.
 
 `CStringOwned` in return position is STA1119: a returned pointer the runtime
 must free has no known allocator (§5's asymmetry again — the doc cannot name
@@ -248,10 +254,34 @@ demands it (§15.3, §15.6):
    ambient `CString` / `CStringOwned` declarations in the stator lib.
 4. The `T**` out-param question Task 7.3's SQLite binding will force
    (STA1119 until then — §2).
-5. `docs/README.md` index and the AGENTS.md repo map do not list this file
-   yet; both live outside this task's file set and follow with the
-   implementation.
+5. ~~`docs/README.md` index and the AGENTS.md repo map do not list this file
+   yet~~ — done alongside the surface commit; both list `FFI.md` now.
 6. `docs/SUBSET.md` Types-row note still says "FFI returns are still Phase 6";
-   FFI is Phase 7 (§10) and Phase 6 is conformance/fuzzing (§9). Flagged for
-   the parent session — correcting it is outside this task's additive-only
-   edit grant.
+   FFI is Phase 7 (§10) and Phase 6 is conformance/fuzzing (§9). Left
+   deliberately: the row covers boundary-checked narrowing where Phase 6 is
+   the proof venue (differential evidence), not the feature owner — flipping
+   it would assert an undecided owner change (plan-notes 253).
+
+## 8. Task 7.2 design sketch (proposed, not approved — full text in the session report)
+
+Agent-drafted ahead of Task 7.2; normative only if scheduled. Core decisions:
+
+- **Export marker is ESM `export`, no new marker.** The C-visible set is exactly the
+  exported-function set (no second list to drift); header declares `stator_<unit>_<name>`.
+- **`--emit-header=<path.h>` + `--unit-name=<unit>`** (both `--flag=value` and
+  `--flag value` forms). With the flag, `-o` names a relocatable object (`clang -c`), no
+  `main()`; link flags print for the consumer instead of linking.
+- **Init contract:** top-level statements in Task 3.11 order become
+  `stator_init_<unit>()`, idempotent via a set-before static guard (a second `jsrt_init()`
+  would self-chain the Boehm roots hook into infinite recursion). Calling before init, or
+  from a second thread, is undefined behavior (single-threaded v0).
+- **Throws:** companion `stator_last_error()` (NULL = success) + documented zero-value
+  sentinel; never abort (libraries must not `exit()` their host; unwind-safety already
+  solved by the pending cell). Cleared on stub entry, `_Thread_local` storage.
+- **Frames:** every stub opens one `JSRT_FRAME`, pops on every exit path; args convert
+  into frame slots; stubs never `JSRT_GLOBALS_ENTER` (init owns it).
+- **Refusals (proposed, DIAGNOSTICS.md untouched):** `STA1122` class/closure/generic
+  exports, `STA1123` mutable exported state (both never-class); `STA1124` band TBD for
+  name collisions; `export default`/renames reuse `STA1214`.
+- **Tests:** `tests/ffi/` fixture + `main.c` byte-compare, double-build `cmp`
+  determinism, collision/error-path goldens, GC-hygiene loop under Boehm, ASan job.

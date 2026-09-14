@@ -113,6 +113,30 @@ uint16_t jsrt_string_char(jsrt_value v, uint32_t i);
 /* String construction from UTF-8 bytes. */
 jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len);
 
+/* FFI string conversions (docs/FFI.md §3) — the only path between a JS string and a C
+ * string. The two directions are asymmetric on purpose:
+ *
+ * - `jsrt_string_to_cstr` (TS → C) encodes the string as NUL-terminated UTF-8 in a
+ *   plain-malloc buffer the CALLER owns: `free` it after the call (the `CString` borrow),
+ *   or hand it to the callee (the `CStringOwned` transfer — the runtime never frees it).
+ *   A GC allocation cannot serve here: the collector cannot free on return, and a callee
+ *   that keeps the pointer must hold malloc memory, not collected memory. An embedded
+ *   U+0000 truncates (C string semantics); a lone surrogate encodes as U+FFFD, because
+ *   `CString` is UTF-8 at the boundary and a surrogate range encoding is not UTF-8
+ *   (`jsrt_print.c`'s encoder makes the same choice; `jsrt_shape_key`'s WTF-8 is internal
+ *   metadata, not a foreign boundary, so it differs deliberately).
+ * - `jsrt_string_from_cstr` (C → TS) copies a NUL-terminated `const char *` return into a
+ *   fresh runtime string — never wrapped, never freed, because the allocator is the
+ *   library's, not ours. Decoding is strict UTF-8 with U+FFFD per maximal invalid
+ *   subsequence (Node's `Buffer.toString('utf8')` rule), NOT the WTF-8 `from_utf8` above
+ *   accepts for source literals: surrogate-range bytes are three U+FFFDs here.
+ *
+ * Preconditions (asserted, not diagnosed — the emitter's boundary checks own the message):
+ * `s`/`v` is a string value, and `s` is non-NULL. A NULL C return is answered by the
+ * `@statorError null` convention (FFI step 4), never by this copy. */
+char *jsrt_string_to_cstr(jsrt_value v);
+jsrt_value jsrt_string_from_cstr(const char *s);
+
 /* String construction from UTF-16 code units, copied verbatim (lone surrogates included). */
 jsrt_value jsrt_string_from_units(const uint16_t *units, uint32_t len);
 

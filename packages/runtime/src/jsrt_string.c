@@ -190,6 +190,163 @@ jsrt_value jsrt_string_from_units(const uint16_t *units, uint32_t len) {
 }
 
 /* ============================================================================
+ * FFI string conversions — docs/FFI.md §3
+ * ============================================================================ */
+
+/* TS → C: a NUL-terminated UTF-8 copy in malloc memory the caller owns. Truncates at the
+ * first U+0000 (C string semantics); lone surrogates become U+FFFD, because CString is
+ * UTF-8 at the boundary and the surrogate range is not UTF-8. Astral pairs combine, so a
+ * pair costs four bytes for two units and the len*3+1 sizing still holds. */
+char *jsrt_string_to_cstr(jsrt_value v) {
+  JSString *str = as_string(v);
+  /* Worst case is three bytes per code unit: an astral PAIR takes four bytes for two units. */
+  char *out = (char *)malloc((size_t)str->length * 3 + 1);
+  if (out == NULL) {
+    jsrt_panic("out of memory: CString copy");
+  }
+  size_t w = 0;
+  for (uint32_t r = 0; r < str->length; r++) {
+    uint32_t cp = str->data[r];
+    if (cp == 0) {
+      break;
+    }
+    if (cp >= 0xD800u && cp <= 0xDBFFu && r + 1 < str->length) {
+      const uint32_t low = str->data[r + 1];
+      if (low >= 0xDC00u && low <= 0xDFFFu) {
+        cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
+        r++;
+      }
+    }
+    if (cp >= 0xD800u && cp <= 0xDFFFu) {
+      cp = 0xFFFDu; /* lone surrogate */
+    }
+    if (cp < 0x80u) {
+      out[w++] = (char)cp;
+    } else if (cp < 0x800u) {
+      out[w++] = (char)(0xC0u | (cp >> 6));
+      out[w++] = (char)(0x80u | (cp & 0x3Fu));
+    } else if (cp < 0x10000u) {
+      out[w++] = (char)(0xE0u | (cp >> 12));
+      out[w++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+      out[w++] = (char)(0x80u | (cp & 0x3Fu));
+    } else {
+      out[w++] = (char)(0xF0u | (cp >> 18));
+      out[w++] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+      out[w++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+      out[w++] = (char)(0x80u | (cp & 0x3Fu));
+    }
+  }
+  out[w] = '\0';
+  return out;
+}
+
+/* One strict UTF-8 step for the C → TS copy: *cp is the decoded code point, or U+FFFD for
+ * one ill-formed maximal subsequence, and *i advances past exactly that subpart. Always
+ * succeeds while *i < len.
+ *
+ * Strict means the WTF-8 `utf8_decode` above accepts is rejected here: the continuation
+ * bounds per starter byte throw out overlongs (C0/C1 never start, E0's second byte starts
+ * at A0, F0's at 90), surrogates (ED's second byte stops at 9F) and past-U+10FFFF (F4's
+ * stops at 8F, F5 and up never start). A byte that ends a partial sequence is reprocessed
+ * as a fresh start, and a sequence cut off by the end of input is one subpart — the two
+ * rules that make E1 80 E1 80 80 decode to U+FFFD U+4C00, exactly as Node answers. */
+static void utf8_strict_step(const unsigned char *bytes, size_t len, size_t *i, int *cp) {
+  const unsigned char b0 = bytes[*i];
+  if (b0 < 0x80u) {
+    *cp = (int)b0;
+    *i += 1;
+    return;
+  }
+  unsigned need = 0;
+  unsigned lo = 0x80u;
+  unsigned hi = 0xBFu;
+  if (b0 >= 0xC2u && b0 <= 0xDFu) {
+    need = 1;
+  } else if (b0 == 0xE0u) {
+    need = 2;
+    lo = 0xA0u;
+  } else if (b0 >= 0xE1u && b0 <= 0xECu) {
+    need = 2;
+  } else if (b0 == 0xEDu) {
+    need = 2;
+    hi = 0x9Fu;
+  } else if (b0 >= 0xEEu && b0 <= 0xEFu) {
+    need = 2;
+  } else if (b0 == 0xF0u) {
+    need = 3;
+    lo = 0x90u;
+  } else if (b0 >= 0xF1u && b0 <= 0xF3u) {
+    need = 3;
+  } else if (b0 == 0xF4u) {
+    need = 3;
+    hi = 0x8Fu;
+  } else {
+    /* 0x80-0xC1 and 0xF5-0xFF never start a sequence. */
+    *cp = 0xFFFD;
+    *i += 1;
+    return;
+  }
+  if (*i + need >= len) {
+    /* Cut off by the end of input: the rest is one maximal subpart. */
+    *cp = 0xFFFD;
+    *i = len;
+    return;
+  }
+  /* Only the FIRST continuation carries the starter's tighter bounds. */
+  for (unsigned k = 1; k <= need; k++) {
+    const unsigned char bk = bytes[*i + k];
+    const unsigned klo = k == 1 ? lo : 0x80u;
+    const unsigned khi = k == 1 ? hi : 0xBFu;
+    if (bk < klo || bk > khi) {
+      /* The subpart is b0 plus the valid continuations before k; bk reprocesses. */
+      *cp = 0xFFFD;
+      *i += k;
+      return;
+    }
+  }
+  int codepoint = 0;
+  if (need == 1) {
+    codepoint = ((int)(b0 & 0x1Fu) << 6) | (int)(bytes[*i + 1] & 0x3Fu);
+  } else if (need == 2) {
+    codepoint = ((int)(b0 & 0x0Fu) << 12) | ((int)(bytes[*i + 1] & 0x3Fu) << 6) |
+                (int)(bytes[*i + 2] & 0x3Fu);
+  } else {
+    codepoint = ((int)(b0 & 0x07u) << 18) | ((int)(bytes[*i + 1] & 0x3Fu) << 12) |
+                ((int)(bytes[*i + 2] & 0x3Fu) << 6) | (int)(bytes[*i + 3] & 0x3Fu);
+  }
+  *cp = codepoint;
+  *i += need + 1;
+}
+
+/* C → TS: copy a NUL-terminated return into a fresh runtime string. The pointer is never
+ * wrapped and never freed — its allocator is the library's, not ours, and a malloc-returning
+ * C function needs its own extern free function in the same binding (docs/FFI.md §3). */
+jsrt_value jsrt_string_from_cstr(const char *s) {
+  assert(s != NULL);
+  const size_t len = strlen(s);
+  const unsigned char *bytes = (const unsigned char *)s;
+  /* First pass: count UTF-16 code units needed. */
+  uint32_t utf16_len = 0;
+  size_t i = 0;
+  int codepoint = 0;
+  while (i < len) {
+    utf8_strict_step(bytes, len, &i, &codepoint);
+    utf16_len += utf16_units_for(codepoint);
+  }
+  size_t alloc_size = sizeof(JSString) + (size_t)utf16_len * sizeof(uint16_t);
+  JSString *str = (JSString *)jsrt_gc_alloc(alloc_size, "string");
+  str->length = utf16_len;
+  /* Second pass: decode again, this time storing. */
+  uint16_t *out_ptr = str->data;
+  i = 0;
+  while (i < len) {
+    utf8_strict_step(bytes, len, &i, &codepoint);
+    utf16_put(&out_ptr, codepoint);
+  }
+  return JSRT_BOX(JSRT_TAG_STRING, (uintptr_t)str);
+}
+
+/* ============================================================================
  * String operations — equality, comparison, and concatenation
  * ============================================================================ */
 
