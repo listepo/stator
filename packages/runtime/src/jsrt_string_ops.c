@@ -25,6 +25,12 @@
 
 static JSString *str_of(jsrt_value v) { return (JSString *)jsrt_ptr(v); }
 
+/* Maximum string length in code units: 2^29 - 24 = 536870888, matching V8's
+ * `String::kMaxLength` on 64-bit (the pinned Node's limit; plan-notes 251 A12).
+ * An earlier cap of 2^31-1 (plan-notes 203) disagreed with Node: lengths between
+ * the two caps must throw `RangeError: Invalid string length`. */
+#define JSRT_MAX_STRING_LENGTH 536870888.0
+
 /* Node's RangeError for a bad repeat count names the ORIGINAL argument value, not the truncated
  * one (`repeat(-1.5)` says `-1.5`, `repeat(1/0)` says `Infinity`), so the message renders ToString
  * of the argument. Every such rendering is ASCII, copied out through the string accessors rather
@@ -265,7 +271,7 @@ jsrt_value jsrt_string_repeat(jsrt_value s, jsrt_value n) {
     jsrt_throw_error(&jsrt_class_range_error, message);
     return JSRT_UNDEFINED;
   }
-  if (count * (double)str->length > 2147483647.0) {
+  if (count * (double)str->length > JSRT_MAX_STRING_LENGTH) {
     /* §22.1.3.19 step 5: the result would exceed the maximum string length. */
     jsrt_throw_error(&jsrt_class_range_error, "Invalid string length");
     return JSRT_UNDEFINED;
@@ -285,18 +291,20 @@ static jsrt_value pad_impl(jsrt_value s, jsrt_value target, jsrt_value pad, bool
   if (want <= (double)str->length) {
     return s;
   }
-  if (want > 2147483647.0) {
-    /* §22.1.3.16 (StringPad): a result past the maximum string length is a catchable RangeError. */
-    jsrt_throw_error(&jsrt_class_range_error, "Invalid string length");
-    return JSRT_UNDEFINED;
-  }
-  /* The default filler is one SPACE; an explicitly empty filler answers the string unchanged. */
+  /* The default filler is one SPACE; an explicitly empty filler answers the string unchanged.
+   * The empty-filler return precedes the cap check: Node answers `"ab"` for
+   * `"ab".padStart(536870889, "")` without throwing, so the check must not fire first. */
   const JSString *fill = pad == JSRT_UNDEFINED ? NULL : str_of(pad);
   static const uint16_t space = 0x0020;
   const uint16_t *fill_data = fill == NULL ? &space : fill->data;
   uint32_t fill_len = fill == NULL ? 1 : fill->length;
   if (fill_len == 0) {
     return s;
+  }
+  if (want > JSRT_MAX_STRING_LENGTH) {
+    /* §22.1.3.16 (StringPad): a result past the maximum string length is a catchable RangeError. */
+    jsrt_throw_error(&jsrt_class_range_error, "Invalid string length");
+    return JSRT_UNDEFINED;
   }
   uint32_t total = (uint32_t)want;
   uint32_t padding = total - str->length;

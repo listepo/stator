@@ -346,6 +346,13 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
   const fields: HField[] = [];
   const methods: HField[] = [];
   for (const property of checker.getPropertiesOfType(type)) {
+    // A `__proto__` data property is never a layout slot: the definition spelling
+    // `{ __proto__: v }` is the prototype setter, not an own property (plan.md §8 step
+    // 33), so a shape carrying one takes the shape table, where the lowering drops the
+    // setter entry. A METHOD named `__proto__` is an own property and keeps its table.
+    if (isProtoDataProperty(property)) {
+      return null;
+    }
     const at = property.valueDeclaration ?? property.declarations?.[0];
     // An ACCESSOR is not a slot: `o.x` on it must RUN the getter, and a layout would compile that
     // read to a slot load. Refusing the layout here is what sends the whole shape to the dynamic
@@ -377,6 +384,25 @@ function shapeTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
     return null;
   }
   return hObject(shapeName(fields, methods), fields, methods, []);
+}
+
+/** Whether `property` is an own data property spelled `__proto__`.
+ *
+ * Only the definition spelling `{ __proto__: v }` / `{ "__proto__": v }` (a non-computed
+ * PropertyAssignment) is the prototype setter; a method, an accessor pair, a shorthand and a
+ * computed key are all own properties. The checker type does not record which spelling
+ * introduced the property, so this answers the conservative half: anything that is not
+ * plainly a method forces the shape table (plan.md §8 step 33), where the lowering keeps
+ * exactly the own spellings and drops the setter one. An accessor overlaps the existing
+ * Get/SetAccessor trigger below and answers the same way either way. */
+function isProtoDataProperty(property: ts.Symbol): boolean {
+  if (property.name !== '__proto__') {
+    return false;
+  }
+  const declarations = property.declarations ?? [];
+  return (
+    !declarations.some(ts.isMethodDeclaration) && (property.flags & ts.SymbolFlags.Method) === 0
+  );
 }
 
 /** Whether `type` is an anonymous object shape that goes to the DYNAMIC representation -- a shape
@@ -444,7 +470,8 @@ export function isDynamicShape(type: ts.Type, checker: ts.TypeChecker): boolean 
       trigger ||
       (property.flags &
         (ts.SymbolFlags.Optional | ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !==
-        0;
+        0 ||
+      isProtoDataProperty(property);
   }
   return (
     trigger ||

@@ -478,6 +478,17 @@ A method is not in the object. One function is shared by every instance, with th
 as argument zero under the ordinary closure ABI. Putting methods in slots would cost one closure
 per method per object and turn every call into an indirect one.
 
+The exception is a method on an OBJECT LITERAL that captures (plan.md §8 step 36): one shared
+function cannot close over each evaluation's own environment, so every method of a literal rides
+in a hidden trailing slot, bound at construction over the definition environment. The slot names
+start with `#`, so every reflective walk (`jsrt_fixed_key_order`, `hasOwn`, the spread-order
+walks, print) already filters them -- exactly like a `#private` field -- and a stored key order
+covers them so the runtime never walks past its end. A method that captures nothing stores the
+shared constant, so identity (`o.m === o.m`) is unchanged; a method that captures stores a fresh
+closure per evaluation, so two `counter()` calls read two different `n`s. The call loads the
+instance's closure and still passes the receiver as argument zero. Class instances keep the
+shared layout above: their methods never capture per-evaluation state.
+
 ### Two orders, and why the descriptor carries both
 
 Slot order is the **layout**: which offset a field lives at, and therefore what `o.x` compiles to.

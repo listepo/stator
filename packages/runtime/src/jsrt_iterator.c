@@ -267,3 +267,27 @@ jsrt_value jsrt_iterator_next(jsrt_value itv, jsrt_value sent) {
   }
   return iterator_result(value, false);
 }
+
+/* IteratorClose for `for...of` (plan.md §8 step 34). The emitter routes every abrupt exit
+ * from a boxed loop — `break`/`return` out, a throw, a throwing step — through its fin,
+ * which calls this; `continue` and the step's own exhaustion never reach here.
+ *
+ * Only a generator has anything to run: the close resumes it with a RETURN injection, so
+ * the `finally` blocks between the parked yield and the top run exactly as a `gen.return()`
+ * call would run them. Every other box is a built-in iterator, and built-in iterators define
+ * no `return()` method — breaking out of a stored `arr.values()` and calling `next()` keeps
+ * yielding where it left off, so the close is deliberately a no-op for them (marking the box
+ * done would be the observable divergence). A close that throws (a throwing `finally`)
+ * leaves it pending for the fin, which gives the original exception precedence on the throw
+ * path, per ECMA-262 IteratorClose step 4. */
+void jsrt_iterator_close(jsrt_value itv) {
+  if (!jsrt_is_generator(itv)) {
+    return;
+  }
+  const JSRTGenerator *g = as_gen(itv);
+  /* generator_inject answers without entering the body for these two states, so calling it
+   * would only allocate the `{ value, done }` result to discard it. */
+  if (!g->done && g->state != 0) {
+    jsrt_generator_close(itv, JSRT_UNDEFINED);
+  }
+}

@@ -274,6 +274,38 @@ static char choose_quote(bool has_single, bool has_double, bool has_backtick) {
   return '\'';
 }
 
+/* The control-escape tail shared by append_quoted (string values) and append_key (quoted
+ * keys): Node escapes both identically -- short escapes, "\x0B" for VT (never "\v"), "\xXX"
+ * uppercase for every other C0 control and DEL. Quote/backslash handling stays at the call
+ * sites because the chosen quote differs per string. */
+static void append_control_escape(Buf *out, uint32_t cp) {
+  switch (cp) {
+    case '\n':
+      buf_puts(out, "\\n");
+      break;
+    case '\t':
+      buf_puts(out, "\\t");
+      break;
+    case '\r':
+      buf_puts(out, "\\r");
+      break;
+    case '\b':
+      buf_puts(out, "\\b");
+      break;
+    case '\f':
+      buf_puts(out, "\\f");
+      break;
+    case 0x0B:
+      buf_puts(out, "\\x0B");
+      break;
+    default: {
+      char hex[8];
+      snprintf(hex, sizeof hex, "\\x%02X", cp);
+      buf_puts(out, hex);
+    }
+  }
+}
+
 /* Quoting follows Node: single quotes, unless the string contains one and no double quote, and
  * backticks only when it contains both. The quote actually chosen is then the only quote that
  * needs escaping inside. */
@@ -294,29 +326,24 @@ static void append_quoted(Buf *out, const JSString *str) {
     if (c == (uint16_t)quote || c == '\\') {
       buf_putc(out, '\\');
       buf_putc(out, (char)c);
-    } else if (c == '\n') {
-      buf_puts(out, "\\n");
-    } else if (c == '\t') {
-      buf_puts(out, "\\t");
-    } else if (c == '\r') {
-      buf_puts(out, "\\r");
-    } else if (c == '\b') {
-      buf_puts(out, "\\b");
-    } else if (c == '\f') {
-      buf_puts(out, "\\f");
-    } else if (c == 0x0B) {
-      buf_puts(out, "\\v");
     } else if (c < 0x20 || c == 0x7F) {
-      char hex[8];
-      snprintf(hex, sizeof hex, "\\x%02X", c);
-      buf_puts(out, hex);
+      append_control_escape(out, c);
+    } else if (c >= 0xD800u && c <= 0xDFFFu &&
+               !(c <= 0xDBFFu && i + 1 < str->length && str->data[i + 1] >= 0xDC00u &&
+                 str->data[i + 1] <= 0xDFFFu)) {
+      /* A LONE surrogate: Node escapes it ("\ud800", lowercase hex), where the unquoted path
+       * substitutes U+FFFD (append_string) and JSON escapes it per well-formed stringify. */
+      char esc[8];
+      snprintf(esc, sizeof esc, "\\u%04x", c);
+      buf_puts(out, esc);
     } else {
       /* Hand the code unit -- with its partner, when it starts a surrogate pair -- to the same
        * UTF-8 writer the unquoted path uses, so a pair still comes out as one code point. A
        * JSString ends in a flexible member, so the stand-in is a byte array shaped like one. */
       _Alignas(JSString) unsigned char storage[sizeof(JSString) + 2 * sizeof(uint16_t)];
       JSString *piece = (JSString *)storage;
-      const bool pair = c >= 0xD800u && c <= 0xDBFFu && i + 1 < str->length;
+      const bool pair = c >= 0xD800u && c <= 0xDBFFu && i + 1 < str->length &&
+                        str->data[i + 1] >= 0xDC00u && str->data[i + 1] <= 0xDFFFu;
       piece->length = pair ? 2 : 1;
       piece->data[0] = c;
       if (pair) {
@@ -557,11 +584,6 @@ static void init_more_entry(Buf *entry, uint32_t remaining) {
 }
 
 static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
-  if (recurse > INSPECT_MAX_DEPTH) {
-    buf_puts(out, "[Array]");
-    return;
-  }
-
   const JSRTArray *a = jsrt_as_array(v);
   const uint32_t length = a->length;
   const size_t shown = length > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : length;
@@ -572,8 +594,14 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   const size_t props = jsrt_shape_property_count(a->shape);
   const size_t count = shown + (truncated ? 1 : 0) + props;
 
+  /* Emptiness first: Node prints an empty container in full past the depth cap
+   * (`[[[[]]]]` is `[ [ [ [] ] ] ]`), abbreviating only the non-empty ones. */
   if (count == 0) {
     buf_puts(out, "[]");
+    return;
+  }
+  if (recurse > INSPECT_MAX_DEPTH) {
+    buf_puts(out, "[Array]");
     return;
   }
 
@@ -673,11 +701,32 @@ static void append_key(Buf *out, const char *key) {
   }
   const char quote = choose_quote(has_single, has_double, has_backtick);
   buf_putc(out, quote);
-  for (size_t i = 0; key[i] != '\0'; i++) {
-    if (key[i] == quote || key[i] == '\\') {
-      buf_putc(out, '\\');
+  /* Keys arrive as NUL-terminated bytes (WTF-8: a lone surrogate is its 3-byte ED A0-BF 80-BF
+   * form), so this walk decodes where append_quoted reads code units. The escape set is the
+   * same one -- short escapes, "\x0B" for VT, "\xXX" for the other controls, "\uXXXX" for a
+   * lone surrogate -- because Node quotes keys exactly the way it quotes strings. */
+  for (size_t i = 0; key[i] != '\0';) {
+    const unsigned char b = (unsigned char)key[i];
+    if (b == 0xED && (unsigned char)key[i + 1] >= 0xA0 && (unsigned char)key[i + 1] <= 0xBF &&
+        ((unsigned char)key[i + 2] & 0xC0) == 0x80) {
+      const unsigned int cp = ((unsigned int)(b & 0x0F) << 12) |
+                              ((unsigned int)((unsigned char)key[i + 1] & 0x3F) << 6) |
+                              (unsigned int)((unsigned char)key[i + 2] & 0x3F);
+      char esc[8];
+      snprintf(esc, sizeof esc, "\\u%04x", cp);
+      buf_puts(out, esc);
+      i += 3;
+      continue;
     }
-    buf_putc(out, key[i]);
+    if (b == (unsigned char)quote || b == '\\') {
+      buf_putc(out, '\\');
+      buf_putc(out, (char)b);
+    } else if (b < 0x20 || b == 0x7F) {
+      append_control_escape(out, b);
+    } else {
+      buf_putc(out, (char)b);
+    }
+    i++;
   }
   buf_putc(out, quote);
 }
@@ -685,6 +734,16 @@ static void append_key(Buf *out, const char *key) {
 static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTObject *o = jsrt_as_object(v);
   const JSRTClass *cls = o->cls;
+
+  /* A boxed iterator is a cursor, not a record: Node prints the matchAll iterator's tag rather
+   * than its class (`Object [RegExp String Iterator] {}`, plan.md §8 step 30 A15). The other
+   * iterator kinds keep `Iterator {}`; their remaining-contents form is not this step. */
+  if (cls == &jsrt_class_iterator) {
+    const JSRTIterator *it = (const JSRTIterator *)o;
+    buf_puts(out, it->kind == JSRT_ITER_MATCH_ALL ? "Object [RegExp String Iterator] {}"
+                                                  : "Iterator {}");
+    return;
+  }
 
   /* A DYNAMIC object's layout lives in its shape, not its class: keys come from the shape chain,
    * values from the out-of-line slots, and insertion order is the chain reversed. Everything
@@ -704,35 +763,42 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
                                                           : NULL;
   const bool named = name != NULL;
 
-  if (recurse > INSPECT_MAX_DEPTH) {
-    /* `[Deep]`, not `[Object]`: past the cap Node still names the constructor it stopped at --
-     * and for a literal, which has no constructor, that name IS `Object`. */
-    buf_putc(out, '[');
-    buf_puts(out, named ? name : "Object");
-    buf_putc(out, ']');
-    return;
-  }
-
   /* A `#private` field HAS a slot -- it is on the instance like any other field -- but
-   * `util.inspect` does not show it, so neither does this. A leading '#' is the whole test, and it
-   * is unambiguous: a class field's name is an identifier by construction, and no identifier can
-   * start with one. Printing therefore walks the visible slots, not every slot. */
+   * `util.inspect` does not show it, so neither does this. The '#' filter lives in
+   * jsrt_fixed_key_order, which print and reflection share; what the walk below reads is already
+   * the visible slots, in enumeration order. */
   size_t count = 0;
+  /* The fixed walk partitions the descriptor the same way Object.keys does (integer indices
+   * first, then insertion order -- plan.md §8 step 28), so console.log and the keys walk cannot
+   * disagree. `#private` slots never enter either order. */
+  uint32_t *fixed_order = NULL;
   if (dyn != NULL) {
     count = jsrt_shape_property_count(dyn->shape);
   } else {
-    for (uint32_t i = 0; i < cls->field_count; i++) {
-      if (cls->fields[i][0] != '#') {
-        count++;
-      }
-    }
+    uint32_t fixed_count = 0;
+    fixed_order = jsrt_fixed_key_order(cls, &fixed_count);
+    count = fixed_count;
   }
+
+  /* Emptiness first, like inspect_array: Node prints `{}` and `C {}` in full past the depth cap
+   * (plan.md §8 step 30 A11), abbreviating only the non-empty ones below. */
   if (count == 0) {
+    free(fixed_order);
     if (named) {
       buf_puts(out, name);
       buf_putc(out, ' ');
     }
     buf_puts(out, "{}");
+    return;
+  }
+
+  if (recurse > INSPECT_MAX_DEPTH) {
+    /* `[Deep]`, not `[Object]`: past the cap Node still names the constructor it stopped at --
+     * and for a literal, which has no constructor, that name IS `Object`. */
+    free(fixed_order);
+    buf_putc(out, '[');
+    buf_puts(out, named ? name : "Object");
+    buf_putc(out, ']');
     return;
   }
 
@@ -750,13 +816,12 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
     }
     free(links);
   } else {
-    for (uint32_t i = 0; i < cls->field_count; i++) {
-      /* Insertion order, not slot order: the two differ whenever the layout came from a type the
-       * literal did not write in that order (jsrt_value.h, JSRTClass::key_order). */
-      const uint32_t slot = jsrt_class_key_slot(cls, i);
-      if (cls->fields[slot][0] == '#') {
-        continue;
-      }
+    /* fixed_order holds exactly the visible slots in enumeration order, so this loop runs `count`
+     * times with no skips -- `next` and `count` agree at emit_braced. */
+    for (size_t i = 0; i < count; i++) {
+      /* Enumeration order, not slot order: integer indices first, then the insertion sequence
+       * the layout's key_order records (jsrt_value.h, JSRTClass::key_order). */
+      const uint32_t slot = fixed_order[i];
       Buf *entry = &entries[next++];
       buf_init(entry);
       /* A class field's name is an identifier by construction, but an object literal's is only a
@@ -767,6 +832,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
       buf_puts(entry, ": ");
       inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
     }
+    free(fixed_order);
   }
 
   /* The name and the space after it are part of the prefix Node measures, along with the `{`. A
@@ -793,23 +859,29 @@ static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTMap *m = jsrt_as_map(v);
   const bool is_map = m->cls == &jsrt_class_map;
 
+  char base[32];
+  snprintf(base, sizeof base, "%s(%u)", m->cls->name, m->size);
+
+  /* Emptiness first, like inspect_array: Node prints `Map(0) {}` in full past the depth cap
+   * (plan.md §8 step 30 A11), abbreviating only the non-empty ones below. */
+  if (m->size == 0) {
+    buf_puts(out, base);
+    buf_putc(out, ' ');
+    buf_puts(out, "{}");
+    return;
+  }
+
   if (recurse > INSPECT_MAX_DEPTH) {
     buf_puts(out, is_map ? "[Map]" : "[Set]");
     return;
   }
 
-  char base[32];
-  snprintf(base, sizeof base, "%s(%u)", m->cls->name, m->size);
   buf_puts(out, base);
   buf_putc(out, ' ');
 
   const size_t shown = m->size > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : m->size;
   const bool truncated = m->size > shown;
   const size_t count = shown + (truncated ? 1 : 0);
-  if (count == 0) {
-    buf_puts(out, "{}");
-    return;
-  }
 
   Buf *entries = alloc_entries(count);
   size_t next = 0;
@@ -1840,6 +1912,20 @@ jsrt_value jsrt_to_string(jsrt_value v) {
      * original span carried into the binary. Until then this is deliberately shaped like a
      * function rather than "[object Object]", and differs from Node. */
     snprintf(buf, sizeof buf, "function %s() { [native code] }", jsrt_as_closure(v)->name);
+  } else if (jsrt_is_map_or_set(v)) {
+    /* `Symbol.toStringTag` is "Map"/"Set", so `Object.prototype.toString` -- which is what
+     * ToString reaches through ToPrimitive here -- answers `[object Map]` (plan.md §8 step 29). */
+    snprintf(buf, sizeof buf, "[object %s]",
+             jsrt_as_object(v)->cls == &jsrt_class_map ? "Map" : "Set");
+  } else if (jsrt_is_regexp(v)) {
+    /* `RegExp.prototype.toString`: `/source/flags` off the normalized strings (§22.2.6.13). */
+    return jsrt_regexp_to_string(v);
+  } else if (jsrt_is_date(v)) {
+    /* `Date.prototype.toString` form (§21.4.4.41); "Invalid Date" for a non-finite time value. */
+    return jsrt_date_to_string(v);
+  } else if (jsrt_is_error(v)) {
+    /* `Error.prototype.toString`: `name: message` with the empty-side rules (§20.5.3.4). */
+    return jsrt_error_to_string(v);
   } else if (jsrt_is_promise(v)) {
     snprintf(buf, sizeof buf, "[object Promise]");
   } else {

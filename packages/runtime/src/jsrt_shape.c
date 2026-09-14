@@ -53,9 +53,10 @@ static uint32_t shape_slot_count(const JSRTShape *shape) {
 }
 
 /* A property is an array index exactly when its canonical decimal spelling round-trips through
- * ToUint32 and is not 2^32-1.  Shape keys are UTF-8, so non-ASCII bytes and any leading zero make
- * the key an ordinary string. */
-static bool array_index_value(const char *key, uint32_t *value) {
+ * ToUint32 and is not 2^32-1. Shape keys are UTF-8, so non-ASCII bytes and any leading zero make
+ * the key an ordinary string. Fixed-shape enumeration (jsrt_fixed_key_order below) shares this
+ * test: a string-literal key like "1" in a fixed layout is an index exactly as it is in a shape. */
+bool jsrt_key_is_array_index(const char *key, uint32_t *value) {
   if (key[0] == '\0' || (key[0] == '0' && key[1] != '\0')) {
     return false;
   }
@@ -77,8 +78,8 @@ static bool array_index_value(const char *key, uint32_t *value) {
 static bool property_before(const JSRTShape *a, const JSRTShape *b) {
   uint32_t ai = 0;
   uint32_t bi = 0;
-  const bool a_is_index = array_index_value(a->key, &ai);
-  const bool b_is_index = array_index_value(b->key, &bi);
+  const bool a_is_index = jsrt_key_is_array_index(a->key, &ai);
+  const bool b_is_index = jsrt_key_is_array_index(b->key, &bi);
   if (a_is_index != b_is_index) {
     return a_is_index;
   }
@@ -125,6 +126,54 @@ const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t cou
     links[j] = current;
   }
   return links;
+}
+
+/* Whether slot `a` enumerates before slot `b` of the same fixed layout. Canonical array-index
+ * keys come first in ascending numeric order; ordinary keys never move relative to each other,
+ * so the sort below is stable by construction and needs no tie-breaker (two distinct canonical
+ * index spellings cannot share a value). */
+static bool fixed_before(const JSRTClass *cls, uint32_t a, uint32_t b) {
+  uint32_t ai = 0;
+  uint32_t bi = 0;
+  const bool a_is_index = jsrt_key_is_array_index(cls->fields[a], &ai);
+  const bool b_is_index = jsrt_key_is_array_index(cls->fields[b], &bi);
+  if (a_is_index != b_is_index) {
+    return a_is_index;
+  }
+  return a_is_index && ai < bi;
+}
+
+uint32_t *jsrt_fixed_key_order(const JSRTClass *cls, uint32_t *count_out) {
+  const uint32_t n = cls->field_count;
+  /* Visible slots in insertion (key_order) sequence first; the partition below only reorders. */
+  uint32_t *order = (uint32_t *)malloc((size_t)(n == 0 ? 1 : n) * sizeof(uint32_t));
+  if (order == NULL) {
+    jsrt_panic("out of memory: fixed object keys");
+  }
+  uint32_t m = 0;
+  if (cls->fields != NULL) {
+    for (uint32_t i = 0; i < n; i++) {
+      const uint32_t slot = jsrt_class_key_slot(cls, i);
+      const char *key = slot < n ? cls->fields[slot] : NULL;
+      /* `#private` slots are storage, not properties -- every reflective walk filters them,
+       * and the filter lives here once rather than in each caller. */
+      if (key != NULL && key[0] != '#') {
+        order[m++] = slot;
+      }
+    }
+  }
+  /* Stable insertion sort, field-count-sized like the shape walk above. */
+  for (uint32_t i = 1; i < m; i++) {
+    const uint32_t current = order[i];
+    uint32_t j = i;
+    while (j > 0 && fixed_before(cls, current, order[j - 1])) {
+      order[j] = order[j - 1];
+      j--;
+    }
+    order[j] = current;
+  }
+  *count_out = m;
+  return order;
 }
 
 static JSRTDynObject *as_dynobj(jsrt_value v, const char *op) {
@@ -414,10 +463,10 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
     /* An INDEX test, not a decimal parse: `strtoul` accepts a sign and leading zeros, so `'01' in
      * a`, `'+1' in a` and `'-0' in a` all answered `true` where Node answers `false`. The canonical
-     * spelling `array_index_value` is the one test the rest of this file uses. */
+     * spelling `jsrt_key_is_array_index` is the one test the rest of this file uses. */
     uint32_t index = 0;
     answer = strcmp(k, "length") == 0 ||
-             (array_index_value(k, &index) && index < jsrt_as_array(obj)->length);
+             (jsrt_key_is_array_index(k, &index) && index < jsrt_as_array(obj)->length);
   }
   if (!answer) {
     answer = jsrt_has_prop(obj, k);
@@ -555,7 +604,7 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
      * the same gap gateArrayLiteral names for `[1, , 3]`). `length` is non-configurable, which is
      * a different refusal the same absence blocks from being spelled honestly. */
     if (strcmp(k, "length") == 0 ||
-        (array_index_value(k, &index) && index < jsrt_as_array(obj)->length)) {
+        (jsrt_key_is_array_index(k, &index) && index < jsrt_as_array(obj)->length)) {
       jsrt_panic("STA2007: an array element cannot be deleted; planned for Phase 5 (array holes)");
     }
   } else if (!has_prop_table(obj)) {

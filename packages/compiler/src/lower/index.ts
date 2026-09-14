@@ -243,6 +243,41 @@ export function lowerSourceFile(
  * the merged program an async module (Phase 5 step 9). */
 let functionNesting = 0;
 
+/** The operators that coerce both operands through ToNumber (docs/NUMERIC.md §6.3): `-`
+ * `*` `/` `%` and `**`. `+` concatenates on strings and the relational, equality and bitwise
+ * operators dispatch at runtime — none of them is a coercion, so none of them comes here. */
+const COERCING_ARITHMETIC: ReadonlySet<BinaryOperator> = new Set(['-', '*', '/', '%', '**']);
+
+/** A `binary-op` whose result the checker could not type, because js mode declined to refuse
+ * the program (plan.md §8 step 37): on a suppressed TS2362/TS2363 the checker's error type maps
+ * to Unknown, which the verifier's STA4013 would report as an internal error, while arithmetic on
+ * coerced operands always answers a number. The operands keep their true types — the verifier
+ * admits the coercible primitives (`string`, `boolean`, `null`, `undefined`) there, since the
+ * emitter coerces every arithmetic operand through `jsrt_to_number` regardless of its static
+ * type, and that coercion is spec-exact for exactly those four (step 27's StringNumericLiteral
+ * grammar, `true`→1, `null`→0, `undefined`→NaN; a primitive cannot carry a `valueOf` to run, so
+ * no user code hides behind them). Restamping an operand instead would break the verifier's
+ * STA4010 identifier rule, which pins every identifier use to its binding's type. The gate
+ * refuses every composite operand (an object reaches ToPrimitive, which runs user code), and
+ * bigint never reaches here (the checker's TS2365 is not suppressed). In ts mode the checker
+ * stops the build before lowering, so the repair branch never fires there. */
+function arithmeticBinOp(
+  operator: BinaryOperator,
+  left: Expression,
+  right: Expression,
+  span: Expression['span'],
+  fallback: HType,
+): BinaryOp {
+  return {
+    kind: 'binary-op',
+    type: COERCING_ARITHMETIC.has(operator) && fallback.kind === 'unknown' ? H_NUMBER : fallback,
+    span,
+    operator,
+    left,
+    right,
+  };
+}
+
 /** HIR names of named-function-expression self bindings; assignment is a TypeError. */
 const immutableSelfBindings = new Set<string>();
 /** Optional-chain cut points (plan.md §8 step 24): the TS node whose lowered value the enclosing
@@ -1885,14 +1920,16 @@ function assignmentParts(
         // NOT H_NUMBER: `+=` is the `+` operator, so `s += 1` on a string is a string. Asking the
         // checker for the type of the whole `x += e` is the only answer that holds for all five
         // compound operators — the verifier rejected the hardcoded number, correctly.
-        return {
-          kind: 'binary-op',
-          type: typeAt(expr, checker, bindings),
-          span: current.span,
+        // `arithmeticBinOp` repairs the coercing four (`-=`, `*=`, `/=`, `%=`, `**=`): a suppressed
+        // TS2362 lets a statically-known primitive reach them, and the emitter coerces it through
+        // `jsrt_to_number` exactly as the binary spelling does (plan.md §8 step 37).
+        return arithmeticBinOp(
           operator,
-          left: current,
+          current,
           right,
-        };
+          current.span,
+          typeAt(expr, checker, bindings),
+        );
       });
     }
     const logicalAssign = LOGICAL_ASSIGN_OPERATORS.get(expr.operatorToken.kind);
@@ -2043,17 +2080,12 @@ function memberAssignment(
       return undefined;
     } else if (compound !== undefined) {
       const right = lowerExpression(expr.right, sourceFile, checker, bindings, diagnostics);
+      // The identifier path's `arithmeticBinOp`, for the same suppressed TS2362: a member holding
+      // a statically-known primitive coerces through `jsrt_to_number` (plan.md §8 step 37).
       value =
         right === null
           ? null
-          : {
-              kind: 'binary-op',
-              type: typeAt(expr, checker, bindings),
-              span,
-              operator: compound,
-              left: current,
-              right,
-            };
+          : arithmeticBinOp(compound, current, right, span, typeAt(expr, checker, bindings));
     } else if (logicalAssign !== undefined) {
       const right = lowerExpression(expr.right, sourceFile, checker, bindings, diagnostics);
       value =
@@ -2758,6 +2790,18 @@ function lowerArrayLiteralExpression(
   return result ?? emptyArrayLiteral(literalType, span);
 }
 
+/** Whether `name` is the prototype-setter spelling: a non-computed `__proto__` written as an
+ * identifier or a string literal (plan.md §8 step 33). A computed key -- even one whose
+ * static name is `__proto__` -- is an own data property, as are shorthand, method and
+ * accessor members under the name, so none of those answers true here. */
+function isProtoSetterName(name: ts.PropertyName): boolean {
+  return (
+    !ts.isComputedPropertyName(name) &&
+    (ts.isIdentifier(name) || ts.isStringLiteral(name)) &&
+    name.text === '__proto__'
+  );
+}
+
 function staticObjectLiteralKey(name: ts.PropertyName, checker: ts.TypeChecker): string | null {
   if (ts.isIdentifier(name) || ts.isStringLiteral(name)) {
     return name.text;
@@ -3221,6 +3265,26 @@ function lowerExpression(
         diagnostics,
       );
     }
+    // A miss the checker ALSO sees as absent is js mode's suppressed TS2339, not a layout
+    // disagreement: `c.missing` on a class instance answers `undefined` in JavaScript
+    // (plan.md §8 step 37). The dynamic read resolves through the receiver's OWN descriptor at
+    // run time (`fixed_get` misses to `undefined`), so a subclass value's added field still
+    // answers — a static `undefined` would lie about those. A miss the checker says EXISTS keeps
+    // the STA4060 below: the checker proved the name is declared, so the layout lacking it is a
+    // real lowering bug. In ts mode the checker stops the build before lowering, so the dynamic
+    // branch never fires there.
+    if (
+      (target.type.kind === 'object' ? fieldSlot(target.type, field) : undefined) === undefined &&
+      checker.getPropertyOfType(checker.getTypeAtLocation(node.expression), field) === undefined
+    ) {
+      return {
+        kind: 'dyn-field-access',
+        type: hUnknown(false),
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        target,
+        field,
+      };
+    }
     const slot = slotOf(target, field, node, sourceFile, diagnostics);
     if (slot === null) {
       return null;
@@ -3555,7 +3619,15 @@ function lowerExpression(
       }
       const staticKey = staticObjectLiteralKey(property.name, checker);
       if (staticKey !== null) {
-        entries.push({ name: staticKey, value });
+        // `{ __proto__: v }` (and the quoted spelling) is the prototype setter, not an own
+        // data property (plan.md §8 step 33): the entry keeps its written position so the
+        // value still evaluates in order, and the dynamic emitter stores nothing for it. A
+        // computed key -- even `["__proto__"]` -- stays an own data property and is unmarked.
+        if (isProtoSetterName(property.name)) {
+          entries.push({ name: staticKey, value, protoSetter: true });
+        } else {
+          entries.push({ name: staticKey, value });
+        }
         continue;
       }
       if (!ts.isComputedPropertyName(property.name)) {
@@ -4165,8 +4237,7 @@ function lowerExpression(
       return logicalOp;
     }
     if (operator !== undefined) {
-      const binOp: BinaryOp = { kind: 'binary-op', type, span, operator, left, right };
-      return binOp;
+      return arithmeticBinOp(operator, left, right, span, type);
     }
     return null;
   }
@@ -4743,6 +4814,15 @@ function lowerExpression(
           };
           return call;
         }
+        // A name the class does not declare at all is js mode's suppressed TS2339, not a method
+        // the table lost: `c.missing()` answers Node's catchable `TypeError` (plan.md §8 step
+        // 37), the call twin of the dynamic read the property arm builds. The receiver still
+        // evaluates (it may run user code), then the arguments, then the throw — `nonFunctionCall`
+        // with the receiver in the callee's seat. A name the checker SAYS exists falls through:
+        // a present method the table lacks is the STA4067 disagreement below, not a suppression.
+        if (checker.getPropertyOfType(checker.getTypeAtLocation(obj), propName) === undefined) {
+          return nonFunctionCall(node, expr, target, args, sourceFile);
+        }
       }
     }
 
@@ -4787,6 +4867,13 @@ function lowerExpression(
     const args = lowerCallArguments(node, sourceFile, checker, bindings, diagnostics);
     if (args === null) {
       return null;
+    }
+    // A callee of concrete non-function type: js mode suppressed the checker's TS2349, so this
+    // call reaches lowering with a type the verifier's STA4041 would report. `fn` and Unknown
+    // call through `jsrt_call_at` (a non-function there is the documented STA2006 abort); anything
+    // else throws Node's catchable TypeError after evaluating callee and arguments in order.
+    if (callee.type.kind !== 'fn' && callee.type.kind !== 'unknown') {
+      return nonFunctionCall(node, expr, callee, args, sourceFile);
     }
     const call: CallExpr = {
       kind: 'call',
@@ -4897,6 +4984,88 @@ function lowerDynMethodCall(
     method: expr.name.text,
     args,
   };
+}
+
+/** How V8 spells a non-function callee (verified against the pinned Node): a nameable
+ * callee — identifier, property or element — by its source text (`x`, `o.m`, `fns[0]`);
+ * a call by its inner callee plus `(...)` (`getX(...)`); anything else is
+ * `(intermediate value)`. Parentheses and `!` are transparent, as they are nowhere at run
+ * time. Exotic nestings (`(c ? f : g)()()` — V8 repeats the marker per layer) fall back to one
+ * marker rather than three; the type (`TypeError`) is what programs observe. */
+function notFunctionSubject(callee: ts.Expression, sourceFile: ts.SourceFile): string {
+  let node = callee;
+  while (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
+    node = node.expression;
+  }
+  if (
+    ts.isIdentifier(node) ||
+    ts.isPropertyAccessExpression(node) ||
+    ts.isElementAccessExpression(node)
+  ) {
+    return node.getText(sourceFile);
+  }
+  // A literal or keyword callee is named by its spelling (`"s"`, `` `t` ``, `5`, `true`, `null` —
+  // verified against the pinned Node, quotes included).
+  if (
+    ts.isStringLiteral(node) ||
+    ts.isNumericLiteral(node) ||
+    ts.isBigIntLiteral(node) ||
+    ts.isNoSubstitutionTemplateLiteral(node) ||
+    node.kind === ts.SyntaxKind.TrueKeyword ||
+    node.kind === ts.SyntaxKind.FalseKeyword ||
+    node.kind === ts.SyntaxKind.NullKeyword ||
+    node.kind === ts.SyntaxKind.UndefinedKeyword
+  ) {
+    return node.getText(sourceFile);
+  }
+  if (ts.isCallExpression(node)) {
+    return `${notFunctionSubject(node.expression, sourceFile)}(...)`;
+  }
+  return '(intermediate value)';
+}
+
+/** A call whose callee the HIR types as a concrete non-function (plan.md §8 step 37): js mode
+ * suppresses the checker's TS2349, so `const x = 5; x()` reaches lowering, where the verifier's
+ * STA4041 would report it as an internal error. The honest HIR is the dynamic answer: evaluate
+ * the callee, evaluate the arguments left to right (each may run user code, and the spec runs
+ * them before the callability check), then throw Node's catchable `TypeError` through the
+ * existing `type-error` node. Sequencing is nested `,` — the same shape a source comma folds
+ * to, so every pass already treats both sides as evaluated. The verifier's STA4041 stays as the
+ * lowering invariant: mirroring its `fn`-or-Unknown rule here is what makes that code
+ * unreachable rather than merely untested. */
+function nonFunctionCall(
+  node: ts.CallExpression,
+  calleeNode: ts.Expression,
+  callee: Expression,
+  args: readonly Expression[],
+  sourceFile: ts.SourceFile,
+): Expression {
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  let sequenced: Expression = {
+    kind: 'type-error',
+    type: hUnknown(false),
+    span,
+    message: `${notFunctionSubject(calleeNode, sourceFile)} is not a function`,
+  };
+  const parts = [callee, ...args];
+  for (let index = parts.length - 1; index >= 0; index--) {
+    const part = parts[index];
+    if (part === undefined) {
+      continue;
+    }
+    // The comma's type IS the right operand's: the verifier's comma rule demands equality with
+    // it (not with the call's own type, whose implicit-any flag may differ), and every consumer
+    // reads only the unknown kind.
+    sequenced = {
+      kind: 'binary-op',
+      type: sequenced.type,
+      span,
+      operator: ',',
+      left: part,
+      right: sequenced,
+    };
+  }
+  return sequenced;
 }
 
 /** Binds every function declared directly in `statements` before any of them is lowered.

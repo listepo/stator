@@ -1,6 +1,8 @@
 // Object.keys/values/entries (Task 4.2) over all three receiver layouts: fixed-shape literals,
-// class instances (declaration order), and dynamic shapes (insertion order) -- both orders ARE
-// the spec enumeration order, because identifier keys never reorder.
+// class instances, and dynamic shapes. Ordinary string keys enumerate in insertion order on every
+// layout; canonical integer-like keys ("1", "10") partition ahead of them in ascending numeric
+// order (plan.md §8 step 28) -- including in fixed layouts, whose string-literal keys are indices
+// exactly as a shape's are.
 
 const p = { x: 1, y: 2, z: 3 };
 console.log(Object.keys(p));

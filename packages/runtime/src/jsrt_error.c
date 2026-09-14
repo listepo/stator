@@ -81,6 +81,43 @@ void jsrt_throw_error(const JSRTClass *cls, const char *message) {
   jsrt_throw(jsrt_error_new(cls, jsrt_string_from_utf8(message, strlen(message))));
 }
 
+/* `Error.prototype.toString` without the method (ECMA-262 §20.5.3.4), for `"" + err` and
+ * `` `${err}` `` (plan.md §8 step 29). `name` defaults to `"Error"` and `message` to `""`
+ * when the slot is `undefined` (an assignment the subset can spell); anything else goes
+ * through `jsrt_to_string`, which is also what makes `new Error(42).message` read `"42"`.
+ * A slot holding the error ITSELF would recurse -- pathological (`e.message = e`), and Node
+ * answers it with a stack overflow rather than a string, so no guard is bought here. */
+jsrt_value jsrt_error_to_string(jsrt_value v) {
+  JSRT_FRAME(3);
+  const JSRTObject *object = jsrt_as_object(v);
+  JSRT_LOCAL(0) = object->fields[JSRT_ERROR_SLOT_NAME];
+  JSRT_LOCAL(1) = object->fields[JSRT_ERROR_SLOT_MESSAGE];
+  if (JSRT_LOCAL(0) == JSRT_UNDEFINED) {
+    JSRT_LOCAL(0) = jsrt_string_from_utf8("Error", 5);
+  } else {
+    JSRT_LOCAL(0) = jsrt_to_string(JSRT_LOCAL(0));
+  }
+  if (JSRT_LOCAL(1) == JSRT_UNDEFINED) {
+    JSRT_LOCAL(1) = jsrt_string_from_utf8("", 0);
+  } else {
+    JSRT_LOCAL(1) = jsrt_to_string(JSRT_LOCAL(1));
+  }
+  jsrt_value out = JSRT_LOCAL(0);
+  if (jsrt_string_length(JSRT_LOCAL(0)) != 0 && jsrt_string_length(JSRT_LOCAL(1)) != 0) {
+    /* Each partial is parked before the next allocation runs: a NaN-boxed C local is invisible
+     * to the collector, so the `": "` literal and the `name + ": "` prefix each sit in a rooted
+     * slot while the following call allocates (plan-notes 222). */
+    JSRT_LOCAL(2) = jsrt_string_from_utf8(": ", 2);
+    JSRT_LOCAL(2) = jsrt_string_concat(JSRT_LOCAL(0), JSRT_LOCAL(2));
+    JSRT_LOCAL(2) = jsrt_string_concat(JSRT_LOCAL(2), JSRT_LOCAL(1));
+    out = JSRT_LOCAL(2);
+  } else if (jsrt_string_length(JSRT_LOCAL(0)) == 0) {
+    out = JSRT_LOCAL(1);
+  }
+  JSRT_FRAME_POP();
+  return out;
+}
+
 /* The answer to reading a name nothing declares. Node's wording is `<name> is not defined`, and the
  * class is the one the (b) sweep could not use until the model above existed: a ReferenceError the
  * program can CATCH, whose `name`/`message`/`instanceof` a golden can compare against Node.

@@ -573,6 +573,64 @@ jsrt_value jsrt_date_to_date_string(jsrt_value v) {
   return jsrt_string_from_utf8(text, strlen(text));
 }
 
+/* The short zone name libc reports for the instant `t` (`UTC`, `EST`, ...), for the one string
+ * form that prints it. Empty when libc cannot place the instant -- the same range where
+ * `offset_at` answers 0, so the two fallbacks agree with each other. */
+static void zone_abbrev(double t, char *out, size_t n) {
+  out[0] = '\0';
+  if (!isfinite(t)) {
+    return;
+  }
+  const double secs = floor_div(t, MS_PER_SECOND);
+  if (secs < -9.2e18 || secs > 9.2e18) {
+    return;
+  }
+  const time_t as_time = (time_t)secs;
+  struct tm parts;
+  if (localtime_r(&as_time, &parts) == NULL || parts.tm_zone == NULL) {
+    return;
+  }
+  snprintf(out, n, "%s", parts.tm_zone);
+}
+
+/* The IMPLICIT Date string (§21.4.4.41 `Date.prototype.toString` form) for `"" + date` and
+ * `` `${date}` `` (plan.md §8 step 29): `Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated
+ * Universal Time)` under TZ=UTC, `Invalid Date` for a non-finite time value.
+ *
+ * KNOWN CEILING, recorded not hidden: the parenthesized long display name comes from ICU,
+ * which the default build does not have -- the explicit `.toString()`/`toTimeString()` methods
+ * stay STA1210 for exactly this reason. What libc reports is the ABBREVIATION (`UTC`, `EST`),
+ * so this special-cases exactly `UTC` (the golden pin's whole world) to Node's
+ * `Coordinated Universal Time` and prints the abbreviation elsewhere -- a documented divergence
+ * outside UTC, and strictly closer than the `[object Object]` it replaces. */
+jsrt_value jsrt_date_to_string(jsrt_value v) {
+  const double t = as_date(v)->time;
+  if (isnan(t)) {
+    return jsrt_string_from_utf8("Invalid Date", 12);
+  }
+  const double local = local_time(t);
+  const double day = floor_div(local, MS_PER_DAY);
+  const Civil c = civil_from_days(day);
+  char year[10];
+  write_year(year, sizeof year, c.year);
+  const double off = offset_at(t);
+  const char sign = off < 0 ? '-' : '+';
+  const long mins = (long)(fabs(off) / MS_PER_MINUTE);
+  char zone[32];
+  zone_abbrev(t, zone, sizeof zone);
+  const char *name = zone[0] == '\0' ? "UTC" : zone;
+  if (strcmp(name, "UTC") == 0) {
+    name = "Coordinated Universal Time";
+  }
+  char text[128];
+  snprintf(text, sizeof text, "%s %s %02d %s %02d:%02d:%02d GMT%c%02ld%02ld (%s)",
+           DAYS[(size_t)floor_mod(day + 4, 7)], MONTHS[(size_t)c.month - 1], (int)c.day, year,
+           (int)floor_mod(floor_div(local, MS_PER_HOUR), 24),
+           (int)floor_mod(floor_div(local, MS_PER_MINUTE), 60),
+           (int)floor_mod(floor_div(local, MS_PER_SECOND), 60), sign, mins / 60, mins % 60, name);
+  return jsrt_string_from_utf8(text, strlen(text));
+}
+
 jsrt_value jsrt_date_to_utc_string(jsrt_value v) {
   const double t = as_date(v)->time;
   if (isnan(t)) {
@@ -652,6 +710,10 @@ static double parse_iso(const char *s, size_t len) {
   double minute = 0;
   double second = 0;
   double milli = 0;
+  /* Any nonzero digit anywhere in the fractional-seconds run, at full precision rather than
+   * truncated to milliseconds: `24:00:00.0001` is NaN in Node although its first three digits
+   * are zero (plan.md §8 step 32). */
+  bool frac_nonzero = false;
   bool has_time = false;
   if (i < len && (s[i] == 'T' || s[i] == 't')) {
     has_time = true;
@@ -666,11 +728,35 @@ static double parse_iso(const char *s, size_t len) {
         return NAN;
       }
       i += 3;
-      if (i + 4 <= len && s[i] == '.') {
-        if (!digits(s + i + 1, 3, &milli)) {
+      /* Fractional seconds: §21.4.1.32 spells exactly three digits, but V8 accepts one or more
+       * (plan.md §8 step 32). At least one digit is required; the first three set the
+       * milliseconds (one digit is tenths, so ×100; two digits ×10) and further digits are
+       * consumed and truncated, so `…00.5Z` and `…00.123456Z` are timestamps while `…00.Z` is
+       * NaN. */
+      if (i + 2 <= len && s[i] == '.') {
+        size_t j = i + 1;
+        size_t ndig = 0;
+        double frac = 0;
+        while (j < len && s[j] >= '0' && s[j] <= '9') {
+          if (s[j] != '0') {
+            frac_nonzero = true;
+          }
+          if (ndig < 3) {
+            frac = frac * 10 + (double)(s[j] - '0');
+            ndig++;
+          }
+          j++;
+        }
+        if (ndig == 0) {
           return NAN;
         }
-        i += 4;
+        if (ndig == 1) {
+          frac *= 100;
+        } else if (ndig == 2) {
+          frac *= 10;
+        }
+        milli = frac;
+        i = j;
       }
     }
   }
@@ -681,24 +767,35 @@ static double parse_iso(const char *s, size_t len) {
     const double osign = s[i] == '-' ? -1 : 1;
     double oh = 0;
     double om = 0;
-    if (i + 6 > len || !digits(s + i + 1, 2, &oh) || s[i + 3] != ':' ||
-        !digits(s + i + 4, 2, &om)) {
+    /* `+HH:MM` and the colon-less `+HHMM` V8 accepts alongside it (plan.md §8 step 32); a bare
+     * `+HH` is NaN in both spellings. Hours past 23 and minutes past 59 are NaN — the parser
+     * used to answer an offset no clock keeps. */
+    if (i + 6 <= len && digits(s + i + 1, 2, &oh) && s[i + 3] == ':' &&
+        digits(s + i + 4, 2, &om)) {
+      i += 6;
+    } else if (i + 5 <= len && digits(s + i + 1, 2, &oh) && digits(s + i + 3, 2, &om)) {
+      i += 5;
+    } else {
+      return NAN;
+    }
+    if (oh > 23 || om > 59) {
       return NAN;
     }
     offset = osign * (oh * MS_PER_HOUR + om * MS_PER_MINUTE);
-    i += 6;
   } else if (has_time) {
     /* A date-time with no offset is LOCAL time by §21.4.3.2, which slice A cannot resolve. */
     return NAN;
   }
   /* Hour 24 is midnight at the END of the day (§21.4.1.32): valid only with zero
-   * minutes, seconds and milliseconds, rolling into the next day through make_time's own
-   * arithmetic. Anything past it (`24:00:01`, `24:00:00.001`) is NaN, which is what makes
+   * minutes, seconds and fractional seconds, rolling into the next day through make_time's own
+   * arithmetic. The fraction is judged at full precision — `24:00:00.0001` is NaN in Node
+   * although its truncated milliseconds are zero (plan.md §8 step 32). Anything past it
+   * (`24:00:01`, `24:00:00.001`) is NaN, which is what makes
    * `Date.parse("2024-01-01T24:00:01Z")` NaN while `24:00:00` answers midnight (plan.md §8
    * step 21d). */
   if (
     i != len || hour > 24 || minute > 59 || second > 59 ||
-    (hour == 24 && (minute != 0 || second != 0 || milli != 0))
+    (hour == 24 && (minute != 0 || second != 0 || frac_nonzero))
   ) {
     return NAN;
   }

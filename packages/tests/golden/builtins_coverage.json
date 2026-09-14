@@ -278,7 +278,7 @@
     "setMinutes": ["ts/date_local.ts"],
     "setSeconds": ["ts/date_local.ts"],
     "setMilliseconds": ["ts/date_local.ts"],
-    "toString": [],
+    "toString": ["ts/tostring_date.ts", "js/tostring_date.js"],
     "toDateString": ["ts/date_local.ts", "js/date_local.js"],
     "toTimeString": [],
     "toLocaleString": [],

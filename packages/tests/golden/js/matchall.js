@@ -1,5 +1,6 @@
 // String.prototype.matchAll in js mode. Same contract as the ts fixture:
-// do not log the iterator object.
+// the iterator object prints Object [RegExp String Iterator] {} like Node
+// (plan.md §8 step 30 A15, pinned in inspect_matchall_tag.js).
 const re = /(\d+)/g;
 for (const m of 'a1b22c'.matchAll(re)) {
   console.log(m);

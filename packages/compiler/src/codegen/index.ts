@@ -184,29 +184,18 @@ function cNameLiteral(name: string): string {
   return `"${escapeCString(name)}"`;
 }
 
-/** A C string literal's body for everything that is not a byte string: a file name in a `#line`,
- * a `file:line` location, a reference error's name, a function's own name. Same escaping rules as
- * `escapeBytes`, and the same trigraph rule, spelled once so the two cannot drift. C0 controls and
- * DEL go out octal-escaped (defense in depth, plan.md §8 step 17): a raw NUL truncates the C
- * string at the first byte (`-Wnull-character`), so no name reaching a literal may carry one. The
- * display name is what restores the printed spelling; this only keeps the emitter warning-free. */
+/** A C string literal's body for everything that is not a byte string: a field or property
+ * name, a file name in a `#line`, a `file:line` location, a reference error's name, a function's
+ * own name. Spelled once so the sites cannot drift: the value travels as WTF-8 octal escapes
+ * (the `wtf8Bytes` transport `escapeBytes` prints), so a lone surrogate in a key reaches the
+ * runtime as its three-byte form instead of coming back as U+FFFD (plan.md §8 step 30 A9) -- the
+ * same loss `wtf8Bytes` already closed for string values. C0 controls and DEL go out
+ * octal-escaped, with `\n`/`\t`/`\r` short (defense in depth, plan.md §8 step 17): a raw NUL
+ * truncates the C string at the first byte (`-Wnull-character`), so no name reaching a literal
+ * may carry one. The display name is what restores the printed spelling; this only keeps the
+ * emitter warning-free. `?` is escaped for the trigraph reason `escapeBytes` documents. */
 function escapeCString(text: string): string {
-  let result = '';
-  for (const char of text) {
-    const code = char.charCodeAt(0);
-    if (char === '\\') {
-      result += '\\\\';
-    } else if (char === '"') {
-      result += '\\"';
-    } else if (char === '?') {
-      result += '\\?';
-    } else if (code < 0x20 || code === 0x7f) {
-      result += `\\${code.toString(8).padStart(3, '0')}`;
-    } else {
-      result += char;
-    }
-  }
-  return result;
+  return escapeBytes(wtf8Bytes(text));
 }
 
 /* One emitted C function. Each HIR function becomes a `_jsrt_fn_N` with a frame of its own, plus a
@@ -229,7 +218,8 @@ interface TryFinallyScope {
   /** A try's completion code lives in a counted slot, boxed as a number, so it survives a
    * suspension between the route and the dispatch; the Map/Set for-of cleanup's comp is a raw
    * C int, which is safe only because that loop never suspends (the suspendable units box the
-   * walk into a heap iterator instead). */
+   * walk into a heap iterator instead). The boxed-iterator cleanup below is that boxed walk,
+   * so its comp is a counted slot too. */
   readonly compBoxed: boolean;
   readonly finLabel: string;
   /** `this.enclosing.length` when the try opened: a break/continue leaves the try exactly when
@@ -316,6 +306,14 @@ function keyOrderOf(expr: ObjectLiteral, layout: readonly HField[]): number[] | 
   // that shape is unreachable (a partial literal is a dynamic one), so identity is the safe answer.
   const identity = order.every((slot, i) => slot === i);
   return order.length !== layout.length || identity ? undefined : order;
+}
+
+/** The descriptor field name for an object literal's bound-method slot (plan.md §8 step 36).
+ * `#`-prefixed, so every reflective walk (`jsrt_fixed_key_order`, which print and
+ * keys/values/entries share, `hasOwn`, the spread-order walks) already filters it: a bound
+ * method is storage, not a property, exactly like a `#private` field. */
+function hiddenMethodField(method: string): string {
+  return `#method:${method}`;
 }
 
 /** Slots a dynamic literal reserves before any spread scratch: the object itself, plus the
@@ -576,6 +574,13 @@ class Emitter {
   private classIds: Map<string, number> = new Map();
   /** Class id -> enumeration order, present only for a literal whose keys are not in slot order. */
   private classKeyOrders: Map<number, number[]> = new Map();
+  /** Shape name -> (method name -> hidden instance slot) for object literals with methods
+   * (plan.md §8 step 36). A literal's methods ride in hidden trailing slots, bound per evaluation,
+   * so a direct call loads the instance's closure instead of rebuilding one over the caller's
+   * environment. Keyed by shape name rather than descriptor: every literal of one shape lays the
+   * same methods out in the same order, so the indices agree however many descriptors (key orders)
+   * the shape has. Classes never appear here -- their instances carry no per-evaluation state. */
+  private classHiddenMethods: Map<string, ReadonlyMap<string, number>> = new Map();
   /* An array literal's elements occupy a contiguous run, for the same reason a call's arguments do:
    * `jsrt_array_new` takes a pointer to the first, and every element already evaluated must stay
    * rooted while the rest are evaluated -- the allocation inside `jsrt_array_new` itself can
@@ -591,6 +596,12 @@ class Emitter {
   /* The for-of iterable's slot. Evaluated ONCE -- `for (const x of f())` calls `f` once -- and the
    * array has to stay rooted for the whole loop, since the body can allocate on every iteration. */
   private forOfSlots: Map<ForOfStatement, number> = new Map();
+  /* A boxed for-of's cleanup triple (plan.md §8 step 34): the iterator copy the fin closes,
+   * the stashed exception the throw path waits in while the close runs, and the completion
+   * code as a boxed number. All three must outlive a suspension -- a yield/await in the body
+   * pops the C frame, and the resume's goto jumps over whatever initializer a local would
+   * have had -- so they are counted slots, never C locals. */
+  private forOfCloseSlots: Map<ForOfStatement, number> = new Map();
   private slotCount: number = 0;
 
   /* Module-level bindings, which are NOT in any function's frame: a function body may read one, and
@@ -689,6 +700,7 @@ class Emitter {
     this.callSlots.clear();
     this.classes = [];
     this.classIds.clear();
+    this.classHiddenMethods.clear();
     this.slotCount = 0;
     this.globalMap = new Map();
     this.globalCount = 0;
@@ -1254,6 +1266,15 @@ class Emitter {
           this.countIterEnvSlots(stmt);
           this.forOfSlots.set(stmt, this.slotCount);
           this.slotCount++;
+          // A boxed walk closes its iterator on abrupt exit (plan.md §8 step 34): the fin
+          // reads the iterator, the stashed exception and the completion code from slots
+          // the body cannot overwrite. A bare `return` parks `undefined` in slot 0, which
+          // is this loop's iterable slot when the function returns no value, so the fin
+          // must not read the iterable slot itself.
+          if (this.forOfIsBoxed(stmt)) {
+            this.forOfCloseSlots.set(stmt, this.slotCount);
+            this.slotCount += 3;
+          }
           this.countExpression(stmt.iterable);
           this.bindSlot(stmt.binding);
           this.countBindings(stmt.body.statements);
@@ -1991,15 +2012,14 @@ class Emitter {
         }
         const id = this.enterLoop(stmt);
         this.emitIterEnvOpen(id, stmt.span);
-        if (stmt.iterable.type.kind === 'iterator') {
-          this.emitBoxedIteratorForOf(stmt, iterable, id);
-          break;
-        }
-        // A suspendable unit cannot hold loop state in its C frame: a yield/await in the body
-        // pops the frame and the resume's goto jumps over the initializer, so a C-local cursor
-        // reads back as garbage. Box the walk instead — the cursor then lives in the heap
-        // iterator, the same object a stored `arr.values()` already drives (plan-notes 153).
-        if (this.inAsync || this.inGenerator) {
+        // One predicate for both halves of the decision: counting claims the cleanup
+        // triple exactly when emission takes this arm (plan.md §8 step 34).
+        const boxed = this.forOfIsBoxed(stmt);
+        if (boxed && stmt.iterable.type.kind !== 'iterator') {
+          // A suspendable unit cannot hold loop state in its C frame: a yield/await in the body
+          // pops the frame and the resume's goto jumps over the initializer, so a C-local cursor
+          // reads back as garbage. Box the walk instead — the cursor then lives in the heap
+          // iterator, the same object a stored `arr.values()` already drives (plan-notes 153).
           const kind = stmt.iterable.type.kind;
           if (kind === 'map' || kind === 'set' || kind === 'array' || kind === 'string') {
             const box =
@@ -2014,9 +2034,11 @@ class Emitter {
               `${iterable} = jsrt_iterator_new(${iterable}, ${String(box)});`,
               stmt.span,
             );
-            this.emitBoxedIteratorForOf(stmt, iterable, id);
-            break;
           }
+        }
+        if (boxed) {
+          this.emitBoxedIteratorForOf(stmt, iterable, id);
+          break;
         }
         if (stmt.iterable.type.kind === 'map' || stmt.iterable.type.kind === 'set') {
           this.emitMapSetForOf(stmt, iterable, id);
@@ -2305,15 +2327,72 @@ class Emitter {
     this.appendLine(`${bind} = jsrt_array_new(2, ${pair});`, stmt.span);
   }
 
+  /* Whether this for-of drives a boxed iterator rather than an inlined walk: a generator
+   * (or stored iterator) always does, and a collection walk does when the unit can suspend
+   * across it. Counting and emission both ask this one predicate, so the cleanup triple is
+   * claimed exactly when the boxed arm below takes it. */
+  private forOfIsBoxed(stmt: ForOfStatement): boolean {
+    if (stmt.iterable.type.kind === 'iterator') {
+      return true;
+    }
+    if (!this.inAsync && !this.inGenerator) {
+      return false;
+    }
+    const kind = stmt.iterable.type.kind;
+    return kind === 'map' || kind === 'set' || kind === 'array' || kind === 'string';
+  }
+
+  /* A boxed-iterator walk with IteratorClose on abrupt exit (plan.md §8 step 34).
+   *
+   * A `break`, `return` or `throw` out of the body must run the iterator's `return()` — a
+   * generator's `finally` — while `continue` and exhaustion must not. The cleanup is a
+   * try/finally with no catch on the `emitMapSetForOf` shape, but with the completion code
+   * BOXED in a counted slot: unlike that loop this one suspends, so a C-local comp would not
+   * survive a yield/await between the route and the dispatch.
+   *
+   * `brk` lands just before the fin and flows through the close; `cont` sits inside the loop
+   * and never reaches it. A throw (including a throwing step, which closes too) parks its
+   * completion in the fin-throw pad, where the exception is stashed BEFORE the close runs:
+   * the close itself can throw — a throwing `finally` — and its exception must find the cell
+   * empty to overwrite while the original waits rooted. The fin then gives the ORIGINAL
+   * exception precedence (ECMA-262 IteratorClose); on the break/return path a throwing close
+   * propagates instead. */
   private emitBoxedIteratorForOf(stmt: ForOfStatement, iterable: string, id: number): void {
     const span = stmt.span;
+    const closeBase = this.forOfCloseSlots.get(stmt);
+    if (closeBase === undefined) {
+      throw new Error('boxed for-of has no close slots; countBindings missed a node');
+    }
+    const iterCopy = this.slotAt(closeBase);
+    const exc = this.slotAt(closeBase + 1);
+    const comp = this.slotAt(closeBase + 2);
     const item = `_jsrt_item_${id}`;
+    // The fin must not read the iterable slot itself: see the counting arm.
+    this.appendLine(`${iterCopy} = ${iterable};`, span);
+
+    const tryId = this.tryCount++;
+    const fin = `_jsrt_forfin_${tryId}`;
+    const finThr = `_jsrt_forfinthr_${tryId}`;
+    this.appendLine('{', span);
+    this.indent++;
+    this.appendLine(`${comp} = jsrt_number(0);`, span);
+    const scope: TryFinallyScope = {
+      compVar: comp,
+      compBoxed: true,
+      finLabel: fin,
+      enclosingDepth: this.enclosing.length - 1,
+      routes: new Map(),
+    };
+    this.tryFinallyStack.push(scope);
+    this.padStack.push(finThr);
+
     this.appendLine(`jsrt_value ${item};`, span);
     this.appendLine(`for (;;) {`, span);
     this.indent++;
     this.appendLine(`if (!jsrt_iterator_step(${iterable}, &${item})) {`, span);
     this.indent++;
     // A generator's step can throw: false then means "stop AND unwind", not "exhausted".
+    // The pad on top is the fin-throw below, so the close runs on this path too.
     this.appendLine(`if (jsrt_pending()) { goto ${this.currentPad()}; }`, span);
     this.appendLine('break;', span);
     this.indent--;
@@ -2325,7 +2404,45 @@ class Emitter {
     this.emitIterEnvCommit(id, span);
     this.indent--;
     this.appendLine('}', span);
+
+    this.padStack.pop();
+    this.usedLabels.add(fin);
+    this.appendLine(`goto ${fin};`, span);
+    if (this.usedLabels.has(finThr)) {
+      this.appendLine(`${finThr}: ;`, span);
+      this.appendLine(`${comp} = jsrt_number(1);`, span);
+      // Take BEFORE the close runs, for the reason the header comment gives.
+      this.appendLine(`${exc} = jsrt_take_exception();`, span);
+      this.appendLine(`goto ${fin};`, span);
+    }
     this.emitJumpTarget(`brk_${id}`, span);
+    this.tryFinallyStack.pop();
+    this.appendLine(`${fin}: ;`, span);
+    this.appendLine(`jsrt_iterator_close(${iterCopy});`, span);
+    this.appendLine(`if (jsrt_pending()) {`, span);
+    this.indent++;
+    this.appendLine(`if (jsrt_number_value(${comp}) == 1) {`, span);
+    this.indent++;
+    this.appendLine(`(void)jsrt_take_exception();`, span);
+    this.appendLine(`jsrt_throw(${exc});`, span);
+    this.indent--;
+    this.appendLine('}', span);
+    this.appendLine(`goto ${this.currentPad()};`, span);
+    this.indent--;
+    this.appendLine('}', span);
+    this.appendLine(
+      `if (jsrt_number_value(${comp}) == 1) { jsrt_throw(${exc}); goto ${this.currentPad()}; }`,
+      span,
+    );
+    for (const route of scope.routes.values()) {
+      this.appendLine(`if (jsrt_number_value(${comp}) == ${String(route.code)}) {`, span);
+      this.indent++;
+      route.action();
+      this.indent--;
+      this.appendLine('}', span);
+    }
+    this.indent--;
+    this.appendLine('}', span);
     this.emitIterEnvClose(id, span);
     this.enclosing.pop();
   }
@@ -3469,7 +3586,7 @@ class Emitter {
         const callee =
           expr.dispatch === 'virtual'
             ? `jsrt_method(${this.slotAt(base)}, ${expr.slot})`
-            : this.closureValue(this.methodOf(expr).fn);
+            : this.methodCallee(expr, this.slotAt(base));
         return this.finishStatement(
           parts,
           `${this.slotAt(base)} = jsrt_call(${callee}, ${1 + expr.args.length}, &${this.slotAt(base)})`,
@@ -3609,6 +3726,17 @@ class Emitter {
               (v) => `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, ${v})`,
             ) || flushed;
         });
+        // A literal's methods are bound HERE, over the definition environment (plan.md §8 step 36):
+        // each evaluation stores its own closures into the hidden trailing slots, which is what
+        // makes two `counter()` calls read two different `n`s. A method that captures nothing
+        // stores the shared constant -- the same value every instance would load -- so identity
+        // (`o.m === o.m`) is unchanged. `closureValue` is pure, so joining `parts` is exact, and
+        // the object is already in its rooted slot, so the fresh closures cannot collect it.
+        expr.methods.forEach((method, index) => {
+          parts.push(
+            `jsrt_object_set(${this.slotAt(slot)}, ${String(layout.length + index)}, ${this.closureValue(method.fn)})`,
+          );
+        });
         if (needsOrder) {
           // The repair runs after every value, as statements: the declaration opens here -- past
           // any suspension, so no park can strand it indeterminate (plan.md §8 step 15) -- and
@@ -3720,6 +3848,18 @@ class Emitter {
             parts.push(
               `jsrt_dyn_index_set(${this.slotAt(slot)}, ${keyScratch}, ${valueScratch}, NULL)`,
             );
+            continue;
+          }
+          // `{ __proto__: v }` is the prototype setter, not an own data property (plan.md §8
+          // step 33): the value evaluates in written position for its effects and nothing is
+          // stored, so the shape table never gains the key and every enumeration agrees with
+          // Node. Installing an object or null prototype would need a [[Prototype]] slot
+          // neither layout has -- that is Phase 8's prototype surface -- and own-only reads
+          // cannot observe one either way.
+          if (entry.protoSetter === true) {
+            flushed =
+              this.sequencePart(parts, entry.value, expr.span, (v) => `${scratch} = ${v}`) ||
+              flushed;
             continue;
           }
           // A spread fragment copies its whole source in the SOURCE's enumeration order, in one
@@ -4458,16 +4598,39 @@ class Emitter {
     if (this.classIds.has(name)) {
       return;
     }
-    this.classIds.set(name, this.classes.length);
-    if (order !== undefined) {
-      this.classKeyOrders.set(this.classes.length, order);
+    const id = this.classes.length;
+    this.classIds.set(name, id);
+    // A literal's methods ride in hidden trailing slots, bound per evaluation (plan.md §8 step 36):
+    // one shared function cannot close over each instance's own environment. Every literal of one
+    // shape lays the same methods out in the same order, so the indices are uniform however many
+    // descriptors the shape has -- and the call sites resolve them by shape name for the same
+    // reason. A stored key order must cover EVERY slot, hidden ones included: the runtime walks
+    // `field_count` entries through it, so a user-only order would read past its end.
+    const shapeName = shapeNameOf(expr);
+    const fields = layout.map((field) => ({ name: field.name, type: field.type, span: expr.span }));
+    if (expr.methods.length > 0) {
+      const full = [...(order ?? layout.map((_, index) => index))];
+      const hidden = new Map<string, number>();
+      expr.methods.forEach((method, index) => {
+        hidden.set(method.name, layout.length + index);
+        full.push(layout.length + index);
+        fields.push({
+          name: hiddenMethodField(method.name),
+          type: method.fn.type,
+          span: expr.span,
+        });
+      });
+      this.classKeyOrders.set(id, full);
+      this.classHiddenMethods.set(shapeName, hidden);
+    } else if (order !== undefined) {
+      this.classKeyOrders.set(id, order);
     }
     this.classes.push({
       kind: 'class-declaration',
       type: expr.type,
       span: expr.span,
       name,
-      fields: layout.map((field) => ({ name: field.name, type: field.type, span: expr.span })),
+      fields,
       methods: expr.methods,
       statics: [],
       vtable: [],
@@ -4482,6 +4645,24 @@ class Emitter {
       throw new Error(`class ${expr.className} has no method ${expr.method}`);
     }
     return method;
+  }
+
+  /** The callee a direct method call invokes. Usually the method's own closure -- a shared constant
+   * when it captures nothing, a fresh closure over the CALLER's environment otherwise. But a method
+   * on an object literal was bound at CONSTRUCTION into a hidden instance slot (plan.md §8 step 36),
+   * so rebuilding it here would close over the wrong environment: `counter().get()` read NULL and
+   * segfaulted exactly this way. The slot holds the definition-site closure (or the shared constant
+   * for a method that captures nothing), and the receiver below is still passed as argument zero.
+   * `jsrt_object_get_field` is a pure slot load -- no allocation between the load and the call --
+   * so nesting it in the call needs no extra rooted slot, exactly like the virtual arm's
+   * `jsrt_method` above. Classes never hit the hidden arm: their instances carry no per-evaluation
+   * state, so `classHiddenMethods` holds no class name. */
+  private methodCallee(expr: MethodCall, receiver: string): string {
+    const hidden = this.classHiddenMethods.get(expr.className)?.get(expr.method);
+    if (hidden !== undefined) {
+      return `jsrt_object_get_field(${receiver}, ${String(hidden)}, ${cNameLiteral(expr.method)})`;
+    }
+    return this.closureValue(this.methodOf(expr).fn);
   }
 
   /** The closure constant a method-table entry names: the implementing class's own function.

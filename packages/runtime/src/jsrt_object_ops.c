@@ -1,12 +1,13 @@
 /* Object.keys / Object.values / Object.entries (plan.md §7 Task 4.2), ECMA-262 §20.1.2.
  *
- * Two receiver layouts, one enumeration rule. A fixed-shape object's public keys are its class
- * descriptor's `fields` (private `#name` slots are filtered), already in declaration order; a
- * dynamic object's are its shape chain,
- * ordered by OrdinaryOwnPropertyKeys (canonical array-index keys numerically first, then the
- * remaining keys in insertion order). Source object literals only create identifier keys, but
- * Object.fromEntries and JSON.parse can create integer-like names, so the dynamic path must do the
- * full ordering rather than assume insertion order.
+ * Two receiver layouts, one enumeration rule (ECMA-262 OrdinaryOwnPropertyKeys): canonical
+ * array-index keys first in ascending numeric order, then the remaining string keys in insertion
+ * order. A dynamic object walks its shape chain through jsrt_shape_property_order; a fixed-shape
+ * object walks its class descriptor through jsrt_fixed_key_order, which applies the same
+ * partition -- a string-literal key like "1" in a fixed layout IS an index (plan.md §8 step 28).
+ * plan-notes 85's claim that identifier-only layouts cannot trigger the reorder was falsified by
+ * the string-literal keys note 181 landed: `{ b: 1, "1": 2, a: 3 }` is fixed and enumerates
+ * `1,b,a`.
  *
  * Anything else at the argument position is a compiler bug — the gate restricts the argument to
  * the two object layouts — and panics as one (STA4084). */
@@ -37,18 +38,21 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
   const JSRTObject *fixed = (const JSRTObject *)jsrt_ptr(v);
   const bool dynamic = jsrt_is_dynobj(v);
   const JSRTDynObject *dyn = (const JSRTDynObject *)jsrt_ptr(v);
-  const uint32_t count = dynamic ? jsrt_shape_property_count(dyn->shape) : fixed->cls->field_count;
-  const JSRTShape **links = dynamic ? jsrt_shape_property_order(dyn->shape, count) : NULL;
+  /* The dynamic walk sorts the shape chain; the fixed walk partitions the class descriptor the
+   * same way (integer indices first, then insertion order). Both arrays are malloc-owned and die
+   * with the call; free(NULL) covers the layout that did not allocate. */
+  const uint32_t shape_count = dynamic ? jsrt_shape_property_count(dyn->shape) : 0;
+  const JSRTShape **links = dynamic ? jsrt_shape_property_order(dyn->shape, shape_count) : NULL;
+  uint32_t fixed_count = 0;
+  uint32_t *fixed_order = dynamic ? NULL : jsrt_fixed_key_order(fixed->cls, &fixed_count);
+  const uint32_t count = dynamic ? shape_count : fixed_count;
 
   /* A getter can allocate or collect; the partially built result is not reachable from v. */
   JSRT_FRAME(2);
   JSRT_LOCAL(0) = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; i < count; i++) {
-    const uint32_t slot = dynamic ? links[i]->offset : jsrt_class_key_slot(fixed->cls, i);
+    const uint32_t slot = dynamic ? links[i]->offset : fixed_order[i];
     const char *key = dynamic ? links[i]->key : fixed->cls->fields[slot];
-    if (!dynamic && is_private_field(key)) {
-      continue;
-    }
     jsrt_value value = dynamic ? dyn->slots[slot] : fixed->fields[slot];
     /* An accessor's value is what its getter RETURNS: Object.values and Object.entries perform a
      * [[Get]], while Object.keys needs only the key and must not call anything. jsrt_get_prop is
@@ -58,6 +62,7 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
       value = jsrt_get_prop(v, key, NULL);
       if (jsrt_pending()) {
         free((void *)links);
+        free(fixed_order);
         JSRT_FRAME_POP();
         return JSRT_UNDEFINED;
       }
@@ -76,6 +81,7 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
     jsrt_array_push(JSRT_LOCAL(0), JSRT_LOCAL(1));
   }
   free((void *)links);
+  free(fixed_order);
   const jsrt_value result = JSRT_LOCAL(0);
   JSRT_FRAME_POP();
   return result;

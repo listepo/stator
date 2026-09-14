@@ -375,13 +375,13 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
       return gateDeclaration(node as ts.VariableDeclaration);
 
     case ts.SyntaxKind.BinaryExpression:
-      return gateBinary(node as ts.BinaryExpression, typeChecker);
+      return gateBinary(node as ts.BinaryExpression, typeChecker, mode);
 
     case ts.SyntaxKind.PrefixUnaryExpression:
-      return gatePrefixUnary(node as ts.PrefixUnaryExpression, typeChecker);
+      return gatePrefixUnary(node as ts.PrefixUnaryExpression, typeChecker, mode);
 
     case ts.SyntaxKind.PostfixUnaryExpression:
-      return gateUpdate(node);
+      return gateUpdate(node, typeChecker, mode);
 
     case ts.SyntaxKind.TypeOfExpression:
       return { kind: 'accept' };
@@ -1173,7 +1173,45 @@ export function brandDeclaringClass(
     : undefined;
 }
 
-function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): GateResult {
+function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
+  // Arithmetic that coerces (`- * / % **` and the compounds that fold to them): a composite
+  // operand reaches ToPrimitive, which runs user `valueOf`/`toString` — the dynamic tier's work,
+  // not the emitter's `jsrt_to_number` (which only answers NaN there). Primitives coerce without
+  // user code (`"5" * 1` is 5, `true * 2` is 2, `null * 2` is 0, `undefined * 1` is NaN), so the
+  // verifier admits them and they never reach this refusal; `+` is exempt because it concatenates
+  // rather than coerces (plan.md §8 step 37). In `ts` mode the checker's own TS2362/TS2363 owns
+  // every one of these programs, so refusing here too would report one mistake twice — and
+  // `explain` would answer not-yet where the build answers error.
+  if (
+    mode === 'js' &&
+    (bin.operatorToken.kind === ts.SyntaxKind.MinusToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.AsteriskToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.SlashToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.PercentToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.MinusEqualsToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.AsteriskEqualsToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.SlashEqualsToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.PercentEqualsToken ||
+      bin.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken)
+  ) {
+    for (const operand of [bin.left, bin.right]) {
+      const operandType = tsTypeToHType(typeChecker.getTypeAtLocation(operand), typeChecker);
+      if (
+        operandType.kind === 'object' ||
+        operandType.kind === 'array' ||
+        operandType.kind === 'map' ||
+        operandType.kind === 'set' ||
+        operandType.kind === 'iterator' ||
+        operandType.kind === 'regexp' ||
+        operandType.kind === 'date' ||
+        operandType.kind === 'promise' ||
+        operandType.kind === 'fn'
+      ) {
+        return notYet(`arithmetic on a ${hTypeName(operandType)} operand is not yet supported`, 8);
+      }
+    }
+  }
   switch (bin.operatorToken.kind) {
     // Every operator BinaryOp and LogicalOp model, plus plain assignment. Loose equality is here
     // rather than deferred because docs/NUMERIC.md §6.3 defines it for primitives without any
@@ -1246,6 +1284,13 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
       // A dynamic-shape member is a fourth target, plain `=` only: the compound forms fold to a
       // read of the place, and the read-once machinery hoists SLOTS, which a shape-table entry
       // is not -- so they stay refused below, not admitted here.
+      // A name the class never declared is refused first: growing a fixed layout is Phase 8's
+      // dictionary mode (the write twin of the dynamic read, plan.md §8 step 37). In `ts` mode
+      // the checker's own TS2339 owns the program, so refusing here too would report one mistake
+      // twice — and `explain` would answer not-yet where the build answers error.
+      if (mode === 'js' && isAbsentClassMemberWrite(bin.left, typeChecker)) {
+        return notYet('assigning a new property on a class instance is not yet supported', 8);
+      }
       return isAssignableTarget(bin.left, typeChecker) ||
         (ts.isPropertyAccessExpression(bin.left) &&
           (isDynamicShape(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker) ||
@@ -1273,7 +1318,7 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
       if (!isAssignableTarget(bin.left, typeChecker)) {
         return notYet('compound assignment to anything but a variable is not yet supported', 5);
       }
-      return gateUpdate(bin);
+      return gateUpdate(bin, typeChecker, mode);
 
     case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
     case ts.SyntaxKind.BarBarEqualsToken:
@@ -1281,14 +1326,18 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker): Gate
       if (!isAssignableTarget(bin.left, typeChecker)) {
         return notYet('compound assignment to anything but a variable is not yet supported', 5);
       }
-      return gateUpdate(bin);
+      return gateUpdate(bin, typeChecker, mode);
 
     default:
       return notYet('this operator is not yet supported', 5);
   }
 }
 
-function gatePrefixUnary(unary: ts.PrefixUnaryExpression, typeChecker: ts.TypeChecker): GateResult {
+function gatePrefixUnary(
+  unary: ts.PrefixUnaryExpression,
+  typeChecker: ts.TypeChecker,
+  mode: Mode,
+): GateResult {
   switch (unary.operator) {
     // `-x`, `+x`, `!x`, `~x` all map onto UnaryOp. `-<numeric literal>` additionally gets folded
     // into a single NumberLiteral by the lowering, but that is an optimization, not the reason
@@ -1306,7 +1355,7 @@ function gatePrefixUnary(unary: ts.PrefixUnaryExpression, typeChecker: ts.TypeCh
       if (!isAssignableTarget(unary.operand, typeChecker)) {
         return notYet('++ and -- on anything but a variable are not yet supported', 5);
       }
-      return gateUpdate(unary);
+      return gateUpdate(unary, typeChecker, mode);
 
     default:
       return notYet('this unary operator is not yet supported', 5);
@@ -1355,8 +1404,40 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   return shape.kind === 'object' && shape.fields.some((f) => f.name === node.name.text);
 }
 
+/** A write to a name a class never declared (`c.missing = 1`): JavaScript grows the object,
+ * but a fixed layout has no slot to grow into — the symmetric "cannot grow" case STA2004 names
+ * for reads, owned by Phase 8's dictionary mode (plan.md §8 step 37; the delete gate states the
+ * same rule for the symmetric removal). Reads of the same name answer `undefined` through the
+ * dynamic path; only writes refuse. Private names are excluded: `this.#x` is always declared
+ * where it may be written, and anything else the checker refuses first. */
+function isAbsentClassMemberWrite(target: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (!ts.isPropertyAccessExpression(target) || ts.isPrivateIdentifier(target.name)) {
+    return false;
+  }
+  if (classDeclarationOf(checker.getTypeAtLocation(target.expression)) === undefined) {
+    return false;
+  }
+  return (
+    checker.getPropertyOfType(checker.getTypeAtLocation(target.expression), target.name.text) ===
+    undefined
+  );
+}
+
 /** `++`/`--`/`+=`/`=` in any position: statement form folds to Assignment; value form is UpdateExpr. */
-function gateUpdate(_node: ts.Node): GateResult {
+function gateUpdate(node: ts.Node, checker: ts.TypeChecker, mode: Mode): GateResult {
+  // Every read-modify-write grows nothing, but an absent member's write would have to: `c.missing
+  // += 1` reads `undefined` fine and then has nowhere to store. One predicate covers the compound,
+  // logical and update spellings alike — plain `=` is decided in gateBinary, the one assignment
+  // form that does not route through here. In `ts` mode the checker's own TS2339 owns the program
+  // (see gateBinary's `=` arm for why the refusal is js-only).
+  const target = ts.isBinaryExpression(node)
+    ? node.left
+    : ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)
+      ? node.operand
+      : undefined;
+  if (mode === 'js' && target !== undefined && isAbsentClassMemberWrite(target, checker)) {
+    return notYet('assigning a new property on a class instance is not yet supported', 8);
+  }
   return { kind: 'accept' };
 }
 
@@ -2110,6 +2191,14 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     if (collection !== undefined) {
       return collection;
     }
+    // A spread's count is not its arity: the lowering pads every other call to a fixed argv, and
+    // a spread needs a dynamic one nothing builds (plan.md §8 step 37). Refused here rather than
+    // lowered wrong — the lowering's STA4031 on SpreadElement is the same bug wearing an
+    // internal error's clothes, in both modes. The builtin namespaces refuse their own spreads
+    // above with their own messages; what reaches here is a user function or method.
+    if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
+      return notYet('a spread argument to a method call is not yet supported', 5);
+    }
     // `C.m(…)` -- a static method, which is an ordinary function with no receiver. It is decided
     // before the instance case because the receiver's type answers the same for both.
     if (staticMemberOf(callee, typeChecker, true) !== undefined) {
@@ -2181,8 +2270,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
 
   // `super(...)`, which the gate reaches only after gateClass proved it is the first statement of a
   // derived constructor: it is the base constructor run against the receiver this one was handed.
+  // A spread needs the same dynamic argv an ordinary spread call does (above), so it waits with it.
   if (callee.kind === ts.SyntaxKind.SuperKeyword) {
-    return { kind: 'accept' };
+    return call.arguments.some((argument) => ts.isSpreadElement(argument))
+      ? notYet('a spread argument to a function call is not yet supported', 5)
+      : { kind: 'accept' };
   }
 
   // Any expression may be the callee. `CallExpr.callee` is an ordinary Expression, the emitter
@@ -2195,7 +2287,10 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   //
   // The argument count is deliberately unchecked: JavaScript drops extras and fills missing ones
   // with `undefined`, and the calling convention does that at runtime rather than making it a gate
-  // decision.
+  // decision. A spread is the one argument form with no fixed count at all (plan.md §8 step 37).
+  if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
+    return notYet('a spread argument to a function call is not yet supported', 5);
+  }
   return { kind: 'accept' };
 }
 
@@ -3380,6 +3475,11 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
   }
   if (classDeclarationOf(checker.getTypeAtLocation(node)) === undefined) {
     return notYet('new on this type is not yet supported', 5);
+  }
+  // A spread needs a dynamic argv no constructor call builds (plan.md §8 step 37) — the same
+  // missing feature as a spread function call, refused rather than STA4031'd in the lowering.
+  if (node.arguments?.some((argument) => ts.isSpreadElement(argument)) === true) {
+    return notYet('a spread argument to a constructor is not yet supported', 5);
   }
   return { kind: 'accept' };
 }

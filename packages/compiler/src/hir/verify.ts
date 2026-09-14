@@ -837,15 +837,25 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // string operand it concatenates, so neither "operands are numbers" nor "the result is a
       // number" holds for it. `"a" + "b"` is well-formed IR of type string.
       if (op === '-' || op === '*' || op === '/' || op === '%' || op === '**') {
-        // Operands must be number, or `unknown` -- a value whose type is not known until it exists.
-        // The emitter wraps every arithmetic operand in `jsrt_to_number`, which is ToNumber, which
-        // is defined on every value there is: an object converts through ToPrimitive, a string
-        // through the StringNumericLiteral grammar, anything unparseable to NaN. So `unknown` here
-        // is a well-formed dynamic operand, not a lowering that lost a type. What the rule still
-        // catches is a KNOWN non-number -- a `string` operand means the lowering built `-` out of
-        // something the frontend had already typed, which no source can produce.
+        // Operands must be number, `unknown`, or a primitive the emitter coerces: `string`,
+        // `boolean`, `null`, `undefined`. The emitter wraps every arithmetic operand in
+        // `jsrt_to_number`, which is ToNumber, which is defined on every value there is: an
+        // object converts through ToPrimitive, a string through the StringNumericLiteral grammar,
+        // anything unparseable to NaN. So `unknown` here is a well-formed dynamic operand, not a
+        // lowering that lost a type — and so is a statically-known coercible primitive: js mode
+        // suppresses the checker's TS2362/TS2363 (plan.md §8 step 37), which lets `"5" * 1` reach
+        // lowering, and the runtime answers 5 exactly as Node does (step 27's grammar, `true`→1,
+        // `null`→0, `undefined`→NaN; a primitive cannot carry a `valueOf` to run). A COMPOSITE
+        // operand is still rejected: the gate refuses those (ToPrimitive runs user code), so one
+        // reaching here means the lowering built `-` out of something the frontend had already
+        // typed, which no source can produce.
         const arithmeticOperand = (t: HType): boolean =>
-          hTypeEquals(t, H_NUMBER) || t.kind === 'unknown';
+          hTypeEquals(t, H_NUMBER) ||
+          t.kind === 'unknown' ||
+          t.kind === 'string' ||
+          t.kind === 'boolean' ||
+          t.kind === 'null' ||
+          t.kind === 'undefined';
         if (!arithmeticOperand(binOp.left.type)) {
           problems.push({
             kind: 'binary-op',
@@ -1424,7 +1434,18 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
 
     case 'dyn-field-access': {
       verifyExpression(expr.target, problems, bindings);
-      if (expr.target.type.kind !== 'unknown' || expr.type.kind !== 'unknown') {
+      // The target is Unknown, or a fixed layout read at a name with no slot. The second shape
+      // is js mode's suppressed TS2339 (plan.md §8 step 37): `c.missing` on a class instance
+      // answers `undefined`, and the lowering only builds this node after the checker agreed the
+      // name is absent. It is sound because `jsrt_get_prop` is total on fixed objects — a present
+      // field answers through the receiver's own descriptor (so a subclass value's added field
+      // still resolves), a miss answers `undefined` — and the per-site cache is untouched on that
+      // path. What is still rejected is a concrete NON-object target, which has no descriptor for
+      // any name.
+      if (
+        (expr.target.type.kind !== 'unknown' && expr.target.type.kind !== 'object') ||
+        expr.type.kind !== 'unknown'
+      ) {
         problems.push({
           kind: 'dyn-field-access',
           span: expr.span,

@@ -22,6 +22,49 @@ function identifierAt(source: ts.SourceFile, position: number): ts.Identifier | 
   return found;
 }
 
+/** The coercing compound operators: `-=`, `*=`, `/=`, `%=`, `**=`. `+=` concatenates rather
+ * than coerces, and the logical and nullish forms assign their right side as-is. */
+function isCoercingCompound(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.MinusEqualsToken ||
+    kind === ts.SyntaxKind.AsteriskEqualsToken ||
+    kind === ts.SyntaxKind.SlashEqualsToken ||
+    kind === ts.SyntaxKind.PercentEqualsToken ||
+    kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken
+  );
+}
+
+/** The identifier a suppressed 2362/2363 assigns through, or `undefined` when the diagnostic is
+ * not on a coercing compound assignment's left. `s *= 2` widens `s` (the number result lands in
+ * its slot); `s * 2` widens nothing (a read leaves the binding alone); `o.x *= 2` and
+ * `a[i] *= 2` widen nothing (a member is not a binding — the place machinery, not the scope,
+ * owns its type). Parentheses and `!` are transparent, as they are everywhere else. */
+function compoundAssignTarget(token: ts.Identifier): ts.Identifier | undefined {
+  let node: ts.Node = token;
+  for (;;) {
+    const parent = node.parent;
+    if (parent === undefined) {
+      return undefined;
+    }
+    if (ts.isParenthesizedExpression(parent) || ts.isNonNullExpression(parent)) {
+      node = parent;
+      continue;
+    }
+    if (
+      ts.isBinaryExpression(parent) &&
+      parent.left === node &&
+      isCoercingCompound(parent.operatorToken.kind)
+    ) {
+      let target: ts.Expression = parent.left;
+      while (ts.isParenthesizedExpression(target) || ts.isNonNullExpression(target)) {
+        target = target.expression;
+      }
+      return ts.isIdentifier(target) ? target : undefined;
+    }
+    return undefined;
+  }
+}
+
 /* The checker refusals js mode drops, because each one refuses an operation the DYNAMIC RUNTIME
  * settles at run time -- not untyped code, which §1.2 already promises never to reject, but valid
  * JavaScript whose answer is a value rather than a type (plan.md §8 steps 2, 2a).
@@ -302,13 +345,24 @@ function createProgramUncached(
       // assignment, and it needs the same widening -- without it the suppression turns a checker
       // refusal into an STA4004 internal error (plan-notes 194).
       if (
-        (diag.code === 2322 || diag.code === 2403) &&
+        (diag.code === 2322 || diag.code === 2403 || diag.code === 2362 || diag.code === 2363) &&
         diag.file !== undefined &&
         diag.start !== undefined
       ) {
         const token = identifierAt(diag.file, diag.start);
+        // A plain incompatible assignment widens its target; a coercing compound assignment
+        // (`s *= 2` — the result is a number whatever `s` held) must widen its target the same
+        // way, or the lowering's number-typed value meets a string-typed slot as STA4004
+        // (plan.md §8 step 37). A pure binary (`s * 2`) only READS `s`, so only a diagnostic on
+        // the compound's left widens; anything else keeps the binding it declared.
+        const target =
+          diag.code === 2322 || diag.code === 2403
+            ? token
+            : token === undefined
+              ? undefined
+              : compoundAssignTarget(token);
         const symbol =
-          token === undefined ? undefined : program.getTypeChecker().getSymbolAtLocation(token);
+          target === undefined ? undefined : program.getTypeChecker().getSymbolAtLocation(target);
         if (symbol !== undefined) runtimeDynamicSymbols.add(symbol);
       }
       continue;

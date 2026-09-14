@@ -1,6 +1,7 @@
 // String.prototype.matchAll — iterator of match arrays (Phase 5 step 8).
-// Do not log the iterator object: Node prints Object [RegExp String Iterator] {}
-// and we print Iterator {}. Log next() results and for-of yields.
+// The iterator object itself prints Object [RegExp String Iterator] {} like Node
+// (plan.md §8 step 30 A15, pinned in inspect_matchall_tag.ts); this fixture
+// exercises next() results and for-of yields.
 const re = /(\d+)/g;
 for (const m of 'a1b22c'.matchAll(re)) {
   console.log(m);

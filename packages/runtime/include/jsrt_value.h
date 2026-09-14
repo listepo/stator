@@ -298,9 +298,11 @@ typedef struct JSRTClass {
    * A fixed shape's slot order is the LAYOUT -- what `o.x` resolves against, and therefore a
    * property of the TYPE, which the checker may list in a different order than the literal wrote
    * (`const o: { y: number; x: string } = { x: "s", y: 2 }`, and every object spread). Enumeration
-   * order is a different fact: §10.1.11 OrdinaryOwnPropertyKeys answers in insertion order, which
-   * only the allocating literal knows. Keeping both means a reordering annotation and a spread
-   * store to the right slots AND print the way Node prints (plan-notes 181).
+   * order is a different fact: §10.1.11 OrdinaryOwnPropertyKeys answers ordinary string keys in
+   * insertion order, which only the allocating literal knows -- with canonical array-index keys
+   * ("1", "10") partitioned ahead of them in ascending numeric order at enumeration time
+   * (jsrt_fixed_key_order; plan.md §8 step 28). Keeping both means a reordering annotation and a
+   * spread store to the right slots AND print the way Node prints (plan-notes 181).
    *
    * Length is field_count when present; every slot appears exactly once. */
   const uint32_t *key_order;
@@ -440,6 +442,16 @@ void jsrt_define_accessor(jsrt_value obj, const char *key, jsrt_value get, jsrt_
  * not GC values, and is therefore safe to hold outside a JSRT_FRAME. */
 uint32_t jsrt_shape_property_count(const JSRTShape *shape);
 const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t count);
+/* The array-index half of the same rule, over a NUL-terminated UTF-8 key: true with `*value` the
+ * numeric value when the spelling round-trips through ToUint32 and is not 2^32-1 (so "01",
+ * "+1" and "-0" are ordinary strings). Shared by the shape walk above and fixed-shape
+ * enumeration below, which is one rule over two layouts. */
+bool jsrt_key_is_array_index(const char *key, uint32_t *value);
+/* Own-property order for a FIXED layout, in the same OrdinaryOwnPropertyKeys order: canonical
+ * array-index keys first in ascending numeric order, then the remaining keys in insertion
+ * (key_order) sequence. `#private` slots are not properties and are already filtered out, so
+ * `*count_out` is the visible key count. The returned slot array is malloc-owned by the caller. */
+uint32_t *jsrt_fixed_key_order(const JSRTClass *cls, uint32_t *count_out);
 
 /* A shape key from a JS string: an immortal NUL-terminated UTF-8 copy, the lifetime the shape
  * table already gives every key. A key containing U+0000 aborts -- a C string cannot hold one. */
@@ -629,9 +641,12 @@ jsrt_value jsrt_array_with(jsrt_value array, jsrt_value index, jsrt_value value)
 bool jsrt_array_method(jsrt_value array, const char *key, jsrt_value *out);
 
 /* Object.keys/values/entries (§20.1.2) over the two object layouts — runtime/src/jsrt_object_ops.c.
- * Fixed shapes enumerate declaration-order public identifiers (private #name slots are omitted);
- * dynamic shapes apply the full OrdinaryOwnPropertyKeys order because Object.fromEntries/JSON.parse
- * can create integer keys. */
+ * Both layouts enumerate ECMA-262 OrdinaryOwnPropertyKeys: canonical array-index keys first in
+ * ascending numeric order, then the remaining string keys in insertion order. The dynamic walk
+ * sorts the shape chain (Object.fromEntries/JSON.parse can create integer keys there); the fixed
+ * walk partitions the class descriptor the same way, because a string-literal key like "1" in a
+ * fixed layout is an index exactly as it is in a shape (plan.md §8 step 28 -- plan-notes 85's
+ * "integer-like keys cannot trigger" invariant was falsified by string-literal keys). */
 jsrt_value jsrt_object_keys(jsrt_value v);
 jsrt_value jsrt_object_values(jsrt_value v);
 jsrt_value jsrt_object_entries(jsrt_value v);
@@ -732,6 +747,24 @@ void jsrt_throw_error(const JSRTClass *cls, const char *message);
 /* Throws `ReferenceError: <name> is not defined` and answers undefined so an expression
  * position has a value; the caller checks jsrt_pending() and unwinds (plan.md §8 step 2a(c)). */
 jsrt_value jsrt_reference_error(const char *name);
+
+/* True for exactly the five standard error classes -- pointer compares, NOT the parent walk
+ * `jsrt_instanceof` does. A user class cannot extend one today (`extends` anything but a class
+ * declaration is STA1214), and if that ever lands the subclass's layout is its own, so slots
+ * 0/1 below would be the wrong read; exact match keeps `jsrt_error_to_string` honest. */
+static inline bool jsrt_is_error(jsrt_value v) {
+  if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
+    return false;
+  }
+  const JSRTClass *cls = jsrt_as_object(v)->cls;
+  return cls == &jsrt_class_error || cls == &jsrt_class_type_error ||
+         cls == &jsrt_class_range_error || cls == &jsrt_class_reference_error ||
+         cls == &jsrt_class_syntax_error;
+}
+
+/* `Error.prototype.toString` without the method (§20.5.3.4): `name` + `": "` + `message`,
+ * with the spec's empty-side rules. `jsrt_to_string` routes every error here. */
+jsrt_value jsrt_error_to_string(jsrt_value v);
 
 /* ------------------------------------------------------------ Map and Set */
 
@@ -846,6 +879,12 @@ jsrt_value jsrt_iterator_new(jsrt_value target, uint8_t kind);
 jsrt_value jsrt_iterator_match_all_new(jsrt_value str, jsrt_value matcher);
 jsrt_value jsrt_iterator_next(jsrt_value it, jsrt_value sent);
 bool jsrt_iterator_step(jsrt_value it, jsrt_value *out);
+/* IteratorClose for `for...of` (plan.md §8 step 34): a `break`, `return` or `throw` out of the
+ * loop body runs the iterator's `return()` — a generator's `finally`. Only generators define
+ * one: closing any other box is a no-op (a stored `arr.values()` keeps yielding after the loop
+ * breaks, so touching the box would be the divergence). A close that throws leaves it pending
+ * for the call site, which is the generated-code convention for a user call that throws. */
+void jsrt_iterator_close(jsrt_value it);
 
 /* `m.set(k, v)` and `s.add(v)` both RETURN THE COLLECTION, which is what makes them chainable. */
 jsrt_value jsrt_map_set(jsrt_value map, jsrt_value key, jsrt_value value);
@@ -999,9 +1038,12 @@ jsrt_value jsrt_date_to_iso_string(jsrt_value v);
 jsrt_value jsrt_date_to_json(jsrt_value v);
 jsrt_value jsrt_date_to_utc_string(jsrt_value v);
 /* `toDateString` is the LOCAL calendar date alone. Its siblings `toString` and `toTimeString` are
- * NOT here: both append the host zone's long display name, which Node sources from ICU and libc's
- * `%Z` cannot produce -- so they stay residue under STA1210 with the `toLocale*` family. */
+ * NOT here as METHODS: both append the host zone's long display name, which Node sources from ICU and libc's
+ * `%Z` cannot produce -- so they stay residue under STA1210 with the `toLocale*` family.
+ * `jsrt_date_to_string` below is the narrower IMPLICIT form `"" + date` needs (plan.md §8 step 29):
+ * the same fields, with the UTC long name special-cased where libc cannot supply it. */
 jsrt_value jsrt_date_to_date_string(jsrt_value v);
+jsrt_value jsrt_date_to_string(jsrt_value v);
 
 /* The two statics. `Date.UTC` takes all seven components, absent ones as `undefined`; `Date.parse`
  * accepts the §21.4.1.32 Date Time String Format ONLY and answers NaN for anything else. */

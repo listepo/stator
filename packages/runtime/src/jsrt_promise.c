@@ -6,11 +6,13 @@
  * needs `.then` to exist. When `.then` lands it becomes a client of this — a reaction whose state
  * is the JS handler and the derived promise — rather than the thing everything else is built on.
  *
- * Ordering is the part that is easy to get wrong and observable when you do. Two rules carry it:
- * a reaction is always QUEUED and never called inline, even when the promise it subscribes to has
- * already settled; and reactions run in registration order. Together they make `await` yield to
- * the queue exactly once per await regardless of whether the awaited value was ready, which is
- * what makes an interleaving match Node's rather than merely finishing with the same answer.
+ * Ordering is the part that is easy to get wrong and observable when you do. Three rules carry
+ * it: a reaction is always QUEUED and never called inline, even when the promise it subscribes
+ * to has already settled; reactions run in registration order; and adoption costs a subscribe
+ * job of its own, so resolving with an already-settled promise still ticks once before anything
+ * is queued off it. Together they make `await` yield to the queue exactly once per await
+ * regardless of whether the awaited value was ready, which is what makes an interleaving match
+ * Node's rather than merely finishing with the same answer.
  *
  * The event loop is a drain and nothing more: `main` calls jsrt_run_microtasks() once after the
  * module body. There are no timers and no I/O, so there is no macrotask phase to run — plan.md is
@@ -142,12 +144,23 @@ static void promise_settle_now(jsrt_value promise, jsrt_value value, bool reject
   p->last = NULL;
 }
 
-/* Adoption: an outer promise fulfilled WITH a promise settles when the inner one does. Registered
- * as an ordinary reaction, so it costs the same extra microtask tick the spec's job does. It goes
- * straight to the state change -- the outer promise's own [[AlreadyResolved]] was consumed by the
- * resolve() call that adopted, and this is that resolution completing. */
+/* Adoption: an outer promise fulfilled WITH a promise settles when the inner one does.
+ * Registered as an ordinary reaction, so the outer promise's own [[AlreadyResolved]] stays
+ * consumed by the resolve() call that adopted (this reaction IS that resolution completing)
+ * and the state change goes straight through. */
 static void adopt(void *state, jsrt_value value, bool rejected) {
   promise_settle_now((jsrt_value)(uintptr_t)state, value, rejected);
+}
+
+/* NewPromiseResolveThenableJob (§27.5.2.2): resolving with a promise enqueues a job that
+ * SUBSCRIBES to it, rather than subscribing synchronously. Subscribing to an already-settled
+ * promise queues its reaction immediately, so subscribing inline skips the thenable job and an
+ * adoption chain runs one microtask ahead of Node (plan.md §8 step 35). The job is enqueued
+ * even when the inner promise is still pending -- the spec does not condition on it, and the
+ * queue position (ahead of every subscription that has not run yet) is observable. */
+static void adopt_subscribe(void *state, jsrt_value value, bool rejected) {
+  (void)rejected;
+  jsrt_promise_subscribe(value, adopt, state);
 }
 
 void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected) {
@@ -157,7 +170,15 @@ void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected) {
   }
   p->resolved = true;
   if (!rejected && jsrt_is_promise(value)) {
-    jsrt_promise_subscribe(value, adopt, (void *)(uintptr_t)promise);
+    if (promise == value) {
+      /* Self-resolution would subscribe a reaction to a promise that only that reaction
+       * could settle -- a silent hang. The spec rejects with a TypeError instead. */
+      const char *text = "Chaining cycle detected for promise";
+      jsrt_value message = jsrt_string_from_utf8(text, strlen(text));
+      promise_settle_now(promise, jsrt_error_new(&jsrt_class_type_error, message), true);
+      return;
+    }
+    enqueue(adopt_subscribe, (void *)(uintptr_t)promise, value, false);
     return;
   }
   promise_settle_now(promise, value, rejected);
@@ -312,7 +333,13 @@ typedef struct {
   bool rejected;
 } FinallyState;
 
-static void finally_after(void *state, jsrt_value value, bool rejected) {
+/* The `valueThunk`/`thrower` half of the spec's pass-through wrapper (§27.5.5.3): `thenFinally`
+ * answers `p.then(valueThunk)`, and the outer reaction adopts that intermediate -- it is the
+ * intermediate this settles, never the derived promise directly. On the callback promise's
+ * fulfilment the ORIGINAL settlement passes through untouched; on its rejection the callback's
+ * reason wins and the original is dropped. Skipping the wrapper settles the derived promise in
+ * the reaction itself, so a `.finally().then()` chain runs two microtasks ahead of Node. */
+static void finally_thunk(void *state, jsrt_value value, bool rejected) {
   FinallyState *s = (FinallyState *)state;
   if (rejected) {
     jsrt_promise_settle(s->derived, value, true);
@@ -334,11 +361,16 @@ static void finally_react(void *state, jsrt_value value, bool rejected) {
     jsrt_promise_settle(s->derived, done.value, true);
     return;
   }
-  if (jsrt_is_promise(done.value)) {
-    jsrt_promise_subscribe(done.value, finally_after, s);
-    return;
-  }
-  jsrt_promise_settle(s->derived, value, rejected);
+  FinallyState *inner = (FinallyState *)jsrt_gc_alloc(sizeof(FinallyState), "Promise.finally");
+  inner->derived = jsrt_promise_new();
+  inner->on_finally = JSRT_UNDEFINED;
+  inner->value = value;
+  inner->rejected = rejected;
+  /* Adopt the intermediate BEFORE subscribing the thunk: the adoption job then runs first and
+   * finds it pending (a plain registration, no tick of its own), so settling it queues the
+   * reaction -- and a rejection never sits unobserved between the two jobs. */
+  jsrt_promise_settle(s->derived, inner->derived, false);
+  jsrt_promise_subscribe(jsrt_promise_resolve(done.value), finally_thunk, inner);
 }
 
 jsrt_value jsrt_promise_finally(jsrt_value promise, jsrt_value on_finally) {

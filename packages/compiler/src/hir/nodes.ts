@@ -426,6 +426,15 @@ export interface ObjectEntry {
    * entries. Only the lowering sets it -- an own value reading the same shape is
    * indistinguishable by shape alone, and passes preserve it with the entry. */
   readonly spread?: true;
+  /** Set on a `{ __proto__: v }` / `{ "__proto__": v }` definition (plan.md §8 step 33):
+   * the spelling is the prototype setter, not an own data property, so the dynamic emitter
+   * evaluates the value in written position for its effects and stores nothing. Only the
+   * lowering sets it, and only for the non-computed PropertyAssignment spelling -- a
+   * shorthand, a method, an accessor and a computed key (even a statically-known one) are
+   * all own properties and stay unmarked. A marked entry never reaches the fixed path: the
+   * spelling puts a `__proto__` data property in the checker's type, which is exactly what
+   * sends the literal to the shape table. */
+  readonly protoSetter?: true;
 }
 
 /** An object literal whose type is NOT a layout — an optional property or an index signature
