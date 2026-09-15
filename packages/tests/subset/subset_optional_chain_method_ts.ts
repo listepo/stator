@@ -1,8 +1,7 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
-// SUBSET.md: Optional chaining ?. — a method call on a receiver the static arms decline
-// (here a class instance) waits on dynamic method dispatch (plan.md §8 step 20).
+// @verdict: dynamic
+// SUBSET.md: Optional chaining ?. — a method call on a nullable class instance dispatches
+// statically against the non-nullish class (the chain guards the base).
 
 class C {
   m(): number {

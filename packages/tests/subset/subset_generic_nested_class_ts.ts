@@ -1,9 +1,9 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
-// SUBSET.md: Generics — a generic class nested in a function would leak scope: tuples are
-// collected per file and descriptors emitted at module scope. Top-level generic classes
-// compile today.
+// @verdict: static
+// SUBSET.md: Generics — a generic class nested in a function specializes in place, one
+// descriptor per tuple scoped to that evaluation, exactly like a nested ordinary class.
+// The name must be unique across the program and no enclosing scope may bind a type
+// parameter the tuple would close over.
 
 function f() {
   class Local<T> {

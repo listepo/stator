@@ -15,12 +15,14 @@ import type {
   Expression,
   FieldAccess,
   FieldAssignment,
+  FunctionDeclaration,
   InstanceOf,
   MethodCall,
   NewExpr,
   ObjectLiteral,
   Statement,
 } from '../../compiler/src/hir/nodes.ts';
+import { hTypeName } from '../../compiler/src/hir/types.ts';
 import { lowerSource, requireInit, verifiedStatements } from './helpers.ts';
 
 function classOf(code: string): ClassDeclaration {
@@ -597,4 +599,94 @@ test('an empty literal takes the dynamic path so it can grow', () => {
   const value = requireInit(decl as Extract<Statement, { kind: 'declaration' }>);
   assert.equal(value.kind, 'dyn-object-literal');
   assert.deepEqual((value as { entries: readonly unknown[] }).entries, []);
+});
+
+const GENERIC_BASE = `class Box<T> {
+  static kind: string = "box";
+  value: T;
+  constructor(v: T) { this.value = v; }
+  get(): T { return this.value; }
+  describe(): string { return "box"; }
+}
+class Sub extends Box<number> {
+  w: number = 0;
+  constructor(v: number, w: number) { super(v); this.w = w; }
+  override describe(): string { return "sub"; }
+}
+`;
+
+test('a subclass of a generic base grounds the base fields once, base-first', () => {
+  const sub = classNamed(`${GENERIC_BASE}const s = new Sub(1, 2);\nconsole.log(s.w);\n`, 'Sub');
+  // Not the checker's own-first order, and not the base's unbound `T`: the prefix layout with
+  // the heritage tuple applied, which is what makes a base-typed slot read land.
+  assert.deepEqual(
+    sub.fields.map((f) => `${f.name}: ${hTypeName(f.type)}`),
+    ['value: number', 'w: number'],
+  );
+  assert.equal(sub.base, 'Box<number>', 'the tuple descriptor, not the statics-only carrier');
+});
+
+test('the base tuple is emitted even when nothing constructs it directly', () => {
+  // No `new Box<number>` appears — only `new Sub()` — yet the descriptor that owns the
+  // inherited members and runs the base constructor must exist for the base pointer, the
+  // method owner and the super-call to name.
+  const tuple = classNamed(
+    `${GENERIC_BASE}const s = new Sub(1, 2);\nconsole.log(s.w);\n`,
+    'Box<number>',
+  );
+  assert.deepEqual(
+    tuple.fields.map((f) => `${f.name}: ${hTypeName(f.type)}`),
+    ['value: number'],
+  );
+  assert.deepEqual(tuple.methods.map((m) => m.name).sort(), ['describe', 'get']);
+});
+
+test('an inherited method call through a generic base names the tuple', () => {
+  const expr = lastExpression(`${GENERIC_BASE}const s = new Sub(1, 2);\nconsole.log(s.get());\n`);
+  const arg = (expr as Extract<Expression, { kind: 'console-log' }>).args[0] as MethodCall;
+  assert.equal(arg.kind, 'method-call');
+  assert.equal(
+    arg.className,
+    'Box<number>',
+    'Sub has no get of its own -- the carrier has no methods at all',
+  );
+  assert.ok(
+    arg.target.type.kind === 'object' && arg.target.type.bases.includes('Box<number>'),
+    'the receiver carries the tuple in its ancestry, which is what the verifier checks',
+  );
+});
+
+test('an override of a generic-base method tabulates the tuple as the implementer', () => {
+  const sub = classNamed(`${GENERIC_BASE}const s = new Sub(1, 2);\nconsole.log(s.w);\n`, 'Sub');
+  const table = new Map(sub.vtable.map((entry) => [entry.name, entry.className]));
+  assert.equal(table.get('describe'), 'Sub', 'the override implements itself');
+  assert.equal(table.get('get'), 'Box<number>', 'the inherited method implements its tuple');
+});
+
+test('a nested generic class specializes in place, carrier first', () => {
+  const stmts = verifiedStatements(
+    `function f(n: number): number {
+      class Local<T> {
+        v: T;
+        constructor(x: T) { this.v = x; }
+        get(): T { return this.v; }
+      }
+      const a = new Local<number>(10);
+      console.log(a.get());
+      console.log(new Local<string>("s").get());
+      return a.get() + n;
+    }
+    console.log(f(5));\n`,
+  );
+  const fn = stmts.find((s): s is FunctionDeclaration => s.kind === 'function-declaration');
+  assert.ok(fn !== undefined, 'source should declare f');
+  const block = fn.fn.body.statements.find(
+    (s): s is Block => s.kind === 'block' && s.flatten === true,
+  );
+  // The carrier (statics) runs where the declaration sits, each tuple after it, in collection
+  // order — the module-scope rule, scoped to this evaluation.
+  assert.deepEqual(
+    block?.statements.map((s) => (s.kind === 'class-declaration' ? s.name : s.kind)),
+    ['Local', 'Local<number>', 'Local<string>'],
+  );
 });

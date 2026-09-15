@@ -357,6 +357,46 @@ void test('statics are accepted; what has no class object to read is not', () =>
   assert.deepEqual(codesFor('class C {\n  static n = 1;\n}\nconsole.log(C.name);'), ['STA1214']);
 });
 
+void test('a class alias erases in place and stays not-yet as a value', () => {
+  // `const K = C` binds no value: every in-place use erases to the target declaration, so the
+  // three spellings below compile exactly as the direct ones (plan.md §8 step 12e). Anything
+  // else reads the alias as a value, which is the class object -- the same STA1214.
+  const cls =
+    'class C {\n  x: number = 1;\n  static s: number = 5;\n  static sm(): number {\n    return C.s;\n  }\n}\nconst K = C;\n';
+  assert.deepEqual(codesFor(`${cls}console.log(new K().x);`), []);
+  assert.deepEqual(codesFor(`${cls}console.log(new K() instanceof K);`), []);
+  assert.deepEqual(codesFor(`${cls}console.log(K.s);\nconsole.log(K.sm());`), []);
+  assert.deepEqual(codesFor(`${cls}K.s = 2;\nconsole.log(K.s);`), []);
+  assert.deepEqual(codesFor(`${cls}const J = K;\nconsole.log(new J() instanceof K);`), []);
+  assert.deepEqual(codesFor(`${cls}console.log(K);`), ['STA1214']);
+  assert.deepEqual(codesFor(`${cls}function f(v: unknown): void { console.log(v); }\nf(K);`), [
+    'STA1214',
+  ]);
+  // A `let` can be reassigned, so erasing it would compile a different program; `extends K`
+  // names a declaration chain, not an alias.
+  assert.deepEqual(
+    codesFor('class C {\n  x: number = 1;\n}\nlet K = C;\nconsole.log(new K().x);'),
+    ['STA1214'],
+  );
+  assert.deepEqual(codesFor(`${cls}class D extends K {\n}\nconsole.log(new D().x);`), ['STA1214']);
+  // The message is the class's own, in both modes.
+  for (const mode of ['ts', 'js'] as const) {
+    const { program } = createProgram(
+      mode === 'js' ? 'class C { }\nconst K = C;\nconsole.log(K);' : `${cls}console.log(K);`,
+      mode === 'js' ? '/test.js' : '/test.ts',
+    );
+    const diags = gateProgram(program, mode);
+    assert.deepEqual(
+      diags.map((d) => d.code),
+      ['STA1214'],
+    );
+    assert.match(
+      diags[0]?.message ?? '',
+      /using a class as a value is not yet supported; planned for Phase 5/,
+    );
+  }
+});
+
 void test('a class expression is vetted like a declaration but stays not-yet on the class object', () => {
   // `const C = class { … }` used to fall into the describeKind catch-all ("classes is not yet
   // supported"). It now runs through gateClass: a broken member reads as the member problem,

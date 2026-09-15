@@ -1,9 +1,9 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
-// SUBSET.md: Generics — extending a generic class needs the base's substituted layout
-// threaded through the ancestry the type model builds once per declaration; the subclass
-// side (a generic class extending an ordinary one) compiles today.
+// @verdict: dynamic
+// SUBSET.md: Generics — a non-generic class extending a generic base with explicit,
+// fully concrete arguments grounds the base's layout once: the subclass reads the
+// substituted fields and methods through the tuple's specialization. Dynamic here only
+// because the inherited `value: T | undefined` field is a union with no HType.
 
 class Box<T> {
   value: T | undefined = undefined;

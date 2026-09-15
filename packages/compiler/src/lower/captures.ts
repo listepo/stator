@@ -16,7 +16,7 @@
  * exactly where the intermediate function sits. */
 
 import * as ts from 'typescript';
-import { isStaticMember } from '../frontend/types.ts';
+import { isClassAliasUse, isStaticMember } from '../frontend/types.ts';
 
 /** The receiver, as the lowering names it (`RECEIVER` in `src/lower/index.ts`): parameter zero of
  * a method, constructor or accessor, spelled with a space because no source identifier can be.
@@ -247,7 +247,7 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
     // receiver parameter, which is a cross-function reference exactly like a local variable's.
     // Only the arrow case is a capture: inside the owner's own body the same keyword is the
     // ordinary parameter read, and a plain nested `function`'s `this` belongs to that function
-    // (the gate refuses it, since a strict-mode plain call has no receiver).
+    // (its dynamic receiver, `undefined` on a bare strict-mode call via `has_receiver`).
     if (node.kind === ts.SyntaxKind.ThisKeyword) {
       const owner = enclosingThisOwner(node);
       if (owner !== undefined && owner !== enclosingFunction(node)) {
@@ -281,6 +281,13 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
       }
     }
     if (ts.isIdentifier(node)) {
+      // A class alias binds no value -- every in-place use erases to the target declaration --
+      // so a reference to one needs no environment slot. Without this a closure reading `new K()`
+      // would mint storage for a binding the lowering never emits, and the emitter's slot lookup
+      // would aim at a name with no home.
+      if (isClassAliasUse(node, checker)) {
+        return;
+      }
       const decl = checker.getSymbolAtLocation(node)?.valueDeclaration;
       if (decl !== undefined && isCapturableDeclaration(decl) && !isDeclarationNameOf(node, decl)) {
         const enclosing = enclosingFunction(decl);

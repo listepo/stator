@@ -505,3 +505,65 @@ export function hTypeName(t: HType): string {
   }
   return t.kind === 'date' ? 'Date' : t.kind;
 }
+
+/** Replaces every type parameter with what `lookup` binds it to.
+ *
+ * Applied where a `ts.Type` becomes an HType inside a specialization, which is what keeps a type
+ * parameter out of the HIR entirely: the emitter never sees one, because none is ever built. An
+ * unbound name is left ALONE rather than defaulted to Unknown — the verifier refuses a type
+ * parameter, and a silent Unknown would turn a missed substitution into a boxed value nobody
+ * asked for.
+ *
+ * A lookup FUNCTION rather than a map, because the callers keep their substitutions where they
+ * already thread them (a binding map under unspellable keys, a heritage map keyed by
+ * declaration), and neither wants to copy its table into the other's shape. Lives here rather
+ * than in `frontend/generics.ts` so the type model (`frontend/types.ts`, which the generic
+ * instantiation code already imports) can ground heritage arguments without an import cycle. */
+export function substituteHType(type: HType, lookup: (name: string) => HType | undefined): HType {
+  switch (type.kind) {
+    case 'type-param':
+      return lookup(type.name) ?? type;
+    case 'array':
+      return { kind: 'array', element: substituteHType(type.element, lookup) };
+    case 'set':
+      return { kind: 'set', element: substituteHType(type.element, lookup) };
+    case 'iterator':
+      return { kind: 'iterator', element: substituteHType(type.element, lookup) };
+    case 'map':
+      return {
+        kind: 'map',
+        key: substituteHType(type.key, lookup),
+        value: substituteHType(type.value, lookup),
+      };
+    case 'fn':
+      return {
+        kind: 'fn',
+        params: type.params.map((p) => substituteHType(p, lookup)),
+        ret: substituteHType(type.ret, lookup),
+      };
+    // An object substitutes its members and keeps its identity: the layout (name, bases, slot
+    // order) is what every slot lookup and assignability check already resolved against, so only
+    // the member types change. Terminates because every HType the mapper builds is finite — the
+    // mapper cuts cyclic layouts at its depth cap rather than building an infinite tree.
+    case 'object':
+      return {
+        ...type,
+        fields: type.fields.map((f) => ({ ...f, type: substituteHType(f.type, lookup) })),
+        methods: type.methods.map((m) => ({ ...m, type: substituteHType(m.type, lookup) })),
+      };
+    default:
+      return type;
+  }
+}
+
+/** The name a specialization is bound under: `box<number>`.
+ *
+ * Unspellable, like the receiver parameter's leading space and a static's dot — no identifier may
+ * contain an angle bracket, so a specialization can never collide with a user binding, and the two
+ * calls `box(1)` and `box(2)` produce the same name and therefore the same one function. The name
+ * is a compile-time key only: the emitter names C functions `_jsrt_fn_N` by id, and the printable
+ * name the closure carries stays the source's own `box`. Lives here for the same reason
+ * `substituteHType` does: descriptor names for generic BASES are computed in the type model. */
+export function specializationName(name: string, typeArguments: readonly HType[]): string {
+  return `${name}<${typeArguments.map(hTypeName).join(', ')}>`;
+}

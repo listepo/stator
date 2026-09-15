@@ -20,7 +20,10 @@
 
 import * as ts from 'typescript';
 import type { HType } from '../hir/types.ts';
-import { hTypeName, hUnknown } from '../hir/types.ts';
+import { hUnknown, substituteHType } from '../hir/types.ts';
+// Moved to `hir/types.ts` so the type model can ground heritage arguments without an import
+// cycle; re-exported here so every existing import site keeps working.
+export { specializationName, substituteHType } from '../hir/types.ts';
 import { tsTypeToHType } from './types.ts';
 
 /** What a call to a generic function resolves to.
@@ -475,17 +478,6 @@ export function genericAliasTarget(
   return undefined;
 }
 
-/** The name a specialization is bound under: `box<number>`.
- *
- * Unspellable, like the receiver parameter's leading space and a static's dot — no identifier may
- * contain an angle bracket, so a specialization can never collide with a user binding, and the two
- * calls `box(1)` and `box(2)` produce the same name and therefore the same one function. The name
- * is a compile-time key only: the emitter names C functions `_jsrt_fn_N` by id, and the printable
- * name the closure carries stays the source's own `box`. */
-export function specializationName(name: string, typeArguments: readonly HType[]): string {
-  return `${name}<${typeArguments.map(hTypeName).join(', ')}>`;
-}
-
 /** The HType of a declared default (`<T = string>`), if the parameter has one.
  *
  * Read through the checker's `getTypeFromTypeNode` so the default resolves in scope — a default
@@ -736,51 +728,4 @@ function fieldNames(type: {
   readonly methods: readonly { readonly name: string }[];
 }): string {
   return [...type.fields, ...type.methods].map((f) => f.name).join(',');
-}
-
-/** Replaces every type parameter with what `lookup` binds it to.
- *
- * Applied where a `ts.Type` becomes an HType inside a specialization, which is what keeps a type
- * parameter out of the HIR entirely: the emitter never sees one, because none is ever built. An
- * unbound name is left ALONE rather than defaulted to Unknown — the verifier refuses a type
- * parameter, and a silent Unknown would turn a missed substitution into a boxed value nobody
- * asked for.
- *
- * A lookup FUNCTION rather than a map, because the caller in the lowering keeps its substitution in
- * the binding map it already threads everywhere, under keys no identifier can spell. */
-export function substituteHType(type: HType, lookup: (name: string) => HType | undefined): HType {
-  switch (type.kind) {
-    case 'type-param':
-      return lookup(type.name) ?? type;
-    case 'array':
-      return { kind: 'array', element: substituteHType(type.element, lookup) };
-    case 'set':
-      return { kind: 'set', element: substituteHType(type.element, lookup) };
-    case 'iterator':
-      return { kind: 'iterator', element: substituteHType(type.element, lookup) };
-    case 'map':
-      return {
-        kind: 'map',
-        key: substituteHType(type.key, lookup),
-        value: substituteHType(type.value, lookup),
-      };
-    case 'fn':
-      return {
-        kind: 'fn',
-        params: type.params.map((p) => substituteHType(p, lookup)),
-        ret: substituteHType(type.ret, lookup),
-      };
-    // An object substitutes its members and keeps its identity: the layout (name, bases, slot
-    // order) is what every slot lookup and assignability check already resolved against, so only
-    // the member types change. Terminates because every HType the mapper builds is finite — the
-    // mapper cuts cyclic layouts at its depth cap rather than building an infinite tree.
-    case 'object':
-      return {
-        ...type,
-        fields: type.fields.map((f) => ({ ...f, type: substituteHType(f.type, lookup) })),
-        methods: type.methods.map((m) => ({ ...m, type: substituteHType(m.type, lookup) })),
-      };
-    default:
-      return type;
-  }
 }

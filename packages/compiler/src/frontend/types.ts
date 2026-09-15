@@ -18,10 +18,13 @@ import {
   hObject,
   hPromise,
   hSet,
+  hasTypeParam,
   hTypeEquals,
   hTypeName,
   hTypeParam,
   hUnknown,
+  specializationName,
+  substituteHType,
 } from '../hir/types.ts';
 
 /** A function type may refer to itself (`type F = () => F`), so the descent needs a stop. Four is
@@ -209,6 +212,11 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
   // each, and it must take the BASE's slot -- one slot, at the base's index -- which falls out of
   // "first claim wins" and does not fall out of any ranking of the merged list.
   const chain = ancestry(declaration, checker); // root ancestor first, this class last
+  // A generic base's members arrive with its parameters unbound (`value: T | undefined` for
+  // `Box`), so the layout grounds each ancestor's properties in THIS declaration's context
+  // (`value: number | undefined` for `class Sub extends Box<number>`). Ordinary chains ground
+  // nothing and read exactly what they read before.
+  const heritage = heritageSubstitution(declaration, checker);
   const claimed = new Set<string>();
   for (const ancestor of chain) {
     const ancestorType = declaredTypeOf(ancestor, checker);
@@ -232,11 +240,24 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
       }
       claimed.add(name);
       const declarations = property.declarations ?? [];
-      const valueType = tsTypeToHType(
+      // The substitution belongs to the class that DECLARED the property, not to the loop's
+      // ancestor: the checker's per-class list is own-first-then-inherited, so a base member
+      // surfaces here again under its descendant, and grounding it with the descendant's map
+      // would read a same-spelled parameter as the wrong declaration's. A non-class parent
+      // (a `.js` assignment in a constructor) keeps the loop ancestor, as before.
+      const ownerDecl =
+        at.parent !== undefined && ts.isClassDeclaration(at.parent) ? at.parent : ancestor;
+      const ground = heritage.get(ownerDecl);
+      const declared = tsTypeToHType(
         checker.getTypeOfSymbolAtLocation(property, at),
         checker,
         depth + 1,
       );
+      // The ancestor's own spelling, grounded where the heritage binds it: `Box`'s `T` is
+      // `number` in `Sub`'s layout and stays `T` in `Box`'s own. Skipped wholesale without a
+      // map, so an ordinary ancestor pays no walk for a substitution that would change nothing.
+      const valueType =
+        ground === undefined ? declared : substituteHType(declared, (param) => ground.get(param));
       // An accessor is not a slot and never was: `x` names a pair of functions, and the checker's
       // property type is what the GETTER returns. So it contributes one method per half, under a
       // name no source can spell, and the property name claims no field. A class with a getter
@@ -275,11 +296,15 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
     }
   }
   // Nearest ancestor first, which is the order `hTypeAssignable` and `instanceof` read it in.
+  // A generic ancestor names its tuple (`Box<number>`), not the declaration: the descriptor
+  // that owns the inherited members IS the specialization, and every receiver check reads
+  // these names. An incomplete tuple (a refused program's) keeps the source name, exactly as
+  // before, so this stays total where the gate still refuses.
   const bases = chain
     .slice(0, -1)
     .reverse()
-    .map((c) => c.name?.text)
-    .filter((n): n is string => n !== undefined);
+    .map((c) => baseDescriptorName(c, declaration, checker))
+    .filter((n) => n !== '');
   return hObject(declaration.name.text, fields, methods, bases);
 }
 
@@ -641,6 +666,124 @@ export function baseClassOf(
   return base !== undefined && ts.isClassDeclaration(base) ? base : undefined;
 }
 
+/** The `extends` type node of a declaration (`Box<number>` in `class Sub extends Box<number>`),
+ * or `undefined` for no base. Only the heritage CLAUSE is read here, like `baseClassOf` — an
+ * `implements` clause is type-only and erased, so it never contributes a substitution. */
+function extendsTypeNode(
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+): ts.ExpressionWithTypeArguments | undefined {
+  const clause = declaration.heritageClauses?.find((h) => h.token === ts.SyntaxKind.ExtendsKeyword);
+  return clause?.types[0];
+}
+
+/** Every generic ancestor's type parameters grounded in `leaf`'s context: `Box.T := number`
+ * for `class Sub extends Box<number>`.
+ *
+ * The walk runs LEAF-UP, threading each edge's written arguments through the maps already
+ * grounded below it, so `class Mid<U> extends Box<U[]>` under `class Sub extends Mid<string>`
+ * grounds `Box.T := string[]` — while a same-named parameter at two levels never collides,
+ * because each level's map is keyed by its own declaration rather than by the spelling. An
+ * argument mentioning a parameter nothing grounds (an enclosing generic's, which the gate
+ * refuses for the accepted shapes) is left as a type parameter: total on refused programs,
+ * concrete on accepted ones. Ordinary ancestors take no entry, so a chain without a generic
+ * base grounds nothing and every existing caller reads exactly what it read before. */
+export function heritageSubstitution(
+  leaf: ts.ClassDeclaration,
+  checker: ts.TypeChecker,
+): ReadonlyMap<ts.ClassDeclaration, ReadonlyMap<string, HType>> {
+  const grounded = new Map<ts.ClassDeclaration, Map<string, HType>>();
+  const chain = ancestry(leaf, checker);
+  const leafIndex = chain.indexOf(leaf);
+  if (leafIndex < 0) {
+    return grounded;
+  }
+  for (let i = leafIndex; i > 0; i--) {
+    const child = chain[i];
+    const parent = chain[i - 1];
+    if (child === undefined || parent === undefined) {
+      continue;
+    }
+    const parameters = parent.typeParameters ?? [];
+    if (parameters.length === 0) {
+      continue;
+    }
+    const args = extendsTypeNode(child)?.typeArguments ?? [];
+    // A raw bound (`extends Box` with no arguments) grounds nothing: the checker owns that
+    // spelling in ts mode, and the gate refuses it in js mode. Leaving the parent ungrounded
+    // reads downstream as an incomplete tuple rather than a wrong one.
+    if (args.length !== parameters.length) {
+      continue;
+    }
+    const childMap = grounded.get(child);
+    const parentMap = new Map<string, HType>();
+    parameters.forEach((parameter, index) => {
+      const arg = args[index];
+      if (arg === undefined) {
+        return;
+      }
+      const raw = tsTypeToHType(checker.getTypeFromTypeNode(arg), checker);
+      parentMap.set(
+        parameter.name.text,
+        substituteHType(raw, (name) => childMap?.get(name)),
+      );
+    });
+    grounded.set(parent, parentMap);
+  }
+  return grounded;
+}
+
+/** The tuple a generic `base` is instantiated at as seen from `leaf`: `[number]` for `Box` in
+ * `class Sub extends Box<number>`. May still mention a type parameter (a generic leaf, which
+ * the gate holds for a later slice) — the caller decides what is concrete enough. `undefined`
+ * when `base` is ordinary (no tuple to name), outside `leaf`'s ancestry, or not groundable
+ * (a raw bound, an arity mismatch): all ordinary paths, never errors. */
+export function heritageTuple(
+  base: ts.ClassDeclaration,
+  leaf: ts.ClassDeclaration,
+  checker: ts.TypeChecker,
+): HType[] | undefined {
+  const parameters = base.typeParameters ?? [];
+  if (parameters.length === 0) {
+    return undefined;
+  }
+  if (!ancestry(leaf, checker).includes(base)) {
+    return undefined;
+  }
+  const grounded = heritageSubstitution(leaf, checker).get(base);
+  if (grounded === undefined) {
+    return undefined;
+  }
+  const tuple: HType[] = [];
+  for (const parameter of parameters) {
+    const element = grounded.get(parameter.name.text);
+    if (element === undefined) {
+      return undefined;
+    }
+    tuple.push(element);
+  }
+  return tuple;
+}
+
+/** The descriptor name for ancestor `base` as seen from `leaf`: the mangled tuple
+ * (`Box<number>`) for a generic base grounded completely, the source name otherwise. The
+ * otherwise covers two shapes that never reach the lowering together — an ordinary base, and
+ * a refused program's incomplete tuple — so both read exactly what they read before. */
+export function baseDescriptorName(
+  base: ts.ClassDeclaration,
+  leaf: ts.ClassDeclaration,
+  checker: ts.TypeChecker,
+): string {
+  const name = base.name?.text ?? '';
+  if (name === '') {
+    return '';
+  }
+  const tuple = heritageTuple(base, leaf, checker);
+  if (tuple === undefined || tuple.some(hasTypeParam)) {
+    return name;
+  }
+  return specializationName(name, tuple);
+}
+
 /** The class declaration a type came from, or `undefined` if the type is not a class instance
  * this subset models. This must stay in step with `classTypeToHType` below: the gate's accept set
  * is the HIR's vocabulary, so a shape accepted on the strength of this that maps to Unknown there
@@ -793,6 +936,27 @@ export function isGlobalSymbolIteratorName(
   return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
 }
 
+/** True when `arg` is a global `Symbol.iterator` element key (`u[Symbol.iterator]`) — the
+ * well-known iterator, not a shadowed `const Symbol` and not an optional `u?.[Symbol.iterator]`
+ * (which the optional-chain element rule owns). The use-site twin of `isGlobalSymbolIteratorName`
+ * (which answers for a computed member NAME); the gate and the lowering share this so the two
+ * cannot disagree about which brackets name the protocol. */
+export function isSymbolIteratorKey(arg: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (
+    !ts.isPropertyAccessExpression(arg) ||
+    arg.questionDotToken !== undefined ||
+    !ts.isIdentifier(arg.expression) ||
+    arg.expression.text !== 'Symbol' ||
+    !ts.isIdentifier(arg.name) ||
+    arg.name.text !== 'iterator'
+  ) {
+    return false;
+  }
+  const symbol = checker.getSymbolAtLocation(arg.expression);
+  const declarations = symbol?.declarations ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
 /** An object type whose `[Symbol.iterator]()` returns an iterator (a Generator, or a boxed
  * specialized iterator). That is the user-iterable case docs/VALUE.md §4.13 admits: the frontend
  * can see the method, and the existing iterator for-of drives what it returns. */
@@ -804,6 +968,96 @@ export function userIteratorMethod(type: HType): HField | undefined {
   return method !== undefined && method.type.kind === 'fn' && method.type.ret.kind === 'iterator'
     ? method
     : undefined;
+}
+
+/** Whether a declarator is the only one in a `const` list: the one shape an alias formation
+ * takes, mirroring the lowering's one-binding-per-declaration limit.
+ *
+ * Exported: the lowering skips exactly the formations the gate accepts, so the two cannot
+ * disagree about which declarators bind nothing. Lives here rather than in the gate because
+ * the alias resolution below asks the same question, and the gate re-exports it for its
+ * existing importers. */
+export function isSingleConstDeclarator(declaration: ts.VariableDeclaration): boolean {
+  const list = declaration.parent;
+  return (
+    list !== undefined &&
+    ts.isVariableDeclarationList(list) &&
+    (list.flags & ts.NodeFlags.Const) !== 0 &&
+    list.declarations.length === 1 &&
+    ts.isIdentifier(declaration.name)
+  );
+}
+
+/** The class declaration an identifier names, directly or through `const K = C` aliases.
+ *
+ * A class used as a value is erased, not built (plan.md §8 step 12e): `const K = C` binds no
+ * value -- the class object rung 6b never allocated -- so every in-place use (`new K`,
+ * `K.static`, `o instanceof K`) rewrites to the target declaration. There is therefore no
+ * heap object to root and no tag to spend (docs/VALUE.md §1.1 is full). Only single-`const`
+ * links resolve: a `let` can be reassigned, so erasing it would compile a different program.
+ * An `import`/`export` specifier resolves through the checker's alias to the local declaration
+ * it names, so `export { K }` reads as the alias use it is (accepted as a boundary spelling,
+ * like the class's own name), while an imported class answers for its declaration wherever a
+ * direct name would. Answers `undefined`
+ * for anything else, including the binding's own name (a declaration, not a use) and anything
+ * circular. An opaque use (`foo(K)`) is the real class object, which is family 12(d)'s, not
+ * this erasure's -- the gate refuses those with the same STA1214. */
+export function aliasedClassDeclaration(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+): ts.ClassDeclaration | undefined {
+  const seen = new Set<ts.Symbol>();
+  let current: ts.Identifier | undefined = node;
+  while (current !== undefined) {
+    const symbol = checker.getSymbolAtLocation(current);
+    if (symbol === undefined || seen.has(symbol)) {
+      return undefined;
+    }
+    seen.add(symbol);
+    // An import or export specifier is not the binding: the alias it names is.
+    const declaration: ts.Declaration | undefined =
+      (symbol.flags & ts.SymbolFlags.Alias) !== 0
+        ? checker.getAliasedSymbol(symbol).valueDeclaration
+        : symbol.valueDeclaration;
+    if (declaration === undefined) {
+      return undefined;
+    }
+    if (ts.isClassDeclaration(declaration)) {
+      return declaration.name !== undefined ? declaration : undefined;
+    }
+    // The binding's own name declares rather than uses: without this the formation
+    // `const K = C` would resolve its own `K` to `C` and read as a use of itself.
+    if (
+      !ts.isVariableDeclaration(declaration) ||
+      declaration.name === current ||
+      declaration.initializer === undefined ||
+      !ts.isIdentifier(declaration.initializer) ||
+      !isSingleConstDeclarator(declaration)
+    ) {
+      return undefined;
+    }
+    current = declaration.initializer;
+  }
+  return undefined;
+}
+
+/** Whether `node` uses a `const K = C` alias: it resolves to a class, but is not the class's
+ * own name. The gate accepts exactly the uses that erase and refuses the rest; the capture
+ * analysis skips these references, since an erased name needs no environment slot.
+ *
+ * An `import`/`export` specifier carries the Alias flag with no `valueDeclaration` of its own,
+ * so the direct-declaration test below resolves through the alias first: only a name that
+ * reaches a class declaration WITHOUT passing through a variable is the class's own. */
+export function isClassAliasUse(node: ts.Identifier, checker: ts.TypeChecker): boolean {
+  if (aliasedClassDeclaration(node, checker) === undefined) {
+    return false;
+  }
+  const symbol = checker.getSymbolAtLocation(node);
+  const direct =
+    symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) === 0
+      ? symbol.valueDeclaration
+      : undefined;
+  return direct === undefined || !ts.isClassDeclaration(direct);
 }
 
 /** The static member `C.name` names, walking the chain -- statics are inherited in JavaScript, so
@@ -821,8 +1075,15 @@ export function staticMemberOf(
   if (!ts.isIdentifier(access.expression)) {
     return undefined;
   }
-  const declaration = checker.getSymbolAtLocation(access.expression)?.valueDeclaration;
-  if (declaration === undefined || !ts.isClassDeclaration(declaration)) {
+  // A class alias names the same declaration its target does: `K.sm` on `const K = C` is the
+  // one binding `C.sm`, so the direct check below keeps its exact shape and the alias resolves
+  // beside it. Anything else -- including the binding's own formation -- resolves nowhere.
+  const direct = checker.getSymbolAtLocation(access.expression)?.valueDeclaration;
+  const declaration =
+    direct !== undefined && ts.isClassDeclaration(direct)
+      ? direct
+      : aliasedClassDeclaration(access.expression, checker);
+  if (declaration === undefined) {
     return undefined;
   }
   const name = access.name.text;

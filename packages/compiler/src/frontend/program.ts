@@ -84,6 +84,12 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2554, // Expected N arguments, but got M.
   2322, // Type 'X' is not assignable to type 'Y'.
   2345, // Argument of type 'X' is not assignable to parameter of type 'Y'.
+  // No overload matches: JavaScript runs the implementation with the runtime value, so in
+  // js mode the call dispatches to it dynamically (its signature — a union or `unknown` in
+  // practice, hence Unknown — accepts anything the overloads refused; a dynamic argument
+  // reaching a checkable parameter takes the existing boundary path). ts mode keeps the
+  // refusal (STA0012). Non-overloaded mismatches already run via the 2345 path above.
+  2769, // No overload matches this call.
   // Member access and calls through a value the checker could not resolve.
   2339, // Property 'x' does not exist on type 'T'.
   2551, // Property 'x' does not exist on type 'T'. Did you mean 'y'?
@@ -277,6 +283,15 @@ function createProgramUncached(
     // hard error before the gate ever runs, so js mode opts back out; ts mode keeps it, and the
     // gate reports implicit any as STA1001 with a mode-aware message instead of tsc's.
     noImplicitAny: mode === 'ts',
+    // `this` in a plain function is per-function dynamic, not program-wide: in js mode the call
+    // site passes its receiver or nothing, and the lowering binds it as an Unknown parameter zero
+    // (docs/VALUE.md §4.16 `has_receiver`; a bare call answers `undefined`, which is the honest
+    // answer because emitted modules are always strict ESM, never sloppy-global). Flipping the
+    // OPTION is correct here, beside `noImplicitAny` above, rather than suppressing code 2683:
+    // suppressing the code would silence the checker but leave `this: any` for the gate to
+    // reclassify as STA1214, while the option gives the lowering the dynamic type to work with.
+    // ts mode keeps it: there an unannotated `this` is a compile error (STA0012).
+    noImplicitThis: mode === 'ts',
     noUncheckedIndexedAccess: true,
     exactOptionalPropertyTypes: true,
     // Same contract, one rung further along: in js mode `noImplicitOverride` would demand a JSDoc
