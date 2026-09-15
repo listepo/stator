@@ -29,6 +29,7 @@ import {
   genericArrowKey,
   genericCallInstantiation,
   genericNewInstantiation,
+  genericValueInstantiation,
 } from './generics.ts';
 import { assertedBy, isCheckable } from './narrowing.ts';
 import {
@@ -437,10 +438,11 @@ function gateConstruct(
     case ts.SyntaxKind.CallExpression:
       return gateCall(node as ts.CallExpression, typeChecker, mode);
 
-    // `super` never denotes a value: it is a marker on the two forms that mention it. `super(...)`
-    // is the base constructor run against this constructor's own receiver, and `super.m()` is a
-    // call on this same receiver that skips the override. Anywhere else -- passed, returned,
-    // compared -- there is no object for it to be.
+    // `super` never denotes a value of its own: it is a marker on the forms that mention
+    // it. `super(...)` is the base constructor run against this constructor's own receiver,
+    // `super.m()` is a call on this same receiver that skips the override, and `super.m` as a
+    // value is the base's method as an unbound closure (gateMemberAccess vets the read itself).
+    // Anywhere else -- passed, returned, compared -- there is no object for it to be.
     case ts.SyntaxKind.SuperKeyword:
       if (ts.isCallExpression(node.parent) && node.parent.expression === node) {
         return { kind: 'accept' };
@@ -893,15 +895,26 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
   ) {
     return { kind: 'accept' };
   }
-  // A generic passed as an argument specializes at the parameter's function type — the only
-  // static description of how the value will be used. The lowering decides per specialization,
-  // so this only carves argument positions out of the refusal below; anything undeterminable
-  // stays refused there.
+  // A generic passed as an argument: a determinable one specializes at the parameter's
+  // function type — the only static description of how the value will be used — and anything
+  // else takes the canonical value tuple (defaults, else Unknown), which the lowering
+  // collects beside the static ones. Either way the position names a specialization, so this
+  // carves every non-spread argument position out of the refusal below; a spread element has
+  // no single parameter to read, and what escapes further (returned, stored) still waits on
+  // the dynamic tier.
   if (
     ts.isCallExpression(node.parent) &&
     node.parent.expression !== node &&
-    genericAliasTarget(node, typeChecker) !== undefined &&
-    isDeterminableArgument(node, node.parent, typeChecker)
+    genericAliasTarget(node, typeChecker) !== undefined
+  ) {
+    return { kind: 'accept' };
+  }
+  // `typeof id` answers "function" for every specialization, so it folds without naming one:
+  // the lowering answers the literal directly and no value is ever built.
+  if (
+    ts.isTypeOfExpression(node.parent) &&
+    node.parent.expression === node &&
+    genericValueInstantiation(node, typeChecker) !== undefined
   ) {
     return { kind: 'accept' };
   }
@@ -1109,9 +1122,8 @@ function isClassAliasNonValueUse(node: ts.Identifier): boolean {
 }
 
 /** The alias uses that erase to the target declaration: construction, static access, and the
- * `instanceof` right operand. A heritage base is not among them -- the layout is built from the
- * declaration chain, which names declarations rather than aliases -- so `extends K` still fails,
- * at the heritage rule rather than here. */
+ * `instanceof` right operand. (A heritage base erases too, but through `isClassAliasNonValueUse`
+ * above plus `baseClassOf` resolving the alias -- not here.) */
 function isClassAliasUseInPlace(node: ts.Identifier, checker: ts.TypeChecker): boolean {
   const parent = node.parent;
   if (ts.isNewExpression(parent) && parent.expression === node) {
@@ -1140,6 +1152,18 @@ function namesAClassInPlace(node: ts.Identifier, checker: ts.TypeChecker): boole
   // a value. It is not a type NODE, so the type-position exemption does not cover it.
   if (ts.isExpressionWithTypeArguments(parent)) {
     return parent.expression === node;
+  }
+  // `C` in `class D extends NS.C` -- the name half of a member-expression heritage base, which
+  // names a layout exactly as the bare base does above. The heritage rule judges the base; this
+  // only keeps the walker from double-reporting the spelling. Any other member access keeps its
+  // verdict: `o.m` still needs the method-value machinery and `C.prototype` the class object.
+  if (
+    ts.isPropertyAccessExpression(parent) &&
+    parent.name === node &&
+    ts.isExpressionWithTypeArguments(parent.parent) &&
+    parent.parent.expression === parent
+  ) {
+    return true;
   }
   // `C.count` -- the class NAME on the left of a static member access. It is not a value being
   // read: a static is one binding for the whole program, and the class name is half of its name.
@@ -1974,6 +1998,20 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   const generic = genericCallInstantiation(call, typeChecker);
   if (generic.kind === 'not-generic' && call.typeArguments !== undefined) {
     return notYet('explicit type arguments on a call are not yet supported', 5);
+  }
+  // A generic call whose tuple still mentions a type parameter names no specialization: the
+  // checker inferred a generic type for an argument (self-application `box(box)`), which no
+  // monomorphic copy can spell. Refused here rather than lowered into the collection's
+  // STA4070 canary, which exists for compiler bugs, not user programs. Parameters bound by
+  // an enclosing generic are fine — the enclosing specialization substitutes them — so only
+  // what nothing binds refuses.
+  if (
+    generic.kind === 'generic' &&
+    generic.typeArguments.some((type) =>
+      mentionsUnboundParameter(type, enclosingTypeParameterNames(call)),
+    )
+  ) {
+    return notYet('a generic call at a generic type is not yet supported', 5);
   }
   const callee = skipParens(call.expression);
 
@@ -4350,35 +4388,6 @@ function mentionsUnboundParameter(type: HType, bound: ReadonlySet<string>): bool
   }
 }
 
-/** Whether a generic passed as this argument can specialize: a positional, non-spread slot
- * whose parameter is function-typed over parameters something binds. The lowering decides per
- * specialization; this only refuses what no tuple could ever determine. */
-function isDeterminableArgument(
-  node: ts.Identifier,
-  outerCall: ts.CallExpression,
-  checker: ts.TypeChecker,
-): boolean {
-  const outer = checker.getResolvedSignature(outerCall);
-  if (outer === undefined) {
-    return false;
-  }
-  const parameter = outer.getParameters()[outerCall.arguments.indexOf(node)];
-  const declaration = parameter?.valueDeclaration;
-  if (
-    parameter === undefined ||
-    declaration === undefined ||
-    !ts.isParameter(declaration) ||
-    declaration.dotDotDotToken !== undefined
-  ) {
-    return false;
-  }
-  const parameterType = tsTypeToHType(checker.getTypeOfSymbolAtLocation(parameter, node), checker);
-  return (
-    parameterType.kind === 'fn' &&
-    !mentionsUnboundParameter(parameterType, enclosingTypeParameterNames(node))
-  );
-}
-
 /** The class a type-parameter-typed value is bounded by, if it is bounded by a class.
  *
  * Lets a `T`-typed receiver gate exactly as its constraint does: `c.m()` with `c: T extends C`
@@ -4427,6 +4436,39 @@ function staticBlockUsesSuper(block: ts.ClassStaticBlockDeclaration): boolean {
   return found;
 }
 
+/** Whether a value-position `super.m` sits where the lowering can read the receiver.
+ *
+ * Mirrors `gateThis`'s walk, minus its plain-function arm: an arrow is transparent (it shares
+ * the enclosing method's home object), but a plain `function` boundary ends the chain -- and
+ * the checker's own error gets there first anyway, so refusing here is only the safe default,
+ * never a new diagnostic. A field initializer counts: the lowering moves it into the
+ * constructor, where the receiver is a parameter. */
+function superValueHasReceiver(access: ts.PropertyAccessExpression): boolean {
+  for (let n: ts.Node | undefined = access.parent; n !== undefined; n = n.parent) {
+    if (
+      ts.isConstructorDeclaration(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n) ||
+      ts.isPropertyDeclaration(n)
+    ) {
+      return !isStaticMember(n);
+    }
+    if (ts.isClassStaticBlockDeclaration(n)) {
+      return false;
+    }
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isClassDeclaration(n) ||
+      ts.isClassExpression(n)
+    ) {
+      return false;
+    }
+  }
+  return false;
+}
+
 /** `o.x` and `o.m` on a class instance. A name the class does not declare cannot reach here — the
  * checker rejects it first — so the only question is whether the class itself is one this subset
  * lays out. */
@@ -4453,20 +4495,32 @@ function gateMemberAccess(
       ? { kind: 'accept' }
       : symbolNotYet();
   }
-  // `super.m` is only ever a callee: it names the base's function, and reading it as a value would
-  // need a bound method object, which nothing here builds. `super.x` on a FIELD is refused for a
-  // sharper reason -- a field has one slot per name, so `super.x` and `this.x` are the same slot
-  // and the spelling would promise a distinction the layout cannot make.
+  // `super.m` is a call on this same receiver that skips the override -- or, since plan.md
+  // §8 step 42, the base's method as an UNBOUND closure: `const f = super.m; f()` drops the
+  // receiver per `has_receiver` (docs/VALUE.md §4.16), exactly as `const g = o.m; g()` does.
+  // Either way the owner is the class declaring the method and the dispatch is direct.
+  // `super.x` on a FIELD stays refused -- a field has one slot per name, so `super.x` and
+  // `this.x` are the same slot and the spelling would promise a distinction the layout cannot
+  // make. Bare `super` never reaches here (the SuperKeyword case owns it) and stays refused
+  // there.
   if (access.expression.kind === ts.SyntaxKind.SuperKeyword) {
-    if (!(ts.isCallExpression(access.parent) && access.parent.expression === access)) {
-      return notYet('super as a value is not yet supported', 5);
-    }
     const base = classDeclarationOf(checker.getTypeAtLocation(access.expression));
-    return base !== undefined &&
-      ts.isIdentifier(access.name) &&
-      methodDeclaringClass(base, access.name.text, checker) !== undefined
-      ? { kind: 'accept' }
-      : notYet('super on anything but an inherited method is not yet supported', 5);
+    const method =
+      base !== undefined && ts.isIdentifier(access.name)
+        ? methodDeclaringClass(base, access.name.text, checker)
+        : undefined;
+    if (ts.isCallExpression(access.parent) && access.parent.expression === access) {
+      return method !== undefined
+        ? { kind: 'accept' }
+        : notYet('super on anything but an inherited method is not yet supported', 5);
+    }
+    // Value position needs what the call gets for free: an instance receiver in scope for the
+    // lowering to read. In a static member (or block) `super.m` is the base CLASS's member
+    // with no receiver to run it against, so it stays refused there.
+    if (method !== undefined && superValueHasReceiver(access)) {
+      return { kind: 'accept' };
+    }
+    return notYet('super as a value is not yet supported', 5);
   }
   // `Math.floor` and `Math.PI` -- decided before anything that looks for a class, because Math
   // resolves to no declaration this compiler models. A constant is a plain read the lowering
@@ -4895,6 +4949,22 @@ function gateElementAccess(
           : { kind: 'accept' };
       }
       return notYet('index access on a non-array is not yet supported', 5);
+    }
+    // An object-typed key on a fixed shape coerces via ToPropertyKey (plan.md §8 step 44b): the
+    // read-side twin of the suppressed-2464 write coercion. The verifier admits the shape (an
+    // object target under an object-or-Unknown key) and the runtime degrades through the
+    // coercing entry points, while every static-key spelling above keeps its slot. Custom
+    // `toString` dispatch is the shared Phase-8 ceiling both sides name; ts mode keeps the
+    // checker's own refusal (STA0012). The broad `object` annotation carries NonPrimitive, not
+    // Object, so both flags admit — anything narrower the checker already refused or names.
+    if (
+      hir.kind === 'object' &&
+      key === null &&
+      (checker.getTypeAtLocation(access.argumentExpression).flags &
+        (ts.TypeFlags.Object | ts.TypeFlags.NonPrimitive)) !==
+        0
+    ) {
+      return { kind: 'accept' };
     }
     return hir.kind === 'unknown' || isDynamicShape(receiver, checker)
       ? { kind: 'accept' }

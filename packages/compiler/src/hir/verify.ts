@@ -172,14 +172,28 @@ function hoistFunctions(statements: readonly Statement[], bindings: Scope): void
  *
  * The Unknown exemption is the same one calls get (STA4041): in js mode indexing an unresolved
  * value is the whole point, and the runtime decides. A CONCRETE non-array target means the
- * lowering built an index the checker would already have rejected. */
+ * lowering built an index the checker would already have rejected — with one gate-admitted
+ * exception: a fixed-shape target under an object-typed key (`o[kObj]`, plan.md §8 step 44b),
+ * which coerces the key via ToPropertyKey and routes through the degrading array entry points.
+ * The index-kind rule is what keeps the exception precise: the key must be object-typed (an
+ * identifier of object type) or Unknown (a literal key — `{}` and `[]` lower dynamic, so their
+ * node type is Unknown even though the gate admitted them by their checker type). Any other key
+ * on a layout — notably `any`, which the gate still refuses — is still a lowering mistake,
+ * exactly as before. */
 function checkIndexable(
   target: Expression,
+  index: Expression,
   kind: 'index-access' | 'index-assignment',
   code: 'STA4044',
   problems: VerifyProblem[],
 ): void {
   if (target.type.kind !== 'array' && target.type.kind !== 'unknown') {
+    if (
+      target.type.kind === 'object' &&
+      (index.type.kind === 'object' || index.type.kind === 'unknown')
+    ) {
+      return;
+    }
     problems.push({
       kind,
       span: target.span,
@@ -484,7 +498,7 @@ function verifyStatement(
       verifyExpression(stmt.target, problems, bindings);
       verifyExpression(stmt.index, problems, bindings);
       verifyExpression(stmt.value, problems, bindings);
-      checkIndexable(stmt.target, 'index-assignment', 'STA4044', problems);
+      checkIndexable(stmt.target, stmt.index, 'index-assignment', 'STA4044', problems);
       // No element-type rule. `a[i] = v` on a `number[]` with a `v: unknown` is the dynamic path
       // doing its job; the runtime stores whatever it is given, and narrowing is Task 3.5's.
       break;
@@ -1243,7 +1257,7 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
     case 'index-access': {
       verifyExpression(expr.target, problems, bindings);
       verifyExpression(expr.index, problems, bindings);
-      checkIndexable(expr.target, 'index-access', 'STA4044', problems);
+      checkIndexable(expr.target, expr.index, 'index-access', 'STA4044', problems);
       // No rule on `expr.type` either. It is `T | undefined` -- Unknown -- until Task 3.5 narrows
       // it, and pinning it to Unknown here would have to be undone by that same pass.
       break;

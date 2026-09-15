@@ -1,8 +1,7 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1214
-// SUBSET.md: Classes -- `super.m` as a value would need a bound method object nothing builds
-// (plan.md §8 step 12e). `super.m()` as a call is accepted; reading the method stays not-yet.
+// @verdict: static
+// SUBSET.md: Method overriding and super.method() -- `super.m` as a value is the base's
+// method as an unbound closure (plan.md §8 step 42). `super.m()` as a call was already accepted.
 
 class B {
   m() {

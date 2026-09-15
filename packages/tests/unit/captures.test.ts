@@ -266,3 +266,33 @@ void test('an explicit constructor carries the field-initializer receiver in its
   assert.notEqual(ctor, undefined);
   assert.deepEqual(ctor?.envVars, [RECEIVER_NAME]);
 });
+
+void test('a super use in an arrow captures the enclosing receiver like this does', () => {
+  const { named, raw } = analyze(`
+    class B {
+      m(): number {
+        return 1;
+      }
+    }
+    class D extends B {
+      n(): number {
+        const g = (): number => super.m();
+        return g();
+      }
+    }
+    console.log(new D().n());
+  `);
+  // `super.m()` is a call on the enclosing receiver, so the arrow reads it from the method's
+  // environment exactly as a `this` read would (plan.md §8 step 42). Without this the arrow
+  // captured nothing and the emitter failed the receiver read as STA4072.
+  assert.deepEqual(get(named, 'n').envVars, [RECEIVER_NAME]);
+  const arrow = [...raw.values()].find((info) =>
+    info.captures.some((c) => c.name === RECEIVER_NAME),
+  );
+  assert.notEqual(arrow, undefined);
+  assert.deepEqual(
+    arrow?.captures.map((c) => ({ name: c.name, levels: c.levels, index: c.index })),
+    [{ name: RECEIVER_NAME, levels: 0, index: 0 }],
+  );
+  assert.equal(arrow?.needsEnv, true);
+});

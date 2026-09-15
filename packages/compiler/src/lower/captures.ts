@@ -248,7 +248,11 @@ export function analyzeCaptures(sourceFile: ts.SourceFile, checker: ts.TypeCheck
     // Only the arrow case is a capture: inside the owner's own body the same keyword is the
     // ordinary parameter read, and a plain nested `function`'s `this` belongs to that function
     // (its dynamic receiver, `undefined` on a bare strict-mode call via `has_receiver`).
-    if (node.kind === ts.SyntaxKind.ThisKeyword) {
+    // `super` reads the same receiver -- `super.m()` is a call on it that skips the override,
+    // and `super.m` as a value takes it as the method-value target -- so it captures under the
+    // same rule. Without this an arrow holding only a `super` use captured nothing and the
+    // emitter failed the receiver read as STA4072 (plan.md §8 step 42).
+    if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) {
       const owner = enclosingThisOwner(node);
       if (owner !== undefined && owner !== enclosingFunction(node)) {
         let owned = capturedByOwner.get(owner);

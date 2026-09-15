@@ -257,20 +257,30 @@ jsrt_value jsrt_array_length(jsrt_value array) {
   return jsrt_number((double)jsrt_as_array(array)->length);
 }
 
-/* An index is in range only when it is a non-negative integer below `length`. Everything else --
- * a fraction, a negative, NaN, a number past the end -- is a property name that this array does
- * not have, which reads as `undefined`. Returning the index through a bool keeps that single
- * definition of "in range" shared between the read and the write path. */
+/* An index is in range only when its ToPropertyKey is a canonical numeric string (ECMA-262
+ * §6.1.7) below `length`. Everything else -- a fraction, a negative, NaN, a number past the end,
+ * a boolean, null, `"01"` -- is a property name that this array does not have, which reads as
+ * `undefined`. A bare `jsrt_to_number` cannot tell them apart (`true` is 1, `"01"` is 1, `""` is
+ * 0, all of which Node misses), so only numbers take the numeric test; every other key goes
+ * through the same canonical spelling the shape table uses (plan.md §8 step 44b). Returning the
+ * index through a bool keeps that single definition of "in range" shared between the read and
+ * the write path. */
 static bool index_of(jsrt_value index, uint32_t *out) {
-  double d = jsrt_to_number(index);
-  /* Check the upper bound BEFORE converting: a C floating-to-uint32 conversion outside the
-   * representable range is undefined, while JavaScript simply treats that value as a named
-   * (non-index) property. */
-  if (!(d >= 0.0) || d >= 4294967296.0 || d != trunc(d)) {
-    return false;
+  if (jsrt_is_number(index)) {
+    const double d = jsrt_number_value(index);
+    /* Check the upper bound BEFORE converting: a C floating-to-uint32 conversion outside the
+     * representable range is undefined, while JavaScript simply treats that value as a named
+     * (non-index) property. */
+    if (!(d >= 0.0) || d >= 4294967296.0 || d != trunc(d)) {
+      return false;
+    }
+    *out = (uint32_t)d;
+    return true;
   }
-  *out = (uint32_t)d;
-  return true;
+  const char *key = jsrt_shape_key(jsrt_to_string(index));
+  const bool ok = jsrt_key_is_array_index(key, out);
+  free((void *)key);
+  return ok;
 }
 
 jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {

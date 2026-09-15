@@ -372,13 +372,49 @@ void test('a class alias erases in place and stays not-yet as a value', () => {
   assert.deepEqual(codesFor(`${cls}function f(v: unknown): void { console.log(v); }\nf(K);`), [
     'STA1214',
   ]);
-  // A `let` can be reassigned, so erasing it would compile a different program; `extends K`
-  // names a declaration chain, not an alias.
+  // A `let` can be reassigned, so erasing it would compile a different program.
   assert.deepEqual(
     codesFor('class C {\n  x: number = 1;\n}\nlet K = C;\nconsole.log(new K().x);'),
     ['STA1214'],
   );
-  assert.deepEqual(codesFor(`${cls}class D extends K {\n}\nconsole.log(new D().x);`), ['STA1214']);
+  // A heritage base naming an alias grounds to the target's layout (plan.md §8 step 43): a
+  // `const` chain erases, while a `let` stays refused at the heritage rule.
+  assert.deepEqual(codesFor(`${cls}class D extends K {\n}\nconsole.log(new D().x);`), []);
+  assert.deepEqual(
+    codesFor(`${cls}const J = K;\nclass E extends J {\n}\nconsole.log(new E().x);`),
+    [],
+  );
+  // A `let` alias erases nowhere: the formation itself reads the class as a value, and the
+  // heritage base stays refused -- two diagnostics under the one code.
+  assert.deepEqual(
+    codesFor('class C {\n  x: number = 1;\n}\nlet K = C;\nclass D extends K {\n}\nconsole.log(1);'),
+    ['STA1214', 'STA1214'],
+  );
+  // A computed base is a value, not a declaration: no layout exists to ground the subclass in,
+  // so a true mixin stays not-yet under the same heritage message, in both modes.
+  for (const mode of ['ts', 'js'] as const) {
+    assert.deepEqual(
+      codesFor(
+        'class C {\n  x: number = 1;\n}\nfunction mixin(Base: new () => C): new () => C {\n  return Base;\n}\nclass D extends mixin(C) {\n  y: number = 2;\n}\nconsole.log(new D().x);',
+        mode,
+        mode === 'js' ? '/test.js' : '/test.ts',
+      ),
+      ['STA1214'],
+    );
+  }
+  // A member-expression base naming one class declaration is accepted by the heritage rule;
+  // the namespace itself stays not-yet on its own verdict, which is then the only diagnostic.
+  {
+    const { program } = createProgram(
+      'namespace NS {\n  export class C {\n    x: number = 1;\n  }\n}\nclass D extends NS.C {\n  y: number = 2;\n}\nconsole.log(new D().x);',
+    );
+    const diags = gateProgram(program, 'ts');
+    assert.deepEqual(
+      diags.map((d) => d.code),
+      ['STA1214'],
+    );
+    assert.match(diags[0]?.message ?? '', /ModuleDeclaration/);
+  }
   // The message is the class's own, in both modes.
   for (const mode of ['ts', 'js'] as const) {
     const { program } = createProgram(

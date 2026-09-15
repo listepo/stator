@@ -652,7 +652,13 @@ export function ancestry(
  * type-only and erase, so they contribute nothing to a layout. Takes an expression as well as a
  * declaration -- the gate vets both through one path, and only the heritage CLAUSE is read here,
  * which the two spell identically. The BASE is still always a declaration: extending an
- * expression reaches a layout that was never emitted. */
+ * expression reaches a layout that was never emitted. A bare-identifier base additionally
+ * resolves through `const K = C` alias erasure (possibly chained): the alias binds no value,
+ * so the heritage names the target's layout directly, and every consumer of this function
+ * (ancestry, the HType bases, the lowering's base name, the vtable owner, the generic tuple)
+ * grounds to the same declaration. A member-expression base (`NS.C`) resolves through the
+ * checker's own symbol, exactly as the direct spelling does. Anything else -- a call, a
+ * static field holding a class, a `let` -- resolves nowhere. */
 export function baseClassOf(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
@@ -663,7 +669,13 @@ export function baseClassOf(
     return undefined;
   }
   const base = checker.getSymbolAtLocation(expression)?.valueDeclaration;
-  return base !== undefined && ts.isClassDeclaration(base) ? base : undefined;
+  if (base !== undefined && ts.isClassDeclaration(base)) {
+    return base;
+  }
+  if (ts.isIdentifier(expression)) {
+    return aliasedClassDeclaration(expression, checker);
+  }
+  return undefined;
 }
 
 /** The `extends` type node of a declaration (`Box<number>` in `class Sub extends Box<number>`),

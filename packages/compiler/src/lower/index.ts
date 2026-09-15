@@ -40,6 +40,7 @@ import {
   genericArrowKey,
   genericCallInstantiation,
   genericNewInstantiation,
+  genericValueInstantiation,
   specializationName,
   substituteHType,
 } from '../frontend/generics.ts';
@@ -345,9 +346,20 @@ export function lowerProgram(
   const diagnostics: Diagnostic[] = [];
   lowerDiagMode = mode;
   const bindings = Scope.root();
-  hasRuntimeDynamicSymbols = runtimeDynamicSymbols.size > 0;
+  // Step 44c runs before anything is lowered: an Unknown (or mismatched) value reaching a
+  // fixed-shape slot widens the receiving binding, and the widening must be visible to the
+  // declaration itself, not only to later uses. Unioned with `runtimeDynamicSymbols` — which
+  // also feeds the walk as `knownDynamic`, so an already-widened binding counts as dynamic.
+  const dynamicFqns = new Set<string>();
   for (const symbol of runtimeDynamicSymbols) {
-    bindings.set(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`, hUnknown(false));
+    dynamicFqns.add(checker.getFullyQualifiedName(symbol));
+  }
+  for (const fqn of collectDynamicSlots(files, checker, dynamicFqns)) {
+    dynamicFqns.add(fqn);
+  }
+  hasRuntimeDynamicSymbols = dynamicFqns.size > 0;
+  for (const fqn of dynamicFqns) {
+    bindings.set(`\u0000dynamic:${fqn}`, hUnknown(false));
   }
   const statements: Statement[] = [];
   functionNesting = 0;
@@ -974,6 +986,301 @@ function maybeBoundary(
     value,
     where: sourceLocation(node, sourceFile),
   };
+}
+
+/** Whether a value of HType `value` can inhabit a fixed-shape slot of HType `target` without
+ * widening the slot to Unknown: only a slot-EXACT layout. Static reads load `fields[slot]`
+ * directly, so even the same field set in a different order reads the wrong field — and a
+ * generic target (`Box<number>`) grounds its type arguments per specialization, which a
+ * declaration-name prefix test cannot see. Unknown, a primitive, a union, a reordered or
+ * mismatched shape: all may arrive in a representation the slot's static reads do not describe.
+ * A subclass value into a NON-generic base is safe by the prefix rule `hTypeAssignable` states
+ * (the layout starts with the base's, in the base's slot order), and identical names are the
+ * same layout by construction. */
+function staticallySafeValue(value: HType, target: HType): boolean {
+  return (
+    value.kind === 'object' &&
+    target.kind === 'object' &&
+    (value.name === target.name ||
+      (!target.name.includes('<') && value.bases.includes(target.name)))
+  );
+}
+
+/** The HType a value expression delivers where a fixed-shape slot reads it, mirroring the
+ * lowering's own erasures rather than the checker's spelling. A non-checkable `as` assertion
+ * lowers to its operand (`x as T` below), parentheses and `!` are transparent, and an identifier
+ * answers its DECLARED type: a narrowing the compiler cannot check is not a fact about the value
+ * (the `typeAt` rule), and a narrowing it can check settles a tag, never a layout. When the
+ * declaration cannot be found the checker's own answer stands. Biased toward Unknown: a missed
+ * widening is silent garbage, an extra one is a dynamic read. */
+function effectiveValueType(
+  node: ts.Expression,
+  checker: ts.TypeChecker,
+  knownDynamic: ReadonlySet<string>,
+): HType {
+  let current = node;
+  for (;;) {
+    if (ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    if (ts.isAsExpression(current) || ts.isSatisfiesExpression(current)) {
+      const assertion = ts.isAsExpression(current) ? assertedBy(current, checker) : null;
+      const operandType = effectiveValueType(current.expression, checker, knownDynamic);
+      if (assertion !== null && isCheckable(assertion.asserted) && operandType.kind === 'unknown') {
+        return assertion.asserted;
+      }
+      current = current.expression;
+      continue;
+    }
+    if (ts.isIdentifier(current)) {
+      const symbol = checker.getSymbolAtLocation(current);
+      if (symbol !== undefined && knownDynamic.has(checker.getFullyQualifiedName(symbol))) {
+        return hUnknown(false);
+      }
+      const declaration = symbol?.valueDeclaration;
+      if (symbol !== undefined && declaration !== undefined) {
+        const declared = tsTypeToHType(
+          checker.getTypeOfSymbolAtLocation(symbol, declaration),
+          checker,
+        );
+        if (declared.kind !== 'unknown') {
+          return declared;
+        }
+        return hUnknown(false);
+      }
+    }
+    return tsTypeToHType(checker.getTypeAtLocation(current), checker);
+  }
+}
+
+/** Whether the body of `fn` reads a METHOD through parameter `param` (plan.md §8 step 44c).
+ *
+ * Widening a fixed-shape parameter routes every use through the shape table, and shape-table
+ * reads resolve FIELDS by name but cannot reach a class instance's methods (they live on the
+ * prototype, not in a slot — calling one through an untyped parameter aborts STA2006 today).
+ * A field-only body is always safe to widen; a method-touching one keeps its static dispatch,
+ * which is exactly right for the class values that reach it and the pre-existing behavior for
+ * the rest. Element reads with a statically-known key answer the same question by name; a
+ * runtime key is already dynamic and never blocks. */
+function paramTouchesMethod(fn: ts.Node, param: ts.Symbol, checker: ts.TypeChecker): boolean {
+  // Compared by qualified name, not identity: two lookups of one declaration answer the same
+  // symbol in practice, but the name is the contract the seeding loop already keeps.
+  const paramName = checker.getFullyQualifiedName(param);
+  let touched = false;
+  const visit = (node: ts.Node): void => {
+    if (touched) {
+      return;
+    }
+    if (ts.isPropertyAccessExpression(node) && !ts.isPrivateIdentifier(node.name)) {
+      const receiver = node.expression;
+      const symbol =
+        ts.isIdentifier(receiver) || ts.isPropertyAccessExpression(receiver)
+          ? checker.getSymbolAtLocation(receiver)
+          : undefined;
+      if (symbol !== undefined && checker.getFullyQualifiedName(symbol) === paramName) {
+        const member = checker.getPropertyOfType(
+          checker.getTypeAtLocation(receiver),
+          node.name.text,
+        );
+        const declarations = member?.declarations ?? [];
+        if (
+          member === undefined ||
+          declarations.some(
+            (declaration) =>
+              ts.isMethodDeclaration(declaration) ||
+              ts.isGetAccessorDeclaration(declaration) ||
+              ts.isSetAccessorDeclaration(declaration),
+          )
+        ) {
+          touched = true;
+          return;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(fn, visit);
+  return touched;
+}
+
+/** The declaration a call's arguments map onto, with its user parameters.
+ *
+ * Plain calls resolve through the callee's symbol (one-hop aliases included); method calls
+ * resolve through the method. An explicit `this` parameter is skipped: it names the receiver
+ * the call syntax does not pass, so every user argument sits one slot later in the source
+ * than in `node.arguments`. Anything without a static declaration (a dynamic call, an
+ * element-access callee, a builtin) has no parameters to widen. */
+function calleeParameters(
+  node: ts.CallExpression | ts.NewExpression,
+  checker: ts.TypeChecker,
+):
+  | { readonly declaration: ts.Node; readonly parameters: readonly ts.ParameterDeclaration[] }
+  | undefined {
+  const callee = node.expression;
+  if (isFunctionLike(callee)) {
+    return { declaration: callee, parameters: callee.parameters };
+  }
+  const symbol =
+    ts.isIdentifier(callee) || ts.isPropertyAccessExpression(callee)
+      ? checker.getSymbolAtLocation(callee)
+      : undefined;
+  const resolved = calleeTargetDeclaration(symbol, checker, 0);
+  // `new C(v)` maps onto the constructor: a declared one names its parameters, while an
+  // implicit one forwards to the base — a chain the source never spells, so it stays a
+  // follow-up rather than a guess.
+  const declaration =
+    resolved !== undefined || !ts.isNewExpression(node)
+      ? resolved
+      : constructorOfClass(symbol);
+  if (declaration === undefined || !isFunctionLike(declaration)) {
+    return undefined;
+  }
+  const [firstParam] = declaration.parameters;
+  const parameters =
+    firstParam !== undefined && ts.isIdentifier(firstParam.name) && firstParam.name.text === 'this'
+      ? declaration.parameters.slice(1)
+      : declaration.parameters;
+  return { declaration, parameters };
+}
+
+/** The constructor a `new` expression's class declares, or `undefined` for an implicit one
+ * (which forwards to the base through no syntax this walk can see). */
+function constructorOfClass(
+  symbol: ts.Symbol | undefined,
+): ts.ConstructorDeclaration | undefined {
+  const declaration = symbol?.valueDeclaration;
+  if (declaration !== undefined && ts.isClassDeclaration(declaration)) {
+    for (const member of declaration.members) {
+      if (ts.isConstructorDeclaration(member)) {
+        return member;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Follow a callee symbol to the function-like declaration it names: directly, or through one
+ * variable hop (`const g = getX; g(v)`). Deeper chains stay dynamic. */
+function calleeTargetDeclaration(
+  symbol: ts.Symbol | undefined,
+  checker: ts.TypeChecker,
+  depth: number,
+): ts.Node | undefined {
+  const declaration = symbol?.valueDeclaration;
+  if (declaration === undefined || depth > 1) {
+    return undefined;
+  }
+  if (isFunctionLike(declaration)) {
+    return declaration;
+  }
+  if (
+    ts.isVariableDeclaration(declaration) &&
+    declaration.initializer !== undefined &&
+    ts.isIdentifier(declaration.initializer)
+  ) {
+    return calleeTargetDeclaration(
+      checker.getSymbolAtLocation(declaration.initializer),
+      checker,
+      depth + 1,
+    );
+  }
+  return undefined;
+}
+
+/** Fixed-shape parameters a dynamic value can reach (plan.md §8 step 44c).
+ *
+ * In js mode the checker no longer refuses Unknown-into-object flows (2322/2345 suppressed) and
+ * `maybeBoundary` only settles tags, so an Unknown holding a dynamic object that lands in a
+ * fixed-layout parameter reads garbage — `jsrt_object_get_field` on a shape-table value, silent
+ * wrong answers down to SIGSEGV. The fix widens the RECEIVING parameter to Unknown through the
+ * same NUL-dynamic channel 2322/2454 use, so the body reads through the shape table. A
+ * statically slot-exact value needs no widening; a method-touching body keeps its static
+ * dispatch (`paramTouchesMethod`), which class values already answer correctly.
+ *
+ * Returns the fully-qualified names to seed; the caller unions them with
+ * `runtimeDynamicSymbols`, which also feeds the walk as `knownDynamic`, so an already-widened
+ * binding counts as a dynamic source for the next edge. Declarations, assignments and returns
+ * are the same hole from other sides and are NOT covered: widening a variable needs gate
+ * coherence the object spread does not have, and widening a return type cannot reach callers,
+ * whose reads are checker-typed. */
+function collectDynamicSlots(
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  knownDynamic: ReadonlySet<string>,
+): Set<string> {
+  // To a fixpoint: a widened parameter is itself a dynamic source, so `b(p) { a(p); }` marks
+  // `a`'s parameter once `b`'s is marked, whatever order the two calls come in. The walk only
+  // ever adds names, so the loop terminates; chains longer than a handful of hops do not occur
+  // outside generated code, and a second pass over one is noise against the checker calls.
+  const fqns = new Set<string>();
+  const seen = new Set<string>(knownDynamic);
+  for (;;) {
+    const before = fqns.size;
+    collectDynamicSlotsPass(files, checker, seen, fqns);
+    if (fqns.size === before) {
+      return fqns;
+    }
+    for (const fqn of fqns) {
+      seen.add(fqn);
+    }
+  }
+}
+
+function collectDynamicSlotsPass(
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  knownDynamic: ReadonlySet<string>,
+  fqns: Set<string>,
+): void {
+  const paramDeclaredType = (param: ts.ParameterDeclaration): HType | undefined => {
+    if (!ts.isIdentifier(param.name)) {
+      return undefined;
+    }
+    const symbol = checker.getSymbolAtLocation(param.name);
+    const declaration = symbol?.valueDeclaration;
+    if (symbol === undefined || declaration === undefined) {
+      return undefined;
+    }
+    return tsTypeToHType(checker.getTypeOfSymbolAtLocation(symbol, declaration), checker);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      // `new C(v)` maps its arguments onto the constructor's parameters exactly as a call
+      // maps onto its callee's — the same fixed-shape/dynamic-value hole in the same shape.
+      const callee = calleeParameters(node, checker);
+      if (callee !== undefined) {
+        // A `new C` without an argument list has no arguments to map.
+        (node.arguments ?? []).forEach((argument, index) => {
+          if (ts.isSpreadElement(argument)) {
+            return;
+          }
+          const param = callee.parameters[index];
+          if (param === undefined || !ts.isIdentifier(param.name)) {
+            return;
+          }
+          const declared = paramDeclaredType(param);
+          if (declared?.kind !== 'object') {
+            return;
+          }
+          const paramSymbol = checker.getSymbolAtLocation(param.name);
+          if (paramSymbol === undefined) {
+            return;
+          }
+          if (
+            !staticallySafeValue(effectiveValueType(argument, checker, knownDynamic), declared) &&
+            !paramTouchesMethod(callee.declaration, paramSymbol, checker)
+          ) {
+            fqns.add(checker.getFullyQualifiedName(paramSymbol));
+          }
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const file of files) {
+    visit(file);
+  }
 }
 
 /** `let x = 1` / `const x = 1`, from either a statement or a `for` header's first slot.
@@ -2970,6 +3277,22 @@ function emptyArrayLiteral(type: HType, span: Span): ArrayLiteral {
  * Parentheses unwrap; an `as` assertion unwraps too, because the lowering drops every assertion
  * to a type no tag check settles (an array never is one) and keeps only checkable assertions
  * (number, string, boolean), which can never spell a union of arrays. */
+/** One union arm that is always an array at run time: a checker array or tuple, or a match
+ * array (plan.md §8 step 44a) — the same declaration-file interface test `isMatchReceiver`
+ * applies to an expression, spelled here for a type because arms have no syntax. */
+function spreadArmIsAlwaysArray(arm: ts.Type, checker: ts.TypeChecker): boolean {
+  if (checker.isArrayType(arm) || checker.isTupleType(arm)) {
+    return true;
+  }
+  const symbol = arm.getSymbol();
+  const name = symbol?.getName();
+  if (name !== 'RegExpExecArray' && name !== 'RegExpMatchArray') {
+    return false;
+  }
+  const declarations = symbol?.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
 function spreadUnionIsAlwaysArray(expression: ts.Expression, checker: ts.TypeChecker): boolean {
   let current = expression;
   while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current)) {
@@ -2979,7 +3302,7 @@ function spreadUnionIsAlwaysArray(expression: ts.Expression, checker: ts.TypeChe
   return (
     type.isUnion() &&
     type.types.length > 0 &&
-    type.types.every((arm) => checker.isArrayType(arm) || checker.isTupleType(arm))
+    type.types.every((arm) => spreadArmIsAlwaysArray(arm, checker))
   );
 }
 
@@ -3043,7 +3366,10 @@ function lowerArrayLiteralExpression(
     if (result === null) {
       if ('elems' in segment) {
         result = piece;
-      } else if (spreadUnionIsAlwaysArray(segment.from, checker)) {
+      } else if (
+        spreadUnionIsAlwaysArray(segment.from, checker) ||
+        isMatchReceiver(segment.from, checker)
+      ) {
         // `[...u]` over a union of arrays: the operand lowers to Unknown (its arms disagree on
         // the element type), so reading it as the concat RECEIVER fails the verifier (STA4082).
         // The empty literal receives instead and the operand rides as the spread-or-append
@@ -3052,6 +3378,10 @@ function lowerArrayLiteralExpression(
         // array: each arm spreads element-wise, so `[]` plus `u` is a copy of `u`. A union with
         // a non-array arm keeps the receiver shape, whose tag check throws a catchable TypeError
         // where appending would silently wrap the value.
+        // A narrowed match array (`RegExpExecArray`/`RegExpMatchArray`, plan.md §8 step 44a)
+        // rides the same arm: the checker calls it an interface, so the HType model calls it
+        // Unknown, but at run time it IS a dense jsrt array (elements plus a property table),
+        // which the argument-position concat already spreads today (`[0, ...m]` compiles).
         result = arrayConcatExpr(emptyArrayLiteral(literalType, span), piece, span);
       } else {
         result = arrayConcatExpr(piece, emptyArrayLiteral(literalType, span), span);
@@ -3217,7 +3547,7 @@ function lowerClassMethodCall(
     );
     return null;
   }
-  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics, node);
   if (args === null) {
     return null;
   }
@@ -3842,6 +4172,77 @@ function lowerExpression(
       target,
       field: node.name.text,
     };
+  }
+
+  // `super.m` as a value: the base's method as an unbound closure -- the value twin of the
+  // `super.m()` call `lowerClassMethodCall` builds. The target is the receiver parameter, not
+  // an evaluation of `super`, which names no value at all; the owner is the class declaring
+  // the method (an ancestor, never the receiver's own); the dispatch is always direct,
+  // because skipping the override is what `super` means. A bare call drops the receiver per
+  // `has_receiver` (docs/VALUE.md §4.16), exactly as `const g = o.m; g()` does. The gate
+  // admitted only identifier-named methods with an instance receiver in scope, so anything
+  // else reaching here is the gate and the lowering disagreeing.
+  if (ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    const target = receiverIdentifier(node.expression, sourceFile, bindings, diagnostics);
+    if (target === null) {
+      return null;
+    }
+    if (target.type.kind !== 'object') {
+      diagnostics.push(
+        lowerDiagnostic(node, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
+      );
+      return null;
+    }
+    if (ts.isPrivateIdentifier(node.name)) {
+      diagnostics.push(
+        lowerDiagnostic(
+          node,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `private '${node.name.text}' has no method value the lowering can reach`,
+        ),
+      );
+      return null;
+    }
+    const field = node.name.text;
+    const owner = declaringClassName(node.expression, field, checker, bindings, sourceFile);
+    if (owner === null) {
+      diagnostics.push(
+        lowerDiagnostic(
+          node,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `method '${field}' names no class the lowering can reach`,
+        ),
+      );
+      return null;
+    }
+    const slot = target.type.methods.findIndex((m) => m.name === field);
+    if (slot < 0) {
+      diagnostics.push(
+        lowerDiagnostic(
+          node,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `method '${field}' has no slot in the layout of ${hTypeName(target.type)}`,
+        ),
+      );
+      return null;
+    }
+    const value: MethodValue = {
+      kind: 'method-value',
+      type: typeAt(node, checker, bindings),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      target,
+      className: owner,
+      method: field,
+      slot,
+      dispatch: 'direct',
+    };
+    return value;
   }
 
   // `o.x` on a class instance. This is tested BEFORE `.length` because a class may declare a field
@@ -4806,6 +5207,15 @@ function lowerExpression(
         value: name === 'NaN' ? Number.NaN : Number.POSITIVE_INFINITY,
       };
     }
+    // A generic read as a value (`console.log(box)`, `take(f)` through an alias) names
+    // the canonical specialization, not the binding above: a declaration binds its raw
+    // generic type (which the verifier refuses as unsubstituted) and an alias binds
+    // nothing at all. Asked before either is read, so an accepted value-use never reaches
+    // the miss below as an internal error; anything else falls through untouched.
+    const canonical = canonicalValueReference(node, sourceFile, checker, bindings, diagnostics);
+    if (canonical !== undefined) {
+      return canonical;
+    }
     if (!binding) {
       // Two different failures wear the same shape here, and telling them apart is the whole point.
       // An unresolved name (including an expando-only namespace) is a catchable `ReferenceError`.
@@ -4869,6 +5279,19 @@ function lowerExpression(
     let operandNode: ts.Expression = node.expression;
     while (ts.isParenthesizedExpression(operandNode)) {
       operandNode = operandNode.expression;
+    }
+    // `typeof id` on a named generic answers "function" for every specialization, so it folds
+    // without naming one: no value is built, and the gate accepts exactly this position.
+    if (
+      ts.isIdentifier(operandNode) &&
+      genericValueInstantiation(operandNode, checker) !== undefined
+    ) {
+      return {
+        kind: 'string-literal',
+        type: H_STRING,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        value: 'function',
+      };
     }
     if (ts.isIdentifier(operandNode) && isUnresolvableIdentifier(operandNode, checker, bindings)) {
       return {
@@ -5158,7 +5581,14 @@ function lowerExpression(
         obj.text === 'console' &&
         Object.hasOwn(CONSOLE_METHODS, propName)
       ) {
-        const given = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        const given = lowerArguments(
+          node.arguments,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+          node,
+        );
         if (given === null) {
           return null;
         }
@@ -5291,7 +5721,14 @@ function lowerExpression(
         receiverType.kind === 'promise' &&
         (propName === 'then' || propName === 'catch' || propName === 'finally')
       ) {
-        const given = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+        const given = lowerArguments(
+          node.arguments,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+          node,
+        );
         if (given === null) {
           return null;
         }
@@ -5578,7 +6015,14 @@ function lowerExpression(
           return null;
         }
         {
-          const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+          const args = lowerArguments(
+            node.arguments,
+            sourceFile,
+            checker,
+            bindings,
+            diagnostics,
+            node,
+          );
           if (args === null) {
             return null;
           }
@@ -5649,7 +6093,14 @@ function lowerExpression(
           if (raw === null) {
             return null;
           }
-          const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+          const args = lowerArguments(
+            node.arguments,
+            sourceFile,
+            checker,
+            bindings,
+            diagnostics,
+            node,
+          );
           if (args === null) {
             return null;
           }
@@ -7627,7 +8078,7 @@ function lowerSuperCall(
     );
     return null;
   }
-  const args = lowerArguments(call.arguments, sourceFile, checker, bindings, diagnostics);
+  const args = lowerArguments(call.arguments, sourceFile, checker, bindings, diagnostics, call);
   if (args === null) {
     return null;
   }
@@ -7930,7 +8381,7 @@ function collectSpecializations(
    * parameters. */
   const enqueueSpecialization = (
     at: ts.Node,
-    subject: 'call' | 'construction' | 'argument',
+    subject: 'call' | 'construction' | 'argument' | 'value',
     key: string,
     declaration:
       | ts.FunctionDeclaration
@@ -8067,6 +8518,41 @@ function collectSpecializations(
     );
   };
 
+  /** Records one generic read as a value: `console.log(box)`, `take(box)`, a rest
+   * argument — anywhere the gate accepts the read but no parameter type determines a
+   * tuple. The canonical tuple (defaults, else `Unknown`) is what an undetermined call
+   * takes too, so the two share one specialization. Skips what the static argument path
+   * owns, and anything that is not a named generic at all. */
+  const requestValue = (
+    argument: ts.Expression,
+    outerCall: ts.CallExpression,
+    substitution: ReadonlyMap<string, HType>,
+    depth: number,
+  ): void => {
+    if (!ts.isIdentifier(argument)) {
+      return;
+    }
+    if (genericArgumentTuple(argument, outerCall, checker) !== undefined) {
+      return;
+    }
+    const value = genericValueInstantiation(argument, checker);
+    if (value === undefined) {
+      return;
+    }
+    const typeArguments = value.typeArguments.map((t) =>
+      substituteHType(t, (name) => substitution.get(name)),
+    );
+    enqueueSpecialization(
+      argument,
+      'value',
+      value.key,
+      value.declaration,
+      typeArguments,
+      value.substitution,
+      depth,
+    );
+  };
+
   /** Every call and construction in `root`, skipping the bodies of generic declarations — those
    * are reached through the worklist instead, once there is a tuple to read them under. */
   const walkCalls = (
@@ -8091,10 +8577,13 @@ function collectSpecializations(
       if (ts.isCallExpression(node)) {
         request(node, substitution, depth);
         // A generic passed as an argument specializes at the parameter's function type, in the
-        // same pass: spread elements have no single parameter to read.
+        // same pass: spread elements have no single parameter to read. What no parameter
+        // determines takes the canonical value tuple instead, in the same pass for the same
+        // reason — the lowering must have a specialization for every read the gate accepted.
         for (const argument of node.arguments) {
           if (!ts.isSpreadElement(argument)) {
             requestArgument(argument, node, substitution, depth);
+            requestValue(argument, node, substitution, depth);
           }
         }
       }
@@ -8296,6 +8785,60 @@ function specializedArgument(
   };
 }
 
+/** The identifier naming the specialization a generic read as a value resolves to.
+ *
+ * Mirrors `specializedArgument` for the positions no parameter type determines:
+ * `console.log(box)`, `take(box)`, a rest argument. `undefined` means the read is not a
+ * generic value-use and the ordinary path applies; `null` means it is and something went
+ * wrong, with a diagnostic already pushed. Reads the canonical tuple (defaults, else
+ * `Unknown`) the collection enqueued beside the static ones, so the value shares its
+ * specialization with an undetermined call. */
+function canonicalValueReference(
+  node: ts.Identifier,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Identifier | null | undefined {
+  const parent = node.parent;
+  if (!ts.isCallExpression(parent) || parent.expression === node) {
+    return undefined;
+  }
+  if (genericArgumentTuple(node, parent, checker) !== undefined) {
+    // The static argument path owns this read: every argument-lowering caller rewrites it
+    // before the identifier branch runs, so reaching here means the two disagree — fall
+    // through to the ordinary read rather than mask the gap with a second answer.
+    return undefined;
+  }
+  const value = genericValueInstantiation(node, checker);
+  if (value === undefined) {
+    return undefined;
+  }
+  const typeArguments = value.typeArguments.map((t) =>
+    substituteHType(t, (name) => bindings.get(typeParameterKey(name))),
+  );
+  const name = specializationName(value.key, typeArguments);
+  const type = bindings.get(name);
+  if (type === undefined) {
+    diagnostics.push(
+      lowerDiagnostic(
+        node,
+        sourceFile,
+        'STA4070',
+        'internal',
+        `no specialization '${name}' was collected for this value`,
+      ),
+    );
+    return null;
+  }
+  return {
+    kind: 'identifier',
+    type,
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    name,
+  };
+}
+
 /** The specialization's own function type: the generic's signature with the substitution applied. */
 function specializationType(specialization: Specialization, checker: ts.TypeChecker): HType {
   const declared = tsTypeToHType(checker.getTypeAtLocation(specialization.declaration), checker);
@@ -8354,10 +8897,16 @@ function typeParameterKey(name: string): string {
  * to find and rewrite. Outside a specialization the lookup finds nothing and this is `tsTypeToHType`
  * exactly. */
 function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType {
-  if (ts.isIdentifier(node)) {
+  // Parameters join identifiers here: step 44c widens a fixed-shape parameter that may receive
+  // a dynamic value, and the widening must reach the declaration (which `lowerFunction` types
+  // through here), not only later uses. A parameter declaration carries no symbol of its own —
+  // only its name does — so it probes through that; a binding pattern has neither and falls
+  // through.
+  if (ts.isIdentifier(node) || ts.isParameter(node)) {
     // An expando namespace has a checker shape, but its runtime read throws instead of producing
     // an object with that layout. Property consumers must agree with the reference-error's type.
-    if (isUnresolvableIdentifier(node, checker, bindings)) {
+    // Parameters skip this: the test names an identifier position, and a parameter has none.
+    if (ts.isIdentifier(node) && isUnresolvableIdentifier(node, checker, bindings)) {
       return hUnknown(false);
     }
     // Fast path: with nothing seeded the probe below always misses, so skip the symbol lookup,
@@ -8365,7 +8914,10 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType 
     // checker time on big files). `hasRuntimeDynamicSymbols` is set from the same set the
     // seeding loop reads, so skipping here agrees with probing there by construction.
     if (hasRuntimeDynamicSymbols) {
-      const symbol = checker.getSymbolAtLocation(node);
+      const symbol =
+        ts.isParameter(node) && ts.isIdentifier(node.name)
+          ? checker.getSymbolAtLocation(node.name)
+          : checker.getSymbolAtLocation(node);
       if (
         symbol !== undefined &&
         bindings.has(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`)
@@ -8501,7 +9053,7 @@ function lowerOnlyArgument(
   bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null {
-  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics, node);
   return args?.[0] ?? null;
 }
 
@@ -8511,9 +9063,33 @@ function lowerArguments(
   checker: ts.TypeChecker,
   bindings: Scope,
   diagnostics: Diagnostic[],
+  outerCall?: ts.CallExpression,
 ): Expression[] | null {
   const args: Expression[] = [];
   for (const node of nodes ?? []) {
+    // A generic passed as an argument names a specialization, exactly as in an ordinary call:
+    // `arr.map(box)` passes `box<number>`, resolved against the callback's type. Receiver-op
+    // paths reach here instead of `lowerCallArguments`, and without this hook an accepted
+    // program lowers the raw generic and dies in the verifier. Spread elements have no single
+    // parameter to read and lower as ordinary expressions; `new` never passes its call, so its
+    // arguments keep the ordinary path (the gate refuses a generic there first).
+    if (outerCall !== undefined && !ts.isSpreadElement(node)) {
+      const specialized = specializedArgument(
+        node,
+        outerCall,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      if (specialized === null) {
+        return null;
+      }
+      if (specialized !== undefined) {
+        args.push(specialized);
+        continue;
+      }
+    }
     const lowered = lowerExpression(node, sourceFile, checker, bindings, diagnostics);
     if (lowered === null) {
       return null;
@@ -8533,7 +9109,7 @@ function lowerGlobalCall(
   bindings: Scope,
   diagnostics: Diagnostic[],
 ): { args: Expression[]; span: Span } | null {
-  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics, node);
   if (args === null) {
     return null;
   }
@@ -8572,7 +9148,7 @@ function lowerReceiverCall(
   if (target === null) {
     return null;
   }
-  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics, node);
   if (args === null) {
     return null;
   }

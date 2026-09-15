@@ -322,6 +322,57 @@ export function genericArgumentTuple(
   return { declaration: generic, key, typeArguments, substitution };
 }
 
+/** What a named generic resolves to where it is READ as a value: `console.log(box)`,
+ * `take(box)` for an untyped parameter, a rest argument.
+ *
+ * The tuple is what no call site determines: every parameter takes its declared default,
+ * in order, or `Unknown` when it has none — the same `finishTuple` a call with no
+ * information takes, so the value shares its specialization with an undetermined call
+ * rather than inventing a second answer. The caller applies the enclosing substitution,
+ * as for every other instantiation; at the top level there is nothing to apply and the
+ * tuple is closed.
+ *
+ * Only a generic with a home to specialize under qualifies — a declaration, an assigned
+ * arrow or function expression, or a `const` alias chain to either (all through
+ * `genericAliasTarget`). An unassigned arrow has nowhere to build even one copy for and
+ * stays refused at the gate. `undefined` for anything else. */
+export function genericValueInstantiation(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+):
+  | {
+      readonly declaration: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+      readonly key: string;
+      readonly typeArguments: readonly HType[];
+      readonly substitution: ReadonlyMap<string, HType>;
+    }
+  | undefined {
+  const target = genericAliasTarget(node, checker);
+  if (target === undefined) {
+    return undefined;
+  }
+  const signature = checker.getSignatureFromDeclaration(target);
+  const typeParameters = signature?.getTypeParameters() ?? [];
+  if (typeParameters.length === 0) {
+    return undefined;
+  }
+  const key = ts.isFunctionDeclaration(target)
+    ? (target.name?.text ?? '')
+    : genericArrowKey(target);
+  if (key === undefined) {
+    return undefined;
+  }
+  const substitution = new Map<string, HType>();
+  const typeArguments = finishTuple(
+    typeParameters.map((typeParameter) => ({
+      name: typeParameter.getSymbol()?.getName() ?? '',
+      defaultType: typeParameterDefault(typeParameter, checker),
+    })),
+    substitution,
+  );
+  return { declaration: target, key, typeArguments, substitution };
+}
+
 /** The tuple a class reference already carries: `Box<number>` names `[number]` without asking
  * any call site.
  *

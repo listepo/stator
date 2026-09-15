@@ -12,3 +12,17 @@ function run(cb: (x: number) => number, v: number): number {
 }
 console.log(run(box, 8));
 console.log(run(f, 9));
+
+// Generic as-value (plan.md §8 step 41): `typeof` folds to "function" without building a
+// value, any other value-use takes the canonical tuple (defaults, else Unknown), and a
+// receiver-op callback specializes at the callback's type like an ordinary argument.
+console.log(typeof box);
+console.log(typeof f);
+console.log(box);
+console.log([1, 2, 3].map(box));
+
+function take(x: unknown): string {
+  return typeof x;
+}
+console.log(take(box));
+console.log(take(f));

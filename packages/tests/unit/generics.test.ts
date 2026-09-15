@@ -132,13 +132,97 @@ test('the specialization is typed with its concrete arguments', () => {
   assert.equal(hTypeName((decl as FunctionDeclaration).fn.type), '(a0: string) => string');
 });
 
-test('a generic used as a value is refused, not specialized', () => {
-  // There is no tuple to specialize on: the value is the function itself, and monomorphization has
-  // nothing to monomorphize. Refused at the gate rather than lowered to one arbitrary instantiation.
+test('a generic used as a value takes the canonical tuple', () => {
+  // No call site determines a tuple, so the value shares its specialization with an
+  // undetermined call: every parameter takes its declared default, else Unknown
+  // (plan.md §8 step 41). The gate accepts the read and the collection enqueues the one
+  // specialization every such read resolves to.
+  const source = `
+    function box<T>(item: T): T { return item; }
+    console.log(box);
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['box<unknown>']);
+});
+
+test('a generic read through an alias takes the same canonical tuple', () => {
+  // The alias binds no value, so every read resolves through it to the ultimate generic —
+  // and to the same specialization a direct read takes.
+  const source = `
+    function box<T>(item: T): T { return item; }
+    const f = box;
+    console.log(f);
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['box<unknown>']);
+});
+
+test('a generic arrow read as a value takes the canonical tuple under its variable', () => {
+  const source = `
+    const box = <T,>(item: T): T => item;
+    console.log(box);
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['box<unknown>']);
+});
+
+test('a defaulted parameter keeps its default in the canonical tuple', () => {
+  // The canonical tuple is what a call with no information takes, so a defaulted
+  // parameter reads its default rather than Unknown.
+  const source = `
+    function withDefault<T = string>(x?: T): string { return \`\${x}\`; }
+    console.log(withDefault);
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['withDefault<string>']);
+});
+
+test('typeof a generic names no specialization', () => {
+  // Every specialization is a function, so `typeof` folds to the literal without building
+  // a value at all.
+  const source = `
+    function box<T>(item: T): T { return item; }
+    console.log(typeof box);
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), []);
+});
+
+test('a generic callback to a receiver op specializes at the callback type', () => {
+  // The gate always accepted the position (the checker's instantiated parameter type has
+  // no unbound parameter); the lowering dropped it by routing receiver-op arguments
+  // around the specialization hook, which died in the verifier as STA4054.
+  const source = `
+    function box<T>(item: T): T { return item; }
+    console.log([1, 2].map(box));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), ['box<number>']);
+});
+
+test('a generic returned from a function is still refused', () => {
+  // A returned generic escapes every call site that could name a tuple — even when the
+  // declared return type is function-typed — so it waits on the dynamic tier with the
+  // other escaping positions (plan.md §8 step 41).
   assert.deepEqual(
     gateCodes(`
       function box<T>(item: T): T { return item; }
-      console.log(box);
+      function get(): (x: number) => number { return box; }
+      console.log(get()(1));
+    `),
+    ['STA1214'],
+  );
+});
+
+test('a generic call at a generic type is refused, not an internal error', () => {
+  // Self-application `box(box)` infers a generic type for the argument, which no
+  // monomorphic copy can spell. The widened argument arm accepts the read, so the call
+  // itself refuses — otherwise the file reaches the collection's STA4070 canary, which
+  // exists for compiler bugs, not user programs (plan.md §8 step 41).
+  assert.deepEqual(
+    gateCodes(`
+      function box<T>(item: T): T { return item; }
+      console.log(typeof box(box));
     `),
     ['STA1214'],
   );
