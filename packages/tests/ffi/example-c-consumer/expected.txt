@@ -1,0 +1,5 @@
+add=42
+positive=1
+captured: Error: neg
+recovered=7
+c-consumer ok

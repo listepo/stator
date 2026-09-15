@@ -1,60 +1,92 @@
 /* The FFI test harness (plan.md §10 Task 7.1 step 10, Task 7.2 steps 8–9).
  *
- * What runs today is the half that needs no new compiler surface. The committed libm goldens
- * (`tests/golden/ts|js/extern_libm`) build through `stator build` and their binaries are
- * compared against the pinned Node byte-for-byte — both streams, `TZ=UTC` on both sides. The
- * `ts` side proves the direct extern call; the `js` side the same contract with a
- * dynamically-typed argument crossing the boundary check. Header determinism (Task 7.2
- * step 8) runs as a pure `cmp` over a stub until `--emit-header` exists. Everything else is
- * a `TODO(step-7)` stub that throws if reached and reports as `not run`, never as a pass.
+ * Usage: node packages/tests/ffi/run.ts [--filter <substring> | --filter=<substring>]
+ *
+ * Five checks, every one a real build compared against the pinned Node byte-for-byte (both
+ * streams, `TZ=UTC` on both sides):
+ *
+ * - `ts/extern_libm` and `js/extern_libm`: the committed libm goldens through an in-process
+ *   `build()` (the golden runner's pattern) — the `ts` side the direct extern call, the `js`
+ *   side the same contract with a dynamically-typed argument crossing the boundary check.
+ *   `-lm` needs no plumbing: it rides every link inside the runtime's `link-flags.txt`.
+ * - `self-compiled .c`: the `ts/extern_ptr` golden's two-function fixture C (`ffi.c`, no
+ *   header) compiled here with the same C11 `-Wall -Wextra -Werror` discipline as the
+ *   runtime, the objects linked through the `--link=` channel (docs/FFI.md §9) — the
+ *   `extraLinkFlags` consumer path, exercised by a test instead of asserted by a comment.
+ * - `--emit-header double build`: a small exported-function fixture built twice in-process;
+ *   the two headers must compare byte-identical with `headersEqual` (docs/FFI.md §8: no
+ *   timestamps, no absolute paths, no hash-ordered iteration).
+ * - `asan buffer ownership`: the same `extern_ptr` fixture — C `memset`/`memcmp` into
+ *   `malloc`'d blocks — linked against the sanitized archive under `STATOR_RUNTIME=asan`.
+ *   A buffer overrun aborts the binary instead of diffing, so any sanitizer report fails the
+ *   check. The flavor pins at `build.ts` module load, so this one spawns the CLI where the
+ *   rest build in-process. With no `build-asan/libjsrt.a` the check reports `not run`.
+ *
+ * A check that cannot run reports `not run`, never a pass and never a failure — the summary
+ * counts all three separately.
  */
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  buildFixture,
+  compileFixtureC,
+  runNodeOracle,
+  type FixtureStreams,
+} from '../support/fixture-build.ts';
 import { pool, runProcess } from '../support/parallel.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GOLDEN = join(HERE, '..', 'golden');
+const RUNTIME_ROOT = join(HERE, '..', '..', 'runtime');
 const CLI = join(HERE, '..', '..', 'compiler', 'src', 'cli', 'main.ts');
+const ASAN_ARCHIVE = join(RUNTIME_ROOT, 'build-asan', 'libjsrt.a');
 
-const TS_ENTRY = join(GOLDEN, 'ts', 'extern_libm', 'main.ts');
-const JS_ENTRY = join(GOLDEN, 'js', 'extern_libm', 'main.js');
+const TS_LIBM_ENTRY = join(GOLDEN, 'ts', 'extern_libm', 'main.ts');
+const JS_LIBM_ENTRY = join(GOLDEN, 'js', 'extern_libm', 'main.js');
+const PTR_ENTRY = join(GOLDEN, 'ts', 'extern_ptr', 'main.ts');
 
 /* Every spawn runs with `TZ` pinned to UTC — the build too, so a compile-time constant fold
  * can never see a different zone from the run that checks it, and the compiled binary reads
  * the tzdb through libc while Node reads it through ICU, which only agree on UTC. */
 const PINNED_ENV = { ...process.env, TZ: 'UTC' };
 
-/* Both streams, because console.error/warn write to STDERR in Node and the runtime mirrors
- * that — comparing stdout alone would let a wrong-stream bug pass. */
-interface Streams {
-  readonly stdout: string;
-  readonly stderr: string;
-}
+/* In-process `build()` reads the process environment directly — there is no spawn to carry
+ * `PINNED_ENV` — so the pin has to hold here too, for the same reason (the golden runner's
+ * pattern). */
+process.env['TZ'] = 'UTC';
 
-/* One `stator build` spawn per fixture (the leak runner's shape). The link needs no extra
- * flags on the command line: `-lm` is already in the runtime's `link-flags.txt`, which
- * `linkExecutable` reads on every link, so this is the same link a user gets. */
-async function compile(entry: string, out: string, mode: 'ts' | 'js'): Promise<void> {
-  const built = await runProcess(
-    process.execPath,
-    [CLI, 'build', entry, '-o', out, '--mode', mode],
-    { env: PINNED_ENV },
-  );
-  if (built.status !== 0) {
-    throw new Error(`stator build failed: ${built.stderr.trim()}`);
+/* `--filter <substring>` (or `--filter=<substring>`) narrows the run to checks whose name
+ * contains the substring — developer iteration speed, so debugging one check does not rebuild
+ * every fixture. A filter that matches nothing prints the zero-line and exits 0. */
+function parseFilter(argv: readonly string[]): string | undefined {
+  let filter: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--filter') {
+      const value = argv[index + 1];
+      if (value === undefined) {
+        throw new Error('--filter requires a value');
+      }
+      filter = value;
+      index += 1;
+    } else if (arg !== undefined && arg.startsWith('--filter=')) {
+      filter = arg.slice('--filter='.length);
+    }
   }
+  return filter;
 }
 
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
- * binary lives in a directory unique to THIS CALL, so two workers can never compile into
- * each other's `app`. */
-async function runCompiled(entry: string, mode: 'ts' | 'js'): Promise<Streams> {
+ * binary and its intermediates live in a directory unique to THIS CALL, so two workers can
+ * never compile into each other's `app`. */
+async function runCompiled(entry: string, mode: 'ts' | 'js'): Promise<FixtureStreams> {
   const work = mkdtempSync(join(tmpdir(), 'stator-ffi-'));
   try {
+    const objects = await compileFixtureC(entry, work);
     const out = join(work, 'app');
-    await compile(entry, out, mode);
+    await buildFixture({ entry, out, mode, linkFlags: objects });
     const exec = await runProcess(out, [], { env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
@@ -65,50 +97,48 @@ async function runCompiled(entry: string, mode: 'ts' | 'js'): Promise<Streams> {
   }
 }
 
-async function runNode(entry: string): Promise<Streams> {
-  // The oracle runs on `process.execPath` — the pinned Node under the repo's `mise exec` pin,
-  // which `scripts/check-node.mjs` refuses to let be anything else. FFI fixtures cannot run
-  // under Node as written (an ambient `declare function` erases to nothing), so their
-  // `node_shim.mjs` preloads the same bindings via `--import` — invisible to Stator, which
-  // never imports it. What the comparison still proves is the observable contract: same
-  // calls, same values, same caught messages, byte-for-byte.
-  const shim = join(dirname(entry), 'node_shim.mjs');
-  const args = existsSync(shim) ? ['--import', shim, entry] : [entry];
-  const result = await runProcess(process.execPath, args, { env: PINNED_ENV });
-  if (result.status !== 0) {
-    throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);
-  }
-  return { stdout: result.stdout, stderr: result.stderr };
+type CheckOutcome =
+  | { readonly kind: 'passed' }
+  | { readonly kind: 'failed'; readonly message: string }
+  | { readonly kind: 'not-run'; readonly reason: string };
+
+interface Check {
+  readonly name: string;
+  readonly run: () => Promise<CheckOutcome>;
 }
 
-interface Fixture {
-  readonly label: string;
-  readonly entry: string;
-  readonly mode: 'ts' | 'js';
+function diffMessage(name: string, actual: FixtureStreams, expected: FixtureStreams): string {
+  const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
+  return `${name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`;
 }
 
-async function checkExtern(fixture: Fixture): Promise<string | undefined> {
+async function checkExtern(name: string, entry: string, mode: 'ts' | 'js'): Promise<CheckOutcome> {
   try {
     const [actual, expected] = await Promise.all([
-      runCompiled(fixture.entry, fixture.mode),
-      runNode(fixture.entry),
+      runCompiled(entry, mode),
+      runNodeOracle(entry, PINNED_ENV),
     ]);
     if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
-      return undefined;
+      return { kind: 'passed' };
     }
-    const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
-    return `${fixture.label}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`;
+    return { kind: 'failed', message: diffMessage(name, actual, expected) };
   } catch (error) {
-    return `${fixture.label}: ${error instanceof Error ? error.message : String(error)}`;
+    return {
+      kind: 'failed',
+      message: `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 }
 
 /* Task 7.2 step 8: an emitted header must be deterministic — same input, byte-identical
- * output, no timestamps, no absolute paths. Until `--emit-header` exists the `cmp` itself
- * runs against this stub, so the shape of the check is fixed before the flag it will check. */
-const STUB_HEADER =
-  '#ifndef STATOR_FFI_STUB_H\n#define STATOR_FFI_STUB_H\n\n' +
-  'double stator_stub_sqrt(double x);\n\n#endif\n';
+ * output, no timestamps, no absolute paths. Two real in-process `--emit-header` builds of one
+ * small exported-function fixture, compared with `headersEqual` below; any mismatch fails
+ * loudly rather than diffing, because a diff of generated C invites "fixing" the expectation. */
+const HEADER_FIXTURE =
+  'export function add(a: number, b: number): number {\n  return a + b;\n}\n' +
+  'export function truth(): boolean {\n  return true;\n}\n' +
+  'export const VERSION: number = 1;\n' +
+  'console.log(add(1, 2));\n';
 
 /** Pure byte comparison for emitted headers: `Buffer` equality, no decoding and no
  * normalization that could hide the nondeterminism the check exists to catch. */
@@ -116,80 +146,156 @@ export function headersEqual(first: Buffer, second: Buffer): boolean {
   return first.equals(second);
 }
 
-function checkHeaderDeterminism(): string | undefined {
-  const first = Buffer.from(STUB_HEADER, 'utf8');
-  const second = Buffer.from(STUB_HEADER, 'utf8');
-  if (headersEqual(first, second)) {
-    return undefined;
+async function checkEmitHeaderDoubleBuild(): Promise<CheckOutcome> {
+  const name = '--emit-header double build';
+  const work = mkdtempSync(join(tmpdir(), 'stator-ffi-header-'));
+  try {
+    const entry = join(work, 'widget.ts');
+    writeFileSync(entry, HEADER_FIXTURE);
+    const firstHeader = join(work, 'first.h');
+    const secondHeader = join(work, 'second.h');
+    // `--emit-header` compiles a relocatable object, never links: this check proves the
+    // header half even where the link half cannot run.
+    await buildFixture({
+      entry,
+      out: join(work, 'first.o'),
+      mode: 'ts',
+      linkFlags: [],
+      emitHeader: firstHeader,
+      unitName: 'widget',
+    });
+    await buildFixture({
+      entry,
+      out: join(work, 'second.o'),
+      mode: 'ts',
+      linkFlags: [],
+      emitHeader: secondHeader,
+      unitName: 'widget',
+    });
+    if (headersEqual(readFileSync(firstHeader), readFileSync(secondHeader))) {
+      return { kind: 'passed' };
+    }
+    return {
+      kind: 'failed',
+      message: `${name}: same input emitted byte-different headers`,
+    };
+  } catch (error) {
+    return {
+      kind: 'failed',
+      message: `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    rmSync(work, { recursive: true, force: true });
   }
-  return 'header determinism: identical inputs compared unequal';
 }
 
-/* The three checks the compiler cannot run yet: Task 7.1 step 10's second half, its ASan
- * clause, and Task 7.2's `--emit-header`. Each throws if reached — `main` reports them as
- * `not run`, never as passes and never as failures. */
-function selfCompiledC(): void {
-  throw new Error('TODO(step-7): compile the two-function .c fixture in the harness and link it');
+/* Task 7.1 step 10's ASan clause (docs/FFI.md §8): C writes into `malloc`'d blocks through
+ * `memset` and reads them back through `memcmp` — under the sanitized archive any overrun or
+ * use-after-free aborts the binary, which fails the check instead of diffing. The flavor pins
+ * at `build.ts` module load, so the sanitized link cannot go through the in-process `build()`
+ * the other checks use: this one spawns the CLI with `STATOR_RUNTIME=asan` (the asan-gate's
+ * shape, `detect_leaks=0` included). Fixture C stays uninstrumented, as in the golden runner:
+ * what the sanitizer watches is the runtime-owned buffers C writes into, not the fixture. */
+async function checkAsanBufferOwnership(): Promise<CheckOutcome> {
+  const name = 'asan buffer ownership';
+  if (!existsSync(ASAN_ARCHIVE)) {
+    return {
+      kind: 'not-run',
+      reason: `no sanitized archive at ${ASAN_ARCHIVE} — build it with the runtime-asan recipe first`,
+    };
+  }
+  const work = mkdtempSync(join(tmpdir(), 'stator-ffi-asan-'));
+  try {
+    const objects = await compileFixtureC(PTR_ENTRY, work);
+    const out = join(work, 'app');
+    const built = await runProcess(
+      process.execPath,
+      [
+        CLI,
+        'build',
+        PTR_ENTRY,
+        '-o',
+        out,
+        '--mode',
+        'ts',
+        ...objects.flatMap((object) => ['--link', object]),
+      ],
+      { env: { ...PINNED_ENV, STATOR_RUNTIME: 'asan', ASAN_OPTIONS: 'detect_leaks=0' } },
+    );
+    if (built.status !== 0) {
+      throw new Error(`stator build (asan) failed: ${built.stderr.trim()}`);
+    }
+    const exec = await runProcess(out, [], {
+      env: { ...PINNED_ENV, ASAN_OPTIONS: 'detect_leaks=0' },
+    });
+    if (exec.status !== 0) {
+      throw new Error(`asan binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
+    }
+    const expected = await runNodeOracle(PTR_ENTRY, PINNED_ENV);
+    if (exec.stdout === expected.stdout && exec.stderr === expected.stderr) {
+      return { kind: 'passed' };
+    }
+    return {
+      kind: 'failed',
+      message: diffMessage(name, { stdout: exec.stdout, stderr: exec.stderr }, expected),
+    };
+  } catch (error) {
+    return {
+      kind: 'failed',
+      message: `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
-
-function asanBufferOwnership(): void {
-  throw new Error('TODO(step-7): ASan run where C writes into a buffer the runtime owns');
-}
-
-function emitHeaderDoubleBuild(): void {
-  throw new Error('TODO(step-7): real --emit-header double build with byte comparison');
-}
-
-interface Stub {
-  readonly name: string;
-  readonly run: () => void;
-}
-
-const STUBS: readonly Stub[] = [
-  { name: 'self-compiled .c fixture', run: selfCompiledC },
-  { name: 'ASan buffer-ownership check', run: asanBufferOwnership },
-  { name: '--emit-header double build', run: emitHeaderDoubleBuild },
-];
 
 async function main(): Promise<void> {
-  const fixtures: readonly Fixture[] = [
-    { label: 'ts/extern_libm', entry: TS_ENTRY, mode: 'ts' },
-    { label: 'js/extern_libm', entry: JS_ENTRY, mode: 'js' },
+  const filter = parseFilter(process.argv.slice(2));
+  const all: readonly Check[] = [
+    {
+      name: 'ts/extern_libm',
+      run: () => checkExtern('ts/extern_libm', TS_LIBM_ENTRY, 'ts'),
+    },
+    {
+      name: 'js/extern_libm',
+      run: () => checkExtern('js/extern_libm', JS_LIBM_ENTRY, 'js'),
+    },
+    {
+      name: 'self-compiled .c (ts/extern_ptr)',
+      run: () => checkExtern('self-compiled .c (ts/extern_ptr)', PTR_ENTRY, 'ts'),
+    },
+    { name: '--emit-header double build', run: checkEmitHeaderDoubleBuild },
+    { name: 'asan buffer ownership', run: checkAsanBufferOwnership },
   ];
+  const checks = filter === undefined ? all : all.filter((check) => check.name.includes(filter));
 
-  // One result per fixture, indexed by fixture: the pool completes out of order, and a report
+  // One result per check, indexed by check: the pool completes out of order, and a report
   // whose failure order shifted run to run would be unreadable as a diff.
-  const results = await pool(fixtures, (fixture) => checkExtern(fixture));
+  const outcomes = await pool(checks, (check) => check.run());
 
-  const failures: string[] = [];
-  for (const result of results) {
-    if (result !== undefined) {
-      failures.push(result);
+  let passed = 0;
+  let failed = 0;
+  let notRun = 0;
+  for (let index = 0; index < checks.length; index += 1) {
+    const check = checks[index];
+    const outcome = outcomes[index];
+    if (check === undefined || outcome === undefined) {
+      continue;
+    }
+    if (outcome.kind === 'passed') {
+      passed += 1;
+    } else if (outcome.kind === 'failed') {
+      failed += 1;
+      process.stderr.write(`FAIL ${outcome.message}\n`);
+    } else {
+      notRun += 1;
+      process.stdout.write(`ffi: not run — ${check.name} (${outcome.reason})\n`);
     }
   }
-  const header = checkHeaderDeterminism();
-  if (header !== undefined) {
-    failures.push(header);
-  }
-
-  for (const failure of failures) {
-    process.stderr.write(`FAIL ${failure}\n`);
-  }
-  for (const stub of STUBS) {
-    let reason: string;
-    try {
-      stub.run();
-      reason = 'stub returned without running a check';
-    } catch (error) {
-      reason = error instanceof Error ? error.message : String(error);
-    }
-    process.stdout.write(`ffi: not run — ${stub.name} (${reason})\n`);
-  }
-  const passed = 3 - failures.length;
   process.stdout.write(
-    `ffi: 3 checks — ${String(passed)} passed, ${String(failures.length)} failed, ${String(STUBS.length)} not run\n`,
+    `ffi: ${String(checks.length)} checks — ${String(passed)} passed, ${String(failed)} failed, ${String(notRun)} not run\n`,
   );
-  if (failures.length > 0) {
+  if (failed > 0) {
     process.exitCode = 1;
   }
 }
