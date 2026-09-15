@@ -1747,6 +1747,46 @@ golden: 202 passed for this landing's six fixtures; 1 unrelated pre-existing fai
 ```
 
 
+### Steps 18–38 — the 2026-09-14 bug-hunt batch ✅ (landed 2026-09-14/15, consolidated 2026-09-15)
+
+Twenty-one steps from the 2026-09-14 bug hunt (plan-notes 249–251) landed in three commits but were
+never moved out of `plan.md` — the plan kept listing implemented work as open (golden rule 1).
+Verified 2026-09-15 by four parallel verification agents (one per step group), each rebuilding the
+step's goldens in both modes against the pinned Node 26.7.0 and running the subset runner; all
+Checks passed with no code changes, working tree clean throughout.
+
+- **Batch 1 — steps 18–27** (`49d8193`, 2026-09-14): console variadic (18), variadic builtins (19 —
+  the only remaining "method calls are not yet supported" is the generic unresolvable-receiver
+  fallback at `gate.ts:2266`, not a named builtin), dynamic-receiver crash → catchable `STA2008` /
+  `STA2009` (20), four runtime divergences (21), computed keys with methods/accessors (22),
+  shadowed-class identity via `Scope.declare` (23), optional chaining with the decision fixture now
+  honestly `dynamic` (24), field-initializer arrow `this` (25 — landing renamed
+  `enclosingNonArrowFunction` to `enclosingThisOwner`), duplicate-keys js carve-out with ts keeping
+  `STA0012` (26), spec-exact `ToNumber(string)` in `jsrt_numeric.c` (27).
+- **Batch 2 — steps 28–37** (`6ed9f77`, 2026-09-15; the commit message under-names the batch as
+  "33–37" — history is not rewritten, this entry is the correction): integer-key enumeration order
+  (28), `ToString` of Map/Set/RegExp/Date/Error (29), five inspector divergences (30), the
+  `2^29−24` string-length cap with catchable `RangeError` (31, correcting note 203), `Date.parse`
+  ISO leniencies (32), `{ __proto__: 1 }` as proto setter (33), `IteratorClose` on abrupt exit but
+  not `continue` (34), Promise adoption/`finally` ordering (35), object-method capture UB fixed and
+  ASan-clean (36, the P0 segfault), suppressed-diagnostics → no `STA4xxx` with spread-call honestly
+  `STA1214` (37).
+- **Step 38** (`5a83a1d`, 2026-09-15, plan-notes 257): `for-in` over arrays/strings via `forInKeys`
+  with `TS2407` suppressed in both modes; `Object.keys` off-layout stays loud `STA4084` by design.
+  Records the ts-mode contract tension honestly (tsc refuses `for-in` over a string; Stator compiles
+  it with byte-exact semantics — revert the `BOTH_MODES` half to js-only in one line if the owner
+  prefers refusal).
+
+**Check evidence** (cited runs): `golden: 337 fixtures — 337 passed, 0 failed` (release; every
+step filter above also green under `STATOR_RUNTIME=asan`); `subset: 570 fixtures — 530 passed,
+40 expected-fail, 0 failed`; per-step manual `build` + run + `diff` vs the pinned Node byte-exact
+in both modes (16 js fixtures + 15 ts twins for steps 18–22; 5/5/2/2/2 release+ASan pairs for
+28–32; proto/iterator/promise/capture/nonfunction/for-in pairs for 33–38, plus a `STA4` grep over
+step-37 js builds with zero hits). Two observations carried forward, not gaps: `docs/NUMERIC.md`
+§6.3 was not expanded with step 27's six cases (detail lives in code comments + fixtures), and
+§8 step-12 prose is stale where later landings went broader than written (recorded in plan-notes
+258 with the triaged residue).
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)

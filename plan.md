@@ -547,155 +547,29 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     byte-for-byte; the recorded choice (docs/SUBSET.md, plan-notes 225) is DYNAMIC for an interface
     with an optional property or an index signature.
 17. ~~**A shadow-renamed function's display name leaks the HIR spelling into `console.log`**~~ ✅ **landed 2026-09-14** (plan-notes 247; evidence in [done.md](done.md) → Phase 5 step 17).
-18. **[D3][P1] The `console` family takes exactly one argument, and in `ts` mode that is a raw
-    checker code** (plan-notes 249). `console.log`/`info`/`debug`/`warn`/`error`/`dir` are declared
-    unary (`src/frontend/lib/stator.globals.d.ts`) and `CONSOLE_METHODS` is `arity: 1`, so
-    `console.log(a, b)` is `STA0012 [ts] Expected 1 arguments` where Node prints `a b`; `js` mode
-    reaches the gate's own `STA1214` instead — one source, two diagnostic classes, and a not-yet
-    that names Phase 5 for work no step owns. `console.log()` prints a blank line in Node and is
-    rejected here too. Land the variadic form end to end (declaration, gate, lowering, emitter and a
-    runtime entry that inspects N values), or, if it stays deferred, declare the methods variadic so
-    the gate rather than the checker owns the message. **Check:** a golden whose `console.log(a, b,
-    c)`, `console.error(…)` and `console.log()` match the pinned Node byte-for-byte in both modes;
-    the single-argument goldens unchanged.
-19. **[D3][P1] Variadic built-in argument forms name Phase 5, which owns none of them** (plan-notes
-    249). `Array.prototype.push`/`unshift` with more than one argument, insertion `splice`,
-    multi-array `concat`, `String.fromCharCode` with more than one code, and `lastIndexOf(x, from)`
-    are all `STA1214` "planned for Phase 5" today, but §8's open list is step 2a(b)/(c) and step
-    12(c)–(f) — no step owns any of them (§15.9). Two do not even name their construct:
-    `String.fromCharCode` and `lastIndexOf` fall through to the catch-all "method calls are not yet
-    supported". Land the forms or name the owning step; either way a named built-in must not be
-    answered by the catch-all. **Check:** a golden per landed form byte-for-byte against the pinned
-    Node in both modes, and no `notYet` under `src/` reads "method calls are not yet supported" for a
-    named built-in.
-20. **[D4][P1] A dynamic receiver CRASHES where Node throws** (plan-notes 223 items 5 and 6c,
-    re-verified 2026-09-14). `function add(v) { arr.push(v); } add(1); var arr = [];` exits 139
-    (SIGSEGV) where Node throws `TypeError`; `function pushIt(a) { a.push(9); return a.length; }
-    pushIt([1, 2])` aborts with `STA2006` where Node runs. `jsrt_as_array` unboxes a NaN-boxed
-    payload with no tag test, and `jsrt_get_prop` walks shape tables only, never a class descriptor
-    or a builtin prototype — both are failures on values the checker typed but that are wrong at run
-    time, the §0.2 boundary the dynamic representation exists to catch. **Check:** both programs
-    throw a catchable `TypeError` whose `name`/`message`/exit status match the pinned Node, with the
-    new codes allocated in `docs/DIAGNOSTICS.md`; one golden covers each.
-21. **[D2][P2] Four runtime-semantics divergences from the 2026-09-11 hunt** (plan-notes 223 items
-    3, 4, 6a and 6b; re-verified 2026-09-14). `{ ...o }` enumerates in the type's field order rather
-    than the object's key order (`Object.keys({ ...o })` answers `y,x` where Node answers `x,y`);
-    `fn.length` on an untyped function value answers `undefined` where Node answers the arity (and a
-    method's closure counts the receiver — docs/VALUE.md §4.16 — so that must be right first);
-    `"ab".replace(/(?<x>a)/, "[$<x>]")` prints `[$<x>]b` where Node prints `[a]b`;
-    `Date.parse("2024-01-01T24:00:01Z")` answers a timestamp where Node answers `NaN` (hour 24 is
-    valid only with zero minutes and seconds). **Check:** one golden per case byte-for-byte against
-    the pinned Node.
-22. **[D3][P0] A computed object-literal key: methods are dropped and the read uses the wrong
-    representation** (plan-notes 250 items 1–2). `DynObjectLiteral` has no `methods` field and the
-    lowering discards them, so `const k = "dyn"; const o = { [k]: 2, m() { return 1; } };
-    console.log(o.m())` is a compile-time `STA4072`, a runtime `STA2006` panic (exit 134) with a
-    runtime-computed key, and `typeof o.m === "undefined"` with an accessor added. Separately, a
-    computed key whose identifier has a LITERAL type builds a dynamic object while the binding's
-    type stays a fixed shape, so `const k = "dyn"; const o = { [k]: 1 }; console.log(o.dyn)` reads
-    uninitialised memory (`2e-323`, value changes per run) where Node prints `1` — a silent wrong
-    answer. Fix the classification at `frontend/types.ts:458-492` and give the dynamic literal a
-    place for its methods. **Check:** goldens for `[k]: v` with a literal-typed and a runtime key,
-    with and without a method and an accessor, all matching the pinned Node in both modes.
-23. **[D3][P1] A shadowed class declaration shares the outer class's identity** (plan-notes 250
-    item 3). Classes never go through `Scope.declare` and the descriptor is keyed by source name, so
-    an inner `class C` resolves to the outer one: `class C { m() { return "outer"; } } { class C {
-    m() { return "inner"; } } console.log(new C().m()); } console.log(new C().m());` prints
-    `outer / outer` where Node prints `inner / outer`; a differing member set aborts with `STA4072`.
-    Route class declarations through the same alpha-renaming as every other binding. **Check:** the
-    nested-, sibling- and function-shadowed class shapes match the pinned Node in
-    `tests/golden/js/`; a differing-member-set fixture compiles.
-24. **[D2][P1] Optional chaining `?.` is silently ignored** (plan-notes 250 item 4). No
-    `questionDotToken` handling exists in `lower/` or `gate.ts`, so the access is unconditional:
-    `const o: { a?: { b?: number } } = {}; console.log(o.a?.b);` is `undefined` in Node and an
-    uncaught `TypeError` (exit 1) here, in both modes. The decision fixture
-    `subset_optional_chaining_ts.ts` is `@expected-fail: true` with `@verdict: static` while the gate
-    returns `dynamic`, so the runner hides the regression. Land `?.` (and `?.[]`/`?.()`), or refuse
-    it with a `not-yet`; either way the fixture's verdict must match the gate. **Check:** a golden
-    whose `?.` chains answer Node's `undefined`/short-circuit at every position, and the decision
-    fixture no longer masks the construct.
-25. **[D2][P1] `this` in an arrow inside a class field initializer is not captured** (plan-notes 250
-    item 5). `enclosingNonArrowFunction` (`lower/captures.ts:89`) finds no non-arrow ancestor for a
-    field initializer at module scope, so `class Counter { n = 0; inc = (): number => { this.n += 1;
-    return this.n; }; }; console.log(new Counter().inc());` is a compile-time `STA4072` where Node
-    prints `1`. **Check:** the field-initializer arrow, a nested arrow and a `this`-free initializer
-    match the pinned Node in both modes.
-26. **[D1][P2] `js` mode rejects duplicate object literal keys** (plan-notes 250 item 6).
-    `const a = { x: 1, x: 2 }; console.log(a.x);` is `STA0012 [js] An object literal cannot have
-    multiple properties with the same name.` where Node prints `2`. Duplicate keys are legal JS (last
-    wins) and §1.2 says js mode never rejects untyped code; the diagnostic is tsc's grammar check
-    TS1117 with no js-mode carve-out. **Check:** the program is `dynamic` in the js-mode decision
-    matrix and matches Node byte-for-byte in a golden; `ts` mode keeps its refusal.
-27. **[D3][P1] `ToNumber(string)` diverges from the spec in six measured ways** (plan-notes 251
-    A1–A6). `+"inf"`/`"INFINITY"` are `Infinity` where Node answers `NaN` (`strtod` — which
-    `docs/NUMERIC.md` §6.3 says the conversion is not); `0b101`/`0o17` are `NaN` where Node answers
-    `5`/`15`; `-0x10` is `-16` where Node answers `NaN`; `0xffffffffffffffff` saturates through
-    `strtol`; a leading NBSP or trailing VT answers `NaN`; and any numeric text over 256 code units
-    is `NaN`. **Check:** one golden per case byte-for-byte against the pinned Node, so §6.3's
-    "not `strtod`" is true again.
-28. **[D2][P1] Fixed-shape objects ignore `OrdinaryOwnPropertyKeys`** (plan-notes 251 A7).
-    `const o = { b: 1, "1": 2, a: 3 }` enumerates `b,1,a` where Node enumerates integer-like keys
-    first, ascending (`1,b,a`); `Object.keys`/`values`/`entries`/`getOwnPropertyNames`,
-    `JSON.stringify` and `console.log` all follow. Only the fixed arm (`jsrt_object_ops.c:47`,
-    `jsrt_print.c:736`) is wrong; the dynamic path already partitions. **Check:** a golden with
-    integer-like and named keys in a fixed literal and a class instance matches Node; plan-notes 85's
-    falsified invariant is corrected.
-29. **[D2][P1] `ToString` of Map/Set/RegExp/Date/Error is `[object Object]`** (plan-notes 251 A14,
-    B4). `"" + new Map()` → `[object Object]` where Node answers `[object Map]`; `"" + /abc/g` →
-    `[object Object]` where Node answers `/abc/g`; `new Date(0)` and `` `${new Error("boom")}` ``
-    (`Error: boom`) too. `jsrt_to_string` (`jsrt_print.c:1771`) has no arm for any of them. **Check:**
-    a golden per receiver matches Node byte-for-byte.
-30. **[D2][P2] Five `console.log` inspector divergences** (plan-notes 251 A8–A11, A15). The depth cap
-    abbreviates EMPTY containers (`[[[[]]]]` → `[ [ [ [Array] ] ] ]` where Node prints
-    `[ [ [ [] ] ] ]`); a quoted key does not escape control characters (`{ "a\nb": 1 }` prints a real
-    newline); a lone surrogate prints U+FFFD where Node escapes it (`[ '\ud800A' ]`); VT escapes as
-    `\v` where Node uses `\x0B`; and the `matchAll` iterator prints `Iterator {}` where Node prints
-    `Object [RegExp String Iterator] {}`. **Check:** a golden per case matches Node.
-31. **[D1][P2] `repeat`/`padStart`/`padEnd` length cap** (plan-notes 251 A12). The cap is 2^31−1;
-    Node's maximum string length is 2^29−24 (536870888), so `"ab".repeat(300000000)` answers
-    `600000000` where Node throws a catchable `RangeError`. **Check:** a golden matches Node's
-    `RangeError`/exit for a length just over the cap; note 203's choice is corrected.
-32. **[D2][P2] `Date.parse` ISO leniencies** (plan-notes 251 A13). Fractional seconds must be
-    exactly three digits and an offset must use a `+HH:MM` colon, so `"…00.5Z"` and `"…+0530"` answer
-    `NaN` where Node answers timestamps. **Check:** goldens for 1/2/6-digit fractions and a
-    colon-less offset match Node (the hour-24 case is step 21).
-33. **[D2][P2] Object literal `{ __proto__: 1 }` is an own data property** (plan-notes 251 A16).
-    Node treats the spelling as the proto setter, so `JSON.stringify({ __proto__: 1, a: 1 })` is
-    `{"a":1}`; here it is `{"__proto__":1,"a":1}`. **Check:** a both-modes golden matches Node.
-34. **[D3][P1] `for...of` never calls IteratorClose on abrupt exit** (plan-notes 251 B1). A `break`,
-    `return` or `throw` out of the loop body must run the iterator's `return()` — a generator's
-    `finally` — and it does not, in either mode, sync or async:
-    `for (const v of g()) { if (v === 1) break; }` skips `g`'s `finally` where Node runs it.
-    `continue` is correct. There is no `jsrt_iterator_close` and the emitter's boxed-iterator path
-    only closes the lexical env. **Check:** a golden whose generator/`return()` observable runs on
-    `break`, `return` and `throw`, and NOT on `continue`, matches Node.
-35. **[D3][P1] Promise microtask ordering is one hop short** (plan-notes 251 B2–B3). Adoption is
-    eager (`Promise.resolve(1).then(() => Promise.resolve(2)).then(...)` interleaves one tick off)
-    and `Promise.prototype.finally` omits the spec's pass-through wrapper, so a `.finally().then()`
-    chain orders differently from Node. **Check:** ordering goldens for adoption and `finally`
-    (resolve and reject paths) match the pinned Node's microtask interleaving.
-36. **[D3][P0] An object-literal method that captures a local or parameter SEGFAULTS** (plan-notes
-    251 B6). `function counter() { let n = 0; return { get() { return n; } }; }
-    console.log(counter().get());` exits 139 where Node prints `0`; a variant returns garbage
-    (`4 5 5` for `1 2 2`), so it is undefined behaviour, not only a crash. The emitter's
-    `object-literal` case never binds `expr.methods`, and the call site rebuilds the closure with the
-    access site's env. **Check:** goldens (captured local, captured parameter, `this` + captured) run
-    under ASan and match the pinned Node.
-37. **[D3][P1] `js` mode turns suppressed checker diagnostics into internal errors** (plan-notes 251
-    B7–B10, A-ICE). `const x = 5; x()` → `STA4041`; `f(...arr)` on a user function → `STA4031`; a
-    missing class-instance property → `STA4060`; `{ a: 1, 10: 2 }` → `STA4068`; `"5" * 1` →
-    `STA4011`. Each is valid at run time (Node throws `TypeError` or answers a value) and each is a
-    `STA4xxx` internal error, which `AGENTS.md` says is always a compiler bug — js mode suppressed
-    the checker diagnostic that a lowering/verifier invariant still assumes. **Check:** a golden or a
-    decision test per case: the program either reaches the dynamic path with Node's answer, or gets a
-    `not-yet` naming its blocker; no `STA4xxx`.
-38. **[D2][P1] `for...in` over an array panics `STA4084`** (plan-notes 251 B12).
-    `for (const k in [10, 20]) console.log(k);` prints `0 / 1` in Node and aborts
-    `STA4084: Object.keys/values/entries on a non-object value` (exit 134) here, in both modes;
-    `for...in` over an object literal is correct. The lowering emits `jsrt_object_keys`
-    (`lower/index.ts:2306`), which the runtime refuses for an array (or the lowering must ask for the
-    array's indices). **Check:** `for...in` over an array, a string and an object literal matches the
-    pinned Node in both modes.
+18. ~~**The `console` family takes exactly one argument**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+19. ~~**Variadic built-in argument forms name Phase 5**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+20. ~~**A dynamic receiver CRASHES where Node throws**~~ ✅ **landed 2026-09-14** (`49d8193`, new codes `STA2008`/`STA2009`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+21. ~~**Four runtime-semantics divergences from the 2026-09-11 hunt**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+22. ~~**A computed object-literal key: methods are dropped and the read uses the wrong representation**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+23. ~~**A shadowed class declaration shares the outer class's identity**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+24. ~~**Optional chaining `?.` is silently ignored**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+25. ~~**`this` in an arrow inside a class field initializer is not captured**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+26. ~~**`js` mode rejects duplicate object literal keys**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+27. ~~**`ToNumber(string)` diverges from the spec in six measured ways**~~ ✅ **landed 2026-09-14** (`49d8193`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+28. ~~**Fixed-shape objects ignore `OrdinaryOwnPropertyKeys`**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+29. ~~**`ToString` of Map/Set/RegExp/Date/Error is `[object Object]`**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+30. ~~**Five `console.log` inspector divergences**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+31. ~~**`repeat`/`padStart`/`padEnd` length cap**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+32. ~~**`Date.parse` ISO leniencies**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+33. ~~**Object literal `{ __proto__: 1 }` is an own data property**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+34. ~~**`for...of` never calls IteratorClose on abrupt exit**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+35. ~~**Promise microtask ordering is one hop short**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+36. ~~**An object-literal method that captures a local or parameter SEGFAULTS**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+37. ~~**`js` mode turns suppressed checker diagnostics into internal errors**~~ ✅ **landed 2026-09-14** (`6ed9f77`; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+38. ~~**`for...in` over an array panics `STA4084`**~~ ✅ **landed 2026-09-15** (`5a83a1d`, plan-notes 257; evidence in [done.md](done.md) → Phase 5 steps 18–38).
+39. **[D1][P0] Spread of an unknown value is a gate-verifier gap that throws `STA4082`** (found 2026-09-15, plan-notes 258). `[...(u as number[])]` in js mode reaches the CLI as `STA4082 internal error in array-op` — the step-37 shape (suppressed diagnostic → `STA4xxx`) outside step 37's five named cases. `gateArrayLiteral` accepts unknown spread (`gate.ts:2607-2610`) but lowering emits `concat` the verifier rejects. **Check:** the program either reaches the dynamic path with Node's answer or gets a `not-yet` naming its blocker; no `STA4xxx`; decision fixtures in both modes.
+40. **[D2][P1] Lowering diagnostics mislabel the mode as `[ts]` under `--mode=js`** (found 2026-09-15, plan-notes 258). ~30 sites in `lower/index.ts` (e.g. `STA4068` at `:3498`) print `[ts]` when the build ran with `--mode=js`. `lowerSourceFile` takes no mode — correct per §0.8, since lowering must not branch on mode — so the fix threads the mode for labeling only. **Check:** a js-mode build that raises a lowering diagnostic labels it `[js]`; a unit test pins the label; `ts`-mode output unchanged.
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---

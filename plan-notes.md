@@ -7632,3 +7632,39 @@ bent in js: 2407 is a lint-grade refusal of a program with an exact runtime answ
 type error, and the ts encoding represents the answer (unlike 2790's fixed-shape delete,
 which stays refused in ts precisely because no encoding exists). If the owner wants ts to
 keep the refusal, revert the `BOTH_MODES` half to js-only in one line; the runtime stays.
+
+## 258. Steps 18–38 consolidated; triage residue becomes steps 39–40 (2026-09-15)
+
+**The consolidation.** Steps 18–38 landed in `49d8193` (18–27), `6ed9f77` (28–37) and `5a83a1d`
+(38) but `plan.md` still listed all twenty-one as open — golden rule 1 debt. Four verification
+agents (one per step group) rebuilt every step's goldens in both modes against the pinned Node
+26.7.0 plus the subset runner: all Checks pass, no code changes, tree clean. `plan.md` now carries
+struck stubs pointing at `done.md` → Phase 5 steps 18–38, where the per-batch evidence lives.
+`6ed9f77`'s message under-names its batch ("33–37" while also carrying 28–32); history stands, the
+`done.md` entry is the correction.
+
+**The triage.** A fifth agent probed everything else still open in §8 (step 12(c)–(f) residue, step
+2a(b)/(c) leftovers, Task 6.12, Phase 7 tail) with 3-line repros in `/tmp/stator-probes/`. Findings:
+
+- Step 12(d) landed far broader than its prose (static getters/setters, static blocks, index
+  signatures, method overloads, pre-super validation, optional members with defaults, explicit type
+  args on `new`); the prose still claims several of them as residue. The prose is not corrected in
+  this change — the residue table below is the sharper record, and a prose pass can follow the next
+  landings rather than churn ahead of them.
+- Step 12 residue, precisely bounded: uninitialized optional class fields, non-`Symbol.iterator`
+  computed member names, `#private` re-declared in a subclass, static `#private` accessors, class
+  expressions (no `ClassExpression` case in `gateConstruct` — the "classes" catch-all), generic
+  bases, nested generic classes, class-as-value / `super`-as-value (blocked on the class object),
+  bare generics as value. Spread residue: spread of an array without fixed shape, spread of a
+  methods-carrying literal.
+- Step 2a leftovers confirmed still refused in js mode (2683, 2769, 2464, 2488, 2454) with exact fix
+  locations; 2683's option flip alone would only reclassify (needs a dynamic-`this` mechanism), and
+  the first 2769 probe was a false positive (non-overloaded calls already run through the 2345 path).
+  Open verdicts for the owner: TS2416 override-mismatch in js (keep as real refusal vs suppress),
+  2769 fallback semantics (permissive like the 2345 path, or boundary abort).
+- Task 6.12 is code-complete (`mise.toml` exact `26.7.0`, full-version compare in
+  `scripts/check-node.mjs`); only its `pnpm run ci` green clause is unverified here.
+- Two adjacent bugs are new plan work, added as steps 39–40 in the same change: spread of an
+  unknown value throwing `STA4082` (gate accepts, verifier rejects — the step-37 shape outside its
+  five cases), and lowering diagnostics mislabeling the mode as `[ts]` under `--mode=js` (~30 sites;
+  fix threads the mode for labeling only, per §0.8).
