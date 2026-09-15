@@ -25,8 +25,11 @@ import type {
 } from '../hir/nodes.ts';
 import { rewriteExpression, rewriteModule, rewriteStatements } from './rewrite.ts';
 
-export function eliminateDeadCode(module: Module): Module {
-  return shakeFunctions(rewriteModule(module, { statement: prune, statements: dropUnreachable }));
+export function eliminateDeadCode(module: Module, roots: readonly string[] = []): Module {
+  return shakeFunctions(
+    rewriteModule(module, { statement: prune, statements: dropUnreachable }),
+    roots,
+  );
 }
 
 /** True when control cannot fall out of this statement into the next one.
@@ -184,11 +187,16 @@ function referencedInDefaults(params: readonly Parameter[]): ReadonlySet<string>
  * each other dies as a group. That transitivity is why this is a fixpoint and not one filter pass:
  * `f` calling `g` keeps `g` alive only while something keeps `f` alive.
  *
+ * `roots` are extra entry points that count as referenced even when nothing in the module names
+ * them: the `--emit-header` C-visible exports (plan.md §10 Task 7.2), which a C caller reaches
+ * without going through any statement here. A root that names no declaration is skipped, so a
+ * caller that passes names from another stage cannot keep the wrong thing alive.
+ *
  * Only module level, and only functions. A nested function is part of its parent's body and dies
  * with it; a class is left alone because `new C()` names its class by string rather than by an
  * identifier the walk above would see, and a shake that cannot see a reference is a shake that
  * deletes live code. */
-function shakeFunctions(module: Module): Module {
+function shakeFunctions(module: Module, roots: readonly string[]): Module {
   const declared = new Map<string, FunctionDeclaration>();
   for (const stmt of module.statements) {
     if (stmt.kind === 'function-declaration') {
@@ -202,6 +210,7 @@ function shakeFunctions(module: Module): Module {
   const live = new Set<string>();
   const pending = [
     ...referencedNames(module.statements.filter((s) => s.kind !== 'function-declaration')),
+    ...roots,
   ];
   for (let name = pending.pop(); name !== undefined; name = pending.pop()) {
     const declaration = declared.get(name);

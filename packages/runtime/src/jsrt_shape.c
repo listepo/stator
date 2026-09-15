@@ -19,19 +19,19 @@
 
 #include <assert.h>
 
-const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL, NULL};
+const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
 
 /* Identical to `jsrt_class_dynamic` in every field that means anything -- the SHAPE owns the layout
  * -- and distinct from it by address, which is the whole job: it marks the objects §22.2.7.2 builds
  * with a null prototype so the printer writes Node's `[Object: null prototype]` prefix. */
-const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL};
+const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
 
 /* The descriptor that marks an accessor CELL (docs/VALUE.md §4.15). Like the two above it means
  * nothing by its fields and everything by its address: a property read tests the value it just
  * loaded against this pointer to tell a get/set pair from an ordinary property value. Nothing in
  * the language can build one, so the test cannot be fooled -- jsrt_define_accessor is the only
  * producer. */
-const JSRTClass jsrt_class_accessor = {"", 0, NULL, NULL, 0, NULL, NULL};
+const JSRTClass jsrt_class_accessor = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
 
 /* The one shape with no key: every dynamic object starts here. Static, so "has no properties"
  * needs no allocation and compares by address. */
@@ -200,9 +200,42 @@ static int32_t fixed_slot(jsrt_value obj, const char *key) {
   return -1;
 }
 
-static jsrt_value fixed_get(jsrt_value obj, const char *key) {
-  const int32_t slot = fixed_slot(obj, key);
-  return slot < 0 ? JSRT_UNDEFINED : jsrt_as_object(obj)->fields[slot];
+/* Dynamic method dispatch through Unknown (plan.md §8 step 45): a fixed-shape object's methods
+ * live in no slot `fixed_get` walks -- an object-literal method rides a hidden trailing
+ * `#method:<name>` slot bound per evaluation, a class method rides the descriptor's method
+ * table -- so a shape-table read of a method NAME missed to `undefined` and the following call
+ * aborted STA2006 where Node runs. Own data properties shadow: the caller asks only on a field
+ * miss, and a hit never fills the IC (a bound closure belongs to one receiver for literals,
+ * and the IC fast path trusts a shape match for the site's key alone).
+ *
+ * Sets `*found` true on a hit and answers the closure; otherwise sets it false and answers
+ * `undefined`. A NULL table entry (a capturing method with no one constant form) is skipped,
+ * leaving the hidden slot -- which carries the construction-site environment -- as the hit.
+ * Accessors (`get x`) are not methods under `x` and never match here. */
+static jsrt_value fixed_method_get(jsrt_value obj, const char *key, bool *found) {
+  JSRTObject *o = jsrt_as_object(obj);
+  const JSRTClass *cls = o->cls;
+  if (cls->fields != NULL) {
+    for (uint32_t i = 0; i < cls->field_count; i++) {
+      const char *name = cls->fields[i];
+      if (name != NULL && strncmp(name, "#method:", 8) == 0 && strcmp(name + 8, key) == 0) {
+        *found = true;
+        return o->fields[i];
+      }
+    }
+  }
+  if (cls->method_names != NULL && cls->methods != NULL) {
+    for (uint32_t i = 0; i < cls->method_count; i++) {
+      const char *name = cls->method_names[i];
+      const JSRTClosure *entry = cls->methods[i];
+      if (name != NULL && entry != NULL && (name == key || strcmp(name, key) == 0)) {
+        *found = true;
+        return jsrt_closure(entry);
+      }
+    }
+  }
+  *found = false;
+  return JSRT_UNDEFINED;
 }
 
 static bool fixed_set(jsrt_value obj, const char *key, jsrt_value value) {
@@ -392,7 +425,16 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
-      return fixed_get(obj, key);
+      const int32_t slot = fixed_slot(obj, key);
+      if (slot >= 0) {
+        return jsrt_as_object(obj)->fields[slot];
+      }
+      bool found = false;
+      const jsrt_value method = fixed_method_get(obj, key, &found);
+      if (found) {
+        return method;
+      }
+      return JSRT_UNDEFINED;
     }
     if (jsrt_is(obj, JSRT_TAG_STRING) && strcmp(key, "length") == 0) {
       return jsrt_number((double)jsrt_string_length(obj));

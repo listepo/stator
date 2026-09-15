@@ -28,40 +28,21 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { emitC } from '../../compiler/src/codegen/index.ts';
-import { lowerSource } from './helpers.ts';
+import { assertReturnsPopFrame, lowerSource, splitEmittedFunctions } from './helpers.ts';
+import type { EmittedFunction } from './helpers.ts';
 
 const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), '..', 'golden', 'ts');
 
-interface EmittedFunction {
-  readonly name: string;
-  readonly body: string;
-}
-
-/* Splits the emitted C into function bodies. Parsing C in general is not on the table; parsing
- * THIS C is, because we wrote it: every function opens at column zero and its closing brace is the
- * only `}` at column zero, everything inside being indented. */
+/* Splits the emitted C into function bodies: the internal units and `main`, which is the
+ * corpus the three invariants below hold over. */
 function functionsIn(c: string): EmittedFunction[] {
-  const found: EmittedFunction[] = [];
-  let open: string | null = null;
-  let body: string[] = [];
-  for (const line of c.split('\n')) {
-    if (open === null) {
-      const start = /^(?:static jsrt_value (_jsrt_fn_\d+)\(uint32_t|(int main)\(void\))/.exec(line);
-      if (start !== null && line.endsWith('{')) {
-        open = start[1] ?? 'main';
-        body = [];
-      }
-      continue;
+  return splitEmittedFunctions(c, (line) => {
+    const start = /^(?:static jsrt_value (_jsrt_fn_\d+)\(uint32_t|(int main)\(void\))/.exec(line);
+    if (start === null) {
+      return undefined;
     }
-    if (line === '}') {
-      found.push({ name: open, body: body.join('\n') });
-      open = null;
-      continue;
-    }
-    body.push(line);
-  }
-  assert.equal(open, null, 'a function body was never closed');
-  return found;
+    return start[1] ?? 'main';
+  });
 }
 
 function indices(body: string, macro: string): number[] {
@@ -182,19 +163,7 @@ void test('every path out of a framed function pops its frame', () => {
       if (!fn.body.includes('JSRT_FRAME(')) {
         continue;
       }
-      // `#line` directives and blank lines are not statements; dropping them is what makes "the
-      // pop is right before the return" a statement about the CODE rather than about formatting.
-      const lines = fn.body
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line !== '' && !line.startsWith('#line'));
-      for (const [at, line] of lines.entries()) {
-        if (!line.startsWith('return')) {
-          continue;
-        }
-        const popped = line.includes('JSRT_FRAME_POP()') || lines[at - 1] === 'JSRT_FRAME_POP();';
-        assert.ok(popped, `${name}:${fn.name} returns without popping: ${line}`);
-      }
+      assertReturnsPopFrame(fn.body, `${name}:${fn.name}`);
     }
   }
 });

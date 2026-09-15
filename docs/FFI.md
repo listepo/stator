@@ -40,7 +40,7 @@ bindings exist (plan §10 Task 7.1 step 1):
    marking would make extern-ness silent: one new declaration in an annotated
    file would cross the trust boundary (§5) without anyone writing it down.
    Each binding is an audit point (`stator explain` flags every one, §5), so
-   each one is marked. A `declare function` in a `.d.ts` *without* the tag is
+   each one is marked. A `declare function` in a `.d.ts` _without_ the tag is
    an ordinary ambient declaration, not an extern call.
 2. **The C symbol defaults to the TS name; the tag's trailing text overrides
    it.** `/** @statorExtern */` calls the C symbol spelled exactly like the TS
@@ -69,20 +69,20 @@ bindings exist (plan §10 Task 7.1 step 1):
 The table is the contract, and it is small on purpose (plan §10 Task 7.1
 step 2):
 
-| TS type | C type | Notes |
-|---|---|---|
-| `number` | `double` | The unmarked case; no conversion |
-| `number` + `i32` refinement | `int32_t` | No user spelling exists yet — until one lands, every `number` maps to `double` (`docs/NUMERIC.md`) |
-| `boolean` | `bool` | `<stdbool.h>` |
-| `void` | `void` | Return position only; a `void` parameter is STA1119 |
-| branded pointer type | `T*` | Opaque; never dereferenced by generated code (see below) |
-| `CString` / `CStringOwned` | `const char*` | Allocates; see §3. `CStringOwned` is parameter-only |
-| anything else | — | Compile error (STA1119 catch-all; specific kinds below) |
+| TS type                     | C type        | Notes                                                                                              |
+| --------------------------- | ------------- | -------------------------------------------------------------------------------------------------- |
+| `number`                    | `double`      | The unmarked case; no conversion                                                                   |
+| `number` + `i32` refinement | `int32_t`     | No user spelling exists yet — until one lands, every `number` maps to `double` (`docs/NUMERIC.md`) |
+| `boolean`                   | `bool`        | `<stdbool.h>`                                                                                      |
+| `void`                      | `void`        | Return position only; a `void` parameter is STA1119                                                |
+| branded pointer type        | `T*`          | Opaque; never dereferenced by generated code (see below)                                           |
+| `CString` / `CStringOwned`  | `const char*` | Allocates; see §3. `CStringOwned` is parameter-only                                                |
+| anything else               | —             | Compile error (STA1119 catch-all; specific kinds below)                                            |
 
 **Branded pointer.** An opaque handle the TS side names but never inspects:
 
 ```ts
-type sqlite3 = { readonly __brand: "sqlite3" };
+type sqlite3 = { readonly __brand: 'sqlite3' };
 ```
 
 Recognition is structural and exact: an object type (alias or interface) with
@@ -107,16 +107,16 @@ fix is `CString` (borrow) or `CStringOwned` (transfer), §3.
 design, so these are permanent, not scheduled; a future task that widens the
 table splits a kind out with a NEW code, never by reusing one):
 
-| Refused kind | Code | Fix |
-|---|---|---|
-| `unknown` in an extern signature | error(STA1114) | Narrow first, or pick an ABI type. Explicit or implicit `any` counts as `unknown` here, in both modes — dynamic is inexpressible across the boundary |
-| object type in an extern signature | error(STA1115) | Branded pointer, or `CString` for text |
-| array type in an extern signature | error(STA1116) | Pass a pointer + length as ABI types |
-| function/closure type in an extern signature | error(STA1117) | v0 has no trampoline; C calls in via Task 7.2 exports instead |
-| bare `string` in an extern signature | error(STA1118) | `CString` (borrow) or `CStringOwned` (transfer) |
-| anything else outside the table — incl. struct by value, `T**` out-params, `void` as a parameter, `CStringOwned` as a return | error(STA1119) | No mapping exists in v0 |
-| variadic (`printf`-style) extern declaration | error(STA1120) | No sound signature; each call site is a different function type (permanent — plan §10 out-of-scope table) |
-| extern declaration outside a `.d.ts` | error(STA1121) | Move it into a `.d.ts` (§1.3) |
+| Refused kind                                                                                                                 | Code           | Fix                                                                                                                                                  |
+| ---------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unknown` in an extern signature                                                                                             | error(STA1114) | Narrow first, or pick an ABI type. Explicit or implicit `any` counts as `unknown` here, in both modes — dynamic is inexpressible across the boundary |
+| object type in an extern signature                                                                                           | error(STA1115) | Branded pointer, or `CString` for text                                                                                                               |
+| array type in an extern signature                                                                                            | error(STA1116) | Pass a pointer + length as ABI types                                                                                                                 |
+| function/closure type in an extern signature                                                                                 | error(STA1117) | v0 has no trampoline; C calls in via Task 7.2 exports instead                                                                                        |
+| bare `string` in an extern signature                                                                                         | error(STA1118) | `CString` (borrow) or `CStringOwned` (transfer)                                                                                                      |
+| anything else outside the table — incl. struct by value, `T**` out-params, `void` as a parameter, `CStringOwned` as a return | error(STA1119) | No mapping exists in v0                                                                                                                              |
+| variadic (`printf`-style) extern declaration                                                                                 | error(STA1120) | No sound signature; each call site is a different function type (permanent — plan §10 out-of-scope table)                                            |
+| extern declaration outside a `.d.ts`                                                                                         | error(STA1121) | Move it into a `.d.ts` (§1.3)                                                                                                                        |
 
 Notes on the refusals: `Unknown`, objects, arrays, and closures are errors by
 construction — they are the cases that would need boxing, and "no boxing for
@@ -185,13 +185,13 @@ spelled as a second JSDoc tag with a closed vocabulary:
 declare function sqliteStep(stmt: sqlite3_stmt): number;
 ```
 
-| Tag | Meaning; the lowering emits the throw |
-|---|---|
-| *(absent)* | No convention: the return is a value, never an exception |
-| `@statorError nonzero` | Nonzero return throws |
-| `@statorError negative` | Negative return throws |
-| `@statorError null` | NULL (pointer-typed) return throws — a `CString` return or a branded pointer |
-| `@statorError errno` | `errno` carries the failure; it is read immediately after the call, before any other runtime call |
+| Tag                     | Meaning; the lowering emits the throw                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------- |
+| _(absent)_              | No convention: the return is a value, never an exception                                          |
+| `@statorError nonzero`  | Nonzero return throws                                                                             |
+| `@statorError negative` | Negative return throws                                                                            |
+| `@statorError null`     | NULL (pointer-typed) return throws — a `CString` return or a branded pointer                      |
+| `@statorError errno`    | `errno` carries the failure; it is read immediately after the call, before any other runtime call |
 
 The thrown value is an `Error` naming the TS function and the failed convention —
 `extern call '<tsName>' failed: <nonzero return | negative return | NULL return | errno set>` —
@@ -330,8 +330,8 @@ demands it (§15.3, §15.6):
 ## 8. Task 7.2 design sketch (non-normative appendix — proposed, not approved)
 
 The sections above are the Task 7.1 contract; what follows is an agent-drafted sketch ahead
-of Task 7.2, kept here so the implementer finds it. Steps 1–2 have LANDED (below); steps
-3–9 remain sketch, explicitly OUTSIDE the sole-allocator promise at the top of this file
+of Task 7.2, kept here so the implementer finds it. Steps 1–7 have LANDED (below);
+steps 8–9 remain sketch, explicitly OUTSIDE the sole-allocator promise at the top of this file
 until they are scheduled. Normative only if scheduled; full text in the session report.
 
 Landed (steps 1–2): `--emit-header`, the reverse mapping, the export decision, and the
@@ -339,6 +339,70 @@ determinism rule. `src/frontend/export.ts` is the only reader of the export surf
 `src/frontend/extern.ts`'s `exportAbiKindOf` is the table's export direction — one table,
 two directions, so the halves cannot drift. `STA1122`–`STA1124` are allocated rows in
 `docs/DIAGNOSTICS.md`, no longer proposals.
+
+Landed (steps 3–5): the init contract, the TS-throws contract, and the frame/stack roots —
+`src/codegen/index.ts` emits them from the same slot layout `main` uses, `build.ts` roots
+the shake at the export names, and every decision below is pinned in
+`tests/unit/export-stubs.test.ts` (in-process shape plus a linked C `main()` proving the
+init→call→error paths; the CI example stays step 9's). Recorded choices, each made once
+and generated uniformly:
+
+- **Init is `stator_init_<unit>()`, declared first in the header** — GC, the globals
+  frame, the module environment, then the merged module's top-level statements in Task
+  3.11 order (the SAME emission `main` runs, shared helpers, never a second copy), then
+  the microtask drain, then the exported-const stores. Idempotent via a set-before static
+  guard: a second `jsrt_init()` would chain the Boehm roots hook into itself, and a second
+  `JSRT_GLOBALS_ENTER` would wipe every global. Calling an exported function before init
+  is undefined behavior (the header says so). A top-level throw lands in the error cell
+  like any stub failure instead of `jsrt_uncaught`'s exit — the unit is then unusable. A
+  top-level-await module starts and drains like `main`'s async startup; a rejected body
+  parks its reason for the init to capture rather than exiting, while an unhandled
+  rejection from a queued job still exits exactly as in `main`.
+- **Throws are `stator_<unit>_last_error()` (NULL = success) plus a zero-value sentinel**
+  per C spelling — `0.0`, `false`, `NULL`, `JSRT_UNDEFINED`; `void` has nothing to get
+  wrong. The companion carries the unit prefix (step 7's mangling applied to a generated
+  symbol) so two units linked together never share one cell. Cleared on every stub entry,
+  `_Thread_local` storage, valid until the next exported call. Never abort, never unwind:
+  the stub takes the pending cell into a ROOTED slot (a frame slot, or the scratch global
+  in init — never a bare C local across the `to_string` allocation), renders it through
+  `jsrt_to_string` (total in this subset: no `valueOf`, no `Symbol.toPrimitive`), and
+  answers the sentinel. A `NULL` `const char *` argument is the same path — a catchable
+  `TypeError` in the cell, never the converter's assert. Panics (`STA2002`, OOM) still
+  abort: they are internal errors, not exceptions, and aborting does not unwind.
+- **Every stub opens one `JSRT_FRAME` (argc + answer, floor 1) and pops it on every exit**
+  — the normal return and the single `_jsrt_err` epilogue every throw path funnels
+  through. Arguments convert into the frame's slots (which double as `argv`), so every
+  operand is rooted across the call's own allocation. Stubs never `JSRT_GLOBALS_ENTER`
+  (init owns it). No per-call Boehm registration exists in v0, deliberately: Boehm scans
+  the init thread's C stack itself since `jsrt_init`, every stub runs on that thread, and
+  a second thread is UB by the header — Phase 10 adds `GC_register_my_thread` at spawn,
+  which is already where that registration belongs.
+- **Ownership at the edge, stated once:** a `const char *` PARAMETER is the caller's
+  borrow (copied in, never freed, never retained); a `const char *` ANSWER is a fresh
+  malloc copy the caller frees. A `void *` travels by bit pattern both ways and is never
+  inspected — which fixes its NULL rule: a NULL handle arrives as `+0.0` (bit pattern
+  zero), round-trips back to NULL, and cannot be tested from TS in v0 (the checker
+  refuses the comparison that would observe it). A `jsrt_value` answer is additionally
+  parked in the rooted scratch global, so "live until the next call" is a mechanism, not
+  a promise — root longer-lived values in the caller's own `JSRT_FRAME`. Exported consts
+  are defined mutable in the object and stored by init from their globals (const-after-
+  init; the header's `extern const` is the consumer's never-write view), so computed
+  primitives link with the same symbol a literal one does. A `CString` const spells one
+  `const`, not two (`extern const char *` — the doubled form fails the consumer build).
+- **Version note:** `EXPORT_ABI_VERSION` stays 0. Steps 3–5 complete the v0 contract the
+  version was introduced alongside; they do not revise a shipped one — and a skewed
+  header/object pair already fails at link time on the missing init/stub symbols
+  themselves. The bump protocol (test + header + link proof together) governs the first
+  real revision.
+
+Landed (steps 6–7): the single-threaded-v0 sentence rides every emitted header (`calling
+in from a second thread is undefined behavior until T10.2`); the `stator_<unit>_<name>`
+mangling with the `--unit-name` prefix and sanitization, STA1124 refusing collisions on
+the sanitized symbol, and the `stator_<unit>_abi_v<V>` version symbol the header declares
+and the object defines — a header from one build linked against an object from another
+fails at link time instead of at runtime. All pinned in `tests/unit/export-header.test.ts`
+plus a manual link proof (fresh pair links and runs; version-skewed pair fails with
+`Undefined symbols ... "_stator_<unit>_abi_v<V>"`).
 
 - **Export marker is ESM `export`, no new marker.** The C-visible set is exactly the
   exported-function set (no second list to drift); header declares `stator_<unit>_<name>`.
@@ -355,15 +419,13 @@ two directions, so the halves cannot drift. `STA1122`–`STA1124` are allocated 
   carries no timestamps, no paths, and no hash-ordered iteration — same input,
   byte-identical output, proved by a unit test that collects twice. Only the entry file's
   direct declaration exports are read.
-- **Init contract:** top-level statements in Task 3.11 order become
-  `stator_init_<unit>()`, idempotent via a set-before static guard (a second `jsrt_init()`
-  would self-chain the Boehm roots hook into infinite recursion). Calling before init, or
-  from a second thread, is undefined behavior (single-threaded v0).
-- **Throws:** companion `stator_last_error()` (NULL = success) + documented zero-value
-  sentinel; never abort (libraries must not `exit()` their host; unwind-safety already
-  solved by the pending cell). Cleared on stub entry, `_Thread_local` storage.
-- **Frames:** every stub opens one `JSRT_FRAME`, pops on every exit path; args convert
-  into frame slots; stubs never `JSRT_GLOBALS_ENTER` (init owns it).
+- **Init contract — LANDED, see the record above.** (Was: top-level statements in
+  Task 3.11 order become `stator_init_<unit>()`, idempotent via a set-before static guard.)
+- **Throws — LANDED, see the record above.** (Was: companion `stator_last_error()`
+  (NULL = success) + documented zero-value sentinel; never abort. The unit prefix on the
+  companion name resolves the sketch's open collision question per step 7.)
+- **Frames — LANDED, see the record above.** (Was: every stub opens one `JSRT_FRAME`,
+  pops on every exit path; args convert into frame slots; stubs never `JSRT_GLOBALS_ENTER`.)
 - **Refusals — LANDED as `docs/DIAGNOSTICS.md` rows (never class):** `STA1122` the
   declaration shape (class, closure-valued const, generic function, rest/destructured
   parameter, `export default`, re-export and other non-declaration export forms);

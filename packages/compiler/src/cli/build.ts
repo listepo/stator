@@ -13,11 +13,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emitC } from '../codegen/index.ts';
+import { emitC, type LibraryEmit } from '../codegen/index.ts';
 import { collectLinkFlags } from '../frontend/extern.ts';
 import {
   collectUnitExports,
   defaultUnitName,
+  exportVersionDefinition,
   renderHeader,
   sanitizeUnitName,
 } from '../frontend/export.ts';
@@ -191,7 +192,8 @@ export async function build(options: BuildOptions): Promise<number> {
   if (options.emitHeader !== undefined) {
     writeFileSync(options.emitHeader, compiled.header ?? '', 'utf8');
     // A unit exposed to C links at the consumer, not here: `clang -c`, no `-ljsrt`, no
-    // extern link flags. Stubs and `stator_init_<unit>` arrive with Task 7.2 steps 3–5.
+    // extern link flags. The init, stubs, and error cell (Task 7.2 steps 3–5) are already in
+    // the C; only `main` is absent, which is what makes this an object and not a program.
     const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
     const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
     try {
@@ -270,6 +272,7 @@ export async function compileToC(
   // The C-visible set behind `--emit-header` (Task 7.2 steps 1–2): refusals stop the build
   // before the lowering, so no object or header is written for a unit C cannot see.
   let header: string | undefined;
+  let library: LibraryEmit | undefined;
   if (unit !== undefined) {
     const unitExports = withSpan('frontend/export', {}, () =>
       collectUnitExports(entryFile, program.getTypeChecker(), unit, mode),
@@ -278,6 +281,7 @@ export async function compileToC(
       return null;
     }
     header = renderHeader(unitExports);
+    library = { unit, exports: unitExports };
   }
 
   // The module graph: every reachable file, dependencies first, cycles refused (STA3001). The
@@ -298,8 +302,11 @@ export async function compileToC(
 
   // Optimization runs BEFORE the verifier, so the verifier checks what the emitter will actually
   // see. A pass that produced ill-typed HIR would otherwise pass through a verifier that had only
-  // inspected the lowering's output.
-  const optimized = withSpan('passes/optimize', {}, () => optimize(module));
+  // inspected the lowering's output. A library build roots the shake at its C-visible exports:
+  // nothing in the module names them, so without roots an exported-but-uncalled function would
+  // be shaken away from under its own stub (plan.md §10 Task 7.2 step 3).
+  const exportRoots = library === undefined ? [] : library.exports.functions.map((fn) => fn.name);
+  const optimized = withSpan('passes/optimize', {}, () => optimize(module, exportRoots));
 
   // The verifier is not an optional debug pass: it is the only thing standing between a lowering
   // bug and silently wrong generated C, and it costs one tree walk.
@@ -316,7 +323,12 @@ export async function compileToC(
   }
 
   return withSpan('codegen/emit-c', {}, () => ({
-    c: emitC(optimized),
+    // With `--emit-header` the object also defines the ABI-identity symbol the header
+    // declares (plan §10 Task 7.2 step 7): same unit, same compiler constant, so the two
+    // always agree — and a header from another build names a symbol this object lacks. The
+    // init, stubs, and error cell ride `library` into the emitter, which owns the module's
+    // slot layout and so is the only stage that can place them (steps 3–5).
+    c: emitC(optimized, library) + (unit === undefined ? '' : exportVersionDefinition(unit)),
     linkFlags: withSpan('frontend/link-flags', {}, () => collectLinkFlags(program)),
     ...(header !== undefined && { header }),
   }));

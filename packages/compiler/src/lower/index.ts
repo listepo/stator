@@ -8281,30 +8281,38 @@ function lowerClass(
   // the plain name otherwise. Overriding is asked of the DECLARED name: ancestry is
   // declaration-level, and the mangled name appears in no chain. The carrier has no
   // methods to tabulate.
+  // A table for every class with public methods -- not only overridden families. Virtual
+  // dispatch needs it only where a method is overridden (the old `some(isOverridden)` gate),
+  // but dynamic dispatch through Unknown needs it everywhere: `o.m` where `o` is Unknown
+  // holding a class instance resolves the NAME at run time, and without the table the read
+  // missed to `undefined` (plan.md §8 step 45). The order is still the layout's method order,
+  // so virtual slots resolved against the static type keep indexing the right entry on every
+  // descendant; an always-emitted table is a superset of the old conditional one, never a
+  // reordering. `#private` methods never join it (lexical dispatch, see `declaresMethod`).
+  // Capturing methods join by NAME with a NULL entry at emission (no one constant form);
+  // the dynamic get skips NULLs for the hidden slot. The carrier has no methods to tabulate.
   const declaredName = node.name?.text ?? '';
   const vtableMethods = layout.methods.filter((m) => !isPrivateMemberName(m.name));
   const vtable =
     spec?.staticsOnly === true
       ? []
-      : vtableMethods.some((m) => isOverridden(declaredName, m.name, sourceFile, checker))
-        ? vtableMethods.map((m) => {
-            const declaringDecl = methodDeclaringClass(node, m.name, checker);
-            const declaring =
-              declaringDecl === undefined
-                ? layout.name
-                : declaringDecl.typeParameters !== undefined &&
-                    declaringDecl.typeParameters.length > 0
-                  ? baseDescriptorName(declaringDecl, node, checker)
-                  : (hirNameOf(declaringDecl) ?? declaringDecl.name?.text ?? layout.name);
-            return {
-              name: m.name,
-              className:
-                spec !== undefined && !spec.staticsOnly && declaring === declaredName
-                  ? spec.name
-                  : declaring,
-            };
-          })
-        : [];
+      : vtableMethods.map((m) => {
+          const declaringDecl = methodDeclaringClass(node, m.name, checker);
+          const declaring =
+            declaringDecl === undefined
+              ? layout.name
+              : declaringDecl.typeParameters !== undefined &&
+                  declaringDecl.typeParameters.length > 0
+                ? baseDescriptorName(declaringDecl, node, checker)
+                : (hirNameOf(declaringDecl) ?? declaringDecl.name?.text ?? layout.name);
+          return {
+            name: m.name,
+            className:
+              spec !== undefined && !spec.staticsOnly && declaring === declaredName
+                ? spec.name
+                : declaring,
+          };
+        });
 
   const classDecl: ClassDeclaration = {
     kind: 'class-declaration',

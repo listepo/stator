@@ -35,7 +35,11 @@ export type { Rewriter } from './rewrite.ts';
  * Every pass preserves `Unknown`: none of them introduces a type, and each declines any rewrite
  * that would replace a subtree with one of a different HType — which is what keeps a boundary check
  * attached to the value that needs it. The verifier runs after this in `build.ts`, over the
- * OPTIMIZED module, so a pass that broke the HIR is a caught bug rather than bad C. */
-export function optimize(module: Module): Module {
-  return eliminateDeadCode(constFold(inlineCalls(module)));
+ * OPTIMIZED module, so a pass that broke the HIR is a caught bug rather than bad C.
+ *
+ * `roots` are the `--emit-header` C-visible export names (plan.md §10 Task 7.2): entry points a
+ * C caller reaches without naming them in any statement, so the shake keeps them and whatever
+ * they transitively call. Empty in every other build, where the statements are the only roots. */
+export function optimize(module: Module, roots: readonly string[] = []): Module {
+  return eliminateDeadCode(constFold(inlineCalls(module)), roots);
 }

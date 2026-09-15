@@ -80,6 +80,12 @@ import {
   stringOpCanThrow,
 } from '../hir/nodes.ts';
 import type { HField } from '../hir/types.ts';
+import {
+  exportInitName,
+  exportLastErrorName,
+  type ExportedFunction,
+  type UnitExports,
+} from '../frontend/export.ts';
 import { RECEIVER_NAME } from '../lower/captures.ts';
 import { shadowSource } from '../lower/scope.ts';
 
@@ -713,7 +719,7 @@ class Emitter {
    * rethrows it. */
   private trySlots: Map<TryStatement, number> = new Map();
 
-  emit(module: Module): string {
+  emit(module: Module, library?: LibraryEmit): string {
     this.fileName = module.fileName;
     this.slotMap = new Map();
     this.tempSlots.clear();
@@ -760,11 +766,19 @@ class Emitter {
     this.countBindings(module.statements);
     this.globalMap = this.slotMap;
     this.globalCount = this.slotCount;
+    // A library build roots one scratch global past the module's own bindings (steps 3–5):
+    // the init error stash and every `jsrt_value`-returning stub's last result share it —
+    // init runs once before any stub, so the two uses never overlap. It starts UNDEFINED,
+    // a valid non-pointer value, so the collector never reads garbage through it.
+    const exportScratch = library === undefined ? 0 : this.globalCount;
     // A zero-length array is not valid C11, and a program with no module-level binding is.
-    const globalSlots = Math.max(this.globalCount, 1);
+    const globalSlots = Math.max(this.globalCount + (library === undefined ? 0 : 1), 1);
 
     const functionLines = this.emitFunctionUnits();
-    const mainLines = this.emitMain(module, globalSlots);
+    const mainLines =
+      library === undefined
+        ? this.emitMain(module, globalSlots)
+        : this.emitLibrary(module, library, globalSlots, exportScratch);
 
     const out: string[] = ['#include "jsrt_value.h"'];
     // The extern prologue, if the module called out (docs/FFI.md §§1, 9): `<errno.h>` only for
@@ -777,8 +791,15 @@ class Emitter {
     if (this.externErrno) {
       out.push('#include <errno.h>');
     }
-    if (this.externStdlib) {
+    // `<stdlib.h>` for the borrow the emitter frees — and always in a library build, where
+    // the error cell is freed; `<stdbool.h>` for the init guard a library build always emits.
+    // An executable build includes each only for the extern call that needs it, so its
+    // prologue stays byte-identical when no externs are in play.
+    if (this.externStdlib || library !== undefined) {
       out.push('#include <stdlib.h>');
+    }
+    if (library !== undefined) {
+      out.push('#include <stdbool.h>');
     }
     for (const header of this.externHeaders) {
       out.push(`#include ${header}`);
@@ -814,13 +835,20 @@ class Emitter {
         cls.fields.length === 0 ? '""' : cls.fields.map((f) => cNameLiteral(f.name)).join(', ');
       out.push(`static const char *const _jsrt_fields_${id}[] = {${names}};`);
       if (cls.vtable.length > 0) {
-        const entries = cls.vtable.map((entry) => `&_jsrt_closure_${this.methodId(entry)}`);
+        const entries = cls.vtable.map((entry) => {
+          const id = this.methodIdOrNull(entry);
+          return id === null ? 'NULL' : `&_jsrt_closure_${id}`;
+        });
         out.push(
           `static const JSRTClosure *const _jsrt_methods_${id}[] = {${entries.join(', ')}};`,
         );
+        const methodNames = cls.vtable.map((entry) => cNameLiteral(entry.name)).join(', ');
+        out.push(`static const char *const _jsrt_method_names_${id}[] = {${methodNames}};`);
       }
       const table =
-        cls.vtable.length === 0 ? '0, NULL' : `${cls.vtable.length}, _jsrt_methods_${id}`;
+        cls.vtable.length === 0
+          ? '0, NULL, NULL'
+          : `${cls.vtable.length}, _jsrt_methods_${id}, _jsrt_method_names_${id}`;
       // Absent unless the literal's key order differs from its layout: a class declaration lays
       // its fields out in the order it writes them, so identity is the overwhelming case.
       const keyOrder = this.classKeyOrders.get(id);
@@ -870,6 +898,41 @@ class Emitter {
     return `${out.join('\n')}\n`;
   }
 
+  /* The module's own environment, when a top-level loop declares a `let`/`const` a closure
+   * captures (docs/VALUE.md §4.3). Rooted through the globals frame, which is pushed once and
+   * never popped -- the module environment has to outlive main's locals for the same reason
+   * the globals array does. Shared by `main` and the library init: the body they both run
+   * reads the same bindings (plan.md §10 Task 7.2 step 3 reuses this path, never a second). */
+  private emitModuleEnv(module: Module): void {
+    if (module.envVars.length > 0) {
+      this.appendLine(
+        `JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(module.envVars.length)});`,
+        module.span,
+      );
+      this.appendLine('JSRT_GLOBALS_ENV(_jsrt_env);', module.span);
+    }
+  }
+
+  /* The merged module's top-level statements in Task 3.11 order, hoisted functions first
+   * (so `f(); function f() {}` resolves). The one body both `main` and `stator_init_<unit>`
+   * run: a library init is the same side effects in the same order, not a second copy. */
+  private emitSyncTopLevelStatements(module: Module): void {
+    this.emitHoistedFunctions(module.statements);
+    for (const stmt of module.statements) {
+      this.emitStatement(stmt);
+    }
+  }
+
+  /* Everything a promise queued runs before the program exits -- that is the whole of the job
+   * queue's observable behaviour for a program with no other event source. Emitted only when
+   * the module actually promised, so a program that never did does not link the driver in.
+   * Shared by `main` and the library init, which drains what the top level queued the same way. */
+  private emitMicrotaskDrain(module: Module): void {
+    if (this.usedAsync) {
+      this.appendLine('jsrt_run_microtasks();', module.span);
+    }
+  }
+
   private emitMain(module: Module, globalSlots: number): string[] {
     const produced: string[] = [];
     this.lines = produced;
@@ -891,25 +954,9 @@ class Emitter {
     this.indent++;
     this.appendLine('jsrt_init();', module.span);
     this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
-    // Rooted through the globals frame, which is pushed once and never popped -- the module
-    // environment has to outlive main's locals for the same reason the globals array does.
-    if (module.envVars.length > 0) {
-      this.appendLine(
-        `JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(module.envVars.length)});`,
-        module.span,
-      );
-      this.appendLine('JSRT_GLOBALS_ENV(_jsrt_env);', module.span);
-    }
-    this.emitHoistedFunctions(module.statements);
-    for (const stmt of module.statements) {
-      this.emitStatement(stmt);
-    }
-    // Everything a promise queued runs before the program exits -- that is the whole of the job
-    // queue's observable behaviour for a program with no other event source. Emitted only when
-    // the module actually promised, so a program that never did does not link the driver in.
-    if (this.usedAsync) {
-      this.appendLine('jsrt_run_microtasks();', module.span);
-    }
+    this.emitModuleEnv(module);
+    this.emitSyncTopLevelStatements(module);
+    this.emitMicrotaskDrain(module);
     // No pop: the globals frame is pushed once and lives as long as the program does.
     this.appendLine('return 0;', module.span);
     if (this.unwindUsed) {
@@ -928,43 +975,9 @@ class Emitter {
    * live in a heap environment because a suspension pops main's C frame. Init runs in Task 3.11's
    * topological order — Stator does not interleave sibling subgraphs the way Node does. */
   private emitAsyncModule(module: Module, globalSlots: number): void {
-    this.usedAsync = true;
-    this.moduleAsync = true;
-    this.inAsync = true;
-    this.inFunction = true;
-    this.slotMap = new Map();
-    // Same layout an async FUNCTION uses (see emitFunctionUnit): the module's captured
-    // per-iteration bindings own env indices 0..envVars.length-1, and the suspension-surviving
-    // locals are numbered past them into the same environment. One env, two tenants -- which is
-    // why the per-iteration clone works here unchanged.
-    this.envMap = new Map(module.envVars.map((name, index) => [name, index]));
-    this.slotCount = module.envVars.length;
-    this.captureMap = new Map();
-    this.awaitStates = new Map();
-    this.returnsValue = true;
-    this.countBindings(module.statements);
-    this.returnSlot = this.slotCount;
-    this.slotCount++;
-    const envSlots = Math.max(1, this.slotCount);
-
-    this.appendLine(
-      'static void _jsrt_module_done(void *state, jsrt_value value, bool rejected) {',
-    );
-    this.indent++;
-    this.appendLine('(void)state;');
-    this.appendLine('if (rejected) {');
-    this.indent++;
-    this.appendLine('jsrt_throw(value);');
-    this.appendLine('jsrt_uncaught();');
-    this.indent--;
-    this.appendLine('}');
-    this.indent--;
-    this.appendLine('}');
-    this.appendLine('');
-    this.appendLine(
-      'static void _jsrt_async_module(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err);',
-    );
-    this.appendLine('');
+    const envSlots = this.countAsyncModule(module);
+    this.emitModuleDoneMain();
+    this.emitAsyncModuleForward();
 
     this.appendLine('int main(void) {');
     this.indent++;
@@ -986,6 +999,64 @@ class Emitter {
     this.appendLine('}');
     this.appendLine('');
 
+    this.emitAsyncModuleBody(module);
+  }
+
+  /* The async module's counting half: the heap-environment layout the resume body reads, with
+   * the suspension-surviving locals numbered past the module's captured per-iteration bindings
+   * (see the layout note it keeps). Split out because the library init counts the same module
+   * before running `main`'s startup sequence with init semantics instead. */
+  private countAsyncModule(module: Module): number {
+    this.usedAsync = true;
+    this.moduleAsync = true;
+    this.inAsync = true;
+    this.inFunction = true;
+    this.slotMap = new Map();
+    // Same layout an async FUNCTION uses (see emitFunctionUnit): the module's captured
+    // per-iteration bindings own env indices 0..envVars.length-1, and the suspension-surviving
+    // locals are numbered past them into the same environment. One env, two tenants -- which is
+    // why the per-iteration clone works here unchanged.
+    this.envMap = new Map(module.envVars.map((name, index) => [name, index]));
+    this.slotCount = module.envVars.length;
+    this.captureMap = new Map();
+    this.awaitStates = new Map();
+    this.returnsValue = true;
+    this.countBindings(module.statements);
+    this.returnSlot = this.slotCount;
+    this.slotCount++;
+    return Math.max(1, this.slotCount);
+  }
+
+  /* `main`'s settlement observer: a rejected module body rethrows into the pending cell and
+   * exits(1) via `jsrt_uncaught` — the process answer, not a library's (compare
+   * `emitInitDone`, which parks the reason for the init to capture instead). */
+  private emitModuleDoneMain(): void {
+    this.appendLine(
+      'static void _jsrt_module_done(void *state, jsrt_value value, bool rejected) {',
+    );
+    this.indent++;
+    this.appendLine('(void)state;');
+    this.appendLine('if (rejected) {');
+    this.indent++;
+    this.appendLine('jsrt_throw(value);');
+    this.appendLine('jsrt_uncaught();');
+    this.indent--;
+    this.appendLine('}');
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  private emitAsyncModuleForward(): void {
+    this.appendLine(
+      'static void _jsrt_async_module(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err);',
+    );
+    this.appendLine('');
+  }
+
+  /* The resume function holding the module body itself, shared by `main` and the library
+   * init: each `await` pops the frame and each resumption re-enters from the top. */
+  private emitAsyncModuleBody(module: Module): void {
     this.appendLine(
       'static void _jsrt_async_module(JSRTAsync *_jsrt_self, jsrt_value _jsrt_v, bool _jsrt_err) {',
     );
@@ -1002,6 +1073,397 @@ class Emitter {
     }
     this.indent--;
     this.appendLine('}');
+  }
+
+  /* The `--emit-header` object tail (plan.md §10 Task 7.2 steps 3–5): no `main` — linking is
+   * the consumer's job — but the init contract, the error cell, the exported consts, and one
+   * stub per exported function, in that file order. State reset mirrors `emitMain`: the
+   * function units above saved and restored everything they touched, so the module level is
+   * pristine here exactly as it is there. */
+  private emitLibrary(
+    module: Module,
+    library: LibraryEmit,
+    globalSlots: number,
+    scratch: number,
+  ): string[] {
+    const produced: string[] = [];
+    this.lines = produced;
+    this.indent = 0;
+    this.inFunction = false;
+    this.slotMap = this.globalMap;
+    this.slotCount = this.globalCount;
+    this.padStack = [];
+    this.unwindUsed = false;
+    this.tryFinallyStack = [];
+    this.tryCount = 0;
+
+    this.emitExportConstDefs(library);
+    this.emitErrorCell(library);
+    if (module.isAsync) {
+      const envSlots = this.countAsyncModule(module);
+      this.emitInitDone(scratch);
+      this.emitAsyncModuleForward();
+      this.emitLibraryInitAsync(module, library, globalSlots, envSlots, scratch);
+      this.emitAsyncModuleBody(module);
+    } else {
+      this.emitLibraryInitSync(module, library, globalSlots, scratch);
+    }
+    for (const fn of library.exports.functions) {
+      this.emitExportStub(library, fn, scratch, module.span);
+    }
+    return produced;
+  }
+
+  /* One file-scope definition per exported const. Mutable here and stored by init AFTER the
+   * body populated the globals — a `const`-qualified definition could not be stored at all,
+   * and a literals-only rule would refuse computed primitives the gate accepts. The header
+   * stays `extern const`: that is the consumer's view (never write through it), and reading
+   * through a qualified version of the effective type is sound (C11 6.5p7). No TU ever sees
+   * both spellings, so `-Werror` stays silent. Zero-initialized until init stores: calling
+   * before init is UB by the header, so no path reads these first. */
+  private emitExportConstDefs(library: LibraryEmit): void {
+    if (library.exports.consts.length === 0) {
+      return;
+    }
+    this.appendLine('/* Exported consts: C views of module globals, stored by the init below. */');
+    for (const constant of library.exports.consts) {
+      this.appendLine(`${constant.cType} ${constant.cName};`);
+    }
+    this.appendLine('');
+  }
+
+  /* The step-4 error cell (plan.md §10 Task 7.2 step 4): what C sees when TS throws. One
+   * malloc-owned message per unit, thread-local like the pending cell it renders from, NULL
+   * when the last call succeeded. Cleared on every stub entry; captured on every stub
+   * failure. Capture is total: the value arrives already rooted in the caller's frame (a
+   * frame slot or the scratch global — never a bare C local across the `to_string`
+   * allocation), and `jsrt_to_string` runs no user code in this subset (no `valueOf`, no
+   * `Symbol.toPrimitive`), so nothing on this path can throw past the stub. The accessor
+   * hands out the cell WITHOUT transferring it: valid until the next exported call, which
+   * clears or replaces it — the same rule a `const char *` answer's ownership does NOT
+   * follow (that one is malloc-owned per call and the caller frees it). */
+  private emitErrorCell(library: LibraryEmit): void {
+    const unit = library.unit;
+    this.appendLine(`static _Thread_local char *_stator_${unit}_last_error_msg = NULL;`);
+    this.appendLine(`static void _stator_${unit}_error_clear(void) {`);
+    this.indent++;
+    this.appendLine(`free(_stator_${unit}_last_error_msg);`);
+    this.appendLine(`_stator_${unit}_last_error_msg = NULL;`);
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine(`static void _stator_${unit}_error_capture(jsrt_value _stator_error) {`);
+    this.indent++;
+    this.appendLine('jsrt_value _stator_text = jsrt_to_string(_stator_error);');
+    this.appendLine(`free(_stator_${unit}_last_error_msg);`);
+    this.appendLine(`_stator_${unit}_last_error_msg = jsrt_string_to_cstr(_stator_text);`);
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine(`const char *${exportLastErrorName(unit)}(void) {`);
+    this.indent++;
+    this.appendLine(`return _stator_${unit}_last_error_msg;`);
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* After the body (and the drain) populated the globals, publish the C views: each exported
+   * const is stored from its module slot with Task 7.1's table read outwards — a
+   * `const char *` is a fresh malloc copy that lives as long as the program (the borrower's
+   * borrow, docs/FFI.md §3, made permanent), a `jsrt_value` stays rooted in the globals
+   * frame it is copied out of. */
+  private emitExportConstStores(library: LibraryEmit, span: Span): void {
+    for (const constant of library.exports.consts) {
+      const slot = this.exportSlot('const', constant.name);
+      const global = `JSRT_GLOBAL(${String(slot)})`;
+      let stored: string;
+      if (constant.cType === 'double') {
+        stored = `jsrt_to_number(${global})`;
+      } else if (constant.cType === 'bool') {
+        stored = `jsrt_as_bool(${global})`;
+      } else if (constant.cType === 'const char *') {
+        stored = `jsrt_string_to_cstr(${global})`;
+      } else if (constant.cType === 'jsrt_value') {
+        stored = global;
+      } else {
+        throw new Error(`exported const has no C store: ${constant.cType}`);
+      }
+      this.appendLine(`${constant.cName} = ${stored};`, span);
+    }
+  }
+
+  /* The module-global slot of a C-visible export. `collectUnitExports` accepted the name and
+   * the DCE roots kept the declaration, so a miss is a pipeline disagreement — loud, never a
+   * zero slot that would read a stranger's binding. */
+  private exportSlot(kind: string, name: string): number {
+    const slot = this.globalMap.get(name);
+    if (slot === undefined) {
+      throw new Error(`exported ${kind} '${name}' has no module slot`);
+    }
+    return slot;
+  }
+
+  /* The `stator_init_<unit>` opening both inits share: the idempotency guard FIRST, set
+   * before `jsrt_init()` — a second `jsrt_init()` would chain the Boehm roots hook into
+   * itself, and a second `JSRT_GLOBALS_ENTER` would wipe every global back to `undefined`. */
+  private emitInitOpen(unit: string, span: Span, globalSlots: number): void {
+    this.appendLine(`static bool _stator_${unit}_initialized = false;`);
+    this.appendLine('');
+    this.appendLine(`void ${exportInitName(unit)}(void) {`);
+    this.indent++;
+    this.appendLine(`if (_stator_${unit}_initialized) {`, span);
+    this.indent++;
+    this.appendLine('return;', span);
+    this.indent--;
+    this.appendLine('}', span);
+    this.appendLine(`_stator_${unit}_initialized = true;`, span);
+    this.appendLine('jsrt_init();', span);
+    this.appendLine(`JSRT_GLOBALS_ENTER(${String(globalSlots)});`, span);
+  }
+
+  /* `stator_init_<unit>` for a synchronous module (plan.md §10 Task 7.2 step 3): the same
+   * top-level side effects `main` runs, in the same order — GC, the globals frame, the
+   * module environment, the statements, the microtask drain — then the exported consts,
+   * which are C views of globals the body just populated. A top-level throw lands in the
+   * error cell like any stub failure (step 4) instead of exiting the host: the unit is then
+   * unusable, and further calls are undefined behavior. */
+  private emitLibraryInitSync(
+    module: Module,
+    library: LibraryEmit,
+    globalSlots: number,
+    scratch: number,
+  ): void {
+    this.emitInitOpen(library.unit, module.span, globalSlots);
+    this.emitModuleEnv(module);
+    this.emitSyncTopLevelStatements(module);
+    this.emitMicrotaskDrain(module);
+    this.emitExportConstStores(library, module.span);
+    this.appendLine('return;', module.span);
+    if (this.unwindUsed) {
+      this.appendLine('_jsrt_unwind: ;', module.span);
+      this.appendLine(`JSRT_GLOBAL(${String(scratch)}) = jsrt_take_exception();`, module.span);
+      this.appendLine(
+        `_stator_${library.unit}_error_capture(JSRT_GLOBAL(${String(scratch)}));`,
+        module.span,
+      );
+      this.appendLine('return;', module.span);
+    }
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* The library twin of `_jsrt_module_done`: a rejected top-level-await body parks its reason
+   * in the rooted scratch global and raises the flag the init reads after the drain — instead
+   * of throwing into the pending cell (whose setters would truncate the queue still draining)
+   * and instead of `jsrt_uncaught`'s exit, which is `main`'s answer, not a library's. */
+  private emitInitDone(scratch: number): void {
+    this.appendLine('static bool _jsrt_init_rejected = false;');
+    this.appendLine('static void _jsrt_init_done(void *state, jsrt_value value, bool rejected) {');
+    this.indent++;
+    this.appendLine('(void)state;');
+    this.appendLine('if (rejected) {');
+    this.indent++;
+    this.appendLine('_jsrt_init_rejected = true;');
+    this.appendLine(`JSRT_GLOBAL(${String(scratch)}) = value;`);
+    this.indent--;
+    this.appendLine('}');
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* `stator_init_<unit>` for a top-level-await module: `main`'s async startup with the exit
+   * replaced by init semantics. A rejected module body captures into the error cell instead
+   * of `jsrt_uncaught`'s exit(1): libraries must not exit their host. An unhandled rejection
+   * from a QUEUED job still exits, exactly as in `main` — that fatality belongs to the promise
+   * machinery, not to the init path. */
+  private emitLibraryInitAsync(
+    module: Module,
+    library: LibraryEmit,
+    globalSlots: number,
+    envSlots: number,
+    scratch: number,
+  ): void {
+    this.emitInitOpen(library.unit, module.span, globalSlots);
+    this.emitHoistedFunctions(module.statements);
+    this.appendLine('JSRT_FRAME(1);', module.span);
+    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
+    this.appendLine(
+      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
+      module.span,
+    );
+    this.appendLine('jsrt_promise_subscribe(JSRT_LOCAL(0), _jsrt_init_done, NULL);', module.span);
+    this.appendLine('jsrt_run_microtasks();', module.span);
+    this.appendLine('JSRT_FRAME_POP();', module.span);
+    this.appendLine('if (_jsrt_init_rejected) {', module.span);
+    this.indent++;
+    this.appendLine(
+      `_stator_${library.unit}_error_capture(JSRT_GLOBAL(${String(scratch)}));`,
+      module.span,
+    );
+    this.appendLine('return;', module.span);
+    this.indent--;
+    this.appendLine('}', module.span);
+    this.emitExportConstStores(library, module.span);
+    this.appendLine('return;', module.span);
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* One exported function as C sees it (plan.md §10 Task 7.2 steps 4–5): convert the C
+   * arguments into frame slots, call the closure the init left in its global, convert the
+   * answer back. The stub opens the frame a call from C otherwise lacks (Boehm scans the
+   * init thread's C stack itself since `jsrt_init`; a second thread is UB, header says so),
+   * and pops it on EVERY exit: the normal return and the `_jsrt_err` epilogue every throw
+   * path — including a NULL `const char *` argument — funnels through. An exception never
+   * unwinds into the C caller: the pending cell is taken into a rooted slot, rendered into
+   * the error cell, and the stub answers its zero-value sentinel. */
+  private emitExportStub(
+    library: LibraryEmit,
+    fn: ExportedFunction,
+    scratch: number,
+    span: Span,
+  ): void {
+    const unit = library.unit;
+    const slot = this.exportSlot('function', fn.name);
+    const params = fn.params.map((param) => `${param.cType} ${param.name}`).join(', ');
+    this.appendLine(`${fn.ret} ${fn.cName}(${fn.params.length === 0 ? 'void' : params}) {`);
+    this.indent++;
+    const frameSlots = Math.max(fn.params.length + (fn.ret === 'void' ? 0 : 1), 1);
+    this.appendLine(`JSRT_FRAME(${String(frameSlots)});`, span);
+    this.appendLine(`_stator_${unit}_error_clear();`, span);
+    fn.params.forEach((param, index) => {
+      if (param.cType === 'const char *') {
+        // `from_cstr` asserts non-NULL, so the boundary refuses it first — as a catchable
+        // TypeError in the cell, never an assert firing in a C caller's frame.
+        this.appendLine(`if (${param.name} == NULL) {`, span);
+        this.indent++;
+        this.appendLine(
+          'jsrt_throw_error(&jsrt_class_type_error, "stator: NULL for string parameter ' +
+            `'${this.escapeCString(param.name)}' of exported function '${this.escapeCString(fn.name)}'");`,
+          span,
+        );
+        this.appendLine('goto _jsrt_err;', span);
+        this.indent--;
+        this.appendLine('}', span);
+      }
+      this.appendLine(
+        `JSRT_LOCAL(${String(index)}) = ${this.exportArg(param.cType, param.name)};`,
+        span,
+      );
+    });
+    // `_jsrt_slots` doubles as argv: the frame roots every argument across the call's own
+    // allocation, and the answer (when there is one) lands past them. argc 0 reads nothing.
+    if (fn.ret === 'void') {
+      this.appendLine(
+        `jsrt_call(JSRT_GLOBAL(${String(slot)}), ${String(fn.params.length)}, _jsrt_slots);`,
+        span,
+      );
+    } else {
+      this.appendLine(
+        `JSRT_LOCAL(${String(fn.params.length)}) = jsrt_call(JSRT_GLOBAL(${String(slot)}), ` +
+          `${String(fn.params.length)}, _jsrt_slots);`,
+        span,
+      );
+    }
+    this.appendLine('if (jsrt_pending()) {', span);
+    this.indent++;
+    this.appendLine('goto _jsrt_err;', span);
+    this.indent--;
+    this.appendLine('}', span);
+    if (fn.ret !== 'void') {
+      this.appendLine(
+        `${fn.ret} _jsrt_ret = ${this.exportRet(fn.ret, fn.params.length, scratch)};`,
+        span,
+      );
+    }
+    this.appendLine('JSRT_FRAME_POP();', span);
+    if (fn.ret === 'void') {
+      this.appendLine('return;', span);
+    } else {
+      this.appendLine('return _jsrt_ret;', span);
+    }
+    this.appendLine('_jsrt_err: ;', span);
+    this.appendLine(`JSRT_GLOBAL(${String(scratch)}) = jsrt_take_exception();`, span);
+    this.appendLine(`_stator_${unit}_error_capture(JSRT_GLOBAL(${String(scratch)}));`, span);
+    this.appendLine('JSRT_FRAME_POP();', span);
+    if (fn.ret === 'void') {
+      this.appendLine('return;', span);
+    } else {
+      this.appendLine(`return ${this.exportSentinel(fn.ret)};`, span);
+    }
+    this.indent--;
+    this.appendLine('}');
+    this.appendLine('');
+  }
+
+  /* One C argument into its frame slot, Task 7.1's table read outwards (plan §10 7.2.1):
+   * scalars box, a `const char *` copies in (the caller's borrow — never freed here, never
+   * stored past the call), a `void *` travels by bit pattern like every 7.1 borrow, and a
+   * `jsrt_value` crosses untouched. Total over what the header can spell; anything else
+   * throws rather than inventing a conversion. */
+  private exportArg(cType: string, name: string): string {
+    if (cType === 'double') {
+      return `jsrt_number(${name})`;
+    }
+    if (cType === 'bool') {
+      return `jsrt_bool(${name})`;
+    }
+    if (cType === 'const char *') {
+      return `jsrt_string_from_cstr(${name})`;
+    }
+    if (cType === 'void *') {
+      return `(jsrt_value)(uintptr_t)(${name})`;
+    }
+    if (cType === 'jsrt_value') {
+      return name;
+    }
+    throw new Error(`exported parameter has no C passing: ${cType}`);
+  }
+
+  /* The answer out of its slot, the mirror image: a `const char *` answer is a fresh malloc
+   * copy the CALLER owns (the transfer direction of docs/FFI.md §3 — free it), a `void *`
+   * unboxes by bit pattern, and a `jsrt_value` is additionally parked in the scratch global
+   * so "live until the next call" is a mechanism, not a promise. */
+  private exportRet(cType: string, slot: number, scratch: number): string {
+    const value = `JSRT_LOCAL(${String(slot)})`;
+    if (cType === 'double') {
+      return `jsrt_to_number(${value})`;
+    }
+    if (cType === 'bool') {
+      return `jsrt_as_bool(${value})`;
+    }
+    if (cType === 'const char *') {
+      return `jsrt_string_to_cstr(${value})`;
+    }
+    if (cType === 'void *') {
+      return `jsrt_ptr(${value})`;
+    }
+    if (cType === 'jsrt_value') {
+      return `JSRT_GLOBAL(${String(scratch)}) = ${value}`;
+    }
+    throw new Error(`exported return has no C answer: ${cType}`);
+  }
+
+  /* The zero-value sentinel an error path answers instead (plan §10 Task 7.2 step 4,
+   * documented in the header): 0.0, false, NULL, JSRT_UNDEFINED — one per C spelling,
+   * generated uniformly for every stub. */
+  private exportSentinel(cType: string): string {
+    if (cType === 'double') {
+      return '0.0';
+    }
+    if (cType === 'bool') {
+      return 'false';
+    }
+    if (cType === 'const char *' || cType === 'void *') {
+      return 'NULL';
+    }
+    if (cType === 'jsrt_value') {
+      return 'JSRT_UNDEFINED';
+    }
+    throw new Error(`exported return has no sentinel: ${cType}`);
   }
 
   /* Emits every function unit, counting each body immediately before emitting it. The list grows
@@ -4822,17 +5284,19 @@ class Emitter {
 
   /** The closure constant a method-table entry names: the implementing class's own function.
    *
-   * A table entry must be a file-scope constant, so a method that captures cannot appear in one.
-   * The gate guarantees it by refusing to override in a class that is not at module scope, and a
-   * class at module scope has nothing to capture. This throws rather than emitting a wrong table
-   * if that guarantee is ever broken -- an internal error is the honest failure there. */
-  private methodId(entry: VtableEntry): number {
+   * A table entry must be a file-scope constant to name one, so a method that captures has none:
+   * the entry is NULL and the dynamic get skips it, leaving the instance's hidden `#method:`
+   * slot -- which carries the construction-site environment -- as the hit. The gate guarantees
+   * a virtual family never captures (overriding outside module scope is refused), so a NULL
+   * entry is never loaded through `jsrt_method`; it is only skipped by name lookup. A missing
+   * method still throws: the lowering proved it exists, so absence is a compiler bug. */
+  private methodIdOrNull(entry: VtableEntry): number | null {
     const method = this.classAt(entry.className).methods.find((m) => m.name === entry.name);
     if (method === undefined) {
       throw new Error(`class ${entry.className} has no method ${entry.name}`);
     }
     if (method.fn.needsEnv) {
-      throw new Error(`method ${entry.className}.${entry.name} captures and cannot be in a table`);
+      return null;
     }
     return this.functionId(method.fn);
   }
@@ -5276,9 +5740,17 @@ class Emitter {
   }
 }
 
-export function emitC(module: Module): string {
+/** A `--emit-header` unit the object exposes to C (plan.md §10 Task 7.2 steps 3–5): the
+ * sanitized unit name plus the C-visible set `collectUnitExports` decided. Present only in
+ * library builds; an executable build passes none and keeps its `main`. */
+export interface LibraryEmit {
+  readonly unit: string;
+  readonly exports: UnitExports;
+}
+
+export function emitC(module: Module, library?: LibraryEmit): string {
   const emitter = new Emitter();
-  return emitter.emit(module);
+  return emitter.emit(module, library);
 }
 
 /** The C call one Map or Set operation becomes, given its already-sequenced operands.

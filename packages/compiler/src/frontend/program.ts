@@ -168,6 +168,12 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // METHODS, duplicate accessors, and mixed property/accessor duplicates are different checker
   // codes (2300, 1118, 1119) and stay refused in both modes.
   1117, // An object literal cannot have multiple properties with the same name.
+  // A spread overwriting an explicit key (`{ b: 9, ...o }` where `o` has `b`) is legal
+  // JavaScript — last wins — and the lowering already expands the spread into one read per
+  // field stored in source order into one slot, so the spread's write wins on its own exactly
+  // as Node answers it. The reverse order (`{ ...o, a: 7 }`) never errored: only the
+  // OVERWRITTEN usage is diagnosed, never the winner. ts mode keeps the refusal (STA0012).
+  2783, // 'X' is specified more than once, so this usage will be overwritten.
   // The possibly-null family: 3855 of Task 6.1's 10,513 Test262 failures, the largest bucket by a
   // factor of three, and every one of them ordinary JavaScript that runs (plan-notes 176, 180).
   // `xs[i].toFixed(2)` is how JavaScript indexes an array; the spec's answer for the miss is a

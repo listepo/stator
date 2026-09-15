@@ -492,6 +492,65 @@ export function call(
   return { kind: 'call', type, span: span(line), callee, args };
 }
 
+/** Every `return` in a framed C function body pops its frame first: the pop is on the
+ * same line as the return or on the line before it. `#line` directives and blank lines are
+ * not statements; dropping them is what makes "the pop is right before the return" a
+ * statement about the CODE rather than about formatting. Shared by the shadow-frame audit
+ * (`frames.test.ts`, over the golden corpus) and the export-stub audit
+ * (`export-stubs.test.ts`, over library stubs) — different corpora, one discipline. */
+export function assertReturnsPopFrame(body: string, owner: string): void {
+  const lines = body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#line'));
+  for (const [at, line] of lines.entries()) {
+    if (!line.startsWith('return')) {
+      continue;
+    }
+    const popped = line.includes('JSRT_FRAME_POP()') || lines[at - 1] === 'JSRT_FRAME_POP();';
+    assert.ok(popped, `${owner} returns without popping: ${line}`);
+  }
+}
+
+/** One emitted C function: its captured name and its body lines joined. */
+export interface EmittedFunction {
+  readonly name: string;
+  readonly body: string;
+}
+
+/* Splits emitted C into function bodies. Parsing C in general is not on the table; parsing
+ * THIS C is, because we wrote it: every function opens at column zero and its closing brace
+ * is the only `}` at column zero, everything inside being indented. `openName` names the
+ * function an opening line starts, or answers `undefined` for any other line — the internal
+ * units and `main` for the shadow-frame audit, the `stator_<unit>_*` symbols for the
+ * export-stub audit — so both corpora share the walk instead of each owning a copy. */
+export function splitEmittedFunctions(
+  c: string,
+  openName: (line: string) => string | undefined,
+): EmittedFunction[] {
+  const found: EmittedFunction[] = [];
+  let open: string | null = null;
+  let body: string[] = [];
+  for (const line of c.split('\n')) {
+    if (open === null) {
+      const name = openName(line);
+      if (name !== undefined && line.endsWith('{')) {
+        open = name;
+        body = [];
+      }
+      continue;
+    }
+    if (line === '}') {
+      found.push({ name: open, body: body.join('\n') });
+      open = null;
+      continue;
+    }
+    body.push(line);
+  }
+  assert.equal(open, null, 'a function body was never closed');
+  return found;
+}
+
 /** A `node:test` option object that skips a test which compiles and runs a native binary.
  *
  * Producing one needs `runtime/build/libjsrt.a` and clang, a toolchain the justfile does

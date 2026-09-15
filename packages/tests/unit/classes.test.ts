@@ -444,13 +444,14 @@ test('an override keeps the base slot and changes only the entry', () => {
   );
 });
 
-test('a class nothing overrides has no table at all', () => {
-  // Not an optimization detail: a direct call is what rung 6a emits, and it stays exactly that.
+test('a class nothing overrides still carries a table for dynamic dispatch', () => {
+  // Direct calls stay direct (rung 6a emits a named call, and `dispatch` below still says so);
+  // the table is for `o.m` through Unknown, which resolves the NAME at run time (step 45).
   const cls = classNamed(
     'class C {\n  m(): number { return 1; }\n}\nconsole.log(new C().m());\n',
     'C',
   );
-  assert.deepEqual(cls.vtable, []);
+  assert.deepEqual(cls.vtable, [{ name: 'm', className: 'C' }]);
 });
 
 test('overriding makes the call virtual for the WHOLE family, base-typed calls included', () => {

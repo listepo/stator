@@ -290,9 +290,17 @@ typedef struct JSRTClass {
    * property the fields have -- so a slot resolved against the static type of a receiver indexes
    * the same method on every descendant, and an override is a different entry at the same index.
    * The entries are file-scope constants, which is exactly why the table is absent for a class
-   * whose methods capture: such a closure is not one constant per class. */
+   * whose methods capture: such a closure is not one constant per class.
+   *
+   * Since dynamic dispatch through Unknown (plan.md §8 step 45), the table is emitted for every
+   * class with methods -- not only overridden families -- so that `jsrt_get_prop` can resolve a
+   * method NAME at run time. `method_names` is parallel to `methods`: `method_names[i]` is the
+   * name `methods[i]` implements. A capturing method's entry is NULL (it has no one constant
+   * form); the dynamic get skips NULL entries and falls back to the instance's hidden
+   * `#method:` slot, which carries the construction-site closure. */
   uint32_t method_count;
   const struct JSRTClosure *const *methods;
+  const char *const *method_names;
   /* Slot indices in PROPERTY-INSERTION order, or NULL when insertion order IS slot order.
    *
    * A fixed shape's slot order is the LAYOUT -- what `o.x` resolves against, and therefore a
