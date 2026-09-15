@@ -7745,3 +7745,17 @@ precisely scoped: each pass's marks are invisible to the other (calls vs binding
 keyspaces by design), so the combination needs either return marks fed into the slots pass or
 decl-side handling of marked calls in one joint fixpoint. No new mechanism — one shared
 fixpoint instead of two adjacent ones.
+
+## 264. Wave 7 landed: step 46 + Task 7.2 steps 1–2 (2026-09-15)
+
+Two slices in `4445956` (evidence in `done.md` → Phase 5 wave 7). Notes:
+
+- **Phase 5's boundary-widening arc is closed** (steps 44–46): call, decl, assign, return, and
+  combo edges all route dynamic values soundly. The remaining loud edges (method calls on marked
+  class-typed results → `STA2006`, spread of marked calls → `STA1214`) are documented Phase-8
+  dynamic-tier work, not silent gaps.
+- **Task 7.2's header declares only what exists** — no `stator_init_<unit>` symbol that nothing
+  defines yet. Steps 3–9 stay open in plan order.
+- **Remaining Phase-5 surface:** opaque class uses, `extends NS.C` (namespace's own refusal),
+  `instanceof` vs generic class (deliberate), integer-like computed class members, escape-position
+  generics, custom-`toString` key coercion (Phase-8 ceiling), `c?.m` multi-class unions.

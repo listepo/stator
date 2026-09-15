@@ -575,7 +575,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
 43. ~~**`extends` beyond a class declaration**~~ ✅ **landed 2026-09-15** (`a84a970`; evidence in [done.md](done.md) → Phase 5 wave 5).
 44. ~~**Element/spread receiver hardening**~~ ✅ **landed 2026-09-15** (`a84a970`; evidence in [done.md](done.md) → Phase 5 wave 5).
 45. ~~**Boundary widening stops at the call edge**~~ ✅ **landed 2026-09-15** (`2ac7e4d`; evidence in [done.md](done.md) → Phase 5 wave 6).
-46. **[D3][P0] The decl×return combination needs a joint fixpoint** (plan-notes 263). Step 45 widened calls (return edge) and bindings (decl/assign edges) in two separate passes: the return pass marks the CALL, the decl pass reads the checker's DECLARED return, so `const x: Fixed = f()` with a widened `f()` still miscompiles — neither suite covers the combination. Feed return marks into the slots pass (or handle decl-side) in one joint fixpoint. **Check:** a golden where a widened call flows into a fixed-annotated declaration matches Node; both step-45 goldens stay green.
+46. ~~**The decl×return combination needs a joint fixpoint**~~ ✅ **landed 2026-09-15** (`4445956`; evidence in [done.md](done.md) → Phase 5 wave 7).
 **Check:** a mixed graph (typed `.ts` entry importing an untyped `.js` lib) compiles under `--mode=js` and matches Node byte-for-byte; a `js`-only program using `var`/hoisting/`==` matches Node; `stator explain` shows static/dynamic split per function; `ts`-mode behavior and binary sizes unchanged (regression-checked against Phase 3 baselines).
 
 ---
@@ -831,6 +831,8 @@ Steps (detailed 2026-09-01; plan-notes 131):
    that is the failure this design is most likely to produce and the ASan job already exists.
 
 **[D4] Task 7.2 — Exposing TS to C.** `--emit-header` generates a `.h` for exported functions (Static Hermes `--exported-unit` model); values crossing out are C ABI types where sound, `jsrt_value` otherwise.
+
+Steps 1–2 ✅ landed 2026-09-15 (`4445956`; evidence in [done.md](done.md) → Phase 7 Task 7.2 steps 1–2). Steps 3+ open.
 
 Steps (detailed 2026-09-01; plan-notes 131):
 1. **`--emit-header` in the CLI**, reusing Task 7.1's ABI table in the other direction: an exported

@@ -1917,6 +1917,22 @@ unchanged 1.0%, `unit 503/503`, `subset 653 — 613/40/0`, `golden 380/380`, new
 - **Remainder → step 46:** the decl×return combination (`const x: Fixed = f()` with widened
   `f()`) needs the two passes joined in one fixpoint — each pass is blind to the other's marks.
 
+### Wave 7 — step 46 + Task 7.2 steps 1–2 ✅ (landed 2026-09-15)
+
+Two parallel slices (`4445956`), green at HEAD (`tsc` both, oxlint 0/0, oxfmt clean, cpd
+0.9% — net code removed; `unit 517/517`, `subset 655 — 615/40/0`, `golden 382/382`):
+
+- **Step 46** — one joint driver `collectDynamicWidening`: slots and returns passes alternate
+  in a single fixpoint, slot marks feed back as `knownDynamic`, return marks as `knownReturn`;
+  both sets grow monotonically (combined least fixpoint, source-order independent); keyspace
+  disjointness untouched.
+- **Task 7.2 steps 1–2** — `--emit-header`/`--unit-name` CLI flags; `frontend/export.ts` (the
+  only surface reader) renders deterministic headers from Task 7.1's ABI table in reverse
+  (in-table → C prototype, else `jsrt_value`; `extern const` for primitives); refusals
+  `STA1122` (shape) / `STA1123` (mutable state) / `STA1124` (symbol collision); `clang -c`
+  object output; determinism unit-pinned. Follow-up (steps 3–9): export stubs, init/error
+  companions, frame/thread treatment, version symbol, CI example.
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)
