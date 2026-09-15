@@ -246,7 +246,12 @@ function listArchiveMembers(archive: string): string[] {
 }
 
 function readArchiveMember(archive: string, member: string): Uint8Array {
-  return execFileSync(resolveAR(), ['p', archive, member]);
+  // `ar p` prints the whole member to stdout, and execFileSync caps buffered stdout at 1 MiB
+  // by default: an ASan-instrumented member past that (vendor_libregexp.o is already 0.6 MiB
+  // on macOS; Linux objects run larger) dies as `spawnSync ar ENOBUFS` instead of hashing.
+  // The gate already holds every member in memory for the digest, so a roomy cap — the same
+  // 64 MiB the golden-asan spawn below uses — only moves the ceiling far past any member.
+  return execFileSync(resolveAR(), ['p', archive, member], { maxBuffer: 64 * 1024 * 1024 });
 }
 
 export function listTrackedFiles(

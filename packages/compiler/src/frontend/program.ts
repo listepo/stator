@@ -22,6 +22,43 @@ function identifierAt(source: ts.SourceFile, position: number): ts.Identifier | 
   return found;
 }
 
+/** A TS1117 duplicate-key diagnostic that must NOT be swallowed by the js-mode carve-out:
+ * two or more `__proto__` DATA properties (`PropertyName : AssignmentExpression`) in one
+ * object literal — an early SyntaxError per spec B.3.1 that Node rejects, so js mode refuses it
+ * as STA0012 like every other checker refusal. Only that form counts: a computed key
+ * (`{ ['__proto__']: 1 }`), a shorthand (`{ __proto__ }`), a method, an accessor, or a spread
+ * beside a data `__proto__` is legal JavaScript (last wins) and stays suppressed. The
+ * diagnostic sits on one of the duplicate names; whichever occurrence it is, walking up to the
+ * enclosing literal and counting data `__proto__` entries answers the question. */
+function isDuplicateProtoDataProperty(source: ts.SourceFile, position: number): boolean {
+  let literal: ts.ObjectLiteralExpression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (position < node.getStart(source) || position >= node.getEnd()) return;
+    if (ts.isObjectLiteralExpression(node)) {
+      literal = node;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (literal === undefined) {
+    return false;
+  }
+  let count = 0;
+  for (const property of literal.properties) {
+    if (!ts.isPropertyAssignment(property) || property.name === undefined) {
+      continue;
+    }
+    const { name } = property;
+    if (ts.isComputedPropertyName(name)) {
+      continue;
+    }
+    if (name.text === '__proto__') {
+      count += 1;
+    }
+  }
+  return count >= 2;
+}
+
 /** The coercing compound operators: `-=`, `*=`, `/=`, `%=`, `**=`. `+=` concatenates rather
  * than coerces, and the logical and nullish forms assign their right side as-is. */
 function isCoercingCompound(kind: ts.SyntaxKind): boolean {
@@ -173,7 +210,12 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // emitter stores in source order into one slot, so the last write wins on its own; the verifier
   // covers the shape by name, not by position. ts mode keeps the refusal (STA0012). Duplicate
   // METHODS, duplicate accessors, and mixed property/accessor duplicates are different checker
-  // codes (2300, 1118, 1119) and stay refused in both modes.
+  // codes (2300, 1118, 1119) and stay refused in both modes. One shape stays refused in js mode
+  // too: duplicate `__proto__` DATA properties are an early SyntaxError (spec B.3.1 — Node
+  // answers "Duplicate __proto__ fields are not allowed in object literals"), so 1117 on a
+  // `__proto__` name is never swallowed — see isDuplicateProtoDataProperty at the suppression
+  // site below. A computed key, a shorthand, a method, or a spread beside a data `__proto__`
+  // is legal (last wins) and stays on the dynamic path.
   1117, // An object literal cannot have multiple properties with the same name.
   // A spread overwriting an explicit key (`{ b: 9, ...o }` where `o` has `b`) is legal
   // JavaScript — last wins — and the lowering already expands the spread into one read per
@@ -396,9 +438,18 @@ function createProgramUncached(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = ts.getPreEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
+    // Duplicate `__proto__` data properties are the one 1117 js mode keeps: an early
+    // SyntaxError (spec B.3.1), not last-wins JavaScript — see isDuplicateProtoDataProperty.
+    const keepProtoRefusal =
+      mode === 'js' &&
+      diag.code === 1117 &&
+      diag.file !== undefined &&
+      diag.start !== undefined &&
+      isDuplicateProtoDataProperty(diag.file, diag.start);
     if (
-      BOTH_MODES_RUNTIME_CODES.has(diag.code) ||
-      (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code))
+      !keepProtoRefusal &&
+      (BOTH_MODES_RUNTIME_CODES.has(diag.code) ||
+        (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code)))
     ) {
       // An inferred binding that TypeScript says has an incompatible assignment must be dynamic
       // throughout lowering. The diagnostic starts at the assignment target, whose symbol is the

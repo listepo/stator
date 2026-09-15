@@ -7759,3 +7759,33 @@ Two slices in `4445956` (evidence in `done.md` → Phase 5 wave 7). Notes:
 - **Remaining Phase-5 surface:** opaque class uses, `extends NS.C` (namespace's own refusal),
   `instanceof` vs generic class (deliberate), integer-like computed class members, escape-position
   generics, custom-`toString` key coercion (Phase-8 ceiling), `c?.m` multi-class unions.
+
+## 265. CI red-on-main triage: three fixes for the revert-bot gate (2026-09-15)
+
+`main` was red since 2026-09-13 (every push auto-reverted): asan/linux `spawnSync ar ENOBUFS`,
+six `extern_link` subset failures on Windows, and the test262 ratchet `passed 2372 → 2371`.
+Evidence per fix (all three verified locally; CI is the cross-platform proof):
+
+- **test262 `__proto__-duplicate.js` passed → skipped.** Step 26's 1117 carve-out (`49d8193`,
+  "duplicate data keys are last-wins") is wrong for one shape: duplicate `__proto__` DATA
+  properties are an early SyntaxError (spec B.3.1; Node: "Duplicate __proto__ fields are not
+  allowed in object literals"). Suppression made the body checker-clean, so the gate ran and
+  the assert.js prelude's own STA1214s (JSON/String globals, method calls) failed the build
+  with nothing-but-STA12xx → skip instead of the negative-test pass. Fix: `program.ts`
+  `isDuplicateProtoDataProperty` — a 1117 on a literal with ≥2 non-computed `PropertyAssignment`
+  `__proto__` entries is never suppressed (STA0012, both modes effectively). Only that form
+  counts: computed keys, shorthands, methods, spreads beside a data `__proto__` are legal
+  last-wins (measured against the pinned Node) and stay dynamic. SUBSET.md step-26 row and
+  two decision fixtures (`subset_object_literal_protodup_{js,ts}`) updated in the same change.
+- **Windows `extern_link_*`: verdict static, want error (STA1119).** `parseLinkPragmas`
+  (`extern.ts`) splits on `'\n'` and matches `/...(.*)$/` without the multiline flag — on a
+  CRLF checkout (Windows default) `$` never matches before `\r`, so every pragma line is
+  invisible and the file reads as pragma-free. Proven: old regex `false` on a `\r`-terminated
+  line, `true` on LF. Fix strips one trailing `\r` per line (LF sources byte-identical);
+  `@statorExtern` was never at risk (TS's own JSDoc parser). Reproduced the STA1119 verdicts
+  locally with CRLF-converted helpers.
+- **asan/linux ENOBUFS.** `readArchiveMember` (`asan-gate.ts`) uses `execFileSync` with the
+  1 MiB default `maxBuffer`; the largest ASan member is already 0.6 MiB on macOS
+  (`vendor_libregexp.o`) and Linux objects run larger, so `ar p` exceeds the buffer. Fix:
+  explicit 64 MiB cap (the precedent the golden-asan spawn already uses); the gate holds all
+  members in memory for the digest anyway.

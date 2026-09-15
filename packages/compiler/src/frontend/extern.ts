@@ -410,8 +410,13 @@ const LINK_MARKER = /^\s*\/\/\s*@statorLink\b(.*)$/;
 function parseLinkPragmas(sourceFile: ts.SourceFile): readonly LinkPragma[] {
   const found: LinkPragma[] = [];
   const fileDir = dirname(sourceFile.fileName);
+  // A CRLF file leaves a trailing `\r` on every line after the split, and without the
+  // multiline flag `$` matches only at the very end of the string — so on Windows checkouts
+  // (CRLF by default) the marker silently matches nothing and every pragma file reads as
+  // pragma-free. Stripping one trailing `\r` keeps LF sources byte-identical.
   const lines = sourceFile.getFullText().split('\n');
-  for (const [index, text] of lines.entries()) {
+  for (const [index, raw] of lines.entries()) {
+    const text = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const match = LINK_MARKER.exec(text);
     if (match === null) {
       continue;
