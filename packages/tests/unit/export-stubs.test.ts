@@ -22,6 +22,7 @@ import type { Module } from '../../compiler/src/hir/nodes.ts';
 import { verifyHir } from '../../compiler/src/hir/verify.ts';
 import { lowerSourceFile } from '../../compiler/src/lower/index.ts';
 import { eliminateDeadCode, optimize } from '../../compiler/src/passes/index.ts';
+import { staleLdRetryArgs } from '../../compiler/src/support/toolchain.ts';
 import {
   assertReturnsPopFrame,
   createProgram,
@@ -327,28 +328,36 @@ void test(
       const mainPath = join(work, 'main.c');
       writeFileSync(mainPath, STUB_MAIN('widget.h'));
       const app = join(work, 'app');
-      const link = spawnSync(
-        'clang',
-        [
-          '-std=c11',
-          '-Wall',
-          '-Wextra',
-          '-Werror',
-          '-I',
-          RUNTIME_INCLUDE,
-          '-I',
-          work,
-          mainPath,
-          out,
-          '-L',
-          RUNTIME_LIB_DIR,
-          '-ljsrt',
-          ...archiveSystemFlags(),
-          '-o',
-          app,
-        ],
-        { encoding: 'utf8' },
-      );
+      const linkArgs: string[] = [
+        '-std=c11',
+        '-Wall',
+        '-Wextra',
+        '-Werror',
+        '-I',
+        RUNTIME_INCLUDE,
+        '-I',
+        work,
+        mainPath,
+        out,
+        '-L',
+        RUNTIME_LIB_DIR,
+        '-ljsrt',
+        ...archiveSystemFlags(),
+        '-o',
+        app,
+      ];
+      // The consumer-side link shares the CLI's stale-linker retry (a stale bundled ld
+      // against a newer Xcode SDK fails here exactly as in `build.ts` link()): one retry
+      // under the newest readable CLT SDK, then the original failure stands.
+      let link = spawnSync('clang', linkArgs, { encoding: 'utf8' });
+      const retry = staleLdRetryArgs(linkArgs, link.stderr, {
+        darwin: process.platform === 'darwin',
+        defaultCc: true,
+        sanitized: false,
+      });
+      if (link.status !== 0 && retry !== undefined) {
+        link = spawnSync('clang', retry.args, { encoding: 'utf8' });
+      }
       assert.equal(link.status, 0, `link failed:\n${link.stdout}${link.stderr}`);
       const run = spawnSync(app, [], { encoding: 'utf8' });
       assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);

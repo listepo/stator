@@ -31,6 +31,7 @@ import { optimize } from '../passes/index.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { runtimeFlavor } from '../support/features.ts';
 import { withSpan } from '../support/telemetry.ts';
+import { isStaleLdSystemLibFailure, staleLdHint, staleLdRetryArgs } from '../support/toolchain.ts';
 import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
 
 type Mode = 'ts' | 'js';
@@ -391,9 +392,15 @@ function selectCC(): string {
  * install hint) and a spawn that died before compiling (STA0009). A nonzero EXIT is the
  * caller's to interpret — the link names its extern flags there, the object compile reports
  * a compiler bug — so this answers only the start. Returns undefined when clang ran. */
-function clangStartError(cc: string, result: { error?: Error }): BuildError | undefined {
+function clangStartError(cc: string, result: { error?: unknown }): BuildError | undefined {
   const { error } = result;
-  if (error !== undefined && 'code' in error && error.code === 'ENOENT') {
+  if (
+    error !== undefined &&
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'ENOENT'
+  ) {
     return new BuildError(
       'STA0008',
       `C compiler "${cc}" not found — install clang ` +
@@ -401,7 +408,8 @@ function clangStartError(cc: string, result: { error?: Error }): BuildError | un
     );
   }
   if (error !== undefined) {
-    return new BuildError('STA0009', `C compiler failed to start: ${error.message}`);
+    const detail = error instanceof Error ? `: ${error.message}` : '';
+    return new BuildError('STA0009', `C compiler failed to start${detail}`);
   }
   return undefined;
 }
@@ -410,6 +418,26 @@ function clangStartError(cc: string, result: { error?: Error }): BuildError | un
  * errors rather than routing them through a diagnostic. */
 function runClang(cc: string, args: readonly string[]) {
   return spawnSync(cc, args, { stdio: ['ignore', 'inherit', 'inherit'] });
+}
+
+interface CapturedClang {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly error: unknown;
+}
+
+/** The link's private runner: captured, so a failure can be classified before anything is
+ * printed. Callers replay `stdout`/`stderr` on failure, which keeps the terminal output
+ * identical to the inherited-stdio form — buffered rather than live, but byte-identical. */
+function runClangCaptured(cc: string, args: readonly string[]): CapturedClang {
+  const result = spawnSync(cc, args, { encoding: 'utf8' });
+  return {
+    status: result.status,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
+    error: result.error,
+  };
 }
 
 /** Compile generated C to a relocatable object for a C consumer (`--emit-header`, plan §10
@@ -463,7 +491,7 @@ function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly s
     : process.platform === 'darwin'
       ? ['-Wl,-dead_strip']
       : ['-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections'];
-  const result = runClang(cc, [
+  const args: string[] = [
     '-std=c11',
     ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
     ...shakeFlags,
@@ -480,28 +508,65 @@ function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly s
     ...dedupLinkLibs([...extraLinkFlags(), ...externFlags]),
     '-o',
     out,
-  ]);
-
-  const startError = clangStartError(cc, result);
+  ];
+  const first = runClangCaptured(cc, args);
+  const startError = clangStartError(cc, first);
   if (startError !== undefined) {
     throw startError;
   }
-  if (result.status !== 0) {
-    // A failed link with extern flags is usually a missing library rather than a compiler
-    // bug — name the flags so the user knows where to look first.
-    if (externFlags.length > 0) {
-      throw new BuildError(
-        'STA0009',
-        `C compiler failed (exit ${result.status ?? 'signal'}) with extern link flags ` +
-          `${externFlags.join(' ')} — if a flag names a library that is not installed, install ` +
-          'it or fix the @statorLink pragma / --link= value; otherwise keep the C with ' +
-          '`--keep-c` and report it',
-      );
+  if (first.status === 0) {
+    return;
+  }
+
+  // A stale bundled linker against a newer Xcode SDK (conda ld64-956 vs `.tbd` files naming
+  // `arm64e.x1`) fails every Darwin link, including a trivial `int main` — retry once under
+  // the newest readable CLT SDK. Green-path cost is zero: this runs only after a failure
+  // carrying the signature.
+  const staleSignature = isStaleLdSystemLibFailure(first.stderr);
+  const retry = staleLdRetryArgs(args, first.stderr, {
+    darwin: process.platform === 'darwin',
+    defaultCc: process.env['CC'] === undefined,
+    sanitized: SANITIZED,
+  });
+  if (retry !== undefined) {
+    const second = runClangCaptured(cc, retry.args);
+    const secondStartError = clangStartError(cc, second);
+    if (secondStartError !== undefined) {
+      throw secondStartError;
     }
-    throw new BuildError(
+    if (second.status === 0) {
+      return;
+    }
+    process.stderr.write(second.stdout);
+    process.stderr.write(second.stderr);
+    throw linkFailure(externFlags, second.status, staleLdHint(retry.sysroot));
+  }
+
+  process.stderr.write(first.stdout);
+  process.stderr.write(first.stderr);
+  throw linkFailure(externFlags, first.status, staleSignature ? staleLdHint(undefined) : undefined);
+}
+
+/** The link diagnostic: a failed link with extern flags is usually a missing library rather
+ * than a compiler bug — name the flags so the user knows where to look first. `hint` rides
+ * along only for the stale-linker signature, where the raw `ld` output names a format the
+ * user cannot act on. */
+function linkFailure(
+  externFlags: readonly string[],
+  status: number | null,
+  hint: string | undefined,
+): BuildError {
+  const where = `C compiler failed (exit ${status ?? 'signal'})`;
+  const tail =
+    hint === undefined
+      ? 'keep the C with `--keep-c` and report it'
+      : `${hint}; otherwise keep the C with \`--keep-c\` and report it`;
+  if (externFlags.length > 0) {
+    return new BuildError(
       'STA0009',
-      `C compiler failed (exit ${result.status ?? 'signal'}) — this is a compiler bug; ` +
-        'keep the C with `--keep-c` and report it',
+      `${where} with extern link flags ${externFlags.join(' ')} — if a flag names a library ` +
+        `that is not installed, install it or fix the @statorLink pragma / --link= value; ${tail}`,
     );
   }
+  return new BuildError('STA0009', `${where} — this is a compiler bug; ${tail}`);
 }

@@ -240,8 +240,29 @@ _runtime-test flavor:
     # CLI does rather than rediscovering the answer here.
     LINK_FLAGS="$(cat "${DIR}/link-flags.txt")"
 
+    # conda ld64-956 cannot parse a newer Xcode SDK's `.tbd` (dotted `arm64e.x1` arch names),
+    # failing every Darwin link against the default SDK. Same retry as the CLI's link() in
+    # packages/compiler/src/cli/build.ts: first attempt runs as before (zero green-path
+    # cost); only a failure carrying that signature retries once under the newest CLT SDK
+    # the old parser can still read. An explicit CC is never second-guessed.
+    fallback_sdk() {
+        for sdk in $(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk 2>/dev/null | grep -v '/MacOSX\.sdk$' | sort -r); do
+            tbd="${sdk}/usr/lib/libSystem.tbd"
+            if [[ -f "${tbd}" ]] && ! grep -Eq 'arm64e\.[a-z0-9]+' "${tbd}"; then printf '%s' "${sdk}"; return 0; fi
+        done
+        return 1
+    }
+    link_one() {
+        log="$(mktemp)"
+        if ${CC} ${CFLAGS} "$1" -L"${DIR}" -ljsrt ${LINK_FLAGS} -o "$2" 2>"${log}"; then rm -f "${log}"; return 0; fi
+        if [[ "$(uname -s)" == 'Darwin' && "${CC}" == 'clang' ]] && grep -q '\.tbd' "${log}" && grep -Eq 'malformed file|unknown architecture' "${log}" && sdk="$(fallback_sdk)"; then
+            if ${CC} ${CFLAGS} "$1" -L"${DIR}" -ljsrt ${LINK_FLAGS} -isysroot "${sdk}" -o "$2" 2>"${log}"; then rm -f "${log}"; return 0; fi
+        fi
+        cat "${log}" >&2; rm -f "${log}"; return 1
+    }
+
     for corpus in "${CORPORA[@]}"; do
-      ${CC} ${CFLAGS} "tests/${corpus}.c" -L"${DIR}" -ljsrt ${LINK_FLAGS} -o "${DIR}/${corpus}"
+      link_one "tests/${corpus}.c" "${DIR}/${corpus}"
       ${NODE} "tests/${corpus}.mjs" > "${DIR}/${corpus}.expected.txt"
       "./${DIR}/${corpus}" > "${DIR}/${corpus}.actual.txt"
       diff -u "${DIR}/${corpus}.expected.txt" "${DIR}/${corpus}.actual.txt"

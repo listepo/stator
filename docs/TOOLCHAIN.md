@@ -141,6 +141,19 @@ command-line tools (`xcode-select --install`) on macOS and from `binutils`/`pkg-
 `diffutils` on Debian/Ubuntu. A missing compiler is a diagnostic with the install hint (`STA0008`),
 not a crash.
 
+### macOS SDK fallback for a stale bundled linker
+
+The pinned conda clang ships its own `ld`, which can lag the installed Xcode SDK: when the
+SDK's `.tbd` files name arch variants the bundled `ld` cannot parse, every Darwin link
+fails. The CLI link (`packages/compiler/src/cli/build.ts`), the justfile's `runtime-test`
+corpus link, and the test-side consumer links (export-stubs, the FFI C-consumer) all handle
+this the same way — one retry under the newest Command Line Tools SDK the old parser can
+still read (`packages/compiler/src/support/toolchain.ts`), only after a failure carrying
+that exact signature, never for an explicit `CC`. Green-path cost is zero; nothing is
+recorded in `link-flags.txt`. Do not rebuild the runtime archive (`just runtime`) while a
+golden run is linking against it — `ar` rewriting `libjsrt.a` mid-link surfaces as a
+transient `library not found for -ljsrt` in exactly one fixture.
+
 ## Not yet required
 
 These arrive with the phase that needs them; do not add them to CI before that:
