@@ -7704,3 +7704,22 @@ Five slices in `7e9079d` (evidence in `done.md` → Phase 5 wave 3). Process not
 - **Test262 ratchet drift is pre-existing:** 2372→2371 passed gap reproduces on the base commit
   without any wave-3 change. The 2454 landing moves 88 failed→skipped with zero passed→failed,
   which is the honest direction; `ratchet.json` stays untouched until the drift itself is owned.
+
+## 261. Wave 4 landed: generics, class values, receivers (2026-09-15)
+
+Five slices in `93af561` (evidence in `done.md` → Phase 5 wave 4). Decisions worth keeping:
+
+- **TS2416 (override kind-mismatch) is a REAL REFUSAL Stator keeps**, on measured evidence: no
+  fixed layout represents field+method under one name, and base-typed access would answer wrong
+  rather than crash. Joins the strict-mode family and 2790's fixed-shape delete as refusals that
+  look like §1.2 violations but are representation impossibilities. Reopen only with a layout
+  that holds both (Phase-8 dictionary dispatch is the named mechanism).
+- **Class-as-value needs no class object** for the landed slices — alias erasure carries
+  construction, `instanceof`, and statics with zero runtime. The remaining class-object work is
+  now exactly: opaque uses (`foo(K)`, `console.log(K)`), `super`-as-value (scoped pointers in
+  the wave report), and whatever Phase 7/10 needs of first-class classes.
+- **Remaining Phase-5 surface after wave 4:** bare generics as value, `super`-as-value,
+  `extends <expression>`/mixins, static `#private` gaps (if any beyond the landed pair rule),
+  spread-of-non-identifier computed fallout, `o[kObj]` TS2538, RegExpExecArray spread,
+  fixed-param/dynamic-arg miscompile, `c?.m` unions-of-two-classes/`any`-mixing. Plus owner
+  verdicts already recorded (2769 permissive-fallback consistency, TS2416 now settled above).

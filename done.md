@@ -1849,6 +1849,33 @@ clean, `unit 484/484`, `subset 603 — 563/40/0`, `golden 355/355`):
   fall through to `dyn-method-call`). Test262 moves 88 failed→skipped, 0 passed→failed; `ratchet.json`
   untouched (the 2372→2371 gap is pre-existing corpus drift, red at baseline too).
 
+### Wave 4 — generics, class values, receivers ✅ (landed 2026-09-15)
+
+Five parallel slices (`93af561`), all green at HEAD (`tsc` both projects, oxlint 0/0, oxfmt
+clean, cpd 0.9%, `unit 495/495`, `subset 623 — 583/40/0`, `golden 368/368`):
+
+- **Generic bases + nesting** — concrete-arity generic bases (heritage grounding per declaring
+  class, tuple descriptors seeded) and program-unique nested generic classes; generic subclasses,
+  partial bounds, dup names, and `instanceof` against a generic class stay `STA1214` (no
+  family-wide check exists without a runtime mechanism — deliberate).
+- **Class-as-value via alias erasure** — the "blocked on the class object" premise dissolved:
+  `new K()`/`instanceof K`/`K.static` never evaluate the class, so `const K = C` binds no value
+  and every in-place use rewrites to the target (zero runtime/C/HIR/GC changes). Opaque uses,
+  `extends K`, `let`-formations, and `super`-as-value stay `STA1214` (super-as-value has scoped
+  follow-up pointers: `method-value` with receiver param + `direct` dispatch).
+- **Dynamic `this` (2683)** — `noImplicitThis: mode === 'ts'` plus Unknown receiver param zero,
+  reusing the `has_receiver` machinery; ESM-strict `undefined` is the honest answer. ts keeps
+  `STA0012`; top-level/static/explicit-`this` stay `STA1214`.
+- **Overload fallback (2769)** — js suppression + gate acceptance of signatures with an
+  implementation; calls flow through the existing Unknown/`STA2001` path. **TS2416 verdict:
+  REAL REFUSAL Stator keeps** — one name cannot be both a field slot and a method entry, and a
+  fixed layout would answer base-typed reads wrong (evidence table in the report); same
+  conclusion shape as 2790's fixed-shape delete.
+- **Iterator dispatch + nullable reads** — static `c[Symbol.iterator]` through member machinery;
+  unknown receivers get a precise Phase-8 `STA1214` (full GetIterator scoped with file:line);
+  `c?.m` lowers statically in the `?.`-consequent for single-class receivers (short-circuit
+  makes it sound). Test262: 88 more failed→skipped via 2454's wake, 0 passed→failed.
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)
