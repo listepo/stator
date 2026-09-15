@@ -8,7 +8,7 @@
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -99,7 +99,13 @@ function mappedType(
     throw new Error('unreachable');
   }
   const value = mapped.value;
-  return value.kind === 'primitive' ? value.ts : `pointer:${value.alias}`;
+  if (value.kind === 'primitive') {
+    return value.ts;
+  }
+  if (value.kind === 'out-param') {
+    return `out:${value.alias}`;
+  }
+  return `pointer:${value.alias}`;
 }
 
 function refusedCode(
@@ -155,8 +161,19 @@ void test('struct pointers brand; unions, bitfields, and T** refuse', () => {
   });
   assert.equal(mappedType('Node *', 'param', model), 'pointer:Ptr_Node');
   assert.equal(mappedType('struct Node *', 'param', model), 'pointer:Ptr_Node');
-  assert.match(refusedCode('Node **', 'param', model), /T\*\*/);
-  assert.match(refusedCode('const char **', 'param', model), /T\*\*/);
+  // A `T*` pointing at a brand in PARAMETER position is the v0.1 out-param spelling.
+  assert.equal(mappedType('Node **', 'param', model), 'out:Ptr_Node');
+  assert.equal(mappedType('struct Node **', 'param', model), 'out:Ptr_Node');
+  // Return position stays refused: Out<T> is parameter-only.
+  assert.match(refusedCode('Node **', 'return', model), /return position.*\|\|STA1119/);
+  // A `const char **` out-param copies on read (`Out<CString>`, docs/FFI.md section 2);
+  // anything else unbranded stays refused, with the reason named.
+  assert.equal(mappedType('const char **', 'param', model), 'out:CString');
+  assert.match(refusedCode('int **', 'param', model), /not a branded pointer.*\|\|STA1119/);
+  assert.match(refusedCode('char **', 'param', model), /mutable.*\|\|STA1119/);
+  // Triple (or deeper) pointers never map, in either position.
+  assert.match(refusedCode('Node ***', 'param', model), /T\*\*\*.*\|\|STA1119/);
+  assert.match(refusedCode('Node ***', 'return', model), /T\*\*.*\|\|STA1119/);
   assert.match(refusedCode('struct Bits *', 'param', model), /bitfield/);
   assert.match(refusedCode('union U *', 'param', model), /union/);
   assert.match(refusedCode('union U', 'param', model), /union/);
@@ -194,8 +211,8 @@ void test('typedef chains that hide declarator depth re-enter the full analysis'
   });
   // A starless use-site spelling is no proof of a scalar: the star hides in the typedef.
   assert.equal(mappedType('sqlite3_filename', 'param', model), 'cstring');
-  // One outer star plus one hidden star is T**, not a brand.
-  assert.match(refusedCode('NodePtr *', 'param', model), /T\*\*/);
+  // One outer star plus one hidden star is T** with a brand pointee: Out, not a brand.
+  assert.equal(mappedType('NodePtr *', 'param', model), 'out:Ptr_Node');
   assert.equal(mappedType('NodePtr', 'param', model), 'pointer:Ptr_Node');
   // A function pointer behind a typedef is still STA1117, not "unsupported".
   assert.match(refusedCode('cb_t', 'param', model), /\|\|STA1117/);
@@ -319,20 +336,34 @@ function generateSample(headerName = 'sample.h'): {
 }
 
 void test(
-  'end-to-end: five functions emitted with brands, thirteen refusals with lines',
+  'end-to-end: six functions emitted with brands, twelve refusals with lines',
   NEEDS_CLANG,
   () => {
     const { dts, summary, diagnostics } = generateSample();
-    assert.match(summary, /ffi-gen: 5 emitted, 13 refused \(.*\) from sample\.h/);
+    assert.match(summary, /ffi-gen: 6 emitted, 12 refused \(.*\) from sample\.h/);
     assert.match(
       summary,
-      /64-bit integer: 1, T\*\* out-param: 1, bitfield struct: 1, enum constant: 3, function pointer: 1, function-like macro: 1, inline function: 1, macro constant: 2, union: 1, variadic: 1/,
+      /64-bit integer: 1, bitfield struct: 1, enum constant: 3, function pointer: 1, function-like macro: 1, inline function: 1, macro constant: 2, union: 1, variadic: 1/,
     );
+    assert.ok(!summary.includes('T** out-param'), 'the sample keeps no T** refusal');
     assert.ok(dts.includes(`type Ptr_Node = { readonly __brand: 'Node' };`), 'struct brand');
     assert.ok(
       dts.includes(`type Ptr_Point = { readonly __brand: 'Point' };`),
       'anonymous-struct brand',
     );
+    // The shared out-param alias is emitted once, before its uses.
+    assert.equal(
+      dts.split(`type Out<T> = { readonly value: T };`).length - 1,
+      1,
+      'exactly one Out alias',
+    );
+    assert.ok(
+      dts.indexOf(`type Out<T> = { readonly value: T };`) < dts.indexOf('Out<Ptr_Node>'),
+      'the Out alias precedes its uses',
+    );
+    // The #include pragma always names the input header's basename — mechanical, never a path.
+    assert.ok(dts.includes(`// @statorLink #include "./sample.h"`), 'include pragma');
+    assert.ok(!dts.includes(tmpdir()), 'no resolved path leaks into the pragma');
     assert.ok(dts.includes('/** @statorExtern plain_add */'), 'C symbol spelled explicitly');
     assert.ok(
       dts.includes('declare function plainAdd(a: number, b: number): number;'),
@@ -347,6 +378,10 @@ void test(
       'copy-out declare line',
     );
     assert.ok(
+      dts.includes('declare function openNode(path: CString, out: Out<Ptr_Node>): number;'),
+      'T** out-param declare line',
+    );
+    assert.ok(
       dts.includes('declare function usePoint(p: Ptr_Point): number;'),
       'anonymous-brand declare line',
     );
@@ -358,7 +393,6 @@ void test(
       'take_union',
       'take_bits',
       'get_bignum',
-      'open_node',
       'helper_add',
       'SAMPLE_OK',
       'SAMPLE_VERSION',
@@ -386,15 +420,24 @@ void test(
 );
 
 void test(
-  'end-to-end: every emitted declaration passes the real gate classifier',
+  'end-to-end: every emitted non-Out declaration passes the real gate classifier',
   NEEDS_CLANG,
   () => {
     const { dts } = generateSample();
     const { program, sourceFile } = createProgram(dts, '/gen.d.ts');
     const checker = program.getTypeChecker();
     let count = 0;
+    let skippedOut = 0;
     for (const stmt of sourceFile.statements) {
       if (!ts.isFunctionDeclaration(stmt)) {
+        continue;
+      }
+      // The Out<T> out-param spelling compiles once the parallel compiler track lands
+      // its gate/lowering support; the generator must not wait for it, so the check
+      // below pins the five stable declarations and names the deferred one.
+      const text = stmt.getText();
+      if (text.includes('Out<')) {
+        skippedOut += 1;
         continue;
       }
       count += 1;
@@ -405,7 +448,8 @@ void test(
         `generated declaration rejected: ${JSON.stringify(classified)}`,
       );
     }
-    assert.equal(count, 5, 'all five emitted functions checked');
+    assert.equal(count, 5, 'all five non-Out emitted functions checked');
+    assert.equal(skippedOut, 1, 'exactly the openNode Out declaration awaits compiler support');
   },
 );
 
@@ -439,3 +483,189 @@ void test('oracle diff: matches, mismatches, and both one-sided rows', NEEDS_CLA
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+void test('refusal codes: macros, enum constants, and globals cite STA1130', () => {
+  const model: HeaderModel = {
+    basename: 't.h',
+    functions: [],
+    typedefs: new Map(),
+    recordsById: new Map(),
+    enums: [{ id: 'e1', name: 'Color', line: 5, constants: [{ name: 'RED', line: 6 }] }],
+    macros: [
+      { name: 'FOO', line: 2, functionLike: false },
+      { name: 'MAX', line: 3, functionLike: true },
+    ],
+    globals: [{ name: 'g', line: 8, cType: 'int' }],
+  };
+  const result = generate(model);
+  assert.equal(result.refusals.length, 4);
+  const byConstruct = new Map(result.refusals.map((refusal) => [refusal.construct, refusal]));
+  for (const name of ['FOO', 'MAX', 'RED', 'g']) {
+    assert.equal(byConstruct.get(name)?.code, 'STA1130', `${name} cites STA1130`);
+  }
+  assert.equal(byConstruct.get('FOO')?.kind, 'macro constant');
+  assert.equal(byConstruct.get('MAX')?.kind, 'function-like macro');
+  assert.equal(byConstruct.get('RED')?.kind, 'enum constant');
+  assert.equal(byConstruct.get('g')?.kind, 'global variable');
+  const lines = result.refusals.map((refusal) => diagnosticLine(result.basename, refusal));
+  for (const [name, where] of [
+    ['FOO', 't.h:2'],
+    ['MAX', 't.h:3'],
+    ['RED', 't.h:6'],
+    ['g', 't.h:8'],
+  ] as const) {
+    const found = lines.find((line) => line.includes(`${name}: refused`));
+    assert.ok(found !== undefined && found.includes('STA1130'), `${name} cites STA1130`);
+    assert.ok(found !== undefined && found.includes(where), `${name} names header:line`);
+  }
+  assert.ok(
+    !lines.some((line) => line.includes('no STA code allocated yet')),
+    'the unallocated marker is gone',
+  );
+  assert.match(summaryLine(result), /enum constant: 1/);
+  assert.match(summaryLine(result), /function-like macro: 1/);
+  assert.match(summaryLine(result), /global variable: 1/);
+  assert.match(summaryLine(result), /macro constant: 1/);
+});
+
+void test('refusal codes: gate-equivalent refusals keep their would-be codes', () => {
+  const model: HeaderModel = {
+    basename: 'g.h',
+    functions: [
+      cfn('v', ['int'], 'void', { variadic: true }),
+      cfn('t', ['void (*)(int)'], 'void'),
+      cfn('u', ['int **'], 'void'),
+      cfn('w', [], 'long long'),
+      cfn('x', [], 'void *'),
+    ],
+    typedefs: new Map(),
+    recordsById: new Map(),
+    enums: [],
+    macros: [],
+    globals: [],
+  };
+  const result = generate(model);
+  assert.equal(result.refusals.length, 5);
+  const byConstruct = new Map(result.refusals.map((refusal) => [refusal.construct, refusal]));
+  assert.equal(byConstruct.get('v')?.code, 'STA1120');
+  assert.equal(byConstruct.get('t')?.code, 'STA1117');
+  assert.equal(byConstruct.get('u')?.code, 'STA1119');
+  assert.equal(byConstruct.get('w')?.code, 'STA1119');
+  assert.equal(byConstruct.get('x')?.code, 'STA1119');
+  for (const refusal of result.refusals) {
+    assert.ok(
+      diagnosticLine(result.basename, refusal).includes(refusal.code ?? 'missing'),
+      `${refusal.construct} cites its code`,
+    );
+    assert.notEqual(refusal.code, 'STA1130', `${refusal.construct} is not STA1130`);
+  }
+});
+
+void test('--lib emits one @statorLink line per lib, in order, after the header comment', () => {
+  const result = generate(EMPTY_MODEL);
+  const plain = renderDts(result);
+  assert.ok(!plain.includes('@statorLink: -l'), 'no flag means no link lines');
+  assert.ok(
+    plain.includes('// @statorLink #include "./test.h"'),
+    'the include pragma is always emitted',
+  );
+  const withLibs = renderDts(result, ['sqlite3', 'm']);
+  const lines = withLibs.split('\n');
+  const generated = lines.findIndex((line) => line.startsWith('// GENERATED by ffi-gen'));
+  const first = lines.indexOf('// @statorLink: -lsqlite3');
+  const second = lines.indexOf('// @statorLink: -lm');
+  const include = lines.indexOf('// @statorLink #include "./test.h"');
+  assert.ok(generated !== -1 && first !== -1 && second !== -1 && include !== -1);
+  assert.ok(
+    generated < first && first < second && second < include,
+    'header comment, then libs in order, then the include',
+  );
+});
+
+void test('T** out-params share one Out alias that precedes its uses', () => {
+  const model: HeaderModel = {
+    basename: 'o.h',
+    functions: [
+      cfn('open_a', ['const char *', 'Node **'], 'int'),
+      cfn('open_b', ['Node **', 'int'], 'void'),
+      cfn('plain_add', ['int', 'int'], 'int'),
+    ],
+    typedefs: new Map([
+      ['Node', { name: 'Node', underlying: 'struct Node', anonTagId: undefined }],
+    ]),
+    recordsById: new Map([
+      ['r1', { id: 'r1', name: 'Node', tag: 'struct', complete: true, hasBitfield: false }],
+    ]),
+    enums: [],
+    macros: [],
+    globals: [],
+  };
+  const result = generate(model);
+  assert.equal(result.functions.length, 3);
+  assert.equal(result.usesOutAlias, true);
+  const dts = renderDts(result);
+  assert.equal(
+    dts.split('type Out<T> = { readonly value: T };').length - 1,
+    1,
+    'exactly one Out alias for two Out params',
+  );
+  assert.ok(
+    dts.indexOf('type Out<T> = { readonly value: T };') < dts.indexOf('Out<Ptr_Node>'),
+    'the Out alias precedes its uses',
+  );
+  assert.ok(
+    dts.includes('declare function openA(a0: CString, a1: Out<Ptr_Node>): number;'),
+    'Out declare line',
+  );
+  assert.ok(
+    dts.includes('out-param written on success'),
+    'the ownership comment names the out-param',
+  );
+  const withoutOut = renderDts(generate(EMPTY_MODEL));
+  assert.ok(!withoutOut.includes('type Out<T>'), 'no Out params means no alias');
+});
+
+void test(
+  'cli: --lib is repeatable, output is deterministic, a second header errors',
+  NEEDS_CLANG,
+  () => {
+    const work = mkdtempSync(join(tmpdir(), 'stator-ffi-gen-cli-'));
+    try {
+      const header = join(work, 'mini.h');
+      writeFileSync(header, 'int plain_add(int a, int b);\n');
+      const main = join('packages', 'compiler', 'src', 'ffi-gen', 'main.ts');
+      const out = join(work, 'mini.d.ts');
+      const run = spawnSync(
+        process.execPath,
+        [main, header, `--out=${out}`, '--lib=a', '--lib=b'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(run.status, 0, `ffi-gen failed:\n${run.stdout}${run.stderr}`);
+      const text = readFileSync(out, 'utf8');
+      const lines = text.split('\n');
+      assert.ok(
+        lines.indexOf('// @statorLink: -la') < lines.indexOf('// @statorLink: -lb'),
+        'repeatable libs keep command-line order',
+      );
+      assert.ok(lines.includes('// @statorLink #include "./mini.h"'), 'basename include');
+      // Determinism: a second run is byte-identical.
+      const again = join(work, 'mini-again.d.ts');
+      const rerun = spawnSync(
+        process.execPath,
+        [main, header, `--out=${again}`, '--lib=a', '--lib=b'],
+        {
+          encoding: 'utf8',
+        },
+      );
+      assert.equal(rerun.status, 0, `ffi-gen rerun failed:\n${rerun.stdout}${rerun.stderr}`);
+      assert.equal(readFileSync(again, 'utf8'), text, 'double run is byte-identical');
+      // One binding wraps one header: a second positional is an error, not a second include.
+      const extra = spawnSync(process.execPath, [main, header, join(work, 'other.h')], {
+        encoding: 'utf8',
+      });
+      assert.equal(extra.status, 2, `expected exit 2:\n${extra.stdout}${extra.stderr}`);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  },
+);

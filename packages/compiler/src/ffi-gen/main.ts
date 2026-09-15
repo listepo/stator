@@ -2,7 +2,12 @@
  *
  *  Usage:
  *    node packages/compiler/src/ffi-gen/main.ts <header.h> [--out=<file.d.ts>]
- *      [--diff=<handwritten.d.ts>] [--clang=<cc>] [-I<dir>]... [-D<def>]...
+ *      [--diff=<handwritten.d.ts>] [--clang=<cc>] [--lib=<name>]... [-I<dir>]... [-D<def>]...
+ *
+ *  `--lib` is repeatable: each value emits one `// @statorLink: -l<name>` line at the
+ *  top of the `.d.ts` (in command-line order). The `#include` pragma always names the
+ *  input header's basename. A second positional header is an error: one binding wraps
+ *  one header, so the first input wins by construction.
  *
  *  No `--out` prints the `.d.ts` to stdout (diagnostics and the summary go to stderr, so the
  *  stdout stream stays a clean committable file). `--diff` prints the oracle report instead
@@ -22,13 +27,14 @@ interface Options {
   readonly out: string | undefined;
   readonly diff: string | undefined;
   readonly clang: string;
+  readonly libs: readonly string[];
   readonly extraArgs: readonly string[];
 }
 
 function usage(): string {
   return (
     'usage: ffi-gen/main.ts <header.h> [--out=<file.d.ts>] [--diff=<handwritten.d.ts>] ' +
-    '[--clang=<cc>] [-I<dir>]... [-D<def>]...'
+    '[--clang=<cc>] [--lib=<name>]... [-I<dir>]... [-D<def>]...'
   );
 }
 
@@ -37,6 +43,7 @@ function parseArgs(argv: readonly string[]): Options {
   let out: string | undefined;
   let diff: string | undefined;
   let clang = process.env['CC'] ?? 'clang';
+  const libs: string[] = [];
   const extraArgs: string[] = [];
   for (const arg of argv) {
     if (arg === '--help' || arg === '-h') {
@@ -47,6 +54,8 @@ function parseArgs(argv: readonly string[]): Options {
       diff = arg.slice('--diff='.length);
     } else if (arg.startsWith('--clang=')) {
       clang = arg.slice('--clang='.length);
+    } else if (arg.startsWith('--lib=')) {
+      libs.push(arg.slice('--lib='.length));
     } else if (arg.startsWith('-I') || arg.startsWith('-D')) {
       extraArgs.push(arg);
     } else if (arg.startsWith('-')) {
@@ -60,10 +69,10 @@ function parseArgs(argv: readonly string[]): Options {
   if (header === undefined) {
     throw new Error(`ffi-gen: no header given\n${usage()}`);
   }
-  if (out === '' || diff === '' || clang === '') {
+  if (out === '' || diff === '' || clang === '' || libs.some((lib) => lib === '')) {
     throw new Error(`ffi-gen: empty flag value\n${usage()}`);
   }
-  return { header, out, diff, clang, extraArgs };
+  return { header, out, diff, clang, libs, extraArgs };
 }
 
 function main(): number {
@@ -97,7 +106,7 @@ function main(): number {
     );
     return 3;
   }
-  const dts = renderDts(result);
+  const dts = renderDts(result, options.libs);
   if (options.diff !== undefined) {
     let handText: string;
     try {

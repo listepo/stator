@@ -28,7 +28,8 @@ export type AbiOk =
       readonly ts: TsPrimitive;
       readonly cNote: 'int' | 'size' | undefined;
     }
-  | { readonly kind: 'pointer'; readonly alias: string; readonly tag: string };
+  | { readonly kind: 'pointer'; readonly alias: string; readonly tag: string }
+  | { readonly kind: 'out-param'; readonly alias: string; readonly tag: string };
 
 export interface AbiRefusal {
   /** Short stable key — the summary line counts per kind, so these never vary. */
@@ -448,9 +449,50 @@ function mapCTypeInner(
   );
   const { base, depth } = splitPointer(declarator);
   if (depth >= 2) {
+    // A `T*` pointing at a branded-pointer type in PARAMETER position is the v0.1
+    // out-param spelling (`Out<Brand>`, docs/FFI.md §2): the inner single star must
+    // map to a brand. Anything else stays refused with the reason named.
+    if (depth === 2 && position === 'param') {
+      const inner = mapPointee(model, base, position, via);
+      if (inner.ok) {
+        if (inner.value.kind === 'pointer') {
+          return {
+            ok: true,
+            value: { kind: 'out-param', alias: inner.value.alias, tag: inner.value.tag },
+          };
+        }
+        // A `const char **` out-param (`sqlite3_prepare_v2`'s tail): the callee writes a
+        // borrowed string pointer, the caller copies on read through `.value`
+        // (`Out<CString>`, docs/FFI.md section 2). Mutable `char **` stays refused below —
+        // a writable buffer is a different contract no row covers.
+        if (inner.value.kind === 'primitive' && inner.value.ts === 'cstring') {
+          return {
+            ok: true,
+            value: { kind: 'out-param', alias: 'CString', tag: 'char' },
+          };
+        }
+        return refuse(
+          'T** out-param',
+          `'${spelling}' is a T** out-param whose pointee '${collapseSpaces(base)} *' is not a branded pointer — CString crosses by borrow/copy, never by out-param (docs/FFI.md §3)`,
+          'STA1119',
+        );
+      }
+      return refuse(
+        'T** out-param',
+        `'${spelling}' is a T** out-param whose pointee is not a branded pointer — ${inner.refusal.reason}`,
+        'STA1119',
+      );
+    }
+    if (position === 'return') {
+      return refuse(
+        'T** out-param',
+        `'${spelling}' is a T** out-param in return position — Out<T> is a parameter-only spelling (docs/FFI.md §2)`,
+        'STA1119',
+      );
+    }
     return refuse(
       'T** out-param',
-      `'${spelling}' is a T** out-param with no ABI row — the v0.1 spelling question (docs/FFI.md §7.4)`,
+      `'${spelling}' is a T*** (or deeper) out-param with no ABI row — only a single T** maps to Out<T> (docs/FFI.md §2)`,
       'STA1119',
     );
   }
@@ -470,7 +512,7 @@ export interface BrandRef {
 export interface MappedParam {
   readonly tsName: string;
   readonly tsType: string;
-  readonly ownership: 'value' | 'borrow' | 'pointer';
+  readonly ownership: 'value' | 'borrow' | 'pointer' | 'out';
   readonly brand: BrandRef | undefined;
   /** Why this position widens: C `int`-family (`int`) or `size_t` (`size`) → `number`. */
   readonly cNote: 'int' | 'size' | undefined;
@@ -585,11 +627,22 @@ function tsSpelling(value: AbiOk): string {
   if (value.kind === 'primitive') {
     return value.ts === 'cstring' ? 'CString' : value.ts;
   }
+  if (value.kind === 'out-param') {
+    return `Out<${value.alias}>`;
+  }
   return value.alias;
 }
 
 function brandOf(value: AbiOk): BrandRef | undefined {
-  return value.kind === 'pointer' ? { alias: value.alias, tag: value.tag } : undefined;
+  if (value.kind === 'primitive') {
+    return undefined;
+  }
+  // An `Out<CString>` names no handle: the shared `CString` alias (emitted from
+  // `needsCString`) is its only declaration.
+  if (value.kind === 'out-param' && value.alias === 'CString') {
+    return undefined;
+  }
+  return { alias: value.alias, tag: value.tag };
 }
 
 function noteOf(value: AbiOk): 'int' | 'size' | undefined {
@@ -664,7 +717,13 @@ export function classifyFunction(
       tsName: tsNameParam,
       tsType: tsSpelling(value),
       ownership:
-        value.kind === 'primitive' ? (value.ts === 'cstring' ? 'borrow' : 'value') : 'pointer',
+        value.kind === 'primitive'
+          ? value.ts === 'cstring'
+            ? 'borrow'
+            : 'value'
+          : value.kind === 'out-param'
+            ? 'out'
+            : 'pointer',
       brand: brandOf(value),
       cNote: noteOf(value),
     });
@@ -699,7 +758,9 @@ export function classifyFunction(
               ? 'none'
               : 'value'
           : 'handle',
-      needsCString: params.some((p) => p.tsType === 'CString') || retSpelling === 'CString',
+      needsCString:
+        params.some((p) => p.tsType === 'CString' || p.tsType === 'Out<CString>') ||
+        retSpelling === 'CString',
     },
   };
 }
