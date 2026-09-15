@@ -1822,6 +1822,33 @@ the value scratch for spreads-only dynamic literals (`{ ...o }` into a dynamic r
 `golden: 343/343`; single-accessor/spread-only/spread+plain dynamic shapes probed exact
 (no unwritten slots, no overruns) beyond the corpus.
 
+### Wave 3 — class surface + 2a residue ✅ (landed 2026-09-15)
+
+Five parallel slices (`7e9079d`), all green at HEAD (`tsc` both projects, oxlint 0/0, oxfmt
+clean, `unit 484/484`, `subset 603 — 563/40/0`, `golden 355/355`):
+
+- **S-F class expressions** — `ClassExpression` rides the shared `gateClass` vetting (no duplicated
+  member checks); verdict stays honest `STA1214` (lowering has no expression arm — accepting would
+  trade it for `STA4031`), with correct messages for anonymous/named expressions. Mid-wave
+  collision (a half-landed computed-names refactor broke named-class paths) resolved by the
+  refactor's owner in the same tree; lesson recorded in plan-notes 259 and reused here: verify
+  against the final shared state, not the slice start.
+- **Literal-typed computed members** — `[k]` with a static name declares/reads/calls exactly what
+  the direct spelling does (dot/element twins share lowering); dynamic keys, integer-like keys and
+  `C[k]` stay `STA1214` with their boundaries. Observed out of scope: nullable `c?.m` answers
+  `undefined` where Node answers the function — needs a triage owner.
+- **Per-class `#private` slots** — `#name@Owner` storage with lexical resolution through the
+  checker's symbol; static `#private` accessors land; same-chain redeclare stays a (currently
+  unreachable) defense-in-depth refusal. Also fixed a latent static-setter placeholder mistype.
+- **Array spreads** — `{...a}` accepted for dynamic literals only (a fixed binding would promise
+  slots the value never builds — silent garbage reproduced, hence dynamic-only); `[...u]` over
+  all-array unions lowers to `[].concat(u)`. `RegExpExecArray` spread and fixed-param/dynamic-arg
+  miscompile observed adjacent, not fixed.
+- **2454 definite assignment** — suppressed in js as a CODE (no option flip) + binding widening so
+  every use goes dynamic; uninit method receivers throw Node's catchable `TypeError` (unknown arms
+  fall through to `dyn-method-call`). Test262 moves 88 failed→skipped, 0 passed→failed; `ratchet.json`
+  untouched (the 2372→2371 gap is pre-existing corpus drift, red at baseline too).
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)

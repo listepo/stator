@@ -7690,3 +7690,17 @@ evidence in `done.md` → Phase 5 steps 39–40). Three things worth recording:
 - **Left for follow-ups:** spread of a union of arrays (`STA4082`, deserves compilation);
   `o[kObj]` reads (TS2538, separate suppression decision); TS2416 override-mismatch in js and
   2769 fallback semantics (owner verdicts from note 258, still open); Task 6.12's `ci`-green clause.
+
+## 260. Wave 3 landed: class surface + 2a residue (2026-09-15)
+
+Five slices in `7e9079d` (evidence in `done.md` → Phase 5 wave 3). Process notes:
+
+- **Shared-tree collisions are now routine, not exceptional.** Wave 3 had two (S-F vs the
+  computed-names refactor; spread-slice vs live `gate.ts` edits). Both resolved by the refactor
+  owners with the reporter verifying intact hunks. Next wave uses separate worktrees per slice if
+  the slices share files — recommended twice now (notes 258-area triage, wave-3 spread report).
+- **The nullable method-value read (`c?.m` → `undefined`, Node: the function)** is triaged but
+  ownerless; it rides with the 2454-adjacent receiver work or the next class-value slice.
+- **Test262 ratchet drift is pre-existing:** 2372→2371 passed gap reproduces on the base commit
+  without any wave-3 change. The 2454 landing moves 88 failed→skipped with zero passed→failed,
+  which is the honest direction; `ratchet.json` stays untouched until the drift itself is owned.
