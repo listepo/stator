@@ -29,7 +29,7 @@
   (new spelling, comment convention, or "always widen to `number`").
 - **`sqlite3_int64` has no ABI row and must not widen silently.** Forced by
   `sqlite3_last_insert_rowid` / `sqlite3_changes64` (refused, sqlite3.d.ts
-  refusal 5). `number` (`double`) cannot hold every int64 exactly, so mapping
+  refusal 3). `number` (`double`) cannot hold every int64 exactly, so mapping
   it would be a precision lie, not a binding. REQUIREMENT: the generator must
   refuse 64-bit integer types with a diagnostic (same class as STA1119), never
   emit `number` for them.
@@ -38,7 +38,7 @@
 
 - **The binding's constructor is inexpressible: `T**` out-params are the
   SQLite shape.** Forced by `sqlite3_open_v2` (sqlite3.h:3998) and
-  `sqlite3_prepare_v2` (sqlite3.h:4602) — refused, sqlite3.d.ts refusals 1–2.
+  `sqlite3_prepare_v2` (sqlite3.h:4602) — sqlite3.d.ts refusal 1 (open_v2, zVfs) plus the converted sqliteOpenDb/sqlitePrepare declarations.
   FFI.md §7.4 already predicts this ("the `T**` out-param question Task 7.3's
   SQLite binding will force"), and this binding is the forcing instance: the
   two functions that create every handle the binding trades in cannot be
@@ -75,7 +75,7 @@
   and write it in FFI.md §3. The generator needs the rule, not a judgment
   call per function.
 - **The `bind_text` destructor is a value choice disguised as a pointer.**
-  Forced by `sqlite3_bind_text` (refused, sqlite3.d.ts refusal 3): the 5th
+  Forced by `sqlite3_bind_text` (refused, sqlite3.d.ts refusal 1): the 5th
   argument is almost always SQLITE_STATIC or SQLITE_TRANSIENT (macros — out
   of scope) rather than a real function, but its C type IS a function
   pointer, so v0 refuses the whole function (STA1117) and scalar binds
@@ -92,7 +92,7 @@
   ownership comment MUST state post-success invalidity for destroying calls —
   `sqliteClose` above is the template.
 - **Macro constants have no refusal code for the generator.** Forced by
-  SQLITE_OK/ROW/DONE/OPEN_* (refused, sqlite3.d.ts refusal 6): Task 7.3
+  SQLITE_OK/ROW/DONE/OPEN_* (refused, sqlite3.d.ts refusal 4): Task 7.3
   step 5 demands "rejected with a diagnostic naming the construct and its
   header line", but DIAGNOSTICS.md allocates no code for generator refusals
   (STA1114–STA1121 are gate codes for hand-written declarations). Callers
@@ -271,3 +271,60 @@
   genuinely-`void` functions (`free`) are fine — but no positive sentence
   says so; a cautious generator could refuse `cFree`'s shape. Minor; one
   sentence in §4.
+
+// --- 2026-09-15: step-1 runnable examples + STA1130 (Task 7.3 follow-ups) ---
+//
+// The step-1 deliverable is now `.d.ts` + link pragma + RUNNABLE example per
+// shape (`examples/ffi/libm/`, `examples/ffi/stat/`; each is example source +
+// `expected.txt` + a tiny runner script comparing the stator binary AND Node
+// byte-for-byte, the `packages/tests/ffi/example-c-consumer/` shape). One
+// bullet per forcing construct, same convention as above.
+
+- **Generator refusals without a gate equivalent cite STA1130.** Forced by
+  every `SQLITE_*` macro and `SQLITE_OK`-family constant in sqlite3.h (539
+  refusals on the current brew header: 534 macro constants, 2
+  function-like macros, 3 globals — zero `[no STA code allocated yet]`
+  markers left on those kinds). Closes the sqlite3.d.ts "macro constants"
+  bullet above: kinds WITH a gate equivalent (`T**`, int64, function
+  pointers, variadic, `void*` returns) keep their would-be gate codes
+  (STA1119/STA1117/STA1120); union, bitfield, and inline-function refusals
+  are the sibling half (abi.ts mapping) and cite STA1130 there, not here.
+  REQUIREMENT: none left on this half — recorded so the oracle count (539)
+  has a home when the next header re-runs it.
+- **Scalar math output is deterministic to the last digit, NaN included.**
+  Forced by `libmSqrt(-1)` in `examples/ffi/libm/main.ts`: the NaN
+  domain-error path prints `NaN` on both sides (Ryū shortest-round-trip vs
+  Node), which pins the NOTES.md "math domain errors" rule as behavior —
+  absent `@statorError` means NaN is the answer, and the example is the
+  proof. REQUIREMENT: the generator needs the documented math rule before
+  it can choose "never carry an error convention" per function (libm.d.ts
+  bullet above); until then every math binding hand-states it.
+- **Field reads go through a demo-local accessor shim, not a struct
+  spelling.** Forced by `statSize` / `statMtime` in
+  `examples/ffi/stat/stat_shim.d.ts`: v0 has no struct spelling, so the
+  binding declares scalar accessors over a C shim (`stat_shim.c`, field
+  offsets derived by the platform compiler, never literals), wired with a
+  quote-form `@statorLink #include` (absolute-resolved against the `.d.ts`)
+  plus the shim object through `--link=`. int64 fields (`st_size`,
+  `st_mtime`) cross as `double` — exact for real files, stated at the
+  declaration — and a missing file is -1 as DATA (the multi-code rule).
+  REQUIREMENT: the `offsetof`-derived glue mechanism (stat.d.ts bullet
+  above) stays the real fix; the shim is the documented pattern until it
+  exists, and the generator must refuse raw field access, never emit
+  offset literals.
+
+---
+
+## 2026-09-15 addendum — v0.1 resolutions (Out<T> pipeline)
+
+- **Out-param spelling: decided.** `Out<T>` (`T**` over brands, `Out<CString>` over
+  `const char**`), created by blessed `outSlot<T>()`, read via `.value` (docs/FFI.md §2;
+  misuses STA1125). The constructor question above is closed: `sqlite3_open` and
+  `sqlite3_prepare_v2` declare through it (sqlite3.d.ts `sqliteOpenDb`/`sqlitePrepare`;
+  `open_v2` stays refused for its nullable `zVfs`, which has no v0 spelling).
+- **Generator-refusal code: allocated.** STA1130 (`both`/`never`) names the construct and
+  header line for macro/enum/inline/global/union/bitfield refusals; gate-equivalent kinds
+  keep citing their gate codes. The `sqliteStep`-against-literals pattern stands until a
+  constants mechanism exists.
+- **int64/i32:** unchanged (still refused); the generator narrows C `int` results with a
+  documented legend. `size_t` still widens to `number` with the 2^53 caveat above.

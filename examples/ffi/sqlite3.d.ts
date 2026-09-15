@@ -8,14 +8,24 @@
 // VERIFIED against headers: /opt/homebrew/opt/sqlite/include/sqlite3.h
 // (brew `sqlite`, 3.51.0 — `pkg-config --modversion sqlite3` agrees) and the
 // Xcode SDK copy. Declared signatures below reproduce the header's parameter
-// lists; anything the v0 surface cannot express is refused in comments, not
-// approximated (docs/FFI.md §2; Task 7.3 step 5).
+// lists; constructors are expressible via `Out` slots since v0.1, while
+// `open_v2` (`zVfs` spelling), `bind_text` (function pointer), `exec`
+// (callback + out-param), int64 returns (no ABI row), and macros (out of
+// scope) stay refused below with reasons, not approximated
+// (docs/FFI.md §2; Task 7.3 step 5).
 //
 // Build: links against libsqlite3 (`-lsqlite3`). No link-pragma spelling
 // exists yet (Task 7.1 step 7 unstarted) — see NOTES.md ("no link pragma").
 
 // Borrowed NUL-terminated UTF-8 at the FFI boundary (docs/FFI.md §3).
 type CString = string & { readonly __statorCstr: 'CString' };
+
+// v0.1 out-slot spelling for `T**` out-params (docs/FFI.md §2).
+// Slots live in locals, pass to Out params, read via `.value`.
+type Out<T> = { readonly value: T };
+
+// Blessed slot constructor, recognized by name.
+declare function outSlot<T>(): Out<T>;
 
 /** Opaque database connection handle (`sqlite3*`). Lifetime belongs to the
  *  C library: created by `sqlite3_open_v2`, destroyed by `sqlite3_close*`.
@@ -115,31 +125,52 @@ declare function sqliteBindDouble(stmt: SqliteStmt, index: number, value: number
 /** @statorExtern sqlite3_changes */
 declare function sqliteChanges(db: SqliteDb): number;
 
+// --- Constructors via out-slots: handle + statement creation. ---
+//
+// Ownership: the caller holds each slot in a local (`outSlot()`), passes it
+// as the `Out` param, checks the numeric return code, then reads `.value`.
+// `sqliteOpenDb`'s handle is library-owned (close to release);
+// `sqlitePrepare`'s statement is library-owned (finalize to release).
+
+/** @statorExtern sqlite3_open */
+declare function sqliteOpenDb(filename: CString, db: Out<SqliteDb>): number;
+
+// `pzTail` is `const char**` out → `Out<CString>` (copy-on-read; a NULL tail
+// is guarded by checking the return code first, before reading `.value`).
+/** @statorExtern sqlite3_prepare_v2 */
+declare function sqlitePrepare(
+  db: SqliteDb,
+  sql: CString,
+  nByte: number,
+  stmt: Out<SqliteStmt>,
+  tail: Out<CString>,
+): number;
+
 // ============================================================================
 // REFUSED (v0 scope; recorded, not approximated — Task 7.3 step 5).
 // Each entry names the construct and the header line it comes from, which is
 // what the future generator must emit as a diagnostic.
 // ============================================================================
 //
-// 1. `sqlite3_open_v2(filename, ppDb, flags, zVfs)` (sqlite3.h:3998) —
-//    `sqlite3** ppDb` is a `T**` out-param: STA1119 (docs/FFI.md §2, open item
-//    §7.4). The constructor for the binding's central handle cannot be
-//    declared, so no end-to-end SQLite program is expressible in v0.
-// 2. `sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail)` (sqlite3.h:4602) —
-//    `sqlite3_stmt** ppStmt` out-param: STA1119, same rule. (`pzTail`, a
-//    `const char**` out-param, is STA1119 independently.)
-// 3. `sqlite3_bind_text(stmt, i, z, n, destructor)` (sqlite3.h:5016) —
+// `sqlite3_open_v2(filename, ppDb, flags, zVfs)` (sqlite3.h:3998) stays
+// refused for `zVfs`: nullable `const char*` has no v0 spelling (STA1119
+// naming `zVfs`). `ppDb` is expressible via `Out<SqliteDb>` — see
+// `sqliteOpenDb` (`sqlite3_open`) above; only `open_v2` stays refused.
+//
+// `sqlite3_prepare_v2` is now declared as `sqlitePrepare` above.
+//
+// 1. `sqlite3_bind_text(stmt, i, z, n, destructor)` (sqlite3.h:5016) —
 //    `void(*)(void*)` destructor is a function-pointer parameter: STA1117.
 //    The value-passing choice (SQLITE_STATIC vs SQLITE_TRANSIENT — macros,
 //    out of scope) cannot be spelled either.
-// 4. `sqlite3_exec(db, sql, callback, arg, errmsg)` (sqlite3.h:430) —
+// 2. `sqlite3_exec(db, sql, callback, arg, errmsg)` (sqlite3.h:430) —
 //    callback function pointer (STA1117) AND `char** errmsg` out-param
 //    (STA1119): doubly refused.
-// 5. `sqlite3_last_insert_rowid` / `sqlite3_changes64` (sqlite3.h:2795,2871) —
+// 3. `sqlite3_last_insert_rowid` / `sqlite3_changes64` (sqlite3.h:2795,2871) —
 //    `sqlite3_int64` (signed 64-bit) return has no ABI-table row (`number` is
 //    `double` and cannot hold every int64 exactly): STA1119. See NOTES.md
 //    ("int64").
-// 6. `SQLITE_OK` / `SQLITE_ROW` / `SQLITE_DONE` / `SQLITE_OPEN_*` macros
+// 4. `SQLITE_OK` / `SQLITE_ROW` / `SQLITE_DONE` / `SQLITE_OPEN_*` macros
 //    (sqlite3.h:449,479-480,603+) — macro constants are out of scope
 //    (Task 7.3 step 5); no diagnostic code is allocated for the generator's
 //    refusal yet. See NOTES.md ("macro constants").
