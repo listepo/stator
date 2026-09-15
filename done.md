@@ -1787,6 +1787,41 @@ step-37 js builds with zero hits). Two observations carried forward, not gaps: `
 §8 step-12 prose is stale where later landings went broader than written (recorded in plan-notes
 258 with the triaged residue).
 
+### Steps 39–40, uninit optional fields, spread methods, 2464 coercion ✅ (landed 2026-09-15)
+
+One wave of five parallel slices (`6f88a8b`), all from the 2026-09-15 triage (plan-notes 258):
+
+- **Step 39** — spread of an unknown value threw `STA4082`/`STA4068` (gate accepted, verifier
+  rejected). The gate now judges the spread by the type the lowering gives the operand and emits
+  an honest `STA1214` Phase 5 for both arms (array + object twin); ts behavior preserved
+  (`STA1003`/`STA0012` twins). Residual for a follow-up: spread of a union of arrays still throws
+  `STA4082` — a union is always iterable and deserves compilation, not refusal.
+- **Step 40** — lowering diagnostics printed `[ts]` under `--mode=js`. `lowerProgram`/
+  `lowerSourceFile` take a trailing label-only `mode` (§0.8: zero `mode ===` branches in lowering);
+  `lower-mode-label.test.ts` pins `[ts]`/`[js]` on `STA4032`.
+- **Step-12(d) slice** — uninitialized optional class fields (`x?: T`, incl. static/`#private`)
+  compile with the slot defaulting to `undefined` (Node uses define-semantics: `"x" in c` is true;
+  `jsrt_object_new` zero-fills). Gate-only change; computed/accessor names stay `STA1214`. The
+  verdict is `dynamic` (union field type), like the initialized twins — the wave's plan said
+  `static` and the runner corrected it.
+- **Step-12(c) slice** — spread of a methods-carrying literal copies each method as data
+  (`MethodCopy` HIR: the source's bound closure, `this` answers the copy) plus a runtime arm in
+  `jsrt_dynobj_spread` for `#method:` slots. Accessor-into-literal and reorder spellings stay
+  honest `STA1214` with their reasons in the fixture headers.
+- **Step-2a(b) slice** — TS2464 suppressed in js mode; computed keys coerce via ToPropertyKey
+  (`{} → "[object Object]"`, `42 → "42"`, null/void/bool/array likewise), ts keeps `STA0012`.
+  No fallback needed; custom-`toString` dispatch is Phase-8 ceiling, shared with concat/`o[k]`.
+
+**Integration fixes the wave itself surfaced** (same commit): `dynLiteralBaseSlots` over-reserved
+the value scratch for spreads-only dynamic literals (`{ ...o }` into a dynamic result copies via
+`jsrt_dynobj_spread` and never stores through it — frames.test.ts caught the gap, one slot), and
+`class-members.test.ts` pinned the old optional-field refusal (updated to the landed behavior).
+
+**Check evidence:** `tsc` clean (compiler + tests); `oxlint` 0/0; `oxfmt` clean; `cpd` 0.9%;
+`unit: 479/479`; `subset: 581 — 541 passed, 40 expected-fail, 0 failed`;
+`golden: 343/343`; single-accessor/spread-only/spread+plain dynamic shapes probed exact
+(no unwritten slots, no overruns) beyond the corpus.
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)

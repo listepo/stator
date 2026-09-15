@@ -7668,3 +7668,25 @@ struck stubs pointing at `done.md` → Phase 5 steps 18–38, where the per-batc
   unknown value throwing `STA4082` (gate accepts, verifier rejects — the step-37 shape outside its
   five cases), and lowering diagnostics mislabeling the mode as `[ts]` under `--mode=js` (~30 sites;
   fix threads the mode for labeling only, per §0.8).
+
+## 259. Wave 2 landed: steps 39–40 plus three triage slices (2026-09-15)
+
+Five parallel slices in `6f88a8b` (steps 39, 40, uninit optional fields, spread methods, 2464 —
+evidence in `done.md` → Phase 5 steps 39–40). Three things worth recording:
+
+- **The wave caught its own integration bugs.** `frames.test.ts` failed on the new
+  `spread_methods.ts` (a spreads-only dynamic literal reserved a value scratch it never writes —
+  fixed in `dynLiteralBaseSlots`, which now reserves the slot only when an entry stores through
+  it), and `class-members.test.ts` pinned the optional-field refusal the wave removed (updated to
+  the landed behavior). Neither agent ran the FULL unit suite — each ran targeted files — so the
+  main thread owns a full-suite pass before committing multi-agent waves. Recorded as process, not
+  blame: the frames gap was also a genuine pre-existing shape (any spreads-only dynamic literal),
+  merely first exercised by S-C's golden.
+- **`pnpm run …` is broken under mise on this host** (native-binary shim SyntaxError) — two agents
+  independently reported it and ran the underlying binaries (`tsc`, `oxlint`, `oxfmt`, `cpd`,
+  `run.ts`) directly via `mise exec node --`. Same underlying cause as plan-notes 204's moon
+  wrapping note. `pnpm run ci` from a raw child process remains unusable here; moon tasks or
+  direct binaries are the working routes.
+- **Left for follow-ups:** spread of a union of arrays (`STA4082`, deserves compilation);
+  `o[kObj]` reads (TS2538, separate suppression decision); TS2416 override-mismatch in js and
+  2769 fallback semantics (owner verdicts from note 258, still open); Task 6.12's `ci`-green clause.
