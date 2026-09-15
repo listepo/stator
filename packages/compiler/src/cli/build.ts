@@ -78,6 +78,20 @@ export class BuildError extends Error {
   }
 }
 
+/** A thrown value is not necessarily an `Error` (`throw "boom"` is legal JavaScript, and a
+ * rejection from a dependency can be anything). The diagnostic still has to say something. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** STA4072's message without the `stator: STA4072 ` prefix the CLI adds at print time. Shared by
+ * the CLI's catch-all (`src/cli/main.ts`) and `compileToC` below, so an escaping exception reads
+ * the same however the compiler was invoked — CLI spawn or in-process (the Test262 runner never
+ * passes through `main()`). */
+export function internalErrorMessage(error: unknown): string {
+  return `internal error: ${messageOf(error)} — this is a compiler bug; report it with the input that triggered it`;
+}
+
 /** Per-async-context sink for diagnostics when several builds share one process.
  *
  * test262 used to spawn a fresh `node …/cli/main.ts build` per test (~0.4–1.2s) just to keep
@@ -242,6 +256,27 @@ export interface CompiledC {
 /** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
  * the only path any generated C comes from. Returns null if the program was rejected. */
 export async function compileToC(
+  entry: string,
+  mode: Mode,
+  unit?: string,
+): Promise<CompiledC | null> {
+  try {
+    return await compileToCInner(entry, mode, unit);
+  } catch (error) {
+    // Diagnostics are the contract for everything the pipeline can name; an ESCAPING exception is
+    // a compiler bug by AGENTS.md's definition, and its contract is STA4072, never a raw stack
+    // trace. `BuildError` passes through: it already carries a code the user can act on. This is
+    // reachable rather than theoretical — the TypeScript checker recurses without a depth guard,
+    // so `var yield` plus a generator method with `[yield]` as its computed key overflows the stack
+    // inside `getPreEmitDiagnostics` (plan-notes 213; plain `tsc` dies on the same file) — and the
+    // in-process callers (notably the Test262 runner) never pass through the CLI's catch-all, so
+    // without this the whole process dies and the shard uploads no artifact.
+    if (error instanceof BuildError) throw error;
+    throw new BuildError('STA4072', internalErrorMessage(error));
+  }
+}
+
+async function compileToCInner(
   entry: string,
   mode: Mode,
   unit?: string,
