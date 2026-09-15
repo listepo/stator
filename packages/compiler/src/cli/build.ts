@@ -92,7 +92,6 @@ export function internalErrorMessage(error: unknown): string {
   return `internal error: ${messageOf(error)} — this is a compiler bug; report it with the input that triggered it`;
 }
 
-
 /** Per-async-context sink for diagnostics when several builds share one process.
  *
  * test262 used to spawn a fresh `node …/cli/main.ts build` per test (~0.4–1.2s) just to keep
@@ -370,7 +369,6 @@ async function compileToCInner(
     ...(header !== undefined && { header }),
   }));
 }
-
 
 /** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are
  * both rejections — the difference is what the user should do about it, not whether it compiles. */
