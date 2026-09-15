@@ -55,12 +55,16 @@ import {
   baseClassOf,
   classDeclarationOf,
   computedKeyStaticName,
+  elementStaticKey,
+  isPrivateMemberName,
   ITERATOR_METHOD_NAME,
   instanceMethodName,
   isDynamicShape,
   isStaticMember,
   methodDeclaringClass,
   objectLiteralIsDynamic,
+  privateMethodName,
+  privateSlotName,
   staticMemberOf,
   tsTypeToHType,
   userIteratorMethod,
@@ -86,6 +90,7 @@ import type {
   DynEntry,
   DynFieldAccess,
   DynMethodCall,
+  DynObjectLiteral,
   ExternCall,
   Expression,
   FieldAccess,
@@ -1800,6 +1805,90 @@ function hirClassName(declaration: ts.ClassDeclaration): string {
   return hirNameOf(declaration) ?? declaration.name?.text ?? '';
 }
 
+/** The storage a `#private` USE resolves to: the mangled slot/property plus the class that
+ * declares it.
+ *
+ * A private name is lexically scoped -- the checker's symbol for the use IS the declaration, so
+ * the owner is read off it, never off the receiver's type. That distinction is the whole fix for
+ * re-declared names: `o.#x` written in `A` means `A`'s slot (`#x@A`) even when `o` is typed `B`,
+ * where the most-derived lookup the public paths use would answer `#x@B`. Shared by every
+ * instance-`#private` path (reads, writes, calls, updates), so no two can disagree about which
+ * slot a spelling means. `undefined` when the name resolves to nothing the gate accepted -- the
+ * caller reports the internal error, since the gate admits a private use only then. */
+function privateUse(
+  name: ts.PrivateIdentifier,
+  checker: ts.TypeChecker,
+): { owner: ts.ClassDeclaration; property: string } | undefined {
+  const owner = brandDeclaringClass(name, checker);
+  const ownerName = owner?.name?.text;
+  if (owner === undefined || ownerName === undefined) {
+    return undefined;
+  }
+  return { owner, property: privateSlotName(ownerName, name.text) };
+}
+
+/** Which halves of the instance `#private` accessor `raw` the LEXICAL owner declares.
+ *
+ * Unlike the public `hasAccessorHalf`/`accessorOwner` pair, this never walks the receiver's
+ * chain: each class owns an independent pair (`get #x@A` vs `get #x@B`), so the halves that
+ * matter are the owner's own. */
+function privateAccessorHalves(
+  owner: ts.ClassDeclaration,
+  raw: string,
+): { get: boolean; set: boolean } {
+  let get = false;
+  let set = false;
+  for (const member of owner.members) {
+    if (
+      member.name === undefined ||
+      !ts.isPrivateIdentifier(member.name) ||
+      member.name.text !== raw
+    ) {
+      continue;
+    }
+    if (ts.isGetAccessorDeclaration(member)) {
+      get = true;
+    }
+    if (ts.isSetAccessorDeclaration(member)) {
+      set = true;
+    }
+  }
+  return { get, set };
+}
+
+/** Whether the lexical owner's `#private` member is an accessor pair (either half). */
+function privateIsAccessor(owner: ts.ClassDeclaration, raw: string): boolean {
+  return owner.members.some(
+    (m) =>
+      m.name !== undefined &&
+      ts.isPrivateIdentifier(m.name) &&
+      m.name.text === raw &&
+      (ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)),
+  );
+}
+
+/** Whether a member write targets an instance `#private` accessor: routed by the lexical
+ * owner's declaration (see `privateUse`), never by the receiver's type. Element accesses are
+ * never private, so they answer false without asking the checker anything. */
+function privateWriteIsAccessor(
+  targetNode: ts.ElementAccessExpression | ts.PropertyAccessExpression,
+  checker: ts.TypeChecker,
+): boolean {
+  if (!ts.isPropertyAccessExpression(targetNode) || !ts.isPrivateIdentifier(targetNode.name)) {
+    return false;
+  }
+  const priv = privateUse(targetNode.name, checker);
+  return priv !== undefined && privateIsAccessor(priv.owner, targetNode.name.text);
+}
+
+/** The member declaration a `#private` use's lexical owner holds for it, if it holds one as a
+ * member node (a `.js` field assigned in the constructor has none -- the slot still exists). */
+function privateOwnerMember(owner: ts.ClassDeclaration, raw: string): ts.ClassElement | undefined {
+  return owner.members.find(
+    (m) => m.name !== undefined && ts.isPrivateIdentifier(m.name) && m.name.text === raw,
+  );
+}
+
 /** Whether `o.x` must resolve through the SHAPE TABLE rather than a slot — the one question the
  * read path and the write path both have to answer the same way, which is why it is one function.
  *
@@ -2210,14 +2299,64 @@ function memberAssignment(
   if (ts.isElementAccessExpression(targetNode)) {
     // `o["a-b"] = v` on a FIXED shape is `o.a = v` written the only way a key that is not an
     // identifier can be spelled -- the same reduction the READ path makes (plan.md §8 step 12
-    // family c). Building an index node here instead made the write the one spelling of a
-    // fixed-shape property that did not compile: the verifier rejects an index write on a layout,
-    // so `o["n"] = 5` was STA4044 while the value-position `(o["n"] += 1)` -- which goes through
-    // the read path -- worked (plan-notes 222).
-    const literalKey = ts.isStringLiteral(targetNode.argumentExpression)
-      ? targetNode.argumentExpression.text
-      : undefined;
-    if (literalKey !== undefined && target.type.kind === 'object') {
+    // family c). A literal-typed key (`o[k] = v` with `k: "m"`) is the same name by the
+    // step-22 rule, so an accessor under one RUNS its setter exactly as the dot spelling does;
+    // anything else keeps the field-or-index split below. Building an index node here instead
+    // made the write the one spelling of a fixed-shape property that did not compile: the
+    // verifier rejects an index write on a layout, so `o["n"] = 5` was STA4044 while the
+    // value-position `(o["n"] += 1)` -- which goes through the read path -- worked
+    // (plan-notes 222).
+    const literalKey = elementStaticKey(targetNode.argumentExpression, checker);
+    const placeOwner =
+      literalKey !== null && target.type.kind === 'object'
+        ? accessorOwner(targetNode.expression, literalKey, checker, bindings, sourceFile)
+        : undefined;
+    if (placeOwner !== undefined && literalKey !== null) {
+      const read = hasAccessorHalf(
+        targetNode.expression,
+        literalKey,
+        'get',
+        checker,
+        bindings,
+        sourceFile,
+      )
+        ? accessorCall(
+            'get',
+            placeOwner,
+            target,
+            literalKey,
+            [],
+            placeType,
+            span,
+            targetNode,
+            sourceFile,
+            diagnostics,
+          )
+        : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
+      if (read === null) {
+        return null;
+      }
+      current = read;
+      write = (value) => {
+        const call = accessorCall(
+          'set',
+          placeOwner,
+          target,
+          literalKey,
+          [value],
+          H_UNDEFINED,
+          span,
+          targetNode,
+          sourceFile,
+          diagnostics,
+        );
+        // `accessorCall` already reported; a null here would be the same miss the read
+        // survived.
+        return call === null
+          ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
+          : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
+      };
+    } else if (literalKey !== null && target.type.kind === 'object') {
       const slot = slotOf(target, literalKey, targetNode, sourceFile, diagnostics);
       if (slot === null) {
         return null;
@@ -2248,16 +2387,63 @@ function memberAssignment(
       });
     }
   } else if (
+    ts.isPropertyAccessExpression(targetNode) &&
+    ts.isPrivateIdentifier(targetNode.name) &&
+    privateUse(targetNode.name, checker) === undefined
+  ) {
+    // A `#private` use the checker cannot resolve to a declaration is a program the gate
+    // refused -- every `#private` lookup below assumes a lexical owner exists.
+    diagnostics.push(
+      lowerDiagnostic(
+        targetNode,
+        sourceFile,
+        'STA4060',
+        'internal',
+        `no private '${targetNode.name.text}' the gate accepted`,
+      ),
+    );
+    return null;
+  } else if (
+    privateWriteIsAccessor(targetNode, checker) ||
     accessorOwner(targetNode.expression, targetNode.name.text, checker, bindings, sourceFile) !==
-    undefined
+      undefined
   ) {
     // `o.x = v` RUNS the setter. The gate refused the compound forms, so `current` is never read
     // here -- it is built anyway so the two halves of a place stay one shape.
-    const field = targetNode.name.text;
-    const owner = accessorOwner(targetNode.expression, field, checker, bindings, sourceFile) ?? '';
+    // A `#private` place resolves lexically (see the read arm): the mangled slot plus lexical
+    // owner, preferred here over the receiver-based lookups below.
+    const writePriv = ts.isPrivateIdentifier(targetNode.name)
+      ? privateUse(targetNode.name, checker)
+      : undefined;
+    const writeRaw = targetNode.name.text;
+    const lexicalOwner =
+      writePriv !== undefined
+        ? mangleClassName(writePriv.owner, targetNode.expression, checker, bindings)
+        : undefined;
+    if (writePriv !== undefined && lexicalOwner === null) {
+      diagnostics.push(
+        lowerDiagnostic(
+          targetNode,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `private '${writeRaw}' names no descriptor the lowering can reach`,
+        ),
+      );
+      return null;
+    }
+    const field = writePriv?.property ?? targetNode.name.text;
+    const owner =
+      lexicalOwner ??
+      accessorOwner(targetNode.expression, field, checker, bindings, sourceFile) ??
+      '';
     // A set-only property has no read at all, which is legal and is why this is conditional: the
     // only forms that would read it are the compound ones, and the gate refused those.
-    const read = hasAccessorHalf(targetNode.expression, field, 'get', checker, bindings, sourceFile)
+    const writeHasGet =
+      writePriv !== undefined
+        ? privateAccessorHalves(writePriv.owner, writeRaw).get
+        : hasAccessorHalf(targetNode.expression, field, 'get', checker, bindings, sourceFile);
+    const read = writeHasGet
       ? accessorCall(
           'get',
           owner,
@@ -2308,7 +2494,10 @@ function memberAssignment(
       value,
     });
   } else {
-    const field = targetNode.name.text;
+    const writeFieldPriv = ts.isPrivateIdentifier(targetNode.name)
+      ? privateUse(targetNode.name, checker)
+      : undefined;
+    const field = writeFieldPriv?.property ?? targetNode.name.text;
     const slot = slotOf(target, field, targetNode, sourceFile, diagnostics);
     if (slot === null) {
       return null;
@@ -2732,6 +2921,27 @@ function emptyArrayLiteral(type: HType, span: Span): ArrayLiteral {
   return { kind: 'array-literal', type, span, elements: [] };
 }
 
+/** Whether `expression` is a union every arm of which is an array at run time.
+ *
+ * Each arm answers the same array-or-tuple test the gate applies to whole operands, so a value
+ * of this type is always spreadable even though the HType model calls the union Unknown (its
+ * arms map to different element types, and the union rule keeps only what every arm agrees on).
+ * Parentheses unwrap; an `as` assertion unwraps too, because the lowering drops every assertion
+ * to a type no tag check settles (an array never is one) and keeps only checkable assertions
+ * (number, string, boolean), which can never spell a union of arrays. */
+function spreadUnionIsAlwaysArray(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current)) {
+    current = current.expression;
+  }
+  const type = checker.getTypeAtLocation(current);
+  return (
+    type.isUnion() &&
+    type.types.length > 0 &&
+    type.types.every((arm) => checker.isArrayType(arm) || checker.isTupleType(arm))
+  );
+}
+
 /** Fold `[a, ...b, c]` into nested `concat` calls over literal runs and spread operands. */
 function lowerArrayLiteralExpression(
   node: ts.ArrayLiteralExpression,
@@ -2755,7 +2965,7 @@ function lowerArrayLiteralExpression(
     return { kind: 'array-literal', type: literalType, span, elements };
   }
 
-  const segments: Array<{ elems: Expression[] } | { spread: Expression }> = [];
+  const segments: Array<{ elems: Expression[] } | { spread: Expression; from: ts.Expression }> = [];
   for (const element of node.elements) {
     if (ts.isSpreadElement(element)) {
       const spread = lowerExpression(
@@ -2768,7 +2978,7 @@ function lowerArrayLiteralExpression(
       if (spread === null) {
         return null;
       }
-      segments.push({ spread });
+      segments.push({ spread, from: element.expression });
       continue;
     }
     const lowered = lowerExpression(element, sourceFile, checker, bindings, diagnostics);
@@ -2792,6 +3002,16 @@ function lowerArrayLiteralExpression(
     if (result === null) {
       if ('elems' in segment) {
         result = piece;
+      } else if (spreadUnionIsAlwaysArray(segment.from, checker)) {
+        // `[...u]` over a union of arrays: the operand lowers to Unknown (its arms disagree on
+        // the element type), so reading it as the concat RECEIVER fails the verifier (STA4082).
+        // The empty literal receives instead and the operand rides as the spread-or-append
+        // argument `jsrt_array_concat` already implements -- the same shape every non-first
+        // spread takes (`[0, ...u]` compiles today). Sound exactly when the union is always an
+        // array: each arm spreads element-wise, so `[]` plus `u` is a copy of `u`. A union with
+        // a non-array arm keeps the receiver shape, whose tag check throws a catchable TypeError
+        // where appending would silently wrap the value.
+        result = arrayConcatExpr(emptyArrayLiteral(literalType, span), piece, span);
       } else {
         result = arrayConcatExpr(piece, emptyArrayLiteral(literalType, span), span);
       }
@@ -2915,6 +3135,248 @@ function lowerOptionalChain(
     base,
     consequent,
   };
+}
+
+/** `o.m(a)` on a class instance: the receiver is lowered, the method is named, not loaded.
+ *
+ * One function is shared by every instance, so naming its class here is what lets the emitter
+ * make a direct call instead of loading a per-instance closure out of a slot. `undefined`
+ * means the name is no method of the receiver -- the caller falls through to the ordinary
+ * get-then-call path, exactly as the dot spelling does when the checker says the property
+ * exists but the table holds no method under it.
+ *
+ * Shared by the dot spelling and the literal-typed element spelling (`o[k](a)` with
+ * `k: "m"`), which the gate resolved to the same name. `privName` carries the `#private`
+ * callee the dot spelling alone can write; `viaSuper` the `super.m()` receiver the element
+ * spelling has no form of. */
+function lowerClassMethodCall(
+  obj: ts.Expression,
+  propName: string,
+  privName: ts.PrivateIdentifier | undefined,
+  viaSuper: boolean,
+  node: ts.CallExpression,
+  at: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null | undefined {
+  // `super.m()` is a call on THIS receiver that skips the override -- the object is the same
+  // one, only the function differs. So the target is the receiver parameter, not an
+  // evaluation of `super`, which names no value at all.
+  const target = viaSuper
+    ? receiverIdentifier(obj, sourceFile, bindings, diagnostics)
+    : lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+  if (target === null) {
+    return null;
+  }
+  if (target.type.kind !== 'object') {
+    diagnostics.push(
+      lowerDiagnostic(at, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
+    );
+    return null;
+  }
+  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+  if (args === null) {
+    return null;
+  }
+  // The DECLARING class, not the receiver's -- `d.describe()` on a `Dog` names `Animal` when
+  // `Animal` is where `describe` is written. Naming the receiver's class here would make the
+  // emitter look for a method that class does not own. A `#private` method names its
+  // LEXICAL owner instead: `o.#m` written in `A` runs `A`'s body even when `o` is a `B`,
+  // and re-declaring never overrides, so the call is always direct.
+  const callPriv = privName !== undefined && !viaSuper ? privateUse(privName, checker) : undefined;
+  if (privName !== undefined && !viaSuper && callPriv === undefined) {
+    diagnostics.push(
+      lowerDiagnostic(
+        at,
+        sourceFile,
+        'STA4067',
+        'internal',
+        `private '${privName.text}' names no class the gate accepted`,
+      ),
+    );
+    return null;
+  }
+  if (callPriv !== undefined) {
+    const privateOwner = mangleClassName(callPriv.owner, obj, checker, bindings);
+    const privateSlot = target.type.methods.findIndex((m) => m.name === callPriv.property);
+    if (privateOwner === null || privateSlot < 0) {
+      diagnostics.push(
+        lowerDiagnostic(
+          at,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `method '${callPriv.property}' has no slot in the layout of ${hTypeName(target.type)}`,
+        ),
+      );
+      return null;
+    }
+    const call: MethodCall = {
+      kind: 'method-call',
+      type: typeAt(node, checker, bindings),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      target,
+      className: privateOwner,
+      method: callPriv.property,
+      slot: privateSlot,
+      dispatch: 'direct',
+      args,
+    };
+    return call;
+  }
+  const owner = declaringClassName(obj, propName, checker, bindings, sourceFile);
+  if (owner !== null) {
+    // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
+    // which is sound for the same reason a field slot is: a subclass's method table begins
+    // with its base's, in the base's order.
+    const slot = target.type.methods.findIndex((m) => m.name === propName);
+    if (slot < 0) {
+      diagnostics.push(
+        lowerDiagnostic(
+          at,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
+        ),
+      );
+      return null;
+    }
+    const call: MethodCall = {
+      kind: 'method-call',
+      type: typeAt(node, checker, bindings),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      target,
+      className: owner,
+      method: propName,
+      slot,
+      // Skipping the override is what `super` MEANS, so this one call stays direct even where
+      // every other call to the same method is virtual.
+      dispatch:
+        !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
+          ? 'virtual'
+          : 'direct',
+      args,
+    };
+    return call;
+  }
+  // A name the class does not declare at all is js mode's suppressed TS2339, not a method
+  // the table lost: `c.missing()` answers Node's catchable `TypeError` (plan.md §8 step
+  // 37), the call twin of the dynamic read the property arm builds. The receiver still
+  // evaluates (it may run user code), then the arguments, then the throw — `nonFunctionCall`
+  // with the receiver in the callee's seat. A name the checker SAYS exists falls through:
+  // a present method the table lacks is the STA4067 disagreement below, not a suppression.
+  if (checker.getPropertyOfType(checker.getTypeAtLocation(obj), propName) === undefined) {
+    return nonFunctionCall(node, at, target, args, sourceFile);
+  }
+  return undefined;
+}
+
+/** A member read on a class instance once the receiver is lowered.
+ *
+ * A method is its value (a `MethodValue` naming the declaring class, virtual where the family
+ * overrides); an accessor read RUNS the getter; a field is a slot load. A miss the checker
+ * also sees as absent is js mode's suppressed TS2339 and answers `undefined` through the
+ * receiver's own descriptor, while a miss the checker says exists is a layout disagreement
+ * (an internal error).
+ *
+ * Shared by the dot spelling (`o.x`) and the literal-typed element spelling (`o[k]` with
+ * `k: "m"`), which the gate resolved to the same name -- so both answer the same way, and a
+ * later change to one cannot silently diverge from the other. */
+function lowerClassMemberRead(
+  target: Expression,
+  field: string,
+  receiver: ts.Expression,
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  // An accessor is not a slot: reading `o.x` RUNS the getter, which is what the property means.
+  const methodOwner = declaringClassName(receiver, field, checker, bindings, sourceFile);
+  if (methodOwner !== null) {
+    if (target.type.kind !== 'object') {
+      diagnostics.push(
+        lowerDiagnostic(node, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
+      );
+      return null;
+    }
+    const slot = target.type.methods.findIndex((m) => m.name === field);
+    if (slot < 0) {
+      diagnostics.push(
+        lowerDiagnostic(
+          node,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `method '${field}' has no slot in the layout of ${hTypeName(target.type)}`,
+        ),
+      );
+      return null;
+    }
+    const value: MethodValue = {
+      kind: 'method-value',
+      type: typeAt(node, checker, bindings),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      target,
+      className: methodOwner,
+      method: field,
+      slot,
+      dispatch: isOverridden(target.type.name, field, sourceFile, checker) ? 'virtual' : 'direct',
+    };
+    return value;
+  }
+  const owner = accessorOwner(receiver, field, checker, bindings, sourceFile);
+  if (owner !== undefined) {
+    return accessorCall(
+      'get',
+      owner,
+      target,
+      field,
+      [],
+      typeAt(node, checker, bindings),
+      makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      node,
+      sourceFile,
+      diagnostics,
+    );
+  }
+  // A miss the checker ALSO sees as absent is js mode's suppressed TS2339, not a layout
+  // disagreement: `c.missing` on a class instance answers `undefined` in JavaScript
+  // (plan.md §8 step 37). The dynamic read resolves through the receiver's OWN descriptor at
+  // run time (`fixed_get` misses to `undefined`), so a subclass value's added field still
+  // answers — a static `undefined` would lie about those. A miss the checker says EXISTS keeps
+  // the STA4060 below: the checker proved the name is declared, so the layout lacking it is a
+  // real lowering bug. In ts mode the checker stops the build before lowering, so the dynamic
+  // branch never fires there.
+  if (
+    (target.type.kind === 'object' ? fieldSlot(target.type, field) : undefined) === undefined &&
+    checker.getPropertyOfType(checker.getTypeAtLocation(receiver), field) === undefined
+  ) {
+    return {
+      kind: 'dyn-field-access',
+      type: hUnknown(false),
+      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      target,
+      field,
+    };
+  }
+  const slot = slotOf(target, field, node, sourceFile, diagnostics);
+  if (slot === null) {
+    return null;
+  }
+  const access: FieldAccess = {
+    kind: 'field-access',
+    type: typeAt(node, checker, bindings),
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    target,
+    field,
+    slot,
+  };
+  return access;
 }
 
 function lowerExpression(
@@ -3218,89 +3680,36 @@ function lowerExpression(
     if (target === null) {
       return null;
     }
-    const field = node.name.text;
-    // An accessor is not a slot: reading `o.x` RUNS the getter, which is what the property means.
-    const methodOwner = declaringClassName(node.expression, field, checker, bindings, sourceFile);
-    if (methodOwner !== null) {
-      if (target.type.kind !== 'object') {
-        diagnostics.push(
-          lowerDiagnostic(node, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
-        );
-        return null;
-      }
-      const slot = target.type.methods.findIndex((m) => m.name === field);
-      if (slot < 0) {
+    // An instance `#private` use resolves LEXICALLY -- the slot belongs to the class whose body
+    // spells it, not to the receiver's most-derived declaration -- so it takes its own path with
+    // the mangled name, and never the receiver-based method/accessor/slot lookups below.
+    if (ts.isPrivateIdentifier(node.name)) {
+      const priv = privateUse(node.name, checker);
+      if (priv === undefined) {
         diagnostics.push(
           lowerDiagnostic(
             node,
             sourceFile,
-            'STA4067',
+            'STA4060',
             'internal',
-            `method '${field}' has no slot in the layout of ${hTypeName(target.type)}`,
+            `no private '${node.name.text}' the gate accepted`,
           ),
         );
         return null;
       }
-      const value: MethodValue = {
-        kind: 'method-value',
-        type: typeAt(node, checker, bindings),
-        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-        target,
-        className: methodOwner,
-        method: field,
-        slot,
-        dispatch: isOverridden(target.type.name, field, sourceFile, checker) ? 'virtual' : 'direct',
-      };
-      return value;
+      return lowerPrivateRead(priv, node, target, sourceFile, checker, bindings, diagnostics);
     }
-    const owner = accessorOwner(node.expression, field, checker, bindings, sourceFile);
-    if (owner !== undefined) {
-      return accessorCall(
-        'get',
-        owner,
-        target,
-        field,
-        [],
-        typeAt(node, checker, bindings),
-        makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-        node,
-        sourceFile,
-        diagnostics,
-      );
-    }
-    // A miss the checker ALSO sees as absent is js mode's suppressed TS2339, not a layout
-    // disagreement: `c.missing` on a class instance answers `undefined` in JavaScript
-    // (plan.md §8 step 37). The dynamic read resolves through the receiver's OWN descriptor at
-    // run time (`fixed_get` misses to `undefined`), so a subclass value's added field still
-    // answers — a static `undefined` would lie about those. A miss the checker says EXISTS keeps
-    // the STA4060 below: the checker proved the name is declared, so the layout lacking it is a
-    // real lowering bug. In ts mode the checker stops the build before lowering, so the dynamic
-    // branch never fires there.
-    if (
-      (target.type.kind === 'object' ? fieldSlot(target.type, field) : undefined) === undefined &&
-      checker.getPropertyOfType(checker.getTypeAtLocation(node.expression), field) === undefined
-    ) {
-      return {
-        kind: 'dyn-field-access',
-        type: hUnknown(false),
-        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-        target,
-        field,
-      };
-    }
-    const slot = slotOf(target, field, node, sourceFile, diagnostics);
-    if (slot === null) {
-      return null;
-    }
-    const access: FieldAccess = {
-      kind: 'field-access',
-      type: typeAt(node, checker, bindings),
-      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    const field = node.name.text;
+    return lowerClassMemberRead(
       target,
       field,
-      slot,
-    };
-    return access;
+      node.expression,
+      node,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
   }
 
   // `m.size` -- a count the structure keeps, so a read rather than a walk, and the reason it is a
@@ -3397,31 +3806,28 @@ function lowerExpression(
 
   if (ts.isElementAccessExpression(node)) {
     // `o["a-b"]` on a fixed shape is `o.a` written the only way TypeScript allows a key that is not
-    // an identifier to be spelled. The slot is known here, so this is the same field read as a dot
-    // access and not an index at all -- without it, `{ "a-b": 1 }` would be a literal nothing could
-    // read back (plan.md §8 step 12 family c).
-    const literalKey = ts.isStringLiteral(node.argumentExpression)
-      ? node.argumentExpression.text
-      : undefined;
-    if (literalKey !== undefined) {
+    // an identifier to be spelled. A literal-typed key (`o[k]` with `k: "m"`) is the same name by
+    // the step-22 rule, so both spellings share the member-read path below -- a method is its
+    // value, an accessor runs its getter, a field is a slot load -- and not an index at all.
+    // Without it, `{ "a-b": 1 }` would be a literal nothing could read back (plan.md §8 step 12
+    // family c), and a computed accessor read would miss the slot it never had (STA4060).
+    const literalKey = elementStaticKey(node.argumentExpression, checker);
+    if (literalKey !== null) {
       const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
       if (target === null) {
         return null;
       }
       if (target.type.kind === 'object') {
-        const slot = slotOf(target, literalKey, node, sourceFile, diagnostics);
-        if (slot === null) {
-          return null;
-        }
-        const access: FieldAccess = {
-          kind: 'field-access',
-          type: typeAt(node, checker, bindings),
-          span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        return lowerClassMemberRead(
           target,
-          field: literalKey,
-          slot,
-        };
-        return access;
+          literalKey,
+          node.expression,
+          node,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+        );
       }
     }
     return lowerIndexAccess(node, sourceFile, checker, bindings, diagnostics);
@@ -3475,6 +3881,12 @@ function lowerExpression(
     // method of a literal-shaped source, stored at the fragment's own `at` like the field
     // reads are, so evaluation order is source order however the emitter walks them.
     const methodCopies: { at: number; order: number; name: string; value: MethodValue }[] = [];
+    // `{ ...a }` over an array, in property order: the entry count before the fragment (runs of
+    // own entries split here), the fragment's own property index (runs bucket the methods they
+    // enclose by it), the lowered source, and the spread's span (the fold's `assign` sites).
+    // The gate accepted exactly the array kind on this arm, so every record here folds through
+    // `assign` below; any other non-object source still reports STA4068 on its own arm.
+    const arraySpreads: { at: number; order: number; source: Expression; span: Span }[] = [];
     for (const [propIndex, property] of node.properties.entries()) {
       // `{ x }` is `{ x: x }`. The desugaring lives here and not in HIR: the value is the ordinary
       // identifier expression, so every later pass sees a name/value pair like any other.
@@ -3516,6 +3928,19 @@ function lowerExpression(
         if (source === null) {
           return null;
         }
+        const spreadSpan = makeSpan(
+          property.getStart(sourceFile),
+          property.getWidth(sourceFile),
+          sourceFile,
+        );
+        // An array has no static key set to expand -- its indices are a run-time count -- so
+        // the fragment is recorded for the assign fold below rather than expanded here. Own
+        // entries around it stay in `entries` (and enclosing methods in `methodNodes`); the
+        // fold splits both at each fragment's `at` and combines the runs left to right.
+        if (source.type.kind === 'array') {
+          arraySpreads.push({ at: entries.length, order: propIndex, source, span: spreadSpan });
+          continue;
+        }
         if (source.type.kind !== 'object') {
           diagnostics.push(
             lowerDiagnostic(
@@ -3528,11 +3953,6 @@ function lowerExpression(
           );
           return null;
         }
-        const spreadSpan = makeSpan(
-          property.getStart(sourceFile),
-          property.getWidth(sourceFile),
-          sourceFile,
-        );
         // Every read below is stamped with the spread's own span, not the operand's: the span is
         // the identity the emitter groups by, and the operand's span belongs to an expression
         // that now evaluates once no matter how many fields read it. Each entry is also marked
@@ -3722,17 +4142,19 @@ function lowerExpression(
     // `const o: { x?: number } = { x: 1 }` the literal's own type is a layout, but every later
     // read of `o` goes through the annotation -- so the object must be the dynamic one those
     // reads resolve against (same reasoning, same order, as gateObjectLiteral).
-    if (objectLiteralIsDynamic(node, checker)) {
-      // A method on a dynamic object is an own data property holding the method's closure, with
-      // the receiver as parameter zero exactly as on the fixed path. The closures splice back
-      // into `entries` at their written positions, so the shape table records the insertion
-      // order the source wrote -- a side table could not. The receiver is Unknown because the
-      // object is dynamic, so `this.x` inside is a shape-table read, as for accessors above.
+    // One dynamic run: `runEntries` with the run's own methods spliced at their written
+    // positions (`at` values are run-local: the fold rebases each run's methods when it splits
+    // them out of `methodNodes`). Shared by the spread-free literal below and every run of the
+    // array-spread fold: the same entries mean the same object whichever path assembles them.
+    const assembleDynRun = (
+      runEntries: DynEntry[],
+      runMethods: { at: number; order: number; node: ts.MethodDeclaration }[],
+    ): DynObjectLiteral | null => {
       const ordered: DynEntry[] = [];
       let cursor = 0;
-      for (const { at, node: methodNode } of methodNodes) {
+      for (const { at, node: methodNode } of runMethods) {
         for (; cursor < at; cursor++) {
-          const entry = entries[cursor];
+          const entry = runEntries[cursor];
           if (entry === undefined) {
             diagnostics.push(
               lowerDiagnostic(
@@ -3758,10 +4180,10 @@ function lowerExpression(
         if (fn === null) {
           return null;
         }
-        ordered.push({ name: memberFunctionName(methodNode, sourceFile), value: fn });
+        ordered.push({ name: memberFunctionName(methodNode, sourceFile, checker), value: fn });
       }
-      for (; cursor < entries.length; cursor++) {
-        const entry = entries[cursor];
+      for (; cursor < runEntries.length; cursor++) {
+        const entry = runEntries[cursor];
         if (entry === undefined) {
           diagnostics.push(
             lowerDiagnostic(
@@ -3777,6 +4199,101 @@ function lowerExpression(
         ordered.push(entry);
       }
       return { kind: 'dyn-object-literal', type: hUnknown(false), span, entries: ordered };
+    };
+    // An array spread anywhere in the literal forces the dynamic fold: indices are a run-time
+    // count no static expansion can name. Runs of own entries around the array fragments
+    // assemble as dynamic literals above -- methods, accessors, computed keys and proto-setters
+    // keep their meaning, and a fixed-object spread inside a run keeps its whole-fragment copy
+    // through `jsrt_dynobj_spread` -- and the runs combine left to right with `assign`, which
+    // copies each array fragment's indices out of its elements and its named extras through
+    // the shape table. Later keys overwrite in place, which is the `{ ...a, x: 1 }` rule the
+    // single-literal store order already gives. Each `assign` answers Unknown, so the whole
+    // fold is Unknown: the honest type of a key set nothing lists.
+    //
+    // Only a dynamic literal may reach the fold: the gate accepted this spread exactly when
+    // `objectLiteralIsDynamic` holds, which is what binds Unknown alongside the Unknown value.
+    // A fixed path here would promise slots the value never builds, so reaching one is the
+    // gate and the lowering disagreeing about the layout -- a compiler bug, not a program error.
+    if (arraySpreads.length > 0 && !objectLiteralIsDynamic(node, checker)) {
+      diagnostics.push(
+        lowerDiagnostic(
+          node,
+          sourceFile,
+          'STA4068',
+          'internal',
+          'object literal with an array spread took the fixed-shape path',
+        ),
+      );
+      return null;
+    }
+    if (arraySpreads.length > 0) {
+      const assignNode = (target: Expression, source: Expression, at: Span): Expression => ({
+        kind: 'object-static',
+        type: hUnknown(false),
+        span: at,
+        method: 'assign',
+        args: [target, source],
+      });
+      let folded: Expression | null = null;
+      const foldRun = (run: DynObjectLiteral): void => {
+        folded = folded === null ? run : assignNode(folded, run, run.span);
+      };
+      const foldArray = (source: Expression, at: Span): void => {
+        if (folded === null) {
+          folded = { kind: 'dyn-object-literal', type: hUnknown(false), span, entries: [] };
+        }
+        folded = assignNode(folded, source, at);
+      };
+      let runStart = 0;
+      let runStartOrder = -1;
+      for (const fragment of arraySpreads) {
+        const runEntries = entries.slice(runStart, fragment.at);
+        const runMethods = methodNodes
+          .filter((method) => method.order > runStartOrder && method.order < fragment.order)
+          .map((method) => ({ ...method, at: method.at - runStart }));
+        runStart = fragment.at;
+        runStartOrder = fragment.order;
+        if (runEntries.length > 0 || runMethods.length > 0) {
+          const run = assembleDynRun(runEntries, runMethods);
+          if (run === null) {
+            return null;
+          }
+          foldRun(run);
+        }
+        foldArray(fragment.source, fragment.span);
+      }
+      const tailEntries = entries.slice(runStart);
+      const tailMethods = methodNodes
+        .filter((method) => method.order > runStartOrder)
+        .map((method) => ({ ...method, at: method.at - runStart }));
+      if (tailEntries.length > 0 || tailMethods.length > 0) {
+        const tail = assembleDynRun(tailEntries, tailMethods);
+        if (tail === null) {
+          return null;
+        }
+        foldRun(tail);
+      }
+      if (folded === null) {
+        diagnostics.push(
+          lowerDiagnostic(
+            node,
+            sourceFile,
+            'STA4068',
+            'internal',
+            'object literal with an array spread folded to nothing',
+          ),
+        );
+        return null;
+      }
+      return folded;
+    }
+    if (objectLiteralIsDynamic(node, checker)) {
+      // A method on a dynamic object is an own data property holding the method's closure, with
+      // the receiver as parameter zero exactly as on the fixed path. The closures splice back
+      // into `entries` at their written positions, so the shape table records the insertion
+      // order the source wrote -- a side table could not. The receiver is Unknown because the
+      // object is dynamic, so `this.x` inside is a shape-table read, as for accessors above.
+      return assembleDynRun(entries, methodNodes);
     }
     // The CONTEXTUAL type is the layout when there is one, because every later read of this object
     // goes through it: `const o: { y: number; x: string } = { x: "s", y: 2 }` resolves `o.x`
@@ -3846,7 +4363,7 @@ function lowerExpression(
       }
     };
     for (const { order, node: method } of methodNodes) {
-      considerWriter(memberFunctionName(method, sourceFile), order);
+      considerWriter(memberFunctionName(method, sourceFile, checker), order);
     }
     for (const fragment of spreadFragments) {
       for (const name of fragment.methods) {
@@ -3886,14 +4403,14 @@ function lowerExpression(
       }
     }
     for (const { order, node: method } of methodNodes) {
-      if (lastWriter.get(memberFunctionName(method, sourceFile)) !== order) {
+      if (lastWriter.get(memberFunctionName(method, sourceFile, checker)) !== order) {
         continue;
       }
       const fn = lowerFunction(method, sourceFile, checker, bindings, diagnostics, type);
       if (fn === null) {
         return null;
       }
-      methods.push({ name: memberFunctionName(method, sourceFile), fn });
+      methods.push({ name: memberFunctionName(method, sourceFile, checker), fn });
     }
     // Every method of the shape needs exactly the writers above: one winner, plus evaluation
     // keepers that a later writer overwrites. A method with no writer at all means the gate
@@ -4649,7 +5166,13 @@ function lowerExpression(
       // The landed `Date.prototype` surface, on the string ops' padding discipline and for the
       // same reason: every setter's spec text reads an omitted trailing component exactly as it
       // reads an explicitly-passed undefined. The result type comes from the table.
+      // A receiver the bindings type Unknown never takes a specialized arm, however the checker
+      // spells it: the value may be `undefined` (an uninitialized annotated binding widened off
+      // its 2454, a `var` read before its assignment), and the static op would trust the
+      // annotation straight into memory-unsafe code. The dynamic method call below answers
+      // Node's catchable TypeError for the nullish case instead (the 2454 rule).
       if (
+        receiverType.kind !== 'unknown' &&
         (isDateReceiver(obj, checker) ||
           substitutedReceiverKind(obj, checker, bindings) === 'date') &&
         Object.hasOwn(DATE_OPS, propName)
@@ -4667,8 +5190,10 @@ function lowerExpression(
 
       // The landed RegExp.prototype METHODS. The result is taken from the node rather than the
       // table because the verifier pins it either way, and this keeps a checker that says
-      // otherwise visible instead of overwritten.
+      // otherwise visible instead of overwritten. Unknown receivers take the dynamic path
+      // (the 2454 rule above).
       if (
+        receiverType.kind !== 'unknown' &&
         (isRegExpReceiver(obj, checker) ||
           substitutedReceiverKind(obj, checker, bindings) === 'regexp') &&
         Object.hasOwn(REGEXP_OPS, propName)
@@ -4691,8 +5216,10 @@ function lowerExpression(
       // undefined-literals up to the table's arity -- for every op in the set the spec gives an
       // explicitly-passed undefined the same meaning as an absent argument, which is what makes
       // the padding observably identical to the source. The node's type comes from the table,
-      // the same table the verifier holds it to.
+      // the same table the verifier holds it to. Unknown receivers take the dynamic path
+      // (the 2454 rule above).
       if (
+        receiverType.kind !== 'unknown' &&
         (isStringReceiver(obj, checker) ||
           substitutedReceiverKind(obj, checker, bindings) === 'string') &&
         Object.hasOwn(STRING_OPS, propName)
@@ -4788,8 +5315,11 @@ function lowerExpression(
       // with `undefined` (sound for every op the table holds — `lastIndexOf` lands without its
       // position for exactly the case where it would not be), and take the result type from the
       // table, where `self` is the RECEIVER's own array type and `element` is Unknown by the
-      // IndexAccess rule (`pop` on an empty array really answers `undefined`).
+      // IndexAccess rule (`pop` on an empty array really answers `undefined`). Unknown receivers
+      // take the dynamic path (the 2454 rule above): the shape table resolves Array.prototype
+      // methods there, and a nullish receiver throws Node's catchable TypeError.
       if (
+        receiverType.kind !== 'unknown' &&
         (isArrayReceiver(obj, checker) ||
           substitutedReceiverKind(obj, checker, bindings) === 'array') &&
         Object.hasOwn(ARRAY_OPS, propName)
@@ -4877,72 +5407,49 @@ function lowerExpression(
       // loading a per-instance closure out of a slot.
       if (isClassInstance(obj, checker, bindings)) {
         // `super.m()` is a call on THIS receiver that skips the override -- the object is the same
-        // one, only the function differs. So the target is the receiver parameter, not an
-        // evaluation of `super`, which names no value at all.
+        // one, only the function differs, which is the one `viaSuper` the helper takes.
         const viaSuper = obj.kind === ts.SyntaxKind.SuperKeyword;
-        const target = viaSuper
-          ? receiverIdentifier(obj, sourceFile, bindings, diagnostics)
-          : lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
-        if (target === null) {
-          return null;
+        const lowered = lowerClassMethodCall(
+          obj,
+          propName,
+          ts.isPrivateIdentifier(expr.name) ? expr.name : undefined,
+          viaSuper,
+          node,
+          expr,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+        );
+        if (lowered !== undefined) {
+          return lowered;
         }
-        if (target.type.kind !== 'object') {
-          diagnostics.push(
-            lowerDiagnostic(expr, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
-          );
-          return null;
-        }
-        const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
-        if (args === null) {
-          return null;
-        }
-        // The DECLARING class, not the receiver's -- `d.describe()` on a `Dog` names `Animal` when
-        // `Animal` is where `describe` is written. Naming the receiver's class here would make the
-        // emitter look for a method that class does not own.
-        const owner = declaringClassName(obj, propName, checker, bindings, sourceFile);
-        if (owner !== null) {
-          // The slot is resolved against the receiver's STATIC type and read from its DYNAMIC one,
-          // which is sound for the same reason a field slot is: a subclass's method table begins
-          // with its base's, in the base's order.
-          const slot = target.type.methods.findIndex((m) => m.name === propName);
-          if (slot < 0) {
-            diagnostics.push(
-              lowerDiagnostic(
-                expr,
-                sourceFile,
-                'STA4067',
-                'internal',
-                `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
-              ),
-            );
-            return null;
-          }
-          const call: MethodCall = {
-            kind: 'method-call',
-            type: typeAt(node, checker, bindings),
-            span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-            target,
-            className: owner,
-            method: propName,
-            slot,
-            // Skipping the override is what `super` MEANS, so this one call stays direct even where
-            // every other call to the same method is virtual.
-            dispatch:
-              !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
-                ? 'virtual'
-                : 'direct',
-            args,
-          };
-          return call;
-        }
-        // A name the class does not declare at all is js mode's suppressed TS2339, not a method
-        // the table lost: `c.missing()` answers Node's catchable `TypeError` (plan.md §8 step
-        // 37), the call twin of the dynamic read the property arm builds. The receiver still
-        // evaluates (it may run user code), then the arguments, then the throw — `nonFunctionCall`
-        // with the receiver in the callee's seat. A name the checker SAYS exists falls through:
-        // a present method the table lacks is the STA4067 disagreement below, not a suppression.
-        if (checker.getPropertyOfType(checker.getTypeAtLocation(obj), propName) === undefined) {
-          return nonFunctionCall(node, expr, target, args, sourceFile);
+      }
+    }
+
+    // `o[k](a)` where `k` statically names a method: the element spelling of the method call
+    // above, and the twin the computed-name fixtures prove (`new C()[k]()` answers what
+    // `new C().m()` does). The key is compile-time, so the call names the declaring class
+    // exactly as the dot spelling does; anything the helper declines (a field holding a
+    // closure, an accessor result) falls through to the ordinary get-then-call path below,
+    // mirroring what the dot forms lower to.
+    if (ts.isElementAccessExpression(expr) && isClassInstance(expr.expression, checker, bindings)) {
+      const key = elementStaticKey(expr.argumentExpression, checker);
+      if (key !== null) {
+        const lowered = lowerClassMethodCall(
+          expr.expression,
+          key,
+          undefined,
+          false,
+          node,
+          expr,
+          sourceFile,
+          checker,
+          bindings,
+          diagnostics,
+        );
+        if (lowered !== undefined) {
+          return lowered;
         }
       }
     }
@@ -5720,9 +6227,20 @@ function classesIn(sourceFile: ts.SourceFile): ts.ClassDeclaration[] {
   return found;
 }
 
-function declaresMethod(declaration: ts.ClassDeclaration, name: string): boolean {
+function declaresMethod(
+  declaration: ts.ClassDeclaration,
+  name: string,
+  checker: ts.TypeChecker,
+): boolean {
+  // A `#private` method never overrides: each class owns its spelling under a per-class name, and
+  // every call to one resolves lexically to direct dispatch. Letting a re-declared `#m` count
+  // here would make the whole family's calls virtual for a second implementation no call reaches.
+  if (isPrivateMemberName(name)) {
+    return false;
+  }
   return declaration.members.some(
-    (m) => ts.isMethodDeclaration(m) && !isStaticMember(m) && instanceMethodName(m) === name,
+    (m) =>
+      ts.isMethodDeclaration(m) && !isStaticMember(m) && instanceMethodName(m, checker) === name,
   );
 }
 
@@ -5744,12 +6262,17 @@ function isOverridden(
   if (shadowSource(name) !== undefined) {
     return false;
   }
+  // A `#private` name never overrides either (see `declaresMethod`): re-declaring one adds a
+  // per-class slot, and every use resolves lexically, so no call is ever virtual on its account.
+  if (isPrivateMemberName(method)) {
+    return false;
+  }
   for (const declaration of classesIn(sourceFile)) {
     const chain = ancestry(declaration, checker);
     if (!chain.some((c) => className(c) === name)) {
       continue;
     }
-    if (chain.filter((c) => declaresMethod(c, method)).length > 1) {
+    if (chain.filter((c) => declaresMethod(c, method, checker)).length > 1) {
       return true;
     }
   }
@@ -5800,6 +6323,103 @@ function accessorCall(
     dispatch: 'direct',
     args,
   };
+}
+
+/** `this.#v` / `this.#m` / `this.#x` on an instance: the lexically-resolved counterpart of
+ * the public read arm above.
+ *
+ * The KIND comes from the lexical owner's declaration, not from the receiver's type: a field is
+ * a slot load of the mangled name, an accessor a direct call to the mangled pair, and a method
+ * a direct method value -- all under the owner's descriptor, which is the one that emitted them.
+ * Dispatch is always direct: a private name never overrides, it re-declares, so there is exactly
+ * one implementation per (owner, name). */
+function lowerPrivateRead(
+  priv: { owner: ts.ClassDeclaration; property: string },
+  node: ts.PropertyAccessExpression,
+  target: Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const raw = node.name.text;
+  const ownerName = mangleClassName(priv.owner, node.expression, checker, bindings);
+  if (ownerName === null) {
+    diagnostics.push(
+      lowerDiagnostic(
+        node,
+        sourceFile,
+        'STA4067',
+        'internal',
+        `private '${raw}' names no descriptor the lowering can reach`,
+      ),
+    );
+    return null;
+  }
+  const member = privateOwnerMember(priv.owner, raw);
+  if (member !== undefined && ts.isMethodDeclaration(member)) {
+    if (target.type.kind !== 'object') {
+      diagnostics.push(
+        lowerDiagnostic(node, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
+      );
+      return null;
+    }
+    const slot = target.type.methods.findIndex((m) => m.name === priv.property);
+    if (slot < 0) {
+      diagnostics.push(
+        lowerDiagnostic(
+          node,
+          sourceFile,
+          'STA4067',
+          'internal',
+          `method '${priv.property}' has no slot in the layout of ${hTypeName(target.type)}`,
+        ),
+      );
+      return null;
+    }
+    const value: MethodValue = {
+      kind: 'method-value',
+      type: typeAt(node, checker, bindings),
+      span,
+      target,
+      className: ownerName,
+      method: priv.property,
+      slot,
+      dispatch: 'direct',
+    };
+    return value;
+  }
+  if (
+    member !== undefined &&
+    (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member))
+  ) {
+    return accessorCall(
+      'get',
+      ownerName,
+      target,
+      priv.property,
+      [],
+      typeAt(node, checker, bindings),
+      span,
+      node,
+      sourceFile,
+      diagnostics,
+    );
+  }
+  const slot = slotOf(target, priv.property, node, sourceFile, diagnostics);
+  if (slot === null) {
+    return null;
+  }
+  const access: FieldAccess = {
+    kind: 'field-access',
+    type: typeAt(node, checker, bindings),
+    span,
+    target,
+    field: priv.property,
+    slot,
+  };
+  return access;
 }
 
 /** `C.x` and `C.x = v` on a static accessor: a plain call to the mangled static binding.
@@ -5861,12 +6481,20 @@ function staticAccessorHalves(
   ) {
     seen.add(current);
     for (const member of current.members) {
-      if (
-        !isStaticMember(member) ||
-        member.name === undefined ||
-        !ts.isIdentifier(member.name) ||
-        member.name.text !== property
-      ) {
+      // A literal-typed computed accessor (`static get [k]` with `k: "m"`) declares the name
+      // the direct spelling writes, so the halves are found under the resolved name; anything
+      // wider declares no static name and keeps the old skip. A `#private` name declares its
+      // own spelling too -- and only its own class's: an ancestor's pair is a different
+      // property that shares the spelling, so the walk stops after the owner for one.
+      const declared =
+        !isStaticMember(member) || member.name === undefined
+          ? undefined
+          : ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)
+            ? member.name.text
+            : ts.isComputedPropertyName(member.name)
+              ? (computedKeyStaticName(member.name, checker) ?? undefined)
+              : undefined;
+      if (declared !== property) {
         continue;
       }
       if (ts.isGetAccessorDeclaration(member)) {
@@ -5875,6 +6503,9 @@ function staticAccessorHalves(
       if (ts.isSetAccessorDeclaration(member)) {
         set = true;
       }
+    }
+    if (property.startsWith('#')) {
+      break;
     }
   }
   return { get, set };
@@ -5948,17 +6579,60 @@ function hasAccessorHalf(
   return false;
 }
 
-/** The name a member function goes under: its own for a method, the mangled one for an accessor. */
+/** The source name a class member declares: a literal-typed computed key (`[k]` with
+ * `k: "m"`) through the checker, anything else as written. The fallback is today's behavior on
+ * exactly the spellings the gate still refuses, which keeps this total on programs the gate
+ * never lets through. */
+function declaredMemberName(
+  member:
+    | ts.PropertyDeclaration
+    | ts.MethodDeclaration
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+): string {
+  return instanceMethodName(member, checker) ?? member.name.getText(sourceFile);
+}
+
+/** Whether `member` declares the layout name `name`. The source-text comparison the slot
+ * lookup used would miss a literal-typed computed key (`[k]` declaring `m`), so the checker
+ * resolves those; the fallback is the same comparison as before. An instance `#private` member
+ * declares its PER-CLASS name (`owner`), so the mangled spelling matches too. */
+function memberDeclaresName(
+  member: ts.ClassElement,
+  name: string,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  owner?: string,
+): boolean {
+  if (member.name === undefined) {
+    return false;
+  }
+  const declared = instanceMethodName(member, checker) ?? member.name.getText(sourceFile);
+  return declared === name || (owner !== undefined && privateMethodName(owner, declared) === name);
+}
+
+/** The name a member function goes under: its own for a method, the mangled one for an
+ * accessor. A literal-typed computed key (`[k]` with `k: "m"`) resolves through the checker to
+ * the name the direct spelling writes; anything wider never reaches here (the gate refused
+ * it), so the source-text fallback below is dead on accepted programs but keeps this total.
+ * An instance `#private` member additionally qualifies by its declaring class (`owner`), so a
+ * re-declared name emits under the same per-class name the layout carries. */
 function memberFunctionName(
   member: ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
   sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  owner?: string,
 ): string {
-  const method = instanceMethodName(member);
+  const method = instanceMethodName(member, checker);
   const spelled = method ?? member.name.getText(sourceFile);
-  if (ts.isGetAccessorDeclaration(member)) {
-    return accessorName('get', spelled);
-  }
-  return ts.isSetAccessorDeclaration(member) ? accessorName('set', spelled) : spelled;
+  const raw = ts.isGetAccessorDeclaration(member)
+    ? accessorName('get', spelled)
+    : ts.isSetAccessorDeclaration(member)
+      ? accessorName('set', spelled)
+      : spelled;
+  return owner === undefined ? raw : privateMethodName(owner, raw);
 }
 
 /** A read of the receiver parameter, which is what both `this` and the object of `super.m()` are.
@@ -6152,7 +6826,10 @@ function lowerClass(
     spec?.staticsOnly === true
       ? []
       : layout.fields.map((field) => {
-          const at = node.members.find((m) => m.name?.getText(sourceFile) === field.name) ?? node;
+          const at =
+            node.members.find((m) =>
+              memberDeclaresName(m, field.name, sourceFile, checker, node.name?.text),
+            ) ?? node;
           return {
             name: field.name,
             type: field.type,
@@ -6244,7 +6921,7 @@ function lowerClass(
   }
   for (const member of staticNodes) {
     bindings.set(
-      staticName(selfName, member.name.getText(sourceFile)),
+      staticName(selfName, declaredMemberName(member, sourceFile, checker)),
       typeAt(member, checker, bindings),
     );
   }
@@ -6252,12 +6929,17 @@ function lowerClass(
   // with the other statics so a body -- static or instance -- may read them. The placeholder is a
   // function kind, not the property type `typeAt` answers for an accessor: a use lowered before
   // the accessor's own emission must still see something callable, and the emission overwrites it
-  // with the real signature below.
+  // with the real signature below. A setter's placeholder already takes the property type: a
+  // static method body lowering before the emission (static methods lower first below) captures
+  // the placeholder into its call nodes, and the verifier holds those against the final
+  // signature -- which takes exactly the property type, the setter's one parameter.
   for (const member of staticAccessors) {
     const half = ts.isGetAccessorDeclaration(member) ? 'get' : 'set';
     bindings.set(
-      staticName(selfName, accessorName(half, member.name.getText(sourceFile))),
-      hFunction([], H_UNDEFINED),
+      staticName(selfName, accessorName(half, declaredMemberName(member, sourceFile, checker))),
+      half === 'get'
+        ? hFunction([], H_UNDEFINED)
+        : hFunction([typeAt(member, checker, bindings)], H_UNDEFINED),
     );
   }
   for (const member of staticNodes) {
@@ -6265,7 +6947,7 @@ function lowerClass(
     if (ts.isMethodDeclaration(member) && member.body === undefined) {
       continue;
     }
-    const name = staticName(selfName, member.name.getText(sourceFile));
+    const name = staticName(selfName, declaredMemberName(member, sourceFile, checker));
     const at = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
     let value: Expression | null;
     if (ts.isMethodDeclaration(member)) {
@@ -6303,7 +6985,10 @@ function lowerClass(
   // exactly as it does there.
   for (const member of staticAccessors) {
     const half = ts.isGetAccessorDeclaration(member) ? 'get' : 'set';
-    const name = staticName(selfName, accessorName(half, member.name.getText(sourceFile)));
+    const name = staticName(
+      selfName,
+      accessorName(half, declaredMemberName(member, sourceFile, checker)),
+    );
     const at = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
     const value = lowerFunction(member, sourceFile, checker, bindings, diagnostics);
     if (value === null) {
@@ -6333,7 +7018,7 @@ function lowerClass(
     if (fn === null) {
       return null;
     }
-    methods.push({ name: memberFunctionName(method, sourceFile), fn });
+    methods.push({ name: memberFunctionName(method, sourceFile, checker, node.name?.text), fn });
   }
 
   // A derived class always needs a constructor even with nothing of its own to do, because the
@@ -6374,6 +7059,7 @@ function lowerClass(
       checker,
       bindings,
       diagnostics,
+      node.name?.text ?? '',
     );
     if (prologue === null) {
       return null;
@@ -6401,10 +7087,11 @@ function lowerClass(
     };
   }
 
-  // A table only where something is overridden. Its entries are file-scope constants, so a class
-  // whose methods capture could not have one -- which is why the gate refuses overriding for a
-  // class that is not at module scope, and why the empty table here is a real answer rather than
-  // a missing one.
+  // A table only where a PUBLIC method is overridden. Its entries are file-scope constants,
+  // so a class whose methods capture could not have one -- which is why the gate refuses
+  // overriding for a class that is not at module scope, and why the empty table here is a real
+  // answer rather than a missing one. `#private` methods never join it: each class owns its
+  // spelling under a per-class name and every call to one is direct (see `declaresMethod`).
   //
   // An entry names the descriptor that implements it: the mangled specialization when the most
   // derived declaration is the generic being specialized, the plain name otherwise (a base is
@@ -6412,11 +7099,12 @@ function lowerClass(
   // ancestry is declaration-level, and the mangled name appears in no chain. The carrier has no
   // methods to tabulate.
   const declaredName = node.name?.text ?? '';
+  const vtableMethods = layout.methods.filter((m) => !isPrivateMemberName(m.name));
   const vtable =
     spec?.staticsOnly === true
       ? []
-      : layout.methods.some((m) => isOverridden(declaredName, m.name, sourceFile, checker))
-        ? layout.methods.map((m) => {
+      : vtableMethods.some((m) => isOverridden(declaredName, m.name, sourceFile, checker))
+        ? vtableMethods.map((m) => {
             const declaringDecl = methodDeclaringClass(node, m.name, checker);
             const declaring =
               declaringDecl === undefined
@@ -6525,6 +7213,7 @@ function lowerFieldInitializers(
   checker: ts.TypeChecker,
   bindings: Scope,
   diagnostics: Diagnostic[],
+  owner: string,
 ): Statement[] | null {
   const inner = bindings.child();
   inner.set(RECEIVER, self);
@@ -6534,7 +7223,10 @@ function lowerFieldInitializers(
       continue;
     }
     const span = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
-    const field = member.name.getText(sourceFile);
+    // An instance `#private` field initializes its PER-CLASS slot (`#x@A`, never `#x`), the same
+    // name every read and write of it resolves to.
+    const declared = declaredMemberName(member, sourceFile, checker);
+    const field = privateMethodName(owner, declared);
     const slot = fieldSlot(self, field);
     const value = lowerExpression(member.initializer, sourceFile, checker, inner, diagnostics);
     if (slot === undefined || value === null) {

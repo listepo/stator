@@ -166,6 +166,11 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   18047, // 'x' is possibly 'null'.
   18048, // 'x' is possibly 'undefined'.
   18049, // 'x' is possibly 'null' or 'undefined'.
+  // Definite assignment (slice 2454): an uninitialized annotated binding's runtime value
+  // IS `undefined` -- this is not TDZ (true syntactic TDZ is 2448, unmodelled). The binding is
+  // widened to Unknown below so no use trusts the annotation; every use then takes the dynamic
+  // path (reads, index, calls) or a null-validated static one (array ops via STA2008).
+  2454, // Variable 'X' is used before being assigned.
 ]);
 
 /** Checker refusals Stator answers with exact runtime semantics in BOTH modes, unlike the
@@ -365,7 +370,11 @@ function createProgramUncached(
       // assignment, and it needs the same widening -- without it the suppression turns a checker
       // refusal into an STA4004 internal error (plan-notes 194).
       if (
-        (diag.code === 2322 || diag.code === 2403 || diag.code === 2362 || diag.code === 2363) &&
+        (diag.code === 2322 ||
+          diag.code === 2403 ||
+          diag.code === 2362 ||
+          diag.code === 2363 ||
+          diag.code === 2454) &&
         diag.file !== undefined &&
         diag.start !== undefined
       ) {
@@ -375,8 +384,12 @@ function createProgramUncached(
         // way, or the lowering's number-typed value meets a string-typed slot as STA4004
         // (plan.md §8 step 37). A pure binary (`s * 2`) only READS `s`, so only a diagnostic on
         // the compound's left widens; anything else keeps the binding it declared.
+        // A 2454 use-before-assignment widens the USED binding itself: the diagnostic sits on a
+        // read, and its symbol is the declaration's -- the slot starts as `undefined`
+        // (JSRT_FRAME fills every slot with it), so every use must go dynamic rather than trust
+        // the annotation (the 2403 rule: the admitted program must still compile).
         const target =
-          diag.code === 2322 || diag.code === 2403
+          diag.code === 2322 || diag.code === 2403 || diag.code === 2454
             ? token
             : token === undefined
               ? undefined

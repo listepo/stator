@@ -237,17 +237,51 @@ test('a #private accessor lowers as a mangled member function', () => {
   const decl = classOf(PRIVATE_ACCESSOR);
   assert.deepEqual(
     decl.methods.map((m) => m.name),
-    ['get #x', 'set #x', 'run', 'has'],
-    'private accessors join the method list under mangled names, like public ones',
+    ['get #x@C', 'set #x@C', 'run', 'has'],
+    'private accessors join the method list under per-class mangled names, like public ones',
   );
   assert.deepEqual(gateCodes(PRIVATE_ACCESSOR, 'ts'), []);
   assert.deepEqual(gateCodes(PRIVATE_ACCESSOR, 'js'), []);
 });
 
-test('a computed accessor name stays not-yet', () => {
+test('a literal-typed computed accessor name lowers as a mangled member function', () => {
+  // `k` has the literal type `"x"`, so `[k]` is the name `x` -- the step-22 computed-literal
+  // rule -- and the pair joins the method list under the resolved name, like a direct spelling.
+  const source = `const k = "x";\nclass C {\n  backing: number = 0;\n  get [k](): number {\n    return this.backing;\n  }\n  set [k](v: number) {\n    this.backing = v;\n  }\n}\n`;
+  assert.deepEqual(gateCodes(source, 'ts'), []);
+  assert.deepEqual(gateCodes(source, 'js'), []);
+  const decl = classOf(source);
   assert.deepEqual(
-    gateCodes(`const k = "x";\nclass C {\n  get [k](): number {\n    return 1;\n  }\n}\n`, 'ts'),
+    decl.methods.map((m) => m.name),
+    ['get x', 'set x'],
+    'a literal-typed computed accessor joins the method list under the resolved name',
+  );
+});
+
+test('a runtime computed accessor name stays not-yet', () => {
+  assert.deepEqual(
+    gateCodes(
+      `function build(k: string): void {\n  class C {\n    get [k](): number {\n      return 1;\n    }\n  }\n}\n`,
+      'ts',
+    ),
     ['STA1214'],
+  );
+});
+
+test('a literal-typed computed method and field lower under the resolved name', () => {
+  const source = `const k = "m";\nconst f = "count";\nclass C {\n  [f]: number = 10;\n  [k](): number {\n    return 5;\n  }\n}\n`;
+  assert.deepEqual(gateCodes(source, 'ts'), []);
+  assert.deepEqual(gateCodes(source, 'js'), []);
+  const decl = classOf(source);
+  assert.deepEqual(
+    decl.fields.map((field) => field.name),
+    ['count'],
+    'a literal-typed computed field takes the slot the direct spelling writes',
+  );
+  assert.deepEqual(
+    decl.methods.map((method) => method.name),
+    ['m'],
+    'a literal-typed computed method joins the method list under the resolved name',
   );
 });
 
@@ -321,10 +355,34 @@ test('a static accessor read lowers to a getter call, not a binding read', () =>
   assert.ok(kinds.includes('call'), 'reading `C.value` runs the getter');
 });
 
-test('a static #private accessor name stays not-yet', () => {
+test('a static #private accessor emits two plain functions under mangled static names', () => {
+  const source = `class C {\n  static #v: number = 0;\n  static get #x(): number {\n    return C.#v;\n  }\n  static set #x(v: number) {\n    C.#v = v;\n  }\n}\n`;
+  const decl = classOf(source);
   assert.deepEqual(
-    gateCodes(`class C {\n  static get #x(): number {\n    return 1;\n  }\n}\n`, 'ts'),
+    decl.statics.map((s) => s.name),
+    ['C.#v', 'C.get #x', 'C.set #x'],
+    'the pair joins the statics under the declaring class, exactly as public ones do',
+  );
+  assert.deepEqual(gateCodes(source, 'ts'), []);
+  assert.deepEqual(gateCodes(source, 'js'), []);
+});
+
+test('a lone static #private half over an ancestor pair stays not-yet', () => {
+  // The missing half would resolve to a binding the subclass never emitted -- the private twin
+  // of the identifier pair rule the neighboring test pins.
+  assert.deepEqual(
+    gateCodes(
+      `class C {\n  static get #x(): number {\n    return 1;\n  }\n  static set #x(v: number) {\n  }\n}\nclass D extends C {\n  static get #x(): number {\n    return 2;\n  }\n}\n`,
+      'ts',
+    ),
     ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(
+      `class C {\n  static get #x(): number {\n    return 1;\n  }\n  static set #x(v: number) {\n  }\n}\nclass D extends C {\n  static get #x(): number {\n    return 2;\n  }\n  static set #x(v: number) {\n  }\n}\n`,
+      'ts',
+    ),
+    [],
   );
 });
 

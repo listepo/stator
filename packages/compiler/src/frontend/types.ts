@@ -217,7 +217,16 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
     }
     for (const property of checker.getPropertiesOfType(ancestorType)) {
       const at = property.valueDeclaration ?? property.declarations?.[0];
-      const name = hirPropertyName(property.name);
+      // A `#private` name is scoped to the class body that writes it, so each declaring class
+      // gets its own slot under a per-class name (`#x@A` vs `#x@B`): the claimed set keys the
+      // MANGLED name, which is what lets a re-declaration add a slot instead of colliding with
+      // (or shadowing) the ancestor's. The gate holds the one boundary this cannot express: two
+      // classes in one chain sharing both the class name and the private name mangle alike.
+      const rawName = hirPropertyName(property.name);
+      const owner = rawName.startsWith('#')
+        ? privateOwnerName(property, at, chain, ancestor)
+        : undefined;
+      const name = owner === undefined ? rawName : privateSlotName(owner, rawName);
       if (at === undefined || claimed.has(name)) {
         continue;
       }
@@ -237,13 +246,19 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
       if (getter || setter) {
         if (getter) {
           methods.push({
-            name: accessorName('get', property.name),
+            name:
+              owner === undefined
+                ? accessorName('get', property.name)
+                : privateMethodName(owner, accessorName('get', property.name)),
             type: hFunction([], valueType),
           });
         }
         if (setter) {
           methods.push({
-            name: accessorName('set', property.name),
+            name:
+              owner === undefined
+                ? accessorName('set', property.name)
+                : privateMethodName(owner, accessorName('set', property.name)),
             type: hFunction([valueType], H_UNDEFINED),
           });
         }
@@ -505,7 +520,18 @@ export function computedKeyStaticName(
   name: ts.ComputedPropertyName,
   checker: ts.TypeChecker,
 ): string | null {
-  const expr = name.expression;
+  return elementStaticKey(name.expression, checker);
+}
+
+/** The compile-time name of an element-access key expression, or `null` when the key is a
+ * runtime value. The same rule `computedKeyStaticName` answers for a `ComputedPropertyName`,
+ * asked of the bare expression instead: a string literal in source is its own name, anything
+ * else is answered by the checker's TYPE (`const k = "m"` has the literal type `"m"`, so
+ * `c[k]` is the name `m` -- the same member the dot spelling reads -- while `k: string` is
+ * not a name at all). A number literal answers `String(value)`, the spelling TypeScript itself
+ * uses for the property it declares. A union of literals, a symbol, or anything wider is
+ * `null`: the key is genuinely not known until the program runs. */
+export function elementStaticKey(expr: ts.Expression, checker: ts.TypeChecker): string | null {
   if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
     return expr.text;
   }
@@ -598,9 +624,12 @@ export function ancestry(
 }
 
 /** The class a declaration extends, or `undefined`. `implements` clauses are skipped: they are
- * type-only and erase, so they contribute nothing to a layout. */
+ * type-only and erase, so they contribute nothing to a layout. Takes an expression as well as a
+ * declaration -- the gate vets both through one path, and only the heritage CLAUSE is read here,
+ * which the two spell identically. The BASE is still always a declaration: extending an
+ * expression reaches a layout that was never emitted. */
 export function baseClassOf(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): ts.ClassDeclaration | undefined {
   const clause = declaration.heritageClauses?.find((h) => h.token === ts.SyntaxKind.ExtendsKeyword);
@@ -646,6 +675,57 @@ export function hirPropertyName(name: string): string {
     : name;
 }
 
+/** Whether an HIR member name is a `#private` one: a field (`#x@A`), or an accessor half
+ * (`get #x@A`, `set #x@A`). Public names can never take these shapes -- an identifier holds no
+ * `#` or space -- so the test is exact, on both the raw (`#x`) and the mangled spellings. */
+export function isPrivateMemberName(name: string): boolean {
+  return name.startsWith('#') || name.startsWith('get #') || name.startsWith('set #');
+}
+
+/** The slot an instance `#private` member lives under: the raw name qualified by the class that
+ * declares it (`#x` in `A` is `#x@A`).
+ *
+ * Two `#x` in one chain are TWO fields in JavaScript -- a private name is scoped to the class
+ * body that writes it -- so one spelling needs one slot per declaring class. The `@owner`
+ * suffix is unspellable (a PrivateIdentifier holds no `@`), and the leading `#` is kept so
+ * every reflective walk that already filters `#private` storage (`is_private_field` in the
+ * runtime, the spread skip, print) keeps filtering it without learning a second spelling. */
+export function privateSlotName(owner: string, raw: string): string {
+  return `#${raw.slice(1)}@${owner}`;
+}
+
+/** The member-function name an instance `#private` method or accessor lowers under: the same
+ * per-class qualification applied to the whole mangled method name, so `get #x` in `A` is
+ * `get #x@A` and `#m` in `A` is `#m@A`. Public names pass through unchanged. */
+export function privateMethodName(owner: string, raw: string): string {
+  if (raw.startsWith('get #') || raw.startsWith('set #')) {
+    const space = raw.indexOf(' ');
+    return `${raw.slice(0, space + 1)}${privateSlotName(owner, raw.slice(space + 1))}`;
+  }
+  return raw.startsWith('#') ? privateSlotName(owner, raw) : raw;
+}
+
+/** The source name of the class that declares `property`, or `undefined` when no declaration in
+ * `chain` claims it. The checker's property list is per TYPE -- an inherited `#x` appears on the
+ * subclass's list under the ancestor's declaration -- so the owner is read off the declaration,
+ * never off the type being built. Falls back to the ancestor whose list carries the symbol, for
+ * a `.js` field the checker attributes without a member node. */
+function privateOwnerName(
+  property: ts.Symbol,
+  at: ts.Declaration | undefined,
+  chain: readonly ts.ClassDeclaration[],
+  ancestor: ts.ClassDeclaration,
+): string | undefined {
+  const parent = at !== undefined && ts.isClassDeclaration(at.parent) ? at.parent : undefined;
+  const owner =
+    parent !== undefined && parent.name !== undefined
+      ? parent
+      : (chain.find((candidate) =>
+          (property.declarations ?? []).some((d) => d.parent === candidate),
+        ) ?? ancestor);
+  return owner.name?.text;
+}
+
 /** `[Symbol.iterator]` as a computed name. Does not ask whether `Symbol` is the global — the
  * caller that admits the spelling as the well-known method does. */
 export function symbolIteratorAccess(
@@ -668,9 +748,18 @@ export function symbolIteratorAccess(
   return expr;
 }
 
-/** The HIR method name a class member goes under. `[Symbol.iterator]` is the one computed name
- * that is a name: it is the well-known iterator method, stored under `ITERATOR_METHOD_NAME`. */
-export function instanceMethodName(member: ts.NamedDeclaration): string | undefined {
+/** The HIR method name a class member goes under.
+ *
+ * `[Symbol.iterator]` is a name: the well-known iterator method, stored under
+ * `ITERATOR_METHOD_NAME`. Any other computed key with a static name (`const k = "m"` makes
+ * `[k]` the name `m`, the step-22 computed-literal rule) is the name the direct spelling
+ * writes, so it resolves the same way. A computed key without one is not a name until there
+ * is a shape table to look it up in -- a class layout has none, so fully dynamic keys stay
+ * `STA1214` (the gate records the boundary). */
+export function instanceMethodName(
+  member: ts.NamedDeclaration,
+  checker: ts.TypeChecker,
+): string | undefined {
   if (member.name === undefined) {
     return undefined;
   }
@@ -683,7 +772,10 @@ export function instanceMethodName(member: ts.NamedDeclaration): string | undefi
   if (!ts.isComputedPropertyName(member.name)) {
     return undefined;
   }
-  return symbolIteratorAccess(member.name) === undefined ? undefined : ITERATOR_METHOD_NAME;
+  if (symbolIteratorAccess(member.name) !== undefined) {
+    return ITERATOR_METHOD_NAME;
+  }
+  return computedKeyStaticName(member.name, checker) ?? undefined;
 }
 
 /** True when `name` is a global `[Symbol.iterator]` computed name — the well-known method, not a
@@ -741,12 +833,16 @@ export function staticMemberOf(
     current = baseClassOf(current, checker)
   ) {
     seen.add(current);
+    // An identifier names itself; a literal-typed computed key (`static [k]` with `k: "m"`)
+    // is the name the direct spelling writes, so it matches the same read. String/numeric
+    // literal spellings keep their old verdict -- this predicate only learns the computed
+    // case, never a second spelling for what is already refused.
     const member = current.members.find(
       (m) =>
         isStaticMember(m) &&
         m.name !== undefined &&
-        (ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) &&
-        m.name.text === name,
+        (((ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) && m.name.text === name) ||
+          (ts.isComputedPropertyName(m.name) && computedKeyStaticName(m.name, checker) === name)),
     );
     if (member !== undefined) {
       return wantMethod === undefined || ts.isMethodDeclaration(member) === wantMethod
@@ -781,7 +877,11 @@ export function methodDeclaringClass(
     return accessorDeclaringClass(declaration, property, checker)?.owner;
   }
   for (const current of ancestry(declaration, checker).toReversed()) {
-    if (current.members.some((m) => ts.isMethodDeclaration(m) && instanceMethodName(m) === name)) {
+    if (
+      current.members.some(
+        (m) => ts.isMethodDeclaration(m) && instanceMethodName(m, checker) === name,
+      )
+    ) {
       return current;
     }
   }
@@ -799,12 +899,14 @@ export function accessorDeclaringClass(
 ): { owner: ts.ClassDeclaration; get: boolean; set: boolean } | undefined {
   for (const current of ancestry(declaration, checker).toReversed()) {
     // Identifiers and #private names alike: a private accessor (`get #x`) is a member function
-    // under a mangled name exactly as a public one is (plan.md §8 step 12(d)).
+    // under a mangled name exactly as a public one is (plan.md §8 step 12(d)). A literal-typed
+    // computed name (`get [k]` with `k: "x"`) is the name the direct spelling writes, so it
+    // matches the same read; anything wider has no name to match under.
     const named = current.members.filter(
       (m) =>
         (ts.isGetAccessor(m) || ts.isSetAccessor(m)) &&
-        (ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) &&
-        m.name.text === name,
+        (((ts.isIdentifier(m.name) || ts.isPrivateIdentifier(m.name)) && m.name.text === name) ||
+          (ts.isComputedPropertyName(m.name) && computedKeyStaticName(m.name, checker) === name)),
     );
     if (named.length > 0) {
       return {

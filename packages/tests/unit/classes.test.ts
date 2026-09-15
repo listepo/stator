@@ -378,12 +378,12 @@ test('a #private member is an ordinary slot: privacy is a printing rule, not a l
   const cls = classNamed(`${PRIVATE}console.log(new Vault().peek());\n`, 'Vault');
   assert.deepEqual(
     cls.fields.map((f) => f.name),
-    ['#secret', 'open'],
-    'the # is carried into the slot name -- it is the whole signal util.inspect reads',
+    ['#secret@Vault', 'open'],
+    'the # is carried into the per-class slot name -- it is the whole signal util.inspect reads',
   );
   assert.deepEqual(
     cls.methods.map((m) => m.name),
-    ['#reveal', 'peek'],
+    ['#reveal@Vault', 'peek'],
     'a #private method dispatches like any other, so it is a member function like any other',
   );
   assert.deepEqual(
@@ -393,10 +393,19 @@ test('a #private member is an ordinary slot: privacy is a printing rule, not a l
   );
 });
 
+test('a re-declared #private name gets one slot per declaring class', () => {
+  const code = `class A {\n  #x: number = 1;\n  readA(): number {\n    return this.#x;\n  }\n}\nclass B extends A {\n  #x: number = 2;\n  readB(): number {\n    return this.#x;\n  }\n}\nconsole.log(new B().readA() + new B().readB());\n`;
+  assert.deepEqual(
+    classNamed(code, 'B').fields.map((f) => f.name),
+    ['#x@A', '#x@B'],
+    'ancestor slot first, then the re-declaration -- two spellings, two slots',
+  );
+});
+
 test('a #private field access indexes its slot like a public one', () => {
   // `#secret` is slot 0 because it is declared first; nothing about privacy reorders the layout.
   const cls = classNamed(`${PRIVATE}console.log(new Vault().peek());\n`, 'Vault');
-  const reveal = cls.methods.find((m) => m.name === '#reveal');
+  const reveal = cls.methods.find((m) => m.name === '#reveal@Vault');
   const ret = reveal?.fn.body.statements[0];
   assert.equal(ret?.kind, 'return-statement');
   const value = (ret as Extract<Statement, { kind: 'return-statement' }>).value;

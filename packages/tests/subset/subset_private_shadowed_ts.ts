@@ -1,9 +1,8 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: Private fields
-// A subclass re-declaring an ancestor's #private name: two distinct slots that share a spelling,
-// which the one-name-one-slot layout cannot express yet.
+// A subclass re-declaring an ancestor's #private name: two distinct slots under per-class
+// names, each body reading the slot its own class declared.
 
 class Base {
   #tag: string = 'b';

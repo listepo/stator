@@ -357,6 +357,57 @@ void test('statics are accepted; what has no class object to read is not', () =>
   assert.deepEqual(codesFor('class C {\n  static n = 1;\n}\nconsole.log(C.name);'), ['STA1214']);
 });
 
+void test('a class expression is vetted like a declaration but stays not-yet on the class object', () => {
+  // `const C = class { … }` used to fall into the describeKind catch-all ("classes is not yet
+  // supported"). It now runs through gateClass: a broken member reads as the member problem,
+  // and a well-formed expression names itself instead. The verdict stays STA1214 in both modes:
+  // an expression IS a value, and a value needs the class object (plan.md §8 step 12e), which
+  // does not exist here -- so the lowering keeps its no-ClassExpression-arm shape.
+  for (const mode of ['ts', 'js'] as const) {
+    const { program } = createProgram(
+      'const C = class { m() { return 7; } }',
+      mode === 'js' ? '/test.js' : '/test.ts',
+    );
+    const diags = gateProgram(program, mode);
+    assert.deepEqual(
+      diags.map((d) => d.code),
+      ['STA1214'],
+    );
+    assert.match(
+      diags[0]?.message ?? '',
+      /an anonymous class expression is not yet supported; planned for Phase 5/,
+    );
+  }
+  // A named expression names its inner binding; an anonymous DECLARATION keeps its own message.
+  const { program: namedProgram } = createProgram(
+    'const C = class D { m() { return 7; } }',
+    '/test.ts',
+  );
+  const named = gateProgram(namedProgram, 'ts');
+  assert.deepEqual(
+    named.map((d) => d.code),
+    ['STA1214'],
+  );
+  assert.match(named[0]?.message ?? '', /a class expression 'D' is not yet supported/);
+  const { program: declProgram } = createProgram(
+    'export default class { m() { return 7; } }\n',
+    '/test.ts',
+  );
+  const decl = gateProgram(declProgram, 'ts');
+  assert.deepEqual(
+    decl.map((d) => d.code),
+    ['STA1214'],
+  );
+  assert.match(decl[0]?.message ?? '', /an anonymous class is not yet supported/);
+  // Shared vetting, not a duplicated one: a computed member in an expression reports the member.
+  assert.deepEqual(
+    codesFor(
+      'const key = "k";\nconst C = class D { [key]() { return 1; } };\nexport const x = 1;\n',
+    ),
+    ['STA1214'],
+  );
+});
+
 void test('this is gated, not left to the lowering', () => {
   // `this` is a TOKEN, and the gate short-circuits tokens. It is exempted by name, without which
   // its case is dead code and `this` outside a class reaches an internal error instead.
@@ -369,7 +420,7 @@ void test('this is gated, not left to the lowering', () => {
   );
 });
 
-void test('#private members are accepted; sharing a name down the chain is not', () => {
+void test('#private members are accepted, re-declared down the chain included', () => {
   assert.deepEqual(
     codesFor(`class C {
   #n: number = 0;
@@ -382,14 +433,14 @@ console.log(new C().get());
     [],
     'a #private field, method and static are ordinary members with an unspellable name',
   );
-  // One name, one slot: two #private `#n`s in one chain are two distinct slots that a layout
-  // keyed by name cannot hold apart, so the gate refuses rather than merging them.
+  // One spelling, one slot PER CLASS: two `#n`s in one chain are two distinct slots under two
+  // per-class names, so each body reads the slot its own class declared.
   assert.deepEqual(
     codesFor(`class B { #n: number = 0; b(): number { return this.#n; } }
 class D extends B { #n: number = 1; d(): number { return this.#n; } }
 console.log(new D().d() + new D().b());
 `),
-    ['STA1214'],
+    [],
   );
 });
 

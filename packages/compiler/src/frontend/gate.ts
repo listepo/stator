@@ -7,7 +7,7 @@ import type {
   RegExpOperation,
 } from '../hir/nodes.ts';
 import type { HType } from '../hir/types.ts';
-import { hTypeEquals, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
+import { accessorName, hTypeEquals, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
@@ -36,6 +36,7 @@ import {
   baseClassOf,
   classDeclarationOf,
   computedKeyStaticName,
+  elementStaticKey,
   hasExplicitAny,
   ITERATOR_METHOD_NAME,
   instanceMethodName,
@@ -456,8 +457,13 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
     case ts.SyntaxKind.ForOfStatement:
       return gateForOf(node as ts.ForOfStatement, typeChecker);
 
+    // `class C { … }` and `const C = class { … }` share one gate: the declaration lowers to
+    // a descriptor plus bindings, while the expression is a VALUE and needs the class object
+    // rung 6b never allocated (plan.md §8 step 12e) -- so the same member vetting runs for both
+    // and only the expression takes the final not-yet below.
     case ts.SyntaxKind.ClassDeclaration:
-      return gateClass(node as ts.ClassDeclaration, typeChecker);
+    case ts.SyntaxKind.ClassExpression:
+      return gateClass(node as ts.ClassDeclaration | ts.ClassExpression, typeChecker);
 
     case ts.SyntaxKind.ObjectLiteralExpression:
       return gateObjectLiteral(node as ts.ObjectLiteralExpression, typeChecker);
@@ -521,9 +527,17 @@ function gateConstruct(node: ts.Node, mode: Mode, typeChecker: ts.TypeChecker): 
 
     // `[Symbol.iterator]` on a class method, or `[key]` on an object literal member.
     // gateObjectLiteral / gateClass vetted the enclosing literal or class; this node is their
-    // child, reached on the way down.
+    // child, reached on the way down. A literal-typed computed class member name (`[k]` with
+    // `k: "m"`) is the name the direct spelling writes, so it rides the class's verdict the
+    // same way; anything wider is refused where the member is.
     case ts.SyntaxKind.ComputedPropertyName:
       if (isObjectLiteralComputedKey(node as ts.ComputedPropertyName)) {
+        return { kind: 'accept' };
+      }
+      if (
+        isClassMemberComputedKey(node as ts.ComputedPropertyName) &&
+        computedKeyStaticName(node as ts.ComputedPropertyName, typeChecker) !== null
+      ) {
         return { kind: 'accept' };
       }
       return isGlobalSymbolIteratorName(node as ts.ComputedPropertyName, typeChecker)
@@ -1412,6 +1426,22 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
  * dynamic path; only writes refuse. Private names are excluded: `this.#x` is always declared
  * where it may be written, and anything else the checker refuses first. */
 function isAbsentClassMemberWrite(target: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (ts.isElementAccessExpression(target)) {
+    // The element twin of the property rule below: `c[k] = v` where `k` statically names a
+    // member the class never declared grows the fixed layout, which waits on Phase 8's
+    // dictionary mode. A runtime key is not absent, just dynamic -- gateElementAccess decides
+    // it -- and a non-class receiver never reaches the layout question at all.
+    const key = elementStaticKey(target.argumentExpression, checker);
+    if (key === null) {
+      return false;
+    }
+    if (classDeclarationOf(checker.getTypeAtLocation(target.expression)) === undefined) {
+      return false;
+    }
+    return (
+      checker.getPropertyOfType(checker.getTypeAtLocation(target.expression), key) === undefined
+    );
+  }
   if (!ts.isPropertyAccessExpression(target) || ts.isPrivateIdentifier(target.name)) {
     return false;
   }
@@ -1701,10 +1731,11 @@ function nonNullishConstituents(type: ts.Type): readonly ts.Type[] {
  * a plain object/interface remainder (function-valued fields read as closures). See the call
  * site for why only a class instance or a builtin receiver is refused. */
 function optionalChainMethodReceiver(
-  callee: ts.PropertyAccessExpression,
+  receiver: ts.Expression,
+  name: string,
   typeChecker: ts.TypeChecker,
 ): GateResult | undefined {
-  const live = nonNullishConstituents(typeChecker.getTypeAtLocation(callee.expression));
+  const live = nonNullishConstituents(typeChecker.getTypeAtLocation(receiver));
   // Vacuously true on an all-nullish union (which the checker never lets through, since no
   // member access typechecks on one): the guard below always skips, and the consequent is dead
   // but well-formed, so accepting is both safe and unreachable.
@@ -1723,7 +1754,7 @@ function optionalChainMethodReceiver(
       }
     }
     return notYet(
-      `calling '${callee.name.text}' through an optional chain on this receiver is not yet supported`,
+      `calling '${name}' through an optional chain on this receiver is not yet supported`,
       5,
     );
   }
@@ -2251,7 +2282,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       // Only a class instance or a builtin receiver is refused: the two whose members the
       // shape table does not hold.
       if (callee.questionDotToken !== undefined) {
-        const refused = optionalChainMethodReceiver(callee, typeChecker);
+        const refused = optionalChainMethodReceiver(
+          callee.expression,
+          callee.name.text,
+          typeChecker,
+        );
         if (refused !== undefined) {
           return refused;
         }
@@ -2267,6 +2302,26 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       return notYet('method calls are not yet supported', 5);
     }
     return { kind: 'accept' };
+  }
+
+  // `c?.[k]()` on a class instance or builtin receiver: the element spelling of the
+  // optional-chain method refusal above, asked in exactly the position the dot spelling asks
+  // it -- only when the receiver resolves to no class declaration. A class instance takes
+  // the OptionalChain path like its dot twin; anything else is decided by the element-access
+  // gate when the child node is reached.
+  if (ts.isElementAccessExpression(callee) && callee.questionDotToken !== undefined) {
+    const key = elementStaticKey(callee.argumentExpression, typeChecker);
+    if (key !== null) {
+      const declaration =
+        classDeclarationOf(typeChecker.getTypeAtLocation(callee.expression)) ??
+        constraintDeclaration(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
+      if (declaration === undefined) {
+        const refused = optionalChainMethodReceiver(callee.expression, key, typeChecker);
+        if (refused !== undefined) {
+          return refused;
+        }
+      }
+    }
   }
 
   // `super(...)`, which the gate reaches only after gateClass proved it is the first statement of a
@@ -2743,6 +2798,25 @@ function isObjectLiteralComputedKey(name: ts.ComputedPropertyName): boolean {
   return false;
 }
 
+/** A computed name written on a class member (`[k]` on a method, field, or accessor). The
+ * declaration's own verdict lives in gateClass; this only tells the child-node walk that the
+ * spelling belongs to a class, so a statically-known key can ride the class's verdict instead
+ * of earning a second diagnostic of its own. */
+function isClassMemberComputedKey(name: ts.ComputedPropertyName): boolean {
+  const parent = name.parent;
+  const isMember =
+    ts.isMethodDeclaration(parent) ||
+    ts.isPropertyDeclaration(parent) ||
+    ts.isGetAccessorDeclaration(parent) ||
+    ts.isSetAccessorDeclaration(parent);
+  return (
+    isMember &&
+    parent.name === name &&
+    parent.parent !== undefined &&
+    ts.isClassDeclaration(parent.parent)
+  );
+}
+
 /** ECMA-262's array-index test on a property key: the canonical decimal spelling of a number below
  * 2^32-1. `"01"` and `"1.0"` are ordinary string keys — only the canonical form is an index. */
 function isIntegerIndex(key: string): boolean {
@@ -2778,6 +2852,29 @@ function gateObjectLiteral(
     if (ts.isSpreadAssignment(property)) {
       const asserted = tsTypeToHType(checker.getTypeAtLocation(property.expression), checker);
       const spread = spreadOperandType(property.expression, checker);
+      // `{ ...a }` over an array: indices first, then named extras through the array's own
+      // shape table (the step-38 walk), copied onto a dynamic result. The lowering folds every
+      // run around such a spread through `object-static assign`, so the result is dynamic BY
+      // CONSTRUCTION and needs no layout decision here -- which is why this accepts before the
+      // fixed-shape test below rather than inside it. No method check either: an HType array
+      // carries no methods, and `Array.prototype` members are not own properties, so there is
+      // nothing to copy and no slot layout for a copy to depend on (the S-C prefix rule answers
+      // only for literal-shaped sources). A tuple stays refused below: it maps to Unknown, and
+      // its statically-known length belongs to the unknown-spread owner, not this arm.
+      //
+      // Accepted only when the literal takes the dynamic path (`objectLiteralIsDynamic`): an
+      // array spread materializes the Array interface as named members in the checker's type
+      // while dropping the index signature as soon as an own key joins it (`{...a, x}` types
+      // `{x, length, pop, ...}` with no index), so a fixed-shape binding would promise slots
+      // the dynamic value never builds -- and every static read of one would miscompile
+      // (`o.length` answers `undefined` in Node and garbage from a slot load). A dynamic
+      // literal binds Unknown, and Unknown reads go through the shape table, which answers
+      // what the copy actually holds. Bare (`{...a}`), multi-array (`{...a, ...b}`) and
+      // dynamically-annotated spreads keep their index signature and stay dynamic; anything
+      // else stays on the refusal below.
+      if (spread.kind === 'array' && objectLiteralIsDynamic(literal, checker)) {
+        continue;
+      }
       if (spread.kind !== 'object') {
         // A dropped `as` assertion to a fixed shape (`...(u as { x: number })` with `u: unknown`)
         // passes the shape test on the asserted type but lowers to Unknown, which the lowering
@@ -2904,12 +3001,18 @@ function gateObjectLiteral(
  *
  * Each rejection below is a real property of the layout, not a scheduling accident: a static
  * initialization block and a static accessor need the class OBJECT, which a plain binding is not;
- * a re-declared FIELD would be two declarations of one slot; a `#private` name an ancestor also
- * declares would be two fields sharing one; and a computed member name is not a name at all until
- * there is a shape to look it up in. */
-function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): GateResult {
+ * a re-declared FIELD would be two declarations of one slot; an instance `#private` FIELD an
+ * ancestor also declares under the SAME class name would be two fields sharing one mangled slot
+ * (`#x@A` twice -- per-class mangling holds every other redeclare apart); and a computed member
+ * name is not a name at all until there is a shape to look it up in. */
+function gateClass(
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+  checker: ts.TypeChecker,
+): GateResult {
   if (declaration.name === undefined) {
-    return notYet('an anonymous class is not yet supported', 5);
+    return ts.isClassExpression(declaration)
+      ? notYet('an anonymous class expression is not yet supported', 5)
+      : notYet('an anonymous class is not yet supported', 5);
   }
   // A generic class specializes at module scope: its tuples are collected per file and its
   // descriptors emitted there, so a declaration nested in a function or block would leak scope
@@ -2918,7 +3021,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
   if (
     declaration.typeParameters !== undefined &&
     declaration.typeParameters.length > 0 &&
-    !ts.isSourceFile(declaration.parent)
+    !isClassAtModuleScope(declaration)
   ) {
     return notYet('a nested generic class is not yet supported', 5);
   }
@@ -2928,7 +3031,18 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
   }
   const inheritedInstance = ancestorMembers(declaration, checker, false);
   const inheritedStatic = ancestorMembers(declaration, checker, true);
-  const inheritedPrivates = ancestorPrivates(declaration, checker);
+  // The one `#private` shape per-class mangling cannot hold apart: an instance FIELD re-declared
+  // under one class NAME twice in a chain would mangle to one slot (`#x@A` twice) that two
+  // initializers write and two bodies read. Every other re-declare -- fields, methods and
+  // accessors across distinct class names, and all statics, whose bindings already carry the
+  // declaring class -- has distinct storage and is accepted in the member loop below.
+  const collidingPrivate = privateNameCollision(declaration, checker);
+  if (collidingPrivate !== undefined) {
+    return notYet(
+      `a #private member named '${collidingPrivate}' that an ancestor also declares is not yet supported`,
+      5,
+    );
+  }
 
   let constructors = 0;
   for (const member of declaration.members) {
@@ -2939,10 +3053,16 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       if (member.body === undefined) {
         return notYet('an accessor with no body is not yet supported', 5);
       }
-      // A computed name is not a name until there is a shape table to look it up in; a #private
-      // name is a name, scoped to this class body, and lowers as a mangled member function like
-      // any other accessor.
-      if (!ts.isIdentifier(member.name) && !ts.isPrivateIdentifier(member.name)) {
+      // A computed name with a static name (`get [k]` with `k: "x"`) IS the name the direct
+      // spelling writes -- the step-22 computed-literal rule -- so it takes the ordinary
+      // accessor path below. A #private name is a name too, scoped to this class body, and
+      // lowers as a mangled member function like any other accessor. Anything wider is not a
+      // name until there is a shape table to look it up in, and a class layout has none.
+      if (
+        !ts.isIdentifier(member.name) &&
+        !ts.isPrivateIdentifier(member.name) &&
+        classMemberStaticName(member, checker) === undefined
+      ) {
         return notYet('a computed accessor name is not yet supported', 5);
       }
       if (isStaticMember(member)) {
@@ -2951,17 +3071,25 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
         // Shadowing an inherited static follows the shared same-kind rule below: a complete pair
         // over anything keeps one working pair per class, while a lone half would split the pair
         // across the chain.
-        if (!ts.isIdentifier(member.name)) {
+        const staticOk = classMemberStaticName(member, checker);
+        if (staticOk === undefined) {
           return notYet('a static #private accessor name is not yet supported', 5);
         }
+        if (ts.isPrivateIdentifier(member.name)) {
+          // A static `#private` pair is per-class like any static binding (`C.get #x` vs
+          // `D.get #x`), so re-declaring one is shadowing, not overriding -- held to the same
+          // complete-pair rule as the identifier spelling: a lone half over an ancestor's pair
+          // would resolve its missing half to a binding the subclass never emitted.
+          if (!privateStaticPairComplete(member, declaration, checker)) {
+            return notYet(`overriding the inherited member '${staticOk}' is not yet supported`, 5);
+          }
+          continue;
+        }
         if (
-          inheritedStatic.has(member.name.text) &&
+          inheritedStatic.has(staticOk) &&
           !inheritedShadowIsSameKind(member, declaration, checker)
         ) {
-          return notYet(
-            `overriding the inherited member '${member.name.text}' is not yet supported`,
-            5,
-          );
+          return notYet(`overriding the inherited member '${staticOk}' is not yet supported`, 5);
         }
         continue;
       }
@@ -2984,11 +3112,14 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       // An accessor re-declaring an inherited name is overriding, and an accessor is dispatched
       // directly -- the method table is indexed only where the lowering proved a method is
       // declared twice, which it asks of method DECLARATIONS.
-      if (inheritedInstance.has(member.name.text)) {
-        return notYet(
-          `overriding the inherited member '${member.name.text}' is not yet supported`,
-          5,
-        );
+      {
+        const overrideName = classMemberStaticName(member, checker);
+        if (overrideName !== undefined && inheritedInstance.has(overrideName)) {
+          return notYet(
+            `overriding the inherited member '${overrideName}' is not yet supported`,
+            5,
+          );
+        }
       }
       continue;
     }
@@ -3023,34 +3154,35 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       !ts.isIdentifier(member.name) &&
       !ts.isPrivateIdentifier(member.name)
     ) {
-      // `[Symbol.iterator]()` is the one computed name that is a name: the well-known iterator
-      // method, stored under TypeScript's `__@iterator`. A field, a static, or any other computed
-      // spelling still needs a shape table.
-      if (
-        !(
-          ts.isMethodDeclaration(member) &&
-          !isStaticMember(member) &&
-          isGlobalSymbolIteratorName(member.name, checker)
-        )
-      ) {
+      // `[Symbol.iterator]()` is the well-known iterator method, stored under TypeScript's
+      // `__@iterator`. A literal-typed computed key (`[k]` with `k: "m"`) is the name the
+      // direct spelling writes -- the step-22 computed-literal rule -- so it takes the ordinary
+      // member path below. Anything wider is not a name until there is a shape table to look
+      // it up in, and a class layout has none: fully dynamic keys stay `STA1214`.
+      //
+      // Integer-like static names stay refused too: `OrdinaryOwnPropertyKeys` sorts those
+      // ahead of the string keys in ascending numeric order, while a fixed layout is
+      // declaration order by definition -- the same reason an integer-like object-literal key
+      // takes the dynamic path, which a class instance has no form of.
+      const staticName =
+        ts.isComputedPropertyName(member.name) && !isGlobalSymbolIteratorName(member.name, checker)
+          ? computedKeyStaticName(member.name, checker)
+          : null;
+      const isIteratorMethod =
+        ts.isMethodDeclaration(member) &&
+        !isStaticMember(member) &&
+        isGlobalSymbolIteratorName(member.name, checker);
+      if (!isIteratorMethod && (staticName === null || isIntegerIndex(staticName))) {
         return notYet('a computed class member name is not yet supported', 5);
       }
     }
     // Two `#x` in one chain are TWO fields in JavaScript -- a private name is scoped to the class
     // body that writes it, so a subclass's `#x` does not override its base's, and an instance
-    // carries both. The slot list is keyed by NAME, so it would give them one slot and let each
-    // write clobber the other. A name is a fact about a layout here, which is what makes this a
-    // real limit rather than a scheduling one.
-    if (
-      member.name !== undefined &&
-      ts.isPrivateIdentifier(member.name) &&
-      inheritedPrivates.has(member.name.text)
-    ) {
-      return notYet(
-        `a #private member named '${member.name.text}' that an ancestor also declares is not yet supported`,
-        5,
-      );
-    }
+    // carries both. Each declaring class gets its own slot under a per-class name (`#x@A` vs
+    // `#x@B`), so a re-declaration adds storage instead of colliding -- accepted here and
+    // resolved lexically in the lowering. The one shape that still shares one slot (an instance
+    // field re-declared under one class name twice in a chain) was refused before the loop,
+    // where the whole chain is visible.
     if (ts.isConstructorDeclaration(member)) {
       // An overload signature has no body and declares nothing to emit; the implementation
       // below is what runs, so the signature is skipped once one exists. Two BODIES would be
@@ -3087,7 +3219,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
     // declaring class, which is what JavaScript does (`D.n` and `C.n` are independent once both
     // declare it). Anything else -- a slot and a method under one name, or half an accessor
     // pair -- is not expressible and stays refused.
-    const inheritedName = instanceMethodName(member);
+    const inheritedName = instanceMethodName(member, checker);
     // An overload signature declares nothing to emit -- the same-name implementation carries
     // the override, so the signature itself skips this check and is vetted by the method arm
     // below. (Constructors never reach here; their arm continues first.)
@@ -3114,7 +3246,7 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
         // A method table is one file-scope constant per class, so no method in an overriding family
         // may capture. A class at module scope has nothing to capture; a class inside a function may,
         // and there is no per-instantiation table to hold what it captured.
-        if (!ts.isSourceFile(declaration.parent)) {
+        if (!isClassAtModuleScope(declaration)) {
           return notYet(
             'overriding a method in a class declared inside a function is not yet supported',
             5,
@@ -3126,13 +3258,13 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       if (member.body === undefined) {
         // An overload signature declares nothing to emit; the same-name implementation below
         // runs. With no implementation in the class there is nothing to run (`declare` members).
-        const name = instanceMethodName(member);
+        const name = instanceMethodName(member, checker);
         const implemented = declaration.members.some(
           (m) =>
             m !== member &&
             ts.isMethodDeclaration(m) &&
             m.body !== undefined &&
-            instanceMethodName(m) === name,
+            instanceMethodName(m, checker) === name,
         );
         if (!implemented) {
           return notYet('a method overload signature is not yet supported', 5);
@@ -3163,11 +3295,14 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
       // this path. Only a plain data field (an identifier or `#private` name) lands here: any
       // other spelling keeps its STA1214, as do accessors and computed members via their own
       // arms above (which fire first; this guard holds the boundary if that order ever moves).
+      // A literal-typed computed field (`[k]?: number` with `k: "x"`) is a plain data field
+      // under the step-22 rule, so it joins the identifier path rather than this refusal.
       if (
         member.questionToken !== undefined &&
         member.initializer === undefined &&
         !ts.isIdentifier(member.name) &&
-        !ts.isPrivateIdentifier(member.name)
+        !ts.isPrivateIdentifier(member.name) &&
+        classMemberStaticName(member, checker) === undefined
       ) {
         return notYet('an optional class field is not yet supported', 5);
       }
@@ -3178,14 +3313,46 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
   if (constructors > 1) {
     return notYet('more than one constructor is not yet supported', 5);
   }
+  // A class expression is a VALUE where a declaration is a binding: even a well-formed one needs
+  // the class object, which does not exist here (plan.md §8 step 12e -- the same blocker as
+  // `using a class as a value`). The lowering has no ClassExpression arm, so accepting here
+  // would only trade this STA1214 for an STA4031 internal error. Member-specific refusals above
+  // still fire first, so a broken member reads as broken rather than as deferred.
+  if (ts.isClassExpression(declaration)) {
+    const name = declaration.name.text;
+    return notYet(`a class expression '${name}' is not yet supported`, 5);
+  }
   return { kind: 'accept' };
+}
+
+/** Whether a class sits at module scope: a declaration directly under the source file, or an
+ * expression whose whole statement does. `const C = class …` nests the class inside the
+ * declaration that binds it, so reading the direct parent would call every top-level expression
+ * "nested" -- the walk passes through the binding and statement wrappers (and an
+ * `export default (…)` around one) to the statement that is, or is not, at the top level. */
+function isClassAtModuleScope(node: ts.ClassDeclaration | ts.ClassExpression): boolean {
+  let current: ts.Node = node;
+  while (
+    ts.isVariableDeclaration(current.parent) ||
+    ts.isVariableDeclarationList(current.parent) ||
+    ts.isVariableStatement(current.parent) ||
+    ts.isExpressionStatement(current.parent) ||
+    ts.isParenthesizedExpression(current.parent) ||
+    ts.isExportAssignment(current.parent)
+  ) {
+    current = current.parent;
+  }
+  return ts.isSourceFile(current.parent);
 }
 
 /** The `extends`/`implements` clauses. `implements` is type-only and erases, so it contributes
  * nothing to a layout and is simply allowed. `extends` must name a class this compiler lays out:
  * extending an expression, a built-in, or an ambient declaration reaches a layout that was never
  * emitted. */
-function gateHeritage(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): GateResult {
+function gateHeritage(
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+  checker: ts.TypeChecker,
+): GateResult {
   for (const clause of declaration.heritageClauses ?? []) {
     if (clause.token === ts.SyntaxKind.ImplementsKeyword) {
       continue;
@@ -3212,12 +3379,12 @@ function gateHeritage(declaration: ts.ClassDeclaration, checker: ts.TypeChecker)
  * with each other: a subclass field shadowing an inherited field would need two slots for one name,
  * and a subclass method shadowing an inherited field would need a slot and no slot at once. */
 function ancestorMembers(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
   wantStatic: boolean,
 ): Set<string> {
   const names = new Set<string>();
-  const seen = new Set<ts.ClassDeclaration>([declaration]);
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>([declaration]);
   for (
     let base = baseClassOf(declaration, checker);
     base !== undefined && !seen.has(base);
@@ -3227,17 +3394,26 @@ function ancestorMembers(
     for (const member of base.members) {
       // Statics and instance members are separate namespaces: `C.count` and `c.count` can coexist
       // and name different things, so a shadowing check that merged them would refuse legal code.
-      if (
+      // A literal-typed computed key (`[k]` with `k: "m"`) declares the name the direct
+      // spelling writes, so it joins the set its spelling would have; anything wider declares
+      // no static name and stays out of it. `#private` names stay out too -- they never shadow:
+      // each declaring class owns its spelling under a per-class name, and
+      // `privateNameCollision` holds the one boundary that mangling cannot express.
+      const declared =
         member.name !== undefined &&
-        ts.isIdentifier(member.name) &&
+        !ts.isPrivateIdentifier(member.name) &&
         isStaticMember(member) === wantStatic
-      ) {
-        names.add(member.name.text);
+          ? ts.isIdentifier(member.name)
+            ? member.name.text
+            : classMemberStaticName(member, checker)
+          : undefined;
+      if (declared !== undefined) {
+        names.add(declared);
       } else if (
         !wantStatic &&
         ts.isMethodDeclaration(member) &&
         !isStaticMember(member) &&
-        instanceMethodName(member) === ITERATOR_METHOD_NAME
+        instanceMethodName(member, checker) === ITERATOR_METHOD_NAME
       ) {
         names.add(ITERATOR_METHOD_NAME);
       }
@@ -3256,11 +3432,21 @@ function ancestorMembers(
  * missing half resolving to a binding the subclass never emitted. */
 function inheritedShadowIsSameKind(
   member: ts.ClassElement,
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): boolean {
-  const name = instanceMethodName(member);
-  if (name === undefined || member.name === undefined || !ts.isIdentifier(member.name)) {
+  const name = instanceMethodName(member, checker);
+  // An identifier or a literal-typed computed key declares a name; anything wider never reaches
+  // here (the member arms refused it), and a string/numeric literal spelling keeps its old
+  // verdict by failing this test exactly as before. `#private` names never share -- a subclass
+  // `#x` is a second slot even over an ancestor's public `"#x"` -- so they fail it too, and the
+  // per-class mangling (`privateNameCollision` holding its one boundary) owns them instead.
+  if (
+    name === undefined ||
+    member.name === undefined ||
+    ts.isPrivateIdentifier(member.name) ||
+    (!ts.isIdentifier(member.name) && classMemberStaticName(member, checker) === undefined)
+  ) {
     return false;
   }
   const wantStatic = isStaticMember(member);
@@ -3275,8 +3461,8 @@ function inheritedShadowIsSameKind(
       (m) =>
         isStaticMember(m) === wantStatic &&
         m.name !== undefined &&
-        ts.isIdentifier(m.name) &&
-        m.name.text === name,
+        !ts.isPrivateIdentifier(m.name) &&
+        (ts.isIdentifier(m.name) ? m.name.text : classMemberStaticName(m, checker)) === name,
     );
     if (found === undefined) {
       continue;
@@ -3297,11 +3483,15 @@ function inheritedShadowIsSameKind(
       return (
         declaration.members.some(
           (m) =>
-            ts.isGetAccessorDeclaration(m) && isStaticMember(m) && staticMemberName(m) === name,
+            ts.isGetAccessorDeclaration(m) &&
+            isStaticMember(m) &&
+            classMemberStaticName(m, checker) === name,
         ) &&
         declaration.members.some(
           (m) =>
-            ts.isSetAccessorDeclaration(m) && isStaticMember(m) && staticMemberName(m) === name,
+            ts.isSetAccessorDeclaration(m) &&
+            isStaticMember(m) &&
+            classMemberStaticName(m, checker) === name,
         )
       );
     }
@@ -3310,9 +3500,25 @@ function inheritedShadowIsSameKind(
   return false;
 }
 
-/** The identifier a static member is declared under, if it has one. */
-function staticMemberName(member: ts.ClassElement): string | undefined {
-  return member.name !== undefined && ts.isIdentifier(member.name) ? member.name.text : undefined;
+/** The name a class member declares when it is an identifier, a `#private` name, or a
+ * literal-typed computed key (`[k]` with `k: "m"` -- the step-22 computed-literal rule).
+ * `undefined` for anything wider, and for string/numeric literal spellings, which keep their
+ * own verdict: this helper learns exactly the computed case, never a second spelling for
+ * what the member arms already refuse. */
+function classMemberStaticName(
+  member: ts.ClassElement,
+  checker: ts.TypeChecker,
+): string | undefined {
+  if (member.name === undefined) {
+    return undefined;
+  }
+  if (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)) {
+    return member.name.text;
+  }
+  if (ts.isComputedPropertyName(member.name)) {
+    return computedKeyStaticName(member.name, checker) ?? undefined;
+  }
+  return undefined;
 }
 
 /** Whether `declaration` (or any ancestor) declares an index signature.
@@ -3337,27 +3543,96 @@ function classHasIndexSignature(
   return false;
 }
 
-/** Every `#private` name declared ANYWHERE in `declaration`'s ancestry.
+/** An instance `#private` FIELD spelling the chain cannot hold apart, if any.
  *
- * Separate from `ancestorMembers` because private names do not shadow: `#x` in a subclass and `#x`
- * in its base are two distinct fields, both present on one instance. That is precisely why a repeat
- * is refused rather than merged -- the slot list is keyed by name and has room for one. */
-function ancestorPrivates(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): Set<string> {
-  const names = new Set<string>();
-  const seen = new Set<ts.ClassDeclaration>([declaration]);
+ * Per-class mangling (`#x` in `A` is `#x@A`) gives every re-declare distinct storage -- except
+ * two instance fields under one class NAME in one chain, which mangle alike and would share a
+ * slot two initializers write. Only instance FIELDS collide: methods and accessors are looked up
+ * by (lexical owner, name) rather than by slot, and statics already carry the declaring class in
+ * the binding name, so neither shares storage however the names repeat. A get/set pair is one
+ * property, not two declarations, so the halves share one entry here. */
+function privateNameCollision(
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+  checker: ts.TypeChecker,
+): string | undefined {
+  const seen = new Set<string>();
+  const visited = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let base = baseClassOf(declaration, checker);
-    base !== undefined && !seen.has(base);
-    base = baseClassOf(base, checker)
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = declaration;
+    current !== undefined && !visited.has(current);
+    current = baseClassOf(current, checker)
   ) {
-    seen.add(base);
-    for (const member of base.members) {
-      if (member.name !== undefined && ts.isPrivateIdentifier(member.name)) {
-        names.add(member.name.text);
+    visited.add(current);
+    const owner = current.name?.text;
+    if (owner === undefined) {
+      continue;
+    }
+    for (const member of current.members) {
+      if (
+        member.name === undefined ||
+        !ts.isPrivateIdentifier(member.name) ||
+        !ts.isPropertyDeclaration(member) ||
+        isStaticMember(member)
+      ) {
+        continue;
       }
+      const key = `${owner}
+${member.name.text}`;
+      if (seen.has(key)) {
+        return member.name.text;
+      }
+      seen.add(key);
     }
   }
-  return names;
+  return undefined;
+}
+
+/** Whether a static `#private` accessor re-declaration keeps a working pair: the subclass
+ * declares BOTH halves, or no ancestor declares either. A lone half over an ancestor's pair
+ * would split the pair across the chain -- the private twin of the identifier rule
+ * `inheritedShadowIsSameKind` states for the same shape. */
+function privateStaticPairComplete(
+  member: ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+  checker: ts.TypeChecker,
+): boolean {
+  if (member.name === undefined || !ts.isPrivateIdentifier(member.name)) {
+    return true;
+  }
+  const name = member.name.text;
+  const own = (half: 'get' | 'set'): boolean =>
+    declaration.members.some(
+      (m) =>
+        isStaticMember(m) &&
+        m.name !== undefined &&
+        ts.isPrivateIdentifier(m.name) &&
+        m.name.text === name &&
+        (half === 'get' ? ts.isGetAccessorDeclaration(m) : ts.isSetAccessorDeclaration(m)),
+    );
+  if (own('get') && own('set')) {
+    return true;
+  }
+  const visited = new Set<ts.ClassDeclaration | ts.ClassExpression>([declaration]);
+  for (
+    let base = baseClassOf(declaration, checker);
+    base !== undefined && !visited.has(base);
+    base = baseClassOf(base, checker)
+  ) {
+    visited.add(base);
+    if (
+      base.members.some(
+        (m) =>
+          (ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)) &&
+          isStaticMember(m) &&
+          m.name !== undefined &&
+          ts.isPrivateIdentifier(m.name) &&
+          m.name.text === name,
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** Whether a derived constructor calls `super(...)` where the lowering can place the field
@@ -4283,14 +4558,32 @@ function gateElementAccess(
     }
     // `o["a-b"]` on a fixed shape: the key is a literal, so the slot is known at compile time and
     // this is a field read spelled the only way TypeScript allows a non-identifier key to be
-    // spelled. Anything else -- a computed key, or a key naming no field -- is still an index.
-    const key = ts.isStringLiteral(access.argumentExpression)
-      ? access.argumentExpression.text
-      : undefined;
-    if (hir.kind === 'object' && key !== undefined) {
-      return hir.fields.some((field) => field.name === key)
-        ? { kind: 'accept' }
-        : notYet('index access on a non-array is not yet supported', 5);
+    // spelled. A literal-typed key (`o[k]` with `k: "m"`) is the same name by the step-22 rule,
+    // so it answers the same way: a field reads, a method exists only as a callee (the
+    // bound-closure rule the dot spelling follows), and an accessor read runs the getter --
+    // while anything else, or a key naming no member, is still an index.
+    const key = elementStaticKey(access.argumentExpression, checker);
+    if (hir.kind === 'object' && key !== null) {
+      if (hir.fields.some((field) => field.name === key)) {
+        return { kind: 'accept' };
+      }
+      if (hir.methods.some((m) => m.name === key)) {
+        return ts.isCallExpression(access.parent) && access.parent.expression === access
+          ? { kind: 'accept' }
+          : notYet('using a method as a value is not yet supported', 5);
+      }
+      // An accessor read is a call to the getter, so a read is fine; a read-modify-write in
+      // VALUE position lowers the target to the getter call, which is not an update place --
+      // the same positional rule the dot spelling states in gateMemberAccess.
+      if (
+        hir.methods.some((m) => m.name === accessorName('get', key)) ||
+        hir.methods.some((m) => m.name === accessorName('set', key))
+      ) {
+        return isReadModifyWrite(access) && !isStatementUpdate(access)
+          ? notYet('a compound assignment to an accessor is not yet supported', 5)
+          : { kind: 'accept' };
+      }
+      return notYet('index access on a non-array is not yet supported', 5);
     }
     return hir.kind === 'unknown' || isDynamicShape(receiver, checker)
       ? { kind: 'accept' }

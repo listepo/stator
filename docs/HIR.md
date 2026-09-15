@@ -167,9 +167,13 @@ member function like any other, and `static #next` is a static binding like any 
 simply keeps its `#`. Privacy is a *checker* fact: every access from outside the class body is
 already an error before the gate runs, so no node below it has anything left to enforce. The one
 place the `#` still matters is printing, and it matters in the runtime rather than here: the printer
-skips a descriptor field whose name starts with `#`. The layout is what forced the two deferrals — a
-subclass re-declaring an ancestor's `#private` name is two slots sharing a spelling, which a list
-keyed by name cannot hold apart, and `#brand in o` asks whether a slot exists rather than reading it.
+skips a descriptor field whose name starts with `#`. An instance `#private` re-declared down a
+chain qualifies by declaring class (`#x` in `A` is the field `#x@A`), so each class keeps its own
+slot and every use resolves to the slot of the class whose body spells it; a static `#private`
+accessor is one pair per declaring class under the usual static bindings, and `#x in o` is an
+`instanceof` against the class that declares the brand. The layout is what forces the remaining
+deferral: an instance field re-declared under one class name twice in a chain is two slots
+sharing one mangled spelling.
 
 Accessors added no HIR surface either, for the reason `#private` did not: a getter is a method under
 the name `get x` and a setter one under `set x`, where the space is unspellable exactly as the

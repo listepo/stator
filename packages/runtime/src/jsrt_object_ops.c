@@ -221,7 +221,15 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
  * which is what makes a target that GROWS legal at all.
  *
  * Snapshot keys, not values: each source getter must run immediately before its target setter,
- * and an exception must prevent all subsequent gets and sets. */
+ * and an exception must prevent all subsequent gets and sets.
+ *
+ * An ARRAY source reads its indices out of its elements, not through `jsrt_get_prop`: indices
+ * live beside the shape table rather than in it, so the property read would miss them and answer
+ * `undefined` for every element. Named extras ride the shape table and read through the ordinary
+ * path. Source-level `Object.assign` with an array source never reaches here (the gate holds the
+ * source to the object layouts); the object-spread-of-array desugar is the only caller that can
+ * hand one over, and it is also why this loop rather than `jsrt_dynobj_spread` carries the case
+ * (that entry point copies fixed-shape fields and panics on anything else). */
 jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   if (!jsrt_is_dynobj(target)) {
     jsrt_panic("STA4084: Object.assign onto a value that is not a dynamic-shape object");
@@ -230,10 +238,16 @@ jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   if (jsrt_pending()) {
     return JSRT_UNDEFINED;
   }
+  const bool sourceIsArray = jsrt_is(source, JSRT_TAG_ARRAY);
+  const JSRTArray *srcArray = sourceIsArray ? jsrt_as_array(source) : NULL;
   const JSRTArray *list = jsrt_as_array(keys);
   for (uint32_t i = 0; i < list->length; i++) {
     const char *key = jsrt_shape_key(list->elements[i]);
-    const jsrt_value value = jsrt_get_prop(source, key, NULL);
+    uint32_t index = 0;
+    const jsrt_value value =
+        srcArray != NULL && jsrt_key_is_array_index(key, &index) && index < srcArray->length
+            ? srcArray->elements[index]
+            : jsrt_get_prop(source, key, NULL);
     if (jsrt_pending()) {
       return JSRT_UNDEFINED;
     }

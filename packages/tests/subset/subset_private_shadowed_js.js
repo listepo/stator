@@ -1,7 +1,8 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: Private fields
+// A subclass re-declaring an ancestor's #private name: two distinct slots under per-class
+// names, each body reading the slot its own class declared.
 
 class Base {
   #tag = 'b';
