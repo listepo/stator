@@ -2343,6 +2343,43 @@ Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output name
 
 ## Phase 7 — FFI (in progress)
 
+### Task 7.3 — Bindings, generator, and the SQLite Check demo ✅ (landed 2026-09-15)
+
+The `T**` question Task 7.3 forced got its v0.1 answer instead of another deferral: the
+`Out<T>` row in the ABI table (`T**` over brands, `Out<CString>` over `const char**`),
+created by blessed `outSlot<T>()`, read via `.value` (docs/FFI.md §2; misuses STA1125,
+exports STA1126). Slots are ordinary frame cells holding handle-or-zero bits — never
+addresses as values, so nothing can dangle; the emitter passes each argument slot's own
+address and copies writes back to named slots. Under a header the cast spells the brand
+tag (`char` for tails); the fallback declares `void **`.
+
+Compiler core: `OutNew`/`OutGet` HIR nodes, `out-pointer` ABI kind with `argTags`, the
+`outSlotInner`/`isOutAlias` recognizers (alias type arguments, not `getTypeArguments`),
+monomorphization and generic-alias-formation skips for the blessed call, verdict
+machinery that reads slots static (`collectOutSlots` + `out-new`/`out-get`/identifier
+cases + `out-pointer` arg exemption), and the gate's seven micro-arms (constructor
+shape/inner, out-arg shape/type, returns, aggregates, annotation agreement, Out-bound
+assignment, no-value aliasing).
+
+The generator (`packages/compiler/src/ffi-gen/`, no new dependencies) maps headers
+through the table in reverse with deterministic output: mechanical camelCase names,
+`Ptr_` brands, `--lib=`/`#include` pragma emission, `Out<T>` for `T**` (brands and
+`const char**` tails), and scope refusals with construct + header line (STA1130 where no
+gate code exists, would-be gate codes elsewhere) plus per-reason counts. The full-header
+oracle agrees kind-for-kind with the hand-written binding (mechanical name deltas only).
+
+The Check: `examples/ffi/sqlite/` builds a generated binding (`sqlite_mini.h` curated
+from real prototypes) into a demo that opens `:memory:`, creates/fills/selects/prints,
+finalizes, and closes — byte-identical to the pinned Node — and answers from a C `main()`
+through the 7.2 header (success + `last_error` paths), both runners green
+(`sqlite demo: ok`, `ffi sqlite-c-main: ok`) and both wired into the ffi CI job
+(`libsqlite3-dev` on Linux; the macOS SDK ships it).
+
+Check evidence: 12/12 `subset_out_*` decision fixtures (ts/js twins with the
+checker-owns-ts splits), 5/5 `extern-out` classifier unit tests, 17/17 generator unit
+tests, golden 386/386 (serial, sharded, ASan), `test:ffi` 5/5, differential smoke 10/10
+with 0 divergences. Net `cpd` unchanged at 0.9%.
+
 ### Test-infra track: Darwin link retry, `test:ffi` real checks, C-consumer example ✅ (landed 2026-09-15)
 
 Three pieces, one unblock: the pinned conda clang ships ld64-956, which cannot parse an

@@ -862,7 +862,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
    `runtime` job (which already has clang and the archive), asserting both a successful call and
    the step-4 error path. An FFI story that is not built in CI decays within a month.
 
-**[D5] Task 7.3 — Bindings for existing headers.** Start **manual** (hand-written `declare` files for the demo libs). A libclang-driven generator (functions + scalars + structs-by-pointer only) is built only after ≥3 manual bindings exist to define its spec.
+**[D5] Task 7.3 — Bindings for existing headers.** ✅ **landed 2026-09-15** — evidence in [done.md](done.md) → Phase 7 Task 7.3 (plan-notes 271). Start **manual** (hand-written `declare` files for the demo libs). A libclang-driven generator (functions + scalars + structs-by-pointer only) is built only after ≥3 manual bindings exist to define its spec.
 
 Steps (detailed 2026-09-01; plan-notes 131):
 1. **Three manual bindings, chosen for three different shapes** — that is what makes them a spec
@@ -905,7 +905,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
    same example is called from a C `main()`), which is what makes the Check one example instead of
    two.
 
-**Check:** an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
+**Check:** ✅ **met 2026-09-15** — `examples/ffi/sqlite/` (generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node; the CI proof is the ffi job's own run (plan-notes 271): an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
 ---
 

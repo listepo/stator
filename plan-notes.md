@@ -7882,3 +7882,47 @@ brand spelling (`Ptr_sqlite3_stmt` vs `SqliteStmt`); (3) emit `@statorLink`/`--l
 provenance from the generator (NOTES.md gap); (4) regenerate SQLite and diff against the
 manual oracle until the only deltas are policy choices from (2). The phase Check (plan
 §10: SQLite queried from TS, callable from a C `main()`, in CI) waits on all four.
+
+## 271. Task 7.3 lands: Out<T>, generator, SQLite Check (2026-09-15)
+
+Nine background agents plus the main track closed the phase Check in one session. What
+each owned: mini-header + generated binding, demo program + runner, C `main()` + CI
+wiring, 12 decision fixtures, SUBSET.md rows, manual oracle update, node:sqlite oracle
+shim, generator `--lib`/include/`Out` emission, STA1130 wiring + libm/stat examples.
+File-partitioned, no commits from agents; integration, the `Out<T>` compiler core, and
+every cross-track inconsistency resolved on the main track.
+
+Load-bearing findings, each with its fix in-tree:
+
+- `checker.getTypeArguments()` returns [] for alias instantiations — the args live in
+  `type.aliasTypeArguments`. `outSlotInner` reads the alias field (unit-pinned).
+- The monomorphization collector and the generic-alias-formation gate both claim the
+  blessed call (`outSlot<Db>()` is generic in spelling only): the collector skips it
+  (nothing to specialize — the ambient body does not exist), and aliasing the
+  constructor as a value is STA1125 (it used to be a silent STA4021 through `f<Db>()`).
+- Verdicts: every slot node reads `unknown`, so `out-new`/`out-get` cases must precede
+  the type check (the `extern-call` precedent — below it they are dead code); `Out`
+  declarations and `out-pointer` args are exempted via a recomputed name set
+  (`collectOutSlots`, fixpoint for alias chains; aliases inside function bodies read
+  dynamic, conservative).
+- Copy semantics, documented in FFI.md §2: every binding owns its cell, so write and
+  read through the same name. No addresses as values anywhere — nothing can dangle —
+  which is also why user-function params/returns/throws/objects need no arms (sound
+  bits; re-entry as `Out` is blocked by the type rules where it matters).
+- Lexicographic SDK order lies (`MacOSX26.sdk` sorts after `MacOSX26.5.sdk`): version
+  compare in the fallback picker, unit-pinned (a working fallback lost to a broken SDK).
+- Two real C-level catches from the first linked demo: `(char**)` discards qualifiers
+  against `const char**` (cast `(const char**)` under headers) and `char *` raw vs
+  `const unsigned char*` returns trips `-Wpointer-sign` (explicit cast at copy-out).
+- Demo form: `.d.ts` value-imports are STA0012 — bindings arrive via `/// <reference>`
+  and bare calls (the golden pattern); the generator emits `./`-anchored includes so the
+  prologue resolves binding-local headers against the declaring file.
+- The `with`-shaped lesson, twice applied: generator refuses `const char**` tails until
+  the `Out<CString>` mapping landed; the mini-header demo hand-checks every
+  unconventioned return code (open/prepare/bind/finalize/close) so no nonzero return is
+  silently discarded (FFI.md §4 absolute).
+
+Responsibilities that stay open: the ambient `CString`/`Out` lib declarations (fixtures
+declare locally until §7.3 owns the binding set — FFI.md §7.3), generator convention
+transfer (manual rc checks until then), and the TS-name/brand alias policies
+(mechanical, documented; human aliases live in manual bindings).
