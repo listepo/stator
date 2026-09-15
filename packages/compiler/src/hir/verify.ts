@@ -1129,7 +1129,7 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // call the generated C cannot reject and the callee reads past. STA4098 polices the four
       // claims the direct call rests on: the count, each argument's ABI kind, the boxed result,
       // and the error convention against the return it reads.
-      if (expr.args.length !== expr.argKinds.length) {
+      if (expr.args.length !== expr.argKinds.length || expr.args.length !== expr.argTags.length) {
         problems.push({
           kind: 'extern-call',
           span: expr.span,
@@ -1151,6 +1151,24 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
         // brand interface lowers as `unknown`, so both honest spellings arrive here, and
         // telling a true handle from a manufactured shape is the declaration's trust (the
         // checker enforces assignability in `ts` mode; docs/FFI.md §9), not the verifier's.
+        // An out-slot argument is the one position whose representation the verifier CAN
+        // pin down: every legitimate slot lowers as `unknown` (from `out-new`, an alias, or an
+        // `Out<T>` annotation), so an object-typed value here is a manufactured shape whose
+        // address the emitter has no slot for — the gate refuses it as STA1125, and this
+        // restates the refusal as STA4098 if the gate ever disagrees with the lowering.
+        if (kind === 'out-pointer') {
+          if (arg.type.kind !== 'unknown') {
+            problems.push({
+              kind: 'extern-call',
+              span: expr.span,
+              code: 'STA4098',
+              message:
+                `extern call '${expr.tsName}' argument ${String(index)} has type ` +
+                `'${hTypeName(arg.type)}', not an out-slot`,
+            });
+          }
+          return;
+        }
         if (kind === 'pointer') {
           if (arg.type.kind !== 'unknown' && arg.type.kind !== 'object') {
             problems.push({
@@ -2233,6 +2251,39 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           span: expr.span,
           code: 'STA4096',
           message: 'reference-error must carry the name it failed to resolve',
+        });
+      }
+      break;
+    }
+
+    case 'out-new': {
+      if (expr.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'out-new',
+          span: expr.span,
+          code: 'STA4098',
+          message: `out-slot must have type 'unknown', got '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    case 'out-get': {
+      verifyExpression(expr.operand, problems, bindings);
+      if (expr.type.kind !== 'unknown') {
+        problems.push({
+          kind: 'out-get',
+          span: expr.span,
+          code: 'STA4098',
+          message: `out-slot read must have type 'unknown', got '${hTypeName(expr.type)}'`,
+        });
+      }
+      if (expr.inner !== 'pointer' && expr.inner !== 'cstring') {
+        problems.push({
+          kind: 'out-get',
+          span: expr.span,
+          code: 'STA4098',
+          message: `out-slot read has inner '${expr.inner}', not 'pointer' or 'cstring'`,
         });
       }
       break;

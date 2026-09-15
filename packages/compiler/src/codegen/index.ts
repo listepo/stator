@@ -2273,6 +2273,13 @@ class Emitter {
       // No slot: the name is a C string literal in the emitted call, not a rooted value.
       case 'reference-error':
       case 'type-error':
+      // An out-slot creation needs no slot: it answers the pure zero-handle inline, and the
+      // binding (or argument slot) that receives it is counted where it is declared.
+      case 'out-new':
+        break;
+      // A slot read allocates nothing: the bits are already rooted where they sit.
+      case 'out-get':
+        this.countExpression(expr.operand);
         break;
       default: {
         const _exhaustive: never = expr;
@@ -3334,6 +3341,7 @@ class Emitter {
     this.sequenceArgs(parts, expr.args, expr.span, base, argStart);
     this.flushParts(parts, expr.span);
     const cArgs: string[] = [];
+    const outWrites: { name: string; slot: string }[] = [];
     for (let index = 0; index < expr.args.length; index++) {
       const slot = this.slotAt(base + argStart + index);
       const kind = expr.argKinds[index];
@@ -3352,6 +3360,30 @@ class Emitter {
         // dispatch, neither of which this direct call can reach), so the collector sees the
         // handle for exactly as long as C may.
         cArgs.push(`jsrt_ptr(${slot})`);
+      } else if (kind === 'out-pointer') {
+        // A slot address, not a value (docs/FFI.md §2): the callee writes the `T*` through it
+        // into the argument's own frame slot, which stays rooted across the call exactly like
+        // any other argument slot. Under a binding header the real prototype governs, so the
+        // address casts through the parameter's brand tag (`char` for an `Out<CString>` tail);
+        // the fallback declaration takes `void **` and the same cast matches it exactly.
+        const tag = expr.argTags[index];
+        if (tag === undefined) {
+          throw new Error(`extern call out-pointer argument ${String(index)} has no cast tag`);
+        }
+        // A `CString` inner crosses as `const char **` under a header (`char **` would
+        // discard qualifiers in nested pointer types); a brand casts through its struct
+        // tag. The fallback declaration takes `void **` either way.
+        const cast =
+          expr.header !== undefined
+            ? tag === 'char'
+              ? '(const char**)'
+              : `(${tag}**)`
+            : '(void**)';
+        cArgs.push(`${cast}&${slot}`);
+        const arg = expr.args[index];
+        if (arg !== undefined && arg.kind === 'identifier') {
+          outWrites.push({ name: arg.name, slot });
+        }
       } else {
         throw new Error(`extern call argument has no C passing: ${kind ?? 'missing'}`);
       }
@@ -3367,9 +3399,21 @@ class Emitter {
       this.appendLine(`${call};`, expr.span);
     } else {
       // `char *` for a string return (see `externCReturnType`): the library's pointer,
-      // NULL-checked below before the copy.
+      // NULL-checked below before the copy. The explicit cast absorbs spelling drift in
+      // real prototypes (`const unsigned char *` from `<sqlite3.h>`): same address, and
+      // nothing written through it before the copy.
       const rawType = expr.retKind === 'cstring' ? 'char *' : this.externCType(expr.retKind);
-      this.appendLine(`${rawType} ${raw} = ${call};`, expr.span);
+      const rawCall = expr.retKind === 'cstring' ? `(char *)(${call})` : call;
+      this.appendLine(`${rawType} ${raw} = ${rawCall};`, expr.span);
+    }
+    // Slot write-back: what the callee stored through an out-pointer lands in the
+    // argument's frame slot, and a NAMED slot must see it — the caller's `.value` reads its
+    // own cell, not the argument's. Slot copies, never addresses, so no dangling is possible;
+    // reading through any other name than the written one answers a stale cell (docs/FFI.md
+    // §2: read through the name you wrote through). Before the errno read, the boxing, and
+    // the convention check: the slot reflects whatever C wrote even when the call throws.
+    for (const write of outWrites) {
+      this.appendLine(`${this.slotRef(write.name)} = ${write.slot};`, expr.span);
     }
     if (expr.error === 'errno') {
       this.appendLine(`int _jsrt_exe_${String(base)} = errno;`, expr.span);
@@ -3971,6 +4015,22 @@ class Emitter {
           throw new Error('extern call was not registered during counting');
         }
         return this.emitExternCall(expr, base);
+      }
+
+      // A fresh slot answers the pure zero-handle: the cell starts NULL and the callee
+      // overwrites it through the `T**` parameter, so creation is one constant store with no
+      // target to know and no allocation to root (docs/FFI.md §2).
+      case 'out-new': {
+        return '(jsrt_value)0';
+      }
+
+      // A slot read: a brand is opaque bits in exactly the representation a branded-pointer
+      // return travels in, so the operand already IS the answer; a `CString` inner copies
+      // the stored `char *` through `from_cstr` exactly like a `cstring` return (including
+      // its NULL assert — a NULL read belongs to the error convention guarding the call).
+      case 'out-get': {
+        const read = this.emitExpression(expr.operand);
+        return expr.inner === 'pointer' ? read : `jsrt_string_from_cstr((char *)jsrt_ptr(${read}))`;
       }
 
       case 'field-access': {
@@ -5137,6 +5197,11 @@ class Emitter {
         return 'const char *';
       case 'pointer':
         return 'void *';
+      case 'out-pointer':
+        // A slot address crosses as an untyped out-param: the fallback declaration cannot
+        // name the pointee (that spelling lives in the binding header, when one governs),
+        // so it takes `void **` and every argument arrives with an explicit cast to match.
+        return 'void **';
       case 'void':
         return 'void';
     }

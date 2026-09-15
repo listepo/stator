@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  compareSdkNames,
   findFallbackSdk,
   isStaleLdSystemLibFailure,
   pickFallbackSdk,
@@ -77,6 +78,22 @@ void test('plain arm64e does not disqualify an SDK', () => {
   assert.equal(
     pickFallbackSdk('/sdks', [{ name: 'MacOSX15.sdk', tbdText: OLD_TBD }]),
     join('/sdks', 'MacOSX15.sdk'),
+  );
+});
+
+void test('SDK versions order numerically, not lexicographically', () => {
+  // 'MacOSX26.sdk' sorts AFTER 'MacOSX26.5.sdk' lexicographically ('s' > '5') while
+  // predating it — the pick must be newest-first by version, or a working fallback loses
+  // to a broken older SDK.
+  assert.ok(compareSdkNames('MacOSX26.5.sdk', 'MacOSX26.sdk') > 0);
+  assert.ok(compareSdkNames('MacOSX27.sdk', 'MacOSX26.5.sdk') > 0);
+  assert.ok(compareSdkNames('MacOSX26.sdk', 'MacOSX26.sdk') === 0);
+  assert.equal(
+    pickFallbackSdk('/sdks', [
+      { name: 'MacOSX26.sdk', tbdText: OLD_TBD },
+      { name: 'MacOSX26.5.sdk', tbdText: OLD_TBD },
+    ]),
+    join('/sdks', 'MacOSX26.5.sdk'),
   );
 });
 

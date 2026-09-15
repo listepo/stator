@@ -46,8 +46,11 @@ import {
 } from '../frontend/generics.ts';
 import {
   classifyExternDeclaration,
+  classifyOutSlotCall,
   externDeclarationOfCall,
   headerOf,
+  outInnerTag,
+  outSlotDeclarationOf,
 } from '../frontend/extern.ts';
 import { assertedBy, isCheckable, narrowedTo, sourceLocation } from '../frontend/narrowing.ts';
 import {
@@ -61,6 +64,7 @@ import {
   elementStaticKey,
   heritageSubstitution,
   heritageTuple,
+  isBrandedPointer,
   isPrivateMemberName,
   ITERATOR_METHOD_NAME,
   instanceMethodName,
@@ -74,6 +78,7 @@ import {
   staticMemberOf,
   tsTypeToHType,
   userIteratorMethod,
+  outSlotInner,
 } from '../frontend/types.ts';
 import type {
   ArrayLength,
@@ -99,6 +104,8 @@ import type {
   DynObjectLiteral,
   ExternCall,
   Expression,
+  OutGet,
+  OutNew,
   FieldAccess,
   FunctionDeclaration,
   FunctionExpr,
@@ -1828,8 +1835,28 @@ function lowerDeclarationList(
   const hirName = bindings.declare(name, type);
   hirNameOfDeclaration.set(decl, hirName);
 
+  // An `Out<T>`-annotated declaration without an initializer is an implicit slot
+  // construction (docs/FFI.md §2): the cell starts NULL exactly as `outSlot<T>()` would
+  // leave it, so the lowering injects the node rather than inventing a second spelling.
+  // The gate already refused every annotation/initializer mismatch, so reaching here with
+  // a non-`Out` initializer is impossible — and an unannotated name infers from its
+  // initializer through the ordinary path below.
+  let injectedOutNew = false;
+  if (decl.initializer === undefined && decl.type !== undefined) {
+    const announced = checker.getTypeFromTypeNode(decl.type);
+    if (outSlotInner(announced, checker) !== undefined) {
+      injectedOutNew = true;
+    }
+  }
+
   let value: Expression | undefined;
-  if (decl.initializer !== undefined) {
+  if (injectedOutNew) {
+    value = {
+      kind: 'out-new',
+      type: hUnknown(false),
+      span: makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile),
+    };
+  } else if (decl.initializer !== undefined) {
     const lowered = lowerExpression(decl.initializer, sourceFile, checker, bindings, diagnostics);
     if (!lowered) {
       return null;
@@ -4122,6 +4149,38 @@ function lowerClassMemberRead(
   return access;
 }
 
+/** A `.value` (or `["value"]`) read on an `Out<T>` slot (docs/FFI.md §2): the `T*` the
+ * callee stored, read as the program sees it. The receiver's spelling decides the content
+ * kind — a brand reads as opaque bits, a `CString` inner copies through `from_cstr` — so the
+ * lowering stamps it from the type and no later stage re-derives it. A non-`Out` receiver
+ * (including `s?.value`, whose `?.` is vacuous — a slot binding is never nullish) is not a
+ * slot read at all: `undefined` sends the caller back to the ordinary access path. */
+function lowerOutGet(
+  receiver: ts.Expression,
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): OutGet | null | undefined {
+  const receiverType = checker.getTypeAtLocation(receiver);
+  const inner = outSlotInner(receiverType, checker);
+  if (inner === undefined) {
+    return undefined;
+  }
+  const operand = lowerExpression(receiver, sourceFile, checker, bindings, diagnostics);
+  if (operand === null) {
+    return null;
+  }
+  return {
+    kind: 'out-get',
+    type: hUnknown(false),
+    span: makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile),
+    operand,
+    inner: isBrandedPointer(inner, checker) ? 'pointer' : 'cstring',
+  };
+}
+
 function lowerExpression(
   node: ts.Expression,
   sourceFile: ts.SourceFile,
@@ -4326,6 +4385,15 @@ function lowerExpression(
   // still the class declaration. A static is one binding, so this is an ordinary identifier read --
   // unless the static IS an accessor, in which case reading it RUNS the getter.
   if (ts.isPropertyAccessExpression(node)) {
+    // An out-slot read rides the ordinary member syntax (`s.value`, and the vacuous
+    // `s?.value` — a slot binding is never nullish, so the check answers nothing): the
+    // receiver's `Out` spelling, not the property machinery, decides what it means.
+    if (node.name.text === 'value') {
+      const read = lowerOutGet(node.expression, node, sourceFile, checker, bindings, diagnostics);
+      if (read !== undefined) {
+        return read;
+      }
+    }
     const found = staticMemberOf(node, checker, undefined);
     if (found !== undefined && found.owner.name !== undefined) {
       if (ts.isGetAccessorDeclaration(found.member) || ts.isSetAccessorDeclaration(found.member)) {
@@ -4655,6 +4723,14 @@ function lowerExpression(
   }
 
   if (ts.isElementAccessExpression(node)) {
+    // The bracket spelling of the same read (`s["value"]`, including literal-typed keys):
+    // anything else keeps the index path below.
+    if (elementStaticKey(node.argumentExpression, checker) === 'value') {
+      const read = lowerOutGet(node.expression, node, sourceFile, checker, bindings, diagnostics);
+      if (read !== undefined) {
+        return read;
+      }
+    }
     // `c[Symbol.iterator]` on a known user-iterable class is `c.m` written the only way the
     // well-known symbol can be spelled: the method's value, resolved statically to
     // `__@iterator` exactly as the dot spelling resolves a name. Anything the gate let through
@@ -6470,6 +6546,32 @@ function lowerExpression(
       if (lowered !== undefined) {
         return lowered;
       }
+    }
+
+    // A slot construction (docs/FFI.md §2): the gate proved the blessed shape and a
+    // resolvable inner — so a refusal here is the gate and the lowering disagreeing (STA4031),
+    // never a user-facing diagnostic. Answers the pure zero-handle: creation allocates
+    // nothing, and every use resolves its meaning from its own context.
+    if (ts.isCallExpression(node) && outSlotDeclarationOf(node, checker) !== undefined) {
+      const classified = classifyOutSlotCall(node, checker);
+      if (!classified.ok) {
+        diagnostics.push(
+          lowerDiagnostic(
+            node,
+            sourceFile,
+            'STA4031',
+            'internal',
+            `outSlot call the gate refused reached the lowering (${classified.message})`,
+          ),
+        );
+        return null;
+      }
+      const made: OutNew = {
+        kind: 'out-new',
+        type: hUnknown(false),
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      };
+      return made;
     }
 
     // An extern call (docs/FFI.md §1): a direct C call, not a closure. The gate proved the
@@ -8752,6 +8854,12 @@ function collectSpecializations(
     substitution: ReadonlyMap<string, HType>,
     depth: number,
   ): void => {
+    // The blessed slot constructor is generic in spelling only: it lowers to a zero-handle,
+    // never to a closure, so no specialization exists to collect. Without this skip the
+    // collector would try to lower an ambient body that does not exist and fail silently.
+    if (outSlotDeclarationOf(call, checker) !== undefined) {
+      return;
+    }
     const instantiation = genericCallInstantiation(call, checker);
     if (instantiation.kind !== 'generic') {
       return;
@@ -9525,11 +9633,37 @@ function lowerExternCall(
     return null;
   }
   const args: Expression[] = [];
+  const argTags: (string | undefined)[] = [];
   for (const [index, arg] of lowered.entries()) {
     const kind = signature.params[index];
     const site = node.arguments[index];
     if (kind === undefined || site === undefined) {
       return fail('extern call with an arity the gate refused reached the lowering');
+    }
+    if (kind === 'out-pointer') {
+      // Only a slot name (or a fresh inline slot) has a cell whose address the emitter can
+      // take: the gate proved the shape, so anything else is the two disagreeing (STA4031).
+      // The cast tag rides from the PARAMETER's spelling, never the argument's — a lying
+      // argument still links (or fails loudly at the clang line), exactly like any other
+      // uncheckable boundary value (docs/FFI.md §5).
+      const unwrapped = ts.isParenthesizedExpression(site) ? site.expression : site;
+      const isSlotName = ts.isIdentifier(unwrapped);
+      const isFreshSlot =
+        ts.isCallExpression(unwrapped) && outSlotDeclarationOf(unwrapped, checker) !== undefined;
+      if (!isSlotName && !isFreshSlot) {
+        return fail('extern call with a non-slot out-pointer argument reached the lowering');
+      }
+      const param = decl.parameters[index];
+      if (param === undefined) {
+        return fail('extern call with an arity the gate refused reached the lowering');
+      }
+      const tag = outInnerTag(checker.getTypeAtLocation(param), checker);
+      if (tag === undefined) {
+        return fail('extern call with an unspellable out-pointer parameter reached the lowering');
+      }
+      argTags.push(tag);
+    } else {
+      argTags.push(undefined);
     }
     args.push(maybeBoundary(arg, externKindHType(kind), site, sourceFile));
   }
@@ -9546,6 +9680,7 @@ function lowerExternCall(
     tsName: signature.tsName,
     args,
     argKinds: signature.params,
+    argTags,
     retKind: signature.ret,
     ...(signature.error !== undefined ? { error: signature.error } : {}),
     ...(header !== undefined ? { header } : {}),

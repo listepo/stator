@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import type { ExternAbiKind, ExternErrorConvention } from '../hir/nodes.ts';
 import { externConventionMismatch, isExternErrorConvention } from '../hir/nodes.ts';
 import { hTypeName } from '../hir/types.ts';
-import { tsTypeToHType } from './types.ts';
+import { isBrandedPointer, isOutAlias, outSlotInner, tsTypeToHType } from './types.ts';
 
 export interface ExternSignature {
   /** What the program spelled — what the error-convention throw reports. */
@@ -123,6 +123,28 @@ export function externDeclarationOfSymbol(
   return undefined;
 }
 
+/** Whether this identifier is the callee of a blessed `outSlot<T>()` construction — the
+ * only position the name is special in (docs/FFI.md §2). Mirrors `isDirectCalleePosition`,
+ * plus the declaration check: a user's own same-named function follows the ordinary
+ * binding arms instead. */
+export function isOutSlotCallee(node: ts.Identifier, checker: ts.TypeChecker): boolean {
+  let current: ts.Expression = node;
+  let parent = node.parent;
+  while (parent !== undefined && ts.isParenthesizedExpression(parent)) {
+    current = parent;
+    parent = parent.parent;
+  }
+  if (
+    parent === undefined ||
+    !ts.isCallExpression(parent) ||
+    parent.expression !== current ||
+    parent.questionDotToken !== undefined
+  ) {
+    return false;
+  }
+  return outSlotDeclarationOf(parent, checker) !== undefined;
+}
+
 /** The extern declaration a call resolves to, or `undefined` for an ordinary call.
  *
  * Externs are bare identifiers (a `.d.ts` ambient has no namespace to hang a property off),
@@ -185,26 +207,104 @@ function cstringKindOf(type: ts.Type): 'cstring' | 'cstring-owned' | 'invalid' |
   return 'invalid';
 }
 
-/** A branded pointer (`{ readonly __brand: "sqlite3" }`, docs/FFI.md §2): opaque, library-owned,
- * crossing as `void *` under step 6's borrow-only rule — the pointer travels in its frame slot
- * untouched, never dereferenced and never retained past the call. Only object types qualify,
- * and only the documented single-literal shape: a wider object is STA1115, whatever it names
- * its fields. */
-function isBrandedPointer(type: ts.Type, checker: ts.TypeChecker): boolean {
-  if ((type.flags & ts.TypeFlags.Object) === 0) {
-    return false;
+/** The C type name an `Out<T>` parameter casts its slot address through under a binding
+ * header: the brand literal for `Out<brand>`, `'char'` for `Out<CString>`. `undefined` when
+ * the type is not an `Out` spelling at all — malformed `Out` (alias without a usable inner)
+ * is the gate's STA1125, never a tag. The lowering stamps `argTags` from this, so the two
+ * cannot disagree about what a parameter means. */
+export function outInnerTag(type: ts.Type, checker: ts.TypeChecker): string | undefined {
+  if (!isOutAlias(type)) {
+    return undefined;
   }
-  const properties = checker.getPropertiesOfType(type);
-  if (properties.length !== 1 || properties[0]?.name !== '__brand') {
-    return false;
+  const inner = outSlotInner(type, checker);
+  if (inner === undefined) {
+    return undefined;
   }
-  const prop = properties[0];
-  const at = prop.valueDeclaration ?? prop.declarations?.[0];
-  if (at === undefined) {
-    return false;
+  if (isBrandedPointer(inner, checker)) {
+    const props = checker.getPropertiesOfType(inner);
+    const prop = props[0];
+    const at = prop?.valueDeclaration ?? prop?.declarations?.[0];
+    if (at === undefined || prop === undefined) {
+      return undefined;
+    }
+    const literal = checker.getTypeOfSymbolAtLocation(prop, at);
+    return literal.isStringLiteral() ? literal.value : undefined;
   }
-  const propType = checker.getTypeOfSymbolAtLocation(prop, at);
-  return (propType.flags & ts.TypeFlags.StringLiteral) !== 0;
+  // A `CString` inner crosses as C `char` (the copy-on-read spelling, docs/FFI.md §2).
+  return 'char';
+}
+
+/** The blessed slot constructor `outSlot<T>()` (docs/FFI.md §2): a bare-identifier call
+ * resolving to an AMBIENT `declare function outSlot` with an `Out`-alias return and no
+ * parameters. A real implementation is the user's own function, never the builtin — only the
+ * declaration shape decides. `undefined` when this call is not a slot construction at all, so
+ * any other shape falls through to the ordinary call arms. */
+export function outSlotDeclarationOf(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+): ts.FunctionDeclaration | undefined {
+  let callee: ts.Expression = call.expression;
+  while (ts.isParenthesizedExpression(callee)) {
+    callee = callee.expression;
+  }
+  if (!ts.isIdentifier(callee) || callee.text !== 'outSlot') {
+    return undefined;
+  }
+  const symbol = checker.getSymbolAtLocation(callee);
+  const decl = symbol?.valueDeclaration;
+  if (
+    decl === undefined ||
+    !ts.isFunctionDeclaration(decl) ||
+    decl.body !== undefined ||
+    decl.parameters.length !== 0
+  ) {
+    return undefined;
+  }
+  const signature = checker.getSignatureFromDeclaration(decl);
+  const ret =
+    decl.type !== undefined
+      ? checker.getTypeFromTypeNode(decl.type)
+      : signature === undefined
+        ? undefined
+        : checker.getReturnTypeOfSignature(signature);
+  if (ret === undefined || !isOutAlias(ret)) {
+    return undefined;
+  }
+  return decl;
+}
+
+export type OutSlotClassified =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly message: string };
+
+/** The `Out` inner an `outSlot` call resolves, or the STA1125 refusal earning it: the call's
+ * own instantiated return first (`outSlot<Db>()`), then the binding annotation
+ * (`const s: Out<Db> = outSlot()` — the js-mode shape, where calls carry no type
+ * arguments). Both must name a brand or CString inner; a bare `outSlot()` with neither is
+ * the one error that names the fix. The gate answers it as STA1125, the lowering restates
+ * it as STA4031 — one classifier, two reporters. */
+export function classifyOutSlotCall(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+): OutSlotClassified {
+  const missing =
+    'outSlot() needs a slot type — outSlot<Db>() or an Out<Db> annotation (docs/FFI.md)';
+  const signature = checker.getResolvedSignature(call);
+  const ret = signature?.getReturnType();
+  if (ret !== undefined && outSlotInner(ret, checker) !== undefined) {
+    return { ok: true };
+  }
+  const parent = call.parent;
+  if (parent !== undefined && ts.isVariableDeclaration(parent) && parent.name !== undefined) {
+    const declared =
+      parent.type !== undefined
+        ? checker.getTypeFromTypeNode(parent.type)
+        : checker.getTypeAtLocation(parent.name);
+    if (outSlotInner(declared, checker) !== undefined) {
+      return { ok: true };
+    }
+  }
+  return { ok: false, message: missing };
 }
 
 function refused(code: string, message: string): ExternClassified {
@@ -252,6 +352,29 @@ function classifyPosition(
     // A TABLE type (docs/FFI.md §2 `T*`), borrow-only in step 6: the handle crosses as `void *`
     // in its frame slot, untouched and unretained. Never a never-code — the table promises it.
     return 'pointer';
+  }
+  if (isOutAlias(type)) {
+    // `Out<T>` out-slots (docs/FFI.md §2, v0.1): `T**` spelled `Out<brand>` (or `const
+    // char**` spelled `Out<CString>`), parameter position only. The slot address crosses as
+    // `T**`; the callee writes, the caller reads `.value`. Anything else wearing the alias
+    // is STA1125, not the table's catch-all: the table widened to `T**`, so the split-out
+    // code owns the misuses (docs/DIAGNOSTICS.md).
+    const inner = outSlotInner(type, checker);
+    if (inner === undefined) {
+      return refused(
+        'STA1125',
+        '`Out<T>` needs a branded-pointer or CString inner in an extern signature ' +
+          '(docs/FFI.md) — anything else has no `T**` to pass',
+      );
+    }
+    if (position !== 'param') {
+      return refused(
+        'STA1119',
+        '`Out<T>` as a return is outside the ABI table (docs/FFI.md) — a returned slot ' +
+          'address would die with the call',
+      );
+    }
+    return 'out-pointer';
   }
   const mapped = tsTypeToHType(type, checker);
   switch (mapped.kind) {
@@ -517,6 +640,30 @@ export function classifyExternDeclaration(
       return kind;
     }
     params.push(kind);
+  }
+  // Under a binding header the real prototype governs the call, so an out-pointer
+  // parameter casts through its brand literal — which must name a C struct tag the emitter
+  // can spell. Without a header the fallback declares `void **` and any tag links, so only
+  // the header case refuses here; a lying tag still fails, but loudly at the clang line
+  // (the §5 trust boundary absorbs what the declaration cannot prove).
+  const header = headerOf(decl.getSourceFile());
+  if (header !== undefined) {
+    for (const param of decl.parameters) {
+      const paramType = checker.getTypeAtLocation(param);
+      if (outSlotInner(paramType, checker) === undefined) {
+        continue;
+      }
+      const tag = outInnerTag(paramType, checker);
+      if (tag === undefined || tag === 'char' || C_IDENTIFIER.test(tag)) {
+        continue;
+      }
+      const which = param.name.getText(decl.getSourceFile());
+      return refused(
+        'STA1125',
+        `Out parameter '${which}' names a brand the header cast cannot spell — ` +
+          'the __brand literal must be a C identifier (docs/FFI.md)',
+      );
+    }
   }
   const signature = checker.getSignatureFromDeclaration(decl);
   if (signature === undefined) {

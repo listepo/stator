@@ -32,6 +32,82 @@ import {
  * answer is Unknown, which is always a safe answer, never a wrong one. */
 const MAX_SIGNATURE_DEPTH = 4;
 
+/** An opaque branded-pointer handle (`{ readonly __brand: 'sqlite3' }`, docs/FFI.md §2):
+ * library-owned, crossing as `void *` — never dereferenced and never retained past the call.
+ * Only object types qualify, and only the documented single-literal shape: a wider object is
+ * a different type, whatever it names its fields. (Moved here from `extern.ts`: `tsTypeToHType`
+ * below must recognize `Out<T>` inners, and `extern.ts` already imports from this module —
+ * the reverse import would be a cycle.) */
+export function isBrandedPointer(type: ts.Type, checker: ts.TypeChecker): boolean {
+  if ((type.flags & ts.TypeFlags.Object) === 0) {
+    return false;
+  }
+  const properties = checker.getPropertiesOfType(type);
+  if (properties.length !== 1 || properties[0]?.name !== '__brand') {
+    return false;
+  }
+  const prop = properties[0];
+  const at = prop.valueDeclaration ?? prop.declarations?.[0];
+  if (at === undefined) {
+    return false;
+  }
+  const propType = checker.getTypeOfSymbolAtLocation(prop, at);
+  return (propType.flags & ts.TypeFlags.StringLiteral) !== 0;
+}
+
+/** Whether this type spells the `Out` alias (`type Out<T> = { readonly value: T }`,
+ * docs/FFI.md §2): the structural half of the out-slot contract. The alias is required, not
+ * just the shape — like `CString`, the spelling is the contract, and a coincidental
+ * `{ readonly value: Brand }` without the alias is a plain heap object, not a slot. */
+export function isOutAlias(type: ts.Type): boolean {
+  return type.aliasSymbol?.getName() === 'Out';
+}
+
+/** The inner type of an `Out<T>` spelling, or `undefined` when this type is not one: the
+ * alias must read `Out` with exactly one type argument, and the object must hold exactly
+ * one property named `value` (readonly is the checker's own business — a write is TS2540
+ * before Stator ever sees it). A malformed `Out` (wrong inner, wrong shape) is NOT an
+ * out-slot: it falls through to whatever its structure earns (usually the object row and
+ * STA1115 in signatures), while the gate refuses the alias-with-bad-inner explicitly as
+ * STA1125 where a precise message matters. */
+export function outSlotInner(type: ts.Type, checker: ts.TypeChecker): ts.Type | undefined {
+  if (!isOutAlias(type)) {
+    return undefined;
+  }
+  if ((type.flags & ts.TypeFlags.Object) === 0) {
+    return undefined;
+  }
+  const properties = checker.getPropertiesOfType(type);
+  if (properties.length !== 1 || properties[0]?.name !== 'value') {
+    return undefined;
+  }
+  const args = type.aliasTypeArguments ?? checker.getTypeArguments(type as ts.TypeReference);
+  if (args.length !== 1) {
+    return undefined;
+  }
+  const inner = args[0];
+  if (inner === undefined || (!isBrandedPointer(inner, checker) && !isCStringInner(inner))) {
+    return undefined;
+  }
+  return inner;
+}
+
+/** The `CString` half of an `Out<CString>` inner (`const char**`, docs/FFI.md §2): the
+ * documented wrapper spelling only — a bare `string` inner is not an out-slot (the same
+ * discipline that refuses bare `string` in signatures with STA1118), so the alias is
+ * required here exactly as `cstringKindOf` in `extern.ts` requires it there. Kept
+ * diagnostic-free for `tsTypeToHType`; that module owns the surface's diagnostics. */
+function isCStringInner(type: ts.Type): boolean {
+  const alias = type.aliasSymbol?.getName();
+  if (alias !== 'CString' && alias !== 'CStringOwned') {
+    return false;
+  }
+  if ((type.flags & ts.TypeFlags.StringLike) !== 0) {
+    return true;
+  }
+  return type.isIntersection() && type.types.some((t) => (t.flags & ts.TypeFlags.StringLike) !== 0);
+}
+
 /** The ONLY module allowed to map ts.Type -> HType (AGENTS.md).
  * Scope: number, string, boolean, undefined, null, and single-signature function types.
  * Anything else becomes hUnknown, never a guess.
@@ -123,6 +199,14 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
     if (isLibInterface(type, ctor)) {
       return errorHType(ctor);
     }
+  }
+
+  // An `Out<T>` out-slot (docs/FFI.md §2) never boxes — ahead of the object row on purpose:
+  // the slot is a frame-local `void *` cell, not a heap object, so the shape mapping below
+  // would invent a layout for bits. Like a brand it takes the opaque HType, while the nodes
+  // that create, pass, and read it still carry the slot, which is what the emitter reads.
+  if (outSlotInner(type, checker) !== undefined) {
+    return hUnknown(false);
   }
 
   const object = classTypeToHType(type, checker, depth);

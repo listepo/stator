@@ -261,12 +261,109 @@ function classify(diagnostics: readonly Diagnostic[]): Explanation | null {
  * This deliberately outranks the per-function rows, which see signatures only: a file whose every
  * function is `static` can still be dynamic, and that is the honest reading. The rows say where the
  * dynamic representation crosses a call; this says whether the file uses it at all. */
+/** The HIR names bound to out-slots (docs/FFI.md §2): `outSlot()` constructions and
+ * aliases of them, to fixpoint for chains. Statement nesting only — aliases inside function
+ * bodies read dynamic (conservative): slot discipline is function-local for verdicts, and HIR
+ * binding names are unique program-wide (plan.md §8 step 14), so no scope threading is owed.
+ * Verdicts only: the gate, not this set, decides legality — misuses never reach this walk. */
+function collectOutSlots(statements: readonly Statement[]): Set<string> {
+  const names = new Set<string>();
+  const considerDeclaration = (name: string, value: Expression | undefined): void => {
+    if (value === undefined) {
+      return;
+    }
+    if (value.kind === 'out-new') {
+      names.add(name);
+    } else if (value.kind === 'identifier' && names.has(value.name)) {
+      names.add(name);
+    }
+  };
+  const walkStatements = (list: readonly Statement[]): void => {
+    for (const stmt of list) {
+      switch (stmt.kind) {
+        case 'declaration':
+          considerDeclaration(stmt.name, stmt.value);
+          break;
+        case 'assignment':
+          considerDeclaration(stmt.target, stmt.value);
+          break;
+        case 'block':
+          walkStatements(stmt.statements);
+          break;
+        case 'if-statement':
+          walkStatements(stmt.consequent.statements);
+          if (stmt.alternate !== undefined) {
+            walkStatements(stmt.alternate.statements);
+          }
+          break;
+        case 'while-statement':
+        case 'do-while-statement':
+        case 'for-of-statement':
+          walkStatements(stmt.body.statements);
+          break;
+        case 'for-statement':
+          if (stmt.init !== undefined) {
+            walkStatements([stmt.init]);
+          }
+          if (stmt.update !== undefined) {
+            walkStatements([stmt.update]);
+          }
+          walkStatements(stmt.body.statements);
+          break;
+        case 'switch-statement':
+          for (const clause of stmt.clauses) {
+            walkStatements(clause.statements);
+          }
+          break;
+        case 'try-statement':
+          walkStatements(stmt.tryBlock.statements);
+          if (stmt.catchBlock !== undefined) {
+            walkStatements(stmt.catchBlock.statements);
+          }
+          if (stmt.finallyBlock !== undefined) {
+            walkStatements(stmt.finallyBlock.statements);
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  };
+  for (;;) {
+    const before = names.size;
+    walkStatements(statements);
+    if (names.size === before) {
+      return names;
+    }
+  }
+}
+
+/** Out-slot-bound HIR names for the current `hasUnknown` walk (docs/FFI.md §2) — module
+ * state for pass context, the `lowerDiagMode` precedent in `lower/index.ts`. Set once per
+ * walk; the walk is single-threaded and never re-enters. */
+let outSlotVerdictNames: ReadonlySet<string> = new Set<string>();
+
 function hasUnknown(module: Module): boolean {
+  outSlotVerdictNames = collectOutSlots(module.statements);
   return module.statements.some(statementHasUnknown);
 }
 
+/** Whether this declaration binds an out-slot (docs/FFI.md §2): constructed by
+ * `outSlot()` or aliased from one (the `collectOutSlots` set). Such bindings read `unknown`
+ * without touching the dynamic representation, so the unknown-type rule above exempts them —
+ * exactly the declarations the gate proved legal, restated for verdicts. */
+function isOutSlotBinding(stmt: Statement): boolean {
+  if (stmt.kind !== 'declaration' || stmt.value === undefined) {
+    return false;
+  }
+  return (
+    stmt.value.kind === 'out-new' ||
+    (stmt.value.kind === 'identifier' && outSlotVerdictNames.has(stmt.value.name))
+  );
+}
+
 function statementHasUnknown(stmt: Statement): boolean {
-  if (stmt.type.kind === 'unknown') {
+  if (stmt.type.kind === 'unknown' && !isOutSlotBinding(stmt)) {
     return true;
   }
   switch (stmt.kind) {
@@ -370,8 +467,22 @@ function expressionHasUnknown(expr: Expression): boolean {
     return expr.args.some(
       (arg, index) =>
         expr.argKinds[index] !== 'pointer' &&
+        expr.argKinds[index] !== 'out-pointer' &&
         (arg.kind === 'boundary-check' || expressionHasUnknown(arg)),
     );
+  }
+  // An out-slot is opaque `unknown` the same way a handle is, and the same way not dynamic:
+  // creating, passing, and reading a slot never touches the dynamic representation (the
+  // positions are the gate's STA1125 contract, not a verdict). Ahead of the type check like
+  // `extern-call` — below it this case is dead code, since every slot node reads `unknown`.
+  if (expr.kind === 'out-new' || expr.kind === 'out-get') {
+    return false;
+  }
+  // A slot-bound name reads static wherever it appears (the `collectOutSlots` set): the
+  // binding holds a cell address or a handle, never a dynamic value. Verdicts only — legality
+  // stays the gate's STA1125 contract, so a misused slot is `error`, never `dynamic`.
+  if (expr.kind === 'identifier' && outSlotVerdictNames.has(expr.name)) {
+    return false;
   }
   if (hTypeHasUnknown(expr.type)) {
     return true;

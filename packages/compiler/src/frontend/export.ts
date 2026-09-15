@@ -8,7 +8,7 @@
  *
  * One table, two directions (Task 7.2 step 1): positions map through `exportAbiKindOf`, the
  * export direction of Task 7.1's ABI table. In-table stays a plain C type; anything else is
- * `jsrt_value` — a fallback, never a refusal. Refusals (STA1122–STA1124) answer declaration
+ * `jsrt_value` — a fallback, never a refusal. Refusals (STA1122–STA1124, STA1126) answer declaration
  * SHAPES, not positions: a class, a closure, a generic, mutable state, and C-symbol
  * collisions. Only the entry file is scanned: re-exported names stay STA1122 in v0.
  */
@@ -17,6 +17,7 @@ import * as ts from 'typescript';
 import type { ExternAbiKind } from '../hir/nodes.ts';
 import { diagnosticFromNode, type Diagnostic } from '../support/diagnostics.ts';
 import { exportAbiKindOf } from './extern.ts';
+import { outSlotInner } from './types.ts';
 import { tsTypeToHType } from './types.ts';
 
 type Mode = 'ts' | 'js';
@@ -179,6 +180,11 @@ function abiCType(kind: ExternAbiKind, position: 'param' | 'return'): string {
       return 'const char *';
     case 'pointer':
       return 'void *';
+    case 'out-pointer':
+      // Unreachable: every `Out<T>` position is refused as STA1126 before a prototype is
+      // rendered. The case exists only because the switch is exhaustive — a slot address has
+      // no C-observable meaning, so there is no honest type to print here.
+      return 'void *';
     case 'void':
       return position === 'return' ? 'void' : 'jsrt_value';
   }
@@ -283,11 +289,20 @@ function exportParamType(collector: Collector, param: ts.ParameterDeclaration): 
     );
     return undefined;
   }
-  const kind = exportAbiKindOf(
-    collector.checker.getTypeAtLocation(param),
-    collector.checker,
-    'param',
-  );
+  const paramType = collector.checker.getTypeAtLocation(param);
+  // An out-slot is a call-local rooted address: it dies with the call, so no export can name
+  // one — STA1126, never the `jsrt_value` fallback (docs/FFI.md).
+  if (outSlotInner(paramType, collector.checker) !== undefined) {
+    collector.never(
+      param.name,
+      'STA1126',
+      `exported function parameter '${param.name.getText(collector.sourceFile)}' holds an ` +
+        '`Out<T>` out-slot and cannot be exposed to C in v0 — out-slots are call-local ' +
+        'rooted addresses (docs/FFI.md)',
+    );
+    return undefined;
+  }
+  const kind = exportAbiKindOf(paramType, collector.checker, 'param');
   return kind === undefined ? 'jsrt_value' : abiCType(kind, 'param');
 }
 
@@ -324,7 +339,18 @@ function collectFunction(
     );
     return;
   }
-  const retKind = exportAbiKindOf(signature.getReturnType(), collector.checker, 'return');
+  const returnType = signature.getReturnType();
+  if (outSlotInner(returnType, collector.checker) !== undefined) {
+    collector.never(
+      nameNode,
+      'STA1126',
+      `exported function '${name}' returns an ` +
+        '`Out<T>` out-slot and cannot be exposed to C in v0 — out-slots are call-local ' +
+        'rooted addresses (docs/FFI.md)',
+    );
+    return;
+  }
+  const retKind = exportAbiKindOf(returnType, collector.checker, 'return');
   const ret = retKind === undefined ? 'jsrt_value' : abiCType(retKind, 'return');
   const cName = collector.claim(name, nameNode);
   if (cName === undefined) {
@@ -400,6 +426,16 @@ function collectConst(
     return;
   }
   const type = collector.checker.getTypeAtLocation(decl);
+  if (outSlotInner(type, collector.checker) !== undefined) {
+    collector.never(
+      at,
+      'STA1126',
+      `exported const '${name}' holds an ` +
+        '`Out<T>` out-slot and cannot be exposed to C in v0 — out-slots are call-local ' +
+        'rooted addresses (docs/FFI.md)',
+    );
+    return;
+  }
   const kind = exportAbiKindOf(type, collector.checker, 'return');
   let cType: string | undefined;
   if (kind === 'number' || kind === 'boolean' || kind === 'cstring') {

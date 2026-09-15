@@ -51,11 +51,15 @@ import {
   methodDeclaringClass,
   objectLiteralIsDynamic,
   staticMemberOf,
+  outSlotInner,
   tsTypeToHType,
   userIteratorMethod,
 } from './types.ts';
 import {
   classifyExternDeclaration,
+  classifyOutSlotCall,
+  isOutSlotCallee,
+  outSlotDeclarationOf,
   externDeclarationOfCall,
   externDeclarationOfSymbol,
   fileHasExternDeclaration,
@@ -388,9 +392,24 @@ function gateConstruct(
       return { kind: 'accept' };
 
     // `return;` and `return e;`. That a return sits inside a function is a structural fact the
-    // HIR verifier checks; the gate only decides the construct is in the subset.
-    case ts.SyntaxKind.ReturnStatement:
+    // HIR verifier checks; the gate only decides the construct is in the subset. Out-slots
+    // are the one value ruled on here: a slot is a call-local cell, so returning one would
+    // hand the caller bits for a frame that is already gone — STA1125 in both modes (the
+    // checker cannot see it: the annotation agrees with the value).
+    case ts.SyntaxKind.ReturnStatement: {
+      const returned = (node as ts.ReturnStatement).expression;
+      if (
+        returned !== undefined &&
+        outSlotInner(typeChecker.getTypeAtLocation(returned), typeChecker) !== undefined
+      ) {
+        return {
+          kind: 'never',
+          code: 'STA1125',
+          message: 'returning an out-slot is outside the out-slot contract (docs/FFI.md)',
+        };
+      }
       return { kind: 'accept' };
+    }
 
     // `outer: for (…)`. Only a loop or switch may carry a label here, because those are the only
     // HIR nodes with a place to put one. `foo: { … }` is legal JavaScript but would need a label
@@ -415,7 +434,7 @@ function gateConstruct(
       return gateDeclarationList(node as ts.VariableDeclarationList, mode);
 
     case ts.SyntaxKind.VariableDeclaration:
-      return gateDeclaration(node as ts.VariableDeclaration);
+      return gateDeclaration(node as ts.VariableDeclaration, typeChecker);
 
     case ts.SyntaxKind.BinaryExpression:
       return gateBinary(node as ts.BinaryExpression, typeChecker, mode);
@@ -888,6 +907,29 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
       ? { kind: 'accept' }
       : notYet('using a class as a value is not yet supported', 5);
   }
+  // The constructor has no VALUE (docs/FFI.md §2): aliasing it (`const f = outSlot`)
+  // would smuggle calls past the shape the call arm proves, and the lowering has no closure
+  // to load for one — which used to be a silent STA4021. Asked ahead of the generic-alias
+  // formation below, which would otherwise accept the spelling as a specialization alias.
+  // Refused where the use sits, so the diagnostic names the aliasing, not a downstream
+  // disagreement.
+  if (node.text === 'outSlot' && !isOutSlotCallee(node, typeChecker)) {
+    const aliasSymbol = typeChecker.getSymbolAtLocation(node);
+    const aliasDecl = aliasSymbol?.valueDeclaration;
+    if (
+      aliasDecl !== undefined &&
+      ts.isFunctionDeclaration(aliasDecl) &&
+      aliasDecl.body === undefined &&
+      aliasDecl.name?.text === 'outSlot'
+    ) {
+      return {
+        kind: 'never',
+        code: 'STA1125',
+        message:
+          'outSlot has no value to alias — only direct outSlot<T>() calls construct slots (docs/FFI.md)',
+      };
+    }
+  }
   // `const f = box` aliases the generic under a name calls specialize by: the read forms no
   // value (the tuple always comes from a call), but the single-const-declarator spelling is how
   // a specialization earns a second name. Anything else stays on the refusals below.
@@ -984,6 +1026,12 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
           message: 'using an extern function as a value is not yet supported; planned for Phase 7',
           phase: 7,
         };
+  }
+  // The slot constructor's callee (docs/FFI.md §2): the call arm already decided the direct
+  // call, so the callee position accepts here — mirroring the extern carve-out above. Any
+  // other position falls through to the ordinary global/binding arms below.
+  if (node.text === 'outSlot' && isOutSlotCallee(node, typeChecker)) {
+    return { kind: 'accept' };
   }
   // A global the compiler does not model -- `String`, `Number`, `parseInt`, `NaN`, `Infinity`,
   // `Math`, `globalThis`, `console` as a value, and everything else that resolves outside the
@@ -1301,10 +1349,29 @@ export function isSimpleBindingPattern(name: ts.BindingName): boolean {
   return false;
 }
 
-function gateDeclaration(decl: ts.VariableDeclaration): GateResult {
-  return isSimpleBindingPattern(decl.name)
-    ? { kind: 'accept' }
-    : notYet('destructuring declarations are not yet supported', 5);
+function gateDeclaration(decl: ts.VariableDeclaration, checker: ts.TypeChecker): GateResult {
+  if (!isSimpleBindingPattern(decl.name)) {
+    return notYet('destructuring declarations are not yet supported', 5);
+  }
+  // Out-slot annotations must agree with the initializer (docs/FFI.md §2): an `Out<T>`
+  // name holding anything else — or a non-`Out` name initialized by a slot — is a
+  // representation lie the emitter cannot see, so the gate answers it. Unannotated names
+  // infer from the initializer and need no rule; the checker already refuses the `ts`-mode
+  // mistypings, which leaves `any` flows and `js`-suppressed mismatches to this arm.
+  if (decl.type !== undefined && decl.initializer !== undefined) {
+    const announced = outSlotInner(checker.getTypeFromTypeNode(decl.type), checker) !== undefined;
+    const held = outSlotInner(checker.getTypeAtLocation(decl.initializer), checker) !== undefined;
+    if (announced !== held) {
+      return {
+        kind: 'never',
+        code: 'STA1125',
+        message:
+          'an Out<T> annotation must agree with its initializer — a slot is not a value ' +
+          'of any other type (docs/FFI.md)',
+      };
+    }
+  }
+  return { kind: 'accept' };
 }
 
 /** The class whose body declares the private name `#n`, or `undefined` when the name does not
@@ -1445,6 +1512,26 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       // twice — and `explain` would answer not-yet where the build answers error.
       if (mode === 'js' && isAbsentClassMemberWrite(bin.left, typeChecker)) {
         return notYet('assigning a new property on a class instance is not yet supported', 8);
+      }
+      // An Out-bound name takes only slots: anything else stored would read back as a handle
+      // the callee never wrote (docs/FFI.md §2). Property targets hold copied bits and are
+      // sound by construction, so only bare names are ruled here.
+      if (ts.isIdentifier(bin.left)) {
+        const bound = outSlotInner(typeChecker.getTypeAtLocation(bin.left), typeChecker);
+        if (bound !== undefined) {
+          const stored = bin.right;
+          const storesSlot =
+            outSlotInner(typeChecker.getTypeAtLocation(stored), typeChecker) !== undefined;
+          if (!storesSlot) {
+            return {
+              kind: 'never',
+              code: 'STA1125',
+              message:
+                'an Out<T> binding takes only out-slots — anything else stored would read ' +
+                'back as a handle the callee never wrote (docs/FFI.md)',
+            };
+          }
+        }
       }
       return isAssignableTarget(bin.left, typeChecker) ||
         (ts.isPropertyAccessExpression(bin.left) &&
@@ -1771,6 +1858,29 @@ function pushExternRefusal(
 /** An extern call (docs/FFI.md §1): a direct C call, decided before the property-access arms
  * because the callee is a bare identifier and the bottom fallthrough would accept it as an
  * ordinary call to a binding that does not exist. */
+/** `outSlot<T>()` (docs/FFI.md §2): zero arguments and an unambiguous inner — the call
+ * answers the pure zero-handle, so every position is sound and no position rule exists. An
+ * optional call is not a call the lowering models (like externs, STA1217's reasoning): a
+ * conditional slot creation has no unconditional cell to name. */
+function gateOutSlotCall(call: ts.CallExpression, typeChecker: ts.TypeChecker): GateResult {
+  if (call.questionDotToken !== undefined) {
+    return {
+      kind: 'never',
+      code: 'STA1125',
+      message: 'an optional outSlot() call is outside the out-slot contract (docs/FFI.md)',
+    };
+  }
+  if (call.arguments.length !== 0) {
+    return {
+      kind: 'never',
+      code: 'STA1125',
+      message: 'outSlot() takes no arguments — the slot type rides the type argument (docs/FFI.md)',
+    };
+  }
+  const inner = classifyOutSlotCall(call, typeChecker);
+  return inner.ok ? { kind: 'accept' } : { kind: 'never', code: 'STA1125', message: inner.message };
+}
+
 function gateExternCall(
   call: ts.CallExpression,
   decl: ts.FunctionDeclaration,
@@ -1849,6 +1959,66 @@ function gateExternSignature(
           `not ${String(got)} — C calls have fixed arity (docs/FFI.md)`,
       };
     }
+  }
+  // Out-pointer parameters take only proven slots (docs/FFI.md §2): the slot's own name, or
+  // a fresh inline slot — an out-param WRITES through the pointer, so unlike a `T*` read no
+  // runtime check can verify an address and only provenance is sound. In `ts` mode the
+  // checker already refuses mistyped arguments (so firing here too would report one mistake
+  // twice — the arity precedent above), which leaves `any`-typed flows and all of `js` mode
+  // to this arm. Either way the lowering never sees a bad shape: its address-taking is
+  // guarded by an STA4031, not by trust.
+  const outParams = classified.signature.params;
+  for (let index = 0; index < outParams.length; index += 1) {
+    // The mirror refusal: a slot where a handle is required. Reading the handle spells
+    // `.value` — passing the slot itself would hand the callee a cell address where it
+    // reads a value. Same mode discipline as the out-pointer twin (the checker owns `ts`,
+    // this arm owns `any` flows and `js`).
+    if (outParams[index] === 'pointer') {
+      const argument = call.arguments[index];
+      if (argument === undefined) {
+        continue;
+      }
+      const argType = typeChecker.getTypeAtLocation(argument);
+      const slotWhereHandle = outSlotInner(argType, typeChecker) !== undefined;
+      const anyFlow = (argType.flags & ts.TypeFlags.Any) !== 0;
+      if (slotWhereHandle && (mode === 'js' || anyFlow)) {
+        return {
+          kind: 'never',
+          code: 'STA1125',
+          message:
+            `extern call '${classified.signature.tsName}' argument ${String(index + 1)} is ` +
+            'an out-slot where a handle is required — read the handle through .value first ' +
+            '(docs/FFI.md)',
+        };
+      }
+      continue;
+    }
+    if (outParams[index] !== 'out-pointer') {
+      continue;
+    }
+    const argument = call.arguments[index];
+    if (argument === undefined) {
+      continue;
+    }
+    const bare = skipParens(argument);
+    const shapeOk =
+      ts.isIdentifier(bare) ||
+      (ts.isCallExpression(bare) &&
+        outSlotDeclarationOf(bare, typeChecker) !== undefined &&
+        classifyOutSlotCall(bare, typeChecker).ok);
+    const argType = typeChecker.getTypeAtLocation(argument);
+    const typedOk = outSlotInner(argType, typeChecker) !== undefined;
+    const anyFlow = (argType.flags & ts.TypeFlags.Any) !== 0;
+    if ((shapeOk && typedOk) || (!typedOk && !anyFlow && mode === 'ts')) {
+      continue;
+    }
+    return {
+      kind: 'never',
+      code: 'STA1125',
+      message:
+        `extern call '${classified.signature.tsName}' argument ${String(index + 1)} is not ` +
+        'a proven out-slot — bind outSlot<T>() to a name first (docs/FFI.md)',
+    };
   }
   return { kind: 'accept' };
 }
@@ -2025,6 +2195,13 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   const externDecl = externDeclarationOfCall(call, typeChecker);
   if (externDecl !== undefined) {
     return gateExternCall(call, externDecl, typeChecker, mode);
+  }
+
+  // The slot constructor (docs/FFI.md §2): decided before the property-access arms for the
+  // same reason extern calls are — the callee is a bare identifier the fallthrough would
+  // accept as an ordinary call to a binding that does not exist.
+  if (outSlotDeclarationOf(call, typeChecker) !== undefined) {
+    return gateOutSlotCall(call, typeChecker);
   }
 
   // Two property-access callees, each its own HIR node: `console.log`, and a method of a class
@@ -2791,6 +2968,28 @@ function gateParameter(param: ts.ParameterDeclaration): GateResult {
  * `gateIdentifier` and its declaration-site test are gone with it: every identifier the checker
  * resolves is now expressible, and the accept set matches the HIR's vocabulary again. */
 
+/** Whether this expression's type is an `Out<T>` slot (docs/FFI.md §2): the one test
+ * every flow arm shares. `unknown` (even slot-flavored) is not `Out` — only the spelling
+ * counts, so a dynamic value never smuggles itself into a slot position. */
+function isOutSlotValue(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  return outSlotInner(checker.getTypeAtLocation(expression), checker) !== undefined;
+}
+
+/** An out-slot stored where only values live (docs/FFI.md §2): array elements, object
+ * fields, and spreads. Slots are call-local cells, not values — copying one's bits into a
+ * heap object or another call's argument divorces the bits from the cell the callee writes,
+ * so every one of these positions is STA1125 and only the slot's own name (or a fresh
+ * inline slot at an out-pointer parameter) ever crosses. */
+function outSlotInValuePosition(what: string): GateResult {
+  return {
+    kind: 'never',
+    code: 'STA1125',
+    message:
+      `${what} cannot hold an out-slot — slots live in locals, pass to Out<T> ` +
+      'parameters, and read through .value (docs/FFI.md)',
+  };
+}
+
 function skipParens(expression: ts.Expression): ts.Expression {
   let current = expression;
   while (ts.isParenthesizedExpression(current)) {
@@ -2903,6 +3102,11 @@ function isFunctionLength(access: ts.PropertyAccessExpression, checker: ts.TypeC
  * iteration — and the dense runtime array has no way to be absent. A spread needs the iterator
  * protocol. Both are rejected rather than approximated. */
 function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeChecker): GateResult {
+  for (const element of literal.elements) {
+    if (!ts.isOmittedExpression(element) && isOutSlotValue(element, checker)) {
+      return outSlotInValuePosition('an array literal');
+    }
+  }
   for (const element of literal.elements) {
     if (ts.isOmittedExpression(element)) {
       return notYet('a hole in an array literal is not yet supported', 5);
@@ -3092,6 +3296,24 @@ function gateObjectLiteral(
   literal: ts.ObjectLiteralExpression,
   checker: ts.TypeChecker,
 ): GateResult {
+  for (const property of literal.properties) {
+    // A method or accessor body is not stored: its returns are their own nodes.
+    if (
+      ts.isMethodDeclaration(property) ||
+      ts.isGetAccessorDeclaration(property) ||
+      ts.isSetAccessorDeclaration(property)
+    ) {
+      continue;
+    }
+    const stored = ts.isSpreadAssignment(property)
+      ? property.expression
+      : ts.isPropertyAssignment(property)
+        ? property.initializer
+        : property.name;
+    if (isOutSlotValue(stored, checker)) {
+      return outSlotInValuePosition('an object literal');
+    }
+  }
   for (const property of literal.properties) {
     // `{ x }` is `{ x: x }` -- the same key, the same value, and a name the checker has already
     // resolved. It gets no layout question of its own, so it is accepted here and desugared in the

@@ -493,6 +493,16 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
       const args = rewriteEach(expr.args, sub);
       return args === expr.args ? expr : { ...expr, args };
     }
+    // A slot creation has no children to rewrite; a slot read rewrites its operand (which is
+    // never itself a slot node — the gate admits only names and fresh slots as receivers —
+    // so one level suffices and no fixpoint is owed).
+    case 'out-new': {
+      return expr;
+    }
+    case 'out-get': {
+      const operand = sub(expr.operand);
+      return operand === expr.operand ? expr : { ...expr, operand };
+    }
     case 'call': {
       const callee = sub(expr.callee);
       const args = rewriteEach(expr.args, sub);

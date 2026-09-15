@@ -21,6 +21,25 @@ import { join } from 'node:path';
 /** Where `xcode-select --install` puts versioned SDKs (`MacOSX26.5.sdk`, …). */
 export const CLT_SDK_ROOT = '/Library/Developer/CommandLineTools/SDKs';
 
+/** Version order for `MacOSX<major>[.<minor>].sdk` names. Lexicographic order lies:
+ * `"MacOSX26.sdk"` sorts after `"MacOSX26.5.sdk"` (`'s' > '5'`), while 26.0 predates 26.5 —
+ * and picking the older SDK is how a working fallback lost to a broken one. Numeric
+ * components compare numerically; a missing minor is older than any present one. */
+export function compareSdkNames(first: string, second: string): number {
+  const parse = (name: string): readonly number[] => {
+    const match = /^MacOSX(\d+)(?:\.(\d+))?\.sdk$/.exec(name);
+    if (match === null) {
+      return [];
+    }
+    const major = Number.parseInt(match[1] ?? '', 10);
+    const minor = match[2] === undefined ? -1 : Number.parseInt(match[2], 10);
+    return [major, minor];
+  };
+  const [aMajor = 0, aMinor = 0] = parse(first);
+  const [bMajor = 0, bMinor = 0] = parse(second);
+  return aMajor - bMajor !== 0 ? aMajor - bMajor : aMinor - bMinor;
+}
+
 /** The `.tbd` whose format decides whether the bundled linker can use an SDK. */
 export function tbdPathOf(sdkPath: string): string {
   return join(sdkPath, 'usr', 'lib', 'libSystem.tbd');
@@ -65,7 +84,7 @@ export function pickFallbackSdk(
         !NEW_ARCH_TOKEN.test(candidate.tbdText),
     )
     .map((candidate) => candidate.name)
-    .sort();
+    .sort(compareSdkNames);
   const newest = usable[usable.length - 1];
   return newest === undefined ? undefined : join(sdkRoot, newest);
 }

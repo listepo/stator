@@ -1093,7 +1093,14 @@ export interface CallExpr extends Node {
  * and never dereferenced — there is no transfer spelling in v0, so every pointer is a borrow.
  * `void` is a return position only — a `void` parameter is STA1119, and `cstring-owned` as a
  * return is STA1119, both refused where the signature is classified, never here. */
-export type ExternAbiKind = 'number' | 'boolean' | 'cstring' | 'cstring-owned' | 'pointer' | 'void';
+export type ExternAbiKind =
+  | 'number'
+  | 'boolean'
+  | 'cstring'
+  | 'cstring-owned'
+  | 'pointer'
+  | 'out-pointer'
+  | 'void';
 
 /** The closed `@statorError` vocabulary (docs/FFI.md §4): the only conventions a declaration
  * may opt into. A misspelling is a gate error (STA1119), never a silent default. */
@@ -1156,6 +1163,15 @@ export function externKindHType(kind: ExternAbiKind): HType {
       return H_STRING;
     case 'pointer':
       return hUnknown(false);
+    case 'out-pointer':
+      // Same opaque bits as a `pointer`: the HIR has no vocabulary for an out-slot either,
+      // and the slot address must never take a boundary check (there is no runtime test for
+      // "is this a proven slot"), so it rides the same `maybeBoundary` passthrough — while
+      // the EXTERN node still carries `out-pointer`, which is what the emitter, the verifier,
+      // and `explain` read instead. The gate admits only proven `Out<T>` values here (a
+      // dynamically-typed argument is STA1125): an out-param WRITES through the pointer, so
+      // unlike a `T*` read it cannot trust bits.
+      return hUnknown(false);
     case 'void':
       return H_UNDEFINED;
   }
@@ -1197,9 +1213,40 @@ export interface ExternCall extends Node {
   readonly tsName: string;
   readonly args: readonly Expression[];
   readonly argKinds: readonly ExternAbiKind[];
+  /** Parallel to `args`/`argKinds`: the C struct tag an out-pointer argument casts through
+   * under a binding header (the brand literal, or `'char'` for `Out<CString>`), `undefined`
+   * elsewhere. The fallback declaration needs no tag (`void **`), so this exists only for
+   * the header case — stamped by the lowering from the parameter's `Out<T>` spelling. */
+  readonly argTags: readonly (string | undefined)[];
   readonly retKind: ExternAbiKind;
   readonly error?: ExternErrorConvention;
   readonly header?: string;
+}
+
+/** A fresh `Out<T>` out-slot (`outSlot<T>()`, docs/FFI.md §2): a rooted `void *` cell the
+ * callee writes a `T*` into through the `T**` parameter.
+ *
+ * Not a call: there is no function VALUE anywhere (like `ExternCall`, the callee is a
+ * mechanism, not a value). The emitter answers the pure zero-handle `(jsrt_value)0` — a slot
+ * cell starts NULL and the callee overwrites it through the `T**` parameter, so creation
+ * allocates nothing and needs no target. The node's `type` is `unknown` — opaque bits, not
+ * a dynamic value — and the creation discipline (name, arity, inner) is the gate's STA1125
+ * contract, restated by the lowering as STA4031. */
+export interface OutNew extends Node {
+  readonly kind: 'out-new';
+}
+
+/** A `.value` read on an `Out<T>` slot: what the callee stored, as the program sees it.
+ * `operand` is always an `Out<T>`-typed identifier — the gate refuses every other receiver
+ * (inline slots, non-slot values), so any other shape here is the lowering disagreeing with
+ * the gate. `inner` is the slot's content kind, stamped by the lowering from the `Out<T>`
+ * spelling: a brand reads as opaque bits in the same representation a branded-pointer
+ * return travels in (docs/FFI.md §6), while a `CString` inner copies the stored `char *`
+ * into a fresh runtime string exactly like a `cstring` return. */
+export interface OutGet extends Node {
+  readonly kind: 'out-get';
+  readonly operand: Expression;
+  readonly inner: 'pointer' | 'cstring';
 }
 
 /** What each console method takes, and the runtime function that serves it. The five printing
@@ -1723,6 +1770,8 @@ export type Expression =
   | FunctionExpr
   | CallExpr
   | ExternCall
+  | OutNew
+  | OutGet
   | AwaitExpr
   | YieldExpr
   | PromiseStaticCall

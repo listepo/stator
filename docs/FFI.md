@@ -8,8 +8,9 @@ lowering (plan §15.6).
 
 Steps 4–7 have landed: error mapping, lowering and the emitter (steps 4–5), opaque
 pointer pass-through borrow-only (step 6, §6), and header/link plumbing with the `@statorLink`
-pragma and `--link=` (step 7, §9). What remains for Task 7.3 is the `T**` out-param question
-its SQLite binding will force and the ambient `CString` lib declarations (§7). Sections below
+pragma and `--link=` (step 7, §9). The `T**` out-param question Task 7.3 forced is
+answered: the `Out<T>` row (§2) with misuses at STA1125. What remains for Task 7.3 is the
+ambient `CString` lib declarations (§7). Sections below
 say where each remaining mechanism hooks in, but no unbuilt mechanism is claimed.
 
 Normative companions: `docs/SUBSET.md` carries the extern rows (feature × mode
@@ -76,6 +77,8 @@ step 2):
 | `boolean`                   | `bool`        | `<stdbool.h>`                                                                                      |
 | `void`                      | `void`        | Return position only; a `void` parameter is STA1119                                                |
 | branded pointer type        | `T*`          | Opaque; never dereferenced by generated code (see below)                                           |
+| `Out<T>` out-slot           | `T**`         | Parameter-only; the caller allocates the cell, the callee writes it (see below)                    |
+| `Out<CString>` out-slot     | `const char**`| Parameter-only; copy-on-read through `.value` (see below)                                          |
 | `CString` / `CStringOwned`  | `const char*` | Allocates; see §3. `CStringOwned` is parameter-only                                                |
 | anything else               | —             | Compile error (STA1119 catch-all; specific kinds below)                                            |
 
@@ -98,6 +101,52 @@ declaration's documentation says who frees it and when. The two-lifetime rule
 the compiler cannot check it; for handles v0 admits only the first — §6's
 borrow-only.
 
+**`Out<T>` out-slots.** A `T**` out-param spelled `Out<brand>` (or `const char**`
+spelled `Out<CString>`):
+
+```ts
+type Out<T> = { readonly value: T };
+declare function outSlot<T>(): Out<T>;
+/** @statorExtern sqlite3_open */
+declare function sqliteOpenDb(filename: CString, db: Out<SqliteDb>): number;
+
+const dbSlot = outSlot<SqliteDb>();
+sqliteOpenDb(":memory:", dbSlot);
+const db: SqliteDb = dbSlot.value;
+```
+
+Recognition is structural and exact, mirroring brands: the `Out` alias with exactly one
+type argument, an object with exactly one property named `value`. The inner must be a
+branded pointer or `CString`; anything else wearing the alias is STA1125. Spelling the
+same shape without the alias is a plain heap object, never a slot.
+
+The rules, each enforced where it can be checked (the contract is STA1125 everywhere):
+
+- Slots are created by the blessed `outSlot<T>()` — a bare-identifier call resolving to
+  an ambient `declare function outSlot` with an `Out` return. A real implementation under
+  the name is the user's own function, never the builtin. The call needs a resolvable
+  inner: an explicit type argument (`outSlot<Db>()`) or a binding annotation
+  (`const s: Out<Db> = outSlot()`).
+- Slots live in locals, pass to `Out<T>` parameters (by name, or a fresh inline slot),
+  and read through `.value`. Anything else — returns, aggregates, non-`Out` bindings,
+  exports (STA1126) — is STA1125. Copies share nothing: every binding owns its cell, so
+  write and read through the same name. Truthiness, string/number coercion, and arithmetic
+  on slots are out of contract (like §6's residue: deterministic bits, never a crash).
+- An out-param WRITES through the pointer, so unlike a `T*` read no runtime check can
+  verify an address: only a proven slot crosses, in both modes (a dynamically-typed
+  argument is STA1125, not STA2001). In `ts` mode the checker already refuses mistyped
+  arguments (STA0012, like extern arity), so the gate fires only for `any` flows there.
+- Representation: every slot is an ordinary frame slot holding handle-or-zero bits —
+  never addresses as values, so nothing can dangle. The emitter passes the slot's own
+  address (`(TAG**)&slot` under a header, `void**` in the fallback declaration) and
+  copies the written bits back to a named slot after the call. Under a header the brand
+  literal must be a C identifier (it names the struct tag); a lying tag fails loudly at
+  the clang line, exactly like any other uncheckable boundary value (§5).
+- `Out<CString>` reads copy through `from_cstr` like a `cstring` return — including its
+  NULL assert, so a NULL read belongs behind the error convention guarding the call.
+- A slot read before any call wrote answers the zero-handle (`+0.0`), the same rule §8
+  states for NULL handles.
+
 **`string` deliberately maps to nothing.** UTF-16 in, bytes out is a real
 conversion with a real allocation, so it is spelled at the declaration and
 never inferred. A bare `string` in an extern signature is error(STA1118); the
@@ -114,7 +163,7 @@ table splits a kind out with a NEW code, never by reusing one):
 | array type in an extern signature                                                                                            | error(STA1116) | Pass a pointer + length as ABI types                                                                                                                 |
 | function/closure type in an extern signature                                                                                 | error(STA1117) | v0 has no trampoline; C calls in via Task 7.2 exports instead                                                                                        |
 | bare `string` in an extern signature                                                                                         | error(STA1118) | `CString` (borrow) or `CStringOwned` (transfer)                                                                                                      |
-| anything else outside the table — incl. struct by value, `T**` out-params, `void` as a parameter, `CStringOwned` as a return | error(STA1119) | No mapping exists in v0                                                                                                                              |
+| anything else outside the table — incl. struct by value, `Out` misuses (STA1125), `void` as a parameter, `CStringOwned` as a return | error(STA1119) | No mapping exists in v0                                                                                                                              |
 | variadic (`printf`-style) extern declaration                                                                                 | error(STA1120) | No sound signature; each call site is a different function type (permanent — plan §10 out-of-scope table)                                            |
 | extern declaration outside a `.d.ts`                                                                                         | error(STA1121) | Move it into a `.d.ts` (§1.3)                                                                                                                        |
 
@@ -123,8 +172,11 @@ construction — they are the cases that would need boxing, and "no boxing for
 primitives" is only meaningful if the non-primitives are refused rather than
 silently boxed. Struct **by value** is STA1119 for v0 (ABI layout per platform
 is a task of its own; plan §10 out-of-scope table). `T**` out-params — the
-SQLite shape — are STA1119 in this surface: Task 7.3's manual bindings will
-force the question, and this file grows then (§7). C++ symbols, name mangling,
+SQLite shape — were STA1119 until v0.1 answered the question Task 7.3 forced: the
+`Out<T>` row above, with misuses split out to STA1125 per this table's own promise.
+What stays refused: `T**` in return position, `T**` over non-brand non-`CString`
+pointees, and nullable-pointer parameters (e.g. `sqlite3_open_v2`'s `zVfs`) — each
+STA1119 naming the position. C++ symbols, name mangling,
 and C calling back into a JS closure have no spelling in this surface at all,
 so there is nothing for the gate to refuse; they are out of scope for v0 by
 the plan's table, not by a code. Threads: v0 FFI is single-threaded, said out
@@ -232,6 +284,11 @@ extern calls are `static` + flag (direct C calls, unboxed); `js`-mode calls are 
 flag when every argument is statically typed, else `dynamic` + flag. A handle-typed
 argument never contributes `dynamic` by itself: it crosses unboxed with no check to fail,
 so the call's mechanics are static whatever the HType says (the HIR cannot name a brand).
+An out-slot is the same story one step further: creating, passing, and reading a slot never
+touches the dynamic representation, so slot positions are `static` — legality is the gate's
+STA1125 contract, never a verdict. A dynamically-typed argument at an `Out` parameter is the
+one place `js` mode refuses where it would otherwise check: no runtime test can verify a
+slot address, so there is nothing for STA2001 to do.
 A call that does not compile — a refusal — carries no flag: it is not a
 boundary, it is a refusal, and its code already names it. Refusals surface at the
 **declaration** (STA1114–21); STA1217 additionally
@@ -317,8 +374,10 @@ demands it (§15.3, §15.6):
    `CString` / `CStringOwned` declarations in the stator lib. Wording and sequence landed
    with steps 4–5 (§4 names both); the ambient lib declarations stay open for §7.3, which
    owns the binding set — fixtures declare the brands locally until then.
-4. The `T**` out-param question Task 7.3's SQLite binding will force
-   (STA1119 until then — §2).
+4. ~~The `T**` out-param question Task 7.3's SQLite binding forced
+   (STA1119 until then — §2).~~ Answered in v0.1: the `Out<T>` row (§2), with misuses
+   split out to STA1125. What stays refused (STA1119 naming the position): `T**` returns,
+   `T**` over non-brand non-`CString` pointees, and nullable-pointer parameters.
 5. ~~`docs/README.md` index and the AGENTS.md repo map do not list this file
    yet~~ — done alongside the surface commit; both list `FFI.md` now.
 6. `docs/SUBSET.md` Types-row note still says "FFI returns are still Phase 6";
@@ -339,7 +398,7 @@ sketch is only the *wording* of this appendix, which still narrates steps 8–9 
 Landed (steps 1–2): `--emit-header`, the reverse mapping, the export decision, and the
 determinism rule. `src/frontend/export.ts` is the only reader of the export surface;
 `src/frontend/extern.ts`'s `exportAbiKindOf` is the table's export direction — one table,
-two directions, so the halves cannot drift. `STA1122`–`STA1124` are allocated rows in
+two directions, so the halves cannot drift. `STA1122`–`STA1124` and `STA1126` are allocated rows in
 `docs/DIAGNOSTICS.md`, no longer proposals.
 
 Landed (steps 3–5): the init contract, the TS-throws contract, and the frame/stack roots —
@@ -433,7 +492,8 @@ plus a manual link proof (fresh pair links and runs; version-skewed pair fails w
   parameter, `export default`, re-export and other non-declaration export forms);
   `STA1123` mutable or non-primitive exported state (`let`/`var`, destructured or
   uninitialized consts, consts of non-primitive type); `STA1124` two exports colliding on
-  one `stator_<unit>_<name>` — a compile error, never last-writer-wins.
+  one `stator_<unit>_<name>` — a compile error, never last-writer-wins; `STA1126` an
+  exported `Out<T>` slot, which names a call-local address with no cross-boundary meaning.
 - **Tests:** `tests/ffi/` fixture + `main.c` byte-compare, double-build `cmp`
   determinism, collision/error-path goldens, GC-hygiene loop under Boehm, ASan job.
 

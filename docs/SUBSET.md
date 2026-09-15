@@ -225,9 +225,16 @@ only when the flag is passed, which the decision runner never passes).
 | Array type in an extern signature | error(STA1116) | error(STA1116) | A managed array is not a C buffer; spell pointer + length as ABI types. |
 | Function/closure type in an extern signature | error(STA1117) | error(STA1117) | v0 has no trampoline; C calls in via Task 7.2 exports instead. |
 | Bare `string` in an extern signature | error(STA1118) | error(STA1118) | UTF-16 in, bytes out is never inferred; use `CString` (borrow) or `CStringOwned` (transfer). |
-| Any other type outside the ABI table (struct by value, `T**` out-params, `void` as a parameter, `CStringOwned` as a return, `void` over a value-returning C function) | error(STA1119) | error(STA1119) | The catch-all that keeps every diagnostic stable-coded (§1.3). A future widening splits a kind out with a NEW code. |
+| Any other type outside the ABI table (struct by value, `T**` spelled any way other than `Out<brand>`, `void` as a parameter, `CStringOwned` as a return, `void` over a value-returning C function) | error(STA1119) | error(STA1119) | The catch-all that keeps every diagnostic stable-coded (§1.3). A future widening splits a kind out with a NEW code. `T**` spelled `Out<brand>` left this row for STA1125 (see the `Out<T>` rows below). |
 | Variadic (`printf`-style) extern declaration | error(STA1120) | error(STA1120) | No sound signature — permanent, plan §10 out-of-scope table. |
 | Extern declaration outside a `.d.ts` | error(STA1121) | error(STA1121) | Keeps Task 7.3's generator output a drop-in; keeps the trust boundary greppable. |
+| `Out<T>` out-parameter call (slot from bare-global `outSlot<T>()`, passed to an `Out<T>` parameter, read via `.value`) | static | static | `T**` spelled `Out<brand>`, parameter-only (docs/FFI.md §2). The slot lives in locals and its address is rooted for the call. |
+| `Out` with a non-brand inner type | error(STA1125) | error(STA1125) | Only a branded pointer names a C address; anything else has no `T**` to pass. |
+| Non-slot argument to an `Out` parameter; slot passed to a non-`Out` parameter | error(STA1125), except the checker owns ts mode (STA0012, like extern arity) | error(STA1125) | Slots live only in locals, pass only to `Out<T>` parameters, and read only through `.value`. |
+| Dynamically-typed argument to an `Out` parameter | error(STA1125) | error(STA1125) | An out-param WRITES through the pointer, so unlike a `T*` read no runtime check can verify a slot address — only a proven slot is sound. |
+| Slot returned, stored in an object/array, or bound to an annotated non-`Out` name; unannotated aliasing | error(STA1125), except unannotated aliasing is static | error(STA1125), except unannotated aliasing is static | An escaped slot outlives the rooted call frame; a bare `const s2 = s` keeps the slot type and stays static. |
+| Exported `Out` value | error(STA1126) | error(STA1126) | An out-slot is a call-local rooted address that dies with the call, so it has no C-observable meaning across the boundary. |
+| `Out<CString>` tail-parameter shape | static | static | For `const char**`: the callee writes a borrowed string pointer, the runtime copies on read via `.value`, and NULL is guarded by the error convention. |
 | `stator explain` marks extern calls as an unchecked boundary | yes (alongside the verdict) | yes (alongside the verdict) | The flag rides ALONGSIDE the verdict — `externCalls: [{name, line}]` in `--json`, an `unchecked boundary` line on the terminal. The four-verdict vocabulary (`docs/MODES.md` §6) is unchanged. A C return can never be runtime-checked (§0.2 asymmetry, `docs/FFI.md` §5). |
 | `--emit-header` on exported functions (Task 7.2 steps 1–2) | header + object | header + object | One table, two directions: a whole-signature-in-table function spells plain C types (`stator_<unit>_<name>`); any other position spells `jsrt_value`. `-o` names a relocatable object (`clang -c`); nothing links. Stubs and `stator_init_<unit>` arrive with steps 3–5. |
 | `--emit-header` on exported `const` primitives | header + object | header + object | `number`/`boolean` spell `extern const double`/`bool`, `CString` spells `extern const char *`, string/null/undefined spell `extern const jsrt_value`. |
@@ -265,12 +272,14 @@ All codes in this range reused from plan.md except the four below.
 | STA1116 | Array type in an extern signature | both | A managed array is not a C buffer; pointer + length instead. |
 | STA1117 | Function/closure type in an extern signature | both | v0 has no closure trampoline; Task 7.2 exports are the supported call-in direction. |
 | STA1118 | Bare `string` in an extern signature | both | The conversion is spelled (`CString`/`CStringOwned`), never inferred. |
-| STA1119 | Anything else outside the extern ABI table | both | The catch-all (struct by value, `T**`, misplaced `void`/`CStringOwned`, discarding returns). Future widenings split out NEW codes. |
+| STA1119 | Anything else outside the extern ABI table | both | The catch-all (struct by value, misplaced `void`/`CStringOwned`, discarding returns). `T**` out-params split out to STA1125 when the table widened to `Out<T>` (docs/FFI.md §2). Future widenings split out NEW codes. |
 | STA1120 | Variadic extern declaration | both | No sound signature — permanent (plan §10 out-of-scope table). |
 | STA1121 | Extern declaration outside a `.d.ts` | both | Placement rule that keeps Task 7.3 generator output a drop-in. |
 | STA1122 | Non-exportable declaration shape under `--emit-header` | both | Class, closure-valued const, generic function, rest/destructured parameter, `export default`, re-export and other non-declaration export forms (plan §10 Task 7.2 step 2). |
 | STA1123 | Mutable or non-primitive exported state under `--emit-header` | both | `let`/`var`, destructured or uninitialized consts, consts of non-primitive type. Only const number/boolean/`CString`/string/null/undefined are exportable. |
 | STA1124 | Two exports colliding on one C symbol under `--emit-header` | both | A collision is a compile error, never last-wins (plan §10 Task 7.2 step 7). |
+| STA1125 | `Out<T>` out-slot used outside its contract | both | Slots are created by `outSlot<T>()`, live in locals, pass to `Out<T>` parameters, and read through `.value` (docs/FFI.md §2). Split out of STA1119 when the table widened to `T**`. |
+| STA1126 | Exported `Out<T>` out-slot under `--emit-header` | both | A slot names a call-local address with no cross-boundary meaning (plan §10 Task 7.2 step 2). |
 
 ### "Not yet" class (planned, STA12xx)
 
