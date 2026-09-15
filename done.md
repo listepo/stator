@@ -1876,6 +1876,30 @@ clean, cpd 0.9%, `unit 495/495`, `subset 623 — 583/40/0`, `golden 368/368`):
   `c?.m` lowers statically in the `?.`-consequent for single-class receivers (short-circuit
   makes it sound). Test262: 88 more failed→skipped via 2454's wake, 0 passed→failed.
 
+### Wave 5 — remaining surface (steps 41–44) ✅ (landed 2026-09-15)
+
+Four parallel slices (`a84a970`), all green at HEAD (`tsc` both projects, oxlint 0/0, oxfmt
+clean, cpd 1.0% — exactly at the gate, see plan-notes 262; `unit 503/503`,
+`subset 643 — 603/40/0`, `golden 376/376`):
+
+- **41 bare generics as value** — `typeof id` folds to `"function"`; other value positions take
+  the canonical tuple (shared specialization); callbacks specialize at the parameter type via
+  `genericArgumentTuple` (which also closed an `STA4054` gap on receiver-op paths). Escape
+  positions (`return`/`===`/spread/…) stay `STA1214`; explicit type args on non-generics stay
+  `STA0012` (genuine TS2558).
+- **42 `super` as value** — `super.m` tear-off lowers to `method-value` (`direct` dispatch,
+  receiver param); plus a root-cause fix in `captures.ts` (`SuperKeyword` now registers a
+  receiver capture — also fixed pre-existing `super.m()`-in-arrow `STA4072`). Bare `super`,
+  field/accessor/element/static positions stay refused.
+- **43 alias/member bases** — `extends K` (incl. chains, `K<number>`, cross-file) and
+  member-expression bases through `baseClassOf` + alias erasure; true mixins, `let` aliases,
+  `NS.K` stay `STA1214`. `extends NS.C` still fails on the namespace's own refusal (separate).
+- **44 receiver hardening** — match-array spread rides `[].concat(u)`; `o[kObj]` reads suppress
+  TS2538 in js with ToPropertyKey coercion (which also fixed pre-existing `a["01"]`→`a[1]`
+  garbage); fixed-param/dynamic-arg widens through the 2322/2454 channel (method-touching bodies
+  keep static dispatch). **Remainder → step 45:** return/decl/assign edges still miscompile the
+  same garbage; dynamic method dispatch on class instances stays `STA2006` (baseline).
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)

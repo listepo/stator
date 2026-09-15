@@ -7723,3 +7723,17 @@ Five slices in `93af561` (evidence in `done.md` → Phase 5 wave 4). Decisions w
   spread-of-non-identifier computed fallout, `o[kObj]` TS2538, RegExpExecArray spread,
   fixed-param/dynamic-arg miscompile, `c?.m` unions-of-two-classes/`any`-mixing. Plus owner
   verdicts already recorded (2769 permissive-fallback consistency, TS2416 now settled above).
+
+## 262. Wave 5 landed; step 45 owns the remaining boundary edges (2026-09-15)
+
+Four slices in `a84a970` (evidence in `done.md` → Phase 5 wave 5). Notes:
+
+- **cpd sits exactly at the gate (1.0%, 106 clones).** The next wave that adds code must
+  extract or it goes red — treat clone-budget as a first-class constraint when slicing (shared
+  helpers over per-site copies; the wave-2 codegen helpers are the model).
+- **Step 45 is the honest remainder of step 44:** return/decl/assign edges miscompile dynamic
+  values into fixed bindings as silent garbage, with the two regressions the first attempt hit
+  (`spread_key_order`, `class_generic_base`) named in the Check so the fix proves it avoided
+  them rather than asserting it.
+- **Test262 note:** 2371 passed / 2159 failed / 49050 skipped with zero TS2538 records;
+  `ratchet.json` untouched (drift from note 260 still pre-existing).
