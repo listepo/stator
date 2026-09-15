@@ -169,6 +169,7 @@ import {
   hIterator,
   hPromise,
   hTypeCanBeNullish,
+  hTypeEquals,
   hTypeHasUnknown,
   hTypeName,
   hUnknown,
@@ -328,6 +329,9 @@ const optionalChainCuts = new Map<ts.Node, HType>();
  * seeding from the same `runtimeDynamicSymbols`, so the two cannot disagree; reset per
  * `lowerProgram` like the module state beside it (in-process callers reuse this module). */
 let hasRuntimeDynamicSymbols = false;
+/** Whether the current `lowerProgram` seeded any `\u0000dynamic-return:` bindings (plan.md §8
+ * step 45). Set alongside that seeding the same way; reset per `lowerProgram` with the rest. */
+let hasDynamicReturnSymbols = false;
 /** Set when an await is lowered at functionNesting === 0. Reset per lowerProgram. */
 let moduleAwaits = false;
 /** The current file's class specializations, for generic declarations nested inside function
@@ -346,8 +350,8 @@ export function lowerProgram(
   const diagnostics: Diagnostic[] = [];
   lowerDiagMode = mode;
   const bindings = Scope.root();
-  // Step 44c runs before anything is lowered: an Unknown (or mismatched) value reaching a
-  // fixed-shape slot widens the receiving binding, and the widening must be visible to the
+  // Steps 44c/45 run before anything is lowered: an Unknown (or mismatched) value reaching
+  // a fixed-shape slot widens the receiving binding, and the widening must be visible to the
   // declaration itself, not only to later uses. Unioned with `runtimeDynamicSymbols` — which
   // also feeds the walk as `knownDynamic`, so an already-widened binding counts as dynamic.
   const dynamicFqns = new Set<string>();
@@ -360,6 +364,17 @@ export function lowerProgram(
   hasRuntimeDynamicSymbols = dynamicFqns.size > 0;
   for (const fqn of dynamicFqns) {
     bindings.set(`\u0000dynamic:${fqn}`, hUnknown(false));
+  }
+  // Step 45's twin: a dynamic value RETURNED where a fixed object/array type is declared
+  // widens the CALL, not the declaration — the declared return type is an overload and
+  // vtable contract callers were compiled against, so the declaration keeps its shape and
+  // every call result answers Unknown, routing uses through the shape table. Seeded after the
+  // parameter pass so a `return` of a widened parameter already reads dynamic; the parameter
+  // pass itself never sees these marks, so step 44c's results are unchanged by their presence.
+  const dynamicReturnFqns = collectDynamicReturns(files, checker, dynamicFqns);
+  hasDynamicReturnSymbols = dynamicReturnFqns.size > 0;
+  for (const fqn of dynamicReturnFqns) {
+    bindings.set(`\u0000dynamic-return:${fqn}`, hUnknown(false));
   }
   const statements: Statement[] = [];
   functionNesting = 0;
@@ -996,8 +1011,13 @@ function maybeBoundary(
  * mismatched shape: all may arrive in a representation the slot's static reads do not describe.
  * A subclass value into a NON-generic base is safe by the prefix rule `hTypeAssignable` states
  * (the layout starts with the base's, in the base's slot order), and identical names are the
- * same layout by construction. */
+ * same layout by construction. Arrays are slot-exact when their elements agree exactly: a
+ * static index read hands the element to a consumer compiled for the declared element type,
+ * so a mismatched element is the same hole one level down. */
 function staticallySafeValue(value: HType, target: HType): boolean {
+  if (value.kind === 'array' && target.kind === 'array') {
+    return hTypeEquals(value.element, target.element);
+  }
   return (
     value.kind === 'object' &&
     target.kind === 'object' &&
@@ -1006,17 +1026,25 @@ function staticallySafeValue(value: HType, target: HType): boolean {
   );
 }
 
+/** Empty mark set for `effectiveValueType` callers with no return marks to consult —
+ * a shared frozen empty rather than an allocation per call on this hot path. */
+const NO_RETURN_MARKS: ReadonlySet<string> = new Set<string>();
+
 /** The HType a value expression delivers where a fixed-shape slot reads it, mirroring the
  * lowering's own erasures rather than the checker's spelling. A non-checkable `as` assertion
  * lowers to its operand (`x as T` below), parentheses and `!` are transparent, and an identifier
  * answers its DECLARED type: a narrowing the compiler cannot check is not a fact about the value
  * (the `typeAt` rule), and a narrowing it can check settles a tag, never a layout. When the
  * declaration cannot be found the checker's own answer stands. Biased toward Unknown: a missed
- * widening is silent garbage, an extra one is a dynamic read. */
+ * widening is silent garbage, an extra one is a dynamic read. A call to a step-45-marked
+ * function delivers Unknown whatever the checker spells (its declared return is the contract,
+ * not the value); `knownReturn` carries those marks, empty when the caller has none to consult
+ * — which keeps every pre-45 call site answering exactly what it answered before. */
 function effectiveValueType(
   node: ts.Expression,
   checker: ts.TypeChecker,
   knownDynamic: ReadonlySet<string>,
+  knownReturn: ReadonlySet<string> = NO_RETURN_MARKS,
 ): HType {
   let current = node;
   for (;;) {
@@ -1026,12 +1054,26 @@ function effectiveValueType(
     }
     if (ts.isAsExpression(current) || ts.isSatisfiesExpression(current)) {
       const assertion = ts.isAsExpression(current) ? assertedBy(current, checker) : null;
-      const operandType = effectiveValueType(current.expression, checker, knownDynamic);
+      const operandType = effectiveValueType(
+        current.expression,
+        checker,
+        knownDynamic,
+        knownReturn,
+      );
       if (assertion !== null && isCheckable(assertion.asserted) && operandType.kind === 'unknown') {
         return assertion.asserted;
       }
       current = current.expression;
       continue;
+    }
+    if (ts.isCallExpression(current)) {
+      if (knownReturn.size > 0) {
+        const fqn = calledFunctionFQN(current, checker);
+        if (fqn !== undefined && knownReturn.has(fqn)) {
+          return hUnknown(false);
+        }
+      }
+      return tsTypeToHType(checker.getTypeAtLocation(current), checker);
     }
     if (ts.isIdentifier(current)) {
       const symbol = checker.getSymbolAtLocation(current);
@@ -1130,9 +1172,7 @@ function calleeParameters(
   // implicit one forwards to the base — a chain the source never spells, so it stays a
   // follow-up rather than a guess.
   const declaration =
-    resolved !== undefined || !ts.isNewExpression(node)
-      ? resolved
-      : constructorOfClass(symbol);
+    resolved !== undefined || !ts.isNewExpression(node) ? resolved : constructorOfClass(symbol);
   if (declaration === undefined || !isFunctionLike(declaration)) {
     return undefined;
   }
@@ -1146,9 +1186,7 @@ function calleeParameters(
 
 /** The constructor a `new` expression's class declares, or `undefined` for an implicit one
  * (which forwards to the base through no syntax this walk can see). */
-function constructorOfClass(
-  symbol: ts.Symbol | undefined,
-): ts.ConstructorDeclaration | undefined {
+function constructorOfClass(symbol: ts.Symbol | undefined): ts.ConstructorDeclaration | undefined {
   const declaration = symbol?.valueDeclaration;
   if (declaration !== undefined && ts.isClassDeclaration(declaration)) {
     for (const member of declaration.members) {
@@ -1160,8 +1198,9 @@ function constructorOfClass(
   return undefined;
 }
 
-/** Follow a callee symbol to the function-like declaration it names: directly, or through one
- * variable hop (`const g = getX; g(v)`). Deeper chains stay dynamic. */
+/** Follow a callee symbol to the function-like declaration it names: directly, through a
+ * variable holding one (`const f = () => …; f(v)`), or through one variable hop
+ * (`const g = getX; g(v)`). Deeper chains stay dynamic. */
 function calleeTargetDeclaration(
   symbol: ts.Symbol | undefined,
   checker: ts.TypeChecker,
@@ -1174,36 +1213,50 @@ function calleeTargetDeclaration(
   if (isFunctionLike(declaration)) {
     return declaration;
   }
-  if (
-    ts.isVariableDeclaration(declaration) &&
-    declaration.initializer !== undefined &&
-    ts.isIdentifier(declaration.initializer)
-  ) {
-    return calleeTargetDeclaration(
-      checker.getSymbolAtLocation(declaration.initializer),
-      checker,
-      depth + 1,
-    );
+  if (ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined) {
+    if (isFunctionLike(declaration.initializer)) {
+      return declaration.initializer;
+    }
+    if (ts.isIdentifier(declaration.initializer)) {
+      return calleeTargetDeclaration(
+        checker.getSymbolAtLocation(declaration.initializer),
+        checker,
+        depth + 1,
+      );
+    }
   }
   return undefined;
 }
 
-/** Fixed-shape parameters a dynamic value can reach (plan.md §8 step 44c).
+/** Fixed-shape bindings a dynamic value can reach (plan.md §8 steps 44c, 45).
  *
  * In js mode the checker no longer refuses Unknown-into-object flows (2322/2345 suppressed) and
  * `maybeBoundary` only settles tags, so an Unknown holding a dynamic object that lands in a
- * fixed-layout parameter reads garbage — `jsrt_object_get_field` on a shape-table value, silent
- * wrong answers down to SIGSEGV. The fix widens the RECEIVING parameter to Unknown through the
- * same NUL-dynamic channel 2322/2454 use, so the body reads through the shape table. A
- * statically slot-exact value needs no widening; a method-touching body keeps its static
- * dispatch (`paramTouchesMethod`), which class values already answer correctly.
+ * fixed-layout slot reads garbage — `jsrt_object_get_field` on a shape-table value, silent
+ * wrong answers down to SIGSEGV. The fix widens the RECEIVING binding to Unknown through the
+ * same NUL-dynamic channel 2322/2454 use, so every later read goes through the shape table. A
+ * statically slot-exact value needs no widening; a method-touching parameter body keeps its
+ * static dispatch (`paramTouchesMethod`), which class values already answer correctly.
+ *
+ * Covers parameters (call/new edges), `let`/`const`/`var` declarations, and plain `x = v`
+ * assignments — all three share one fixpoint, so a widened binding is itself a dynamic source
+ * for the next edge. Object-literal values are excluded: they are built into the contextual
+ * layout at the edge, so even a reordered field set is safe (spread_key_order), while a truly
+ * mismatched literal already carries a 2322 the program-wide channel widens on. Returns are
+ * the sibling edge and live in `collectDynamicReturns` below: a return cannot widen the
+ * declaration (an overload and vtable contract), so it widens each call result instead, and
+ * that mark is consulted where calls are typed rather than here.
+ *
+ * Gate coherence: the gate's spread arm still judges a spread source by its annotation, so a
+ * widened variable that is ALSO spread would be accepted statically at the gate and meet no
+ * shape in the lowering (STA4068). No binding widened here is spread anywhere in the current
+ * corpus — spread_key_order's sources are all literals, which this pass excludes — so the two
+ * agree everywhere they are both asked. Spreading a widened binding stays a known gap (honest
+ * not-yet, not silent garbage) for the dynamic-spread owner.
  *
  * Returns the fully-qualified names to seed; the caller unions them with
  * `runtimeDynamicSymbols`, which also feeds the walk as `knownDynamic`, so an already-widened
- * binding counts as a dynamic source for the next edge. Declarations, assignments and returns
- * are the same hole from other sides and are NOT covered: widening a variable needs gate
- * coherence the object spread does not have, and widening a return type cannot reach callers,
- * whose reads are checker-typed. */
+ * binding counts as a dynamic source for the next edge. */
 function collectDynamicSlots(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
@@ -1244,7 +1297,44 @@ function collectDynamicSlotsPass(
     }
     return tsTypeToHType(checker.getTypeOfSymbolAtLocation(symbol, declaration), checker);
   };
+  // A `let`/`const`/`var` binding (or a plain `x = v` target) whose declared type is a fixed
+  // shape but whose value may arrive dynamic widens the same way a parameter does, so every
+  // later read goes through the shape table. An object-literal value is excluded: it is built
+  // into the contextual layout at the edge, so even a reordered field set is safe (the
+  // spread_key_order rule), while any genuinely mismatched literal already carries a 2322 the
+  // program-wide channel widens on. Destructured bindings have no single symbol and stay out.
+  const widenVariableIfUnsafe = (name: ts.Identifier, value: ts.Expression): void => {
+    if (ts.isObjectLiteralExpression(value)) {
+      return;
+    }
+    const symbol = checker.getSymbolAtLocation(name);
+    const declaration = symbol?.valueDeclaration;
+    if (symbol === undefined || declaration === undefined) {
+      return;
+    }
+    const declared = tsTypeToHType(checker.getTypeOfSymbolAtLocation(symbol, declaration), checker);
+    if (declared.kind !== 'object') {
+      return;
+    }
+    if (!staticallySafeValue(effectiveValueType(value, checker, knownDynamic), declared)) {
+      fqns.add(checker.getFullyQualifiedName(symbol));
+    }
+  };
   const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer !== undefined
+    ) {
+      widenVariableIfUnsafe(node.name, node.initializer);
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(node.left)
+    ) {
+      widenVariableIfUnsafe(node.left, node.right);
+    }
     if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
       // `new C(v)` maps its arguments onto the constructor's parameters exactly as a call
       // maps onto its callee's — the same fixed-shape/dynamic-value hole in the same shape.
@@ -1275,6 +1365,190 @@ function collectDynamicSlotsPass(
           }
         });
       }
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const file of files) {
+    visit(file);
+  }
+}
+
+/** Fixed-shape function returns a dynamic value can reach (plan.md §8 step 45).
+ *
+ * The return edge of the same hole `collectDynamicSlots` closes on bindings: in js mode the
+ * checker no longer refuses Unknown-into-object flows and `maybeBoundary` only settles tags,
+ * so `return JSON.parse(...)` from an object-typed function hands every caller a shape-table
+ * value behind a fixed-layout promise — `jsrt_object_get_field` on it is silent garbage.
+ * Widening the DECLARED return type would rewrite overload and vtable contracts the call
+ * sites were compiled against, so the declaration keeps its shape and each CALL result widens
+ * to Unknown instead (`typeAt` consults these marks), routing every use through the shape
+ * table. A statically slot-exact return needs no widening, by the same `staticallySafeValue`
+ * rule the binding edge uses; only the callers change, never the callee.
+ *
+ * Marks name the callable's symbol, so overloads resolve together (every signature shares
+ * one symbol) and one-hop aliases resolve through `calleeTargetDeclaration` exactly as the
+ * argument edge resolves them. Recursion needs no guard: a self-call reads the checker's
+ * declared type until a mark exists, so `return f()` alone never marks `f`. Constructors,
+ * accessors, anonymous callbacks and generic (type-parameter-mentioning) returns stay out:
+ * a construction always builds the fixed layout, an accessor read is not a call this probe
+ * sees, an unassigned callback names no call site, and a generic grounds per specialization.
+ *
+ * Runs after the binding pass so a `return` of a widened binding already reads dynamic; to
+ * a fixpoint of its own, so `g() { return f(); }` marks `g` once `f` is marked whatever order
+ * the two come in. The binding pass never sees these marks, so step 44c's results are
+ * unchanged by them; a declaration initialized FROM a marked call (`const x = f()`) stays
+ * the declaration edge's own question.
+ *
+ * Returns the fully-qualified names to seed under the sibling `dynamic-return:` prefix — the
+ * same NUL-key Scope channel, a disjoint key space so identifier probes never see function
+ * marks and call probes never see binding marks. */
+function collectDynamicReturns(
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  knownDynamic: ReadonlySet<string>,
+): Set<string> {
+  const fqns = new Set<string>();
+  const seen = new Set<string>();
+  for (;;) {
+    const before = fqns.size;
+    collectDynamicReturnsPass(files, checker, knownDynamic, seen, fqns);
+    if (fqns.size === before) {
+      return fqns;
+    }
+    for (const fqn of fqns) {
+      seen.add(fqn);
+    }
+  }
+}
+
+/** The symbol a call site resolves to `fn` through, as a fully-qualified name: a declared
+ * function's own name, a method's name, or the variable an expression-bodied function is
+ * assigned to (`const f = () => …` is called as `f`). `undefined` for everything without a
+ * callable name — constructors, accessors, anonymous callbacks, computed method names — whose
+ * returns this edge does not mark and whose calls it does not widen. */
+function markingFQNOfFunction(fn: FunctionLike, checker: ts.TypeChecker): string | undefined {
+  if (ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) {
+    const name = fn.name;
+    if (name === undefined || !ts.isIdentifier(name)) {
+      return undefined;
+    }
+    const symbol = checker.getSymbolAtLocation(name);
+    return symbol === undefined ? undefined : checker.getFullyQualifiedName(symbol);
+  }
+  if (ts.isFunctionExpression(fn) || ts.isArrowFunction(fn)) {
+    const parent = fn.parent;
+    if (parent !== undefined && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+      const symbol = checker.getSymbolAtLocation(parent.name);
+      return symbol === undefined ? undefined : checker.getFullyQualifiedName(symbol);
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/** The declared return layout of `fn`, or `undefined` when the edge has nothing to protect:
+ * constructors build their instance (never a returned value), non-function types cannot
+ * occur here, an Unknown or primitive return already routes every caller dynamically, and a
+ * type-parameter-mentioning return grounds per specialization rather than widening the
+ * generic (class_generic_base's `get(): T` returns a field through `T` and must keep its
+ * static dispatch). Only fixed object and array layouts qualify. */
+function declaredReturnOf(fn: FunctionLike, checker: ts.TypeChecker): HType | undefined {
+  if (ts.isConstructorDeclaration(fn)) {
+    return undefined;
+  }
+  const type = tsTypeToHType(checker.getTypeAtLocation(fn), checker);
+  if (type.kind !== 'fn' || hasTypeParam(type.ret)) {
+    return undefined;
+  }
+  if (type.ret.kind !== 'object' && type.ret.kind !== 'array') {
+    return undefined;
+  }
+  return type.ret;
+}
+
+/** Every value `fn` can return: each `return e;` expression in its body, where a bare
+ * `return;` counts as an unsafe (undefined) value. Nested function-likes own their returns
+ * and are never descended into; an arrow's expression body is its implicit return. */
+function functionReturnValues(fn: FunctionLike): {
+  readonly values: readonly ts.Expression[];
+  readonly bare: boolean;
+} {
+  if (ts.isArrowFunction(fn) && !ts.isBlock(fn.body)) {
+    return { values: [fn.body], bare: false };
+  }
+  const body = fn.body;
+  if (body === undefined) {
+    return { values: [], bare: false };
+  }
+  const values: ts.Expression[] = [];
+  let bare = false;
+  const visit = (node: ts.Node): void => {
+    if (isFunctionLike(node)) {
+      return;
+    }
+    if (ts.isReturnStatement(node)) {
+      if (node.expression === undefined) {
+        bare = true;
+      } else {
+        values.push(node.expression);
+      }
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(body, visit);
+  return { values, bare };
+}
+
+/** The marking name of the function a call resolves to, following the same one-hop alias the
+ * argument edge follows (`const g = f; g(v)`). `undefined` for calls with no static target —
+ * dynamic calls, builtins, unresolvable callees — which have no declaration to mark. */
+function calledFunctionFQN(node: ts.CallExpression, checker: ts.TypeChecker): string | undefined {
+  const callee = node.expression;
+  const symbol =
+    ts.isIdentifier(callee) || ts.isPropertyAccessExpression(callee)
+      ? checker.getSymbolAtLocation(callee)
+      : undefined;
+  const resolved = calleeTargetDeclaration(symbol, checker, 0);
+  if (resolved === undefined || !isFunctionLike(resolved)) {
+    return undefined;
+  }
+  return markingFQNOfFunction(resolved, checker);
+}
+
+function collectDynamicReturnsPass(
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  knownDynamic: ReadonlySet<string>,
+  knownReturn: ReadonlySet<string>,
+  fqns: Set<string>,
+): void {
+  const visitFn = (fn: FunctionLike): void => {
+    const fqn = markingFQNOfFunction(fn, checker);
+    if (fqn === undefined || fqns.has(fqn)) {
+      return;
+    }
+    const target = declaredReturnOf(fn, checker);
+    if (target === undefined) {
+      return;
+    }
+    const returned = functionReturnValues(fn);
+    if (returned.bare) {
+      fqns.add(fqn);
+      return;
+    }
+    for (const value of returned.values) {
+      if (
+        !staticallySafeValue(effectiveValueType(value, checker, knownDynamic, knownReturn), target)
+      ) {
+        fqns.add(fqn);
+        return;
+      }
+    }
+  };
+  const visit = (node: ts.Node): void => {
+    if (isFunctionLike(node)) {
+      visitFn(node);
     }
     ts.forEachChild(node, visit);
   };
@@ -3383,6 +3657,23 @@ function lowerArrayLiteralExpression(
         // Unknown, but at run time it IS a dense jsrt array (elements plus a property table),
         // which the argument-position concat already spreads today (`[0, ...m]` compiles).
         result = arrayConcatExpr(emptyArrayLiteral(literalType, span), piece, span);
+      } else if (piece.type.kind === 'unknown') {
+        // A spread operand the checker promised an array for but the lowering typed dynamic —
+        // a call to a step-45-marked function (its declared return is the contract, not the
+        // value). Reading it as the concat receiver fails the verifier (STA4082), and riding
+        // as the argument would silently append a non-array; spreading an unknown value needs
+        // the GetIterator dispatch the gate already names for the checker-unknown twin, so
+        // this names it too (an honest not-yet, never an internal error).
+        diagnostics.push(
+          lowerDiagnostic(
+            segment.from,
+            sourceFile,
+            'STA1214',
+            'not-yet',
+            'spread of an unknown value in an array literal is not yet supported',
+          ),
+        );
+        return null;
       } else {
         result = arrayConcatExpr(piece, emptyArrayLiteral(literalType, span), span);
       }
@@ -3814,13 +4105,17 @@ function lowerClassMemberRead(
   // disagreement: `c.missing` on a class instance answers `undefined` in JavaScript
   // (plan.md §8 step 37). The dynamic read resolves through the receiver's OWN descriptor at
   // run time (`fixed_get` misses to `undefined`), so a subclass value's added field still
-  // answers — a static `undefined` would lie about those. A miss the checker says EXISTS keeps
-  // the STA4060 below: the checker proved the name is declared, so the layout lacking it is a
-  // real lowering bug. In ts mode the checker stops the build before lowering, so the dynamic
-  // branch never fires there.
+  // answers — a static `undefined` would lie about those. A receiver the edge widened to
+  // Unknown takes the same path even when the checker still names a layout for it: `x.a.b`
+  // where `x` holds dynamic has a fixed static type for `x.a` but a dynamic lowered value,
+  // and a slot load off that value is garbage (step 45 nested). A miss the checker says EXISTS
+  // keeps the STA4060 below: the checker proved the name is declared, so the layout lacking it
+  // is a real lowering bug. In ts mode the checker stops the build before lowering, so the
+  // dynamic branch never fires there.
   if (
-    (target.type.kind === 'object' ? fieldSlot(target.type, field) : undefined) === undefined &&
-    checker.getPropertyOfType(checker.getTypeAtLocation(receiver), field) === undefined
+    target.type.kind === 'unknown' ||
+    ((target.type.kind === 'object' ? fieldSlot(target.type, field) : undefined) === undefined &&
+      checker.getPropertyOfType(checker.getTypeAtLocation(receiver), field) === undefined)
   ) {
     return {
       kind: 'dyn-field-access',
@@ -4538,6 +4833,23 @@ function lowerExpression(
         if (source.type.kind === 'array') {
           arraySpreads.push({ at: entries.length, order: propIndex, source, span: spreadSpan });
           continue;
+        }
+        // A value the checker promised a shape for but the lowering typed dynamic — a call to
+        // a step-45-marked function (its declared return is the contract, not the value).
+        // Expanding slots off it would be silent garbage; the shape-table enumeration a
+        // dynamic spread needs is the unknown-spread owner's, so this names it exactly as the
+        // gate names the checker-unknown twin (an honest not-yet, never an internal error).
+        if (source.type.kind === 'unknown') {
+          diagnostics.push(
+            lowerDiagnostic(
+              property,
+              sourceFile,
+              'STA1214',
+              'not-yet',
+              'an object spread of an unknown value is not yet supported',
+            ),
+          );
+          return null;
         }
         if (source.type.kind !== 'object') {
           diagnostics.push(
@@ -8924,6 +9236,17 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType 
       ) {
         return hUnknown(false);
       }
+    }
+  }
+  // Step 45: a call to a function whose declared object/array return can arrive dynamic
+  // answers Unknown, so every use of the result reads through the shape table. The callee
+  // keeps its declared type — only the call widens, which is what leaves overloads and
+  // vtables untouched. Gated like the binding probe above: with no marks anywhere the
+  // resolution below always misses, so well-formed programs skip it entirely.
+  if (hasDynamicReturnSymbols && ts.isCallExpression(node)) {
+    const fqn = calledFunctionFQN(node, checker);
+    if (fqn !== undefined && bindings.has(`\u0000dynamic-return:${fqn}`)) {
+      return hUnknown(false);
     }
   }
   const type = substituteHType(tsTypeToHType(checker.getTypeAtLocation(node), checker), (name) =>
