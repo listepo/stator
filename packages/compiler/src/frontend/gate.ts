@@ -557,12 +557,16 @@ function gateConstruct(
     case ts.SyntaxKind.ThisKeyword:
       return gateThis(node);
 
-    // Permanently rejected in ts mode, by design -- these are the escape hatches that make static
-    // compilation impossible (plan §0.1), not features waiting on a phase.
+    // Permanently rejected in BOTH modes, by design -- ESM is always strict and `with`
+    // is illegal in strict mode, so this is the language's restriction, not Stator's
+    // (docs/SUBSET.md, docs/DIAGNOSTICS.md STA1109). STA1107 is prototype mutation;
+    // `with` must never report that number.
     case ts.SyntaxKind.WithStatement:
-      return mode === 'ts'
-        ? { kind: 'never', code: 'STA1107', message: 'with statements are not allowed in ts mode' }
-        : notYet('with statements are not yet supported', 8);
+      return {
+        kind: 'never',
+        code: 'STA1109',
+        message: 'with statements are not allowed — ESM is always strict mode',
+      };
 
     // Scheduled features that already own a code: the message must name the same phase the
     // diagnostics table does, or `stator explain` and docs/DIAGNOSTICS.md disagree.
