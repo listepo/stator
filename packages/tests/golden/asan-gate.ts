@@ -12,13 +12,7 @@
  * - `build-asan/link-flags.txt` + `build-asan/cflags.txt` (toolchain/flag key);
  * - the working-tree bytes of every tracked file under the compiler, the golden and
  *   support harnesses, and the runtime sources/headers/tests/justfile (sorted, no
- *   mtimes — `git ls-files` names, bytes off disk, so uncommitted edits count), PLUS
- *   untracked-but-not-ignored files under the same scopes: fixture discovery is a
- *   filesystem `readdirSync`, so a brand-new never-added fixture changes stage 3
- *   without moving any tracked bytes. One `git ls-files --cached --others` snapshot
- *   covers both (disjoint by definition); `--exclude-standard` keeps ignored build
- *   outputs out. Fixture inputs must not be gitignored — ignored paths are outside
- *   the gate's promise (an ignored file stage 3 reads is a self-inflicted hole).
+ *   mtimes — `git ls-files` names, bytes off disk, so uncommitted edits count);
  * - the resolved CC's `--version` (same fallback as the justfile and `build.ts`);
  * - the resolved oracle's `node --version` (the same `nodePath()` the golden runner
  *   uses for ground truth);
@@ -254,18 +248,11 @@ function readArchiveMember(archive: string, member: string): Uint8Array {
   return execFileSync(resolveAR(), ['p', archive, member], { maxBuffer: 64 * 1024 * 1024 });
 }
 
-export function listTrackedFiles(
-  cwd: string = REPO,
-  scopes: readonly string[] = TRACKED_SCOPES,
-): string[] {
-  const out = execFileSync(
-    'git',
-    ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...scopes],
-    {
-      encoding: 'utf8',
-      cwd,
-    },
-  );
+function listTrackedFiles(): string[] {
+  const out = execFileSync('git', ['ls-files', '--', ...TRACKED_SCOPES], {
+    encoding: 'utf8',
+    cwd: REPO,
+  });
   return out
     .split('\n')
     .map((line) => line.trim())

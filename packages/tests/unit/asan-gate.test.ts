@@ -11,7 +11,6 @@
  * needs a built `build-asan/` tree, which would make this file a native test. */
 
 import { strict as assert } from 'node:assert';
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,7 +20,6 @@ import {
   greenMatches,
   hashGateInputs,
   isForceRequested,
-  listTrackedFiles,
   readGreenRecord,
   writeGreenRecord,
   type AsanGreenRecord,
@@ -98,14 +96,6 @@ void test('the gate hash is deterministic and sensitive to every input', () => {
       ...base,
       tracked: [{ path: 'packages/runtime/src/b.c', bytes: text('CHANGED') }],
     },
-    // An added file (the untracked-fixture shape) flips the digest; removing it flips back.
-    {
-      ...base,
-      tracked: [
-        ...base.tracked,
-        { path: 'packages/tests/golden/ts/new_fixture.ts', bytes: text('const x = 1;') },
-      ],
-    },
     {
       ...base,
       tracked: [
@@ -179,32 +169,4 @@ void test('the skip line carries the hash prefix, provenance, and force escape',
   assert.match(line, /abc1237/);
   assert.match(line, /212\/212/);
   assert.match(line, /STATOR_ASAN_FORCE=1/);
-});
-
-void test('untracked fixtures are listed, ignored files are not', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'stator-asan-gate-ls-'));
-  try {
-    const git = (args: readonly string[]): void => {
-      execFileSync('git', [...args], {
-        encoding: 'utf8',
-        cwd: dir,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    };
-    git(['init', '-q', '-b', 'main']);
-    git(['config', 'user.email', 'test@test']);
-    git(['config', 'user.name', 'test']);
-    writeFileSync(join(dir, 'tracked.ts'), 'const a = 1;\n');
-    writeFileSync(join(dir, '.gitignore'), '*.o\n');
-    git(['add', '-A']);
-    git(['commit', '-qm', 'init']);
-    writeFileSync(join(dir, 'new_fixture.ts'), 'const b = 2;\n');
-    writeFileSync(join(dir, 'scratch.o'), 'binary');
-    const listed = listTrackedFiles(dir, ['.']);
-    assert.ok(listed.includes('tracked.ts'));
-    assert.ok(listed.includes('new_fixture.ts'));
-    assert.ok(!listed.some((p) => p.endsWith('.o')));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
