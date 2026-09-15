@@ -211,7 +211,10 @@ the explain flag), opaque pointers cross borrow-only (step 6), headers and libra
 the `@statorLink` pragma plus `--link=` (step 7, `docs/FFI.md` §9), and every refusal row
 is a live gate verdict with decision fixtures in
 both modes. What still defers is extern-as-value and the optional call (STA1217), and
-anything steps 5+ do not cover.
+anything steps 5+ do not cover. Task 7.2 steps 1–2 have landed alongside: `--emit-header`
+generates the reverse-direction header (`docs/FFI.md` §8), and its refusal rows are live
+verdicts of the header step with unit tests (not decision fixtures — the header step runs
+only when the flag is passed, which the decision runner never passes).
 
 | Feature | `ts` mode | `js` mode | Notes |
 |---|---|---|---|
@@ -226,6 +229,11 @@ anything steps 5+ do not cover.
 | Variadic (`printf`-style) extern declaration | error(STA1120) | error(STA1120) | No sound signature — permanent, plan §10 out-of-scope table. |
 | Extern declaration outside a `.d.ts` | error(STA1121) | error(STA1121) | Keeps Task 7.3's generator output a drop-in; keeps the trust boundary greppable. |
 | `stator explain` marks extern calls as an unchecked boundary | yes (alongside the verdict) | yes (alongside the verdict) | The flag rides ALONGSIDE the verdict — `externCalls: [{name, line}]` in `--json`, an `unchecked boundary` line on the terminal. The four-verdict vocabulary (`docs/MODES.md` §6) is unchanged. A C return can never be runtime-checked (§0.2 asymmetry, `docs/FFI.md` §5). |
+| `--emit-header` on exported functions (Task 7.2 steps 1–2) | header + object | header + object | One table, two directions: a whole-signature-in-table function spells plain C types (`stator_<unit>_<name>`); any other position spells `jsrt_value`. `-o` names a relocatable object (`clang -c`); nothing links. Stubs and `stator_init_<unit>` arrive with steps 3–5. |
+| `--emit-header` on exported `const` primitives | header + object | header + object | `number`/`boolean` spell `extern const double`/`bool`, `CString` spells `extern const char *`, string/null/undefined spell `extern const jsrt_value`. |
+| Class, closure, generic, or re-exported export under `--emit-header` | error(STA1122) | error(STA1122) | Declaration shapes with no C spelling are refused, never half-emitted. |
+| Mutable or non-primitive exported state under `--emit-header` | error(STA1123) | error(STA1123) | `let`/`var`, destructured or uninitialized consts, consts of non-primitive type. |
+| Two exports colliding on one C symbol under `--emit-header` | error(STA1124) | error(STA1124) | A collision is a compile error, never last-writer-wins. |
 
 ---
 
@@ -260,6 +268,9 @@ All codes in this range reused from plan.md except the four below.
 | STA1119 | Anything else outside the extern ABI table | both | The catch-all (struct by value, `T**`, misplaced `void`/`CStringOwned`, discarding returns). Future widenings split out NEW codes. |
 | STA1120 | Variadic extern declaration | both | No sound signature — permanent (plan §10 out-of-scope table). |
 | STA1121 | Extern declaration outside a `.d.ts` | both | Placement rule that keeps Task 7.3 generator output a drop-in. |
+| STA1122 | Non-exportable declaration shape under `--emit-header` | both | Class, closure-valued const, generic function, rest/destructured parameter, `export default`, re-export and other non-declaration export forms (plan §10 Task 7.2 step 2). |
+| STA1123 | Mutable or non-primitive exported state under `--emit-header` | both | `let`/`var`, destructured or uninitialized consts, consts of non-primitive type. Only const number/boolean/`CString`/string/null/undefined are exportable. |
+| STA1124 | Two exports colliding on one C symbol under `--emit-header` | both | A collision is a compile error, never last-wins (plan §10 Task 7.2 step 7). |
 
 ### "Not yet" class (planned, STA12xx)
 

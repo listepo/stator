@@ -330,16 +330,31 @@ demands it (§15.3, §15.6):
 ## 8. Task 7.2 design sketch (non-normative appendix — proposed, not approved)
 
 The sections above are the Task 7.1 contract; what follows is an agent-drafted sketch ahead
-of Task 7.2, kept here so the implementer finds it, and explicitly OUTSIDE the sole-allocator
-promise at the top of this file (its STA1122–1124 codes are proposals with no DIAGNOSTICS.md
-rows until Task 7.2 is scheduled). Normative only if scheduled; full text in the session
-report.
+of Task 7.2, kept here so the implementer finds it. Steps 1–2 have LANDED (below); steps
+3–9 remain sketch, explicitly OUTSIDE the sole-allocator promise at the top of this file
+until they are scheduled. Normative only if scheduled; full text in the session report.
+
+Landed (steps 1–2): `--emit-header`, the reverse mapping, the export decision, and the
+determinism rule. `src/frontend/export.ts` is the only reader of the export surface;
+`src/frontend/extern.ts`'s `exportAbiKindOf` is the table's export direction — one table,
+two directions, so the halves cannot drift. `STA1122`–`STA1124` are allocated rows in
+`docs/DIAGNOSTICS.md`, no longer proposals.
 
 - **Export marker is ESM `export`, no new marker.** The C-visible set is exactly the
   exported-function set (no second list to drift); header declares `stator_<unit>_<name>`.
 - **`--emit-header=<path.h>` + `--unit-name=<unit>`** (both `--flag=value` and
-  `--flag value` forms). With the flag, `-o` names a relocatable object (`clang -c`), no
-  `main()`; link flags print for the consumer instead of linking.
+  `--flag value` forms) — LANDED. With the flag, `-o` names a relocatable object
+  (`clang -c`), no `main()` required and nothing linked; `--emit=c` alongside writes the C
+  and the header and skips clang. `--unit-name` overrides the default unit (the entry's
+  file basename); either spelling is sanitized to a C identifier. `--link` and
+  `@statorLink` flags are accepted but inert with the flag — linking is the consumer's
+  job, and the consumer link line arrives with step 9. An exported function whose WHOLE
+  signature is in §2's table spells plain C types; any other position spells `jsrt_value`.
+  An exported `const` number/boolean spells `extern const double`/`bool`, a `CString`
+  `extern const char *`, a string/null/undefined `extern const jsrt_value`. The header
+  carries no timestamps, no paths, and no hash-ordered iteration — same input,
+  byte-identical output, proved by a unit test that collects twice. Only the entry file's
+  direct declaration exports are read.
 - **Init contract:** top-level statements in Task 3.11 order become
   `stator_init_<unit>()`, idempotent via a set-before static guard (a second `jsrt_init()`
   would self-chain the Boehm roots hook into infinite recursion). Calling before init, or
@@ -349,9 +364,12 @@ report.
   solved by the pending cell). Cleared on stub entry, `_Thread_local` storage.
 - **Frames:** every stub opens one `JSRT_FRAME`, pops on every exit path; args convert
   into frame slots; stubs never `JSRT_GLOBALS_ENTER` (init owns it).
-- **Refusals (proposed, DIAGNOSTICS.md untouched):** `STA1122` class/closure/generic
-  exports, `STA1123` mutable exported state (both never-class); `STA1124` band TBD for
-  name collisions; `export default`/renames reuse `STA1214`.
+- **Refusals — LANDED as `docs/DIAGNOSTICS.md` rows (never class):** `STA1122` the
+  declaration shape (class, closure-valued const, generic function, rest/destructured
+  parameter, `export default`, re-export and other non-declaration export forms);
+  `STA1123` mutable or non-primitive exported state (`let`/`var`, destructured or
+  uninitialized consts, consts of non-primitive type); `STA1124` two exports colliding on
+  one `stator_<unit>_<name>` — a compile error, never last-writer-wins.
 - **Tests:** `tests/ffi/` fixture + `main.c` byte-compare, double-build `cmp`
   determinism, collision/error-path goldens, GC-hygiene loop under Boehm, ASan job.
 

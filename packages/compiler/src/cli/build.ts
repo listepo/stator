@@ -15,6 +15,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emitC } from '../codegen/index.ts';
 import { collectLinkFlags } from '../frontend/extern.ts';
+import {
+  collectUnitExports,
+  defaultUnitName,
+  renderHeader,
+  sanitizeUnitName,
+} from '../frontend/export.ts';
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
 import { createProgram } from '../frontend/program.ts';
@@ -45,8 +51,17 @@ export interface BuildOptions {
   /** Extra clang link flags from the CLI `--link=` escape hatch (docs/FFI.md §9), in
    * command-line order. The `.d.ts` `@statorLink` pragma flags travel inside the compiled
    * result instead — see `compileToC` — and the link deduplicates libraries across all three
-   * sources while preserving order. */
+   * sources while preserving order. Accepted but inert with `--emit-header`: nothing links,
+   * so there is no line to join (docs/FFI.md §8). */
   readonly linkFlags?: readonly string[];
+  /** Write a C header for the unit's exports to this path (docs/FFI.md §8, plan §10 Task 7.2
+   * steps 1–2) and compile a relocatable object instead of linking an executable: a unit
+   * exposed to C usually has no `main`, and linking is the consumer's job. Export refusals
+   * (STA1122–STA1124) stop the build before anything is written. */
+  readonly emitHeader?: string;
+  /** `--unit-name` override for the `stator_<unit>_<name>` mangling; defaults to the entry's
+   * file basename. Sanitized to a C identifier wherever it came from. */
+  readonly unitName?: string;
 }
 
 /** Raised for conditions the USER can act on: a missing file, a missing toolchain. Anything the
@@ -154,14 +169,40 @@ function extraLinkFlags(): string[] {
 
 /** Returns the process exit code: 0 on success, 1 if the program was rejected. */
 export async function build(options: BuildOptions): Promise<number> {
-  const compiled = await compileToC(options.entry, options.mode);
+  // Sanitized once here — including an explicit `--unit-name`, which the shell will carry
+  // verbatim — so the header and every mangled symbol are valid C whatever was spelled.
+  const unit =
+    options.emitHeader === undefined
+      ? undefined
+      : sanitizeUnitName(options.unitName ?? defaultUnitName(options.entry));
+  const compiled = await compileToC(options.entry, options.mode, unit);
   if (compiled === null) {
     return 1;
   }
 
   if (options.emitCOnly) {
     writeFileSync(options.out, compiled.c, 'utf8');
+    if (options.emitHeader !== undefined) {
+      writeFileSync(options.emitHeader, compiled.header ?? '', 'utf8');
+    }
     return 0;
+  }
+
+  if (options.emitHeader !== undefined) {
+    writeFileSync(options.emitHeader, compiled.header ?? '', 'utf8');
+    // A unit exposed to C links at the consumer, not here: `clang -c`, no `-ljsrt`, no
+    // extern link flags. Stubs and `stator_init_<unit>` arrive with Task 7.2 steps 3–5.
+    const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
+    const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
+    try {
+      writeFileSync(cPath, compiled.c, 'utf8');
+      compileObject(cPath, options.out, options.opt ?? 2);
+      return 0;
+    } finally {
+      if (scratch !== null) {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }
   }
 
   // The .c goes beside the executable when it is being kept, so `--keep-c` produces a file the
@@ -187,15 +228,21 @@ export async function build(options: BuildOptions): Promise<number> {
 
 /** Source text compiled to C, plus what the link owes the extern surface: the `@statorLink`
  * flags every extern-bearing `.d.ts` contributed (docs/FFI.md §9), in program order. The CLI
- * `--link=` flags join them at the link, never here — one source per carrier. */
+ * `--link=` flags join them at the link, never here — one source per carrier. `header` is the
+ * `--emit-header` text, present only when a unit name was given (Task 7.2 steps 1–2). */
 export interface CompiledC {
   readonly c: string;
   readonly linkFlags: readonly string[];
+  readonly header?: string;
 }
 
 /** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
  * the only path any generated C comes from. Returns null if the program was rejected. */
-export async function compileToC(entry: string, mode: Mode): Promise<CompiledC | null> {
+export async function compileToC(
+  entry: string,
+  mode: Mode,
+  unit?: string,
+): Promise<CompiledC | null> {
   if (!existsSync(entry)) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
@@ -218,6 +265,19 @@ export async function compileToC(entry: string, mode: Mode): Promise<CompiledC |
   const entryFile = program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
   if (entryFile === undefined) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
+  }
+
+  // The C-visible set behind `--emit-header` (Task 7.2 steps 1–2): refusals stop the build
+  // before the lowering, so no object or header is written for a unit C cannot see.
+  let header: string | undefined;
+  if (unit !== undefined) {
+    const unitExports = withSpan('frontend/export', {}, () =>
+      collectUnitExports(entryFile, program.getTypeChecker(), unit, mode),
+    );
+    if (await report(unitExports.diagnostics)) {
+      return null;
+    }
+    header = renderHeader(unitExports);
   }
 
   // The module graph: every reachable file, dependencies first, cycles refused (STA3001). The
@@ -258,6 +318,7 @@ export async function compileToC(entry: string, mode: Mode): Promise<CompiledC |
   return withSpan('codegen/emit-c', {}, () => ({
     c: emitC(optimized),
     linkFlags: withSpan('frontend/link-flags', {}, () => collectLinkFlags(program)),
+    ...(header !== undefined && { header }),
   }));
 }
 
@@ -300,6 +361,73 @@ export function dedupLinkLibs(flags: readonly string[]): string[] {
   return kept;
 }
 
+// conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
+// initialization on the current macOS host. Match justfile's sanitizer fallback so the
+// generated golden binaries use the same compiler as the sanitized runtime archive. An
+// explicit compiler-path CC remains authoritative for callers testing another toolchain.
+function selectCC(): string {
+  return (
+    process.env['CC'] ??
+    (SANITIZED && process.platform === 'darwin' && existsSync('/usr/bin/clang')
+      ? '/usr/bin/clang'
+      : 'clang')
+  );
+}
+
+/** The two clang failures that mean the same thing however clang was invoked: a missing
+ * toolchain (STA0008 — the one build failure with an actionable fix and a per-platform
+ * install hint) and a spawn that died before compiling (STA0009). A nonzero EXIT is the
+ * caller's to interpret — the link names its extern flags there, the object compile reports
+ * a compiler bug — so this answers only the start. Returns undefined when clang ran. */
+function clangStartError(cc: string, result: { error?: Error }): BuildError | undefined {
+  const { error } = result;
+  if (error !== undefined && 'code' in error && error.code === 'ENOENT') {
+    return new BuildError(
+      'STA0008',
+      `C compiler "${cc}" not found — install clang ` +
+        '(`mise install`, or macOS: `xcode-select --install`; Debian/Ubuntu: `apt install clang`) or set `CC`',
+    );
+  }
+  if (error !== undefined) {
+    return new BuildError('STA0009', `C compiler failed to start: ${error.message}`);
+  }
+  return undefined;
+}
+
+/** One place owning how clang runs: inherited stdio, so a failing compile shows its own
+ * errors rather than routing them through a diagnostic. */
+function runClang(cc: string, args: readonly string[]) {
+  return spawnSync(cc, args, { stdio: ['ignore', 'inherit', 'inherit'] });
+}
+
+/** Compile generated C to a relocatable object for a C consumer (`--emit-header`, plan §10
+ * Task 7.2 step 1): `clang -c`, so `-o` names an object, not an executable. No archive, no
+ * link flags — linking is the consumer's job once steps 3–5 emit the stubs and the init. */
+function compileObject(cPath: string, out: string, opt: OptLevel): void {
+  const cc = selectCC();
+  const result = runClang(cc, [
+    '-std=c11',
+    ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
+    '-I',
+    RUNTIME_INCLUDE,
+    '-c',
+    cPath,
+    '-o',
+    out,
+  ]);
+  const startError = clangStartError(cc, result);
+  if (startError !== undefined) {
+    throw startError;
+  }
+  if (result.status !== 0) {
+    throw new BuildError(
+      'STA0009',
+      `C compiler failed (exit ${result.status ?? 'signal'}) — this is a compiler bug; ` +
+        'keep the C with `--keep-c` and report it',
+    );
+  }
+}
+
 function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly string[]): void {
   if (!existsSync(RUNTIME_ARCHIVE)) {
     throw new BuildError(
@@ -309,14 +437,8 @@ function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly s
   }
 
   // conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
-  // initialization on the current macOS host. Match justfile's sanitizer fallback so the
-  // generated golden binaries use the same compiler as the sanitized runtime archive. An
-  // explicit compiler-path CC remains authoritative for callers testing another toolchain.
-  const cc =
-    process.env['CC'] ??
-    (SANITIZED && process.platform === 'darwin' && existsSync('/usr/bin/clang')
-      ? '/usr/bin/clang'
-      : 'clang');
+  // initialization on the current macOS host (see selectCC above).
+  const cc = selectCC();
   // Tree-shaking builtins (plan.md Task 3.12): builtins live in libjsrt.a, and the archive links
   // at .o granularity -- one referenced symbol drags in every builtin its object file holds. The
   // linker's dead-stripping restores function granularity: a builtin the program never references
@@ -329,40 +451,28 @@ function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly s
     : process.platform === 'darwin'
       ? ['-Wl,-dead_strip']
       : ['-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections'];
-  const result = spawnSync(
-    cc,
-    [
-      '-std=c11',
-      ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
-      ...shakeFlags,
-      '-I',
-      RUNTIME_INCLUDE,
-      cPath,
-      '-L',
-      RUNTIME_LIB_DIR,
-      '-ljsrt',
-      // The archive states its own system dependencies in `link-flags.txt` (SYS_LIBS, plan-notes
-      // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
-      // Extern surface flags last, in carrier order (pragma files in program order, then the CLI
-      // escape hatch), duplicates dropped first-wins: dependents precede their dependencies.
-      ...dedupLinkLibs([...extraLinkFlags(), ...externFlags]),
-      '-o',
-      out,
-    ],
-    { stdio: ['ignore', 'inherit', 'inherit'] },
-  );
+  const result = runClang(cc, [
+    '-std=c11',
+    ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
+    ...shakeFlags,
+    '-I',
+    RUNTIME_INCLUDE,
+    cPath,
+    '-L',
+    RUNTIME_LIB_DIR,
+    '-ljsrt',
+    // The archive states its own system dependencies in `link-flags.txt` (SYS_LIBS, plan-notes
+    // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
+    // Extern surface flags last, in carrier order (pragma files in program order, then the CLI
+    // escape hatch), duplicates dropped first-wins: dependents precede their dependencies.
+    ...dedupLinkLibs([...extraLinkFlags(), ...externFlags]),
+    '-o',
+    out,
+  ]);
 
-  // ENOENT here means the toolchain is absent, which is the one build failure with an actionable
-  // fix -- so it gets its own code and a per-platform install hint rather than a generic failure.
-  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ENOENT') {
-    throw new BuildError(
-      'STA0008',
-      `C compiler "${cc}" not found — install clang ` +
-        '(`mise install`, or macOS: `xcode-select --install`; Debian/Ubuntu: `apt install clang`) or set `CC`',
-    );
-  }
-  if (result.error !== undefined) {
-    throw new BuildError('STA0009', `C compiler failed to start: ${result.error.message}`);
+  const startError = clangStartError(cc, result);
+  if (startError !== undefined) {
+    throw startError;
   }
   if (result.status !== 0) {
     // A failed link with extern flags is usually a missing library rather than a compiler

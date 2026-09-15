@@ -350,17 +350,21 @@ export function lowerProgram(
   const diagnostics: Diagnostic[] = [];
   lowerDiagMode = mode;
   const bindings = Scope.root();
-  // Steps 44c/45 run before anything is lowered: an Unknown (or mismatched) value reaching
+  // Steps 44c/45/46 run before anything is lowered: an Unknown (or mismatched) value reaching
   // a fixed-shape slot widens the receiving binding, and the widening must be visible to the
   // declaration itself, not only to later uses. Unioned with `runtimeDynamicSymbols` — which
   // also feeds the walk as `knownDynamic`, so an already-widened binding counts as dynamic.
+  // Step 46 drives the slots edge and the returns edge as ONE joint fixpoint
+  // (`collectDynamicWidening`): a marked call feeding a fixed-annotated declaration
+  // (`const y: Fixed = f()`) widened neither edge when the two ran blind, miscompiling to
+  // silent garbage. Return marks now feed the slots pass as `knownReturn`, slot marks feed
+  // the returns pass as `knownDynamic`, and the two keyspaces stay disjoint — identifier
+  // probes consult only the `dynamic:` marks, call probes only the `dynamic-return:` ones.
   const dynamicFqns = new Set<string>();
   for (const symbol of runtimeDynamicSymbols) {
     dynamicFqns.add(checker.getFullyQualifiedName(symbol));
   }
-  for (const fqn of collectDynamicSlots(files, checker, dynamicFqns)) {
-    dynamicFqns.add(fqn);
-  }
+  const dynamicReturnFqns = collectDynamicWidening(files, checker, dynamicFqns);
   hasRuntimeDynamicSymbols = dynamicFqns.size > 0;
   for (const fqn of dynamicFqns) {
     bindings.set(`\u0000dynamic:${fqn}`, hUnknown(false));
@@ -368,10 +372,7 @@ export function lowerProgram(
   // Step 45's twin: a dynamic value RETURNED where a fixed object/array type is declared
   // widens the CALL, not the declaration — the declared return type is an overload and
   // vtable contract callers were compiled against, so the declaration keeps its shape and
-  // every call result answers Unknown, routing uses through the shape table. Seeded after the
-  // parameter pass so a `return` of a widened parameter already reads dynamic; the parameter
-  // pass itself never sees these marks, so step 44c's results are unchanged by their presence.
-  const dynamicReturnFqns = collectDynamicReturns(files, checker, dynamicFqns);
+  // every call result answers Unknown, routing uses through the shape table.
   hasDynamicReturnSymbols = dynamicReturnFqns.size > 0;
   for (const fqn of dynamicReturnFqns) {
     bindings.set(`\u0000dynamic-return:${fqn}`, hUnknown(false));
@@ -1228,7 +1229,7 @@ function calleeTargetDeclaration(
   return undefined;
 }
 
-/** Fixed-shape bindings a dynamic value can reach (plan.md §8 steps 44c, 45).
+/** Fixed-shape bindings a dynamic value can reach (plan.md §8 steps 44c, 45, 46).
  *
  * In js mode the checker no longer refuses Unknown-into-object flows (2322/2345 suppressed) and
  * `maybeBoundary` only settles tags, so an Unknown holding a dynamic object that lands in a
@@ -1243,9 +1244,10 @@ function calleeTargetDeclaration(
  * for the next edge. Object-literal values are excluded: they are built into the contextual
  * layout at the edge, so even a reordered field set is safe (spread_key_order), while a truly
  * mismatched literal already carries a 2322 the program-wide channel widens on. Returns are
- * the sibling edge and live in `collectDynamicReturns` below: a return cannot widen the
- * declaration (an overload and vtable contract), so it widens each call result instead, and
- * that mark is consulted where calls are typed rather than here.
+ * the sibling edge and live in `collectDynamicReturnsPass` below: a return cannot widen the
+ * declaration (an overload and vtable contract), so it widens each call result instead — and
+ * since step 46 that mark feeds BACK here as `knownReturn`, so a declaration initialized
+ * from a marked call (`const x: Fixed = f()`) probes the call dynamic and widens too.
  *
  * Gate coherence: the gate's spread arm still judges a spread source by its annotation, so a
  * widened variable that is ALSO spread would be accepted statically at the gate and meet no
@@ -1254,28 +1256,30 @@ function calleeTargetDeclaration(
  * agree everywhere they are both asked. Spreading a widened binding stays a known gap (honest
  * not-yet, not silent garbage) for the dynamic-spread owner.
  *
- * Returns the fully-qualified names to seed; the caller unions them with
- * `runtimeDynamicSymbols`, which also feeds the walk as `knownDynamic`, so an already-widened
- * binding counts as a dynamic source for the next edge. */
-function collectDynamicSlots(
+ * Slot marks accumulate into `dynamicFqns` (the caller's set, which seeds the `dynamic:`
+ * bindings); the sibling return marks are returned for the `dynamic-return:` seeding. */
+function collectDynamicWidening(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
-  knownDynamic: ReadonlySet<string>,
+  dynamicFqns: Set<string>,
 ): Set<string> {
-  // To a fixpoint: a widened parameter is itself a dynamic source, so `b(p) { a(p); }` marks
-  // `a`'s parameter once `b`'s is marked, whatever order the two calls come in. The walk only
-  // ever adds names, so the loop terminates; chains longer than a handful of hops do not occur
-  // outside generated code, and a second pass over one is noise against the checker calls.
-  const fqns = new Set<string>();
-  const seen = new Set<string>(knownDynamic);
+  // To a JOINT fixpoint: a widened binding is a dynamic source for the returns edge
+  // (`return` of a widened binding reads dynamic and marks the function), and a marked
+  // call is a dynamic source for the slots edge (`const y: Fixed = f()` widens `y`),
+  // so each edge's news is the other's next round whatever order the syntax comes in.
+  // Both sets only ever grow, so the loop terminates.
+  const returnFqns = new Set<string>();
+  const seenReturn = new Set<string>();
   for (;;) {
-    const before = fqns.size;
-    collectDynamicSlotsPass(files, checker, seen, fqns);
-    if (fqns.size === before) {
-      return fqns;
+    const beforeSlots = dynamicFqns.size;
+    const beforeReturns = returnFqns.size;
+    collectDynamicSlotsPass(files, checker, dynamicFqns, seenReturn, dynamicFqns);
+    collectDynamicReturnsPass(files, checker, dynamicFqns, seenReturn, returnFqns);
+    for (const fqn of returnFqns) {
+      seenReturn.add(fqn);
     }
-    for (const fqn of fqns) {
-      seen.add(fqn);
+    if (dynamicFqns.size === beforeSlots && returnFqns.size === beforeReturns) {
+      return returnFqns;
     }
   }
 }
@@ -1284,6 +1288,7 @@ function collectDynamicSlotsPass(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
   knownDynamic: ReadonlySet<string>,
+  knownReturn: ReadonlySet<string>,
   fqns: Set<string>,
 ): void {
   const paramDeclaredType = (param: ts.ParameterDeclaration): HType | undefined => {
@@ -1316,7 +1321,9 @@ function collectDynamicSlotsPass(
     if (declared.kind !== 'object') {
       return;
     }
-    if (!staticallySafeValue(effectiveValueType(value, checker, knownDynamic), declared)) {
+    if (
+      !staticallySafeValue(effectiveValueType(value, checker, knownDynamic, knownReturn), declared)
+    ) {
       fqns.add(checker.getFullyQualifiedName(symbol));
     }
   };
@@ -1358,7 +1365,10 @@ function collectDynamicSlotsPass(
             return;
           }
           if (
-            !staticallySafeValue(effectiveValueType(argument, checker, knownDynamic), declared) &&
+            !staticallySafeValue(
+              effectiveValueType(argument, checker, knownDynamic, knownReturn),
+              declared,
+            ) &&
             !paramTouchesMethod(callee.declaration, paramSymbol, checker)
           ) {
             fqns.add(checker.getFullyQualifiedName(paramSymbol));
@@ -1370,54 +1380,6 @@ function collectDynamicSlotsPass(
   };
   for (const file of files) {
     visit(file);
-  }
-}
-
-/** Fixed-shape function returns a dynamic value can reach (plan.md §8 step 45).
- *
- * The return edge of the same hole `collectDynamicSlots` closes on bindings: in js mode the
- * checker no longer refuses Unknown-into-object flows and `maybeBoundary` only settles tags,
- * so `return JSON.parse(...)` from an object-typed function hands every caller a shape-table
- * value behind a fixed-layout promise — `jsrt_object_get_field` on it is silent garbage.
- * Widening the DECLARED return type would rewrite overload and vtable contracts the call
- * sites were compiled against, so the declaration keeps its shape and each CALL result widens
- * to Unknown instead (`typeAt` consults these marks), routing every use through the shape
- * table. A statically slot-exact return needs no widening, by the same `staticallySafeValue`
- * rule the binding edge uses; only the callers change, never the callee.
- *
- * Marks name the callable's symbol, so overloads resolve together (every signature shares
- * one symbol) and one-hop aliases resolve through `calleeTargetDeclaration` exactly as the
- * argument edge resolves them. Recursion needs no guard: a self-call reads the checker's
- * declared type until a mark exists, so `return f()` alone never marks `f`. Constructors,
- * accessors, anonymous callbacks and generic (type-parameter-mentioning) returns stay out:
- * a construction always builds the fixed layout, an accessor read is not a call this probe
- * sees, an unassigned callback names no call site, and a generic grounds per specialization.
- *
- * Runs after the binding pass so a `return` of a widened binding already reads dynamic; to
- * a fixpoint of its own, so `g() { return f(); }` marks `g` once `f` is marked whatever order
- * the two come in. The binding pass never sees these marks, so step 44c's results are
- * unchanged by them; a declaration initialized FROM a marked call (`const x = f()`) stays
- * the declaration edge's own question.
- *
- * Returns the fully-qualified names to seed under the sibling `dynamic-return:` prefix — the
- * same NUL-key Scope channel, a disjoint key space so identifier probes never see function
- * marks and call probes never see binding marks. */
-function collectDynamicReturns(
-  files: readonly ts.SourceFile[],
-  checker: ts.TypeChecker,
-  knownDynamic: ReadonlySet<string>,
-): Set<string> {
-  const fqns = new Set<string>();
-  const seen = new Set<string>();
-  for (;;) {
-    const before = fqns.size;
-    collectDynamicReturnsPass(files, checker, knownDynamic, seen, fqns);
-    if (fqns.size === before) {
-      return fqns;
-    }
-    for (const fqn of fqns) {
-      seen.add(fqn);
-    }
   }
 }
 
@@ -1516,6 +1478,26 @@ function calledFunctionFQN(node: ts.CallExpression, checker: ts.TypeChecker): st
   return markingFQNOfFunction(resolved, checker);
 }
 
+/** Fixed-shape function returns a dynamic value can reach (plan.md §8 step 45).
+ *
+ * The return edge of the same hole the slots pass closes on bindings: in js mode the
+ * checker no longer refuses Unknown-into-object flows and `maybeBoundary` only settles tags,
+ * so `return JSON.parse(...)` from an object-typed function hands every caller a shape-table
+ * value behind a fixed-layout promise — `jsrt_object_get_field` on it is silent garbage.
+ * Widening the DECLARED return type would rewrite overload and vtable contracts the call
+ * sites were compiled against, so the declaration keeps its shape and each CALL result widens
+ * to Unknown instead (`typeAt` consults these marks), routing every use through the shape
+ * table. A statically slot-exact return needs no widening, by the same `staticallySafeValue`
+ * rule the binding edge uses; only the callers change, never the callee.
+ *
+ * Marks name the callable's symbol, so overloads resolve together (every signature shares
+ * one symbol) and one-hop aliases resolve through `calleeTargetDeclaration` exactly as the
+ * argument edge resolves them. Constructors, accessors, anonymous callbacks and generic
+ * (type-parameter-mentioning) returns stay out: a construction always builds the fixed
+ * layout, an accessor read is not a call this probe sees, an unassigned callback names no
+ * call site, and a generic grounds per specialization. Marks seed under the sibling
+ * `dynamic-return:` prefix — the same NUL-key Scope channel, a disjoint key space so
+ * identifier probes never see function marks and call probes never see binding marks. */
 function collectDynamicReturnsPass(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,

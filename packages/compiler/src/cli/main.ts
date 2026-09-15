@@ -21,6 +21,8 @@ type Command =
       keepC: boolean;
       opt: OptLevel;
       linkFlags: readonly string[];
+      emitHeader: string | undefined;
+      unitName: string | undefined;
     }
   | { kind: 'explain'; entry: string; mode: Mode; json: boolean };
 
@@ -28,7 +30,7 @@ const USAGE = `stator — ahead-of-time compiler for TypeScript/JavaScript
 
 Usage:
   stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
-    [--opt=0|1|2|3] [--link=<flags>]...
+    [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
   stator explain <entry> [--mode=ts|js] [--json]
   stator <command> --help
   stator --version
@@ -45,7 +47,7 @@ Modes:
 const COMMAND_USAGE = {
   build: `Usage:
   stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
-    [--opt=0|1|2|3] [--link=<flags>]...
+    [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
 
 Flags:
   -o, --out <out>  output path: native binary, or C with --emit=c
@@ -55,6 +57,9 @@ Flags:
   --opt 0|1|2|3    clang -O level (default 2; or STATOR_OPT)
   --link <flags>   extra clang link flags (repeatable; splits on spaces);
                    joins the @statorLink pragma flags (docs/FFI.md)
+  --emit-header <h> write a C header for the unit's exports (docs/FFI.md);
+                   -o names a relocatable object, not an executable
+  --unit-name <unit> prefix for stator_<unit>_<name> (default: entry basename)
 `,
   explain: `Usage:
   stator explain <entry> [--mode=ts|js] [--json]
@@ -148,6 +153,8 @@ function parse(argv: readonly string[]): Command {
   let keepC = false;
   let opt: OptLevel | undefined;
   const linkFlags: string[] = [];
+  let emitHeader: string | undefined;
+  let unitName: string | undefined;
 
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -197,6 +204,32 @@ function parse(argv: readonly string[]): Command {
       }
       linkFlags.push(...splitLinkFlags(next));
       i += 1;
+    } else if (arg.startsWith('--emit-header=')) {
+      const value = arg.slice('--emit-header='.length);
+      if (value === '') {
+        throw new StatorError('STA0004', '--emit-header requires a value (output header path)');
+      }
+      emitHeader = value;
+    } else if (arg === '--emit-header') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--emit-header requires a value (output header path)');
+      }
+      emitHeader = next;
+      i += 1;
+    } else if (arg.startsWith('--unit-name=')) {
+      const value = arg.slice('--unit-name='.length);
+      if (value === '') {
+        throw new StatorError('STA0004', '--unit-name requires a value (C identifier prefix)');
+      }
+      unitName = value;
+    } else if (arg === '--unit-name') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--unit-name requires a value (C identifier prefix)');
+      }
+      unitName = next;
+      i += 1;
     } else if (arg.startsWith('-')) {
       throw new StatorError('STA0005', `unknown flag "${arg}"`);
     } else if (entry === undefined) {
@@ -213,7 +246,18 @@ function parse(argv: readonly string[]): Command {
     if (out === undefined) {
       throw new StatorError('STA0004', 'build requires -o <out>');
     }
-    return { kind: 'build', entry, out, mode, emitC, keepC, opt: opt ?? defaultOpt(), linkFlags };
+    return {
+      kind: 'build',
+      entry,
+      out,
+      mode,
+      emitC,
+      keepC,
+      opt: opt ?? defaultOpt(),
+      linkFlags,
+      emitHeader,
+      unitName,
+    };
   }
   return { kind: 'explain', entry, mode, json };
 }
@@ -251,6 +295,8 @@ async function runCommand(command: Command): Promise<void> {
         keepC: command.keepC,
         opt: command.opt,
         linkFlags: command.linkFlags,
+        ...(command.emitHeader !== undefined && { emitHeader: command.emitHeader }),
+        ...(command.unitName !== undefined && { unitName: command.unitName }),
       });
       return;
     case 'explain':

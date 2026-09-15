@@ -211,6 +211,20 @@ function refused(code: string, message: string): ExternClassified {
   return { ok: false, code, message };
 }
 
+/** One signature position through the ABI table in the EXPORT direction (docs/FFI.md Task 7.2
+ * step 1): the same table `classifyPosition` reads, with the refusals turned into `undefined`
+ * instead of diagnostics. An exported function whose whole signature is in the table gets a
+ * plain C prototype; any other position takes and returns `jsrt_value` — the caller spells
+ * that, never this. One table, two directions: a second mapping here is how the halves drift. */
+export function exportAbiKindOf(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  position: 'param' | 'return',
+): ExternAbiKind | undefined {
+  const kind = classifyPosition(type, checker, position);
+  return typeof kind === 'string' ? kind : undefined;
+}
+
 /** One signature position through the ABI table: the C kind, or the refusal that owns it.
  * `void` is a return position only; `CStringOwned` a parameter position only. */
 function classifyPosition(
