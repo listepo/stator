@@ -1900,6 +1900,23 @@ clean, cpd 1.0% — exactly at the gate, see plan-notes 262; `unit 503/503`,
   keep static dispatch). **Remainder → step 45:** return/decl/assign edges still miscompile the
   same garbage; dynamic method dispatch on class instances stays `STA2006` (baseline).
 
+### Wave 6 — step 45 boundary edges ✅ (landed 2026-09-15)
+
+Two parallel slices (`2ac7e4d`), green at HEAD (`tsc` both, oxlint 0/0, oxfmt clean, cpd
+unchanged 1.0%, `unit 503/503`, `subset 653 — 613/40/0`, `golden 380/380`, new goldens ASan-clean):
+
+- **Return edge** — `collectDynamicReturns` pre-pass widens the CALL (never the declaration, so
+  overload/vtable contracts hold); chains to a fixpoint; `calleeTargetDeclaration` also resolves
+  variables holding functions. Unknown-spread sources now refuse honest `STA1214` instead of
+  garbage/`STA4xxx`.
+- **Decl/assign edges** — `widenVariableIfUnsafe` in the shared fixpoint (object declared +
+  unsafe value; literals excluded so order-strict stays static) with gate coherence by
+  construction (same probe both sides); `lowerClassMemberRead` takes the dynamic path for
+  widened targets. Spreading a widened binding stays an honest not-yet for the dynamic-spread
+  owner.
+- **Remainder → step 46:** the decl×return combination (`const x: Fixed = f()` with widened
+  `f()`) needs the two passes joined in one fixpoint — each pass is blind to the other's marks.
+
 ## Phase 6 — Conformance and differential fuzzing (in progress)
 
 ### Task 6.1 — Test262 runner ✅ (2026-09-03)

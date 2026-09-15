@@ -7737,3 +7737,11 @@ Four slices in `a84a970` (evidence in `done.md` → Phase 5 wave 5). Notes:
   them rather than asserting it.
 - **Test262 note:** 2371 passed / 2159 failed / 49050 skipped with zero TS2538 records;
   `ratchet.json` untouched (drift from note 260 still pre-existing).
+
+## 263. Wave 6 landed; step 46 owns the decl×return joint fixpoint (2026-09-15)
+
+Two slices in `2ac7e4d` (evidence in `done.md` → Phase 5 wave 6). The integration gap is
+precisely scoped: each pass's marks are invisible to the other (calls vs bindings, disjoint
+keyspaces by design), so the combination needs either return marks fed into the slots pass or
+decl-side handling of marked calls in one joint fixpoint. No new mechanism — one shared
+fixpoint instead of two adjacent ones.
