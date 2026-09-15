@@ -90,6 +90,54 @@ void test('index access is accepted on an array and not-yet on anything else', (
   assert.deepEqual(codesFor('const s: string = "ab";\nconst c: string[] = [...s];'), ['STA1214']);
 });
 
+// Spreading an unknown value is a gate-verifier gap (plan.md §8 step 39): the lowering folds
+// spread into `concat`, whose verifier case needs an array receiver, so an unknown operand must
+// be refused here rather than accepted into an STA4082 (and STA4068 for the object twin). The
+// refusal names Phase 5 — spreading needs the GetIterator dispatch step 8 owns for unknown
+// iterables — like every other refusal in the spread arms.
+void test('spread of an unknown value is not-yet rather than an internal error', () => {
+  // An `any` operand is silent at the checker and fatal at the verifier: the gate speaks.
+  assert.deepEqual(codesFor('const u = JSON.parse("[1]");\nconst b = [...u];', 'js'), ['STA1214']);
+  // An `as` assertion to an array type is never checkable, so the lowering drops it and spreads
+  // the unknown operand: the gate judges what the lowering reads, not what is asserted.
+  assert.deepEqual(codesFor('declare const u: unknown;\nconst b = [...(u as number[])];', 'js'), [
+    'STA1214',
+  ]);
+  // A tuple is a checker-level array the HType model calls Unknown — same uncompilable concat.
+  assert.deepEqual(codesFor('const t: [number, string] = [1, "a"];\nconst b = [...t];', 'js'), [
+    'STA1214',
+  ]);
+  // The object twin: a dropped assertion to a fixed shape names the unknown value, not the
+  // missing shape (which the assertion itself supplies).
+  assert.deepEqual(
+    codesFor('declare const u: unknown;\nconst b = { ...(u as { x: number }) };', 'js'),
+    ['STA1214'],
+  );
+  // A directly-`unknown` operand stays the checker's (TS2488): the gate stays silent rather than
+  // double-reporting one mistake.
+  assert.deepEqual(codesFor('declare const u: unknown;\nconst b = [...u];'), []);
+  assert.deepEqual(codesFor('declare const u: unknown;\nconst b = [...u];', 'js'), []);
+  // Honest shapes still compile: a known array, including through an identity assertion, and an
+  // array of unknown element type.
+  assert.deepEqual(codesFor('const a: number[] = [1];\nconst b = [...(a as number[])];', 'js'), []);
+  assert.deepEqual(codesFor('const a: unknown[] = [1];\nconst b: unknown[] = [...a];', 'js'), []);
+});
+
+void test('spread unknowns carry their own messages', () => {
+  const { program: arrayProgram } = createProgram(
+    'declare const u: unknown;\nconst b = [...(u as number[])];',
+    '/test.ts',
+  );
+  const arrayDiags = gateProgram(arrayProgram, 'js');
+  assert.match(arrayDiags[0]?.message ?? '', /spread of an unknown value in an array literal/);
+  const { program: objectProgram } = createProgram(
+    'declare const u: unknown;\nconst b = { ...(u as { x: number }) };',
+    '/test.ts',
+  );
+  const objectDiags = gateProgram(objectProgram, 'js');
+  assert.match(objectDiags[0]?.message ?? '', /an object spread of an unknown value/);
+});
+
 void test('switch, case, default and do/while are all accepted syntax', () => {
   assert.deepEqual(
     codesFor('let x: number = 0;\nswitch (x) { case 1: break; default: break; }'),

@@ -41,6 +41,7 @@ import type {
   LogicalOp,
   MathCall,
   MethodCall,
+  MethodCopy,
   MethodValue,
   Module,
   NewExpr,
@@ -317,9 +318,12 @@ function hiddenMethodField(method: string): string {
 }
 
 /** Slots a dynamic literal reserves before any spread scratch: the object itself, plus the
- * value scratch (and a second one for a get/set pair or a computed key). Counting starts the
- * spread scratches after these, and emission reads them back from the same base, so the two
- * agree exactly. */
+ * value scratch (and a second one for a get/set pair or a computed key) — but only the
+ * scratches the emission actually writes. A literal of spreads alone (`{ ...o }` into a
+ * dynamic result, plan.md §8 step 12c S-C) copies whole fragments via `jsrt_dynobj_spread`
+ * and never stores through the value scratch, so reserving it roots a slot nothing writes
+ * (frames.test.ts holds the gap against the counter). Counting starts the spread scratches
+ * after these, and emission reads them back from the same base, so the two agree exactly. */
 function dynLiteralBaseSlots(expr: DynObjectLiteral): number {
   if (expr.entries.length === 0) {
     return 1;
@@ -328,7 +332,13 @@ function dynLiteralBaseSlots(expr: DynObjectLiteral): number {
     (entry) => isAccessorEntry(entry) && entry.get !== undefined && entry.set !== undefined,
   );
   const hasComputed = expr.entries.some((entry) => isComputedEntry(entry));
-  return pair || hasComputed ? 3 : 2;
+  if (pair || hasComputed) {
+    return 3;
+  }
+  const storesValue = expr.entries.some(
+    (entry) => isAccessorEntry(entry) || (!isComputedEntry(entry) && entry.spread !== true),
+  );
+  return storesValue ? 2 : 1;
 }
 
 /** The grouping key for one spread's expanded reads: the spread's own source range.
@@ -345,7 +355,7 @@ function spreadScratchKey(span: Span): string {
 }
 
 /** One rooted scratch slot per spread fragment with a non-trivial source: every maximal group of
- * spread-marked field reads sharing a spread span, in first-occurrence order.
+ * spread-marked reads sharing a spread span, in first-occurrence order.
  *
  * The source evaluates ONCE at the fragment's position into the scratch, however many fields
  * read it -- a call, a member access, a literal would run its effect once per field without
@@ -354,15 +364,32 @@ function spreadScratchKey(span: Span): string {
  * the later fields). A lone read still needs its scratch: since step 21a the order repair reads
  * the source too, so "evaluates exactly once" is a two-reader promise, not a one-reader
  * optimization. Only `spread`-marked entries group: an own value reading the same shape never
- * shares the spread's span, so it can never join a fragment by accident. Counting and emission
- * both call this, so the reserved slots and the written ones agree exactly (frames.test.ts holds
- * any gap against the counter). */
-function spreadScratches(entries: readonly DynEntry[]): readonly {
+ * shares the spread's span, so it can never join a fragment by accident. Spread method copies
+ * join their fragment's group through the same span, so a methods-only fragment still runs its
+ * source once. Counting and emission both call this, so the reserved slots and the written ones
+ * agree exactly (frames.test.ts holds any gap against the counter). */
+function spreadScratches(
+  entries: readonly DynEntry[],
+  copies: readonly MethodCopy[] = [],
+): readonly {
   readonly key: string;
   readonly target: Expression;
 }[] {
   const groups = new Map<string, { readonly target: Expression }>();
   const order: string[] = [];
+  const consider = (value: Expression): void => {
+    if (value.kind !== 'field-access' && value.kind !== 'method-value') {
+      return;
+    }
+    if (value.target.kind === 'identifier') {
+      return;
+    }
+    const key = spreadScratchKey(value.span);
+    if (!groups.has(key)) {
+      groups.set(key, { target: value.target });
+      order.push(key);
+    }
+  };
   for (const entry of entries) {
     if (isAccessorEntry(entry) || isComputedEntry(entry)) {
       continue;
@@ -370,14 +397,10 @@ function spreadScratches(entries: readonly DynEntry[]): readonly {
     if (entry.spread !== true) {
       continue;
     }
-    if (entry.value.kind !== 'field-access' || entry.value.target.kind === 'identifier') {
-      continue;
-    }
-    const key = spreadScratchKey(entry.value.span);
-    if (!groups.has(key)) {
-      groups.set(key, { target: entry.value.target });
-      order.push(key);
-    }
+    consider(entry.value);
+  }
+  for (const copy of copies) {
+    consider(copy.value);
   }
   return order.map((key) => {
     const group = groups.get(key);
@@ -1368,13 +1391,47 @@ class Emitter {
    * subtree, which emission evaluates once into a scratch slot: the first read counts it and
    * the rest count nothing, or every extra field reserves slots (a whole call frame, for a
    * call source) that emission never writes. `spreadKeys`/`countedSpread` are the literal's
-   * own group state, built from the same `spreadScratches` the slot reservation used. */
+   * own group state, built from the same `spreadScratches` the slot reservation used. Spread
+   * method copies read through the same scratch, so they count the same way. */
+  /** The rooted slot holding a spread fragment's source, evaluating it once on first use.
+   *
+   * The field reads and the method copies of one fragment share one source subtree; the first
+   * read evaluates it into the scratch slot the counting pass reserved, and every later read
+   * loads out of that. `flushed` threads through because the evaluation may need statements,
+   * exactly as the caller's own `sequencePart` accounting does. A null slot means the fragment
+   * keeps no scratch -- an identifier source stays inline -- so the caller reads the binding
+   * itself. */
+  private spreadSource(
+    parts: string[],
+    key: string,
+    scratchAt: ReadonlyMap<string, number>,
+    scratchTarget: ReadonlyMap<string, Expression>,
+    scratchDone: Set<string>,
+    span: Span,
+    flushed: boolean,
+  ): { readonly slot: string | null; readonly flushed: boolean } {
+    const scratch = scratchAt.get(key);
+    const source = scratchTarget.get(key);
+    if (scratch === undefined || source === undefined) {
+      return { slot: null, flushed };
+    }
+    let next = flushed;
+    if (!scratchDone.has(key)) {
+      scratchDone.add(key);
+      next =
+        this.sequencePart(parts, source, span, (v) => `${this.slotAt(scratch)} = ${v}`) || next;
+    }
+    return { slot: this.slotAt(scratch), flushed: next };
+  }
   private countEntryValue(
     value: Expression,
     spreadKeys: ReadonlySet<string>,
     countedSpread: Set<string>,
   ): void {
-    if (value.kind === 'field-access' && value.target.kind !== 'identifier') {
+    if (
+      (value.kind === 'field-access' || value.kind === 'method-value') &&
+      value.target.kind !== 'identifier'
+    ) {
       const key = spreadScratchKey(value.span);
       if (spreadKeys.has(key)) {
         if (!countedSpread.has(key)) {
@@ -1560,10 +1617,12 @@ class Emitter {
       // scratch is written once at the spread's position and read inline by every field, so the
       // slots counted here and the ones emission writes agree exactly.
       case 'object-literal': {
-        const scratches = spreadScratches(expr.entries);
+        const scratches = spreadScratches(expr.entries, expr.methodCopies);
         // Snapshots for identifier-fragment sources (spreadSnapshots): the order repair runs
         // after every value, past any suspension, so a source a later entry reassigns would
         // read back wrong -- each one is retained at its own fragment's position instead.
+        // Spread method copies need none: the emitter stores them at the fragment's own
+        // position, so an inline identifier read is already the fragment-time value.
         const snaps = spreadSnapshots(expr.entries);
         this.callSlots.set(expr, this.slotCount);
         this.slotCount += 1 + scratches.length + snaps.length;
@@ -1574,6 +1633,9 @@ class Emitter {
         const countedSpread = new Set<string>();
         for (const entry of expr.entries) {
           this.countEntryValue(entry.value, spreadKeys, countedSpread);
+        }
+        for (const copy of expr.methodCopies) {
+          this.countEntryValue(copy.value, spreadKeys, countedSpread);
         }
         for (const method of expr.methods) {
           this.registerFunction(method.fn, method.name);
@@ -3641,7 +3703,7 @@ class Emitter {
         const order = keyOrderOf(expr, layout);
         const name = `${shapeNameOf(expr)}${order === undefined ? '' : `#${order.join(',')}`}`;
         const id = String(this.classIds.get(name));
-        const scratches = spreadScratches(expr.entries);
+        const scratches = spreadScratches(expr.entries, expr.methodCopies);
         const scratchAt = new Map(scratches.map(({ key }, index) => [key, slot + 1 + index]));
         const scratchTarget = new Map(scratches.map(({ key, target }) => [key, target]));
         const scratchDone = new Set<string>();
@@ -3665,9 +3727,89 @@ class Emitter {
         }
         const parts = [`${this.slotAt(slot)} = jsrt_object_new(&_jsrt_class_${id})`];
         let flushed = false;
+        // Hidden-slot indices by method name, in the TYPE's method order -- the same order
+        // `registerShape` laid out, so every literal of one shape agrees however its own and
+        // copied members interleave.
+        const hiddenAt = new Map(
+          (expr.type.kind === 'object' ? expr.type.methods : []).map((method, index) => [
+            method.name,
+            layout.length + index,
+          ]),
+        );
+        // Spread method copies grouped by the entry index their fragment starts at, in source
+        // order within a group: the emitter stores each group at its fragment's own position
+        // in the walk below, so a non-trivial source evaluates once at that position and an
+        // identifier source reads the fragment-time binding even when a later entry reassigns
+        // it (`{ ...b, y: (b = c) }`).
+        const copiesAt = new Map<number, MethodCopy[]>();
+        for (const copy of expr.methodCopies) {
+          const group = copiesAt.get(copy.at);
+          if (group === undefined) {
+            copiesAt.set(copy.at, [copy]);
+          } else {
+            group.push(copy);
+          }
+        }
+        // One spread method copy: the source's bound closure out of its hidden slot into the
+        // result's. The source renders through the fragment's scratch when it has one --
+        // shared with the field reads through `scratchDone`, so one evaluation serves both --
+        // and inline when the source is a bare identifier, which is side-effect-free.
+        const emitCopy = (copy: MethodCopy): void => {
+          if (copy.value.kind !== 'method-value') {
+            throw new Error('spread method copy is not a method read');
+          }
+          const dst = hiddenAt.get(copy.name);
+          if (dst === undefined) {
+            throw new Error(`spread method ${copy.name} is not in its own shape`);
+          }
+          const receiver = copy.value.target;
+          const receiverType = receiver.type;
+          if (receiverType.kind !== 'object') {
+            throw new Error(`spread method ${copy.name} has no source shape`);
+          }
+          const methodIndex = receiverType.methods.findIndex((method) => method.name === copy.name);
+          if (methodIndex < 0) {
+            throw new Error(`spread method ${copy.name} is not in its source shape`);
+          }
+          const src = receiverType.fields.length + methodIndex;
+          let from: string;
+          if (receiver.kind === 'identifier') {
+            const rendered = this.capture(() => this.emitExpression(receiver));
+            if (rendered.lines.length > 0) {
+              throw new Error('spread copy source produced statements');
+            }
+            from = rendered.value;
+          } else {
+            const key = spreadScratchKey(copy.value.span);
+            const resolved = this.spreadSource(
+              parts,
+              key,
+              scratchAt,
+              scratchTarget,
+              scratchDone,
+              expr.span,
+              flushed,
+            );
+            flushed = resolved.flushed;
+            if (resolved.slot === null) {
+              throw new Error('spread copy source has no slot');
+            }
+            from = resolved.slot;
+          }
+          parts.push(
+            `jsrt_object_set(${this.slotAt(slot)}, ${String(dst)}, jsrt_object_get_field(${from}, ${String(src)}, ${cNameLiteral(copy.name)}))`,
+          );
+        };
         // Source order is the EVALUATION order (§13.2.5.5 runs the initializers left to right);
         // the slot each value lands in comes from the layout, which need not agree.
-        expr.entries.forEach((entry) => {
+        for (let index = 0; index < expr.entries.length; index++) {
+          for (const copy of copiesAt.get(index) ?? []) {
+            emitCopy(copy);
+          }
+          const entry = expr.entries[index];
+          if (entry === undefined) {
+            throw new Error('object literal entry vanished during emission');
+          }
           const target = layout.findIndex((field) => field.name === entry.name);
           if (target < 0) {
             throw new Error(`object literal key ${entry.name} is not in its own shape`);
@@ -3699,23 +3841,21 @@ class Emitter {
           }
           if (entry.value.kind === 'field-access' && entry.value.target.kind !== 'identifier') {
             const key = spreadScratchKey(entry.value.span);
-            const scratch = scratchAt.get(key);
-            const source = scratchTarget.get(key);
-            if (scratch !== undefined && source !== undefined) {
-              if (!scratchDone.has(key)) {
-                scratchDone.add(key);
-                flushed =
-                  this.sequencePart(
-                    parts,
-                    source,
-                    expr.span,
-                    (v) => `${this.slotAt(scratch)} = ${v}`,
-                  ) || flushed;
-              }
+            const resolved = this.spreadSource(
+              parts,
+              key,
+              scratchAt,
+              scratchTarget,
+              scratchDone,
+              expr.span,
+              flushed,
+            );
+            flushed = resolved.flushed;
+            if (resolved.slot !== null) {
               parts.push(
-                `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, jsrt_object_get_field(${this.slotAt(scratch)}, ${String(entry.value.slot)}, ${cNameLiteral(entry.name)}))`,
+                `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, jsrt_object_get_field(${resolved.slot}, ${String(entry.value.slot)}, ${cNameLiteral(entry.name)}))`,
               );
-              return;
+              continue;
             }
           }
           flushed =
@@ -3725,16 +3865,26 @@ class Emitter {
               expr.span,
               (v) => `jsrt_object_set(${this.slotAt(slot)}, ${String(target)}, ${v})`,
             ) || flushed;
-        });
+        }
+        for (const copy of copiesAt.get(expr.entries.length) ?? []) {
+          emitCopy(copy);
+        }
         // A literal's methods are bound HERE, over the definition environment (plan.md §8 step 36):
         // each evaluation stores its own closures into the hidden trailing slots, which is what
         // makes two `counter()` calls read two different `n`s. A method that captures nothing
         // stores the shared constant -- the same value every instance would load -- so identity
         // (`o.m === o.m`) is unchanged. `closureValue` is pure, so joining `parts` is exact, and
         // the object is already in its rooted slot, so the fresh closures cannot collect it.
-        expr.methods.forEach((method, index) => {
+        // Spread copies were already stored at their fragments' positions above; what remains
+        // here are the own members, which the lowering kept only when no later writer -- a
+        // spread, or another own member -- overwrites them, so this last write wins outright.
+        expr.methods.forEach((method) => {
+          const dst = hiddenAt.get(method.name);
+          if (dst === undefined) {
+            throw new Error(`object literal method ${method.name} is not in its own shape`);
+          }
           parts.push(
-            `jsrt_object_set(${this.slotAt(slot)}, ${String(layout.length + index)}, ${this.closureValue(method.fn)})`,
+            `jsrt_object_set(${this.slotAt(slot)}, ${String(dst)}, ${this.closureValue(method.fn)})`,
           );
         });
         if (needsOrder) {
@@ -4604,19 +4754,24 @@ class Emitter {
     // one shared function cannot close over each instance's own environment. Every literal of one
     // shape lays the same methods out in the same order, so the indices are uniform however many
     // descriptors the shape has -- and the call sites resolve them by shape name for the same
-    // reason. A stored key order must cover EVERY slot, hidden ones included: the runtime walks
-    // `field_count` entries through it, so a user-only order would read past its end.
+    // reason. The order is the TYPE's method order: own members lower in written order, which is
+    // that order, and spread copies (plan.md §8 step 12c S-C) have no function of their own to
+    // order by -- so the type is the one order both agree on. A stored key order must cover
+    // EVERY slot, hidden ones included: the runtime walks `field_count` entries through it, so
+    // a user-only order would read past its end.
     const shapeName = shapeNameOf(expr);
     const fields = layout.map((field) => ({ name: field.name, type: field.type, span: expr.span }));
-    if (expr.methods.length > 0) {
+    const shapeMethods = expr.type.kind === 'object' ? expr.type.methods : [];
+    const ownByName = new Map(expr.methods.map((method) => [method.name, method] as const));
+    if (shapeMethods.length > 0) {
       const full = [...(order ?? layout.map((_, index) => index))];
       const hidden = new Map<string, number>();
-      expr.methods.forEach((method, index) => {
+      shapeMethods.forEach((method, index) => {
         hidden.set(method.name, layout.length + index);
         full.push(layout.length + index);
         fields.push({
           name: hiddenMethodField(method.name),
-          type: method.fn.type,
+          type: ownByName.get(method.name)?.fn.type ?? method.type,
           span: expr.span,
         });
       });

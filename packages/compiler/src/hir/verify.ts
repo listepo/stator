@@ -1354,6 +1354,9 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       for (const method of expr.methods) {
         verifyFunction(method.fn, problems, bindings);
       }
+      for (const copy of expr.methodCopies) {
+        verifyExpression(copy.value, problems, bindings);
+      }
       const shape = expr.type;
       if (shape.kind !== 'object') {
         problems.push({
@@ -1386,6 +1389,47 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
             span: expr.span,
             code: 'STA4052',
             message: `shape '${hTypeName(shape)}' has field '${field.name}', which the literal does not write`,
+          });
+        }
+      }
+      // The same cover rule for methods: every writer -- an own member or a spread copy --
+      // names a method of the shape, and every method of the shape has at least one writer.
+      // Duplicates are overwrites (`{ ...a, ...b }`, `{ ...o, m() {} }`), not errors: the
+      // emitter stores in source order into one hidden slot, so the last write wins. Each
+      // copy's own receiver check (`method-value`) already ran through `verifyExpression`
+      // above; what remains here is the shape side, plus the copy's position, which must
+      // land inside the entry list the emitter splices it into.
+      const written = new Set([
+        ...expr.methods.map((method) => method.name),
+        ...expr.methodCopies.map((copy) => copy.name),
+      ]);
+      for (const name of written) {
+        if (!shape.methods.some((method) => method.name === name)) {
+          problems.push({
+            kind: 'object-literal',
+            span: expr.span,
+            code: 'STA4052',
+            message: `method '${name}' names no method of shape '${hTypeName(shape)}'`,
+          });
+        }
+      }
+      for (const method of shape.methods) {
+        if (!written.has(method.name)) {
+          problems.push({
+            kind: 'object-literal',
+            span: expr.span,
+            code: 'STA4052',
+            message: `shape '${hTypeName(shape)}' has method '${method.name}', which the literal does not write`,
+          });
+        }
+      }
+      for (const copy of expr.methodCopies) {
+        if (!Number.isInteger(copy.at) || copy.at < 0 || copy.at > expr.entries.length) {
+          problems.push({
+            kind: 'object-literal',
+            span: expr.span,
+            code: 'STA4052',
+            message: `spread copy of method '${copy.name}' is positioned past its entries`,
           });
         }
       }

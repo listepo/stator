@@ -155,9 +155,19 @@ test('an initialized optional field lowers as a plain field', () => {
   );
 });
 
-test('an uninitialized optional field stays not-yet', () => {
-  // Absent versus holding `undefined`: reads agree, but `in` and inspect do not, and a slot
-  // cannot keep that distinction.
+test('an uninitialized optional field lowers as a plain field', () => {
+  // Absent versus holding `undefined` was the old refusal's worry; Node uses define-semantics
+  // here (`"x" in c` is true), the slot is always present, and `jsrt_object_new` zero-fills it
+  // to `undefined` — so there is no distinction to keep (plan.md §8 step-12 S-B).
+  const decl = classOf(`class C {
+    x?: number;
+  }
+  `);
+  assert.deepEqual(
+    decl.fields.map((f) => f.name),
+    ['x'],
+    'the slot is always present, like its initialized twin',
+  );
   assert.deepEqual(
     gateCodes(
       `class C {
@@ -166,7 +176,7 @@ test('an uninitialized optional field stays not-yet', () => {
       `,
       'ts',
     ),
-    ['STA1214'],
+    [],
   );
 });
 

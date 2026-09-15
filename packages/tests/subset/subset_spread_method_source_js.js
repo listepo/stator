@@ -1,10 +1,9 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: Object literals with static keys
-// A method on an object literal IS an own enumerable property, so spreading must copy it as
-// data -- which the field-only expansion cannot do without silently dropping a key. Stays
-// not-yet (plan.md §8 step 12c residue).
+// A method on an object literal IS an own enumerable property, so spreading copies it as
+// data: the lowering expands one bound-closure read per method into the result's hidden
+// slot, and a later `copy.m()` passes the copy as the receiver (plan.md §8 step 12c S-C).
 
 const base = {
   x: 1,

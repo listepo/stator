@@ -457,9 +457,18 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
         const fn = rewriteFunction(method.fn, rewriter);
         return fn === method.fn ? method : { ...method, fn };
       });
-      return entries === expr.entries && methods === expr.methods
+      const methodCopies = rewriteEach(expr.methodCopies, (copy) => {
+        const value = sub(copy.value);
+        if (value.kind !== 'method-value') {
+          throw new Error(`rewriteExpression: spread method copy became ${value.kind}`);
+        }
+        return value === copy.value ? copy : { ...copy, value };
+      });
+      return entries === expr.entries &&
+        methods === expr.methods &&
+        methodCopies === expr.methodCopies
         ? expr
-        : { ...expr, entries, methods };
+        : { ...expr, entries, methods, methodCopies };
     }
     case 'dyn-object-literal': {
       const entries = rewriteEach(expr.entries, (entry): DynEntry => {

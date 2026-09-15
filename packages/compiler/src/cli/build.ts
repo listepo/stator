@@ -230,7 +230,7 @@ export async function compileToC(entry: string, mode: Mode): Promise<CompiledC |
   }
 
   const { module, diagnostics: lowerDiagnostics } = withSpan('lower', {}, () =>
-    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols),
+    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols, mode),
   );
   if ((await report(lowerDiagnostics)) || module === null) {
     return null;

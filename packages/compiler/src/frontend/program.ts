@@ -140,6 +140,11 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2375, // Type 'X' is not assignable to type 'Y' with 'exactOptionalPropertyTypes: true' (target's properties).
   2379, // Argument of type 'X' is not assignable to parameter of type 'Y' with 'exactOptionalPropertyTypes: true'.
   2412, // Type 'X' is not assignable to type 'Y' with 'exactOptionalPropertyTypes: true' (the target).
+  // A computed key of a type that is not string/number/symbol is still a key at run time:
+  // Node applies ToPropertyKey coercion (`{ [{}]: 1 }` holds `"[object Object]"`), and the
+  // dynamic literal stores through `jsrt_dyn_index_set`, which coerces the same way through
+  // `jsrt_to_string` (plan.md §8 step 2a(b)). ts mode keeps the refusal (STA0012).
+  2464, // A computed property name must be of type 'string', 'number', 'symbol', or 'any'.
   // Duplicate data-property keys in an object literal are legal JavaScript — last wins — and
   // §1.2 says js mode never rejects untyped code; the diagnostic is tsc's grammar check, not a
   // type error (plan.md §8 step 26). The lowering pushes one entry per written property and the

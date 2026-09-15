@@ -150,7 +150,7 @@ export async function explainFile(entry: string, mode: Mode): Promise<Explanatio
   }
 
   const { module, diagnostics } = withSpan('lower', {}, () =>
-    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols),
+    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols, mode),
   );
   const verdictFromLowering = classify(diagnostics);
   if (verdictFromLowering !== null) {
@@ -466,7 +466,10 @@ function expressionHasUnknown(expr: Expression): boolean {
     // A literal's own type stops the deep walk for the same reason a class's does, so what makes
     // one dynamic is a value it was built from -- which is exactly what a read of it will find.
     case 'object-literal':
-      return expr.entries.some((e) => expressionHasUnknown(e.value));
+      return (
+        expr.entries.some((e) => expressionHasUnknown(e.value)) ||
+        expr.methodCopies.some((copy) => expressionHasUnknown(copy.value))
+      );
     // Dynamic by definition -- their type is Unknown, which the check at the top of this function
     // has already answered; these arms only complete the switch.
     case 'dyn-object-literal':

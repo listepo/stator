@@ -415,6 +415,35 @@ export interface ObjectLiteral extends Node {
   readonly entries: readonly ObjectEntry[];
   /** Method members, lowered like a class's -- one shared function per name, receiver as param 0. */
   readonly methods: readonly ClassMethod[];
+  /** Methods a `{ ...src }` expansion copied (plan.md §8 step 12c S-C): one `method-value`
+   * read of the spread source per method the source's shape carries. The read loads the
+   * source's BOUND closure out of its hidden slot, so the copy keeps the source's
+   * construction-site environment and its identity (`c.m === o.m` for a non-capturing
+   * method, as in Node) -- while a later `c.m()` still goes through the method-call path
+   * and passes the COPY as the receiver, which is what makes `this === c`. Only the
+   * lowering sets it, and only for a source whose shape is an object literal's (its name
+   * starts with `{`): a method on a class instance rides the prototype, is not own, and
+   * is never copied, which the field-only expansion already gets right. An accessor can
+   * never appear here -- one forces its whole shape dynamic, so a fixed-shape source has
+   * plain methods only. */
+  readonly methodCopies: readonly MethodCopy[];
+}
+
+/** One method a `{ ...src }` expansion copied (see `ObjectLiteral.methodCopies`).
+ *
+ * `value` is a `method-value` read of the spread source, stamped with the spread's own span
+ * so the emitter's scratch machinery evaluates a shared non-trivial source once no matter
+ * how many fields and methods read it. `at` is the index into the literal's `entries` where
+ * this fragment starts -- the count of entries expanded before it -- so the emitter stores
+ * the copy at the fragment's own position in source order, exactly as the field reads are.
+ * A later writer of the same name (another spread, or an own method) overwrites the slot,
+ * which is the `{ ...a, ...b }` last-wins rule; the lowering drops a losing copy unless its
+ * source would otherwise never evaluate (a methods-only source that is not an identifier),
+ * in which case the duplicate store is what runs it. */
+export interface MethodCopy {
+  readonly name: string;
+  readonly value: MethodValue;
+  readonly at: number;
 }
 
 export interface ObjectEntry {

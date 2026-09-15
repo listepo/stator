@@ -101,6 +101,7 @@ import type {
   MatchField,
   MathMethod,
   MethodCall,
+  MethodCopy,
   MethodValue,
   Module,
   NewExpr,
@@ -143,7 +144,7 @@ import {
   STRING_OPS,
   STRING_STATICS,
 } from '../hir/nodes.ts';
-import type { HObject, HType } from '../hir/types.ts';
+import type { HField, HObject, HType } from '../hir/types.ts';
 import {
   accessorName,
   fieldSlot,
@@ -160,6 +161,7 @@ import {
   hTypeHasUnknown,
   hTypeName,
   hUnknown,
+  objectFieldsPrefix,
 } from '../hir/types.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode } from '../support/diagnostics.ts';
@@ -227,11 +229,35 @@ const UNARY_OPERATORS = new Map<ts.SyntaxKind, UnaryOp['operator']>([
   [ts.SyntaxKind.VoidKeyword, 'void'],
 ]);
 
+type Mode = 'ts' | 'js';
+
+/* plan.md §8 step 40 (plan §0.8): the build's mode, threaded in from the CLI entry points for
+ * diagnostic LABELING only. Lowering never branches on this value -- no `mode ===` check may
+ * appear anywhere below except inside `lowerDiagnostic`, which copies it into the diagnostic's
+ * `mode` field. Set once per `lowerProgram` call; lowering is synchronous, so no call can
+ * observe another's value. */
+let lowerDiagMode: Mode = 'ts';
+
+/** `diagnosticFromNode` with the current build's mode already filled in (see `lowerDiagMode`).
+ * Every lowering diagnostic goes through here, so a `--mode=js` build labels its STA4xxx `[js]`
+ * instead of the hardcoded `[ts]` step 40 found. Label-only: the arguments are the same ones
+ * the call sites always passed, and nothing here (or below) branches on the mode. */
+function lowerDiagnostic(
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+  code: string,
+  diagClass: 'error' | 'never' | 'not-yet' | 'runtime' | 'internal',
+  message: string,
+): Diagnostic {
+  return diagnosticFromNode(node, sourceFile, code, diagClass, lowerDiagMode, message);
+}
+
 export function lowerSourceFile(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
+  mode: Mode = 'ts',
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
-  return lowerProgram([sourceFile], checker);
+  return lowerProgram([sourceFile], checker, new Set(), mode);
 }
 
 /* Lowers a whole program -- the module-graph files in topological order, entry LAST -- into ONE
@@ -298,8 +324,10 @@ export function lowerProgram(
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
   runtimeDynamicSymbols: ReadonlySet<ts.Symbol> = new Set(),
+  mode: Mode = 'ts',
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
+  lowerDiagMode = mode;
   const bindings = Scope.root();
   hasRuntimeDynamicSymbols = runtimeDynamicSymbols.size > 0;
   for (const symbol of runtimeDynamicSymbols) {
@@ -494,12 +522,11 @@ export function lowerProgram(
   } catch (error) {
     // Ensure no exception escapes — all errors must be diagnostics
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         current,
         current,
         'STA4030',
         'internal',
-        'ts',
         `internal error during lowering: ${error instanceof Error ? error.message : String(error)}`,
       ),
     );
@@ -774,12 +801,11 @@ function lowerStatement(
     const name = node.name?.text;
     if (name === undefined) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node,
           sourceFile,
           'STA4031',
           'internal',
-          'ts',
           'function declaration without a name',
         ),
       );
@@ -853,12 +879,11 @@ function lowerStatement(
 
   // Anything else is an internal error
   diagnostics.push(
-    diagnosticFromNode(
+    lowerDiagnostic(
       node,
       sourceFile,
       'STA4031',
       'internal',
-      'ts',
       `unexpected statement kind: ${ts.SyntaxKind[node.kind]}`,
     ),
   );
@@ -962,7 +987,7 @@ function bindPatternElement(
 ): boolean {
   if (!ts.isIdentifier(el.name)) {
     diagnostics.push(
-      diagnosticFromNode(el, sourceFile, 'STA4031', 'internal', 'ts', 'unexpected nested pattern'),
+      lowerDiagnostic(el, sourceFile, 'STA4031', 'internal', 'unexpected nested pattern'),
     );
     return false;
   }
@@ -1023,14 +1048,7 @@ function lowerBindingPattern(
   }
   if (ts.isIdentifier(name)) {
     diagnostics.push(
-      diagnosticFromNode(
-        name,
-        sourceFile,
-        'STA4031',
-        'internal',
-        'ts',
-        'expected a binding pattern',
-      ),
+      lowerDiagnostic(name, sourceFile, 'STA4031', 'internal', 'expected a binding pattern'),
     );
     return null;
   }
@@ -1107,7 +1125,7 @@ function lowerDeclarationList(
   diagnostics: Diagnostic[],
 ): Statement | null {
   const fail = (target: ts.Node, message: string): null => {
-    diagnostics.push(diagnosticFromNode(target, sourceFile, 'STA4032', 'internal', 'ts', message));
+    diagnostics.push(lowerDiagnostic(target, sourceFile, 'STA4032', 'internal', message));
     return null;
   };
 
@@ -1261,12 +1279,11 @@ function lowerForOf(
   const declaration = ts.isVariableDeclarationList(list) ? list.declarations[0] : undefined;
   if (declaration === undefined || !ts.isIdentifier(declaration.name)) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node,
         sourceFile,
         'STA4035',
         'internal',
-        'ts',
         'for-of binding must be a single named declaration',
       ),
     );
@@ -1328,12 +1345,11 @@ function wrapUserIterator(
   const owner = declaringClassName(receiver, ITERATOR_METHOD_NAME, checker);
   if (owner === null) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         at,
         sourceFile,
         'STA4065',
         'internal',
-        'ts',
         `no class in the receiver's ancestry declares method '${ITERATOR_METHOD_NAME}'`,
       ),
     );
@@ -1345,12 +1361,11 @@ function wrapUserIterator(
       : -1;
   if (slot < 0) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         at,
         sourceFile,
         'STA4067',
         'internal',
-        'ts',
         `method '${ITERATOR_METHOD_NAME}' has no slot in the layout of ${hTypeName(iterable.type)}`,
       ),
     );
@@ -1819,12 +1834,11 @@ function slotOf(
   const slot = target.type.kind === 'object' ? fieldSlot(target.type, field) : undefined;
   if (slot === undefined) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         at,
         sourceFile,
         'STA4060',
         'internal',
-        'ts',
         `no field '${field}' on ${hTypeName(target.type)}`,
       ),
     );
@@ -1856,12 +1870,11 @@ function assignmentParts(
     const target = placeName(targetNode, sourceFile, checker);
     if (target === undefined) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           targetNode,
           sourceFile,
           'STA4033',
           'internal',
-          'ts',
           'assignment target must be an identifier',
         ),
       );
@@ -1870,12 +1883,11 @@ function assignmentParts(
     const binding = bindings.get(target);
     if (!binding) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           targetNode,
           sourceFile,
           'STA4034',
           'internal',
-          'ts',
           `identifier '${target}' assigned before declaration`,
         ),
       );
@@ -2490,12 +2502,11 @@ function lowerUpdatePlace(
     return expr;
   }
   diagnostics.push(
-    diagnosticFromNode(
+    lowerDiagnostic(
       node,
       sourceFile,
       'STA4033',
       'internal',
-      'ts',
       'update target must be a variable or member',
     ),
   );
@@ -2530,12 +2541,11 @@ function lowerForIn(
     const decl = node.initializer.declarations[0];
     if (decl === undefined || !ts.isIdentifier(decl.name)) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node.initializer,
           sourceFile,
           'STA4031',
           'internal',
-          'ts',
           'for-in binding must be a name',
         ),
       );
@@ -2552,12 +2562,11 @@ function lowerForIn(
     hirBinding = inner.hirName(binding);
   } else {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node.initializer,
         sourceFile,
         'STA4031',
         'internal',
-        'ts',
         'for-in binding must be a name',
       ),
     );
@@ -3135,12 +3144,11 @@ function lowerExpression(
       const type = bindings.get(name);
       if (type === undefined) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             node,
             sourceFile,
             'STA4066',
             'internal',
-            'ts',
             `static '${name}' read before its class declaration was lowered`,
           ),
         );
@@ -3216,26 +3224,18 @@ function lowerExpression(
     if (methodOwner !== null) {
       if (target.type.kind !== 'object') {
         diagnostics.push(
-          diagnosticFromNode(
-            node,
-            sourceFile,
-            'STA4049',
-            'internal',
-            'ts',
-            'receiver is not an object',
-          ),
+          lowerDiagnostic(node, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
         );
         return null;
       }
       const slot = target.type.methods.findIndex((m) => m.name === field);
       if (slot < 0) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             node,
             sourceFile,
             'STA4067',
             'internal',
-            'ts',
             `method '${field}' has no slot in the layout of ${hTypeName(target.type)}`,
           ),
         );
@@ -3454,9 +3454,28 @@ function lowerExpression(
     const entries: DynEntry[] = [];
     // Methods wait with the entry count at their written position: the fixed path lowers them
     // into the method table, while the dynamic path splices their closures back into `entries`
-    // at exactly these positions, which is what keeps the insertion order.
-    const methodNodes: { at: number; node: ts.MethodDeclaration }[] = [];
-    for (const property of node.properties) {
+    // at exactly these positions, which is what keeps the insertion order. `order` is the
+    // property index, which the fixed path needs to resolve an own method against a spread
+    // copy of the same name: the last writer in source order wins (see the assembly below).
+    const methodNodes: { at: number; order: number; node: ts.MethodDeclaration }[] = [];
+    // One record per spread fragment, in property order: which methods it contributes, whether
+    // it pushed any field entry, and whether its source is a bare identifier. The fixed path
+    // resolves each method name to its last writer; a losing copy is dropped, unless dropping
+    // it would drop its source's only evaluation (a methods-only source that is not an
+    // identifier runs nowhere else). `fields` is the source's field list, for the prefix check
+    // below: a copied method body reads `this` through the source's slots.
+    const spreadFragments: {
+      order: number;
+      pushedFields: boolean;
+      targetIsIdentifier: boolean;
+      methods: readonly string[];
+      fields: readonly HField[];
+    }[] = [];
+    // Methods a `{ ...src }` expansion copied (see `MethodCopy`): one bound-closure read per
+    // method of a literal-shaped source, stored at the fragment's own `at` like the field
+    // reads are, so evaluation order is source order however the emitter walks them.
+    const methodCopies: { at: number; order: number; name: string; value: MethodValue }[] = [];
+    for (const [propIndex, property] of node.properties.entries()) {
       // `{ x }` is `{ x: x }`. The desugaring lives here and not in HIR: the value is the ordinary
       // identifier expression, so every later pass sees a name/value pair like any other.
       if (ts.isShorthandPropertyAssignment(property)) {
@@ -3467,16 +3486,25 @@ function lowerExpression(
         entries.push({ name: property.name.text, value });
         continue;
       }
-      // `{ ...a }` expands to one read per field of `a`'s shape. The gate held the operand to
+      // `{ ...a }` expands to one read per field of `a`'s shape, plus one bound-closure
+      // read per method when `a`'s shape is an object literal's. The gate held the operand to
       // a fixed shape, so both the key set and each slot are known now (plan.md §8 step 12
       // family c). The N reads share one source subtree; the emitter evaluates a shared
       // non-trivial source once into a scratch slot (codegen `spreadScratches`), so this sharing
       // is a single evaluation, not N. A later key of the same name overwrites this entry,
       // which is the `{ ...a, x: 1 }` rule -- the emitter stores in source order into one slot,
       // so the last write wins on its own. `#private` fields are skipped: they are not own
-      // properties, so spreading never copies them (class methods ride the prototype for the
-      // same reason, and the gate refuses the one case -- a method on a literal -- where a
-      // member IS own and would be silently dropped).
+      // properties, so spreading never copies them. A method on a CLASS instance rides the
+      // prototype for the same reason and is never copied either -- only a method on a
+      // literal IS own (the shape name starts with `{`), and the copy below is what carries
+      // it: a `method-value` read stamped with the spread's span, so it joins the fragment's
+      // single evaluation and lands in the result's hidden slot with the source's bound
+      // closure -- the construction-site environment with the call-site receiver, exactly as
+      // Node copies the function object and calls it against the copy (plan.md §8 step 12c
+      // S-C). An accessor can never ride this path: one forces its whole shape dynamic, so
+      // a fixed-shape source carries plain methods only -- spreading a value WITH an
+      // accessor stays refused at the gate (`no fixed shape`), which is step 39's dynamic
+      // spread to land, not this slice's.
       if (ts.isSpreadAssignment(property)) {
         const source = lowerExpression(
           property.expression,
@@ -3490,12 +3518,11 @@ function lowerExpression(
         }
         if (source.type.kind !== 'object') {
           diagnostics.push(
-            diagnosticFromNode(
+            lowerDiagnostic(
               property,
               sourceFile,
               'STA4068',
               'internal',
-              'ts',
               'object spread of a value with no shape',
             ),
           );
@@ -3513,6 +3540,7 @@ function lowerExpression(
         // enumerate in the SOURCE OBJECT's key order, so the emitter repairs the order at run
         // time -- and only a mark tells these reads apart from an own value that happens to
         // read the same shape (plan.md §8 step 21a).
+        const fieldsBefore = entries.length;
         source.type.fields.forEach((field, slot) => {
           if (field.name.startsWith('#')) {
             return;
@@ -3527,6 +3555,42 @@ function lowerExpression(
           };
           entries.push({ name: field.name, value: read, spread: true });
         });
+        // A method on a literal-shaped source is an own enumerable property, so the spread
+        // copies it as data: the source's bound closure, read out of its hidden slot. A
+        // method on a class instance is skipped -- it lives on the prototype and spreading
+        // must not copy it, which the field-only expansion above already gets right.
+        // Hoisted for the closure below: narrowing on `source.type` does not survive into it.
+        const sourceName = source.type.name;
+        const copiedMethods: string[] = sourceName.startsWith('{')
+          ? source.type.methods.map((method, slot) => {
+              const read: MethodValue = {
+                kind: 'method-value',
+                type: method.type,
+                span: spreadSpan,
+                target: source,
+                className: sourceName,
+                method: method.name,
+                slot,
+                dispatch: isOverridden(sourceName, method.name, sourceFile, checker)
+                  ? 'virtual'
+                  : 'direct',
+              };
+              methodCopies.push({
+                at: fieldsBefore,
+                order: propIndex,
+                name: method.name,
+                value: read,
+              });
+              return method.name;
+            })
+          : [];
+        spreadFragments.push({
+          order: propIndex,
+          pushedFields: entries.length > fieldsBefore,
+          targetIsIdentifier: source.kind === 'identifier',
+          methods: copiedMethods,
+          fields: source.type.fields,
+        });
         continue;
       }
       // `get x() {…}` / `set x(v) {…}`. Both halves of one key become ONE entry, so a literal that
@@ -3537,18 +3601,17 @@ function lowerExpression(
       if (ts.isMethodDeclaration(property)) {
         if (!(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
           diagnostics.push(
-            diagnosticFromNode(
+            lowerDiagnostic(
               property,
               sourceFile,
               'STA4068',
               'internal',
-              'ts',
               'object literal method with a key that is not a name',
             ),
           );
           return null;
         }
-        methodNodes.push({ at: entries.length, node: property });
+        methodNodes.push({ at: entries.length, order: propIndex, node: property });
         continue;
       }
       if (ts.isGetAccessorDeclaration(property) || ts.isSetAccessorDeclaration(property)) {
@@ -3562,12 +3625,11 @@ function lowerExpression(
               : null;
         if (accessorKey === null) {
           diagnostics.push(
-            diagnosticFromNode(
+            lowerDiagnostic(
               property,
               sourceFile,
               'STA4068',
               'internal',
-              'ts',
               'object literal accessor with a key that is not a name',
             ),
           );
@@ -3599,12 +3661,11 @@ function lowerExpression(
       }
       if (!ts.isPropertyAssignment(property)) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             property,
             sourceFile,
             'STA4068',
             'internal',
-            'ts',
             'object literal member is not a name/value pair',
           ),
         );
@@ -3635,12 +3696,11 @@ function lowerExpression(
       }
       if (!ts.isComputedPropertyName(property.name)) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             property,
             sourceFile,
             'STA4068',
             'internal',
-            'ts',
             'object literal member is not a name/value pair',
           ),
         );
@@ -3675,12 +3735,11 @@ function lowerExpression(
           const entry = entries[cursor];
           if (entry === undefined) {
             diagnostics.push(
-              diagnosticFromNode(
+              lowerDiagnostic(
                 node,
                 sourceFile,
                 'STA4068',
                 'internal',
-                'ts',
                 'object literal method position is past its entries',
               ),
             );
@@ -3705,12 +3764,11 @@ function lowerExpression(
         const entry = entries[cursor];
         if (entry === undefined) {
           diagnostics.push(
-            diagnosticFromNode(
+            lowerDiagnostic(
               node,
               sourceFile,
               'STA4068',
               'internal',
-              'ts',
               'object literal method position is past its entries',
             ),
           );
@@ -3736,14 +3794,7 @@ function lowerExpression(
     const type = contextualType?.kind === 'object' ? contextualType : own;
     if (type.kind !== 'object') {
       diagnostics.push(
-        diagnosticFromNode(
-          node,
-          sourceFile,
-          'STA4068',
-          'internal',
-          'ts',
-          'object literal has no shape',
-        ),
+        lowerDiagnostic(node, sourceFile, 'STA4068', 'internal', 'object literal has no shape'),
       );
       return null;
     }
@@ -3754,12 +3805,11 @@ function lowerExpression(
     for (const entry of entries) {
       if (isAccessorEntry(entry)) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             node,
             sourceFile,
             'STA4068',
             'internal',
-            'ts',
             'object literal with an accessor took the fixed-shape path',
           ),
         );
@@ -3767,12 +3817,11 @@ function lowerExpression(
       }
       if (isComputedEntry(entry)) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             node,
             sourceFile,
             'STA4068',
             'internal',
-            'ts',
             'object literal with a computed key took the fixed-shape path',
           ),
         );
@@ -3781,14 +3830,100 @@ function lowerExpression(
       fixed.push(entry);
     }
     const methods: ClassMethod[] = [];
-    for (const { node: method } of methodNodes) {
+    // One hidden slot per method name, so writers of one name share it and the last writer in
+    // source order wins (§13.2.5.5, the `{ ...a, ...b }` and `{ ...o, m() {} }` rules). Writers
+    // are own methods and spread fragments, compared by property index. A losing own method is
+    // dropped outright -- binding a fresh closure runs no user code, so there is nothing to
+    // preserve. A losing copy is dropped too, UNLESS its source would otherwise never run: a
+    // fragment that pushed no field entry and whose source is not an identifier evaluates
+    // nowhere else, so the duplicate store is what runs it (a later writer overwrites the
+    // slot, which is exactly as correct as it is cheap).
+    const lastWriter = new Map<string, number>();
+    const considerWriter = (name: string, order: number): void => {
+      const prev = lastWriter.get(name);
+      if (prev === undefined || order >= prev) {
+        lastWriter.set(name, order);
+      }
+    };
+    for (const { order, node: method } of methodNodes) {
+      considerWriter(memberFunctionName(method, sourceFile), order);
+    }
+    for (const fragment of spreadFragments) {
+      for (const name of fragment.methods) {
+        considerWriter(name, fragment.order);
+      }
+    }
+    // The gate refused every spread the result does not preserve (plan.md §8 step 12c S-C):
+    // a copied method body reads `this` through the source's slots, so a fragment whose
+    // fields are not a prefix of the result's would misread them. Reaching here with one
+    // means the gate and the lowering disagree about the layout, which is a compiler bug.
+    for (const fragment of spreadFragments) {
+      if (fragment.methods.length > 0 && !objectFieldsPrefix(type.fields, fragment.fields)) {
+        diagnostics.push(
+          lowerDiagnostic(
+            node,
+            sourceFile,
+            'STA4068',
+            'internal',
+            'object spread of a value with methods that does not preserve its field order',
+          ),
+        );
+        return null;
+      }
+    }
+    const copies: MethodCopy[] = [];
+    for (const copy of methodCopies) {
+      const winner = lastWriter.get(copy.name);
+      if (winner === copy.order) {
+        copies.push({ name: copy.name, value: copy.value, at: copy.at });
+        continue;
+      }
+      const fragment = spreadFragments.find(
+        (candidate) => candidate.order === copy.order && candidate.methods.includes(copy.name),
+      );
+      if (fragment !== undefined && !fragment.pushedFields && !fragment.targetIsIdentifier) {
+        copies.push({ name: copy.name, value: copy.value, at: copy.at });
+      }
+    }
+    for (const { order, node: method } of methodNodes) {
+      if (lastWriter.get(memberFunctionName(method, sourceFile)) !== order) {
+        continue;
+      }
       const fn = lowerFunction(method, sourceFile, checker, bindings, diagnostics, type);
       if (fn === null) {
         return null;
       }
       methods.push({ name: memberFunctionName(method, sourceFile), fn });
     }
-    const literal: ObjectLiteral = { kind: 'object-literal', type, span, entries: fixed, methods };
+    // Every method of the shape needs exactly the writers above: one winner, plus evaluation
+    // keepers that a later writer overwrites. A method with no writer at all means the gate
+    // and the checker agreed it exists while the literal never defines or spreads it -- a
+    // compiler bug, not a program error.
+    for (const method of type.methods) {
+      const written =
+        methods.some((own) => own.name === method.name) ||
+        copies.some((copy) => copy.name === method.name);
+      if (!written) {
+        diagnostics.push(
+          lowerDiagnostic(
+            node,
+            sourceFile,
+            'STA4068',
+            'internal',
+            `object literal method '${method.name}' has no definition or spread source`,
+          ),
+        );
+        return null;
+      }
+    }
+    const literal: ObjectLiteral = {
+      kind: 'object-literal',
+      type,
+      span,
+      entries: fixed,
+      methods,
+      methodCopies: copies,
+    };
     return literal;
   }
 
@@ -3874,12 +4009,11 @@ function lowerExpression(
       const executor = args[0];
       if (executor === undefined) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             node,
             sourceFile,
             'STA4031',
             'internal',
-            'ts',
             'new Promise without an executor reached lowering',
           ),
         );
@@ -3889,12 +4023,11 @@ function lowerExpression(
     }
     if (type.kind !== 'object') {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node,
           sourceFile,
           'STA4062',
           'internal',
-          'ts',
           `new produced ${hTypeName(type)}, which is not a class instance`,
         ),
       );
@@ -3974,12 +4107,11 @@ function lowerExpression(
         };
       }
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node,
           sourceFile,
           'STA4035',
           'internal',
-          'ts',
           `identifier '${name}' used before declaration`,
         ),
       );
@@ -4128,12 +4260,11 @@ function lowerExpression(
     const ownerName = brandOwner === undefined ? undefined : hirClassName(brandOwner);
     if (ownerName === undefined) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node.left,
           sourceFile,
           'STA4073',
           'internal',
-          'ts',
           'the #brand-in-object test names no class the gate accepted',
         ),
       );
@@ -4175,12 +4306,11 @@ function lowerExpression(
       declaration.name === undefined
     ) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node.right,
           sourceFile,
           'STA4063',
           'internal',
-          'ts',
           'instanceof right operand is not a class the gate accepted',
         ),
       );
@@ -4203,12 +4333,11 @@ function lowerExpression(
     const logical = LOGICAL_OPERATORS.get(opKind);
     if (operator === undefined && logical === undefined) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node,
           sourceFile,
           'STA4036',
           'internal',
-          'ts',
           `unsupported binary operator: ${ts.SyntaxKind[opKind]}`,
         ),
       );
@@ -4251,12 +4380,11 @@ function lowerExpression(
     const operator = UNARY_OPERATORS.get(node.operator);
     if (operator === undefined) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           node,
           sourceFile,
           'STA4036',
           'internal',
-          'ts',
           `unsupported unary operator: ${ts.SyntaxKind[node.operator]}`,
         ),
       );
@@ -4623,12 +4751,11 @@ function lowerExpression(
         // two there and the lowering only ever sees them on a Generator.
         if (iteratorMethod !== 'next' && !isGeneratorReceiver(obj, checker)) {
           diagnostics.push(
-            diagnosticFromNode(
+            lowerDiagnostic(
               expr,
               sourceFile,
               'STA4071',
               'internal',
-              'ts',
               `Iterator.${iteratorMethod} reached the lowering on a non-generator receiver`,
             ),
           );
@@ -4722,12 +4849,11 @@ function lowerExpression(
           const op = collectionOperation(propName);
           if (op === undefined) {
             diagnostics.push(
-              diagnosticFromNode(
+              lowerDiagnostic(
                 expr,
                 sourceFile,
                 'STA4069',
                 'internal',
-                'ts',
                 `'${propName}' is not an operation of a ${hTypeName(receiver)}`,
               ),
             );
@@ -4762,14 +4888,7 @@ function lowerExpression(
         }
         if (target.type.kind !== 'object') {
           diagnostics.push(
-            diagnosticFromNode(
-              expr,
-              sourceFile,
-              'STA4049',
-              'internal',
-              'ts',
-              'receiver is not an object',
-            ),
+            lowerDiagnostic(expr, sourceFile, 'STA4049', 'internal', 'receiver is not an object'),
           );
           return null;
         }
@@ -4788,12 +4907,11 @@ function lowerExpression(
           const slot = target.type.methods.findIndex((m) => m.name === propName);
           if (slot < 0) {
             diagnostics.push(
-              diagnosticFromNode(
+              lowerDiagnostic(
                 expr,
                 sourceFile,
                 'STA4067',
                 'internal',
-                'ts',
                 `method '${propName}' has no slot in the layout of ${hTypeName(target.type)}`,
               ),
             );
@@ -4890,12 +5008,11 @@ function lowerExpression(
 
   // Anything else is an internal error
   diagnostics.push(
-    diagnosticFromNode(
+    lowerDiagnostic(
       node,
       sourceFile,
       'STA4031',
       'internal',
-      'ts',
       `unexpected expression kind: ${ts.SyntaxKind[node.kind]}`,
     ),
   );
@@ -5118,12 +5235,11 @@ function hoistVarDeclarations(
       for (const decl of node.declarations) {
         if (!ts.isIdentifier(decl.name)) {
           diagnostics.push(
-            diagnosticFromNode(
+            lowerDiagnostic(
               decl,
               sourceFile,
               'STA4032',
               'internal',
-              'ts',
               'var binding is not an identifier',
             ),
           );
@@ -5226,12 +5342,11 @@ function lowerImportCall(
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
   if (spec === undefined || !ts.isStringLiteral(spec)) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node,
         sourceFile,
         'STA4031',
         'internal',
-        'ts',
         'unexpected expression kind: ImportKeyword',
       ),
     );
@@ -5246,12 +5361,11 @@ function lowerImportCall(
         : undefined;
   if (nsType === undefined || nsType.namespace !== true) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node,
         sourceFile,
         'STA4031',
         'internal',
-        'ts',
         `import('${spec.text}') did not resolve to a module namespace`,
       ),
     );
@@ -5271,7 +5385,7 @@ function lowerImportCall(
     type: resultType.kind === 'promise' ? resultType : hPromise(nsType),
     span,
     method: 'resolve',
-    arg: { kind: 'object-literal', type: nsType, span, entries, methods: [] },
+    arg: { kind: 'object-literal', type: nsType, span, entries, methods: [], methodCopies: [] },
   };
 }
 
@@ -5665,12 +5779,11 @@ function accessorCall(
     target.type.kind === 'object' ? target.type.methods.findIndex((m) => m.name === method) : -1;
   if (slot < 0) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         at,
         sourceFile,
         'STA4067',
         'internal',
-        'ts',
         `method '${method}' has no slot in the layout of ${hTypeName(target.type)}`,
       ),
     );
@@ -5713,12 +5826,11 @@ function staticAccessorCall(
   const fnType = bindings.get(name);
   if (fnType === undefined) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         at,
         sourceFile,
         'STA4066',
         'internal',
-        'ts',
         `static '${name}' has no function the class emitted`,
       ),
     );
@@ -5862,14 +5974,7 @@ function receiverIdentifier(
   const binding = bindings.get(RECEIVER);
   if (binding === undefined) {
     diagnostics.push(
-      diagnosticFromNode(
-        node,
-        sourceFile,
-        'STA4061',
-        'internal',
-        'ts',
-        'this outside a class member',
-      ),
+      lowerDiagnostic(node, sourceFile, 'STA4061', 'internal', 'this outside a class member'),
     );
     return null;
   }
@@ -5985,12 +6090,11 @@ function lowerClass(
   const type = self === undefined ? undefined : tsTypeToHType(self, checker);
   if (node.name === undefined || type === undefined || type.kind !== 'object') {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node,
         sourceFile,
         'STA4062',
         'internal',
-        'ts',
         'not a class instance the type model describes',
       ),
     );
@@ -6384,12 +6488,11 @@ function lowerSuperCall(
   const base = self !== undefined && self.kind === 'object' ? self.bases[0] : undefined;
   if (self === undefined || self.kind !== 'object' || base === undefined) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         statement,
         sourceFile,
         'STA4064',
         'internal',
-        'ts',
         'super call outside a derived constructor',
       ),
     );
@@ -6437,12 +6540,11 @@ function lowerFieldInitializers(
     if (slot === undefined || value === null) {
       if (slot === undefined) {
         diagnostics.push(
-          diagnosticFromNode(
+          lowerDiagnostic(
             member,
             sourceFile,
             'STA4060',
             'internal',
-            'ts',
             `no field '${field}' on ${self.name}`,
           ),
         );
@@ -6710,12 +6812,11 @@ function collectSpecializations(
       // Unreachable for a well-formed program: the enclosing specialization substitutes every type
       // parameter in scope, so a leftover means the two walks disagree about which are in scope.
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           at,
           sourceFile,
           'STA4070',
           'internal',
-          'ts',
           `generic ${subject} still mentions a type parameter after substitution: ${typeArguments.map(hTypeName).join(', ')}`,
         ),
       );
@@ -6728,12 +6829,11 @@ function collectSpecializations(
     }
     if (depth > MAX_INSTANTIATION_DEPTH) {
       diagnostics.push(
-        diagnosticFromNode(
+        lowerDiagnostic(
           at,
           sourceFile,
           'STA2003',
           'error',
-          'ts',
           `generic instantiation is more than ${String(MAX_INSTANTIATION_DEPTH)} deep at '${name}'; it does not terminate`,
         ),
       );
@@ -6923,12 +7023,11 @@ function specializedCallee(
   const type = bindings.get(name);
   if (type === undefined) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node,
         sourceFile,
         'STA4070',
         'internal',
-        'ts',
         `no specialization '${name}' was collected for this call`,
       ),
     );
@@ -6967,12 +7066,11 @@ function specializedClassName(
   );
   if (typeArguments.some(hasTypeParam)) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node,
         sourceFile,
         'STA4070',
         'internal',
-        'ts',
         `generic construction still mentions a type parameter after substitution: ${typeArguments.map(hTypeName).join(', ')}`,
       ),
     );
@@ -6981,12 +7079,11 @@ function specializedClassName(
   const name = specializationName(instantiation.declaration.name?.text ?? '', typeArguments);
   if (!bindings.has(name)) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         node,
         sourceFile,
         'STA4070',
         'internal',
-        'ts',
         `no specialization '${name}' was collected for this construction`,
       ),
     );
@@ -7019,12 +7116,11 @@ function specializedArgument(
   const type = bindings.get(name);
   if (type === undefined) {
     diagnostics.push(
-      diagnosticFromNode(
+      lowerDiagnostic(
         argument,
         sourceFile,
         'STA4070',
         'internal',
-        'ts',
         `no specialization '${name}' was collected for this argument`,
       ),
     );
@@ -7357,7 +7453,7 @@ function lowerExternCall(
   diagnostics: Diagnostic[],
 ): Expression | null {
   const fail = (message: string): null => {
-    diagnostics.push(diagnosticFromNode(node, sourceFile, 'STA4031', 'internal', 'ts', message));
+    diagnostics.push(lowerDiagnostic(node, sourceFile, 'STA4031', 'internal', message));
     return null;
   };
   const classified = classifyExternDeclaration(decl, checker);

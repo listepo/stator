@@ -477,7 +477,19 @@ jsrt_value jsrt_dynobj_spread(jsrt_value dst, jsrt_value src) {
   for (uint32_t i = 0; i < fixed->cls->field_count; i++) {
     const uint32_t slot = jsrt_class_key_slot(fixed->cls, i);
     const char *key = fixed->cls->fields[slot];
-    if (key != NULL && !is_private_field(key)) {
+    if (key == NULL) {
+      continue;
+    }
+    /* A method on an object literal IS an own enumerable property (plan.md §8 step 12c S-C):
+     * its bound closure rides a `#method:`-prefixed hidden slot, which every reflective walk
+     * filters -- but a spread copies own keys, so the closure is stored as data under the
+     * unprefixed name, exactly as a dynamic literal's own method entry does. The closure keeps
+     * its construction-site environment with the call-site receiver, which is what makes
+     * `this` answer the copy. Any other `#` slot is a `#private` field: storage, not a
+     * property, and never copied. */
+    if (strncmp(key, "#method:", 8) == 0) {
+      jsrt_set_prop(dst, key + 8, fixed->fields[slot], NULL);
+    } else if (!is_private_field(key)) {
       jsrt_set_prop(dst, key, fixed->fields[slot], NULL);
     }
   }

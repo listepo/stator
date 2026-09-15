@@ -296,6 +296,25 @@ export function methodOf(t: HObject, name: string): HField | undefined {
   return t.methods.find((m) => m.name === name);
 }
 
+/** Whether the fields of `sub` open the fields of `whole`, in order: every field of `sub`
+ * occupies the same slot in `whole` it occupies in `sub`.
+ *
+ * The spread-copy soundness rule (plan.md §8 step 12c S-C) rests on this and nothing else. A
+ * copied method body reads `this` through the SOURCE's slot layout, while the call passes the
+ * RESULT as the receiver -- so the copy is sound exactly when the result preserves the
+ * source's slots, i.e. the source's fields are a prefix of the result's. TypeScript orders a
+ * spread result's members last-group-first (`{ ...b, z }` types `[z, n, ...]`, verified
+ * against the pinned checker), so a pure spread and a spread-last spelling preserve, while an
+ * appended own key shifts and stays not-yet. A methods-only source preserves vacuously: its
+ * methods read no `this` slots, only their construction-site environment, which the bound
+ * closure carries along. */
+export function objectFieldsPrefix(whole: readonly HField[], sub: readonly HField[]): boolean {
+  if (whole.length < sub.length) {
+    return false;
+  }
+  return sub.every((field, index) => whole[index]?.name === field.name);
+}
+
 /** `Unknown` carries a flag, so it cannot be a shared singleton like the others. */
 export function hUnknown(fromImplicitAny: boolean): HUnknown {
   return { kind: 'unknown', fromImplicitAny };

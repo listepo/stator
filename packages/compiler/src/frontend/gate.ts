@@ -7,7 +7,7 @@ import type {
   RegExpOperation,
 } from '../hir/nodes.ts';
 import type { HType } from '../hir/types.ts';
-import { hTypeName } from '../hir/types.ts';
+import { hTypeEquals, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
@@ -30,6 +30,7 @@ import {
   genericCallInstantiation,
   genericNewInstantiation,
 } from './generics.ts';
+import { assertedBy, isCheckable } from './narrowing.ts';
 import {
   accessorDeclaringClass,
   baseClassOf,
@@ -2597,21 +2598,108 @@ function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeCh
       return notYet('a hole in an array literal is not yet supported', 5);
     }
     if (ts.isSpreadElement(element)) {
-      const operandType = checker.getTypeAtLocation(element.expression);
-      if (isArrayOrTuple(operandType, checker)) {
+      // Judged by the type the lowering gives the operand (spreadOperandType), not by the
+      // checker's asserted type: a checker-level array the HType model calls Unknown — a tuple,
+      // a union of arrays — emits the same uncompilable concat as a directly unknown value.
+      const hir = spreadOperandType(element.expression, checker);
+      if (hir.kind === 'array') {
         continue;
       }
+      const operandType = checker.getTypeAtLocation(element.expression);
       if ((operandType.flags & ts.TypeFlags.StringLike) !== 0) {
         return notYet('spread of a string in an array literal is not yet supported', 5);
       }
-      const hir = tsTypeToHType(operandType, checker);
       if (hir.kind === 'unknown') {
+        // Unknown is three different things and only two of them are this gate's to report. An
+        // `any` operand, a tuple, or a dropped `as` assertion is silent at the checker and fatal
+        // at the verifier (STA4082): spreading an unknown value needs the GetIterator dispatch
+        // Phase 5 step 8 owns for unknown iterables (plan.md §8 step 2a(c) residue 2488), the same
+        // owner every other refusal in this function already names. A directly-`unknown` operand
+        // is the third thing and is excluded: the checker refuses it (TS2488) before the gate
+        // runs, so speaking here too would double-report one mistake — and `explain` would
+        // answer not-yet where the build answers error.
+        if (
+          spreadAdmitsAny(operandType) ||
+          isArrayOrTuple(operandType, checker) ||
+          isDroppedSpreadAssertion(element.expression, checker)
+        ) {
+          return notYet('spread of an unknown value in an array literal is not yet supported', 5);
+        }
         continue;
       }
       return notYet('spread in an array literal of a non-array value is not yet supported', 5);
     }
   }
   return { kind: 'accept' };
+}
+
+/** The HType a spread operand lowers to — the asserted type only when the lowering proves it.
+ *
+ * The lowering drops an `as` cast to any type no tag check can settle (an array or an object
+ * shape never is: `isCheckable` in `src/frontend/narrowing.ts` admits only number, string and
+ * boolean), so `...(u as number[])` lowers to the UNKNOWN `u`, not to the asserted array. Judging
+ * the asserted type here would accept a program the verifier rejects as STA4082 — and STA4068 for
+ * the object twin — the gate-verifier gap plan.md §8 step 39 exists to close. Parentheses express
+ * only precedence and unwrap in the lowering too. The one case that keeps the asserted type is the
+ * BoundaryCheck the lowering inserts for a checkable assertion off an unknown operand, which this
+ * mirrors through the same `assertedBy`/`isCheckable` pair so the two cannot disagree about what a
+ * spread reads. Recursion judges a stacked assertion (`x as unknown as T[]`) by what the last drop
+ * leaves rather than by the spelling on top. Anything but `as` and parentheses is answered from
+ * the checker's own type, exactly as before. */
+function spreadOperandType(expression: ts.Expression, checker: ts.TypeChecker): HType {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  if (ts.isAsExpression(current)) {
+    const assertion = assertedBy(current, checker);
+    if (assertion !== null && isCheckable(assertion.asserted)) {
+      const inner = spreadOperandType(current.expression, checker);
+      if (inner.kind === 'unknown') {
+        // The lowering wraps this operand in a BoundaryCheck: the assertion is settled by a tag
+        // test at run time, so the spread reads the asserted type, not the operand's.
+        return assertion.asserted;
+      }
+    }
+    return spreadOperandType(current.expression, checker);
+  }
+  return tsTypeToHType(checker.getTypeAtLocation(current), checker);
+}
+
+/** Whether `expression` is an `as` assertion the lowering drops rather than checks.
+ *
+ * Only consulted where the effective operand type is already Unknown, so the BoundaryCheck case
+ * (a checkable assertion, which keeps the ASSERTED type and never lands here) is unreachable by
+ * construction. What remains is an assertion to a type no tag settles — an array, a fixed shape —
+ * off a value that stays dynamic: exactly the spelling the checker waves through and the verifier
+ * then rejects. An `as unknown`/`as any` is not one: it asserts nothing, and the `any` half is
+ * refused (or owned by the checker's own diagnostic) through the operand-type rule beside this
+ * one. */
+function isDroppedSpreadAssertion(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  if (!ts.isAsExpression(current)) {
+    return false;
+  }
+  const asserted = tsTypeToHType(checker.getTypeAtLocation(current), checker);
+  return (
+    asserted.kind !== 'unknown' &&
+    !hTypeEquals(asserted, spreadOperandType(current.expression, checker))
+  );
+}
+
+/** Whether the checker lets this operand's Unknown through untouched: an `any` (whose spread
+ * needs no iterator method to satisfy the checker) or a union carrying one. A directly-`unknown`
+ * operand is excluded on purpose — spreading it is TS2488, the checker's own diagnostic — so the
+ * gate stays silent there rather than reporting one mistake twice (and `explain` answering
+ * not-yet where the build answers error). */
+function spreadAdmitsAny(type: ts.Type): boolean {
+  if ((type.flags & ts.TypeFlags.Any) !== 0) {
+    return true;
+  }
+  return type.isUnion() && type.types.some((arm) => (arm.flags & ts.TypeFlags.Any) !== 0);
 }
 
 /** Whether `name` is a key a FIXED layout can carry.
@@ -2688,18 +2776,70 @@ function gateObjectLiteral(
     // scratch slot and reads each field out of that, so a call or member access runs its effect
     // exactly once (plan.md §8 step 12 family c; plan-notes 181).
     if (ts.isSpreadAssignment(property)) {
-      const spread = tsTypeToHType(checker.getTypeAtLocation(property.expression), checker);
+      const asserted = tsTypeToHType(checker.getTypeAtLocation(property.expression), checker);
+      const spread = spreadOperandType(property.expression, checker);
       if (spread.kind !== 'object') {
+        // A dropped `as` assertion to a fixed shape (`...(u as { x: number })` with `u: unknown`)
+        // passes the shape test on the asserted type but lowers to Unknown, which the lowering
+        // reports as STA4068. It names the unknown value rather than the missing shape: the shape
+        // is right there in the assertion, it is the VALUE that is dynamic. Spreading an unknown
+        // object needs the shape-table enumeration of a dynamically-typed value, whose spread
+        // residue (step 12(c)) Phase 5 already owns — the same owner the arm below names.
+        if (asserted.kind === 'object') {
+          return notYet('an object spread of an unknown value is not yet supported', 5);
+        }
         return notYet('an object spread of a value with no fixed shape is not yet supported', 5);
       }
-      // A method on an object LITERAL is an own enumerable property, so spreading must copy it
-      // as data -- but the expansion below copies fields only, and silently dropping a key is a
-      // wrong answer rather than a missing one. A method on a CLASS instance is the opposite: it
-      // lives on the prototype, is not own, and must NOT be copied, which the field-only
-      // expansion already gets right. The shape name tells the two apart (a literal's starts
-      // with `{`, a class's is its name), so only the literal case stays not-yet.
+      // A method on an object LITERAL is an own enumerable property, so spreading copies it
+      // as data: the lowering expands one bound-closure read per method into the result's
+      // hidden slot (plan.md §8 step 12c S-C). A method on a CLASS instance is the opposite:
+      // it lives on the prototype, is not own, and must NOT be copied, which the field-only
+      // expansion gets right without asking. (An accessor never reaches the fixed path: one
+      // forces its whole shape dynamic, which the `object` check above refuses as having no
+      // fixed shape.)
+      //
+      // The copy is sound only when the result preserves the source's slots: a copied method
+      // body reads `this` through the SOURCE's slot layout, while the call passes the RESULT
+      // as the receiver. TypeScript orders a spread result's members last-group-first, so an
+      // appended own key shifts the source's fields and stays not-yet -- spreading the
+      // methods-carrying value last preserves them. A dynamic result needs no such rule: it
+      // copies the whole source object by name through the shape table. A methods-only source
+      // needs none either: its methods read no `this` slots.
+      //
+      // One dynamic result is still refused: a literal that WRITES an accessor. The checker
+      // types a spread result's properties without accessor flags (a spread-copied getter
+      // answers as a plain property, verified against the pinned checker), so such a literal
+      // routes fixed while holding an accessor pair no layout can hold -- invoking the getter
+      // needs step 39's dynamic spread, not this slice's.
       if (spread.methods.length > 0 && spread.name.startsWith('{')) {
-        return notYet('an object spread of a value with methods is not yet supported', 5);
+        if (
+          literal.properties.some(
+            (p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p),
+          )
+        ) {
+          return notYet(
+            'an object spread of a value with methods into an object literal with an accessor is not yet supported',
+            5,
+          );
+        }
+        const contextual = checker.getContextualType(literal);
+        const contextualType =
+          contextual === undefined ? undefined : tsTypeToHType(contextual, checker);
+        // Mirrors the lowering's layout choice (contextual when it is a shape, else the
+        // literal's own): substitution preserves order, so skipping it here cannot change the
+        // prefix answer the layout actually gets.
+        const own = tsTypeToHType(checker.getTypeAtLocation(literal), checker);
+        const dest = contextualType?.kind === 'object' ? contextualType : own;
+        if (
+          dest.kind === 'object' &&
+          !objectLiteralIsDynamic(literal, checker) &&
+          !objectFieldsPrefix(dest.fields, spread.fields)
+        ) {
+          return notYet(
+            'an object spread of a value with methods that does not preserve its field order is not yet supported',
+            5,
+          );
+        }
       }
       continue;
     }
@@ -3015,10 +3155,20 @@ function gateClass(declaration: ts.ClassDeclaration, checker: ts.TypeChecker): G
     }
     if (ts.isPropertyDeclaration(member)) {
       // `x?: number = 1` is always present too: the initializer runs for every instance, so the
-      // slot behaves exactly like a required field's. An UNINITIALIZED optional stays not-yet --
-      // an absent property and one holding `undefined` read the same, but `in` and inspect tell
-      // them apart, and a slot cannot keep that distinction.
-      if (member.questionToken !== undefined && member.initializer === undefined) {
+      // slot behaves exactly like a required field's. An UNINITIALIZED optional (`x?: number;`)
+      // lands on the same fixed-shape slot with nothing emitted: every slot starts `undefined`
+      // in `jsrt_object_new`, and a static without an initializer lowers to an `undefined`
+      // binding, so the read answers what Node answers. The `in`-vs-absent distinction is not
+      // kept -- but neither is it for a required field with no initializer, which already takes
+      // this path. Only a plain data field (an identifier or `#private` name) lands here: any
+      // other spelling keeps its STA1214, as do accessors and computed members via their own
+      // arms above (which fire first; this guard holds the boundary if that order ever moves).
+      if (
+        member.questionToken !== undefined &&
+        member.initializer === undefined &&
+        !ts.isIdentifier(member.name) &&
+        !ts.isPrivateIdentifier(member.name)
+      ) {
         return notYet('an optional class field is not yet supported', 5);
       }
       continue;
