@@ -1,6 +1,14 @@
 /* Golden-test runner (plan.md §5 Task 2.6).
  *
  * Usage: node packages/tests/golden/run.ts [--filter <substring> | --filter=<substring>]
+ *          [--shard=N/M] [--shards=N]
+ *
+ * `--shard=N/M` runs one round-robin slice of the (filtered) fixtures; `--shards=N` fans out to
+ * N worker processes of this same runner and merges their per-item records back by index, so the
+ * merged report is byte-identical to the serial one. Both compose with `--filter`, which applies
+ * first. In-process `build()` still shells clang out per fixture, but the TypeScript-host half of
+ * the work is single-threaded CPU, so `--shards` is what scales a local iteration with cores;
+ * the default stays single-process.
  *
  * Ground truth is the pinned Node in .node-version — that Node and only that Node.
  * Each fixture under tests/golden/ts|js is (a) compiled by stator and executed, and
@@ -12,9 +20,22 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pool, runProcess } from '../support/parallel.ts';
-import { nodePath } from '../support/node-path.ts';
-import { build, BuildError, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
+import {
+  fanOutWorkers,
+  mergeShardFiles,
+  parseShardArgs,
+  pool,
+  runProcess,
+  shardSlice,
+  writeShardFile,
+  type Shard,
+} from '../support/parallel.ts';
+import {
+  buildFixture,
+  compileFixtureC,
+  runNodeOracle,
+  type FixtureStreams,
+} from '../support/fixture-build.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -81,7 +102,13 @@ function skippedIntlCount(): number {
   return skipped;
 }
 
-function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: string }[] {
+interface Fixture {
+  readonly mode: 'ts' | 'js';
+  readonly path: string;
+  readonly name: string;
+}
+
+function fixtures(mode: 'ts' | 'js'): Fixture[] {
   const dir = join(HERE, mode);
   let names: string[];
   try {
@@ -110,102 +137,35 @@ function fixtures(mode: 'ts' | 'js'): { mode: 'ts' | 'js'; path: string; name: s
 /* `--filter <substring>` (or `--filter=<substring>`) narrows the run to fixtures whose
  * `mode/name` contains the substring — developer iteration speed, so debugging five fixtures
  * does not compile two hundred. Applies after the `intl_*` skip, before the pool; the summary
- * counts what ran, and a filter that matches nothing prints the zero-line and exits 0. */
-function parseFilter(argv: readonly string[]): string | undefined {
-  let filter: string | undefined;
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === '--filter') {
-      const value = argv[index + 1];
-      if (value === undefined) {
-        throw new Error('--filter requires a value');
-      }
-      filter = value;
-      index += 1;
-    } else if (arg !== undefined && arg.startsWith('--filter=')) {
-      filter = arg.slice('--filter='.length);
-    }
-  }
-  return filter;
+ * counts what ran, and a filter that matches nothing prints the zero-line and exits 0. Flag
+ * parsing itself lives in support/parallel.ts (`parseShardArgs`), shared with the subset runner
+ * so the two reports cannot drift apart. */
+
+function fixtureKey(fixture: Fixture): string {
+  return `${fixture.mode}/${fixture.name}`;
 }
 
-/* Both streams, because console.error/warn write to STDERR in Node and the runtime mirrors
- * that — comparing stdout alone would let a wrong-stream bug pass. */
-interface Streams {
-  readonly stdout: string;
-  readonly stderr: string;
+/* A per-fixture failure line, or `undefined` for a pass. Hoisted to module scope as the shard
+ * payload: `null` on the wire, `undefined` in memory. */
+function encodeFailure(failure: string | undefined): unknown {
+  return failure ?? null;
 }
 
-/* In-process compile (plan.md §9 Task 6.6): `build()` under `withDiagnosticCapture` — the
- * test262 runner's pattern. The clang link still happens, inside `build()` itself (which spawns
- * clang); only the TypeScript-host hop goes away. Throws with the same `stator build failed: ...`
- * message the old spawn produced. */
-async function buildInProcess(entry: string, out: string, mode: 'ts' | 'js'): Promise<void> {
-  const objects = await compileFixtureC(entry, dirname(out));
-  let status = 0;
-  let stderr = '';
-  try {
-    ({ result: status, stderr } = await withDiagnosticCapture(() =>
-      build({ entry, out, mode, emitCOnly: false, keepC: false, linkFlags: objects }),
-    ));
-  } catch (error) {
-    // The CLI renders a BuildError as exit 1 with `stator: CODE message` on stderr.
-    if (!(error instanceof BuildError)) throw error;
-    status = 1;
-    stderr = `stator: ${error.code} ${error.message}\n`;
-  }
-  if (status !== 0) {
-    throw new Error(`stator build failed: ${stderr.trim()}`);
-  }
-}
-
-/* A fixture directory may carry its own C sources next to the entry (plan.md §10 Task 7.1
- * step 10): the two-function `.c` an extern golden proves the boundary against. Each one is
- * compiled here — same C11 `-Wall -Wextra -Werror` discipline as the runtime, so a warning in
- * fixture C fails the fixture rather than the link — and the objects ride `build()`'s
- * `--link=` channel, which is exactly the `extraLinkFlags` consumer path step 7 exists to
- * prove. `out` lives in the caller's pool-unique scratch directory, so the objects beside it
- * can never collide between workers. A fixture without C sources links exactly as before. */
-async function compileFixtureC(entry: string, work: string): Promise<string[]> {
-  const dir = dirname(entry);
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  const sources = names.filter((name) => name.endsWith('.c')).sort();
-  const objects: string[] = [];
-  for (const source of sources) {
-    const object = join(work, `${source}.o`);
-    const cc = process.env['CC'] ?? 'clang';
-    const compiled = await runProcess(cc, [
-      '-std=c11',
-      '-O2',
-      '-Wall',
-      '-Wextra',
-      '-Werror',
-      '-c',
-      join(dir, source),
-      '-o',
-      object,
-    ]);
-    if (compiled.status !== 0) {
-      throw new Error(`fixture C ${source} failed to compile: ${compiled.stderr.trim()}`);
-    }
-    objects.push(object);
-  }
-  return objects;
+function decodeFailure(value: unknown): string | undefined {
+  if (value === null) return undefined;
+  if (typeof value === 'string') return value;
+  throw new Error('shard record value is not a failure string or null');
 }
 
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
  * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
  * compile into each other's `app`. */
-async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<Streams> {
+async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStreams> {
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
-    await buildInProcess(path, out, mode);
+    const objects = await compileFixtureC(path, dirname(out));
+    await buildFixture({ entry: path, out, mode, linkFlags: objects });
     const exec = await runProcess(out, [], { env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
@@ -216,39 +176,14 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<Streams> {
   }
 }
 
-async function runNode(path: string): Promise<Streams> {
-  // The oracle, never the host: the compiler runs in-process on this host while ground truth
-  // comes from the pinned Node (or `STATOR_NODE`).
-  //
-  // FFI fixtures (`extern_*` directories) cannot run under Node as written: an ambient
-  // `declare function` erases to nothing, so the call would be a `ReferenceError`. Their
-  // `node_shim.mjs` preloads the same bindings Node-side (the C library's own semantics in
-  // JS — `Math.sqrt` for `sqrt`, the convention check re-spelled for the `@statorError`
-  // cases) via `--import`, which runs before the entry and is invisible to Stator (nothing
-  // imports it, so it never enters the module graph). What the comparison still proves is
-  // the observable contract: same calls, same values, same caught messages, byte-for-byte.
-  const shim = join(dirname(path), 'node_shim.mjs');
-  const args = existsSync(shim) ? ['--import', shim, path] : [path];
-  const result = await runProcess(nodePath(), args, { env: PINNED_ENV });
-  if (result.status !== 0) {
-    throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);
-  }
-  return { stdout: result.stdout, stderr: result.stderr };
-}
-
-async function main(): Promise<void> {
-  const filter = parseFilter(process.argv.slice(2));
-  const all = [...fixtures('ts'), ...fixtures('js')].filter(
-    (fixture) => filter === undefined || `${fixture.mode}/${fixture.name}`.includes(filter),
-  );
-
-  // One result per fixture, indexed by fixture: the pool completes out of order, and a golden
-  // report whose failure order shifted run to run would be unreadable as a diff.
-  const results = await pool(all, async (fixture): Promise<string | undefined> => {
+/* One result per fixture, indexed by fixture: the pool completes out of order, and a golden
+ * report whose failure order shifted run to run would be unreadable as a diff. */
+async function collect(all: readonly Fixture[]): Promise<(string | undefined)[]> {
+  return pool(all, async (fixture): Promise<string | undefined> => {
     try {
       const [actual, expected] = await Promise.all([
         runCompiled(fixture.path, fixture.mode),
-        runNode(fixture.path),
+        runNodeOracle(fixture.path, PINNED_ENV),
       ]);
       if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
         return undefined;
@@ -259,15 +194,26 @@ async function main(): Promise<void> {
       return `${fixture.mode}/${fixture.name}: ${error instanceof Error ? error.message : String(error)}`;
     }
   });
+}
 
-  const failures = results.filter((result) => result !== undefined);
-  const passed = all.length - failures.length;
+/* The one report, shared verbatim by the serial run, a direct `--shard` slice, and the merged
+ * `--shards` run — a second copy here would be a second definition of "the golden result". A
+ * `shard` names the slice honestly; `undefined` is the whole (filtered) list, byte-identical to
+ * the pre-sharding report. */
+function printReport(
+  total: number,
+  failures: readonly (string | undefined)[],
+  shard: Shard | undefined,
+): void {
+  const failed = failures.filter((result) => result !== undefined);
+  const passed = total - failed.length;
 
-  for (const failure of failures) {
+  for (const failure of failed) {
     process.stderr.write(`FAIL ${failure}\n`);
   }
+  const where = shard === undefined ? '' : ` (shard ${String(shard.index)}/${String(shard.total)})`;
   process.stdout.write(
-    `golden: ${String(all.length)} fixtures — ${String(passed)} passed, ${String(failures.length)} failed\n`,
+    `golden: ${String(total)} fixtures${where} — ${String(passed)} passed, ${String(failed.length)} failed\n`,
   );
   const skippedIntl = skippedIntlCount();
   if (skippedIntl > 0) {
@@ -275,9 +221,79 @@ async function main(): Promise<void> {
       `golden: SKIPPED ${String(skippedIntl)} intl_* fixtures (STATOR_RUNTIME is not intl; run \`pnpm run test:intl\` to include them)\n`,
     );
   }
-  if (failures.length > 0) {
+  if (failed.length > 0) {
     process.exitCode = 1;
   }
+}
+
+async function main(): Promise<void> {
+  const args = parseShardArgs(process.argv.slice(2), {
+    // Historical leniency: golden has always ignored unknown flags rather than failing the run.
+    onUnknownFlag: (_arg: string): void => {},
+    missingFilterMessage: '--filter requires a value',
+  });
+  const filter = args.filter;
+  const filtered = [...fixtures('ts'), ...fixtures('js')].filter(
+    (fixture) => filter === undefined || `${fixture.mode}/${fixture.name}`.includes(filter),
+  );
+
+  // `--shards=N`: fan out to N workers of this same runner and merge by fixture index. The merge
+  // passes `shard: undefined`, so the printed report is the serial one, byte for byte.
+  if (args.shards !== undefined) {
+    const script = process.argv[1];
+    if (script === undefined) {
+      throw new Error('cannot fan out: no script path in process.argv');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'stator-golden-'));
+    try {
+      await fanOutWorkers({
+        script,
+        baseArgs: args.filter === undefined ? [] : [`--filter=${args.filter}`],
+        shards: args.shards,
+        dir,
+      });
+      const results = mergeShardFiles({
+        dir,
+        shards: args.shards,
+        keys: filtered.map((fixture) => fixtureKey(fixture)),
+        decode: decodeFailure,
+      });
+      printReport(filtered.length, results, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    return;
+  }
+
+  // A direct `--shard` is the worker above, run by hand: same slice, human-readable report.
+  const slice =
+    args.shard === undefined
+      ? filtered.map((fixture, index) => ({ fixture, index }))
+      : shardSlice(filtered, args.shard).map((entry) => ({
+          fixture: entry.item,
+          index: entry.index,
+        }));
+  const results = await collect(slice.map((entry) => entry.fixture));
+  if (args.jsonOut !== undefined) {
+    // Per-item failures are DATA for the driver: exit 0 on a completed slice, nonzero only when
+    // the worker itself broke (which `fanOutWorkers` reports as the fatal error).
+    writeShardFile(
+      args.jsonOut,
+      slice.map((entry, position) => {
+        if (position >= results.length) {
+          throw new Error(`missing result for ${fixtureKey(entry.fixture)}`);
+        }
+        const result: string | undefined = results[position];
+        return {
+          index: entry.index,
+          key: fixtureKey(entry.fixture),
+          value: encodeFailure(result),
+        };
+      }),
+    );
+    return;
+  }
+  printReport(slice.length, results, args.shard);
 }
 
 await main();

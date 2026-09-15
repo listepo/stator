@@ -11,12 +11,28 @@
  * executed — they are counted, so the corpus can land before the compiler can pass it.
  *
  * Usage: node packages/tests/subset/run.ts [--filter <substring> | --filter=<substring>]
+ *          [--shard=N/M] [--shards=N]
+ *
+ * `--shard=N/M` runs one round-robin slice of the (filtered) fixtures; `--shards=N` fans out to
+ * N worker processes of this same runner and merges their per-item records back by index, so the
+ * merged report is byte-identical to the serial one. Both compose with `--filter`, which applies
+ * first. In-process `explainFile` is single-threaded CPU, so `--shards` is what scales a local
+ * iteration with cores; the default stays single-process.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { explainFile } from '../../compiler/src/cli/explain.ts';
-import { pool } from '../support/parallel.ts';
+import {
+  fanOutWorkers,
+  mergeShardFiles,
+  parseShardArgs,
+  pool,
+  shardSlice,
+  writeShardFile,
+  type Shard,
+} from '../support/parallel.ts';
 
 type Verdict = 'static' | 'dynamic' | 'error' | 'not-yet';
 
@@ -88,48 +104,44 @@ async function explain(
  * iteration speed: debug one fixture without running 400+). Both spellings mirror the CLI's
  * dual `--mode` form in packages/compiler/src/cli/main.ts. Filtering happens before pooling,
  * and the summary line reports the filtered totals honestly. A filter that matches nothing is
- * a result, never an error. */
-function parseFilter(argv: readonly string[]): string | undefined {
-  let filter: string | undefined;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === undefined) {
-      continue;
-    }
-    if (arg.startsWith('--filter=')) {
-      filter = arg.slice('--filter='.length);
-    } else if (arg === '--filter') {
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new Error('--filter requires a value (substring)');
-      }
-      filter = next;
-      i += 1;
-    } else {
-      throw new Error(`unknown flag "${arg}"`);
-    }
-  }
-  return filter;
+ * a result, never an error. Flag parsing itself lives in support/parallel.ts (`parseShardArgs`),
+ * shared with the golden runner so the two reports cannot drift apart. */
+
+// One outcome per fixture, INDEXED BY FIXTURE: the pool finishes out of order, and a failure list
+// whose order depended on that would differ between two runs of an unchanged tree. Hoisted to
+// module scope so the shard-merge decode below rebuilds exactly this type.
+type Outcome =
+  | { readonly kind: 'passed' }
+  | { readonly kind: 'expected-fail' }
+  | { readonly kind: 'failed'; readonly message: string };
+
+function encodeOutcome(outcome: Outcome): unknown {
+  return outcome.kind === 'failed'
+    ? { kind: outcome.kind, message: outcome.message }
+    : { kind: outcome.kind };
 }
 
-async function main(): Promise<void> {
-  const filter = parseFilter(process.argv.slice(2));
-  const allFixtures = readdirSync(HERE)
-    .filter((name) => name.startsWith('subset_'))
-    .sort();
-  const fixtures =
-    filter === undefined ? allFixtures : allFixtures.filter((name) => name.includes(filter));
+function decodeOutcome(value: unknown): Outcome {
+  if (typeof value !== 'object' || value === null || !('kind' in value)) {
+    throw new Error('shard record value is not an outcome');
+  }
+  const kind: unknown = value.kind;
+  if (kind === 'passed') return { kind: 'passed' };
+  if (kind === 'expected-fail') return { kind: 'expected-fail' };
+  if (kind === 'failed') {
+    if (!('message' in value) || typeof value.message !== 'string') {
+      throw new Error('shard record failure has no message');
+    }
+    return { kind: 'failed', message: value.message };
+  }
+  throw new Error(`shard record has unknown kind ${String(kind)}`);
+}
 
-  const allocated = allocatedCodes();
-
-  // One outcome per fixture, INDEXED BY FIXTURE: the pool finishes out of order, and a failure list
-  // whose order depended on that would differ between two runs of an unchanged tree.
-  type Outcome =
-    | { readonly kind: 'passed' }
-    | { readonly kind: 'expected-fail' }
-    | { readonly kind: 'failed'; readonly message: string };
-
-  const outcomes = await pool(fixtures, async (name): Promise<Outcome> => {
+async function evaluate(
+  names: readonly string[],
+  allocated: ReadonlySet<string>,
+): Promise<Outcome[]> {
+  return pool(names, async (name): Promise<Outcome> => {
     const path = join(HERE, name);
     const want = parseDirectives(name, readFileSync(path, 'utf8'));
     if (want.code !== undefined && !allocated.has(want.code)) {
@@ -165,7 +177,19 @@ async function main(): Promise<void> {
       };
     }
   });
+}
 
+/* The one report, shared verbatim by the serial run, a direct `--shard` slice, and the merged
+ * `--shards` run — a second copy here would be a second definition of "the subset result". A
+ * `shard` names the slice honestly; `undefined` is the whole (filtered) list, byte-identical to
+ * the pre-sharding report. */
+function printReport(
+  allCount: number,
+  filteredCount: number,
+  names: readonly string[],
+  outcomes: readonly Outcome[],
+  shard: Shard | undefined,
+): void {
   const passed = outcomes.filter((outcome) => outcome.kind === 'passed').length;
   const expectedFail = outcomes.filter((outcome) => outcome.kind === 'expected-fail').length;
   const failures = outcomes
@@ -175,10 +199,21 @@ async function main(): Promise<void> {
   for (const failure of failures) {
     process.stderr.write(`FAIL ${failure}\n`);
   }
-  const scope =
-    filter === undefined
-      ? `${String(fixtures.length)} fixtures`
-      : `${String(fixtures.length)} fixtures (filtered from ${String(allFixtures.length)})`;
+  // No flags: `663 fixtures` / `5 fixtures (filtered from 663)` — exactly the pre-sharding text.
+  // A direct `--shard` appends its selector so a slice never poses as the whole run. The
+  // "filtered from" qualifier keys off the pre-shard list, not the slice: a shard of an
+  // unfiltered run is `166 fixtures (shard 1/4)`, never "filtered from".
+  let scope = `${String(names.length)} fixtures`;
+  const qualifiers: string[] = [];
+  if (filteredCount !== allCount) {
+    qualifiers.push(`filtered from ${String(allCount)}`);
+  }
+  if (shard !== undefined) {
+    qualifiers.push(`shard ${String(shard.index)}/${String(shard.total)}`);
+  }
+  if (qualifiers.length > 0) {
+    scope += ` (${qualifiers.join(', ')})`;
+  }
   process.stdout.write(
     `subset: ${scope} — ${String(passed)} passed, ` +
       `${String(expectedFail)} expected-fail, ${String(failures.length)} failed\n`,
@@ -186,6 +221,83 @@ async function main(): Promise<void> {
   if (failures.length > 0) {
     process.exitCode = 1;
   }
+}
+
+async function main(): Promise<void> {
+  const args = parseShardArgs(process.argv.slice(2), {
+    onUnknownFlag: (arg) => {
+      throw new Error(`unknown flag "${arg}"`);
+    },
+    missingFilterMessage: '--filter requires a value (substring)',
+  });
+  const allFixtures = readdirSync(HERE)
+    .filter((name) => name.startsWith('subset_'))
+    .sort();
+  const filter = args.filter;
+  const fixtures =
+    filter === undefined ? allFixtures : allFixtures.filter((name) => name.includes(filter));
+
+  const allocated = allocatedCodes();
+
+  // `--shards=N`: fan out to N workers of this same runner and merge by fixture index. The merge
+  // passes `shard: undefined`, so the printed report is the serial one, byte for byte.
+  if (args.shards !== undefined) {
+    const script = process.argv[1];
+    if (script === undefined) {
+      throw new Error('cannot fan out: no script path in process.argv');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'stator-subset-'));
+    try {
+      await fanOutWorkers({
+        script,
+        baseArgs: args.filter === undefined ? [] : [`--filter=${args.filter}`],
+        shards: args.shards,
+        dir,
+      });
+      const outcomes = mergeShardFiles({
+        dir,
+        shards: args.shards,
+        keys: fixtures,
+        decode: decodeOutcome,
+      });
+      printReport(allFixtures.length, fixtures.length, fixtures, outcomes, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    return;
+  }
+
+  // A direct `--shard` is the worker above, run by hand: same slice, human-readable report.
+  const slice =
+    args.shard === undefined
+      ? fixtures.map((name, index) => ({ name, index }))
+      : shardSlice(fixtures, args.shard).map((entry) => ({ name: entry.item, index: entry.index }));
+  const outcomes = await evaluate(
+    slice.map((entry) => entry.name),
+    allocated,
+  );
+  if (args.jsonOut !== undefined) {
+    // Per-item failures are DATA for the driver: exit 0 on a completed slice, nonzero only when
+    // the worker itself broke (which `fanOutWorkers` reports as the fatal error).
+    writeShardFile(
+      args.jsonOut,
+      slice.map((entry, position) => {
+        const outcome = outcomes[position];
+        if (outcome === undefined) {
+          throw new Error(`missing outcome for ${entry.name}`);
+        }
+        return { index: entry.index, key: entry.name, value: encodeOutcome(outcome) };
+      }),
+    );
+    return;
+  }
+  printReport(
+    allFixtures.length,
+    fixtures.length,
+    slice.map((entry) => entry.name),
+    outcomes,
+    args.shard,
+  );
 }
 
 await main();
