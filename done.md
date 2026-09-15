@@ -2343,6 +2343,42 @@ Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output name
 
 ## Phase 7 — FFI (in progress)
 
+### Test-infra track: Darwin link retry, `test:ffi` real checks, C-consumer example ✅ (landed 2026-09-15)
+
+Three pieces, one unblock: the pinned conda clang ships ld64-956, which cannot parse an
+Xcode 26 SDK's `.tbd` files, so every Darwin link failed (plan-notes 266). `support/toolchain.ts`
+owns the pure core (stale-linker signature, newest-readable-CLT-SDK pick, `staleLdRetryArgs`
+shared by the CLI link, the export-stubs consumer link, and the FFI C-consumer link);
+`cli/build.ts` link() retries once after a signature-carrying failure (zero green-path cost,
+terminal output byte-identical); the justfile's `runtime-test` corpus link retries the same
+way in bash. Pinned in `tests/unit/toolchain-sdk.test.ts` (6 tests, no toolchain).
+
+`packages/tests/ffi/run.ts` went from 2 checks + 3 `TODO(step-7)` stubs to 5 real checks:
+libm byte-compare in both modes (now in-process), the self-compiled `.c` fixture through
+the `--link=` channel, a real `--emit-header` double build, and the ASan buffer-ownership
+check (loud `not run` only without a sanitized archive) — plus `--filter`. Shared
+build/oracle mechanics with the golden runner live in `tests/support/fixture-build.ts`
+(`buildFixture`, `compileFixtureC`, `runNodeOracle`), which took `cpd` back to 0.9%.
+Task 7.2 step 9's CI example is `packages/tests/ffi/example-c-consumer/` (init-twice,
+success/boolean/throw-recovery paths, header `cmp`, byte-compare vs `expected.txt`),
+wired into the ffi CI job.
+
+Check evidence: unit 540/540, `test:ffi` 5/5 with 0 not-run, C-consumer `ok`,
+`just runtime-test` matches Node, full ASan golden 386/386.
+
+### Binding generator (Task 7.3 steps 3–5) ✅ (landed 2026-09-15)
+
+`packages/compiler/src/ffi-gen/` maps C headers to `.d.ts` through `clang -Xclang
+-ast-dump=json` — no new dependencies. Small IR, reverse ABI table mirroring
+`exportAbiKindOf`, deterministic printer, and scope refusals (varargs, function pointers,
+unions, bitfields, macro constants, inline functions) naming construct + header line with
+a per-reason emitted/refused summary. Oracle prep: `sqlite3.h` regenerates at
+172 emitted / 665 refused with zero kind mismatches against the hand-written binding
+(11 name-spelling deltas only). Pinned in `packages/tests/unit/ffi-gen-binding.test.ts`
+(12 tests, every emitted decl through the real `classifyExternDeclaration`).
+Open for the wiring follow-up: generator-refusal STA family, TS-name/brand policies, and
+`@statorLink` emission (plan-notes 270).
+
 ### Steps 3–5 — String converters, gate refusals, extern-call lowering ✅ (landed 2026-09-14)
 
 Step 3 (runtime): `jsrt_string_to_cstr` (borrow) / `jsrt_string_from_cstr` (copy) with a strict
@@ -2462,3 +2498,23 @@ Fixtures: `tests/golden/{js,ts}/named_function_expression.*` (recursion via inne
 does not see it); `subset_named_function_expression_{ts,js}`; `subset_named_function_expression_assign_{ts,js}`.
 `gate.ts` emits no `not-yet` for named function expressions.
 
+
+### Task 6.12 — Pin the oracle exactly (2026-09-15)
+
+The task's premise aged out before the work did: `mise.toml` already selected
+`node = "26.7.0"` exact (no re-baseline — the pin never moved) and
+`scripts/check-node.mjs` already compared full versions with a mise↔pin drift check.
+Verification closed the remaining legs: pinned Node prints the match (exit 0); bare
+v24.20.0, a skewed `STATOR_NODE`, an unrunnable oracle, and a scratch-copy
+`node = "26"` drift all refuse (exit 1); `engines >= 24` stays a range floor by design.
+
+**Check.** `mise exec node -- node --version` is `v26.7.0`, equal to `.node-version`;
+the preflight refuses every skew above; and the gate is green on the pinned Node with
+every suite run directly (mise's pnpm is unusable from a raw child process on this
+machine — plan-notes 204 — so `pnpm run ci` itself cannot execute here, only its steps):
+typecheck (both projects) clean, oxlint 0/0, oxfmt gate-globs clean, cpd 0.9%, unit
+540/540, subset 663 (625 passed, 38 expected-fail, 0 failed), golden 386/386 serial and
+`--shards=8` byte-identical (17s vs 113s), builtins exit 0, leak plateau both loops,
+`test:ffi` 5/5 with 0 not-run, C-consumer `ok`, runtime-test corpus matches Node, and
+the full ASan golden pass 386/386. The `ci green` leg was blocked only by the host link
+failure of plan-notes 266; with that fixed nothing stands between the pin and green.

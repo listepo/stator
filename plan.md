@@ -678,23 +678,7 @@ one people learn to ignore — which costs more than having no gate at all.
 
 ~~**Task 6.11 — The duplication gate is red, and blind to the differential harness.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.11 (plan-notes 255).
 
-**Task 6.12 — Pin the oracle exactly; the preflight compares majors only.** [D1][P1]
-
-`mise.toml` pins `node = "26"`, which resolves to 26.8.2 on this host, while `.node-version` is
-26.7.0; `scripts/check-node.mjs` reduces both to major 26 and prints `node v26.8.2 matches
-.node-version (26.7.0)`, exit 0. plan.md §4 says the two files "already agree". The golden and
-differential ground truth is the pinned Node and only that Node (Task 6.5), so a green suite does
-not prove 26.7.0 ran (plan-notes 249).
-
-Steps:
-1. Make `mise.toml` select the exact version `.node-version` names — or, if the pin should move,
-   move `.node-version` and re-baseline the three artifacts (146 golden fixtures, the Test262
-   ratchet, `bench/baseline.json`), recorded in `plan-notes.md`.
-2. Compare the full version in `check-node.mjs`, matching the "only that Node" claim.
-3. Add a check that `mise.toml`, `.node-version` and `package.json engines` cannot drift silently.
-
-**Check:** `mise exec node -- node --version` equals `.node-version`; the preflight fails on 26.8.2;
-`pnpm run ci` green.
+~~**Task 6.12 — Pin the oracle exactly; the preflight compares majors only.**~~ ✅ **landed 2026-09-15** — evidence in [done.md](done.md) → Phase 6 Task 6.12 (plan-notes 268).
 
 ~~**Task 6.13 — The golden runner reports its skipped `intl_*` fixtures.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.13 (plan-notes 253).
 
@@ -763,7 +747,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
    boundary rules), `docs/SUBSET.md` FFI rows, `docs/DIAGNOSTICS.md` codes STA1114–STA1121 (never)
    + STA1217 (not-yet Phase 7). Steps 3–5 ✅ landed 2026-09-14 (runtime converters + corpus,
    gate refusals, extern-call lowering with error mapping; evidence in [done.md](done.md) →
-   Phase 7 steps 4–5). Steps 6+ open.
+   Phase 7 steps 4–5). Steps 6–9 landed: borrow-only opaque-pointer pass-through (§6), `@statorLink`/`--link=` plumbing (§9), the `explain` unchecked-boundary mark (§5), and `js`-mode boundary checks at extern calls (evidence: [done.md](done.md) → Phase 7, plan-notes 266). Step 10 landed 2026-09-15: libm goldens in both modes, the self-compiled `.c` fixture through the `--link=` channel, the ASan buffer-ownership check, and a real `--emit-header` double build — all as passing checks in `packages/tests/ffi/run.ts` (plan-notes 266).
 2. **The ABI table is the contract, and it is small on purpose.** It lives in `docs/FFI.md`
    (§2 — this table below is the original sketch; the doc is authoritative where they differ):
 
@@ -832,7 +816,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 **[D4] Task 7.2 — Exposing TS to C.** `--emit-header` generates a `.h` for exported functions (Static Hermes `--exported-unit` model); values crossing out are C ABI types where sound, `jsrt_value` otherwise.
 
-Steps 1–2 ✅ landed 2026-09-15 (`4445956`; evidence in [done.md](done.md) → Phase 7 Task 7.2 steps 1–2). Steps 3+ open.
+Steps 1–2 ✅ landed 2026-09-15 (`4445956`; evidence in [done.md](done.md) → Phase 7 Task 7.2 steps 1–2). Steps 3–8 landed: init contract, throws companion + sentinel, frame/stack roots, the single-thread sentence, mangling + `--unit-name` + version symbol, and header determinism including a real double build in `packages/tests/ffi/run.ts` (evidence: [done.md](done.md) → Phase 7, docs/FFI.md §8, plan-notes 266). Step 9 landed 2026-09-15: the C-consumer example (`packages/tests/ffi/example-c-consumer/`, success + `last_error` paths, header `cmp`) wired into the ffi CI job (plan-notes 266).
 
 Steps (detailed 2026-09-01; plan-notes 131):
 1. **`--emit-header` in the CLI**, reusing Task 7.1's ABI table in the other direction: an exported

@@ -30,13 +30,19 @@ tasks:
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true
+    # Same unit files as `unit`, including the NATIVE_ONLY proofs that link
+    # `runtime/build/libjsrt.a` — without this edge moon may race the coverage
+    # run against a concurrent archive rebuild (moon parity audit, plan-notes 269).
+    deps:
+      - 'runtime:build'
   subset:
     script: 'node packages/tests/subset/run.ts'
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true
-    deps:
-      - 'runtime:build'
+    # No deps on purpose: the subset runner only runs in-process `explain` (no
+    # archive, no link) and CI runs it before the runtime build, so an edge here
+    # would only serialize local iteration (moon parity audit, plan-notes 269).
   golden:
     script: 'node packages/tests/golden/run.ts'
     toolchain: 'system'

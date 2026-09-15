@@ -330,9 +330,11 @@ demands it (§15.3, §15.6):
 ## 8. Task 7.2 design sketch (non-normative appendix — proposed, not approved)
 
 The sections above are the Task 7.1 contract; what follows is an agent-drafted sketch ahead
-of Task 7.2, kept here so the implementer finds it. Steps 1–7 have LANDED (below);
-steps 8–9 remain sketch, explicitly OUTSIDE the sole-allocator promise at the top of this file
-until they are scheduled. Normative only if scheduled; full text in the session report.
+of Task 7.2, kept here so the implementer finds it. Steps 1–9 have LANDED (below):
+step 8's determinism rule is proved by a real `--emit-header` double build in
+`packages/tests/ffi/run.ts` (not only the unit-level byte-compare), and step 9's CI example
+lives in `packages/tests/ffi/example-c-consumer/` and runs in the ffi CI job. What remains
+sketch is only the *wording* of this appendix, which still narrates steps 8–9 as future work.
 
 Landed (steps 1–2): `--emit-header`, the reverse mapping, the export decision, and the
 determinism rule. `src/frontend/export.ts` is the only reader of the export surface;

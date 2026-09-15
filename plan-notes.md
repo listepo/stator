@@ -7789,3 +7789,96 @@ Evidence per fix (all three verified locally; CI is the cross-platform proof):
   (`vendor_libregexp.o`) and Linux objects run larger, so `ar p` exceeds the buffer. Fix:
   explicit 64 MiB cap (the precedent the golden-asan spawn already uses); the gate holds all
   members in memory for the digest anyway.
+
+## 266. Stale bundled linker vs newer Xcode SDK: Darwin link retry (2026-09-15)
+
+This host upgraded to Xcode 26 (macOS 27.0 SDK) while the pinned conda clang 21.1.8 still
+ships ld64-956.6, whose `.tbd` parser rejects the SDK's dotted arch variants
+(`arm64e.x1-macos`): `malformed file ... unknown architecture`, system libs ignored,
+`Undefined symbols ... ___assert_rtn ...` — every link fails, including a trivial
+`int main`. Measured: `mise exec -- clang /tmp/tlink.c -o /tmp/tlink -lm` fails;
+`SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` links;
+`/usr/bin/clang` (Apple 21.0.0) links. Compiling is unaffected (only the link reads
+`.tbd`); the ASan path is unaffected (already links via `/usr/bin/clang` on Darwin).
+CI's macos-14/macos-15-intel images carry older SDKs, so this is host skew, not a
+toolchain break — the fix is conditional and costs nothing on green hosts.
+
+Fix (retry, not a switch): the first link runs exactly as before; only a failure carrying
+the narrow signature (`.tbd` + `malformed file`/`unknown architecture`) retries once with
+`-isysroot` at the newest CLT SDK whose `libSystem.tbd` has no dotted `arm64e` token
+(plain `arm64e` parses fine and never disqualifies). Explicit `CC` is never second-guessed;
+nothing is recorded in `link-flags.txt` (host state, like the ASan `CC` fallback).
+`packages/compiler/src/support/toolchain.ts` owns the pure core (`isStaleLdSystemLibFailure`,
+`pickFallbackSdk`, `staleLdRetryArgs` shared by the CLI link, the export-stubs consumer
+link, and the FFI C-consumer link); `packages/compiler/src/cli/build.ts` link() captures
+the link's stderr to classify it (replayed byte-identical on failure, so terminal output
+is unchanged); the justfile's `_runtime-test` corpus link retries in bash the same way.
+Pinned in `packages/tests/unit/toolchain-sdk.test.ts` (6 tests, no toolchain needed).
+
+Evidence on this host: unit 540/540 (was 516 pass + 23 native-link failures + 1 consumer-link
+failure), `test:ffi` 5/5 with 0 not-run (was 2 pass + 3 link-fail), the new
+`packages/tests/ffi/example-c-consumer/c-consumer.ts` prints `ffi c-consumer: ok`,
+`just runtime-test` matches Node. Full-golden proof cited separately when that run lands.
+
+## 267. Wrong-code emission: ts-mode `with` reported STA1107 (2026-09-15)
+
+Found by the diagnostics-allocator audit (report in-session, not yet a plan-notes entry of
+its own): `gate.ts` emitted `STA1107` (prototype mutation) for a ts-mode `with` statement
+and `notYet(..., 8)` for js-mode `with`, while `docs/DIAGNOSTICS.md` allocates STA1109
+(`both`/`never`) and `docs/SUBSET.md` + plan §1.2 (`with` is illegal in strict-mode ESM in
+both modes) agree with the table, not the gate. Fix: both arms emit `never` STA1109.
+The two `subset_with_statement_{ts,js}` fixtures (already `@code: STA1109`,
+`@expected-fail`) flipped out of expected-fail in the same change: 2/2 pass.
+
+## 268. Task 6.12 verification state (2026-09-15)
+
+Verified in-session: `mise.toml` selects `node = "26.7.0"` exact, matching `.node-version`
+(no re-baseline, pin never moved); `scripts/check-node.mjs` compares full versions and
+refuses skew (pinned→match exit 0; bare v24.20.0, STATOR_NODE skew, unrunnable oracle, and
+a scratch-copy `node = "26"` drift all refuse); engines stays a range floor by design.
+The Check's `ci green` leg was blocked only by the entry-266 host link failure; with that
+fixed the close-out (plan.md stub + done.md record) lands once the full-golden proof and
+the in-flight test-runner work are integrated.
+
+## 269. Differential js-5 transient + moon-parity disposition (2026-09-15)
+
+**js-5 was a phantom, not a bug.** The new differential `--smoke` mode recorded a js-mode
+divergence (`STA4072 ... reading 'darwin'` on the full source; stderr-format mismatch on
+the minimized undeclared-variable program). Re-run on the settled tree
+(`run.ts --seed=5 --count=1 --mode=js`) reports 0 divergences, and both sources build
+clean in isolation. Cause: the smoke ran while `cli/build.ts` was mid-edit in the same
+worktree — an in-process import of a half-written module, i.e. exactly the unreproducible
+recording Task 6.10 exists to prevent. Stale `failures/js-5.*` removed (gitignored dir,
+now empty). Rule restated for multi-agent work: re-run a divergence on a quiet tree
+before triaging it, and never rebuild the archive mid-suite (entry 266).
+
+**Moon parity audit: two real rows fixed, rest dispositioned.** `tests:coverage` gains the
+missing `runtime:build` edge (same NATIVE_ONLY proofs as `unit`); `tests:subset` loses its
+bogus one (in-process `explain` only — the edge purely serialized local iteration).
+Naming drift (`test:runtime` vs `runtime-corpus`, …) is lookup friction, not a bug: left
+as is. `ci.sh` staleness left as is — it is the pre-remote CI (`./ci.sh`, "until a remote
+exists"), superseded by the workflow, not a gate anyone runs. Allocator audit rows #3–#5
+(dead rows pending-by-design behind `@expected-fail` fixtures, STA1208's anti-reuse row,
+one cosmetic phase-label skew) need no action; row #1/#2 (the `with`/STA1107 wrong code)
+landed as entry 267.
+
+## 270. Test-iteration sharding + generator follow-ups (2026-09-15)
+
+**Sharding (local-iteration speed).** Task 6.6's in-process runners left subset/golden
+single-threaded (golden: 113s wall at 119% CPU on 16 cores). `--shard=N/M` +
+`--shards=N` fan-out (shared machinery in `tests/support/parallel.ts`, same
+indexed-by-item ordering invariant as the pool) brings subset 663 fixtures 22s → 4.3s
+and golden 386 fixtures 113s → 17s, both reports byte-identical serial-vs-sharded.
+Default invocation is untouched. The same change's shared `tests/support/fixture-build.ts`
+(`buildFixture`, `compileFixtureC`, `runNodeOracle` for golden + ffi) took `cpd` 1.0% →
+0.9%, back under the gate with headroom.
+
+**Generator wiring follow-up (Task 7.3 steps 6–7).** The generator refuses with
+would-be gate codes today; macros/enums have no allocated code and `DIAGNOSTICS.md` was
+deliberately untouched. Before generated bindings can build: (1) allocate a
+generator-refusal STA family in `docs/DIAGNOSTICS.md` (sole allocator); (2) settle the
+TS-name policy (mechanical camelCase `sqlite3Step` vs prefix-stripped `sqliteStep`) and
+brand spelling (`Ptr_sqlite3_stmt` vs `SqliteStmt`); (3) emit `@statorLink`/`--link=`
+provenance from the generator (NOTES.md gap); (4) regenerate SQLite and diff against the
+manual oracle until the only deltas are policy choices from (2). The phase Check (plan
+§10: SQLite queried from TS, callable from a C `main()`, in CI) waits on all four.
