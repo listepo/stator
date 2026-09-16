@@ -38,6 +38,7 @@ import {
   classDeclarationOf,
   computedKeyStaticName,
   elementStaticKey,
+  hasAbstractModifier,
   hasExplicitAny,
   isClassAliasUse,
   ITERATOR_METHOD_NAME,
@@ -3739,6 +3740,12 @@ function gateClass(
     }
     if (ts.isMethodDeclaration(member)) {
       if (member.body === undefined) {
+        // An `abstract` method declares; a subclass implementation runs (plan.md §8 step
+        // 12(d)). Without `abstract`, the implementation must share this class — the
+        // overload rule below, or refused there when no implementation exists.
+        if (hasAbstractModifier(member)) {
+          continue;
+        }
         // An overload signature declares nothing to emit; the same-name implementation below
         // runs. With no implementation in the class there is nothing to run (`declare` members).
         const name = instanceMethodName(member, checker);

@@ -4,6 +4,41 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 275. Abstract classes and members land via throw-stubs (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** `abstract` classes with abstract methods and properties compile in both
+modes (decision fixtures `subset_abstract_class_{ts,js}.ts`, both `static`; golden
+`tests/golden/ts/abstract_class.ts` — three-level chain with a middle abstract class, an
+abstract property, base-typed reads, an inherited concrete method, statics, `instanceof` —
+byte-for-byte vs Node 26.7.0):
+
+- Gate (`gate.ts`): a bodiless method with the `abstract` modifier skips the
+  overload-signature arm (the implementation lives in a subclass, not in this class). The
+  override check above still runs, so abstract-over-field stays refused; abstract properties
+  needed no change (uninitialized fields already lower to `undefined` slots).
+- Predicate (`frontend/types.ts`): `hasAbstractModifier`, beside `isStaticMember` (shared
+  home — gate and lowering both use it, no duplication).
+- Lowering (`lower/index.ts`): abstract members collect into `abstractStubs` (dropped for
+  generic carriers like every other member list) and lower to a synthesized throw-stub —
+  receiver parameter zero, mirrored parameter list, `throw new TypeError('abstract method
+  …')`. The stub keeps the base's method table complete and gives direct calls a target;
+  virtual dispatch always lands on the runtime class's concrete entry, and every path that
+  could reach the stub is checker-refused first (abstract construction TS2511, missing
+  override TS2515, `super.m()` on abstract — all verified `STA0012` in both modes).
+- Async/generator flags stay false on the stub (a synchronous throw transfers before any
+  promise or iterator is built); parameter defaults are dropped (a default that runs means
+  the call reached a body that never runs).
+
+**Deliberately not in this change: abstract ACCESSORS.** An accessor re-declaring an
+inherited name stays refused (`overriding the inherited member 'y'`), because accessor
+reads dispatch `direct` (`accessorCall`) while methods virtualize — abstract accessors
+cannot override without virtual accessor dispatch, which is its own slice. The bodiless
+rule still refuses them with the existing message; the lowering's stub list already accepts
+the shape when that slice lands.
+
 ## 274. TS2416 override-widening lands: inferred method-method suppression + call widening (2026-09-16)
 
 **Plan:** §8 step 12(d) (override rules) + step 2a(b) wake (plan-notes 68, 272). `plan.md` NOT
