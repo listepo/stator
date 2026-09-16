@@ -3,6 +3,144 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 276. T10.1 docs-first skeleton: `docs/STD.md` lands, no implementation (2026-09-16)
+
+**Plan:** §11b T10.1 step 1 (docs part only). `plan.md` NOT edited — the step stays open; this
+is the doc it asks for, ahead of code.
+
+**What landed:** `docs/STD.md` (DRAFT SKELETON — marked so on its first line): the four
+freezes Design A demands — `std/*` reserved prefix (§1: NOT `@stator/std`, which reads as a
+package and would collide with the bare-import refusal), sync-first with Promise twins at
+T10.2 and no sync-under-async lie (§2), throw-with-`code` error shape with per-module
+vocabularies left open (§3), POSIX-first (§4) — plus the v0 module table and wire order
+(§5), the three implementation layers (§6), the not-Node/not-FFI boundaries (§7), and four
+explicit open questions (§8: error codes, path edges, fd-vs-path, invalid-byte policy).
+`docs/README.md` indexes it; `docs/SUBSET.md` gains a stub `std` section whose rows name
+Phase 10 with NO allocated code (codes and gate arms arrive with the implementing task —
+allocating a code no gate arm emits would be drift). No runtime code, no compiler edge, no
+`THREADS.md` (T10.2's doc, not this step's).
+
+## 275. T9.1 verified in `.worktrees/t9-1`, not merged: steps 1–5 present, scope clean, rebase required (2026-09-16)
+
+**Plan:** §11a T9.1 (open; plan.md:991-992 forbids merging from the planning change).
+`plan.md` NOT edited — the card and its Progress paragraph already describe this state; this
+entry is the merge-ready diff summary and CI-action decision the card asks for. Main is
+untouched by Zig: `packages/runtime/src/*.zig` does not exist there, `jsrt_gc.c` stands.
+
+**Steps verified (worktree branch `agent/t9-1`, all T9.1 content UNCOMMITTED — 5 `.zig` +
+`jsrt_mem.h` untracked, justfile/CI/mise/C-side modifications in the working copy):**
+
+1. Pin + flavors. `zig 0.16.0` in `mise.toml` (also already on main) and `docs/TOOLCHAIN.md`
+   lists it on main — the merge needs no TOOLCHAIN change. The justfile builds one object,
+   `jsrt_zig.o`, from `src/jsrt_mem.zig` inside the shared `_runtime` recipe, so rel, asan
+   AND intl flavors all get it; `ReleaseSafe` for asan, `ReleaseFast` otherwise; the zig
+   version joins the `cflags.txt` key; `zig fmt --check` is the style gate; the archive is
+   rebuilt from scratch (`ar r` would keep a stale `jsrt_gc.o` beside the new symbols).
+2. `jsrt_gc.c` deleted; `jsrt_gc.zig` carries the GC glue behind the same C ABI.
+3. `jsrt_buf.zig`: `JSRTBuf`, `JSRTStrVec`, `JSRTUnitBuf` (print/JSON growables; string ops
+   have no growable buffer, nothing there moved).
+4. `jsrt_shape.zig`: root, transitions, slot growth, enumeration, delete replay; property
+   semantics (ICs, accessors, TypeErrors) stay in `jsrt_shape.c`.
+5. `jsrt_alloc.zig`: object/array/env/closure/rest/dynobj/null-proto constructors;
+   builtin-specific constructors stay with their builtins. `jsrt_mem.h` + `jsrt_mem.zig`
+   root `@cImport` the headers — no mirrored layouts (one `@cDefine` rename for the
+   translate-c `slots` collision).
+
+**Scope containment (plan-notes 239) holds:** the only regexp/math/builtin/codegen matches
+in `*.zig` are comments ("a RegExp match is…", "the emitter only calls this…"). No C file
+defines moved code — the remaining `jsrt_shape.c`/`jsrt_value.c` bodies are property
+semantics and builtin constructors; everything else is a caller.
+
+**Functional proof on this host (Darwin arm64, zig 0.16.0, Node 26.7.0):** worktree
+`just runtime` builds; release AND asan archives carry `jsrt_zig.o` with no `jsrt_gc.o`;
+4/4 sampled print corpora (numbers, objects, shapes, maps — the last two exercise the Zig
+shape table and alloc paths) link against the Zig archive and MATCH the pinned Node
+byte-for-byte. Caveat: the worktree justfile predates the 266 Darwin SDK retry, so its own
+`runtime-test` corpus link fails on this host's Xcode 26 SDK; the proof above linked the
+same archive manually with `-isysroot` at the readable CLT SDK. The merge inherits main's
+already-fixed justfile section, so this is a rebase artifact, not a Zig defect.
+
+**Why the follow-up is a re-application, not a merge.** The worktree base is `82d833f`-era:
+its `gate.ts` differs from main by 3764 lines, and the C-side adaptations were made against
+old `jsrt_shape.c`/`jsrt_value.c` (main has since changed both — compare the
+`jsrt_class_dynamic` initializers). A wholesale merge would revert weeks of main (old
+`ci.yml`/`nightly.yml` triggers, `AGENTS.md`, docs). The PR must start from current main and
+carry over ONLY: the 5 `.zig` + `jsrt_mem.h`, the `jsrt_gc.c` deletion, the justfile Zig
+block (keeping the 266 retry), the C adaptations re-applied, the `print_classes` corpus
+(union with main's `print_ffi_strings` — each side has one the other lacks), and the setup
+action below. T9.1's Check (full ci green in that tree) is the merge gate and was NOT run
+here — the worktree was never green as a whole, only the runtime slice above.
+
+**CI-action decision: recommend `mlugg/setup-zig@v2`, creator approves.** The worktree's
+`.github/actions/setup/action.yml` hunk is minimal and correct: official Zig installer,
+pinned `version: 0.16.0` (matches `mise.toml`), `if: runner.os != 'Windows'` (Windows never
+builds the runtime). No alternative was found that avoids a third-party action (mise cannot
+install tools inside GitHub runners). This entry files the recommendation with rationale;
+the approval itself stays the creator's, as `docs/TOOLCHAIN.md` already records.
+
+## 274. Phase 6 residue narrowed: fuzz clause met on nightly output; noise floor stands on ephemerality (2026-09-16)
+
+**Plan:** §9 Phase 6 (intro + noise-floor residue; phase stays open). `plan.md` edited in this
+change (fuzz-clause citation; residue narrowed, Check kept).
+
+**Fuzzing clause — met, cited.** The nightly `evidence` job (`.github/workflows/nightly.yml`,
+`--minutes=60`) is green with zero divergences on consecutive days: 2026-09-14 run
+34819549697 (`differential: 4316 cases — 0 divergences`, 1h0m53s) and 2026-09-15 run
+34942356204 (`differential: 4128 cases — 0 divergences`, 1h1m50s). Zero divergences means
+zero *unexplained* ones. The clause no longer holds the phase open; the noise floor does.
+
+**Noise floor — narrowed, not closed.** Two findings from the weekly-job side:
+
+1. The weekly bench runs, but its machine does not persist. The 2026-09-13 Sunday run
+   (34745879941) recorded 5 programs (`2026-09-13T07-43-08-…-linux-x64-….json`) and uploaded
+   artifact `benchmark-13` (1103 bytes, upload finalized in-log) on an ephemeral
+   `ubuntu-24.04` VM (Azure westus2, fresh worker per run). "Repeats on the machine that runs
+   the weekly job" therefore names no stable entity — every week is a different VM.
+2. The artifacts do not survive anyway. Two days later that run's artifact list reads
+   `{"total_count":0,"artifacts":[]}`, and no 03:xx Sunday bench output is retrievable beyond
+   the run log — so week-to-week spreads cannot be computed after the fact either.
+
+Neither finding moves the gate: the 20% threshold stands on the 4.0% + 7.4% local spreads
+(~2.7× headroom over the worst seen), and tightening toward 10% still leaves ~1.3× with no
+multi-host data (plan-notes 246). The concrete unblock is retention, not another local
+repeat: keep `benchmark-*` artifacts (or land the weekly result on a non-main branch) until
+repeats accumulate on the same image — then the Check's literal form can pass. Proposed as
+follow-up, not done here.
+
+## 273. Phase 7 closes: 7.1/7.2/7.3 Checks re-verified, evidence moved to done.md (2026-09-16)
+
+**Plan:** §10 Phase 7 (stamped ✅ COMPLETE). `plan.md` edited in this change (§10 compressed
+to stub + Check; full step text moved to `done.md` → Phase 7, which gains the three records
+§10 cited but never wrote: 7.1 steps 1–2, 7.1 steps 6–9, 7.2 steps 3–8).
+
+**Verification (all on `9f2eba4`, pinned Node 26.7.0, branch `agent/infra-next`; docs-only
+changes since, so the numbers stand):** `packages/tests/ffi/run.ts` → 5 checks, 5 passed,
+0 failed, 0 not run; `example-c-consumer/c-consumer.ts` → `ffi c-consumer: ok`;
+`examples/ffi/sqlite/sqlite-c-main.ts` → `ffi sqlite-c-main: ok`;
+`sqlite-demo.ts` → `sqlite demo: ok`; libm/stat examples ok; full `pnpm run ci` green
+(check-node v26.7.0; typecheck/lint/dupes clean; unit 564/564; runtime corpus matches Node;
+subset 677 — 639 passed, 38 expected-fail, 0 failed; golden 386/386 + 2 intl skipped;
+builtins 223/238; leak 10M plateau 3664 KB; golden-asan green). The CI side of the Check is
+structural (`.github/workflows/ci.yml` ffi job: `test:ffi` + both C-main runners) and was not
+re-run remotely here — the job definition is unchanged since the 7.3 landing.
+
+**Two honesty notes.** (1) §15.1's top-down rule gates phase STARTS; Phases 5 and 6 are still
+open while 7 closes. This stamp records completed work, it does not start anything, so the
+rule does not apply to it — stated here so the overlap reads as deliberate, not drift.
+(2) The close-out names two follow-ups as explicitly unowned (ambient `CString`/`Out` lib
+declarations; generator convention transfer — plan-notes 271): never Check items, no phase
+owner, a future card owns them.
+
+**§15.9 reassignment (same change, not a second card).** The stamp surfaced three `phase: 7`
+sites under `src/`, which the rule forbids leaving behind: the optional extern call is
+DELIVERED (direct C call — `?.` on an always-linked callee cannot short-circuit, so there
+is no conditional to model; gate identifier arm + call arm + lowering agree, `STA4031`
+landing-pad removed), while extern-as-value (STA1217) and bare package imports (STA1214)
+go PHASELESS — messages name the blocker (no C value representation; v1 npm non-goal),
+never a phase number, since no open phase owns either. `COMPLETED_PHASES` gains 7 in the
+same change (`phases.test.ts` pins the pair). Proof: `subset_extern_optional_call_{ts,js}`
+at `static`, the `?.` lines in both `extern_libm` goldens byte-exact, `phases.test.ts` 4/4.
+
 
 ## 278. Bound class expressions land via descriptor erasure (2026-09-16)
 

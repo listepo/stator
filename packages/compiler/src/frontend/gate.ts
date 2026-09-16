@@ -666,7 +666,17 @@ function gateImport(node: ts.ImportDeclaration): GateResult {
   if (ts.isStringLiteral(spec) && node.importClause?.isTypeOnly !== true) {
     // Bare specifier: a package. Compiling one means compiling someone else's whole module graph.
     if (!spec.text.startsWith('./') && !spec.text.startsWith('../')) {
-      return notYet('importing a package is not yet supported', 7);
+      // No `phase`: compiling a package means compiling someone else's whole module graph
+      // (npm-ecosystem compatibility, a v1 non-goal in plan.md §0), and no open phase owns
+      // it — a phase number here would tell the user to wait for a release that has no card
+      // for the work (src/support/phases.ts).
+      return {
+        kind: 'not-yet',
+        code: 'STA1214',
+        message:
+          'importing a package is not yet supported (npm-ecosystem compatibility is a ' +
+          'v1 non-goal; no phase owns it)',
+      };
     }
     // Node ESM never resolves an extensionless relative specifier, and Node is the ground truth
     // the golden tests hold this compiler to. The Bundler-style resolution the checker runs
@@ -1048,13 +1058,17 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
     externDeclarationOfSymbol(symbol, typeChecker) !== undefined &&
     !ts.isImportSpecifier(node.parent)
   ) {
+    // No `phase`: v0 has no C value representation for an extern (docs/FFI.md §6), and no
+    // open phase owns one — a phase number here would tell the user to wait for a release
+    // that has no card for the work (src/support/phases.ts).
     return isDirectCalleePosition(node)
       ? { kind: 'accept' }
       : {
           kind: 'not-yet',
           code: 'STA1217',
-          message: 'using an extern function as a value is not yet supported; planned for Phase 7',
-          phase: 7,
+          message:
+            'using an extern function as a value is not yet supported (v0 has no C value ' +
+            'representation for externs; docs/FFI.md section 6)',
         };
   }
   // The slot constructor's callee (docs/FFI.md §2): the call arm already decided the direct
@@ -1881,8 +1895,9 @@ function gateLinkPragmas(sourceFile: ts.SourceFile, mode: Mode, diagnostics: Dia
 
 /** One classified extern declaration as a gate diagnostic: never-codes stay never. Shared by
  * the declaration walk above and the call-site arm below, so the two cannot disagree about
- * which code a signature earns. (`phase` survives on the shape for the call-shape arms'
- * STA1217 positions — extern-as-value, optional call — which bypass the classifier.) */
+ * which code a signature earns. (`phase` survives on the shape but no caller sets it: the
+ * never refusals have none, and the remaining STA1217 position — extern-as-value — is emitted
+ * directly by the identifier arm, phaseless, since no open phase owns it.) */
 function pushExternRefusal(
   node: ts.Node,
   classified: { readonly code: string; readonly message: string; readonly phase?: number },
@@ -1951,17 +1966,10 @@ function gateExternCall(
       message: 'extern declaration is only legal in a .d.ts file; move it there (docs/FFI.md)',
     };
   }
-  // An optional call is not a direct call: the lowering builds one unconditional C call, not a
-  // conditional one. (An extern is always defined once linked, so `?.` would be a no-op — but a
-  // no-op the call does not model is still a shape mismatch, and the identifier arm agrees.)
-  if (call.questionDotToken !== undefined) {
-    return {
-      kind: 'not-yet',
-      code: 'STA1217',
-      message: 'an optional call to an extern function is not yet supported; planned for Phase 7',
-      phase: 7,
-    };
-  }
+  // An optional call IS a direct call: the callee always links (a missing C symbol fails
+  // the build, so there is no binary in which `?.` could short-circuit), which makes `?.` a
+  // proven no-op rather than a conditional the lowering must model. The identifier arm agrees
+  // (`isDirectCalleePosition` accepts the `?.` callee for the same reason).
   return gateExternSignature(call, decl, typeChecker, mode);
 }
 
