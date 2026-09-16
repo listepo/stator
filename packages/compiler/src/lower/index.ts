@@ -60,10 +60,15 @@ import {
   baseClassOf,
   baseDescriptorName,
   classDeclarationOf,
+  classDisplayName,
+  classExpressionTarget,
+  classLikeOf,
   computedKeyStaticName,
   elementStaticKey,
+  expressionClassName,
   hasAbstractModifier,
   heritageSubstitution,
+  innerClassExpression,
   heritageTuple,
   isBrandedPointer,
   isPrivateMemberName,
@@ -1823,6 +1828,20 @@ function lowerDeclarationList(
       flatten: true,
     };
   }
+  // A class expression bound by a single `const` emits its descriptor under the variable's
+  // name and binds no value — the expression twin of the alias skip above (plan.md §8 step
+  // 12(d); see `classExpressionTarget` in `../frontend/types.ts`). Every in-place use erases
+  // to the expression, so the name needs no slot; every other read is refused at the gate.
+  // Only the formation spelling qualifies, mirroring the gate exactly: anything else lowers
+  // as written and fails where it always did.
+  if (
+    decl.initializer !== undefined &&
+    ts.isClassExpression(decl.initializer) &&
+    isSingleConstDeclarator(decl) &&
+    expressionClassName(decl.initializer) !== undefined
+  ) {
+    return lowerClass(decl.initializer, sourceFile, checker, bindings, diagnostics);
+  }
   // A generic arrow or function expression assigned to a `const` lowers to nothing: its
   // specializations are already above (collected by tuple), and the name itself binds no value
   // (the gate refuses reading one outside a call). Only the assigned shape reaches here — the
@@ -2385,7 +2404,7 @@ function placeName(
     return undefined;
   }
   const found = staticMemberOf(node, checker, false);
-  return found === undefined || found.owner.name === undefined
+  return found === undefined || classDisplayName(found.owner) === undefined
     ? undefined
     : staticName(hirClassName(found.owner), node.name.text);
 }
@@ -2443,7 +2462,7 @@ function staticName(className: string, member: string): string {
  * declaration that has not been lowered yet (a forward reference, which is TDZ the compiler does
  * not model) falls back to the source name, which is what the descriptor will carry too: the
  * declaration site renames only against bindings already made. */
-function hirClassName(declaration: ts.ClassDeclaration): string {
+function hirClassName(declaration: ts.ClassDeclaration | ts.ClassExpression): string {
   return hirNameOf(declaration) ?? declaration.name?.text ?? '';
 }
 
@@ -2460,9 +2479,9 @@ function hirClassName(declaration: ts.ClassDeclaration): string {
 function privateUse(
   name: ts.PrivateIdentifier,
   checker: ts.TypeChecker,
-): { owner: ts.ClassDeclaration; property: string } | undefined {
+): { owner: ts.ClassDeclaration | ts.ClassExpression; property: string } | undefined {
   const owner = brandDeclaringClass(name, checker);
-  const ownerName = owner?.name?.text;
+  const ownerName = owner === undefined ? undefined : classDisplayName(owner);
   if (owner === undefined || ownerName === undefined) {
     return undefined;
   }
@@ -2475,7 +2494,7 @@ function privateUse(
  * chain: each class owns an independent pair (`get #x@A` vs `get #x@B`), so the halves that
  * matter are the owner's own. */
 function privateAccessorHalves(
-  owner: ts.ClassDeclaration,
+  owner: ts.ClassDeclaration | ts.ClassExpression,
   raw: string,
 ): { get: boolean; set: boolean } {
   let get = false;
@@ -2499,7 +2518,7 @@ function privateAccessorHalves(
 }
 
 /** Whether the lexical owner's `#private` member is an accessor pair (either half). */
-function privateIsAccessor(owner: ts.ClassDeclaration, raw: string): boolean {
+function privateIsAccessor(owner: ts.ClassDeclaration | ts.ClassExpression, raw: string): boolean {
   return owner.members.some(
     (m) =>
       m.name !== undefined &&
@@ -2525,7 +2544,10 @@ function privateWriteIsAccessor(
 
 /** The member declaration a `#private` use's lexical owner holds for it, if it holds one as a
  * member node (a `.js` field assigned in the constructor has none -- the slot still exists). */
-function privateOwnerMember(owner: ts.ClassDeclaration, raw: string): ts.ClassElement | undefined {
+function privateOwnerMember(
+  owner: ts.ClassDeclaration | ts.ClassExpression,
+  raw: string,
+): ts.ClassElement | undefined {
   return owner.members.find(
     (m) => m.name !== undefined && ts.isPrivateIdentifier(m.name) && m.name.text === raw,
   );
@@ -2780,7 +2802,7 @@ function memberAssignment(
     : undefined;
   const staticAccessor =
     staticFound !== undefined &&
-    staticFound.owner.name !== undefined &&
+    classDisplayName(staticFound.owner) !== undefined &&
     ts.isPropertyAccessExpression(targetNode) &&
     (ts.isGetAccessorDeclaration(staticFound.member) ||
       ts.isSetAccessorDeclaration(staticFound.member))
@@ -4406,7 +4428,7 @@ function lowerExpression(
       }
     }
     const found = staticMemberOf(node, checker, undefined);
-    if (found !== undefined && found.owner.name !== undefined) {
+    if (found !== undefined && classDisplayName(found.owner) !== undefined) {
       if (ts.isGetAccessorDeclaration(found.member) || ts.isSetAccessorDeclaration(found.member)) {
         // A static accessor is not a binding: reading `C.value` RUNS the getter. A missing half
         // is the static twin of the instance hole (STA4067 there) -- the call below reports
@@ -5820,18 +5842,17 @@ function lowerExpression(
     const direct = checker.getSymbolAtLocation(node.right)?.valueDeclaration;
     // A class alias names the same descriptor its target does: `o instanceof K` on
     // `const K = C` is the pointer comparison against `C`, so the direct check keeps its exact
-    // shape and the alias resolves beside it.
+    // shape and the alias resolves beside it. A bound class expression names its own
+    // descriptor the same way (`o instanceof C` on `const C = class …`; plan.md §8 step 12(d)).
     const declaration =
-      direct !== undefined && ts.isClassDeclaration(direct)
+      direct !== undefined && (ts.isClassDeclaration(direct) || ts.isClassExpression(direct))
         ? direct
         : ts.isIdentifier(node.right)
-          ? aliasedClassDeclaration(node.right, checker)
+          ? (aliasedClassDeclaration(node.right, checker) ??
+            classExpressionTarget(node.right, checker) ??
+            innerClassExpression(node.right, checker))
           : undefined;
-    if (
-      declaration === undefined ||
-      !ts.isClassDeclaration(declaration) ||
-      declaration.name === undefined
-    ) {
+    if (declaration === undefined || classDisplayName(declaration) === undefined) {
       diagnostics.push(
         lowerDiagnostic(
           node.right,
@@ -7368,11 +7389,18 @@ function classTupleFor(
  * recovered tuple for a generic one. `null` when the class is generic and no tuple exists —
  * the internal-error backstop for a use the gate should have refused. */
 function mangleClassName(
-  owner: ts.ClassDeclaration,
+  owner: ts.ClassDeclaration | ts.ClassExpression,
   receiver: ts.Expression,
   checker: ts.TypeChecker,
   bindings: Scope | undefined,
 ): string | null {
+  if (ts.isClassExpression(owner)) {
+    // An expression class is reached through its HIR identity, recorded when the formation
+    // lowered (plan.md §8 step 12(d)); its display name is only the fallback for a use the
+    // formation does not precede. Generic expressions never reach here (the gate refuses
+    // them), so there is no tuple to specialize.
+    return hirNameOf(owner) ?? expressionClassName(owner) ?? null;
+  }
   const name = owner.name?.text;
   if (name === undefined || name === '') {
     return null;
@@ -7391,6 +7419,24 @@ function mangleClassName(
   return tuple === undefined ? null : specializationName(name, tuple);
 }
 
+/** The class-like a receiver's type resolves to for owner/dispatch questions: declarations
+ * through the existing path, bound expressions through their descriptor identity
+ * (plan.md §8 step 12(d)). A shadowed expression resolves to its HIR name downstream via
+ * `mangleClassName`, exactly like a shadowed declaration. `undefined` for anything else —
+ * the caller falls back to constraint, shape, or dynamic dispatch as before. */
+function receiverClassLike(
+  receiverType: ts.Type,
+): ts.ClassDeclaration | ts.ClassExpression | undefined {
+  const declaration = classDeclarationOf(receiverType);
+  if (declaration !== undefined) {
+    return declaration;
+  }
+  const like = classLikeOf(receiverType);
+  return like !== undefined && ts.isClassExpression(like) && expressionClassName(like) !== undefined
+    ? like
+    : undefined;
+}
+
 /** Does this expression evaluate to an instance of a class this subset lays out?
  *
  * Asked of the checker's type rather than of a lowered node, because it decides WHICH lowering to
@@ -7407,7 +7453,7 @@ function declaringClassName(
   // A `T`-typed receiver answers through its constraint: per specialization the call runs on
   // the bound class, so the owner comes from there.
   const declaration =
-    classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
+    receiverClassLike(receiverType) ?? constraintDeclaration(receiverType, checker);
   if (declaration !== undefined) {
     const owner = methodDeclaringClass(declaration, method, checker);
     if (owner === undefined) {
@@ -7451,10 +7497,16 @@ function declaringClassName(
  * Scanning per call site is quadratic in a file's classes and linear in its chains. It is also
  * exact, needs no plumbing through the lowering, and a program with enough classes for that to
  * matter has a much larger emitter cost -- memoize when a measurement says to. */
-function classesIn(sourceFile: ts.SourceFile): ts.ClassDeclaration[] {
-  const found: ts.ClassDeclaration[] = [];
+function classesIn(sourceFile: ts.SourceFile): (ts.ClassDeclaration | ts.ClassExpression)[] {
+  const found: (ts.ClassDeclaration | ts.ClassExpression)[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isClassDeclaration(node)) {
+    // Declarations and bound expressions alike: an override family may span the spelling
+    // boundary (`const C = class extends B { m() … }` overrides `B.m`), and the direct-vs-
+    // virtual question is asked of the file, not of the spelling.
+    if (
+      ts.isClassDeclaration(node) ||
+      (ts.isClassExpression(node) && expressionClassName(node) !== undefined)
+    ) {
       found.push(node);
     }
     ts.forEachChild(node, visit);
@@ -7464,7 +7516,7 @@ function classesIn(sourceFile: ts.SourceFile): ts.ClassDeclaration[] {
 }
 
 function declaresMethod(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   name: string,
   checker: ts.TypeChecker,
 ): boolean {
@@ -7480,7 +7532,7 @@ function declaresMethod(
   );
 }
 
-function className(declaration: ts.ClassDeclaration): string {
+function className(declaration: ts.ClassDeclaration | ts.ClassExpression): string {
   return declaration.name?.text ?? '';
 }
 
@@ -7570,7 +7622,7 @@ function accessorCall(
  * Dispatch is always direct: a private name never overrides, it re-declares, so there is exactly
  * one implementation per (owner, name). */
 function lowerPrivateRead(
-  priv: { owner: ts.ClassDeclaration; property: string },
+  priv: { owner: ts.ClassDeclaration | ts.ClassExpression; property: string },
   node: ts.PropertyAccessExpression,
   target: Expression,
   sourceFile: ts.SourceFile,
@@ -7703,15 +7755,15 @@ function staticAccessorCall(
  * the read half a compound fold builds -- a set-only static, like a set-only instance
  * property, has no read, which is legal. */
 function staticAccessorHalves(
-  owner: ts.ClassDeclaration,
+  owner: ts.ClassDeclaration | ts.ClassExpression,
   property: string,
   checker: ts.TypeChecker,
 ): { get: boolean; set: boolean } {
   let get = false;
   let set = false;
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let current: ts.ClassDeclaration | undefined = owner;
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = owner;
     current !== undefined && !seen.has(current);
     current = baseClassOf(current, checker)
   ) {
@@ -7757,10 +7809,10 @@ function accessorOwner(
 ): string | undefined {
   const receiverType = checker.getTypeAtLocation(receiver);
   const declaration =
-    classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
+    receiverClassLike(receiverType) ?? constraintDeclaration(receiverType, checker);
   const found =
     declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
-  if (found?.owner.name?.text !== undefined) {
+  if (found?.owner !== undefined && classDisplayName(found.owner) !== undefined) {
     return mangleClassName(found.owner, receiver, checker, bindings) ?? undefined;
   }
   // An accessor through `T` bounded by something without a class: same namesake rule as a
@@ -7797,7 +7849,7 @@ function hasAccessorHalf(
 ): boolean {
   const receiverType = checker.getTypeAtLocation(receiver);
   const declaration =
-    classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
+    receiverClassLike(receiverType) ?? constraintDeclaration(receiverType, checker);
   const found =
     declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
   if (found !== undefined) {
@@ -7903,8 +7955,15 @@ function isClassInstance(node: ts.Expression, checker: ts.TypeChecker, bindings:
   // the expression `C` is the class's STATIC side, whose symbol is still the class declaration, so
   // `tsTypeToHType` answers with the very layout `new C()` produces. Only the spelling separates
   // them, which is why this asks the AST and not the type. A class ALIAS (`const K = C`) names
-  // the same static side through its target declaration, so it takes the same exemption.
-  if (ts.isIdentifier(node) && aliasedClassDeclaration(node, checker) !== undefined) {
+  // the same static side through its target declaration, so it takes the same exemption — as
+  // does a class EXPRESSION's binding (`const C = class …`), whose static side maps to the
+  // layout through the expression (plan.md §8 step 12(d)).
+  if (
+    ts.isIdentifier(node) &&
+    (aliasedClassDeclaration(node, checker) ??
+      classExpressionTarget(node, checker) ??
+      innerClassExpression(node, checker)) !== undefined
+  ) {
     return false;
   }
   return typeAt(node, checker, bindings).kind === 'object';
@@ -8124,7 +8183,7 @@ function abstractMemberStub(
 }
 
 function lowerClass(
-  node: ts.ClassDeclaration,
+  node: ts.ClassDeclaration | ts.ClassExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   bindings: Scope,
@@ -8136,10 +8195,24 @@ function lowerClass(
   },
 ): ClassDeclaration | Block | null {
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-  const symbol = node.name === undefined ? undefined : checker.getSymbolAtLocation(node.name);
-  const self = symbol === undefined ? undefined : checker.getDeclaredTypeOfSymbol(symbol);
+  // An expression has no name of its own: its identity is Node's `.name` for the spelling —
+  // the inner name, else the bound variable (see `expressionClassName`) — which doubles as
+  // the scope registration below (shadowing renames exactly like a declaration's) and as the
+  // `#private` owner and span-lookup name. Its instance type comes from the construct
+  // signature's return: the variable binds the static side, and the inner name (if any)
+  // is visible only inside, so neither names the instance from here.
+  const displayName = ts.isClassExpression(node) ? expressionClassName(node) : node.name?.text;
+  let self: ts.Type | undefined;
+  if (displayName !== undefined) {
+    if (ts.isClassExpression(node)) {
+      self = checker.getTypeAtLocation(node).getConstructSignatures()[0]?.getReturnType();
+    } else if (node.name !== undefined) {
+      const symbol = checker.getSymbolAtLocation(node.name);
+      self = symbol === undefined ? undefined : checker.getDeclaredTypeOfSymbol(symbol);
+    }
+  }
   const type = self === undefined ? undefined : tsTypeToHType(self, checker);
-  if (node.name === undefined || type === undefined || type.kind !== 'object') {
+  if (displayName === undefined || type === undefined || type.kind !== 'object') {
     diagnostics.push(
       lowerDiagnostic(
         node,
@@ -8165,14 +8238,14 @@ function lowerClass(
   // by gate rule, so its source name is already unique, and the tuple lowerings share one
   // declaration node whose HIR name belongs to the carrier.
   if (spec === undefined) {
-    hirNameOfDeclaration.set(node, bindings.declare(node.name.text, type));
+    hirNameOfDeclaration.set(node, bindings.declare(displayName, type));
   }
   // The HIR identity of this declaration: the mangled tuple for a specialization, the renamed
   // binding for a shadowing class, the source name otherwise. Every use site resolves to the
   // same string through `hirClassName`, which is what keeps `new`, method owners, statics,
   // `instanceof` and bases naming one descriptor.
   const selfName =
-    spec !== undefined && !spec.staticsOnly ? spec.name : (hirNameOf(node) ?? node.name.text);
+    spec !== undefined && !spec.staticsOnly ? spec.name : (hirNameOf(node) ?? displayName);
   // The layout answers under the HIR identity too: the verifier matches every member function's
   // receiver against the declaration's name, and every `super` against its bases, so a renamed
   // class whose layout still spelled the source name would fail its own checks. Each base name
@@ -8180,7 +8253,13 @@ function lowerClass(
   // the base is always lowered first, source order being what makes the descriptor's forward
   // reference to it legal.
   const renameBase = (name: string): string => {
-    const owner = ancestry(node, checker).find((candidate) => candidate.name?.text === name);
+    // Expression bases match by display name (Node's `.name`), declarations by source name.
+    const owner = ancestry(node, checker).find(
+      (candidate) =>
+        (ts.isClassExpression(candidate)
+          ? expressionClassName(candidate)
+          : candidate.name?.text) === name,
+    );
     const renamed = owner === undefined ? undefined : hirNameOf(owner);
     return renamed ?? name;
   };
@@ -8205,7 +8284,7 @@ function lowerClass(
       : layout.fields.map((field) => {
           const at =
             node.members.find((m) =>
-              memberDeclaresName(m, field.name, sourceFile, checker, node.name?.text),
+              memberDeclaresName(m, field.name, sourceFile, checker, displayName),
             ) ?? node;
           return {
             name: field.name,
@@ -8442,11 +8521,11 @@ function lowerClass(
     if (fn === null) {
       return null;
     }
-    methods.push({ name: memberFunctionName(method, sourceFile, checker, node.name?.text), fn });
+    methods.push({ name: memberFunctionName(method, sourceFile, checker, displayName), fn });
   }
   for (const member of abstractStubs) {
     methods.push({
-      name: memberFunctionName(member, sourceFile, checker, node.name?.text),
+      name: memberFunctionName(member, sourceFile, checker, displayName),
       fn: abstractMemberStub(member, layout, sourceFile, checker, bindings),
     });
   }
@@ -8512,7 +8591,7 @@ function lowerClass(
       checker,
       bindings,
       diagnostics,
-      node.name?.text ?? '',
+      displayName,
     );
     if (prologue === null) {
       return null;
@@ -8564,7 +8643,7 @@ function lowerClass(
   // reordering. `#private` methods never join it (lexical dispatch, see `declaresMethod`).
   // Capturing methods join by NAME with a NULL entry at emission (no one constant form);
   // the dynamic get skips NULLs for the hidden slot. The carrier has no methods to tabulate.
-  const declaredName = node.name?.text ?? '';
+  const declaredName = displayName;
   const vtableMethods = layout.methods.filter((m) => !isPrivateMemberName(m.name));
   const vtable =
     spec?.staticsOnly === true
@@ -8575,7 +8654,8 @@ function lowerClass(
             declaringDecl === undefined
               ? layout.name
               : declaringDecl.typeParameters !== undefined &&
-                  declaringDecl.typeParameters.length > 0
+                  declaringDecl.typeParameters.length > 0 &&
+                  ts.isClassDeclaration(declaringDecl)
                 ? baseDescriptorName(declaringDecl, node, checker)
                 : (hirNameOf(declaringDecl) ?? declaringDecl.name?.text ?? layout.name);
           return {
@@ -8758,7 +8838,7 @@ function lowerFieldInitializers(
  * initializer behind an arrow reads it as a capture (plan.md §8 step 25), and the arrows the
  * caller prepends resolve that capture against this environment. */
 function synthesizedConstructor(
-  node: ts.ClassDeclaration,
+  node: ts.ClassDeclaration | ts.ClassExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   self: HObject,
@@ -8813,7 +8893,7 @@ function synthesizedConstructor(
 
 /** The nearest constructor actually written in a class's ancestry, or `undefined` if none is. */
 function nearestConstructor(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): ts.ConstructorDeclaration | undefined {
   for (const current of ancestry(declaration, checker).toReversed()) {
@@ -8947,7 +9027,7 @@ interface ClassSpecialization {
   readonly staticsOnly: boolean;
 }
 
-function isGenericClass(node: ts.ClassDeclaration): boolean {
+function isGenericClass(node: ts.ClassDeclaration | ts.ClassExpression): boolean {
   return node.typeParameters !== undefined && node.typeParameters.length > 0;
 }
 
@@ -9217,7 +9297,15 @@ function collectSpecializations(
       continue;
     }
     const base = baseClassOf(declaration, checker);
-    if (base === undefined || base.name === undefined || !isGenericClass(base)) {
+    // A generic expression base belongs to a refused program (the gate holds generic class
+    // expressions); the specialization queue below only knows declarations, so it seeds
+    // nothing here rather than misshaping the tuple.
+    if (
+      base === undefined ||
+      !ts.isClassDeclaration(base) ||
+      base.name === undefined ||
+      !isGenericClass(base)
+    ) {
       continue;
     }
     const tuple = heritageTuple(base, declaration, checker);
@@ -9570,7 +9658,9 @@ function renameShadowedClass(node: ts.Node, type: HType, checker: ts.TypeChecker
   if (type.kind !== 'object') {
     return type;
   }
-  const declaration = classDeclarationOf(checker.getTypeAtLocation(node));
+  // Declarations and bound expressions alike: a shadowed `const C = class …` owns a
+  // descriptor per spelling exactly like a shadowed declaration (plan.md §8 step 23).
+  const declaration = classLikeOf(checker.getTypeAtLocation(node));
   if (declaration === undefined) {
     return type;
   }
