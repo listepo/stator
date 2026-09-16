@@ -8005,3 +8005,36 @@ Responsibilities that stay open: the ambient `CString`/`Out` lib declarations (f
 declare locally until §7.3 owns the binding set — FFI.md §7.3), generator convention
 transfer (manual rc checks until then), and the TS-name/brand alias policies
 (mechanical, documented; human aliases live in manual bindings).
+
+## 272. T9.1 re-apply: CI decision on `mlugg/setup-zig@v2` (2026-09-16)
+
+**Plan:** T9.1 (the justfile builds `src/jsrt_mem.zig` into `libjsrt.a` from this PR on);
+docs/TOOLCHAIN.md "Not yet required". **Recommendation for the creator: approve
+`mlugg/setup-zig@v2` pinned at v2 with `version: 0.16.0`, gated `if: runner.os !=
+'Windows'`, in the shared `.github/actions/setup/action.yml`** — exactly the hunk the
+`.worktrees/t9-1` planning change already carried and this re-apply deliberately does
+not copy (below).
+
+**Why it is needed.** From this PR the runtime archive cannot build without Zig
+0.16.0: the justfile's `_runtime` recipe runs `zig fmt --check` + `zig build-obj`,
+and the C tree no longer contains the moved code (`jsrt_gc.c` is deleted in the
+first commit; print/JSON buffers, the shape table and the alloc helpers follow in
+the same PR). Local builds get Zig from `mise install` (pin already on main). CI
+has no mise Zig: the setup action installs only Node/pnpm, `extractions/setup-just`
+gives just, apt gives clang on Linux. So every CI job that builds `libjsrt.a`
+(runtime, sanitizer, golden, FFI, intl) fails at `zig: command not found` until the
+action lands. There is no graceful-degradation option: a runtime without its memory
+core is missing symbols, not slower, so falling back to "no Zig" would be a
+different (broken) archive, not a degraded one.
+
+**Why setup-zig and not mise in CI.** The established pattern is one purpose-built
+setup action per tool (setup-node, setup-just); mise is a dev-host tool here, not a
+CI tool. `mlugg/setup-zig` is the action Zig's own docs point at, v2 is current,
+and the version request (`0.16.0`) matches the mise pin, so local and CI compile
+the same compiler. Risk is the standard third-party-action risk; mitigation is the
+v2 major pin plus the exact-version request. Windows is excluded by the same
+condition the justfile/runners already assume (Windows never builds the runtime).
+
+**Not in this PR by design** (awaits the approval above): the setup-action hunk,
+and only that hunk. The stale worktree's other `.github` changes (ci.yml trigger
+narrowing, nightly.yml rescheduling) are unrelated and stay out regardless.
