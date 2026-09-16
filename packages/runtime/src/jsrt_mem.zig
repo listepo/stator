@@ -52,4 +52,5 @@ comptime {
     _ = @import("jsrt_gc.zig");
     _ = @import("jsrt_buf.zig");
     _ = @import("jsrt_shape.zig");
+    _ = @import("jsrt_alloc.zig");
 }

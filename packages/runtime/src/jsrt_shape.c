@@ -34,14 +34,6 @@ const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL, NULL}
  * producer. */
 const JSRTClass jsrt_class_accessor = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
 
-/* Slot storage holds jsrt_values, so under Boehm it must be a COLLECTED allocation the collector
- * scans; the shapes themselves hold no values and are immortal metadata, so they use plain malloc
- * either way (a shape is never garbage: the table only grows, by design). */
-static void *slots_alloc(size_t bytes) {
-  void *p = jsrt_gc_alloc(bytes, "dynamic object slots");
-  return p;
-}
-
 /* A property is an array index exactly when its canonical decimal spelling round-trips through
  * ToUint32 and is not 2^32-1. Shape keys are UTF-8, so non-ASCII bytes and any leading zero make
  * the key an ordinary string. Fixed-shape enumeration (jsrt_fixed_key_order below) shares this
@@ -257,20 +249,6 @@ const char *jsrt_shape_key(jsrt_value name) {
   key[k] = '\0';
   return key;
 }
-
-static jsrt_value dynobj_new(const JSRTClass *cls) {
-  JSRTDynObject *o = (JSRTDynObject *)slots_alloc(sizeof(JSRTDynObject));
-  o->cls = cls;
-  o->shape = &jsrt_shape_root;
-  o->capacity = 0;
-  o->slots = NULL;
-  o->frozen = false;
-  return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)o);
-}
-
-jsrt_value jsrt_dynobj_new(void) { return dynobj_new(&jsrt_class_dynamic); }
-
-jsrt_value jsrt_null_proto_new(void) { return dynobj_new(&jsrt_class_null_proto); }
 
 /* A loaded slot, resolved. An accessor cell becomes a call with the receiver as argument zero --
  * the ordinary method ABI (docs/VALUE.md §4.5), so an accessor body is an ordinary function unit.
@@ -493,7 +471,8 @@ void jsrt_set_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC *ic
 }
 
 void jsrt_define_accessor(jsrt_value obj, const char *key, jsrt_value get, jsrt_value set) {
-  JSRTAccessorCell *cell = (JSRTAccessorCell *)slots_alloc(sizeof(JSRTAccessorCell));
+  JSRTAccessorCell *cell =
+      (JSRTAccessorCell *)jsrt_gc_alloc(sizeof(JSRTAccessorCell), "dynamic object slots");
   cell->cls = &jsrt_class_accessor;
   cell->get = get;
   cell->set = set;
