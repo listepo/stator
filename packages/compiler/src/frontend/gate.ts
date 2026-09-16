@@ -48,6 +48,7 @@ import {
   innerClassExpression,
   isClassAliasUse,
   ITERATOR_METHOD_NAME,
+  hirPropertyName,
   instanceMethodName,
   isDynamicShape,
   isGlobalSymbolIteratorName,
@@ -525,7 +526,7 @@ function gateConstruct(
       return gateElementAccess(node as ts.ElementAccessExpression, typeChecker);
 
     case ts.SyntaxKind.ForOfStatement:
-      return gateForOf(node as ts.ForOfStatement, typeChecker);
+      return gateForOf(node as ts.ForOfStatement, mode, typeChecker);
 
     // `class C { … }` and `const C = class { … }` share one gate: the declaration lowers to
     // a descriptor plus bindings, while the expression is a VALUE and needs the class object
@@ -3193,12 +3194,15 @@ function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeCh
       if (hir.kind === 'unknown') {
         // Unknown is three different things and only two of them are this gate's to report. An
         // `any` operand, a tuple, or a dropped `as` assertion is silent at the checker and fatal
-        // at the verifier (STA4082): spreading an unknown value needs the GetIterator dispatch
-        // Phase 5 step 8 owns for unknown iterables (plan.md §8 step 2a(c) residue 2488), the same
-        // owner every other refusal in this function already names. A directly-`unknown` operand
-        // is the third thing and is excluded: the checker refuses it (TS2488) before the gate
-        // runs, so speaking here too would double-report one mistake — and `explain` would
-        // answer not-yet where the build answers error.
+        // at the verifier (STA4082): spreading one stays refused even though the GetIterator
+        // dispatch exists now (plan.md §8 step 2a(c) landed it for `for-of`), because driving an
+        // element walk is not copying elements — spread-of-unknown is step 12(c) residue with
+        // its own card, not this dispatch's second caller. A directly-`unknown` operand
+        // is the third thing and is excluded: in ts mode the checker refuses it (TS2488) before
+        // the gate runs, so speaking here too would double-report one mistake — and `explain`
+        // would answer not-yet where the build answers error. In js mode that refusal is
+        // suppressed (plan.md §8 step 2a(c)), so the operand falls through to the lowering's
+        // own STA1214 arm instead (subset_spread_direct_unknown_js.js pins the wake).
         if (
           spreadAdmitsAny(operandType) ||
           isArrayOrTuple(operandType, checker) ||
@@ -3273,9 +3277,11 @@ function isDroppedSpreadAssertion(expression: ts.Expression, checker: ts.TypeChe
 
 /** Whether the checker lets this operand's Unknown through untouched: an `any` (whose spread
  * needs no iterator method to satisfy the checker) or a union carrying one. A directly-`unknown`
- * operand is excluded on purpose — spreading it is TS2488, the checker's own diagnostic — so the
- * gate stays silent there rather than reporting one mistake twice (and `explain` answering
- * not-yet where the build answers error). */
+ * operand is excluded on purpose in ts mode — spreading it is TS2488, the checker's own
+ * diagnostic — so the gate stays silent there rather than reporting one mistake twice (and
+ * `explain` answering not-yet where the build answers error). In js mode that refusal is
+ * suppressed (plan.md §8 step 2a(c)): the operand still skips this gate arm, but it lands on the
+ * lowering's own STA1214 rather than compiling. */
 function spreadAdmitsAny(type: ts.Type): boolean {
   if ((type.flags & ts.TypeFlags.Any) !== 0) {
     return true;
@@ -5422,10 +5428,15 @@ function gateElementAccess(
  * user class whose `[Symbol.iterator]()` returns an iterator.
  *
  * The four collections compile to specialized loops (docs/VALUE.md §4.13). A user iterable calls
- * the compile-time-known method and then drives the returned iterator with the existing walk. The
- * binding must be a plain `let`/`const` name: `for (x of a)` assigns to an existing binding, and
+ * the compile-time-known method and then drives the returned iterator with the existing walk. In
+ * js mode anything else is admitted too -- an Unknown value, a union the model widens to one, or
+ * a statically-known non-iterable the checker refused via the suppressed TS2488 -- and the
+ * lowering wraps it in `get-iterator`, so the runtime's GetIterator dispatch answers what the
+ * static walks cannot (plan.md §8 step 2a(c)). ts mode keeps the refusal: there an unresolvable
+ * iterable is a type error, not a runtime question.
+ * The binding must be a plain `let`/`const` name: `for (x of a)` assigns to an existing binding, and
  * destructuring needs a pattern the subset cannot lower. */
-function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateResult {
+function gateForOf(statement: ts.ForOfStatement, mode: Mode, checker: ts.TypeChecker): GateResult {
   if (statement.awaitModifier !== undefined) {
     // `for await` drives the ASYNC iterator protocol, which is the generator machinery under
     // another name -- not the await that landed with async functions.
@@ -5448,7 +5459,25 @@ function gateForOf(statement: ts.ForOfStatement, checker: ts.TypeChecker): GateR
     hir.kind !== 'iterator' &&
     userIteratorMethod(hir) === undefined
   ) {
-    return notYet('for-of over a user iterable is not yet supported', 5);
+    if (mode === 'js') {
+      // Fall through to the binding checks: the operand takes the dynamic dispatch.
+    } else if (
+      target
+        .getProperties()
+        .some(
+          (s) =>
+            hirPropertyName(ts.unescapeLeadingUnderscores(s.escapedName)) === ITERATOR_METHOD_NAME,
+        )
+    ) {
+      // The checker ACCEPTED this (it has `[Symbol.iterator]`), so no STA0012 speaks for it and
+      // the gate's refusal is the only diagnostic: a custom `{ next() }` object, or an interface
+      // like `Iterable<T>` whose method the HType mapping drops (so the HType alone cannot tell
+      // acceptance from refusal — the checker's own property list can). Every other shape
+      // reaching here was refused by the checker first (TS2488/TS2571, unsuppressed in ts mode),
+      // and returning accept there leaves that STA0012 speaking alone — which matters because
+      // `explain` ranks a not-yet above an error-class diagnostic.
+      return notYet('for-of over a user iterable is not yet supported', 5);
+    }
   }
   const initializer = statement.initializer;
   if (!ts.isVariableDeclarationList(initializer)) {

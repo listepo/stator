@@ -1218,6 +1218,59 @@ was `STA1214` or `STA0012`, so no passing test could have contained one) and the
 a working copy with the step-12(e) landing whose new shadowing refusal has exactly that shape. Full
 evidence and the re-measure condition: plan-notes 210.
 
+### Step 2a(c) — unknown-iterable GetIterator dispatch, 2488 (2026-09-16)
+
+**The Check that closed** (`plan.md` §8 step 2a(c)): *each suppression lands with a both-modes
+decision fixture (`error` in ts, `dynamic` in js) and a golden proving js mode compiles it to
+Node's answer.* The 2488 suppression does exactly that; the 2454 half had landed in wave 3 and
+is verified green here. Design record: plan-notes 280.
+
+**What was there before.** `for-of` over anything without a static walk was `STA1214` in both
+modes, and `c[Symbol.iterator]` on an unknown receiver a precise Phase-8 refusal (wave 4). The
+checker's TS2488 fired for every one of these shapes in both modes.
+
+**The dispatch, end to end.** A `get-iterator` HIR node (`target`, always typed `iterator` with
+an Unknown element) wraps any `for-of` operand no static walk covers — an Unknown value, a
+union, or a checker-refused non-iterable js mode admitted. The gate admits those in js mode
+only (`gateForOf` takes the mode); the lowering wraps them (`wrapDynamicIterator`); `program.ts`
+suppresses TS2488 in js; ts mode keeps the refusal. The node emits one `jsrt_get_iterator` call
+ahead of the existing boxed walk, so no emission arm was added: the verifier pins the
+node-type contract (`STA4045`), codegen counts one rooted temp, `rewrite.ts` and `explain.ts`
+carry their arms. The runtime (`runtime/src/jsrt_iterator.c`) passes generators and stored
+boxes through, boxes arrays/strings/Maps/Sets into their specialized walks, resolves
+`__@iterator` through the shape table and calls it with the receiver (a non-generator,
+non-box result is Node-verbatim `TypeError: Result of the Symbol.iterator method is not an
+object`), and throws catchable `X is not iterable` otherwise — rendered by the shared
+`jsrt_throw_not_iterable` the `STA2009` path now also uses. A custom `{ next() }` object stays
+`STA1214` by card; driving one is the Phase-8 tier, not this dispatch.
+
+**Two gate refinements the landing forced.** In ts mode the gate refuses only what the checker
+accepted (asked via the checker's property list, since `__@iterator@<id>` suffixing defeats
+exact lookup and the HType mapping drops interface methods — `Iterable<T>` proved it), leaving
+a lone STA0012 otherwise, because `explain` ranks not-yet above error-class. And a `for-of`
+binding is not an annotation site (`annotationSiteOf`), so the checker's recovery-`any` no
+longer buries that STA0012 under STA1003 — every other any-binding has a companion diagnostic,
+so nothing goes silent.
+
+**Check evidence, Node v26.7.0.** Decision fixtures `subset_for_of_unknown_js` (`dynamic`) and
+`subset_for_of_unknown_ts` (`error STA0012`); `tests/golden/js/for_of_unknown.js` matches Node
+byte-for-byte (collections, code-point strings, Map entries, Set, generators with
+finally-on-break/throw, user classes, stored boxes, `.keys()` views, unions, every TypeError
+path). The suppression's wake on spread — directly-`unknown` array spread moving STA0012 →
+lowering STA1214 in js — is pinned by `subset_spread_direct_unknown_{js,ts}`. Test262 per-slice before/after (pristine
+worktree at the base commit vs this branch): `for-of` 87/675/67 → 87/708/34, `spread` 8/286/37
+unchanged, `iterat` 2/598/23 → 2/607/14, `generator` 110/1688/51 → 110/1700/39 — 54
+failed→skipped, zero passed→failed; `ratchet.json` untouched per plan.md:416-422.
+
+```text
+tests 564; pass 564; fail 0
+114 clones · 0.9% duplication
+runtime: print corpus matches Node
+subset: 679 fixtures — 641 passed, 38 expected-fail, 0 failed
+golden: 387 fixtures — 387 passed, 0 failed
+golden: 387 fixtures — 387 passed, 0 failed   (ASan/UBSan)
+```
+
 ### Step 15 — Suspension inside a per-iteration-env loop (2026-09-11)
 
 **The Check that closed** (`plan.md` §8 step 15): *a golden where an async function awaits inside a

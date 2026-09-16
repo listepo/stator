@@ -204,15 +204,19 @@ static void iterable_name(jsrt_value value, char *buf, size_t buflen) {
   (void)snprintf(buf, buflen, "object");
 }
 
-void jsrt_require_array_iterable(jsrt_value value) {
-  if (jsrt_is(value, JSRT_TAG_ARRAY)) {
-    return;
-  }
+void jsrt_throw_not_iterable(jsrt_value value) {
   char name[128];
   iterable_name(value, name, sizeof name);
   char message[256];
   (void)snprintf(message, sizeof message, "%s is not iterable", name);
   jsrt_throw_error(&jsrt_class_type_error, message);
+}
+
+void jsrt_require_array_iterable(jsrt_value value) {
+  if (jsrt_is(value, JSRT_TAG_ARRAY)) {
+    return;
+  }
+  jsrt_throw_not_iterable(value);
 }
 
 /* Allocation for the element buffer. Split out because the array grows: `elements` is reallocated
