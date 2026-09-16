@@ -4,6 +4,40 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 274. TS2416 override-widening lands: inferred method-method suppression + call widening (2026-09-16)
+
+**Plan:** §8 step 12(d) (override rules) + step 2a(b) wake (plan-notes 68, 272). `plan.md` NOT
+edited in this change — no task language changes; the 12(d) remainder stays open.
+
+**What landed.** js mode no longer rejects legal JavaScript when an INFERRED override narrows
+a return type (`subset_override_widening_js.js` out of expected-fail, `static`; new ts twin
+`subset_override_widening_ts.ts` pins `STA0012`; golden
+`tests/golden/js/class_override_widening.js` byte-for-byte vs Node 26.7.0):
+
+- `program.ts`: a 2416-shaped suppression with a fail-closed predicate
+  (`isInferredMethodOverrideMismatch`) — both members bodied `MethodDeclaration`s with
+  identifier names, neither carrying a TS or JSDoc type (`methodIsUnannotated`), base found
+  through the `extends` chain (aliases included). Anything else keeps `STA0012`, exactly per
+  note 68 ("an error about an annotation the user wrote must still be an error"): annotated
+  pairs (verified: `m(): string` vs `m(): number` still refuses in js), field-field pairs (one
+  slot, two types — no call-widening can defend that shape), accessor pairs (the gate refuses
+  them on its own), computed names, bodiless members, unresolvable bases.
+- Both declarations' symbols seed `runtimeDynamicSymbols`; the lowering's returns edge widens
+  calls resolving to either (`collectDynamicReturnsPass`: a `MethodDeclaration` whose own FQN
+  is seeded marks its calls — methods only, so no existing variable/parameter seed can reach
+  the arm). Declarations keep their types (the step-45 shape), so overload and vtable
+  contracts are untouched; a base-typed read of a derived instance (JSDoc `@param {A}`)
+  answers the derived value instead of garbage (probed `1`/`x`, matching Node).
+- The file verdict is honestly `static`: the widened call feeds an export edge whose tag
+  check settles it (`boundary-check` reports the type it produced), so no Unknown survives —
+  a virtual call plus a check, no shape table. Unannotated/dynamic receivers stay dynamic as
+  before (the golden covers both).
+
+**Not in this change.** Field-involved 2416 stays `STA0012` in js too (real refusal, one slot
+two types — same judgment shape as wave 4's field-vs-method TS2416). Function-scope
+method-override keeps the gate's `STA1214` (per-evaluation tables); the suppression may move
+such a program from `STA0012` to that `STA1214`, which names the true blocker.
+
 ## 272. Step-12(e)/41-42 drift check: no contradiction, only breadth; 2a(b) closed; Phase-5 header updated (2026-09-16)
 
 **Plan:** §8 Phase 5 header, step 2a(b), step 12(e). `plan.md` edited in this change.
