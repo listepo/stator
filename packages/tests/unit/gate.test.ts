@@ -311,7 +311,9 @@ void test('super is a marker on two forms, not a value', () => {
 void test('a derived constructor may validate before super(...)', () => {
   // Field initializers are spliced after the super call wherever it stands, so statements before
   // it must not read the receiver -- but validating or transforming the parameters is the shape
-  // real constructors take. A super call nested in a branch has no fixed position for them.
+  // real constructors take. With no initializers to splice, the call may also sit in `if`/`else`
+  // arms (one per arm, every arm covered); with initializers it keeps the top-level rule
+  // (plan.md §8 step 12(d), plan-notes 277).
   const base = 'class A {\n  n: number;\n  constructor(n: number) {\n    this.n = n;\n  }\n}\n';
   assert.deepEqual(
     codesFor(
@@ -328,6 +330,12 @@ void test('a derived constructor may validate before super(...)', () => {
   assert.deepEqual(
     codesFor(
       `${base}class B extends A {\n  constructor(n: number) {\n    if (n > 0) {\n      super(n);\n    } else {\n      super(0);\n    }\n  }\n}\nconsole.log(new B().n);`,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    codesFor(
+      `${base}class B extends A {\n  doubled = 0;\n  constructor(n: number) {\n    if (n > 0) {\n      super(n);\n    } else {\n      super(0);\n    }\n  }\n}\nconsole.log(new B().n);`,
     ),
     ['STA1214'],
   );

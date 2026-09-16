@@ -4,6 +4,38 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 277. Derived constructors may call super from if/else arms when no initializers splice (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** `derivedConstructorOrderOk` is now a recursive coverage analysis instead of
+a top-level scan (gate.ts only — the lowering already lowers arm-supers as ordinary
+statements, and its empty-prologue splice is a no-op exactly when the rule allows arms):
+
+- A class with NO instance field initializers (public or `#private`) may call `super(...)`
+  in `if`/`else` arms: one call per arm, every arm covered, no `this`/`super` read before
+  the call on any path (nesting and `else if` chains recurse free). Uninitialized fields
+  need no splicing; statics never enter the constructor.
+- The invariant is now EXACTLY-once per path, uniformly: a second call on a covered path —
+  straight-line (`super(); super();`) or branch (`super(); if (f) super();`) — is refused,
+  closing a live divergence (Node throws ReferenceError on a re-run; Stator double-ran the
+  base). Coverage is tri-state (`covered`/`conditional`/`none`) so a call after a
+  half-covering `if` still refuses, at any nesting depth.
+- Still refused, each probed: initializers + arms, loops, arrows/nested functions, `try`,
+  `switch`, `super` or `this` in a condition, reads before the call, missing-`else` paths.
+  Condition-`this` and arrow-super are checker-refused first (both modes); the gate checks
+  are defense in depth for shapes the checker misses.
+
+**Tests.** Decision fixtures `subset_class_super_late_{ts,js}` extended (branch ctors);
+goldens `class_super_late.{ts,js}` extended (nesting, `else if`, unbraced arms, post-`if`
+reads) — byte-for-byte vs Node. Unit pins in `class-members.test.ts` rewritten to the new
+rule (acceptance + HIR shape; initializer and re-run refusals) — the two failures that
+surfaced the behavior change, fixed in the same commit, never in bulk.
+
+**Not in this change.** `switch` arms (same principle, unbuilt), `try`-guarded calls, and
+explicit-object-return paths (refused as before).
+
 ## 276. Static fields after static blocks initialize in source order (2026-09-16)
 
 **Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task

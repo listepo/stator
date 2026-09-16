@@ -8519,8 +8519,10 @@ function lowerClass(
     }
     // Field initializers run AFTER `super(...)`, never before it: an initializer may read a field
     // the base constructor wrote (`doubled = this.sides * 2`), and in JavaScript `this` does not
-    // even exist until super returns. The gate proved the call is a top-level statement, so
-    // "after it" is the statement after it, wherever it stands.
+    // even exist until super returns. The gate proved the call is a top-level statement whenever
+    // initializers exist, so "after it" is the statement after it, wherever it stands; a class
+    // whose supers sit in `if`/`else` arms has no initializers by the same rule, and the empty
+    // prologue splices nowhere.
     const statements = fn.body.statements;
     const superIndex = statements.findIndex((s) => s.kind === 'super-call');
     const afterSuper = superIndex >= 0 ? superIndex + 1 : 0;

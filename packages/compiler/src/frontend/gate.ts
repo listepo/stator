@@ -3678,13 +3678,18 @@ function gateClass(
         continue;
       }
       constructors++;
-      // A derived constructor must call `super(...)` as a top-level statement before touching
-      // `this`. JavaScript forbids the touch, and the lowering splices the field initializers
-      // right after the call -- which is only a fixed position when the call is one. Statements
-      // before it may validate or transform the parameters, which is the shape real constructors
-      // take; a `super()` nested in an arrow or a branch has no fixed position, so it does not
-      // count.
-      if (baseClassOf(declaration, checker) !== undefined && !derivedConstructorOrderOk(member)) {
+      // A derived constructor must call `super(...)` exactly once on every path before
+      // touching `this`. JavaScript forbids the touch, and the lowering splices the field
+      // initializers right after the call -- which is only a fixed position when the call is
+      // one, so a class WITH initializers keeps the top-level rule while a class WITHOUT may
+      // call from `if`/`else` arms instead (one per arm, every arm covered). Statements
+      // before it may validate or transform the parameters, which is the shape real
+      // constructors take; a `super()` nested in an arrow, a loop, or any other uncountable
+      // position does not count.
+      if (
+        baseClassOf(declaration, checker) !== undefined &&
+        !derivedConstructorOrderOk(member, declaration)
+      ) {
         return notYet(
           'a derived constructor that does not open with super(...) is not yet supported',
           5,
@@ -4179,30 +4184,131 @@ function privateStaticPairComplete(
   return true;
 }
 
-/** Whether a derived constructor calls `super(...)` where the lowering can place the field
- * initializers after it: as a top-level statement, with no `this`/`super` read before it. Not
- * "contains a super call": a call inside an `if` or an arrow runs conditionally or from another
- * scope, and the base's fields would then be initialized on some paths only, or from none --
- * including when a top-level call is also present, since the nested one re-runs the base
- * constructor wherever it stands. */
-function derivedConstructorOrderOk(ctor: ts.ConstructorDeclaration): boolean {
-  const body = ctor.body?.statements ?? [];
-  let topLevelSuper = 0;
-  for (const stmt of body) {
+/** Whether a derived constructor calls `super(...)` exactly once on every completion path
+ * before touching `this` — and, when the class declares instance field initializers, from a
+ * single fixed position.
+ *
+ * Field initializers splice right after the super call, which is only a fixed position when
+ * the call is a top-level statement: a class WITH initializers keeps the old rule (one
+ * top-level `super(...)`, nothing nested). A class with NONE has nothing to splice, so the
+ * call may sit in `if`/`else` arms instead — one per arm, every arm covered, no reads before
+ * it on any path — which is the shape real validating constructors take. Anything with no
+ * fixed count (loops, a second call on an already-covered path — Node throws ReferenceError
+ * on a re-run) or no fixed position (arrows, nested functions, `try`, `switch`, a `super`
+ * in a condition) stays refused: skipping the call leaves `this` unbound, and re-running
+ * the base constructor re-initializes its fields, and both are silent if admitted. */
+function derivedConstructorOrderOk(
+  ctor: ts.ConstructorDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+): boolean {
+  // Instance field initializers (public and `#private` alike) splice after the call, so only
+  // their absence frees the call from one fixed position. Uninitialized fields need no
+  // splicing — every slot starts `undefined` — and statics never enter the constructor.
+  const flexible = !declaration.members.some(
+    (member) =>
+      ts.isPropertyDeclaration(member) &&
+      !isStaticMember(member) &&
+      member.initializer !== undefined,
+  );
+  return checkCtorList(ctor.body?.statements ?? [], flexible).coverage === 'covered';
+}
+
+/** The verdict for one statement list: accepted, and how much super it guarantees —
+ * every path (`covered`), some path (`conditional`, from an `if` without a covering
+ * `else`), or none. A later top-level call after `conditional` is a re-run on the covered
+ * paths, so the distinction is load-bearing, not bookkeeping. */
+interface CtorSuperCheck {
+  readonly ok: boolean;
+  readonly coverage: 'covered' | 'conditional' | 'none';
+}
+
+const CTOR_SUPER_FAIL: CtorSuperCheck = { ok: false, coverage: 'none' };
+
+/** The straight-line rule, plus `if`/`else` arms when `flexible` (see above). An arm is
+ * checked by the same rule recursively, so nesting and `else if` chains cost nothing extra;
+ * a missing `else` degrades its `if` to `conditional`, which later reads and a later call
+ * both refuse. */
+function checkCtorList(statements: readonly ts.Statement[], flexible: boolean): CtorSuperCheck {
+  let coverage: 'covered' | 'conditional' | 'none' = 'none';
+  const cover = (next: 'covered' | 'conditional'): CtorSuperCheck | undefined => {
+    // A call on an already-covering path re-runs the base constructor; Node answers
+    // ReferenceError, so the gate answers no. Straight-line double calls
+    // (`super(); super();`) land here too — same re-run, same refusal.
+    if (coverage !== 'none') {
+      return CTOR_SUPER_FAIL;
+    }
+    coverage = next;
+    return undefined;
+  };
+  for (const stmt of statements) {
     if (isTopLevelSuperCall(stmt)) {
-      topLevelSuper++;
+      const refused = cover('covered');
+      if (refused !== undefined) {
+        return refused;
+      }
+      continue;
+    }
+    // A bare block groups statements without branching them: its coverage merges like
+    // straight-line code. Like an `if` arm, a block hides the call from the splicer's
+    // top-level scan, so it counts only when there is nothing to splice (`flexible`).
+    if (flexible && ts.isBlock(stmt)) {
+      const inner = checkCtorList(stmt.statements, flexible);
+      if (!inner.ok) {
+        return CTOR_SUPER_FAIL;
+      }
+      if (inner.coverage !== 'none') {
+        const refused = cover(inner.coverage);
+        if (refused !== undefined) {
+          return refused;
+        }
+      } else if (coverage === 'none' && readsThisOrSuper(stmt)) {
+        return CTOR_SUPER_FAIL;
+      }
+      continue;
+    }
+    if (flexible && ts.isIfStatement(stmt) && !nestedSuperCall(stmt.expression)) {
+      // A `super` in the condition runs unconditionally but in expression position, where
+      // the initializers cannot follow it; a `this` there reads before any call. Both are
+      // the nested shapes below wearing a condition's clothes.
+      if (coverage === 'none' && readsThisOrSuper(stmt.expression)) {
+        return CTOR_SUPER_FAIL;
+      }
+      const thenCheck = checkCtorList([stmt.thenStatement], true);
+      if (!thenCheck.ok) {
+        return CTOR_SUPER_FAIL;
+      }
+      const elseCheck =
+        stmt.elseStatement === undefined ? undefined : checkCtorList([stmt.elseStatement], true);
+      if (elseCheck !== undefined && !elseCheck.ok) {
+        return CTOR_SUPER_FAIL;
+      }
+      const thenCoverage = thenCheck.coverage;
+      const elseCoverage = elseCheck?.coverage ?? 'none';
+      if (thenCoverage === 'covered' && elseCoverage === 'covered') {
+        const refused = cover('covered');
+        if (refused !== undefined) {
+          return refused;
+        }
+      } else if (thenCoverage !== 'none' || elseCoverage !== 'none') {
+        const refused = cover('conditional');
+        if (refused !== undefined) {
+          return refused;
+        }
+      } else if (coverage === 'none' && readsThisOrSuper(stmt)) {
+        return CTOR_SUPER_FAIL;
+      }
       continue;
     }
     // A `super()` nested anywhere but a nested class (whose own constructor owns it) re-runs
     // the base constructor from a position the initializers cannot follow.
     if (nestedSuperCall(stmt)) {
-      return false;
+      return CTOR_SUPER_FAIL;
     }
-    if (topLevelSuper === 0 && readsThisOrSuper(stmt)) {
-      return false;
+    if (coverage === 'none' && readsThisOrSuper(stmt)) {
+      return CTOR_SUPER_FAIL;
     }
   }
-  return topLevelSuper > 0;
+  return { ok: true, coverage };
 }
 
 /** `super(...)` as a statement of its own, rather than nested in another expression. */
@@ -4214,9 +4320,9 @@ function isTopLevelSuperCall(stmt: ts.Statement): boolean {
   );
 }
 
-/** Whether `stmt` hides a `super(...)` call in a nested position. Nested class bodies are
+/** Whether `node` hides a `super(...)` call in a nested position. Nested class bodies are
  * skipped: a `super()` there belongs to the inner class, which the gate vets on its own. */
-function nestedSuperCall(stmt: ts.Statement): boolean {
+function nestedSuperCall(node: ts.Node): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found || ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
@@ -4228,15 +4334,15 @@ function nestedSuperCall(stmt: ts.Statement): boolean {
     }
     ts.forEachChild(node, visit);
   };
-  visit(stmt);
+  visit(node);
   return found;
 }
 
-/** Whether `stmt` reads `this` or `super` outside a nested function or class body, whose own
+/** Whether `node` reads `this` or `super` outside a nested function or class body, whose own
  * `this`/`super` the gate vets where they stand. Arrows do not bound the walk: an arrow's `this`
  * IS the enclosing constructor's, and a `super()` nested in one has no fixed position for the
  * initializers, so neither counts as "before". */
-function readsThisOrSuper(stmt: ts.Statement): boolean {
+function readsThisOrSuper(node: ts.Node): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (
@@ -4254,7 +4360,7 @@ function readsThisOrSuper(stmt: ts.Statement): boolean {
     }
     ts.forEachChild(node, visit);
   };
-  visit(stmt);
+  visit(node);
   return found;
 }
 

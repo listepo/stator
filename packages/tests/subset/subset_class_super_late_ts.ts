@@ -23,3 +23,20 @@ class D extends B {
 
 const d = new D(21);
 export const x = d.n + d.m + d.doubled;
+
+// A class with no field initializers may call `super(...)` in `if`/`else` arms instead:
+// there is nothing to splice after the call, so every arm covering its paths is a fixed
+// enough position (plan.md §8 step 12(d), plan-notes 277). One call per path — a second
+// call re-runs the base constructor, which Node refuses.
+class E extends B {
+  constructor(flag: boolean, n: number) {
+    if (flag) {
+      super(n);
+    } else {
+      super(n * 2);
+    }
+  }
+}
+
+const e = new E(true, 21);
+export const y = e.n + new E(false, 21).n;
