@@ -60,9 +60,15 @@ import {
   baseClassOf,
   baseDescriptorName,
   classDeclarationOf,
+  classDisplayName,
+  classExpressionTarget,
+  classLikeOf,
   computedKeyStaticName,
   elementStaticKey,
+  expressionClassName,
+  hasAbstractModifier,
   heritageSubstitution,
+  innerClassExpression,
   heritageTuple,
   isBrandedPointer,
   isPrivateMemberName,
@@ -1517,6 +1523,16 @@ function collectDynamicReturnsPass(
     if (fqn === undefined || fqns.has(fqn)) {
       return;
     }
+    // A suppressed-2416 override pair (program.ts): the hierarchy is inconsistent, so a call
+    // resolving to either declaration answers Unknown instead of trusting one side's return —
+    // or a base-typed read of a derived instance answers garbage. Seeding names the
+    // declarations; this names the calls, leaving overload and vtable contracts (the
+    // declarations) untouched. Methods only: variable and parameter seeds name bindings,
+    // never callables, so no existing seed can reach this arm.
+    if (ts.isMethodDeclaration(fn) && knownDynamic.has(fqn)) {
+      fqns.add(fqn);
+      return;
+    }
     const target = declaredReturnOf(fn, checker);
     if (target === undefined) {
       return;
@@ -1811,6 +1827,20 @@ function lowerDeclarationList(
       statements: [],
       flatten: true,
     };
+  }
+  // A class expression bound by a single `const` emits its descriptor under the variable's
+  // name and binds no value — the expression twin of the alias skip above (plan.md §8 step
+  // 12(d); see `classExpressionTarget` in `../frontend/types.ts`). Every in-place use erases
+  // to the expression, so the name needs no slot; every other read is refused at the gate.
+  // Only the formation spelling qualifies, mirroring the gate exactly: anything else lowers
+  // as written and fails where it always did.
+  if (
+    decl.initializer !== undefined &&
+    ts.isClassExpression(decl.initializer) &&
+    isSingleConstDeclarator(decl) &&
+    expressionClassName(decl.initializer) !== undefined
+  ) {
+    return lowerClass(decl.initializer, sourceFile, checker, bindings, diagnostics);
   }
   // A generic arrow or function expression assigned to a `const` lowers to nothing: its
   // specializations are already above (collected by tuple), and the name itself binds no value
@@ -2403,7 +2433,7 @@ function placeName(
     return undefined;
   }
   const found = staticMemberOf(node, checker, false);
-  return found === undefined || found.owner.name === undefined
+  return found === undefined || classDisplayName(found.owner) === undefined
     ? undefined
     : staticName(hirClassName(found.owner), node.name.text);
 }
@@ -2461,7 +2491,7 @@ function staticName(className: string, member: string): string {
  * declaration that has not been lowered yet (a forward reference, which is TDZ the compiler does
  * not model) falls back to the source name, which is what the descriptor will carry too: the
  * declaration site renames only against bindings already made. */
-function hirClassName(declaration: ts.ClassDeclaration): string {
+function hirClassName(declaration: ts.ClassDeclaration | ts.ClassExpression): string {
   return hirNameOf(declaration) ?? declaration.name?.text ?? '';
 }
 
@@ -2478,9 +2508,9 @@ function hirClassName(declaration: ts.ClassDeclaration): string {
 function privateUse(
   name: ts.PrivateIdentifier,
   checker: ts.TypeChecker,
-): { owner: ts.ClassDeclaration; property: string } | undefined {
+): { owner: ts.ClassDeclaration | ts.ClassExpression; property: string } | undefined {
   const owner = brandDeclaringClass(name, checker);
-  const ownerName = owner?.name?.text;
+  const ownerName = owner === undefined ? undefined : classDisplayName(owner);
   if (owner === undefined || ownerName === undefined) {
     return undefined;
   }
@@ -2493,7 +2523,7 @@ function privateUse(
  * chain: each class owns an independent pair (`get #x@A` vs `get #x@B`), so the halves that
  * matter are the owner's own. */
 function privateAccessorHalves(
-  owner: ts.ClassDeclaration,
+  owner: ts.ClassDeclaration | ts.ClassExpression,
   raw: string,
 ): { get: boolean; set: boolean } {
   let get = false;
@@ -2517,7 +2547,7 @@ function privateAccessorHalves(
 }
 
 /** Whether the lexical owner's `#private` member is an accessor pair (either half). */
-function privateIsAccessor(owner: ts.ClassDeclaration, raw: string): boolean {
+function privateIsAccessor(owner: ts.ClassDeclaration | ts.ClassExpression, raw: string): boolean {
   return owner.members.some(
     (m) =>
       m.name !== undefined &&
@@ -2543,7 +2573,10 @@ function privateWriteIsAccessor(
 
 /** The member declaration a `#private` use's lexical owner holds for it, if it holds one as a
  * member node (a `.js` field assigned in the constructor has none -- the slot still exists). */
-function privateOwnerMember(owner: ts.ClassDeclaration, raw: string): ts.ClassElement | undefined {
+function privateOwnerMember(
+  owner: ts.ClassDeclaration | ts.ClassExpression,
+  raw: string,
+): ts.ClassElement | undefined {
   return owner.members.find(
     (m) => m.name !== undefined && ts.isPrivateIdentifier(m.name) && m.name.text === raw,
   );
@@ -2798,7 +2831,7 @@ function memberAssignment(
     : undefined;
   const staticAccessor =
     staticFound !== undefined &&
-    staticFound.owner.name !== undefined &&
+    classDisplayName(staticFound.owner) !== undefined &&
     ts.isPropertyAccessExpression(targetNode) &&
     (ts.isGetAccessorDeclaration(staticFound.member) ||
       ts.isSetAccessorDeclaration(staticFound.member))
@@ -4424,7 +4457,7 @@ function lowerExpression(
       }
     }
     const found = staticMemberOf(node, checker, undefined);
-    if (found !== undefined && found.owner.name !== undefined) {
+    if (found !== undefined && classDisplayName(found.owner) !== undefined) {
       if (ts.isGetAccessorDeclaration(found.member) || ts.isSetAccessorDeclaration(found.member)) {
         // A static accessor is not a binding: reading `C.value` RUNS the getter. A missing half
         // is the static twin of the instance hole (STA4067 there) -- the call below reports
@@ -5838,18 +5871,17 @@ function lowerExpression(
     const direct = checker.getSymbolAtLocation(node.right)?.valueDeclaration;
     // A class alias names the same descriptor its target does: `o instanceof K` on
     // `const K = C` is the pointer comparison against `C`, so the direct check keeps its exact
-    // shape and the alias resolves beside it.
+    // shape and the alias resolves beside it. A bound class expression names its own
+    // descriptor the same way (`o instanceof C` on `const C = class …`; plan.md §8 step 12(d)).
     const declaration =
-      direct !== undefined && ts.isClassDeclaration(direct)
+      direct !== undefined && (ts.isClassDeclaration(direct) || ts.isClassExpression(direct))
         ? direct
         : ts.isIdentifier(node.right)
-          ? aliasedClassDeclaration(node.right, checker)
+          ? (aliasedClassDeclaration(node.right, checker) ??
+            classExpressionTarget(node.right, checker) ??
+            innerClassExpression(node.right, checker))
           : undefined;
-    if (
-      declaration === undefined ||
-      !ts.isClassDeclaration(declaration) ||
-      declaration.name === undefined
-    ) {
+    if (declaration === undefined || classDisplayName(declaration) === undefined) {
       diagnostics.push(
         lowerDiagnostic(
           node.right,
@@ -7386,11 +7418,18 @@ function classTupleFor(
  * recovered tuple for a generic one. `null` when the class is generic and no tuple exists —
  * the internal-error backstop for a use the gate should have refused. */
 function mangleClassName(
-  owner: ts.ClassDeclaration,
+  owner: ts.ClassDeclaration | ts.ClassExpression,
   receiver: ts.Expression,
   checker: ts.TypeChecker,
   bindings: Scope | undefined,
 ): string | null {
+  if (ts.isClassExpression(owner)) {
+    // An expression class is reached through its HIR identity, recorded when the formation
+    // lowered (plan.md §8 step 12(d)); its display name is only the fallback for a use the
+    // formation does not precede. Generic expressions never reach here (the gate refuses
+    // them), so there is no tuple to specialize.
+    return hirNameOf(owner) ?? expressionClassName(owner) ?? null;
+  }
   const name = owner.name?.text;
   if (name === undefined || name === '') {
     return null;
@@ -7409,6 +7448,24 @@ function mangleClassName(
   return tuple === undefined ? null : specializationName(name, tuple);
 }
 
+/** The class-like a receiver's type resolves to for owner/dispatch questions: declarations
+ * through the existing path, bound expressions through their descriptor identity
+ * (plan.md §8 step 12(d)). A shadowed expression resolves to its HIR name downstream via
+ * `mangleClassName`, exactly like a shadowed declaration. `undefined` for anything else —
+ * the caller falls back to constraint, shape, or dynamic dispatch as before. */
+function receiverClassLike(
+  receiverType: ts.Type,
+): ts.ClassDeclaration | ts.ClassExpression | undefined {
+  const declaration = classDeclarationOf(receiverType);
+  if (declaration !== undefined) {
+    return declaration;
+  }
+  const like = classLikeOf(receiverType);
+  return like !== undefined && ts.isClassExpression(like) && expressionClassName(like) !== undefined
+    ? like
+    : undefined;
+}
+
 /** Does this expression evaluate to an instance of a class this subset lays out?
  *
  * Asked of the checker's type rather than of a lowered node, because it decides WHICH lowering to
@@ -7425,7 +7482,7 @@ function declaringClassName(
   // A `T`-typed receiver answers through its constraint: per specialization the call runs on
   // the bound class, so the owner comes from there.
   const declaration =
-    classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
+    receiverClassLike(receiverType) ?? constraintDeclaration(receiverType, checker);
   if (declaration !== undefined) {
     const owner = methodDeclaringClass(declaration, method, checker);
     if (owner === undefined) {
@@ -7469,10 +7526,16 @@ function declaringClassName(
  * Scanning per call site is quadratic in a file's classes and linear in its chains. It is also
  * exact, needs no plumbing through the lowering, and a program with enough classes for that to
  * matter has a much larger emitter cost -- memoize when a measurement says to. */
-function classesIn(sourceFile: ts.SourceFile): ts.ClassDeclaration[] {
-  const found: ts.ClassDeclaration[] = [];
+function classesIn(sourceFile: ts.SourceFile): (ts.ClassDeclaration | ts.ClassExpression)[] {
+  const found: (ts.ClassDeclaration | ts.ClassExpression)[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isClassDeclaration(node)) {
+    // Declarations and bound expressions alike: an override family may span the spelling
+    // boundary (`const C = class extends B { m() … }` overrides `B.m`), and the direct-vs-
+    // virtual question is asked of the file, not of the spelling.
+    if (
+      ts.isClassDeclaration(node) ||
+      (ts.isClassExpression(node) && expressionClassName(node) !== undefined)
+    ) {
       found.push(node);
     }
     ts.forEachChild(node, visit);
@@ -7482,7 +7545,7 @@ function classesIn(sourceFile: ts.SourceFile): ts.ClassDeclaration[] {
 }
 
 function declaresMethod(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   name: string,
   checker: ts.TypeChecker,
 ): boolean {
@@ -7498,7 +7561,7 @@ function declaresMethod(
   );
 }
 
-function className(declaration: ts.ClassDeclaration): string {
+function className(declaration: ts.ClassDeclaration | ts.ClassExpression): string {
   return declaration.name?.text ?? '';
 }
 
@@ -7588,7 +7651,7 @@ function accessorCall(
  * Dispatch is always direct: a private name never overrides, it re-declares, so there is exactly
  * one implementation per (owner, name). */
 function lowerPrivateRead(
-  priv: { owner: ts.ClassDeclaration; property: string },
+  priv: { owner: ts.ClassDeclaration | ts.ClassExpression; property: string },
   node: ts.PropertyAccessExpression,
   target: Expression,
   sourceFile: ts.SourceFile,
@@ -7721,15 +7784,15 @@ function staticAccessorCall(
  * the read half a compound fold builds -- a set-only static, like a set-only instance
  * property, has no read, which is legal. */
 function staticAccessorHalves(
-  owner: ts.ClassDeclaration,
+  owner: ts.ClassDeclaration | ts.ClassExpression,
   property: string,
   checker: ts.TypeChecker,
 ): { get: boolean; set: boolean } {
   let get = false;
   let set = false;
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let current: ts.ClassDeclaration | undefined = owner;
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = owner;
     current !== undefined && !seen.has(current);
     current = baseClassOf(current, checker)
   ) {
@@ -7775,10 +7838,10 @@ function accessorOwner(
 ): string | undefined {
   const receiverType = checker.getTypeAtLocation(receiver);
   const declaration =
-    classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
+    receiverClassLike(receiverType) ?? constraintDeclaration(receiverType, checker);
   const found =
     declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
-  if (found?.owner.name?.text !== undefined) {
+  if (found?.owner !== undefined && classDisplayName(found.owner) !== undefined) {
     return mangleClassName(found.owner, receiver, checker, bindings) ?? undefined;
   }
   // An accessor through `T` bounded by something without a class: same namesake rule as a
@@ -7815,7 +7878,7 @@ function hasAccessorHalf(
 ): boolean {
   const receiverType = checker.getTypeAtLocation(receiver);
   const declaration =
-    classDeclarationOf(receiverType) ?? constraintDeclaration(receiverType, checker);
+    receiverClassLike(receiverType) ?? constraintDeclaration(receiverType, checker);
   const found =
     declaration === undefined ? undefined : accessorDeclaringClass(declaration, property, checker);
   if (found !== undefined) {
@@ -7921,8 +7984,15 @@ function isClassInstance(node: ts.Expression, checker: ts.TypeChecker, bindings:
   // the expression `C` is the class's STATIC side, whose symbol is still the class declaration, so
   // `tsTypeToHType` answers with the very layout `new C()` produces. Only the spelling separates
   // them, which is why this asks the AST and not the type. A class ALIAS (`const K = C`) names
-  // the same static side through its target declaration, so it takes the same exemption.
-  if (ts.isIdentifier(node) && aliasedClassDeclaration(node, checker) !== undefined) {
+  // the same static side through its target declaration, so it takes the same exemption — as
+  // does a class EXPRESSION's binding (`const C = class …`), whose static side maps to the
+  // layout through the expression (plan.md §8 step 12(d)).
+  if (
+    ts.isIdentifier(node) &&
+    (aliasedClassDeclaration(node, checker) ??
+      classExpressionTarget(node, checker) ??
+      innerClassExpression(node, checker)) !== undefined
+  ) {
     return false;
   }
   return typeAt(node, checker, bindings).kind === 'object';
@@ -8036,8 +8106,113 @@ function classSpecType(spec: ClassSpecialization, checker: ts.TypeChecker): HTyp
  * constructor body, in declaration order, which is what the language specifies and what lets the
  * emitter have exactly one place that populates an object. A class with initializers but no
  * constructor gets an empty one to hold them. */
+/** The stand-in for a bodiless `abstract` member: a function with the declaration's shape
+ * (receiver parameter zero, mirrored parameter list) whose body throws Node's TypeError.
+ *
+ * The stub exists so the base class has a complete method table and direct-call target: a
+ * virtual call always lands on the runtime class's entry (the concrete override), and a
+ * direct call to an abstract method has no instantiable receiver in any checked program
+ * (an abstract class is never constructed, a concrete subclass always overrides — both
+ * checker-enforced), so the stub never runs. If it ever does — `super.m()` on an abstract
+ * base included — a catchable TypeError is Node's answer too (`A.prototype.m` is
+ * `undefined` there). Async and generator flags stay false: the throw transfers before any
+ * promise or iterator could be built, exactly as a synchronous throw in a real body would.
+ *
+ * Parameters mirror the declaration (names, types, rest-ness) for arity's sake; defaults
+ * are dropped, because a default that runs means the call reached a body that never runs.
+ * Bindings are declared in a fresh function scope like `lowerFunction` does, so a verifier
+ * that resolves parameter names the way it resolves any function's finds them. */
+function abstractMemberStub(
+  member: ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
+  receiver: HType,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+): FunctionExpr {
+  const span = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
+  const inner = bindings.functionScope();
+  const params: Parameter[] = [];
+  params.push({
+    name: RECEIVER,
+    type: receiver,
+    span: makeSpan(member.getStart(sourceFile), 0, sourceFile),
+  });
+  inner.set(RECEIVER, receiver);
+  for (const param of member.parameters) {
+    const type = typeAt(param, checker, bindings);
+    const at = makeSpan(param.getStart(sourceFile), param.getWidth(sourceFile), sourceFile);
+    if (ts.isIdentifier(param.name)) {
+      const hirName = inner.declare(param.name.text, type);
+      hirNameOfDeclaration.set(param, hirName);
+      params.push({
+        name: hirName,
+        type,
+        span: at,
+        ...(param.dotDotDotToken !== undefined ? { rest: true as const } : {}),
+      });
+      continue;
+    }
+    const tmp = nextBindTemp();
+    inner.set(tmp, type);
+    params.push({
+      name: tmp,
+      type,
+      span: at,
+      ...(param.dotDotDotToken !== undefined ? { rest: true as const } : {}),
+    });
+  }
+  const declared = typeAt(member, checker, bindings);
+  const type = hFunction(
+    params.map((p) => p.type),
+    declared.kind === 'fn' ? declared.ret : H_UNDEFINED,
+  );
+  const display =
+    member.name !== undefined && ts.isIdentifier(member.name) ? member.name.text : 'anonymous';
+  const message: Expression = {
+    kind: 'string-literal',
+    type: H_STRING,
+    span,
+    value: `abstract method '${display}' has no implementation`,
+  };
+  const body: Block = {
+    kind: 'block',
+    type: H_UNDEFINED,
+    span,
+    statements: [
+      {
+        kind: 'throw-statement',
+        type: H_UNDEFINED,
+        span,
+        value: {
+          kind: 'error-new',
+          type: errorHType('TypeError'),
+          span,
+          ctor: 'TypeError',
+          arg: message,
+        },
+      },
+    ],
+  };
+  const name =
+    member.name !== undefined && ts.isIdentifier(member.name) ? member.name.text : undefined;
+  return {
+    kind: 'function',
+    type,
+    span,
+    ...(name !== undefined && { name }),
+    params,
+    body,
+    isAsync: false,
+    isGenerator: false,
+    envVars: [],
+    captures: [],
+    needsEnv: false,
+    provenance: provenanceOf(member, params, type),
+  };
+}
+
 function lowerClass(
-  node: ts.ClassDeclaration,
+  node: ts.ClassDeclaration | ts.ClassExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   bindings: Scope,
@@ -8049,10 +8224,24 @@ function lowerClass(
   },
 ): ClassDeclaration | Block | null {
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-  const symbol = node.name === undefined ? undefined : checker.getSymbolAtLocation(node.name);
-  const self = symbol === undefined ? undefined : checker.getDeclaredTypeOfSymbol(symbol);
+  // An expression has no name of its own: its identity is Node's `.name` for the spelling —
+  // the inner name, else the bound variable (see `expressionClassName`) — which doubles as
+  // the scope registration below (shadowing renames exactly like a declaration's) and as the
+  // `#private` owner and span-lookup name. Its instance type comes from the construct
+  // signature's return: the variable binds the static side, and the inner name (if any)
+  // is visible only inside, so neither names the instance from here.
+  const displayName = classDisplayName(node);
+  let self: ts.Type | undefined;
+  if (displayName !== undefined) {
+    if (ts.isClassExpression(node)) {
+      self = checker.getTypeAtLocation(node).getConstructSignatures()[0]?.getReturnType();
+    } else if (node.name !== undefined) {
+      const symbol = checker.getSymbolAtLocation(node.name);
+      self = symbol === undefined ? undefined : checker.getDeclaredTypeOfSymbol(symbol);
+    }
+  }
   const type = self === undefined ? undefined : tsTypeToHType(self, checker);
-  if (node.name === undefined || type === undefined || type.kind !== 'object') {
+  if (displayName === undefined || type === undefined || type.kind !== 'object') {
     diagnostics.push(
       lowerDiagnostic(
         node,
@@ -8078,14 +8267,14 @@ function lowerClass(
   // by gate rule, so its source name is already unique, and the tuple lowerings share one
   // declaration node whose HIR name belongs to the carrier.
   if (spec === undefined) {
-    hirNameOfDeclaration.set(node, bindings.declare(node.name.text, type));
+    hirNameOfDeclaration.set(node, bindings.declare(displayName, type));
   }
   // The HIR identity of this declaration: the mangled tuple for a specialization, the renamed
   // binding for a shadowing class, the source name otherwise. Every use site resolves to the
   // same string through `hirClassName`, which is what keeps `new`, method owners, statics,
   // `instanceof` and bases naming one descriptor.
   const selfName =
-    spec !== undefined && !spec.staticsOnly ? spec.name : (hirNameOf(node) ?? node.name.text);
+    spec !== undefined && !spec.staticsOnly ? spec.name : (hirNameOf(node) ?? displayName);
   // The layout answers under the HIR identity too: the verifier matches every member function's
   // receiver against the declaration's name, and every `super` against its bases, so a renamed
   // class whose layout still spelled the source name would fail its own checks. Each base name
@@ -8093,7 +8282,13 @@ function lowerClass(
   // the base is always lowered first, source order being what makes the descriptor's forward
   // reference to it legal.
   const renameBase = (name: string): string => {
-    const owner = ancestry(node, checker).find((candidate) => candidate.name?.text === name);
+    // Expression bases match by display name (Node's `.name`), declarations by source name.
+    const owner = ancestry(node, checker).find(
+      (candidate) =>
+        (ts.isClassExpression(candidate)
+          ? expressionClassName(candidate)
+          : candidate.name?.text) === name,
+    );
     const renamed = owner === undefined ? undefined : hirNameOf(owner);
     return renamed ?? name;
   };
@@ -8118,7 +8313,7 @@ function lowerClass(
       : layout.fields.map((field) => {
           const at =
             node.members.find((m) =>
-              memberDeclaresName(m, field.name, sourceFile, checker, node.name?.text),
+              memberDeclaresName(m, field.name, sourceFile, checker, displayName),
             ) ?? node;
           return {
             name: field.name,
@@ -8139,11 +8334,55 @@ function lowerClass(
   )[] = [];
   const staticAccessors: (ts.GetAccessorDeclaration | ts.SetAccessorDeclaration)[] = [];
   const staticNodes: (ts.PropertyDeclaration | ts.MethodDeclaration)[] = [];
+  // Bodiless `abstract` members declare but never run: the subclass implementation carries the
+  // behavior, while the declaration still needs a table entry and a direct-call target in THIS
+  // class (plan.md §8 step 12(d)). They collect here and lower to throw-stubs beside the real
+  // methods below — reachable in no checked program (an abstract class is never constructed,
+  // a concrete subclass always overrides), so the stub's only job is to exist with the right
+  // shape and throw Node's TypeError if it ever runs.
+  const abstractStubs: (
+    | ts.MethodDeclaration
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration
+  )[] = [];
   // Static initialization blocks run at class-definition time. They lower after the declaration
   // (which initializes every static) into the same scope, so a block observes exactly the
   // bindings the class statement established.
   const staticBlocks: ts.ClassStaticBlockDeclaration[] = [];
+  // Static FIELD initializers execute in source order relative to the blocks (plan.md §8 step
+  // 12(d)): the run before the first block initializes with the class, each later run assigns
+  // after its block. Static METHODS stay hoisted with the class — defining one runs nothing,
+  // so their forward references keep working exactly as they do today. Runs past the first
+  // hold the fields whose declaration below carries `undefined` and whose assignment the tail
+  // emits after its block.
+  const staticFieldRuns: ts.PropertyDeclaration[][] = [];
+  {
+    let run: ts.PropertyDeclaration[] = [];
+    for (const member of node.members) {
+      if (ts.isClassStaticBlockDeclaration(member)) {
+        staticFieldRuns.push(run);
+        run = [];
+      } else if (ts.isPropertyDeclaration(member) && isStaticMember(member)) {
+        run.push(member);
+      }
+    }
+    staticFieldRuns.push(run);
+  }
+  const firstRunFields = new Set<ts.PropertyDeclaration>(staticFieldRuns[0] ?? []);
   for (const member of node.members) {
+    // An `abstract` member without a body is a declaration only: it joins neither the static
+    // lists (a `static abstract` is a checker error the gate never lets through, so reaching
+    // here one is already refused) nor the method lists below — the stub loop emits it.
+    if (
+      (ts.isMethodDeclaration(member) ||
+        ts.isGetAccessorDeclaration(member) ||
+        ts.isSetAccessorDeclaration(member)) &&
+      member.body === undefined &&
+      hasAbstractModifier(member)
+    ) {
+      abstractStubs.push(member);
+      continue;
+    }
     // A static belongs to the class object, not to the layout: it is neither a slot nor a member
     // function, so it leaves both lists before either is built.
     if (
@@ -8207,6 +8446,7 @@ function lowerClass(
     // would lower a type parameter no substitution binds, and none of it can run (the class
     // is never constructed under its own name).
     methodNodes.length = 0;
+    abstractStubs.length = 0;
     staticBlocks.length = 0;
   }
   for (const member of staticNodes) {
@@ -8244,8 +8484,10 @@ function lowerClass(
       // No receiver: a static method is an ordinary function that happens to be written inside a
       // class. `this` inside one is refused at the gate, which is what makes that true.
       value = lowerFunction(member, sourceFile, checker, bindings, diagnostics);
-    } else if (member.initializer === undefined) {
-      // A declared-but-uninitialized static reads `undefined`, exactly as a field slot does.
+    } else if (member.initializer === undefined || !firstRunFields.has(member)) {
+      // A declared-but-uninitialized static reads `undefined`, exactly as a field slot does —
+      // and so does a field whose run sits past a static block: its slot is `undefined` until
+      // the tail's assignment after its block runs (plan.md §8 step 12(d)).
       value = { kind: 'undefined-literal', type: H_UNDEFINED, span: at };
     } else {
       value = lowerExpression(member.initializer, sourceFile, checker, bindings, diagnostics);
@@ -8308,7 +8550,13 @@ function lowerClass(
     if (fn === null) {
       return null;
     }
-    methods.push({ name: memberFunctionName(method, sourceFile, checker, node.name?.text), fn });
+    methods.push({ name: memberFunctionName(method, sourceFile, checker, displayName), fn });
+  }
+  for (const member of abstractStubs) {
+    methods.push({
+      name: memberFunctionName(member, sourceFile, checker, displayName),
+      fn: abstractMemberStub(member, layout, sourceFile, checker, bindings),
+    });
   }
 
   // A derived class always needs a constructor even with nothing of its own to do, because the
@@ -8372,15 +8620,17 @@ function lowerClass(
       checker,
       bindings,
       diagnostics,
-      node.name?.text ?? '',
+      displayName,
     );
     if (prologue === null) {
       return null;
     }
     // Field initializers run AFTER `super(...)`, never before it: an initializer may read a field
     // the base constructor wrote (`doubled = this.sides * 2`), and in JavaScript `this` does not
-    // even exist until super returns. The gate proved the call is a top-level statement, so
-    // "after it" is the statement after it, wherever it stands.
+    // even exist until super returns. The gate proved the call is a top-level statement whenever
+    // initializers exist, so "after it" is the statement after it, wherever it stands; a class
+    // whose supers sit in `if`/`else` arms has no initializers by the same rule, and the empty
+    // prologue splices nowhere.
     const statements = fn.body.statements;
     const superIndex = statements.findIndex((s) => s.kind === 'super-call');
     const afterSuper = superIndex >= 0 ? superIndex + 1 : 0;
@@ -8422,7 +8672,7 @@ function lowerClass(
   // reordering. `#private` methods never join it (lexical dispatch, see `declaresMethod`).
   // Capturing methods join by NAME with a NULL entry at emission (no one constant form);
   // the dynamic get skips NULLs for the hidden slot. The carrier has no methods to tabulate.
-  const declaredName = node.name?.text ?? '';
+  const declaredName = displayName;
   const vtableMethods = layout.methods.filter((m) => !isPrivateMemberName(m.name));
   const vtable =
     spec?.staticsOnly === true
@@ -8433,7 +8683,8 @@ function lowerClass(
             declaringDecl === undefined
               ? layout.name
               : declaringDecl.typeParameters !== undefined &&
-                  declaringDecl.typeParameters.length > 0
+                  declaringDecl.typeParameters.length > 0 &&
+                  ts.isClassDeclaration(declaringDecl)
                 ? baseDescriptorName(declaringDecl, node, checker)
                 : (hirNameOf(declaringDecl) ?? declaringDecl.name?.text ?? layout.name);
           return {
@@ -8467,12 +8718,33 @@ function lowerClass(
   // wrapper keeps the declaration and its blocks one statement in source order, and every pass
   // sees the ordinary statements it already knows.
   const statements: Statement[] = [classDecl];
-  for (const block of staticBlocks) {
+  for (const [index, block] of staticBlocks.entries()) {
     const lowered = lowerBlock(block.body, sourceFile, checker, bindings.child(), diagnostics);
     if (lowered === null) {
       return null;
     }
     statements.push(lowered);
+    // The field run after this block: each initialized field assigns its source-order value
+    // now, into the `undefined` slot the declaration carried (plan.md §8 step 12(d)). Same
+    // shape as the declaration's own value — no boundary, exactly as if it had initialized
+    // with the class — only later. Uninitialized fields need nothing: `undefined` is already
+    // what they are.
+    for (const field of staticFieldRuns[index + 1] ?? []) {
+      if (field.initializer === undefined) {
+        continue;
+      }
+      const value = lowerExpression(field.initializer, sourceFile, checker, bindings, diagnostics);
+      if (value === null) {
+        return null;
+      }
+      statements.push({
+        kind: 'assignment',
+        type: typeAt(field, checker, bindings),
+        span: makeSpan(field.getStart(sourceFile), field.getWidth(sourceFile), sourceFile),
+        target: staticName(selfName, declaredMemberName(field, sourceFile, checker)),
+        value,
+      });
+    }
   }
   return {
     kind: 'block',
@@ -8595,7 +8867,7 @@ function lowerFieldInitializers(
  * initializer behind an arrow reads it as a capture (plan.md §8 step 25), and the arrows the
  * caller prepends resolve that capture against this environment. */
 function synthesizedConstructor(
-  node: ts.ClassDeclaration,
+  node: ts.ClassDeclaration | ts.ClassExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   self: HObject,
@@ -8650,7 +8922,7 @@ function synthesizedConstructor(
 
 /** The nearest constructor actually written in a class's ancestry, or `undefined` if none is. */
 function nearestConstructor(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): ts.ConstructorDeclaration | undefined {
   for (const current of ancestry(declaration, checker).toReversed()) {
@@ -8784,7 +9056,7 @@ interface ClassSpecialization {
   readonly staticsOnly: boolean;
 }
 
-function isGenericClass(node: ts.ClassDeclaration): boolean {
+function isGenericClass(node: ts.ClassDeclaration | ts.ClassExpression): boolean {
   return node.typeParameters !== undefined && node.typeParameters.length > 0;
 }
 
@@ -9054,7 +9326,15 @@ function collectSpecializations(
       continue;
     }
     const base = baseClassOf(declaration, checker);
-    if (base === undefined || base.name === undefined || !isGenericClass(base)) {
+    // A generic expression base belongs to a refused program (the gate holds generic class
+    // expressions); the specialization queue below only knows declarations, so it seeds
+    // nothing here rather than misshaping the tuple.
+    if (
+      base === undefined ||
+      !ts.isClassDeclaration(base) ||
+      base.name === undefined ||
+      !isGenericClass(base)
+    ) {
       continue;
     }
     const tuple = heritageTuple(base, declaration, checker);
@@ -9407,7 +9687,9 @@ function renameShadowedClass(node: ts.Node, type: HType, checker: ts.TypeChecker
   if (type.kind !== 'object') {
     return type;
   }
-  const declaration = classDeclarationOf(checker.getTypeAtLocation(node));
+  // Declarations and bound expressions alike: a shadowed `const C = class …` owns a
+  // descriptor per spelling exactly like a shadowed declaration (plan.md §8 step 23).
+  const declaration = classLikeOf(checker.getTypeAtLocation(node));
   if (declaration === undefined) {
     return type;
   }
