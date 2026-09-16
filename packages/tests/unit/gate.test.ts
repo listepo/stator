@@ -441,38 +441,82 @@ void test('a class alias erases in place and stays not-yet as a value', () => {
   }
 });
 
-void test('a class expression is vetted like a declaration but stays not-yet on the class object', () => {
+void test('a bound class expression is vetted like a declaration and compiles', () => {
   // `const C = class { … }` used to fall into the describeKind catch-all ("classes is not yet
-  // supported"). It now runs through gateClass: a broken member reads as the member problem,
-  // and a well-formed expression names itself instead. The verdict stays STA1214 in both modes:
-  // an expression IS a value, and a value needs the class object (plan.md §8 step 12e), which
-  // does not exist here -- so the lowering keeps its no-ClassExpression-arm shape.
+  // supported"). It now runs through gateClass like a declaration: a broken member reads as
+  // the member problem, and a well-formed bound expression is accepted — the formation emits
+  // the descriptor and binds no value, and every in-place use erases to it (plan.md §8 step
+  // 12(d), plan-notes 278).
   for (const mode of ['ts', 'js'] as const) {
     const { program } = createProgram(
-      'const C = class { m() { return 7; } }',
+      'const C = class { m() { return 7; } }\nconsole.log(new C().m());',
       mode === 'js' ? '/test.js' : '/test.ts',
     );
-    const diags = gateProgram(program, mode);
     assert.deepEqual(
-      diags.map((d) => d.code),
-      ['STA1214'],
-    );
-    assert.match(
-      diags[0]?.message ?? '',
-      /an anonymous class expression is not yet supported; planned for Phase 5/,
+      gateProgram(program, mode).map((d) => d.code),
+      [],
     );
   }
-  // A named expression names its inner binding; an anonymous DECLARATION keeps its own message.
+  // A named expression vets the same way; the inner name is visible in the class body only.
   const { program: namedProgram } = createProgram(
-    'const C = class D { m() { return 7; } }',
+    'const C = class D { m() { return 7; } n() { return new D().m(); } }\nconsole.log(new C().n());',
     '/test.ts',
   );
-  const named = gateProgram(namedProgram, 'ts');
   assert.deepEqual(
-    named.map((d) => d.code),
+    gateProgram(namedProgram, 'ts').map((d) => d.code),
+    [],
+  );
+  // Still refused, each with the message that names it: an unbound expression has no identity,
+  // a `let` formation can be repointed, a generic one has nowhere to specialize, and an
+  // opaque use reads the class object (plan.md §8 step 12e).
+  assert.deepEqual(
+    codesFor(
+      'function take(x: unknown): void {}\ntake(class { m() { return 1; } });\nexport const x = 1;\n',
+    ),
     ['STA1214'],
   );
-  assert.match(named[0]?.message ?? '', /a class expression 'D' is not yet supported/);
+  const unbound = gateProgram(
+    createProgram(
+      'function take(x: unknown): void {}\ntake(class { m() { return 1; } });\nexport const x = 1;\n',
+    ).program,
+    'ts',
+  );
+  assert.match(
+    unbound[0]?.message ?? '',
+    /an anonymous class expression is not yet supported; planned for Phase 5/,
+  );
+  assert.deepEqual(codesFor('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n'), [
+    'STA1214',
+  ]);
+  const letBound = gateProgram(
+    createProgram('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n').program,
+    'ts',
+  );
+  assert.match(letBound[0]?.message ?? '', /a class expression 'D' is not yet supported/);
+  assert.deepEqual(codesFor('const C = class<T> { m(): T | undefined { return undefined; } }\n'), [
+    'STA1214',
+  ]);
+  const generic = gateProgram(
+    createProgram('const C = class<T> { m(): T | undefined { return undefined; } }\n').program,
+    'ts',
+  );
+  assert.match(generic[0]?.message ?? '', /a generic class expression is not yet supported/);
+  assert.deepEqual(codesFor('const C = class { m() { return 7; } }\nconsole.log(C);\n'), [
+    'STA1214',
+  ]);
+  const opaque = gateProgram(
+    createProgram('const C = class { m() { return 7; } }\nconsole.log(C);\n').program,
+    'ts',
+  );
+  assert.match(opaque[0]?.message ?? '', /using a class as a value is not yet supported/);
+  // Shared vetting, not a duplicated one: a computed member in an expression reports the member.
+  assert.deepEqual(
+    codesFor(
+      'const key: string = "k";\nconst C = class D { [key]() { return 1; } };\nexport const x = 1;\n',
+    ),
+    ['STA1214'],
+  );
+  // An anonymous DECLARATION keeps its own message (plan.md §8 step 12(d) residue).
   const { program: declProgram } = createProgram(
     'export default class { m() { return 7; } }\n',
     '/test.ts',
@@ -483,13 +527,6 @@ void test('a class expression is vetted like a declaration but stays not-yet on 
     ['STA1214'],
   );
   assert.match(decl[0]?.message ?? '', /an anonymous class is not yet supported/);
-  // Shared vetting, not a duplicated one: a computed member in an expression reports the member.
-  assert.deepEqual(
-    codesFor(
-      'const key = "k";\nconst C = class D { [key]() { return 1; } };\nexport const x = 1;\n',
-    ),
-    ['STA1214'],
-  );
 });
 
 void test('this is gated, not left to the lowering', () => {

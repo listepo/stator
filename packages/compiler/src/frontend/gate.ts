@@ -36,10 +36,15 @@ import {
   accessorDeclaringClass,
   baseClassOf,
   classDeclarationOf,
+  classDisplayName,
+  classExpressionTarget,
+  classLikeOf,
   computedKeyStaticName,
   elementStaticKey,
+  expressionClassName,
   hasAbstractModifier,
   hasExplicitAny,
+  innerClassExpression,
   isClassAliasUse,
   ITERATOR_METHOD_NAME,
   instanceMethodName,
@@ -908,6 +913,27 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
       ? { kind: 'accept' }
       : notYet('using a class as a value is not yet supported', 5);
   }
+  // The inner name of a class expression declares, exactly like a declaration's own name
+  // above: `D` in `const C = class D { … }` binds the class body, not a value.
+  if (ts.isClassExpression(node.parent) && node.parent.name === node) {
+    return { kind: 'accept' };
+  }
+  // `const C = class …` binds no value either (see `classExpressionTarget` in `./types.ts`):
+  // the formation emits the descriptor, and every in-place use erases to the expression —
+  // `new C`, `C.static`, `o instanceof C`, and (through `baseClassOf`) `extends C`. The
+  // same in-place spellings pass here as for declarations and aliases, and anything else
+  // reads the class object and stays STA1214 under the same message. An import/export
+  // specifier is a boundary spelling that is never evaluated, exactly as for aliases.
+  if (
+    (classExpressionTarget(node, typeChecker) ?? innerClassExpression(node, typeChecker)) !==
+    undefined
+  ) {
+    return ts.isImportSpecifier(node.parent) ||
+      ts.isExportSpecifier(node.parent) ||
+      namesAClassInPlace(node, typeChecker)
+      ? { kind: 'accept' }
+      : notYet('using a class as a value is not yet supported', 5);
+  }
   // The constructor has no VALUE (docs/FFI.md §2): aliasing it (`const f = outSlot`)
   // would smuggle calls past the shape the call arm proves, and the lowering has no closure
   // to load for one — which used to be a silent STA4021. Asked ahead of the generic-alias
@@ -1383,16 +1409,26 @@ function gateDeclaration(decl: ts.VariableDeclaration, checker: ts.TypeChecker):
 export function brandDeclaringClass(
   name: ts.PrivateIdentifier,
   checker: ts.TypeChecker,
-): ts.ClassDeclaration | undefined {
+): ts.ClassDeclaration | ts.ClassExpression | undefined {
   const member = checker.getSymbolAtLocation(name)?.valueDeclaration;
-  return member !== undefined &&
-    (ts.isPropertyDeclaration(member) ||
-      ts.isMethodDeclaration(member) ||
-      ts.isGetAccessorDeclaration(member) ||
-      ts.isSetAccessorDeclaration(member)) &&
-    ts.isClassDeclaration(member.parent) &&
-    member.parent.name !== undefined
-    ? member.parent
+  if (
+    member === undefined ||
+    (!ts.isPropertyDeclaration(member) &&
+      !ts.isMethodDeclaration(member) &&
+      !ts.isGetAccessorDeclaration(member) &&
+      !ts.isSetAccessorDeclaration(member))
+  ) {
+    return undefined;
+  }
+  // Declarations and bound expressions alike: a `#private` name is lexically scoped to the
+  // class body that writes it, whichever spelling the body takes (plan.md §8 step 12(d)).
+  // The display-name check is what keeps an unbound expression (no identity) resolving
+  // nowhere, exactly as an unnamed declaration does.
+  const parent = member.parent;
+  return parent !== undefined &&
+    (ts.isClassDeclaration(parent) || ts.isClassExpression(parent)) &&
+    classDisplayName(parent) !== undefined
+    ? parent
     : undefined;
 }
 
@@ -1477,10 +1513,22 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
         return notYet('instanceof against anything but a class name is not yet supported', 5);
       }
       const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(bin.right));
-      if (declaration?.typeParameters !== undefined && declaration.typeParameters.length > 0) {
+      // A bound class expression names its descriptor like a declaration does (`o instanceof
+      // C` on `const C = class …`; plan.md §8 step 12(d)). Generic expressions have one
+      // descriptor per tuple exactly like generic declarations, so the bare name identifies
+      // nothing in both cases.
+      const expression =
+        declaration === undefined
+          ? (classExpressionTarget(bin.right, typeChecker) ??
+            innerClassExpression(bin.right, typeChecker))
+          : undefined;
+      const typeParameters = declaration?.typeParameters ?? expression?.typeParameters;
+      if (typeParameters !== undefined && typeParameters.length > 0) {
         return notYet('instanceof against a generic class is not yet supported', 5);
       }
-      return declaration !== undefined || INSTANCEOF_BUILTINS.has(bin.right.text)
+      return declaration !== undefined ||
+        expression !== undefined ||
+        INSTANCEOF_BUILTINS.has(bin.right.text)
         ? { kind: 'accept' }
         : notYet('instanceof against anything but a class name is not yet supported', 5);
     }
@@ -1621,7 +1669,7 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   // A field, and ONLY a field: `a.length = 0` is a property access too, and writing it resizes an
   // array -- which is a hole-creating operation the dense representation refuses (STA2002).
   if (
-    classDeclarationOf(checker.getTypeAtLocation(node.expression)) !== undefined ||
+    classLikeOf(checker.getTypeAtLocation(node.expression)) !== undefined ||
     constraintDeclaration(checker.getTypeAtLocation(node.expression), checker) !== undefined
   ) {
     return true;
@@ -3273,7 +3321,7 @@ function isClassMemberComputedKey(name: ts.ComputedPropertyName): boolean {
     isMember &&
     parent.name === name &&
     parent.parent !== undefined &&
-    ts.isClassDeclaration(parent.parent)
+    (ts.isClassDeclaration(parent.parent) || ts.isClassExpression(parent.parent))
   );
 }
 
@@ -3489,9 +3537,26 @@ function gateClass(
   classNameCounts: ReadonlyMap<string, number>,
 ): GateResult {
   if (declaration.name === undefined) {
-    return ts.isClassExpression(declaration)
-      ? notYet('an anonymous class expression is not yet supported', 5)
-      : notYet('an anonymous class is not yet supported', 5);
+    // Only a bound expression has an identity (Node's `.name`: the variable it binds);
+    // an unbound one — a heritage base, a call argument, a parenthesized default export —
+    // has no layout key, and nominal equality has nothing to hold onto.
+    if (ts.isClassExpression(declaration) && expressionClassName(declaration) !== undefined) {
+      // fall through to member vetting below
+    } else {
+      return ts.isClassExpression(declaration)
+        ? notYet('an anonymous class expression is not yet supported', 5)
+        : notYet('an anonymous class is not yet supported', 5);
+    }
+  }
+  // A generic expression has nowhere to specialize under: tuple descriptors key on the
+  // declaration's source name, and an expression's identity is its binding, not a scope
+  // the monomorphizer owns (plan.md §8 step 12(f)).
+  if (
+    ts.isClassExpression(declaration) &&
+    declaration.typeParameters !== undefined &&
+    declaration.typeParameters.length > 0
+  ) {
+    return notYet('a generic class expression is not yet supported', 5);
   }
   // A generic class specializes per tuple, and every tuple shares one descriptor: a nested
   // declaration emits its carrier and tuples where it sits, so the descriptor is scoped to that
@@ -3804,14 +3869,27 @@ function gateClass(
   if (constructors > 1) {
     return notYet('more than one constructor is not yet supported', 5);
   }
-  // A class expression is a VALUE where a declaration is a binding: even a well-formed one needs
-  // the class object, which does not exist here (plan.md §8 step 12e -- the same blocker as
-  // `using a class as a value`). The lowering has no ClassExpression arm, so accepting here
-  // would only trade this STA1214 for an STA4031 internal error. Member-specific refusals above
-  // still fire first, so a broken member reads as broken rather than as deferred.
+  // A class expression is a VALUE where a declaration is a binding: it compiles only as
+  // the initializer of a single-`const` identifier (`const C = class …`), which binds no value
+  // — every in-place use erases to the expression, whose descriptor the lowering emits under
+  // the variable's name (plan.md §8 step 12(d)). Any other position (`let`, a call argument,
+  // a heritage base) has no identity to key the layout on, and reads as the expression it is.
+  // Member-specific refusals above still fire first, so a broken member reads as broken
+  // rather than as deferred.
   if (ts.isClassExpression(declaration)) {
-    const name = declaration.name.text;
-    return notYet(`a class expression '${name}' is not yet supported`, 5);
+    const parent = declaration.parent;
+    const bound =
+      parent !== undefined &&
+      ts.isVariableDeclaration(parent) &&
+      parent.initializer === declaration &&
+      ts.isIdentifier(parent.name) &&
+      isSingleConstDeclarator(parent);
+    if (!bound) {
+      const name = declaration.name?.text;
+      return name === undefined
+        ? notYet('an anonymous class expression is not yet supported', 5)
+        : notYet(`a class expression '${name}' is not yet supported`, 5);
+    }
   }
   return { kind: 'accept' };
 }
@@ -3880,7 +3958,7 @@ function gateHeritage(
  * refused with the same message. */
 function genericBaseArgumentsAreConcrete(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
-  base: ts.ClassDeclaration,
+  base: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): boolean {
   if (
@@ -3999,9 +4077,12 @@ function inheritedShadowIsSameKind(
     return false;
   }
   const wantStatic = isStaticMember(member);
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let current: ts.ClassDeclaration | undefined = baseClassOf(declaration, checker);
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = baseClassOf(
+      declaration,
+      checker,
+    );
     current !== undefined && !seen.has(current);
     current = baseClassOf(current, checker)
   ) {
@@ -4075,12 +4156,12 @@ function classMemberStaticName(
  * A class with one still has a fixed layout of its declared members; only the dynamic keys wait
  * on dictionary mode, and the member-access rule refuses exactly those uses. */
 function classHasIndexSignature(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): boolean {
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let current: ts.ClassDeclaration | undefined = declaration;
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = declaration;
     current !== undefined && !seen.has(current);
     current = baseClassOf(current, checker)
   ) {
@@ -4549,7 +4630,17 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
     return notYet('new on anything but a named class is not yet supported', 5);
   }
   if (classDeclarationOf(checker.getTypeAtLocation(node)) === undefined) {
-    return notYet('new on this type is not yet supported', 5);
+    // A bound class expression constructs its descriptor like a declaration does (`new C` on
+    // `const C = class …`); an unbound one has no identity to construct (plan.md §8 step 12(d)).
+    const like = classLikeOf(checker.getTypeAtLocation(node));
+    const named =
+      like !== undefined &&
+      (ts.isClassDeclaration(like)
+        ? like.name !== undefined
+        : expressionClassName(like) !== undefined);
+    if (!named) {
+      return notYet('new on this type is not yet supported', 5);
+    }
   }
   // A spread needs a dynamic argv no constructor call builds (plan.md §8 step 37) — the same
   // missing feature as a spread function call, refused rather than STA4031'd in the lowering.
@@ -4839,7 +4930,9 @@ function gateMemberAccess(
   // make. Bare `super` never reaches here (the SuperKeyword case owns it) and stays refused
   // there.
   if (access.expression.kind === ts.SyntaxKind.SuperKeyword) {
-    const base = classDeclarationOf(checker.getTypeAtLocation(access.expression));
+    // Declarations and bound-expression bases alike (plan.md §8 step 12(d)): `super.m` in a
+    // subclass of `const C = class …` skips to the expression's method the same way.
+    const base = classLikeOf(checker.getTypeAtLocation(access.expression));
     const method =
       base !== undefined && ts.isIdentifier(access.name)
         ? methodDeclaringClass(base, access.name.text, checker)
@@ -5071,7 +5164,7 @@ function gateMemberAccess(
         );
   }
   const declaration =
-    classDeclarationOf(checker.getTypeAtLocation(access.expression)) ??
+    classLikeOf(checker.getTypeAtLocation(access.expression)) ??
     constraintDeclaration(checker.getTypeAtLocation(access.expression), checker);
   if (declaration === undefined) {
     // A member read through `T`: the constraint is what declares it, the checker already proved

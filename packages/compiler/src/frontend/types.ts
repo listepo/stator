@@ -266,12 +266,26 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
   }
   const symbol = type.getSymbol();
   const declaration = symbol?.valueDeclaration;
-  if (symbol === undefined || declaration === undefined || !ts.isClassDeclaration(declaration)) {
+  if (symbol === undefined || declaration === undefined) {
     return null;
   }
-  // An anonymous class expression has no name to identify its layout by, and nominal equality
-  // needs one. `const C = class { }` is Unknown until a class expression can be given a name.
-  if (declaration.name === undefined) {
+  // An anonymous class DECLARATION (`export default class {}`) has no name to identify its
+  // layout by, and nominal equality needs one. A bound EXPRESSION takes Node's `.name` — the
+  // inner name, else the variable (`const C = class D {}` is `D`, `const C = class {}` is
+  // `C`) — so nominal equality holds onto the same spelling every use resolves through
+  // (plan.md §8 step 12(d)). An unbound expression has no identity and stays Unknown.
+  let className: string | undefined;
+  if (ts.isClassDeclaration(declaration)) {
+    if (declaration.name === undefined) {
+      return null;
+    }
+    className = declaration.name.text;
+  } else if (ts.isClassExpression(declaration)) {
+    className = expressionClassName(declaration);
+    if (className === undefined) {
+      return null;
+    }
+  } else {
     return null;
   }
 
@@ -303,7 +317,14 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
   const heritage = heritageSubstitution(declaration, checker);
   const claimed = new Set<string>();
   for (const ancestor of chain) {
-    const ancestorType = declaredTypeOf(ancestor, checker);
+    // An expression leaf has no declared instance type of its own (its inner name, if any,
+    // binds the class body, and the variable binds the static side), so the leaf grounds
+    // from the use-site type every caller was compiled against. Declaration leaves keep the
+    // declared type, exactly as before.
+    const ancestorType =
+      ancestor === declaration && ts.isClassExpression(ancestor)
+        ? type
+        : declaredTypeOf(ancestor, checker);
     if (ancestorType === undefined) {
       continue;
     }
@@ -387,9 +408,12 @@ function classTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
   const bases = chain
     .slice(0, -1)
     .reverse()
+    // Bases stay declarations, except through `extends C` on a bound expression (plan.md §8
+    // step 12(d)), which names its descriptor by binding. An unbound base has no descriptor
+    // and answers `''`, filtered below like an incomplete tuple.
     .map((c) => baseDescriptorName(c, declaration, checker))
     .filter((n) => n !== '');
-  return hObject(declaration.name.text, fields, methods, bases);
+  return hObject(className, fields, methods, bases);
 }
 
 /** `null` means "not an object literal's shape" — the caller falls through to Unknown.
@@ -701,7 +725,7 @@ export function shapeName(fields: readonly HField[], methods: readonly HField[] 
  * through the name's symbol is what makes this answerable for any class in a chain, not just the
  * one whose `ts.Type` the caller happened to start from. */
 function declaredTypeOf(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): ts.Type | undefined {
   const symbol =
@@ -716,14 +740,14 @@ function declaredTypeOf(
  * or an ambient class is rejected at the gate, and stopping quietly here rather than throwing keeps
  * this function total. */
 export function ancestry(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
-): ts.ClassDeclaration[] {
-  const chain: ts.ClassDeclaration[] = [];
-  let current: ts.ClassDeclaration | undefined = declaration;
+): (ts.ClassDeclaration | ts.ClassExpression)[] {
+  const chain: (ts.ClassDeclaration | ts.ClassExpression)[] = [];
+  let current: ts.ClassDeclaration | ts.ClassExpression | undefined = declaration;
   // A cycle is impossible in well-formed source and the checker has already rejected one, but the
   // seen-set makes that a property of this loop rather than of its input.
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   while (current !== undefined && !seen.has(current)) {
     seen.add(current);
     chain.unshift(current);
@@ -741,12 +765,14 @@ export function ancestry(
  * so the heritage names the target's layout directly, and every consumer of this function
  * (ancestry, the HType bases, the lowering's base name, the vtable owner, the generic tuple)
  * grounds to the same declaration. A member-expression base (`NS.C`) resolves through the
- * checker's own symbol, exactly as the direct spelling does. Anything else -- a call, a
+ * checker's own symbol, exactly as the direct spelling does. A variable bound to a class
+ * expression (`extends C` on `const C = class …`) grounds to the expression the same way an
+ * alias does (plan.md §8 step 12(d)). Anything else -- a call, a
  * static field holding a class, a `let` -- resolves nowhere. */
 export function baseClassOf(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
-): ts.ClassDeclaration | undefined {
+): ts.ClassDeclaration | ts.ClassExpression | undefined {
   const clause = declaration.heritageClauses?.find((h) => h.token === ts.SyntaxKind.ExtendsKeyword);
   const expression = clause?.types[0]?.expression;
   if (expression === undefined) {
@@ -757,7 +783,11 @@ export function baseClassOf(
     return base;
   }
   if (ts.isIdentifier(expression)) {
-    return aliasedClassDeclaration(expression, checker);
+    return (
+      aliasedClassDeclaration(expression, checker) ??
+      classExpressionTarget(expression, checker) ??
+      innerClassExpression(expression, checker)
+    );
   }
   return undefined;
 }
@@ -784,10 +814,10 @@ function extendsTypeNode(
  * concrete on accepted ones. Ordinary ancestors take no entry, so a chain without a generic
  * base grounds nothing and every existing caller reads exactly what it read before. */
 export function heritageSubstitution(
-  leaf: ts.ClassDeclaration,
+  leaf: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
-): ReadonlyMap<ts.ClassDeclaration, ReadonlyMap<string, HType>> {
-  const grounded = new Map<ts.ClassDeclaration, Map<string, HType>>();
+): ReadonlyMap<ts.ClassDeclaration | ts.ClassExpression, ReadonlyMap<string, HType>> {
+  const grounded = new Map<ts.ClassDeclaration | ts.ClassExpression, Map<string, HType>>();
   const chain = ancestry(leaf, checker);
   const leafIndex = chain.indexOf(leaf);
   if (leafIndex < 0) {
@@ -834,8 +864,8 @@ export function heritageSubstitution(
  * when `base` is ordinary (no tuple to name), outside `leaf`'s ancestry, or not groundable
  * (a raw bound, an arity mismatch): all ordinary paths, never errors. */
 export function heritageTuple(
-  base: ts.ClassDeclaration,
-  leaf: ts.ClassDeclaration,
+  base: ts.ClassDeclaration | ts.ClassExpression,
+  leaf: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): HType[] | undefined {
   const parameters = base.typeParameters ?? [];
@@ -865,11 +895,16 @@ export function heritageTuple(
  * otherwise covers two shapes that never reach the lowering together — an ordinary base, and
  * a refused program's incomplete tuple — so both read exactly what they read before. */
 export function baseDescriptorName(
-  base: ts.ClassDeclaration,
-  leaf: ts.ClassDeclaration,
+  base: ts.ClassDeclaration | ts.ClassExpression,
+  leaf: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): string {
-  const name = base.name?.text ?? '';
+  // An expression base is named by its binding (Node's `.name`), not by a source name it does
+  // not have; an unbound one has no descriptor, and the empty string filters it out at every
+  // call site, exactly as an incomplete tuple does.
+  const name = ts.isClassExpression(base)
+    ? (expressionClassName(base) ?? '')
+    : (base.name?.text ?? '');
   if (name === '') {
     return '';
   }
@@ -963,17 +998,20 @@ export function privateMethodName(owner: string, raw: string): string {
 function privateOwnerName(
   property: ts.Symbol,
   at: ts.Declaration | undefined,
-  chain: readonly ts.ClassDeclaration[],
-  ancestor: ts.ClassDeclaration,
+  chain: readonly (ts.ClassDeclaration | ts.ClassExpression)[],
+  ancestor: ts.ClassDeclaration | ts.ClassExpression,
 ): string | undefined {
-  const parent = at !== undefined && ts.isClassDeclaration(at.parent) ? at.parent : undefined;
+  const parent =
+    at !== undefined && (ts.isClassDeclaration(at.parent) || ts.isClassExpression(at.parent))
+      ? at.parent
+      : undefined;
   const owner =
-    parent !== undefined && parent.name !== undefined
+    parent !== undefined && classDisplayName(parent) !== undefined
       ? parent
       : (chain.find((candidate) =>
           (property.declarations ?? []).some((d) => d.parent === candidate),
         ) ?? ancestor);
-  return owner.name?.text;
+  return classDisplayName(owner);
 }
 
 /** `[Symbol.iterator]` as a computed name. Does not ask whether `Symbol` is the global — the
@@ -1148,6 +1186,117 @@ export function aliasedClassDeclaration(
   return undefined;
 }
 
+/** The class expression a `const C = class …` formation binds, or `undefined`.
+ *
+ * The expression twin of the alias erasure above (plan.md §8 step 12(d)): the formation binds
+ * no value — every in-place use (`new C`, `C.static`, `o instanceof C`, `extends C`) erases
+ * to the expression, whose descriptor the lowering emits under the variable's name. Only
+ * single-`const` identifier bindings resolve, for the same reassignability reason aliases
+ * give: a `let` can be repointed, so erasing it would compile a different program. An
+ * `import`/`export` specifier resolves through the checker's alias first, exactly as above.
+ * Answers `undefined` for the binding's own name (a declaration, not a use) and anything
+ * circular. An opaque use (`foo(C)`) is the real class object, refused at the gate under
+ * the same STA1214 as the class itself. */
+export function classExpressionTarget(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+): ts.ClassExpression | undefined {
+  const symbol = checker.getSymbolAtLocation(node);
+  const declaration: ts.Declaration | undefined =
+    symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0
+      ? checker.getAliasedSymbol(symbol).valueDeclaration
+      : symbol?.valueDeclaration;
+  if (
+    declaration === undefined ||
+    !ts.isVariableDeclaration(declaration) ||
+    declaration.name === node ||
+    declaration.initializer === undefined ||
+    !ts.isClassExpression(declaration.initializer) ||
+    !isSingleConstDeclarator(declaration)
+  ) {
+    return undefined;
+  }
+  return declaration.initializer;
+}
+
+/** The class expression whose INNER name `node` spells (`D` in `const C = class D { … }`),
+ * when `node` sits inside that expression but is not the name itself: the inner binding is
+ * visible only in the class body, and every in-place use of it erases to the expression like
+ * any other spelling of it. Outside the body the name resolves nowhere (a checker error in
+ * ts mode, a runtime ReferenceError in js), so no scope work is needed — uses carry their
+ * own containment proof. */
+export function innerClassExpression(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+): ts.ClassExpression | undefined {
+  const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration;
+  const expression =
+    declaration !== undefined && ts.isClassExpression(declaration)
+      ? declaration
+      : declaration !== undefined &&
+          ts.isIdentifier(declaration) &&
+          ts.isClassExpression(declaration.parent)
+        ? declaration.parent
+        : undefined;
+  if (
+    expression === undefined ||
+    expression.name === undefined ||
+    expression.name.text !== node.text ||
+    node === expression.name
+  ) {
+    return undefined;
+  }
+  let current: ts.Node | undefined = node.parent;
+  while (current !== undefined) {
+    if (current === expression) {
+      return expression;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+/** The spelling Node gives a class expression's `.name`: the inner name, else the bound
+ * variable. An unbound expression (a heritage base, a call argument, a default export) has
+ * no identity this subset keys on — the type model answers Unknown for those, and the gate
+ * refuses them where a value would be read. */
+export function expressionClassName(expression: ts.ClassExpression): string | undefined {
+  if (expression.name !== undefined) {
+    return expression.name.text;
+  }
+  const parent = expression.parent;
+  if (
+    parent !== undefined &&
+    ts.isVariableDeclaration(parent) &&
+    ts.isIdentifier(parent.name) &&
+    parent.initializer === expression
+  ) {
+    return parent.name.text;
+  }
+  return undefined;
+}
+
+/** The spelling a class-like answers to in source positions: the declared name for a
+ * declaration, Node's `.name` (inner name, else bound variable) for an expression.
+ * `undefined` for an anonymous declaration or an unbound expression — shapes with no
+ * identity, which the gate refuses before any consumer asks. */
+export function classDisplayName(
+  node: ts.ClassDeclaration | ts.ClassExpression,
+): string | undefined {
+  return ts.isClassExpression(node) ? expressionClassName(node) : node.name?.text;
+}
+
+/** The class-like (declaration or expression) a type came from, or `undefined` for anything
+ * else. Beside `classDeclarationOf`: existing declaration-only consumers keep their shape,
+ * and only the use sites class expressions newly reach migrate to this one. */
+export function classLikeOf(type: ts.Type): ts.ClassDeclaration | ts.ClassExpression | undefined {
+  const declaration = type.getSymbol()?.valueDeclaration;
+  return declaration !== undefined &&
+    (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration))
+    ? declaration
+    : undefined;
+}
+
 /** Whether `node` uses a `const K = C` alias: it resolves to a class, but is not the class's
  * own name. The gate accepts exactly the uses that erase and refuses the rest; the capture
  * analysis skips these references, since an erased name needs no environment slot.
@@ -1178,25 +1327,34 @@ export function staticMemberOf(
   access: ts.PropertyAccessExpression,
   checker: ts.TypeChecker,
   wantMethod: boolean | undefined,
-): { owner: ts.ClassDeclaration; member: ts.ClassElement } | undefined {
+):
+  | {
+      owner: ts.ClassDeclaration | ts.ClassExpression;
+      member: ts.ClassElement;
+    }
+  | undefined {
   if (!ts.isIdentifier(access.expression)) {
     return undefined;
   }
   // A class alias names the same declaration its target does: `K.sm` on `const K = C` is the
   // one binding `C.sm`, so the direct check below keeps its exact shape and the alias resolves
-  // beside it. Anything else -- including the binding's own formation -- resolves nowhere.
+  // beside it. A class expression's binding names the expression the same way (`C.sm` on
+  // `const C = class …`), through `classExpressionTarget` (or the inner name). Anything
+  // else -- including the binding's own formation -- resolves nowhere.
   const direct = checker.getSymbolAtLocation(access.expression)?.valueDeclaration;
   const declaration =
     direct !== undefined && ts.isClassDeclaration(direct)
       ? direct
-      : aliasedClassDeclaration(access.expression, checker);
+      : (classExpressionTarget(access.expression, checker) ??
+        innerClassExpression(access.expression, checker) ??
+        aliasedClassDeclaration(access.expression, checker));
   if (declaration === undefined) {
     return undefined;
   }
   const name = access.name.text;
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let current: ts.ClassDeclaration | undefined = declaration;
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = declaration;
     current !== undefined && !seen.has(current);
     current = baseClassOf(current, checker)
   ) {
@@ -1229,10 +1387,10 @@ export function staticMemberOf(
  * classes in one chain declare the name, and the call site is direct only where no such second
  * declaration exists anywhere in the family (see `isOverridden` in the lowering). */
 export function methodDeclaringClass(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   name: string,
   checker: ts.TypeChecker,
-): ts.ClassDeclaration | undefined {
+): ts.ClassDeclaration | ts.ClassExpression | undefined {
   // An accessor is a method under a mangled name (`get x`), and every walk of an HType's method
   // list meets those names -- the class table does, which is where this used to answer `undefined`
   // and the caller fell back to the class it was asked about: the emitter then looked for an
@@ -1261,10 +1419,10 @@ export function methodDeclaringClass(
  * `undefined` means the name is not an accessor at all -- a field or a method, which take the
  * ordinary paths. */
 export function accessorDeclaringClass(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   name: string,
   checker: ts.TypeChecker,
-): { owner: ts.ClassDeclaration; get: boolean; set: boolean } | undefined {
+): { owner: ts.ClassDeclaration | ts.ClassExpression; get: boolean; set: boolean } | undefined {
   for (const current of ancestry(declaration, checker).toReversed()) {
     // Identifiers and #private names alike: a private accessor (`get #x`) is a member function
     // under a mangled name exactly as a public one is (plan.md §8 step 12(d)). A literal-typed

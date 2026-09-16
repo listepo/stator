@@ -4,6 +4,50 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 278. Bound class expressions land via descriptor erasure (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface: anonymous classes, extends forms) + 12(e)
+(class-as-value remainder, narrowed). `plan.md` NOT edited in this change — no task language
+changes; 12(d)/12(e) remainders stay open.
+
+**What landed.** `const C = class …` (named or not) emits the same descriptor a declaration
+does, under Node's `.name` (inner name, else variable), and binds no value: every in-place
+use (`new C`, `C.static`, `o instanceof C`, `extends C`, the inner name in the class body)
+erases to the expression (decision fixtures `subset_class_expression_{ts,js}` flipped to
+`static`, plus opaque/`let`/generic refusal pairs; goldens `class_expression.{ts,js}`
+byte-for-byte vs Node 26.7.0; `docs/SUBSET.md` row added):
+
+- Type model (`frontend/types.ts`): `classTypeToHType` names bound expressions (unbound stay
+  Unknown); `ancestry`/`heritageSubstitution`/`baseDescriptorName`/`methodDeclaringClass`/
+  `accessorDeclaringClass`/`staticMemberOf`/`baseClassOf` widen to `ClassLike`; new
+  `classExpressionTarget` (variable→expression, single-`const`, alias-chasing),
+  `innerClassExpression` (inner name + lexical containment, no scope work),
+  `expressionClassName`, `classLikeOf`, `classDisplayName`.
+- Gate (`gate.ts`): bound non-generic expressions vet like declarations; the formation must
+  be single-`const`-bound (else the old messages); identifier uses erase in place and refuse
+  opaque as class-as-value (import/export specifiers exempt, like aliases); `new`,
+  `instanceof`, `super.m`, computed keys, assignability, and `#brand` all resolve
+  expressions.
+- Lowering (`lower/index.ts`): the formation emits the class (display-name scope
+  registration for shadowing, no value binding); instance type from the construct
+  signature's return; `lowerClass` widened (identity, layout, vtable, statics, stubs all
+  ride); owner/dispatch resolution via `receiverClassLike`; abstract stubs and static runs
+  compose (verified by probe, not separately pinned).
+- Printing answers Node's name (`D { … }` for `const C = class D`), shadowing renames per
+  step 23, cross-file imports erase through the alias, `extends C` grounds prefix layouts
+  with virtual dispatch, and `#private` mangles by display name.
+
+**Still refused (all probed):** unbound expressions (no identity), `let`/`var` formations
+(reassignable), generic expressions (no specialization home — 12(f)), anonymous default
+declarations (12(d) residue), opaque uses incl. `typeof C` and `C.prototype` (class object
+— 12(e)), `switch`-guarded and loop/arrow supers, `super` in static blocks, `this` in
+static members.
+
+**Observed adjacent, NOT caused, NOT fixed:** a nested class (declaration OR expression)
+whose method captures a local segfaults (`counter()` probe, exit 139 — the declaration
+twin crashes identically on unmodified logic). No golden covers it; filing here so the
+capture owner finds it. Nested-class capture is outside this session's scope.
+
 ## 277. Derived constructors may call super from if/else arms when no initializers splice (2026-09-16)
 
 **Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
