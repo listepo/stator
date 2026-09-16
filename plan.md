@@ -504,10 +504,26 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     which stays not-yet. A class used as a value and `super` as a value are blocked on the class
     object instead, which is family (d)'s. Named function expressions bind the function's own name
     inside its body only (plan-notes 231).
-    (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above:
-    constrained and defaulted type parameters, generic classes, generic function expressions and
-    arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a
-    generic call whose type arguments no argument determines.
+    (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above.
+    Constrained and defaulted type parameters specialize like any other call — the constraint
+    is the checker's, the default fills what no call determines (`finishTuple`, `Unknown`
+    when nothing does). Generic classes specialize per concrete tuple at each `new` site,
+    inferred or explicit (evidence: done.md → Phase 5 waves 4–5). A generic function used as
+    a value takes the canonical tuple, sharing its specialization with an undetermined call
+    (step 41); explicit type arguments on a call or a `new` name the same specialization
+    inference would; generic arrows and function expressions specialize under a module-scope
+    `const` home. **An inline generic arrow or function expression passed directly as a call
+    argument landed 2026-09-16** (plan-notes 279): it specializes at the parameter's function
+    type under a position-derived key (`subset_generic_arrow_bare_*` now `static`, four new
+    decision pairs, `tests/golden/ts|js/generic_inline.*` byte-for-byte).
+    **Residue:** a homeless arrow anywhere else (`let`, a nesting, a branch, a spread, a
+    constructor argument — no single parameter type to read), one whose body reads an
+    enclosing scope or a same-file `let`/`const`/`var` (no binding a module-level
+    specialization could read), a generic that escapes further (returned, stored — the
+    dynamic tier), a generic call at a generic type (self-application — no monomorphic
+    spelling), `instanceof` against a generic class (one descriptor per tuple), and the
+    class-surface residue (a generic subclass of a generic base, raw or partial bounds —
+    family (d)'s).
     **Check (step 12):** one golden fixture per family matching the pinned Node byte-for-byte; the
     decision-test rows for every construct named above out of expected-fail; and `gate.ts` emits no
     `not-yet` for any construct this step names.

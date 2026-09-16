@@ -8214,3 +8214,85 @@ Responsibilities that stay open: the ambient `CString`/`Out` lib declarations (f
 declare locally until §7.3 owns the binding set — FFI.md §7.3), generator convention
 transfer (manual rc checks until then), and the TS-name/brand alias policies
 (mechanical, documented; human aliases live in manual bindings).
+
+## 279. Inline generic arrows land: the 12(f) callback slice (2026-09-16)
+
+**Plan:** §8 step 12(f). `plan.md` edited in this change (the (f) bullet records the landed
+shape and the narrowed residue). Scope coordination: this is Agent 4's slice
+(`agent/p5-generics`); 12(d)/12(e), 2488, and Phase 6/7/9/10 files untouched. Numbered past
+the highest entry known (278 on `agent/p5-class-surface`); merge resolves any race. Step
+12(c)'s spread residue and the (b) close-out belong to their owners' edits — this note
+concurs on (b) by verification rather than re-editing it (notes 272, 277).
+
+**What landed.** An inline generic arrow or function expression passed directly as a call
+argument specializes at the parameter's function type: `[1].map(<T>(x: T): T => x)` and
+`run(<T>(x: T): T => x, 5)` compile `static` and match Node byte-for-byte, in both modes.
+
+- Frontend (`src/frontend/generics.ts`): `genericArgumentTuple` keeps the identifier path
+  untouched and delegates every other argument to `inlineGenericTuple`, which unwraps
+  parentheses, requires a direct non-spread argument position with a single parameter type,
+  and shares the parameter lookup, unification, and `finishTuple` recovery through a common
+  `instantiateAtParameter` — so the named and inline paths cannot disagree about what a
+  parameter determines. The key is the position (`arrow@<file>#<offset>`), unspellable from
+  source like every other specialization key, with the file base disambiguating the
+  cross-file merge in `lowerProgram` (same-name dedupe is load-bearing there).
+- Two refusals keep the gate/lowering contract (note 194's rule: a suppression that
+  manufactures an `STA4xxx` is a bug report, not a landing). A body that reads an enclosing
+  scope — an enclosing function's parameter or local, `this`, `super`, `new.target`, or a
+  binding a block scopes away from the module top level — would resolve to no binding in a
+  module-level specialization (`STA4035`), so the gate refuses it; the check is by symbol,
+  so shadowing is safe, types erase (skipped whole), and member names are not reads (only
+  the object side can be a capture). And a same-file `let`/`const`/`var` read is refused
+  too: specialization bodies lower before their file's own statements, so only hoisted
+  bindings are reachable in time — functions, classes, imports, and globals (all probed
+  green). A `var` is the sharp case: its hoist feeds the lowering but not the verifier, so
+  it fails as `STA4002` rather than `STA4035`.
+- Lowering (`src/lower/index.ts`): no collection or use-site change — `requestArgument`
+  and both argument-lowering paths already route through `genericArgumentTuple`. The one
+  lowering edit is the display name: a homeless arrow keeps no name (Node prints anonymous
+  for a callback-position arrow, as a non-generic inline arrow lowers today) while a named
+  function expression keeps its own.
+- Gate (`src/frontend/gate.ts`): `gateFunction` accepts exactly what the probe accepts
+  (same function, both sides), and takes the checker as a parameter to do it. `let`-held,
+  nested, branched, spread, and constructor-argument arrows stay `STA1214`, as do
+  capturing and module-binding reads. Parenthesized arguments pair by the chain's top:
+  the first cut paired by the bare arrow, found no parameter, and refused — caught by a
+  probe (`run((<T>(x: T): T => x), 3)`), fixed, unit-pinned.
+
+**Proof.** Unit: 12 new cases in `tests/unit/generics.test.ts` (tuple recovery with
+computed position keys, separate specializations per literal, anonymous display, nested
+compile, enclosing-tuple substitution, `STA4054`-clean, parenthesized pairing, three
+refusal shapes) and the `anywhere-but-a-const` test narrowed to `let`/nesting. Decision: the
+`subset_generic_arrow_bare_*` pair flips `not-yet` → `static`; four new pairs
+(`inline_fnexpr`, `inline_nested` static; `inline_capture`, `inline_module_binding`
+`not-yet` `STA1214`). Golden: `tests/golden/ts/generic_inline.ts` +
+`tests/golden/js/generic_inline/main.ts` match the pinned Node 26.7.0 byte-for-byte.
+Suites on this branch: unit 575/575, subset 683 (645 passed, 38 expected-fail, 0 failed),
+golden 388/388 (and the same 388 under ASan/UBSan), `tsc` both projects, oxlint/oxfmt
+clean, `cpd` 0.9%, builtins 223/238 (standing residue), leak plateau, runtime corpus match,
+differential 24 cases with 0 divergences. Test262 `arrow-function` slice before/after
+(pristine worktree at the base commit vs this branch): 75 passed / 466 skipped / 25 failed
+of 566 on both — zero movement, as the mechanism predicts (a `.js` parse cannot produce
+syntactic type parameters, so the inline path is unreachable there; the identifier path is
+the same body). `ratchet.json` untouched.
+
+**Drift reconciled in this change.** The `TypeParameter` gate comment still said a
+constraint or default "is refused" — true of no code in the tree (`gateTypeParameter`
+accepts both; the constraint is the checker's, the default fills the tuple in
+`finishTuple`) — reworded to the landed semantics. `docs/SUBSET.md`'s generics row now
+names the inline shape and the narrowed residue. The 12(f) plan bullet, which listed all
+six constructs as open with no mention of waves 4–5, now records the landed shapes with
+their evidence and the residue above.
+
+**Verified, not built (the prove half).** 2454 (suppression + widening), 2683 (option),
+2769 (overload fallback), 2464 (js suppression + `ToPropertyKey` coercion), and every
+landed 12(f) shape (constrained/defaulted/explicit/undetermined/classes/value) are green
+in this branch's subset + golden runs — concurring with notes 272 and 277, whose edits
+carry the (b) close-out and the 12(e) narrowing respectively.
+
+**Pre-existing gap found, not widened.** A NAMED generic whose body reads a same-file
+`let`/`const`/`var` is accepted by the gate and fails downstream: `const base = 100` with a
+generic body reading `base` fails as `STA4035` (a `var` in js mode as `STA4002`, whose hoist
+feeds the lowering but not the verifier). The inline path refuses those reads; the named
+path predates the rule. Follow-up (not this slice): refuse module-order-blind reads for
+named generics at the gate, or lower specialization bodies after their file's statements.

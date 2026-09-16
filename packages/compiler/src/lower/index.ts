@@ -9559,12 +9559,18 @@ function lowerSpecialization(
   // An arrow or function expression carries no name of its own; the variable's is what Node
   // prints (`[Function: id]`), following the rule declarations already keep.
   const node = specialization.declaration;
+  // An inline generic arrow or function expression has no home whose name it could print: the
+  // key is a position (`arrow@test.ts#128`), not a name. A named function expression keeps its
+  // own name (what Node prints for it); an anonymous arrow keeps none (what Node prints for a
+  // callback-position arrow), exactly as a non-generic inline arrow lowers today. Every other
+  // specialization prints its home, as before.
+  const homeless = !ts.isFunctionDeclaration(node) && genericArrowKey(node) === undefined;
   return {
     kind: 'function-declaration',
     type: H_UNDEFINED,
     span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
     name: specialization.name,
-    fn: fn.name === undefined ? { ...fn, name: specialization.key } : fn,
+    fn: fn.name === undefined && !homeless ? { ...fn, name: specialization.key } : fn,
   };
 }
 
