@@ -8241,6 +8241,26 @@ function lowerClass(
   // (which initializes every static) into the same scope, so a block observes exactly the
   // bindings the class statement established.
   const staticBlocks: ts.ClassStaticBlockDeclaration[] = [];
+  // Static FIELD initializers execute in source order relative to the blocks (plan.md §8 step
+  // 12(d)): the run before the first block initializes with the class, each later run assigns
+  // after its block. Static METHODS stay hoisted with the class — defining one runs nothing,
+  // so their forward references keep working exactly as they do today. Runs past the first
+  // hold the fields whose declaration below carries `undefined` and whose assignment the tail
+  // emits after its block.
+  const staticFieldRuns: ts.PropertyDeclaration[][] = [];
+  {
+    let run: ts.PropertyDeclaration[] = [];
+    for (const member of node.members) {
+      if (ts.isClassStaticBlockDeclaration(member)) {
+        staticFieldRuns.push(run);
+        run = [];
+      } else if (ts.isPropertyDeclaration(member) && isStaticMember(member)) {
+        run.push(member);
+      }
+    }
+    staticFieldRuns.push(run);
+  }
+  const firstRunFields = new Set<ts.PropertyDeclaration>(staticFieldRuns[0] ?? []);
   for (const member of node.members) {
     // An `abstract` member without a body is a declaration only: it joins neither the static
     // lists (a `static abstract` is a checker error the gate never lets through, so reaching
@@ -8356,8 +8376,10 @@ function lowerClass(
       // No receiver: a static method is an ordinary function that happens to be written inside a
       // class. `this` inside one is refused at the gate, which is what makes that true.
       value = lowerFunction(member, sourceFile, checker, bindings, diagnostics);
-    } else if (member.initializer === undefined) {
-      // A declared-but-uninitialized static reads `undefined`, exactly as a field slot does.
+    } else if (member.initializer === undefined || !firstRunFields.has(member)) {
+      // A declared-but-uninitialized static reads `undefined`, exactly as a field slot does —
+      // and so does a field whose run sits past a static block: its slot is `undefined` until
+      // the tail's assignment after its block runs (plan.md §8 step 12(d)).
       value = { kind: 'undefined-literal', type: H_UNDEFINED, span: at };
     } else {
       value = lowerExpression(member.initializer, sourceFile, checker, bindings, diagnostics);
@@ -8585,12 +8607,33 @@ function lowerClass(
   // wrapper keeps the declaration and its blocks one statement in source order, and every pass
   // sees the ordinary statements it already knows.
   const statements: Statement[] = [classDecl];
-  for (const block of staticBlocks) {
+  for (const [index, block] of staticBlocks.entries()) {
     const lowered = lowerBlock(block.body, sourceFile, checker, bindings.child(), diagnostics);
     if (lowered === null) {
       return null;
     }
     statements.push(lowered);
+    // The field run after this block: each initialized field assigns its source-order value
+    // now, into the `undefined` slot the declaration carried (plan.md §8 step 12(d)). Same
+    // shape as the declaration's own value — no boundary, exactly as if it had initialized
+    // with the class — only later. Uninitialized fields need nothing: `undefined` is already
+    // what they are.
+    for (const field of staticFieldRuns[index + 1] ?? []) {
+      if (field.initializer === undefined) {
+        continue;
+      }
+      const value = lowerExpression(field.initializer, sourceFile, checker, bindings, diagnostics);
+      if (value === null) {
+        return null;
+      }
+      statements.push({
+        kind: 'assignment',
+        type: typeAt(field, checker, bindings),
+        span: makeSpan(field.getStart(sourceFile), field.getWidth(sourceFile), sourceFile),
+        target: staticName(selfName, declaredMemberName(field, sourceFile, checker)),
+        value,
+      });
+    }
   }
   return {
     kind: 'block',

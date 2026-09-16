@@ -3617,19 +3617,15 @@ function gateClass(
       continue; // a stray `;` between members declares nothing
     }
     // A static initialization block runs at class-definition time against the statics, which
-    // are plain bindings initialized where the class declaration sits -- so the block's statements
-    // lower right after the declaration, in the same scope. Two limits keep that honest. `super`
-    // in one would read the class object through a base it has no receiver for (`this` is refused
-    // separately, by the `this` rule, as for static methods). And a static FIELD after the block
-    // would initialize after it ran, while the layout initializes every field with the class, so
-    // the field would observe a state no execution reaches.
+    // are plain bindings initialized where the class declaration sits. Field initializers and
+    // blocks execute in source order (plan.md §8 step 12(d)): the declaration carries every
+    // static binding, the fields before the first block initialize with it, and each later
+    // field run assigns after its block. One limit keeps that honest: `super` in a block
+    // would read the class object through a base it has no receiver for (`this` is refused
+    // separately, by the `this` rule, as for static methods).
     if (ts.isClassStaticBlockDeclaration(member)) {
       if (staticBlockUsesSuper(member)) {
         return notYet('super in a static initialization block is not yet supported', 5);
-      }
-      const later = declaration.members.slice(declaration.members.indexOf(member) + 1);
-      if (later.some((m) => ts.isPropertyDeclaration(m) && isStaticMember(m))) {
-        return notYet('a static field after a static initialization block is not yet supported', 5);
       }
       continue;
     }

@@ -4,6 +4,33 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 276. Static fields after static blocks initialize in source order (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** The gate's `a static field after a static initialization block` refusal is
+gone; fields and blocks execute in source order (subset fixtures
+`subset_static_block_{ts,js}` extended, both `static`; golden
+`tests/golden/ts/class_static_block.ts` extended with a two-block interleave plus an
+uninitialized later field — byte-for-byte vs Node 26.7.0):
+
+- Lowering (`lower/index.ts`): static field initializers partition into runs split by blocks
+  (`staticFieldRuns`); the first run initializes with the class as before, each later run
+  assigns after its block. The declaration still carries every static binding (later-run
+  fields as `undefined` slots), so pre-registration, TDZ-shape behavior, and the
+  method-hoisting divergence are all unchanged — only execution order moved. Static METHODS
+  stay hoisted with the class (defining one runs nothing), as do static accessors.
+- Later-run assignments mirror the declaration's own value shape (no boundary, same as if
+  initialized with the class), only later; uninitialized later fields need nothing.
+
+**Sharp edges, all checker-held.** Any block touching a later field is TS2448 (`used before
+its initialization`) in BOTH modes — js mode does not suppress it (TDZ is unmodelled by
+design, step 2a(c)'s open half) — so only non-touching shapes reach the new lowering, and a
+block write to a later field (`C.a = 5` before `static a = 1`) is refused the same way
+Node's TDZ would fail it at run time. Verified: `static { C.a }` + later `static a`
+refuses identically in ts and js.
+
 ## 275. Abstract classes and members land via throw-stubs (2026-09-16)
 
 **Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
