@@ -3,6 +3,64 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 275. T9.1 verified in `.worktrees/t9-1`, not merged: steps 1–5 present, scope clean, rebase required (2026-09-16)
+
+**Plan:** §11a T9.1 (open; plan.md:991-992 forbids merging from the planning change).
+`plan.md` NOT edited — the card and its Progress paragraph already describe this state; this
+entry is the merge-ready diff summary and CI-action decision the card asks for. Main is
+untouched by Zig: `packages/runtime/src/*.zig` does not exist there, `jsrt_gc.c` stands.
+
+**Steps verified (worktree branch `agent/t9-1`, all T9.1 content UNCOMMITTED — 5 `.zig` +
+`jsrt_mem.h` untracked, justfile/CI/mise/C-side modifications in the working copy):**
+
+1. Pin + flavors. `zig 0.16.0` in `mise.toml` (also already on main) and `docs/TOOLCHAIN.md`
+   lists it on main — the merge needs no TOOLCHAIN change. The justfile builds one object,
+   `jsrt_zig.o`, from `src/jsrt_mem.zig` inside the shared `_runtime` recipe, so rel, asan
+   AND intl flavors all get it; `ReleaseSafe` for asan, `ReleaseFast` otherwise; the zig
+   version joins the `cflags.txt` key; `zig fmt --check` is the style gate; the archive is
+   rebuilt from scratch (`ar r` would keep a stale `jsrt_gc.o` beside the new symbols).
+2. `jsrt_gc.c` deleted; `jsrt_gc.zig` carries the GC glue behind the same C ABI.
+3. `jsrt_buf.zig`: `JSRTBuf`, `JSRTStrVec`, `JSRTUnitBuf` (print/JSON growables; string ops
+   have no growable buffer, nothing there moved).
+4. `jsrt_shape.zig`: root, transitions, slot growth, enumeration, delete replay; property
+   semantics (ICs, accessors, TypeErrors) stay in `jsrt_shape.c`.
+5. `jsrt_alloc.zig`: object/array/env/closure/rest/dynobj/null-proto constructors;
+   builtin-specific constructors stay with their builtins. `jsrt_mem.h` + `jsrt_mem.zig`
+   root `@cImport` the headers — no mirrored layouts (one `@cDefine` rename for the
+   translate-c `slots` collision).
+
+**Scope containment (plan-notes 239) holds:** the only regexp/math/builtin/codegen matches
+in `*.zig` are comments ("a RegExp match is…", "the emitter only calls this…"). No C file
+defines moved code — the remaining `jsrt_shape.c`/`jsrt_value.c` bodies are property
+semantics and builtin constructors; everything else is a caller.
+
+**Functional proof on this host (Darwin arm64, zig 0.16.0, Node 26.7.0):** worktree
+`just runtime` builds; release AND asan archives carry `jsrt_zig.o` with no `jsrt_gc.o`;
+4/4 sampled print corpora (numbers, objects, shapes, maps — the last two exercise the Zig
+shape table and alloc paths) link against the Zig archive and MATCH the pinned Node
+byte-for-byte. Caveat: the worktree justfile predates the 266 Darwin SDK retry, so its own
+`runtime-test` corpus link fails on this host's Xcode 26 SDK; the proof above linked the
+same archive manually with `-isysroot` at the readable CLT SDK. The merge inherits main's
+already-fixed justfile section, so this is a rebase artifact, not a Zig defect.
+
+**Why the follow-up is a re-application, not a merge.** The worktree base is `82d833f`-era:
+its `gate.ts` differs from main by 3764 lines, and the C-side adaptations were made against
+old `jsrt_shape.c`/`jsrt_value.c` (main has since changed both — compare the
+`jsrt_class_dynamic` initializers). A wholesale merge would revert weeks of main (old
+`ci.yml`/`nightly.yml` triggers, `AGENTS.md`, docs). The PR must start from current main and
+carry over ONLY: the 5 `.zig` + `jsrt_mem.h`, the `jsrt_gc.c` deletion, the justfile Zig
+block (keeping the 266 retry), the C adaptations re-applied, the `print_classes` corpus
+(union with main's `print_ffi_strings` — each side has one the other lacks), and the setup
+action below. T9.1's Check (full ci green in that tree) is the merge gate and was NOT run
+here — the worktree was never green as a whole, only the runtime slice above.
+
+**CI-action decision: recommend `mlugg/setup-zig@v2`, creator approves.** The worktree's
+`.github/actions/setup/action.yml` hunk is minimal and correct: official Zig installer,
+pinned `version: 0.16.0` (matches `mise.toml`), `if: runner.os != 'Windows'` (Windows never
+builds the runtime). No alternative was found that avoids a third-party action (mise cannot
+install tools inside GitHub runners). This entry files the recommendation with rationale;
+the approval itself stays the creator's, as `docs/TOOLCHAIN.md` already records.
+
 ## 274. Phase 6 residue narrowed: fuzz clause met on nightly output; noise floor stands on ephemerality (2026-09-16)
 
 **Plan:** §9 Phase 6 (intro + noise-floor residue; phase stays open). `plan.md` edited in this
