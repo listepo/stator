@@ -434,15 +434,19 @@ function inlineGenericKey(fn: ts.FunctionExpression | ts.ArrowFunction): string 
   return `${kind}@${base}#${String(fn.getStart(sourceFile))}`;
 }
 
-/** Whether the arrow's body reads anything a module-level specialization could not see.
+/** Whether the function's body reads anything a module-level specialization could not see.
  *
  * Every free reference in the body resolves by symbol; a reference is safe exactly when its
- * declaration is the arrow's own or is visible from module scope. Types erase, so type
+ * declaration is the function's own or is visible from module scope. Types erase, so type
  * positions are skipped whole — a type argument mentioning an enclosing `T` is a substitution
  * the enclosing specialization applies, not a value the body reads. `this`, `super`, and
- * `new.target` are always captures: an arrow's `this` is its encloser's by definition. */
-function capturesEnclosingScope(
-  fn: ts.FunctionExpression | ts.ArrowFunction,
+ * `new.target` are always captures: an arrow's `this` is its encloser's by definition, and
+ * for named functions treating them as captures over-refuses a compilable program rather
+ * than accepting an uncompilable one. Shared by the inline path and the named-declaration
+ * path (plan.md §8 step 12(f)): specialization bodies lower before their file's statements,
+ * so both shapes refuse the same reads. */
+export function capturesEnclosingScope(
+  fn: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction,
   checker: ts.TypeChecker,
 ): boolean {
   let captured = false;
@@ -569,10 +573,15 @@ function isModuleVisible(declaration: ts.Node, fn: ts.Node): boolean {
  * verifier for the third, whose hoist feeds one stage but not the other), so the gate refuses
  * the read here rather than manufacture those internal errors. Cross-file bindings are
  * already registered — dependencies lower before their importers — as are ambient globals.
- * Named generics predate this rule and still accept-then-fail on the same reads; that gap is
- * recorded in plan-notes, not widened here. */
+ * The inline path and the named-declaration path share this rule through
+ * `capturesEnclosingScope` (plan.md §8 step 12(f)). */
 function isSpecializationBlindSpot(declaration: ts.Node, fn: ts.Node): boolean {
   if (!ts.isVariableDeclaration(declaration)) {
+    return false;
+  }
+  // The function's own bindings lower with it: a `let` inside the body is part of the
+  // specialization, not a module-order read. Only an outer same-file variable is blind.
+  if (containsNode(fn, declaration)) {
     return false;
   }
   return declaration.getSourceFile() === fn.getSourceFile();

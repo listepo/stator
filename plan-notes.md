@@ -4,6 +4,37 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 280. Named generics refuse module-order-blind reads at the gate (2026-09-16)
+
+**Plan:** §8 step 12(f). `plan.md` edited in this change (the (f) residue names the named
+shape alongside the inline one). Scope: `agent/p5-leftovers` on top of PRs #7/#9/#11;
+12(c)/12(d)/12(e) untouched.
+
+**What landed.** A generic declaration or homed arrow whose body reads an enclosing scope
+or a same-file `let`/`const`/`var` is `not-yet STA1214` at the gate instead of an
+accept-then-fail downstream (`STA4035` for `let`/`const`, `STA4002` for `var` in js mode,
+whose hoist feeds the lowering but not the verifier):
+
+- `generics.ts`: `capturesEnclosingScope` widened to `FunctionDeclaration` and exported;
+  `isSpecializationBlindSpot` excludes the function's own bindings (a `let` inside the
+  body lowers with the specialization — the old rule refused `sum<T>`'s `total`, caught by
+  `subset_generic_constrained_*`). The inline path shares the same function, so the two
+  cannot disagree about what a read means.
+- `gate.ts`: `gateFunction` refuses a generic with a body that captures, with the same
+  owner the inline path names. Homeless inline arrows still refuse first on position, so
+  their message is unchanged; homed arrows and declarations reach the new arm. Overload
+  signatures (no body) skip it; generic methods stay refused on their own arm.
+- Tests: 6 decision fixtures (`subset_generic_named_capture_*`,
+  `subset_generic_named_module_binding_*`, `subset_generic_homed_module_binding_*`, both
+  modes, all `not-yet STA1214`); 2 unit cases (blind-spot + capture, plus the hoisted-
+  function acceptance). `docs/SUBSET.md` generics row names the named shape.
+- Proof on this branch (pinned Node 26.7.0): `tsc` both projects, oxlint/oxfmt clean,
+  `cpd` 0.9%, unit 579/579, subset 704 (667/37/0), golden 393/393 sharded, runtime built.
+
+**Not in this change.** Switch-guarded supers, abstract accessors, and the class-object
+residue (opaque uses, `super` in statics, `this` in statics, anonymous defaults) stay as
+PR #9 recorded them; 12(c) spread residue stays as the gate proves it. Those are the next
+commit's reconciliation, not this slice's.
 
 ## 278. Bound class expressions land via descriptor erasure (2026-09-16)
 

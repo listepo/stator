@@ -531,13 +531,14 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     type under a position-derived key (`subset_generic_arrow_bare_*` now `static`, four new
     decision pairs, `tests/golden/ts|js/generic_inline.*` byte-for-byte).
     **Residue:** a homeless arrow anywhere else (`let`, a nesting, a branch, a spread, a
-    constructor argument — no single parameter type to read), one whose body reads an
-    enclosing scope or a same-file `let`/`const`/`var` (no binding a module-level
-    specialization could read), a generic that escapes further (returned, stored — the
-    dynamic tier), a generic call at a generic type (self-application — no monomorphic
-    spelling), `instanceof` against a generic class (one descriptor per tuple), and the
-    class-surface residue (a generic subclass of a generic base, raw or partial bounds —
-    family (d)'s).
+    constructor argument — no single parameter type to read), one (inline, named, or homed)
+    whose body reads an enclosing scope or a same-file `let`/`const`/`var` (no binding a
+    module-level specialization could read — plan-notes 280 refuses the named/homed shapes
+    at the gate instead of failing downstream), a generic that escapes further (returned,
+    stored — the dynamic tier), a generic call at a generic type (self-application — no
+    monomorphic spelling), `instanceof` against a generic class (one descriptor per tuple),
+    and the class-surface residue (a generic subclass of a generic base, raw or partial
+    bounds — family (d)'s).
     **Check (step 12):** one golden fixture per family matching the pinned Node byte-for-byte; the
     decision-test rows for every construct named above out of expected-fail; and `gate.ts` emits no
     `not-yet` for any construct this step names.
