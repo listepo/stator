@@ -246,6 +246,17 @@ only when the flag is passed, which the decision runner never passes).
 
 ---
 
+## `std` — systems library (Phase 10, T10.1 — docs skeleton only, nothing implemented)
+
+Stub rows for the T10.1 surface (`docs/STD.md` is the contract). No `STA` code is allocated
+here — codes are allocated with the implementing task, which also wires the gate arms. Until
+then `std/*` imports fail like any unrecognized module edge.
+
+| Feature | `ts` mode | `js` mode | Notes |
+|---|---|---|---|
+| `import … from 'std/env'` / `'std/path'` / `'std/process'` / `'std/fs'` / `'std/time'` | not-yet (Phase 10) | not-yet (Phase 10) | First-party modules, not packages: the `std/` prefix is reserved and recognized at the module-graph edge (`docs/STD.md` §1). Unknown `std/foo` will be a hard error. |
+| `import … from 'std/sync'` / `'std/thread'` | not-yet (Phase 10, T10.2) | not-yet (Phase 10, T10.2) | Needs the OS-threads ↔ async bridge; refuses until it exists (`docs/STD.md` §5). |
+
 ## Out of scope for v1
 
 | Feature | `ts` mode | `js` mode | Notes |

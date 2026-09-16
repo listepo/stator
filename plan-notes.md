@@ -3,6 +3,23 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 276. T10.1 docs-first skeleton: `docs/STD.md` lands, no implementation (2026-09-16)
+
+**Plan:** §11b T10.1 step 1 (docs part only). `plan.md` NOT edited — the step stays open; this
+is the doc it asks for, ahead of code.
+
+**What landed:** `docs/STD.md` (DRAFT SKELETON — marked so on its first line): the four
+freezes Design A demands — `std/*` reserved prefix (§1: NOT `@stator/std`, which reads as a
+package and would collide with the bare-import refusal), sync-first with Promise twins at
+T10.2 and no sync-under-async lie (§2), throw-with-`code` error shape with per-module
+vocabularies left open (§3), POSIX-first (§4) — plus the v0 module table and wire order
+(§5), the three implementation layers (§6), the not-Node/not-FFI boundaries (§7), and four
+explicit open questions (§8: error codes, path edges, fd-vs-path, invalid-byte policy).
+`docs/README.md` indexes it; `docs/SUBSET.md` gains a stub `std` section whose rows name
+Phase 10 with NO allocated code (codes and gate arms arrive with the implementing task —
+allocating a code no gate arm emits would be drift). No runtime code, no compiler edge, no
+`THREADS.md` (T10.2's doc, not this step's).
+
 ## 275. T9.1 verified in `.worktrees/t9-1`, not merged: steps 1–5 present, scope clean, rebase required (2026-09-16)
 
 **Plan:** §11a T9.1 (open; plan.md:991-992 forbids merging from the planning change).
