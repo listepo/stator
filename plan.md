@@ -293,8 +293,11 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, and **steps 18–38** —
-the twenty-one added by the 2026-09-14 bug hunt (plan-notes 249–251). The two
+<What is still OPEN in this phase is **step 12 (c)–(f)** residue — steps 2a(b) and 2a(c)
+are both closed (all three (b) buckets landed per plan-notes 272; both (c) buckets landed per
+plan-notes 277), and the twenty-one steps 18–38 added by the 2026-09-14 bug hunt
+(plan-notes 249–251) plus steps 39–46 added after it have all landed (struck stubs below;
+evidence in [done.md](done.md) → Phase 5). The two
 shipped-construct defects the bug hunt of 2026-09-11 found (steps 15 and 16) both landed the same
 day — plan-notes 225 and 226.
 Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
@@ -346,10 +349,11 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    ~~The remaining buckets were swept 2026-09-04; four more codes landed (18050, 2403, 2695,
    8024/8029) and the strict-mode family was judged a **real refusal Stator keeps**.~~
    ✅ **the sweep is complete** (plan-notes 194, 196) — evidence in [done.md](done.md) → Phase 5
-   step 2a. **Still open in (b):** three buckets **judged correct but blocked on a Stator not-yet**,
-   not on the judgment — 2683 (`this` implicitly any — and when it is taken it goes in as the OPTION
-   `noImplicitThis: mode === 'ts'`, **not** as a code), 2769 (`No overload matches this call`) and
-   2464 (computed property name), all three waiting on step 12(c)/(d)/(e) surface. What is left after
+   step 2a. **All three (b) buckets have landed since** (plan-notes 272): 2683 went in as the
+   OPTION `noImplicitThis: mode === 'ts'` (done.md → Phase 5 wave 4, dynamic `this`), 2769 as the
+   overload-fallback acceptance (done.md → wave 4), and 2464 as a js-mode suppression with
+   dynamic-path coercion. (b) is closed; the override-widening bucket it never named (TS2416,
+   plan-notes 68) is owned by step 12(d). What is left after
    those is one shared blocker, not a set of buckets — see (c).
    (c) **[D4] The error-object model, and the buckets that sat behind it** (added 2026-09-04 from the (b)
    sweep; plan-notes 194).
@@ -382,13 +386,25 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `STA4035`. Reading an undeclared name now throws a catchable `ReferenceError`, `typeof` answers
    `"undefined"` without throwing, and the three WRITE forms the suppression newly admitted were
    caught manufacturing `STA4034` and fixed in the same change — the TS2403 rule again, asked of 24
-   syntactic positions instead of one fixture. · **2488 `Symbol.iterator`**
-   needs runtime dispatch for unknown iterables, not only a panic-to-throw conversion.
+   syntactic positions instead of one fixture. · ~~**2488 `Symbol.iterator`**~~ ✅ **landed
+   2026-09-16** (plan-notes 277; evidence in [done.md](done.md) → Phase 5 step 2a(c),
+   unknown-iterable dispatch): js mode suppresses the checker's refusal and lowers `for-of`
+   over any operand with no static walk through a `get-iterator` HIR node to the runtime
+   GetIterator dispatch (`jsrt_get_iterator` — collections box, generators and stored
+   iterators drive as-is, a user-iterable method resolves and runs, the rest throw Node's
+   catchable `TypeError`), proved by `tests/golden/js/for_of_unknown.js` byte-for-byte and a
+   both-modes decision pair (`subset_for_of_unknown_*`: `dynamic` in js, `error STA0012` in
+   ts). ts mode keeps the refusal, and the gate there refuses only what the checker accepted
+   (a custom `{ next() }` object, an `Iterable<T>` interface) so the STA0012 speaks alone; a
+   `for-of` binding is not an annotation site, so the checker's recovery-`any` no longer
+   buries it under STA1003.
    **2454 definite assignment** rejects an uninitialized annotated binding whose runtime value is
    `undefined`; it is **not TDZ**. True syntactic TDZ is 2448 (closure-mediated TDZ may have no
    checker diagnostic), and there is no runtime TDZ sentinel/check to convert. Suppressing 2454
    additionally requires sound dynamic method receivers rather than trusting the annotation
-   (plan-notes 200, correcting note 195's premise). Both buckets remain open.
+   (plan-notes 200, correcting note 195's premise).~~ ✅ **landed in wave 3** ([done.md](done.md)
+   → Phase 5 wave 3: suppressed in js as a code plus binding widening; verified green in
+   plan-notes 277 — `subset_definite_assignment_*`, both goldens). Both buckets are closed.
    · ~~**`missing.a = 1` and `missing[0] = 1` raise `STA4035`**~~ ✅ **fixed 2026-09-05**
    (plan-notes 199; [done.md](done.md) → Phase 5 step 2a(c), inferred JS namespaces).
    ~~**Check:** `typeof unresolvableName` answers `"undefined"` without throwing and a bare
@@ -401,8 +417,9 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `TypeError`, caught by `tests/golden/js/property_errors.js` and
    `tests/golden/js/iterator_receiver_error.js`. The same conversion later reached the string-length
    builtins: `repeat`/`padStart`/`padEnd` throw a catchable `RangeError` matching Node instead of
-   aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets stay
-   open for the reasons above, which are not panics. ~~**Check:** the two delete buckets (2704, 2790)
+   aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets
+   below were still open then, being not panics — both have since landed (2488: plan-notes 277;
+   2454: wave 3). ~~**Check:** the two delete buckets (2704, 2790)
    land with the `delete` OPERATOR — lowering plus whatever
    answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
    returns Node's boolean and the subsequent read answers `undefined`.~~ ✅ **2026-09-09**
@@ -479,7 +496,12 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     methods).
     **Computed keys landed 2026-09-12** (plan-notes 229; evidence in [done.md](done.md) → Phase 5
     step 12c computed keys).
-    **Residue:** a spread of anything but a variable of fixed shape stays `STA1214`.
+    **Residue:** a spread of an unknown value (`gate.ts:3221,3446`), of a value with no fixed
+    shape (`gate.ts:3225,3448`), and the methods-order shapes (`gate.ts` spread-prefix arms)
+    stay `STA1214` — all need the dynamic tier (step 39), not this slice. Spread of any
+    fixed-shape EXPRESSION compiles — variable, call, or member access, evaluated once via
+    a scratch slot (`tests/golden/ts|js/spread_call_result.*`, `gate.test.ts` spread-call
+    acceptance) — so the old "anything but a variable" line is retired here.
     (d) **[D5] The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an
@@ -488,21 +510,51 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     override rules, anonymous classes, and the `extends` forms. The `this`/`super`/`new` position
     sites ride here (`this` in a static member or outside a class member; `super` on anything but
     an inherited method; `new` on anything but a named class).
+    **Five slices landed 2026-09-16 on `agent/p5-class-surface`** (plan-notes 272–278; evidence
+    in [done.md](done.md) → Phase 5 step 12d): js override-widening for inferred method
+    overrides (274), abstract classes/members via throw-stubs (275), static fields after static
+    blocks in source order (276), branch `super` in init-free derived ctors with exactly-once
+    refusal (273), and bound class expressions via descriptor erasure (278). **Residue:**
+    abstract accessors (`gate.ts:3670` override arm — need virtual accessor dispatch),
+    switch-guarded supers (the branch rule's `checkCtorList` covers `if`/`else`/blocks only —
+    a `switch` stays `STA1214`), `super` in a static block (`gate.ts:3730`), `this` in a static
+    member or block (`gate.ts:4711,4715`), bare `super` (`gate.ts:482,4984` — a JavaScript
+    SyntaxError, stays refused), opaque class values (`gate.ts:904,919,940,5283` — need the
+    class object), and anonymous defaults (`gate.ts:3584` — blocked on default imports).
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~,
     ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~,
     ~~calling a class field~~, and ~~named function expressions~~ **landed** (evidence in
-    [done.md](done.md) → Phase 5 step 12e); still open are a class used as a value and `super` as a
-    value.
+    [done.md](done.md) → Phase 5 step 12e); still open are an OPAQUE class use — anything but
+    the in-place spellings (`new K`, `K.static`, `o instanceof K`, alias formation), which need
+    the class object — and BARE `super` (the `super.m` tear-off landed as step 42; a `super`
+    with no member is a JavaScript SyntaxError and stays refused).
     Method values use the method's own `JSRTClosure` with `has_receiver` so `jsrt_call` shifts when
     the receiver is omitted (`docs/VALUE.md` §4.16, plan-notes 208, 230); that is still not
     `Function.prototype.bind`'s two-slot `JSRTEnv` (which INSERTS a receiver where this DROPS one),
     which stays not-yet. A class used as a value and `super` as a value are blocked on the class
     object instead, which is family (d)'s. Named function expressions bind the function's own name
     inside its body only (plan-notes 231).
-    (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above:
-    constrained and defaulted type parameters, generic classes, generic function expressions and
-    arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a
-    generic call whose type arguments no argument determines.
+    (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above.
+    Constrained and defaulted type parameters specialize like any other call — the constraint
+    is the checker's, the default fills what no call determines (`finishTuple`, `Unknown`
+    when nothing does). Generic classes specialize per concrete tuple at each `new` site,
+    inferred or explicit (evidence: done.md → Phase 5 waves 4–5). A generic function used as
+    a value takes the canonical tuple, sharing its specialization with an undetermined call
+    (step 41); explicit type arguments on a call or a `new` name the same specialization
+    inference would; generic arrows and function expressions specialize under a module-scope
+    `const` home. **An inline generic arrow or function expression passed directly as a call
+    argument landed 2026-09-16** (plan-notes 279): it specializes at the parameter's function
+    type under a position-derived key (`subset_generic_arrow_bare_*` now `static`, four new
+    decision pairs, `tests/golden/ts|js/generic_inline.*` byte-for-byte).
+    **Residue:** a homeless arrow anywhere else (`let`, a nesting, a branch, a spread, a
+    constructor argument — no single parameter type to read), one (inline, named, or homed)
+    whose body reads an enclosing scope or a same-file `let`/`const`/`var` (no binding a
+    module-level specialization could read — plan-notes 280 refuses the named/homed shapes
+    at the gate instead of failing downstream), a generic that escapes further (returned,
+    stored — the dynamic tier), a generic call at a generic type (self-application — no
+    monomorphic spelling), `instanceof` against a generic class (one descriptor per tuple),
+    and the class-surface residue (a generic subclass of a generic base, raw or partial
+    bounds — family (d)'s).
     **Check (step 12):** one golden fixture per family matching the pinned Node byte-for-byte; the
     decision-test rows for every construct named above out of expected-fail; and `gate.ts` emits no
     `not-yet` for any construct this step names.
