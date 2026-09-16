@@ -1517,6 +1517,16 @@ function collectDynamicReturnsPass(
     if (fqn === undefined || fqns.has(fqn)) {
       return;
     }
+    // A suppressed-2416 override pair (program.ts): the hierarchy is inconsistent, so a call
+    // resolving to either declaration answers Unknown instead of trusting one side's return —
+    // or a base-typed read of a derived instance answers garbage. Seeding names the
+    // declarations; this names the calls, leaving overload and vtable contracts (the
+    // declarations) untouched. Methods only: variable and parameter seeds name bindings,
+    // never callables, so no existing seed can reach this arm.
+    if (ts.isMethodDeclaration(fn) && knownDynamic.has(fqn)) {
+      fqns.add(fqn);
+      return;
+    }
     const target = declaredReturnOf(fn, checker);
     if (target === undefined) {
       return;
