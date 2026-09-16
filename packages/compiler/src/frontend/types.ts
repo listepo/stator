@@ -901,6 +901,17 @@ export function isStaticMember(member: ts.ClassElement): boolean {
   );
 }
 
+/** Whether a class member carries `abstract`: it declares, and a subclass implementation
+ * runs. Bodiless abstract members need no lowering of their own — the stub the lowering
+ * emits in their place throws if it ever runs, which no checked program does (an abstract
+ * class is never constructed, a concrete subclass always overrides). */
+export function hasAbstractModifier(member: ts.ClassElement): boolean {
+  return (
+    ts.canHaveModifiers(member) &&
+    ts.getModifiers(member)?.some((m) => m.kind === ts.SyntaxKind.AbstractKeyword) === true
+  );
+}
+
 /** TypeScript's name for a class's `[Symbol.iterator]()` method — `getPropertiesOfType` spells
  * well-known symbols as `__@` plus the spec name, and HObject.methods has to match that so a
  * MethodCall slot and a vtable entry name the same row. */

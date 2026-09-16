@@ -62,6 +62,7 @@ import {
   classDeclarationOf,
   computedKeyStaticName,
   elementStaticKey,
+  hasAbstractModifier,
   heritageSubstitution,
   heritageTuple,
   isBrandedPointer,
@@ -8017,6 +8018,111 @@ function classSpecType(spec: ClassSpecialization, checker: ts.TypeChecker): HTyp
  * constructor body, in declaration order, which is what the language specifies and what lets the
  * emitter have exactly one place that populates an object. A class with initializers but no
  * constructor gets an empty one to hold them. */
+/** The stand-in for a bodiless `abstract` member: a function with the declaration's shape
+ * (receiver parameter zero, mirrored parameter list) whose body throws Node's TypeError.
+ *
+ * The stub exists so the base class has a complete method table and direct-call target: a
+ * virtual call always lands on the runtime class's entry (the concrete override), and a
+ * direct call to an abstract method has no instantiable receiver in any checked program
+ * (an abstract class is never constructed, a concrete subclass always overrides — both
+ * checker-enforced), so the stub never runs. If it ever does — `super.m()` on an abstract
+ * base included — a catchable TypeError is Node's answer too (`A.prototype.m` is
+ * `undefined` there). Async and generator flags stay false: the throw transfers before any
+ * promise or iterator could be built, exactly as a synchronous throw in a real body would.
+ *
+ * Parameters mirror the declaration (names, types, rest-ness) for arity's sake; defaults
+ * are dropped, because a default that runs means the call reached a body that never runs.
+ * Bindings are declared in a fresh function scope like `lowerFunction` does, so a verifier
+ * that resolves parameter names the way it resolves any function's finds them. */
+function abstractMemberStub(
+  member: ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
+  receiver: HType,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+): FunctionExpr {
+  const span = makeSpan(member.getStart(sourceFile), member.getWidth(sourceFile), sourceFile);
+  const inner = bindings.functionScope();
+  const params: Parameter[] = [];
+  params.push({
+    name: RECEIVER,
+    type: receiver,
+    span: makeSpan(member.getStart(sourceFile), 0, sourceFile),
+  });
+  inner.set(RECEIVER, receiver);
+  for (const param of member.parameters) {
+    const type = typeAt(param, checker, bindings);
+    const at = makeSpan(param.getStart(sourceFile), param.getWidth(sourceFile), sourceFile);
+    if (ts.isIdentifier(param.name)) {
+      const hirName = inner.declare(param.name.text, type);
+      hirNameOfDeclaration.set(param, hirName);
+      params.push({
+        name: hirName,
+        type,
+        span: at,
+        ...(param.dotDotDotToken !== undefined ? { rest: true as const } : {}),
+      });
+      continue;
+    }
+    const tmp = nextBindTemp();
+    inner.set(tmp, type);
+    params.push({
+      name: tmp,
+      type,
+      span: at,
+      ...(param.dotDotDotToken !== undefined ? { rest: true as const } : {}),
+    });
+  }
+  const declared = typeAt(member, checker, bindings);
+  const type = hFunction(
+    params.map((p) => p.type),
+    declared.kind === 'fn' ? declared.ret : H_UNDEFINED,
+  );
+  const display =
+    member.name !== undefined && ts.isIdentifier(member.name) ? member.name.text : 'anonymous';
+  const message: Expression = {
+    kind: 'string-literal',
+    type: H_STRING,
+    span,
+    value: `abstract method '${display}' has no implementation`,
+  };
+  const body: Block = {
+    kind: 'block',
+    type: H_UNDEFINED,
+    span,
+    statements: [
+      {
+        kind: 'throw-statement',
+        type: H_UNDEFINED,
+        span,
+        value: {
+          kind: 'error-new',
+          type: errorHType('TypeError'),
+          span,
+          ctor: 'TypeError',
+          arg: message,
+        },
+      },
+    ],
+  };
+  const name =
+    member.name !== undefined && ts.isIdentifier(member.name) ? member.name.text : undefined;
+  return {
+    kind: 'function',
+    type,
+    span,
+    ...(name !== undefined && { name }),
+    params,
+    body,
+    isAsync: false,
+    isGenerator: false,
+    envVars: [],
+    captures: [],
+    needsEnv: false,
+    provenance: provenanceOf(member, params, type),
+  };
+}
+
 function lowerClass(
   node: ts.ClassDeclaration,
   sourceFile: ts.SourceFile,
@@ -8120,11 +8226,35 @@ function lowerClass(
   )[] = [];
   const staticAccessors: (ts.GetAccessorDeclaration | ts.SetAccessorDeclaration)[] = [];
   const staticNodes: (ts.PropertyDeclaration | ts.MethodDeclaration)[] = [];
+  // Bodiless `abstract` members declare but never run: the subclass implementation carries the
+  // behavior, while the declaration still needs a table entry and a direct-call target in THIS
+  // class (plan.md §8 step 12(d)). They collect here and lower to throw-stubs beside the real
+  // methods below — reachable in no checked program (an abstract class is never constructed,
+  // a concrete subclass always overrides), so the stub's only job is to exist with the right
+  // shape and throw Node's TypeError if it ever runs.
+  const abstractStubs: (
+    | ts.MethodDeclaration
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration
+  )[] = [];
   // Static initialization blocks run at class-definition time. They lower after the declaration
   // (which initializes every static) into the same scope, so a block observes exactly the
   // bindings the class statement established.
   const staticBlocks: ts.ClassStaticBlockDeclaration[] = [];
   for (const member of node.members) {
+    // An `abstract` member without a body is a declaration only: it joins neither the static
+    // lists (a `static abstract` is a checker error the gate never lets through, so reaching
+    // here one is already refused) nor the method lists below — the stub loop emits it.
+    if (
+      (ts.isMethodDeclaration(member) ||
+        ts.isGetAccessorDeclaration(member) ||
+        ts.isSetAccessorDeclaration(member)) &&
+      member.body === undefined &&
+      hasAbstractModifier(member)
+    ) {
+      abstractStubs.push(member);
+      continue;
+    }
     // A static belongs to the class object, not to the layout: it is neither a slot nor a member
     // function, so it leaves both lists before either is built.
     if (
@@ -8188,6 +8318,7 @@ function lowerClass(
     // would lower a type parameter no substitution binds, and none of it can run (the class
     // is never constructed under its own name).
     methodNodes.length = 0;
+    abstractStubs.length = 0;
     staticBlocks.length = 0;
   }
   for (const member of staticNodes) {
@@ -8290,6 +8421,12 @@ function lowerClass(
       return null;
     }
     methods.push({ name: memberFunctionName(method, sourceFile, checker, node.name?.text), fn });
+  }
+  for (const member of abstractStubs) {
+    methods.push({
+      name: memberFunctionName(member, sourceFile, checker, node.name?.text),
+      fn: abstractMemberStub(member, layout, sourceFile, checker, bindings),
+    });
   }
 
   // A derived class always needs a constructor even with nothing of its own to do, because the
