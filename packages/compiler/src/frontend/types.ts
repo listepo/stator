@@ -1651,6 +1651,20 @@ function annotationSiteOf(node: ts.Node): ts.TypeNode | null | undefined {
     ts.isArrowFunction(node) ||
     ts.isFunctionExpression(node)
   ) {
+    // A `for-of` binding cannot carry an annotation (`for (const x: T of ...)` is a grammar
+    // error), so it can never be *implicit* any in the sense this question asks: when iteration
+    // itself is refused (TS2488/TS2571, plan.md §8 step 2a(c)) the checker types the binding `any`
+    // as error recovery, and reporting STA1003 for it would bury the STA0012 that names the real
+    // refusal (`explain` ranks the never above the error). Every other any-binding has a
+    // companion diagnostic -- explicit `any` is STA1001 even in ambient declarations, an untyped
+    // source is STA1003 on its own site -- so nothing goes silent here.
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isVariableDeclarationList(node.parent) &&
+      ts.isForOfStatement(node.parent.parent)
+    ) {
+      return null;
+    }
     return node.type;
   }
   return null;

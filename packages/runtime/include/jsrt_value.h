@@ -888,6 +888,17 @@ extern const JSRTClass jsrt_class_iterator;
 
 jsrt_value jsrt_iterator_new(jsrt_value target, uint8_t kind);
 jsrt_value jsrt_iterator_match_all_new(jsrt_value str, jsrt_value matcher);
+/* Dynamic GetIterator dispatch for `for-of` over a statically-unknown iterable (plan.md §8 step
+ * 2a(c), TS2488): arrays, strings, Maps and Sets box into the specialized walk the static loop
+ * would have inlined; generators and stored boxes pass through untouched; any other object
+ * resolves its `__@iterator` method through the shape table (fixed or dynamic alike) and calls
+ * it with the receiver, and whatever else arrives leaves a catchable `X is not iterable`
+ * pending. The answer is always something `jsrt_iterator_step` drives -- a method result that
+ * is neither a generator nor a box is Node's `TypeError: Result of the Symbol.iterator method
+ * is not an object` rather than a step the walk cannot take. A custom `{ next() }` object is
+ * that error too: driving one needs a callback into compiled code per step, which is the
+ * Phase-8 dynamic tier, not this dispatch (a statically-known one stays STA1214). */
+jsrt_value jsrt_get_iterator(jsrt_value value);
 jsrt_value jsrt_iterator_next(jsrt_value it, jsrt_value sent);
 bool jsrt_iterator_step(jsrt_value it, jsrt_value *out);
 /* IteratorClose for `for...of` (plan.md §8 step 34): a `break`, `return` or `throw` out of the
@@ -1180,6 +1191,11 @@ JSRTArray *jsrt_require_array(jsrt_value array, const char *method);
  * above. Only the array-kind operand takes this path; other static kinds have their own walks
  * and their own steps. */
 void jsrt_require_array_iterable(jsrt_value value);
+
+/* Shared `X is not iterable` throw for the dynamic GetIterator dispatch (plan.md §8 step 2a(c)):
+ * the same rendering `jsrt_require_array_iterable` uses, so every for-of refusal names the
+ * receiver the same way. Catchable, like STA2009's. */
+void jsrt_throw_not_iterable(jsrt_value value);
 
 /* `.length` as a Number, so the emitter never reads the struct field itself. */
 jsrt_value jsrt_array_length(jsrt_value array);

@@ -235,6 +235,12 @@ forms (`keys`, `values`, `entries`) land as a result kind `iterator` (Phase 5 st
 operand peels to an inlined walk, and a stored result is a boxed `JSRTIterator` whose `next()` is
 the `IteratorNext` node. `function*` is the same `iterator` type wrapping a `JSRTGenerator`:
 `YieldExpr` is the suspension, and `IteratorNext.sent` is what a later `next(v)` injects.
+`for-of` over an operand no static walk covers wraps it in `GetIterator` (plan.md §8 step
+2a(c)): one target, always typed `iterator` with an Unknown element, emitting a single
+`jsrt_get_iterator` call ahead of the existing boxed walk. The verifier pins that contract
+(`STA4045`) because the for-of case copies the node's type onto the loop binding with no
+further check -- a concrete element would be a silent narrowing of values the runtime never
+promised.
 
 Task 4.2 added `MathCall` on the CollectionOp precedent: a closed method set, exact arity, one
 runtime function per operation, no function value anywhere. Post-lowering arity is FIXED at one or

@@ -1778,7 +1778,8 @@ export type Expression =
   | PromiseMethodCall
   | PromiseConstruct
   | ConsoleLogCall
-  | IteratorNext;
+  | IteratorNext
+  | GetIterator;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Statements
@@ -2049,6 +2050,16 @@ export interface IteratorNext extends Node {
    * the injected exception (`throw(e)`). An absent argument pads `undefined`. Specialized
    * iterators ignore it; generators use it as the resume value. */
   readonly sent: Expression;
+}
+
+/** Runtime GetIterator dispatch for `for-of` over a statically-unknown iterable (plan.md §8
+ * step 2a(c)): the `jsrt_get_iterator` call the lowering wraps any operand in that no static
+ * walk covers. The node's own type is always `iterator` with an Unknown element -- whatever the
+ * runtime answers, `jsrt_iterator_step` drives it, and the yielded values are dynamically typed
+ * -- so the existing boxed for-of walk takes it with no new emission arm. */
+export interface GetIterator extends Node {
+  readonly kind: 'get-iterator';
+  readonly target: Expression;
 }
 
 /** One `case` or `default` arm. An absent `test` is `default`.

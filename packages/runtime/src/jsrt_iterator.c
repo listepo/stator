@@ -224,6 +224,51 @@ static bool generator_step(jsrt_value gen, jsrt_value sent, jsrt_value *out) {
   return true;
 }
 
+jsrt_value jsrt_get_iterator(jsrt_value value) {
+  if (jsrt_is_generator(value) || is_iterator(value)) {
+    return value;
+  }
+  if (jsrt_is(value, JSRT_TAG_ARRAY)) {
+    return jsrt_iterator_new(value, JSRT_ITER_ARRAY_VALUES);
+  }
+  if (jsrt_is(value, JSRT_TAG_STRING)) {
+    return jsrt_iterator_new(value, JSRT_ITER_STRING);
+  }
+  if (jsrt_is(value, JSRT_TAG_OBJECT)) {
+    const JSRTClass *cls = jsrt_as_object(value)->cls;
+    if (cls == &jsrt_class_map) {
+      return jsrt_iterator_new(value, JSRT_ITER_MAP_ENTRIES);
+    }
+    if (cls == &jsrt_class_set) {
+      return jsrt_iterator_new(value, JSRT_ITER_SET_VALUES);
+    }
+    /* A user iterable: the method the frontend names `__@iterator`, resolved the way any
+     * dynamic method call resolves it (fixed method table or shape table alike). It must be
+     * a closure -- anything else is the non-iterable below, not a call through a garbage
+     * pointer -- and `jsrt_call` passes the receiver itself, since the method declares one. */
+    jsrt_value method = jsrt_get_prop(value, "__@iterator", NULL);
+    if (jsrt_pending()) {
+      return JSRT_UNDEFINED;
+    }
+    if (!jsrt_is(method, JSRT_TAG_CLOSURE)) {
+      jsrt_throw_not_iterable(value);
+      return JSRT_UNDEFINED;
+    }
+    jsrt_value iterator = jsrt_call(method, 1, &value);
+    if (jsrt_pending()) {
+      return JSRT_UNDEFINED;
+    }
+    if (!jsrt_is_generator(iterator) && !is_iterator(iterator)) {
+      jsrt_throw_error(&jsrt_class_type_error,
+                       "Result of the Symbol.iterator method is not an object");
+      return JSRT_UNDEFINED;
+    }
+    return iterator;
+  }
+  jsrt_throw_not_iterable(value);
+  return JSRT_UNDEFINED;
+}
+
 bool jsrt_iterator_step(jsrt_value itv, jsrt_value *out) {
   if (jsrt_is_generator(itv)) {
     return generator_step(itv, JSRT_UNDEFINED, out);
