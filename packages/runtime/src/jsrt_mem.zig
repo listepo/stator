@@ -51,4 +51,5 @@ pub fn reallocOrPanic(ptr: ?*anyopaque, bytes: usize, what: [*:0]const u8) *anyo
 comptime {
     _ = @import("jsrt_gc.zig");
     _ = @import("jsrt_buf.zig");
+    _ = @import("jsrt_shape.zig");
 }

@@ -10,6 +10,7 @@
  */
 
 #include "jsrt.h"
+#include "jsrt_mem.h"
 #include "jsrt_value.h"
 
 #include <stdint.h>
@@ -33,23 +34,12 @@ const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL, NULL}
  * producer. */
 const JSRTClass jsrt_class_accessor = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
 
-/* The one shape with no key: every dynamic object starts here. Static, so "has no properties"
- * needs no allocation and compares by address. */
-static JSRTShape shape_root = {NULL, NULL, 0, NULL, NULL};
-
 /* Slot storage holds jsrt_values, so under Boehm it must be a COLLECTED allocation the collector
  * scans; the shapes themselves hold no values and are immortal metadata, so they use plain malloc
  * either way (a shape is never garbage: the table only grows, by design). */
 static void *slots_alloc(size_t bytes) {
   void *p = jsrt_gc_alloc(bytes, "dynamic object slots");
   return p;
-}
-
-static uint32_t shape_slot_count(const JSRTShape *shape) {
-  if (shape->key == NULL) {
-    return 0;
-  }
-  return shape->offset + 1;
 }
 
 /* A property is an array index exactly when its canonical decimal spelling round-trips through
@@ -75,58 +65,10 @@ bool jsrt_key_is_array_index(const char *key, uint32_t *value) {
   return true;
 }
 
-static bool property_before(const JSRTShape *a, const JSRTShape *b) {
-  uint32_t ai = 0;
-  uint32_t bi = 0;
-  const bool a_is_index = jsrt_key_is_array_index(a->key, &ai);
-  const bool b_is_index = jsrt_key_is_array_index(b->key, &bi);
-  if (a_is_index != b_is_index) {
-    return a_is_index;
-  }
-  if (a_is_index && ai != bi) {
-    return ai < bi;
-  }
-  /* Distinct canonical index keys cannot tie; this offset tie-breaker preserves insertion order
-   * for ordinary keys and keeps the sort deterministic if malformed metadata ever appears. */
-  return a->offset < b->offset;
-}
-
-uint32_t jsrt_shape_property_count(const JSRTShape *shape) {
-  /* NULL is an array that never gained a property -- the same "no properties" the root shape means
-   * for a dynamic object, spelled without an allocation. */
-  return shape == NULL || shape->key == NULL ? 0 : shape->offset + 1;
-}
-
-/* The chain flattened into slot order: `links[i]` is the shape node whose value lives in slot `i`.
- * That IS insertion order, which both callers need before doing anything else -- enumeration sorts
- * it, and a delete replays it. */
-static const JSRTShape **shape_links(const JSRTShape *shape, uint32_t count) {
-  const JSRTShape **links =
-      (const JSRTShape **)malloc((size_t)count * sizeof(const JSRTShape *));
-  if (links == NULL && count > 0) {
-    jsrt_panic("out of memory: dynamic object keys");
-  }
-  for (const JSRTShape *s = shape; s != NULL && s->key != NULL; s = s->parent) {
-    links[s->offset] = s;
-  }
-  return links;
-}
-
-const JSRTShape **jsrt_shape_property_order(const JSRTShape *shape, uint32_t count) {
-  const JSRTShape **links = shape_links(shape, count);
-  /* Stable insertion sort is sufficient for shape-sized key sets and avoids a comparator carrying
-   * hidden state.  Offset order is the insertion order for non-index keys. */
-  for (uint32_t i = 1; i < count; i++) {
-    const JSRTShape *current = links[i];
-    uint32_t j = i;
-    while (j > 0 && property_before(current, links[j - 1])) {
-      links[j] = links[j - 1];
-      j--;
-    }
-    links[j] = current;
-  }
-  return links;
-}
+/* The shape table itself -- the root, the chain walk, transitions, slot growth, key order and the
+ * delete replay -- is jsrt_shape.zig (declared in jsrt_mem.h), and the dynamic-object allocators
+ * are jsrt_alloc.zig. What stays here is property SEMANTICS over that table: inline caches,
+ * accessors, the fixed-layout fallbacks and every TypeError the language names. */
 
 /* Whether slot `a` enumerates before slot `b` of the same fixed layout. Canonical array-index
  * keys come first in ascending numeric order; ordinary keys never move relative to each other,
@@ -263,7 +205,7 @@ static PropTable as_prop_table(jsrt_value v, const char *op) {
   if (jsrt_is(v, JSRT_TAG_ARRAY)) {
     JSRTArray *a = jsrt_as_array(v);
     if (a->shape == NULL) {
-      a->shape = &shape_root; /* first touch: an ordinary array pays nothing until here */
+      a->shape = &jsrt_shape_root; /* first touch: an ordinary array pays nothing until here */
     }
     return (PropTable){&a->shape, &a->slots, &a->slot_capacity};
   }
@@ -319,7 +261,7 @@ const char *jsrt_shape_key(jsrt_value name) {
 static jsrt_value dynobj_new(const JSRTClass *cls) {
   JSRTDynObject *o = (JSRTDynObject *)slots_alloc(sizeof(JSRTDynObject));
   o->cls = cls;
-  o->shape = &shape_root;
+  o->shape = &jsrt_shape_root;
   o->capacity = 0;
   o->slots = NULL;
   o->frozen = false;
@@ -329,41 +271,6 @@ static jsrt_value dynobj_new(const JSRTClass *cls) {
 jsrt_value jsrt_dynobj_new(void) { return dynobj_new(&jsrt_class_dynamic); }
 
 jsrt_value jsrt_null_proto_new(void) { return dynobj_new(&jsrt_class_null_proto); }
-
-/* The chain walk both get and set share: the object's live keys are exactly the keys on the path
- * from its shape back to the root. Pointer compare first — generated C passes string literals,
- * and the transition that created the shape stored that same literal — with strcmp as the
- * correctness backstop for a key spelled at two sites. */
-static const JSRTShape *shape_find(const JSRTShape *shape, const char *key) {
-  for (const JSRTShape *s = shape; s->key != NULL; s = s->parent) {
-    if (s->key == key || strcmp(s->key, key) == 0) {
-      return s;
-    }
-  }
-  return NULL;
-}
-
-/* The child of `from` that adds `key`, reusing an existing one before allocating. Reuse before
- * allocation is what keeps two same-history objects on ONE shape -- and it is why a delete can
- * replay a chain minus one key and land where an object built without that key would have. */
-static JSRTShape *shape_transition(JSRTShape *from, const char *key) {
-  for (JSRTShape *s = from->transitions; s != NULL; s = s->sibling) {
-    if (s->key == key || strcmp(s->key, key) == 0) {
-      return s;
-    }
-  }
-  JSRTShape *next = (JSRTShape *)malloc(sizeof(JSRTShape));
-  if (next == NULL) {
-    jsrt_panic("out of memory: shape");
-  }
-  next->parent = from;
-  next->key = key;
-  next->offset = shape_slot_count(from);
-  next->transitions = NULL;
-  next->sibling = from->transitions;
-  from->transitions = next;
-  return next;
-}
 
 /* A loaded slot, resolved. An accessor cell becomes a call with the receiver as argument zero --
  * the ordinary method ABI (docs/VALUE.md §4.5), so an accessor body is an ordinary function unit.
@@ -445,7 +352,7 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   if (ic != NULL && ic->shape == *o.shape) {
     return accessor_read((*o.slots)[ic->offset], obj);
   }
-  const JSRTShape *hit = shape_find(*o.shape, key);
+  const JSRTShape *hit = jsrt_shape_find(*o.shape, key);
   if (hit == NULL) {
     /* Array.prototype as values (plan.md §8 step 20): the walk above covers own properties
      * only, so `a.push` on an array fell through to `undefined` and the call aborted STA2006
@@ -476,7 +383,7 @@ bool jsrt_has_prop(jsrt_value obj, const char *key) {
     return jsrt_is(obj, JSRT_TAG_STRING) && strcmp(key, "length") == 0;
   }
   const PropTable o = as_prop_table(obj, "has");
-  return shape_find(*o.shape, key) != NULL;
+  return jsrt_shape_find(*o.shape, key) != NULL;
 }
 
 bool jsrt_in(jsrt_value key, jsrt_value obj) {
@@ -558,7 +465,7 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
     (*o.slots)[ic->offset] = value;
     return;
   }
-  const JSRTShape *hit = shape_find((*o.shape), key);
+  const JSRTShape *hit = jsrt_shape_find((*o.shape), key);
   if (hit != NULL) {
     if (ic != NULL) {
       ic->shape = (*o.shape);
@@ -571,23 +478,9 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
     return;
   }
 
-  /* New property: take (or build) the transition. */
-  JSRTShape *next = shape_transition((*o.shape), key);
-
-  if (next->offset >= (*o.capacity)) {
-    /* Double from 4 so repeated additions stay amortized O(1). The old slots are copied, not
-     * reallocated in place: under Boehm the old block is simply dropped for the collector. */
-    uint32_t grown = (*o.capacity) == 0 ? 4 : (*o.capacity) * 2;
-    jsrt_value *fresh = (jsrt_value *)slots_alloc((size_t)grown * sizeof(jsrt_value));
-    for (uint32_t i = 0; i < (*o.capacity); i++) {
-      fresh[i] = (*o.slots)[i];
-    }
-#ifndef JSRT_HAVE_BOEHM
-    free((*o.slots));
-#endif
-    (*o.slots) = fresh;
-    (*o.capacity) = grown;
-  }
+  /* New property: take (or build) the transition, and make its slot writable. */
+  JSRTShape *next = jsrt_shape_transition((*o.shape), key);
+  jsrt_shape_reserve(o.slots, o.capacity, next->offset);
   (*o.slots)[next->offset] = value;
   /* Transitions are not IC-cached: each object performs a given addition exactly once, so a
    * transition cache would only ever hit across objects — worth building when Phase 5 measures
@@ -606,27 +499,6 @@ void jsrt_define_accessor(jsrt_value obj, const char *key, jsrt_value get, jsrt_
   cell->set = set;
   /* No IC: installation happens once per object at construction, so a cache would never hit. */
   store_prop(obj, key, JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)cell), NULL, false);
-}
-
-/* The shape rebuild. A shape node is shared metadata -- other objects sit on the same chain -- so
- * removing a key means replaying the chain from the root without it and compacting the slots to
- * match. `next` never runs ahead of `i`, so the compaction reads every slot before it is written.
- * Deliberately not IC-aware: an IC is trusted by shape-pointer compare, and the object now holds a
- * different pointer, so every cache filled against the old shape simply misses. */
-static void shape_delete(PropTable o, const JSRTShape *hit) {
-  const uint32_t count = shape_slot_count(*o.shape);
-  const JSRTShape **links = shape_links(*o.shape, count);
-  JSRTShape *shape = &shape_root;
-  uint32_t next = 0;
-  for (uint32_t i = 0; i < count; i++) {
-    if (links[i] == hit) {
-      continue;
-    }
-    shape = shape_transition(shape, links[i]->key);
-    (*o.slots)[next++] = (*o.slots)[i];
-  }
-  free(links);
-  *o.shape = shape;
 }
 
 bool jsrt_delete(jsrt_value obj, jsrt_value key) {
@@ -672,7 +544,7 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
     return true;
   }
   const PropTable o = as_prop_table(obj, "delete");
-  const JSRTShape *hit = shape_find(*o.shape, k);
+  const JSRTShape *hit = jsrt_shape_find(*o.shape, k);
   if (hit == NULL) {
     /* Absent is `true` even on a frozen object: §13.5.1.2 asks [[Delete]], and deleting what is
      * not there succeeds. Only an existing non-configurable property raises. */
@@ -685,7 +557,7 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
     jsrt_throw_error(&jsrt_class_type_error, msg);
     answer = false;
   } else {
-    shape_delete(o, hit);
+    jsrt_shape_remove(o.shape, *o.slots, hit);
   }
   free((void *)k);
   return answer;
