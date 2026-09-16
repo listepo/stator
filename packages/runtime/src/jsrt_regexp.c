@@ -485,7 +485,7 @@ static jsrt_value match_groups(const JSRTRegExp *re, const JSString *s, const ui
 static jsrt_value match_array(const JSRTRegExp *re, const JSString *s, jsrt_value str,
                               const uint32_t *m, uint32_t ncap) {
   /* The half-built array is reachable from NOTHING: it is a local, and a NaN-boxed local is
-   * invisible to the collector (docs/VALUE.md §4.1, jsrt_gc.c's own header). Every call below --
+   * invisible to the collector (docs/VALUE.md §4.1, jsrt_gc.zig's own header). Every call below --
    * jsrt_array_push, jsrt_string_new for a group, match_groups and jsrt_set_prop -- can allocate
    * and collect, so the array has to sit in a rooted slot for as long as it is being built.
    * `str` is a parameter, so it is already a root. Without this, `s.match(re)` in a loop returned

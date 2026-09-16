@@ -18,7 +18,7 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | pnpm                      | `12.3.4`           | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml`                                                                                                                                                               |
 | LLVM                      | `21.1.8`           | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
 | just                      | `1.58.0`           | `mise.toml`. The runtime build (`just -f packages/runtime/justfile -d packages/runtime runtime`, `runtime-asan`, `runtime-intl`).                                                                                                |
-| Zig                       | `0.16.0`           | `mise.toml` (`zig`, Unix). Required for runtime builds once T9.1 lands (plan-notes 238). Pin is in place so the task is executable; main does not yet compile `src/*.zig`. CI install via `mlugg/setup-zig@v2` awaits creator approval. |
+| Zig                       | `0.16.0`           | `mise.toml` (`zig`, Unix). The memory-core objects in `libjsrt.a` (plan-notes 238, T9.1). CI install via `mlugg/setup-zig@v2` awaits creator approval. |
 
 Node ≥ 24 is required because dev runs the compiler's TypeScript sources directly
 (`node packages/compiler/src/cli/main.ts`) via native type stripping — there is no build step in development.
@@ -132,7 +132,7 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 | `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`                       | the runtime, the emitted C, and the final link           |
 | `ar` (`$AR`)    | justfile                                                             | archiving `libjsrt.a`                                    |
 | `just`          | justfile                                                             | the runtime build (pinned `1.58.0` in `mise.toml`)       |
-| `zig`           | justfile (T9.1)                                                      | memory-core objects into `libjsrt.a` (pinned `0.16.0` in `mise.toml`; required once T9.1 lands) |
+| `zig`           | justfile (T9.1)                                                      | memory-core objects into `libjsrt.a` (pinned `0.16.0` in `mise.toml`; required) |
 | `pkg-config`    | justfile                                                             | finding bdw-gc and ICU; absent means both are simply off |
 | `diff`          | `just -f packages/runtime/justfile -d packages/runtime runtime-test` | the print corpus against Node, byte-for-byte             |
 

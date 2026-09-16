@@ -23,7 +23,7 @@ _Noreturn void jsrt_panic(const char *msg);
 /* The runtime's ONE collected allocation, and the only place that knows whether a collector is
  * configured at all. Everything that can hold a jsrt_value comes from here: under Boehm the
  * memory belongs to an object kind whose mark procedure unboxes, and a value stored in memory
- * from anywhere else is invisible to the collector (jsrt_gc.c). `what` names the allocation in
+ * from anywhere else is invisible to the collector (jsrt_gc.zig). `what` names the allocation in
  * the out-of-memory panic; the call never returns NULL. */
 void *jsrt_gc_alloc(size_t bytes, const char *what);
 
