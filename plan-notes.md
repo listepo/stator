@@ -4,6 +4,43 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 272. Step-12(e)/41-42 drift check: no contradiction, only breadth; 2a(b) closed; Phase-5 header updated (2026-09-16)
+
+**Plan:** §8 Phase 5 header, step 2a(b), step 12(e). `plan.md` edited in this change.
+
+**No contradiction between 12(e) and steps 41-42.** Step 41 is bare GENERICS as value
+(done.md → Phase 5 wave 5), not class-as-value; step 42 is the `super.m` tear-off, while bare
+`super` stays refused (`gate.ts:471,4749`) — correctly, since a memberless `super` is a
+JavaScript SyntaxError with no value to lower. Opaque class uses stay refused
+(`gate.ts:893,908,5048`; done.md → Phase 5 wave 4; `subset_class_alias_opaque_*` pin the
+verdict). So 12(e)'s "still open are a class used as a value and `super` as a value" remains
+true and is narrowed by this edit to name exactly the open shapes: opaque class uses
+(including class expressions) and bare `super`.
+
+**Step 2a(b) is closed — all three buckets landed.** 2683 went in as the OPTION
+`noImplicitThis: mode === 'ts'` (`program.ts:351`; done.md → Phase 5 wave 4, dynamic `this`),
+2769 as the overload-fallback acceptance (`hasFunctionImplementation` in `gate.ts`; wave 4),
+2464 as a js-mode suppression (`JS_MODE_RUNTIME_CODES`, `program.ts:190`). 2464 verified
+end-to-end on the pinned Node 26.7.0: `{ [kObj]: 1 }` under `--mode=js` compiles and prints
+`{"[object Object]":1}` (ToPropertyKey coercion, matching Node byte-for-byte); the same
+source under `--mode=ts` keeps `STA0012`. Fully-dynamic computed keys in both modes take the
+dynamic path (`{ [k]: v }` with `k: string` compiles and runs in ts and js).
+
+**Genuinely open in (b)'s wake:** TS2416 override-widening
+(`tests/subset/subset_override_widening_js.js`, plan-notes 68) — a bucket the (b) sweep never
+named, owned by 12(d)'s override rules: js mode still rejects legal JavaScript when an
+INFERRED override narrows a return type. Landing it (suppression gated on both members being
+unannotated, per note 68's "an error about an annotation the user wrote must still be an
+error", plus call-widening so base-typed reads stay sound) is this session's first family.
+
+**Header fixed.** §8's "still OPEN … steps 18–38" predates waves 5–7 (steps 39–46) and the (b)
+landings; rewritten to the current open set. Step 12(c)'s spread residue and 12(f) are
+untouched — other agents own them.
+
+Baselines at branch start (`agent/p5-class-surface`, pinned Node 26.7.0): subset 675
+fixtures (637 passed, 38 expected-fail, 0 failed), golden 386/386, unit 564/564.
+
+
 ## 242. CI run 34778195179: shard 1 died in the checker's stack overflow through the in-process path 213 missed (2026-09-14)
 
 **Plan:** §9 Task 6.1 (the Test262 heartbeat) and the CI decomposition map in
