@@ -32,3 +32,21 @@ function make(k: number): number {
   return D.v;
 }
 console.log(make(21));
+
+// plan.md §8 step 12(d): fields after a block initialize in source order after it ran.
+class E {
+  static a = 1;
+  static {
+    E.a = E.a + 1;
+  }
+  static b = E.a * 10;
+  static {
+    E.b = E.b + 1;
+  }
+  static c = E.a + E.b;
+  static d: number;
+}
+console.log(E.a);
+console.log(E.b);
+console.log(E.c);
+console.log(E.d);

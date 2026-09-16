@@ -36,9 +36,15 @@ import {
   accessorDeclaringClass,
   baseClassOf,
   classDeclarationOf,
+  classDisplayName,
+  classExpressionTarget,
+  classLikeOf,
   computedKeyStaticName,
   elementStaticKey,
+  expressionClassName,
+  hasAbstractModifier,
   hasExplicitAny,
+  innerClassExpression,
   isClassAliasUse,
   ITERATOR_METHOD_NAME,
   instanceMethodName,
@@ -907,6 +913,27 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
       ? { kind: 'accept' }
       : notYet('using a class as a value is not yet supported', 5);
   }
+  // The inner name of a class expression declares, exactly like a declaration's own name
+  // above: `D` in `const C = class D { … }` binds the class body, not a value.
+  if (ts.isClassExpression(node.parent) && node.parent.name === node) {
+    return { kind: 'accept' };
+  }
+  // `const C = class …` binds no value either (see `classExpressionTarget` in `./types.ts`):
+  // the formation emits the descriptor, and every in-place use erases to the expression —
+  // `new C`, `C.static`, `o instanceof C`, and (through `baseClassOf`) `extends C`. The
+  // same in-place spellings pass here as for declarations and aliases, and anything else
+  // reads the class object and stays STA1214 under the same message. An import/export
+  // specifier is a boundary spelling that is never evaluated, exactly as for aliases.
+  if (
+    (classExpressionTarget(node, typeChecker) ?? innerClassExpression(node, typeChecker)) !==
+    undefined
+  ) {
+    return ts.isImportSpecifier(node.parent) ||
+      ts.isExportSpecifier(node.parent) ||
+      namesAClassInPlace(node, typeChecker)
+      ? { kind: 'accept' }
+      : notYet('using a class as a value is not yet supported', 5);
+  }
   // The constructor has no VALUE (docs/FFI.md §2): aliasing it (`const f = outSlot`)
   // would smuggle calls past the shape the call arm proves, and the lowering has no closure
   // to load for one — which used to be a silent STA4021. Asked ahead of the generic-alias
@@ -1382,16 +1409,26 @@ function gateDeclaration(decl: ts.VariableDeclaration, checker: ts.TypeChecker):
 export function brandDeclaringClass(
   name: ts.PrivateIdentifier,
   checker: ts.TypeChecker,
-): ts.ClassDeclaration | undefined {
+): ts.ClassDeclaration | ts.ClassExpression | undefined {
   const member = checker.getSymbolAtLocation(name)?.valueDeclaration;
-  return member !== undefined &&
-    (ts.isPropertyDeclaration(member) ||
-      ts.isMethodDeclaration(member) ||
-      ts.isGetAccessorDeclaration(member) ||
-      ts.isSetAccessorDeclaration(member)) &&
-    ts.isClassDeclaration(member.parent) &&
-    member.parent.name !== undefined
-    ? member.parent
+  if (
+    member === undefined ||
+    (!ts.isPropertyDeclaration(member) &&
+      !ts.isMethodDeclaration(member) &&
+      !ts.isGetAccessorDeclaration(member) &&
+      !ts.isSetAccessorDeclaration(member))
+  ) {
+    return undefined;
+  }
+  // Declarations and bound expressions alike: a `#private` name is lexically scoped to the
+  // class body that writes it, whichever spelling the body takes (plan.md §8 step 12(d)).
+  // The display-name check is what keeps an unbound expression (no identity) resolving
+  // nowhere, exactly as an unnamed declaration does.
+  const parent = member.parent;
+  return parent !== undefined &&
+    (ts.isClassDeclaration(parent) || ts.isClassExpression(parent)) &&
+    classDisplayName(parent) !== undefined
+    ? parent
     : undefined;
 }
 
@@ -1476,10 +1513,24 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
         return notYet('instanceof against anything but a class name is not yet supported', 5);
       }
       const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(bin.right));
-      if (declaration?.typeParameters !== undefined && declaration.typeParameters.length > 0) {
+      // A bound class expression — or an anonymous default export — names its descriptor
+      // like a declaration does (plan.md §8 step 12(d)). Generic expressions have one
+      // descriptor per tuple exactly like generic declarations, so the bare name identifies
+      // nothing in both cases.
+      const like =
+        declaration ??
+        classLikeOf(typeChecker.getTypeAtLocation(bin.right)) ??
+        (ts.isIdentifier(bin.right)
+          ? (classExpressionTarget(bin.right, typeChecker) ??
+            innerClassExpression(bin.right, typeChecker))
+          : undefined);
+      const typeParameters =
+        declaration?.typeParameters ??
+        (like !== undefined && ts.isClassExpression(like) ? like.typeParameters : undefined);
+      if (typeParameters !== undefined && typeParameters.length > 0) {
         return notYet('instanceof against a generic class is not yet supported', 5);
       }
-      return declaration !== undefined || INSTANCEOF_BUILTINS.has(bin.right.text)
+      return like !== undefined || INSTANCEOF_BUILTINS.has(bin.right.text)
         ? { kind: 'accept' }
         : notYet('instanceof against anything but a class name is not yet supported', 5);
     }
@@ -1620,7 +1671,7 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   // A field, and ONLY a field: `a.length = 0` is a property access too, and writing it resizes an
   // array -- which is a hole-creating operation the dense representation refuses (STA2002).
   if (
-    classDeclarationOf(checker.getTypeAtLocation(node.expression)) !== undefined ||
+    classLikeOf(checker.getTypeAtLocation(node.expression)) !== undefined ||
     constraintDeclaration(checker.getTypeAtLocation(node.expression), checker) !== undefined
   ) {
     return true;
@@ -3272,7 +3323,7 @@ function isClassMemberComputedKey(name: ts.ComputedPropertyName): boolean {
     isMember &&
     parent.name === name &&
     parent.parent !== undefined &&
-    ts.isClassDeclaration(parent.parent)
+    (ts.isClassDeclaration(parent.parent) || ts.isClassExpression(parent.parent))
   );
 }
 
@@ -3488,9 +3539,29 @@ function gateClass(
   classNameCounts: ReadonlyMap<string, number>,
 ): GateResult {
   if (declaration.name === undefined) {
-    return ts.isClassExpression(declaration)
-      ? notYet('an anonymous class expression is not yet supported', 5)
-      : notYet('an anonymous class is not yet supported', 5);
+    // Only a bound expression has an identity (Node's `.name`: the variable it binds);
+    // an unbound one — a heritage base, a call argument, a parenthesized expression — has
+    // no layout key, and nominal equality has nothing to hold onto. An anonymous
+    // DECLARATION stays refused here too: its only identity would be `default`, whose
+    // uses arrive through default imports, which name Phase 5's module-namespace residue
+    // (plan-notes 278).
+    if (ts.isClassExpression(declaration) && expressionClassName(declaration) !== undefined) {
+      // fall through to member vetting below
+    } else {
+      return ts.isClassExpression(declaration)
+        ? notYet('an anonymous class expression is not yet supported', 5)
+        : notYet('an anonymous class is not yet supported', 5);
+    }
+  }
+  // A generic expression has nowhere to specialize under: tuple descriptors key on the
+  // declaration's source name, and an expression's identity is its binding, not a scope
+  // the monomorphizer owns (plan.md §8 step 12(f)).
+  if (
+    ts.isClassExpression(declaration) &&
+    declaration.typeParameters !== undefined &&
+    declaration.typeParameters.length > 0
+  ) {
+    return notYet('a generic class expression is not yet supported', 5);
   }
   // A generic class specializes per tuple, and every tuple shares one descriptor: a nested
   // declaration emits its carrier and tuples where it sits, so the descriptor is scoped to that
@@ -3616,19 +3687,15 @@ function gateClass(
       continue; // a stray `;` between members declares nothing
     }
     // A static initialization block runs at class-definition time against the statics, which
-    // are plain bindings initialized where the class declaration sits -- so the block's statements
-    // lower right after the declaration, in the same scope. Two limits keep that honest. `super`
-    // in one would read the class object through a base it has no receiver for (`this` is refused
-    // separately, by the `this` rule, as for static methods). And a static FIELD after the block
-    // would initialize after it ran, while the layout initializes every field with the class, so
-    // the field would observe a state no execution reaches.
+    // are plain bindings initialized where the class declaration sits. Field initializers and
+    // blocks execute in source order (plan.md §8 step 12(d)): the declaration carries every
+    // static binding, the fields before the first block initialize with it, and each later
+    // field run assigns after its block. One limit keeps that honest: `super` in a block
+    // would read the class object through a base it has no receiver for (`this` is refused
+    // separately, by the `this` rule, as for static methods).
     if (ts.isClassStaticBlockDeclaration(member)) {
       if (staticBlockUsesSuper(member)) {
         return notYet('super in a static initialization block is not yet supported', 5);
-      }
-      const later = declaration.members.slice(declaration.members.indexOf(member) + 1);
-      if (later.some((m) => ts.isPropertyDeclaration(m) && isStaticMember(m))) {
-        return notYet('a static field after a static initialization block is not yet supported', 5);
       }
       continue;
     }
@@ -3681,13 +3748,18 @@ function gateClass(
         continue;
       }
       constructors++;
-      // A derived constructor must call `super(...)` as a top-level statement before touching
-      // `this`. JavaScript forbids the touch, and the lowering splices the field initializers
-      // right after the call -- which is only a fixed position when the call is one. Statements
-      // before it may validate or transform the parameters, which is the shape real constructors
-      // take; a `super()` nested in an arrow or a branch has no fixed position, so it does not
-      // count.
-      if (baseClassOf(declaration, checker) !== undefined && !derivedConstructorOrderOk(member)) {
+      // A derived constructor must call `super(...)` exactly once on every path before
+      // touching `this`. JavaScript forbids the touch, and the lowering splices the field
+      // initializers right after the call -- which is only a fixed position when the call is
+      // one, so a class WITH initializers keeps the top-level rule while a class WITHOUT may
+      // call from `if`/`else` arms instead (one per arm, every arm covered). Statements
+      // before it may validate or transform the parameters, which is the shape real
+      // constructors take; a `super()` nested in an arrow, a loop, or any other uncountable
+      // position does not count.
+      if (
+        baseClassOf(declaration, checker) !== undefined &&
+        !derivedConstructorOrderOk(member, declaration)
+      ) {
         return notYet(
           'a derived constructor that does not open with super(...) is not yet supported',
           5,
@@ -3739,6 +3811,12 @@ function gateClass(
     }
     if (ts.isMethodDeclaration(member)) {
       if (member.body === undefined) {
+        // An `abstract` method declares; a subclass implementation runs (plan.md §8 step
+        // 12(d)). Without `abstract`, the implementation must share this class — the
+        // overload rule below, or refused there when no implementation exists.
+        if (hasAbstractModifier(member)) {
+          continue;
+        }
         // An overload signature declares nothing to emit; the same-name implementation below
         // runs. With no implementation in the class there is nothing to run (`declare` members).
         const name = instanceMethodName(member, checker);
@@ -3796,14 +3874,27 @@ function gateClass(
   if (constructors > 1) {
     return notYet('more than one constructor is not yet supported', 5);
   }
-  // A class expression is a VALUE where a declaration is a binding: even a well-formed one needs
-  // the class object, which does not exist here (plan.md §8 step 12e -- the same blocker as
-  // `using a class as a value`). The lowering has no ClassExpression arm, so accepting here
-  // would only trade this STA1214 for an STA4031 internal error. Member-specific refusals above
-  // still fire first, so a broken member reads as broken rather than as deferred.
+  // A class expression is a VALUE where a declaration is a binding: it compiles only as
+  // the initializer of a single-`const` identifier (`const C = class …`), which binds no value
+  // — every in-place use erases to the expression, whose descriptor the lowering emits under
+  // the variable's name (plan.md §8 step 12(d)). Any other position (`let`, a call argument,
+  // a heritage base) has no identity to key the layout on, and reads as the expression it is.
+  // Member-specific refusals above still fire first, so a broken member reads as broken
+  // rather than as deferred.
   if (ts.isClassExpression(declaration)) {
-    const name = declaration.name.text;
-    return notYet(`a class expression '${name}' is not yet supported`, 5);
+    const parent = declaration.parent;
+    const bound =
+      parent !== undefined &&
+      ts.isVariableDeclaration(parent) &&
+      parent.initializer === declaration &&
+      ts.isIdentifier(parent.name) &&
+      isSingleConstDeclarator(parent);
+    if (!bound) {
+      const name = declaration.name?.text;
+      return name === undefined
+        ? notYet('an anonymous class expression is not yet supported', 5)
+        : notYet(`a class expression '${name}' is not yet supported`, 5);
+    }
   }
   return { kind: 'accept' };
 }
@@ -3872,7 +3963,7 @@ function gateHeritage(
  * refused with the same message. */
 function genericBaseArgumentsAreConcrete(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
-  base: ts.ClassDeclaration,
+  base: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): boolean {
   if (
@@ -3991,9 +4082,12 @@ function inheritedShadowIsSameKind(
     return false;
   }
   const wantStatic = isStaticMember(member);
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let current: ts.ClassDeclaration | undefined = baseClassOf(declaration, checker);
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = baseClassOf(
+      declaration,
+      checker,
+    );
     current !== undefined && !seen.has(current);
     current = baseClassOf(current, checker)
   ) {
@@ -4067,12 +4161,12 @@ function classMemberStaticName(
  * A class with one still has a fixed layout of its declared members; only the dynamic keys wait
  * on dictionary mode, and the member-access rule refuses exactly those uses. */
 function classHasIndexSignature(
-  declaration: ts.ClassDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
 ): boolean {
-  const seen = new Set<ts.ClassDeclaration>();
+  const seen = new Set<ts.ClassDeclaration | ts.ClassExpression>();
   for (
-    let current: ts.ClassDeclaration | undefined = declaration;
+    let current: ts.ClassDeclaration | ts.ClassExpression | undefined = declaration;
     current !== undefined && !seen.has(current);
     current = baseClassOf(current, checker)
   ) {
@@ -4176,30 +4270,131 @@ function privateStaticPairComplete(
   return true;
 }
 
-/** Whether a derived constructor calls `super(...)` where the lowering can place the field
- * initializers after it: as a top-level statement, with no `this`/`super` read before it. Not
- * "contains a super call": a call inside an `if` or an arrow runs conditionally or from another
- * scope, and the base's fields would then be initialized on some paths only, or from none --
- * including when a top-level call is also present, since the nested one re-runs the base
- * constructor wherever it stands. */
-function derivedConstructorOrderOk(ctor: ts.ConstructorDeclaration): boolean {
-  const body = ctor.body?.statements ?? [];
-  let topLevelSuper = 0;
-  for (const stmt of body) {
+/** Whether a derived constructor calls `super(...)` exactly once on every completion path
+ * before touching `this` — and, when the class declares instance field initializers, from a
+ * single fixed position.
+ *
+ * Field initializers splice right after the super call, which is only a fixed position when
+ * the call is a top-level statement: a class WITH initializers keeps the old rule (one
+ * top-level `super(...)`, nothing nested). A class with NONE has nothing to splice, so the
+ * call may sit in `if`/`else` arms instead — one per arm, every arm covered, no reads before
+ * it on any path — which is the shape real validating constructors take. Anything with no
+ * fixed count (loops, a second call on an already-covered path — Node throws ReferenceError
+ * on a re-run) or no fixed position (arrows, nested functions, `try`, `switch`, a `super`
+ * in a condition) stays refused: skipping the call leaves `this` unbound, and re-running
+ * the base constructor re-initializes its fields, and both are silent if admitted. */
+function derivedConstructorOrderOk(
+  ctor: ts.ConstructorDeclaration,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+): boolean {
+  // Instance field initializers (public and `#private` alike) splice after the call, so only
+  // their absence frees the call from one fixed position. Uninitialized fields need no
+  // splicing — every slot starts `undefined` — and statics never enter the constructor.
+  const flexible = !declaration.members.some(
+    (member) =>
+      ts.isPropertyDeclaration(member) &&
+      !isStaticMember(member) &&
+      member.initializer !== undefined,
+  );
+  return checkCtorList(ctor.body?.statements ?? [], flexible).coverage === 'covered';
+}
+
+/** The verdict for one statement list: accepted, and how much super it guarantees —
+ * every path (`covered`), some path (`conditional`, from an `if` without a covering
+ * `else`), or none. A later top-level call after `conditional` is a re-run on the covered
+ * paths, so the distinction is load-bearing, not bookkeeping. */
+interface CtorSuperCheck {
+  readonly ok: boolean;
+  readonly coverage: 'covered' | 'conditional' | 'none';
+}
+
+const CTOR_SUPER_FAIL: CtorSuperCheck = { ok: false, coverage: 'none' };
+
+/** The straight-line rule, plus `if`/`else` arms when `flexible` (see above). An arm is
+ * checked by the same rule recursively, so nesting and `else if` chains cost nothing extra;
+ * a missing `else` degrades its `if` to `conditional`, which later reads and a later call
+ * both refuse. */
+function checkCtorList(statements: readonly ts.Statement[], flexible: boolean): CtorSuperCheck {
+  let coverage: 'covered' | 'conditional' | 'none' = 'none';
+  const cover = (next: 'covered' | 'conditional'): CtorSuperCheck | undefined => {
+    // A call on an already-covering path re-runs the base constructor; Node answers
+    // ReferenceError, so the gate answers no. Straight-line double calls
+    // (`super(); super();`) land here too — same re-run, same refusal.
+    if (coverage !== 'none') {
+      return CTOR_SUPER_FAIL;
+    }
+    coverage = next;
+    return undefined;
+  };
+  for (const stmt of statements) {
     if (isTopLevelSuperCall(stmt)) {
-      topLevelSuper++;
+      const refused = cover('covered');
+      if (refused !== undefined) {
+        return refused;
+      }
+      continue;
+    }
+    // A bare block groups statements without branching them: its coverage merges like
+    // straight-line code. Like an `if` arm, a block hides the call from the splicer's
+    // top-level scan, so it counts only when there is nothing to splice (`flexible`).
+    if (flexible && ts.isBlock(stmt)) {
+      const inner = checkCtorList(stmt.statements, flexible);
+      if (!inner.ok) {
+        return CTOR_SUPER_FAIL;
+      }
+      if (inner.coverage !== 'none') {
+        const refused = cover(inner.coverage);
+        if (refused !== undefined) {
+          return refused;
+        }
+      } else if (coverage === 'none' && readsThisOrSuper(stmt)) {
+        return CTOR_SUPER_FAIL;
+      }
+      continue;
+    }
+    if (flexible && ts.isIfStatement(stmt) && !nestedSuperCall(stmt.expression)) {
+      // A `super` in the condition runs unconditionally but in expression position, where
+      // the initializers cannot follow it; a `this` there reads before any call. Both are
+      // the nested shapes below wearing a condition's clothes.
+      if (coverage === 'none' && readsThisOrSuper(stmt.expression)) {
+        return CTOR_SUPER_FAIL;
+      }
+      const thenCheck = checkCtorList([stmt.thenStatement], true);
+      if (!thenCheck.ok) {
+        return CTOR_SUPER_FAIL;
+      }
+      const elseCheck =
+        stmt.elseStatement === undefined ? undefined : checkCtorList([stmt.elseStatement], true);
+      if (elseCheck !== undefined && !elseCheck.ok) {
+        return CTOR_SUPER_FAIL;
+      }
+      const thenCoverage = thenCheck.coverage;
+      const elseCoverage = elseCheck?.coverage ?? 'none';
+      if (thenCoverage === 'covered' && elseCoverage === 'covered') {
+        const refused = cover('covered');
+        if (refused !== undefined) {
+          return refused;
+        }
+      } else if (thenCoverage !== 'none' || elseCoverage !== 'none') {
+        const refused = cover('conditional');
+        if (refused !== undefined) {
+          return refused;
+        }
+      } else if (coverage === 'none' && readsThisOrSuper(stmt)) {
+        return CTOR_SUPER_FAIL;
+      }
       continue;
     }
     // A `super()` nested anywhere but a nested class (whose own constructor owns it) re-runs
     // the base constructor from a position the initializers cannot follow.
     if (nestedSuperCall(stmt)) {
-      return false;
+      return CTOR_SUPER_FAIL;
     }
-    if (topLevelSuper === 0 && readsThisOrSuper(stmt)) {
-      return false;
+    if (coverage === 'none' && readsThisOrSuper(stmt)) {
+      return CTOR_SUPER_FAIL;
     }
   }
-  return topLevelSuper > 0;
+  return { ok: true, coverage };
 }
 
 /** `super(...)` as a statement of its own, rather than nested in another expression. */
@@ -4211,9 +4406,9 @@ function isTopLevelSuperCall(stmt: ts.Statement): boolean {
   );
 }
 
-/** Whether `stmt` hides a `super(...)` call in a nested position. Nested class bodies are
+/** Whether `node` hides a `super(...)` call in a nested position. Nested class bodies are
  * skipped: a `super()` there belongs to the inner class, which the gate vets on its own. */
-function nestedSuperCall(stmt: ts.Statement): boolean {
+function nestedSuperCall(node: ts.Node): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found || ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
@@ -4225,15 +4420,15 @@ function nestedSuperCall(stmt: ts.Statement): boolean {
     }
     ts.forEachChild(node, visit);
   };
-  visit(stmt);
+  visit(node);
   return found;
 }
 
-/** Whether `stmt` reads `this` or `super` outside a nested function or class body, whose own
+/** Whether `node` reads `this` or `super` outside a nested function or class body, whose own
  * `this`/`super` the gate vets where they stand. Arrows do not bound the walk: an arrow's `this`
  * IS the enclosing constructor's, and a `super()` nested in one has no fixed position for the
  * initializers, so neither counts as "before". */
-function readsThisOrSuper(stmt: ts.Statement): boolean {
+function readsThisOrSuper(node: ts.Node): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (
@@ -4251,7 +4446,7 @@ function readsThisOrSuper(stmt: ts.Statement): boolean {
     }
     ts.forEachChild(node, visit);
   };
-  visit(stmt);
+  visit(node);
   return found;
 }
 
@@ -4440,7 +4635,13 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
     return notYet('new on anything but a named class is not yet supported', 5);
   }
   if (classDeclarationOf(checker.getTypeAtLocation(node)) === undefined) {
-    return notYet('new on this type is not yet supported', 5);
+    // A bound class expression — or an anonymous default export, whose identity is Node's
+    // `.name` — constructs its descriptor like a named declaration does (plan.md §8 step
+    // 12(d)); anything without an identity has no descriptor to construct.
+    const like = classLikeOf(checker.getTypeAtLocation(node));
+    if (like === undefined || classDisplayName(like) === undefined) {
+      return notYet('new on this type is not yet supported', 5);
+    }
   }
   // A spread needs a dynamic argv no constructor call builds (plan.md §8 step 37) — the same
   // missing feature as a spread function call, refused rather than STA4031'd in the lowering.
@@ -4730,7 +4931,9 @@ function gateMemberAccess(
   // make. Bare `super` never reaches here (the SuperKeyword case owns it) and stays refused
   // there.
   if (access.expression.kind === ts.SyntaxKind.SuperKeyword) {
-    const base = classDeclarationOf(checker.getTypeAtLocation(access.expression));
+    // Declarations and bound-expression bases alike (plan.md §8 step 12(d)): `super.m` in a
+    // subclass of `const C = class …` skips to the expression's method the same way.
+    const base = classLikeOf(checker.getTypeAtLocation(access.expression));
     const method =
       base !== undefined && ts.isIdentifier(access.name)
         ? methodDeclaringClass(base, access.name.text, checker)
@@ -4962,7 +5165,7 @@ function gateMemberAccess(
         );
   }
   const declaration =
-    classDeclarationOf(checker.getTypeAtLocation(access.expression)) ??
+    classLikeOf(checker.getTypeAtLocation(access.expression)) ??
     constraintDeclaration(checker.getTypeAtLocation(access.expression), checker);
   if (declaration === undefined) {
     // A member read through `T`: the constraint is what declares it, the checker already proved

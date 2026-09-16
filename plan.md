@@ -293,8 +293,10 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, and **steps 18–38** —
-the twenty-one added by the 2026-09-14 bug hunt (plan-notes 249–251). The two
+What is still OPEN in this phase is **step 2a(c)** (2488/2454), **step 12(d)'s class-member
+remainder and 12(e)'s opaque-class remainder** (Agent 1: `agent/p5-class-surface`, plan-notes 272),
+and **step 12(c)'s spread residue and 12(f)** (other agents) — steps 18–46 have all landed, as
+have all three step-2a(b) buckets (2683/2769/2464, plan-notes 272). The two
 shipped-construct defects the bug hunt of 2026-09-11 found (steps 15 and 16) both landed the same
 day — plan-notes 225 and 226.
 Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
@@ -346,10 +348,11 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    ~~The remaining buckets were swept 2026-09-04; four more codes landed (18050, 2403, 2695,
    8024/8029) and the strict-mode family was judged a **real refusal Stator keeps**.~~
    ✅ **the sweep is complete** (plan-notes 194, 196) — evidence in [done.md](done.md) → Phase 5
-   step 2a. **Still open in (b):** three buckets **judged correct but blocked on a Stator not-yet**,
-   not on the judgment — 2683 (`this` implicitly any — and when it is taken it goes in as the OPTION
-   `noImplicitThis: mode === 'ts'`, **not** as a code), 2769 (`No overload matches this call`) and
-   2464 (computed property name), all three waiting on step 12(c)/(d)/(e) surface. What is left after
+   step 2a. **All three (b) buckets have landed since** (plan-notes 272): 2683 went in as the
+   OPTION `noImplicitThis: mode === 'ts'` (done.md → Phase 5 wave 4, dynamic `this`), 2769 as the
+   overload-fallback acceptance (done.md → wave 4), and 2464 as a js-mode suppression with
+   dynamic-path coercion. (b) is closed; the override-widening bucket it never named (TS2416,
+   plan-notes 68) is owned by step 12(d). What is left after
    those is one shared blocker, not a set of buckets — see (c).
    (c) **[D4] The error-object model, and the buckets that sat behind it** (added 2026-09-04 from the (b)
    sweep; plan-notes 194).
@@ -491,8 +494,10 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~,
     ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~,
     ~~calling a class field~~, and ~~named function expressions~~ **landed** (evidence in
-    [done.md](done.md) → Phase 5 step 12e); still open are a class used as a value and `super` as a
-    value.
+    [done.md](done.md) → Phase 5 step 12e); still open are an OPAQUE class use — anything but
+    the in-place spellings (`new K`, `K.static`, `o instanceof K`, alias formation), which need
+    the class object — and BARE `super` (the `super.m` tear-off landed as step 42; a `super`
+    with no member is a JavaScript SyntaxError and stays refused).
     Method values use the method's own `JSRTClosure` with `has_receiver` so `jsrt_call` shifts when
     the receiver is omitted (`docs/VALUE.md` §4.16, plan-notes 208, 230); that is still not
     `Function.prototype.bind`'s two-slot `JSRTEnv` (which INSERTS a receiver where this DROPS one),

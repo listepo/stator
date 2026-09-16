@@ -4,6 +4,215 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 278. Bound class expressions land via descriptor erasure (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface: anonymous classes, extends forms) + 12(e)
+(class-as-value remainder, narrowed). `plan.md` NOT edited in this change — no task language
+changes; 12(d)/12(e) remainders stay open.
+
+**What landed.** `const C = class …` (named or not) emits the same descriptor a declaration
+does, under Node's `.name` (inner name, else variable), and binds no value: every in-place
+use (`new C`, `C.static`, `o instanceof C`, `extends C`, the inner name in the class body)
+erases to the expression (decision fixtures `subset_class_expression_{ts,js}` flipped to
+`static`, plus opaque/`let`/generic refusal pairs; goldens `class_expression.{ts,js}`
+byte-for-byte vs Node 26.7.0; `docs/SUBSET.md` row added):
+
+- Type model (`frontend/types.ts`): `classTypeToHType` names bound expressions (unbound stay
+  Unknown); `ancestry`/`heritageSubstitution`/`baseDescriptorName`/`methodDeclaringClass`/
+  `accessorDeclaringClass`/`staticMemberOf`/`baseClassOf` widen to `ClassLike`; new
+  `classExpressionTarget` (variable→expression, single-`const`, alias-chasing),
+  `innerClassExpression` (inner name + lexical containment, no scope work),
+  `expressionClassName`, `classLikeOf`, `classDisplayName`.
+- Gate (`gate.ts`): bound non-generic expressions vet like declarations; the formation must
+  be single-`const`-bound (else the old messages); identifier uses erase in place and refuse
+  opaque as class-as-value (import/export specifiers exempt, like aliases); `new`,
+  `instanceof`, `super.m`, computed keys, assignability, and `#brand` all resolve
+  expressions.
+- Lowering (`lower/index.ts`): the formation emits the class (display-name scope
+  registration for shadowing, no value binding); instance type from the construct
+  signature's return; `lowerClass` widened (identity, layout, vtable, statics, stubs all
+  ride); owner/dispatch resolution via `receiverClassLike`; abstract stubs and static runs
+  compose (verified by probe, not separately pinned).
+- Printing answers Node's name (`D { … }` for `const C = class D`), shadowing renames per
+  step 23, cross-file imports erase through the alias, `extends C` grounds prefix layouts
+  with virtual dispatch, and `#private` mangles by display name.
+
+**Still refused (all probed):** unbound expressions (no identity), `let`/`var` formations
+(reassignable), generic expressions (no specialization home — 12(f)), anonymous default
+declarations (12(d) residue), opaque uses incl. `typeof C` and `C.prototype` (class object
+— 12(e)), `switch`-guarded and loop/arrow supers, `super` in static blocks, `this` in
+static members.
+
+**Observed adjacent, NOT caused, NOT fixed:** a nested class (declaration OR expression)
+whose method captures a local segfaults (`counter()` probe, exit 139 — the declaration
+twin crashes identically on unmodified logic). No golden covers it; filing here so the
+capture owner finds it. Nested-class capture is outside this session's scope.
+
+## 277. Derived constructors may call super from if/else arms when no initializers splice (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** `derivedConstructorOrderOk` is now a recursive coverage analysis instead of
+a top-level scan (gate.ts only — the lowering already lowers arm-supers as ordinary
+statements, and its empty-prologue splice is a no-op exactly when the rule allows arms):
+
+- A class with NO instance field initializers (public or `#private`) may call `super(...)`
+  in `if`/`else` arms: one call per arm, every arm covered, no `this`/`super` read before
+  the call on any path (nesting and `else if` chains recurse free). Uninitialized fields
+  need no splicing; statics never enter the constructor.
+- The invariant is now EXACTLY-once per path, uniformly: a second call on a covered path —
+  straight-line (`super(); super();`) or branch (`super(); if (f) super();`) — is refused,
+  closing a live divergence (Node throws ReferenceError on a re-run; Stator double-ran the
+  base). Coverage is tri-state (`covered`/`conditional`/`none`) so a call after a
+  half-covering `if` still refuses, at any nesting depth.
+- Still refused, each probed: initializers + arms, loops, arrows/nested functions, `try`,
+  `switch`, `super` or `this` in a condition, reads before the call, missing-`else` paths.
+  Condition-`this` and arrow-super are checker-refused first (both modes); the gate checks
+  are defense in depth for shapes the checker misses.
+
+**Tests.** Decision fixtures `subset_class_super_late_{ts,js}` extended (branch ctors);
+goldens `class_super_late.{ts,js}` extended (nesting, `else if`, unbraced arms, post-`if`
+reads) — byte-for-byte vs Node. Unit pins in `class-members.test.ts` rewritten to the new
+rule (acceptance + HIR shape; initializer and re-run refusals) — the two failures that
+surfaced the behavior change, fixed in the same commit, never in bulk.
+
+**Not in this change.** `switch` arms (same principle, unbuilt), `try`-guarded calls, and
+explicit-object-return paths (refused as before).
+
+## 276. Static fields after static blocks initialize in source order (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** The gate's `a static field after a static initialization block` refusal is
+gone; fields and blocks execute in source order (subset fixtures
+`subset_static_block_{ts,js}` extended, both `static`; golden
+`tests/golden/ts/class_static_block.ts` extended with a two-block interleave plus an
+uninitialized later field — byte-for-byte vs Node 26.7.0):
+
+- Lowering (`lower/index.ts`): static field initializers partition into runs split by blocks
+  (`staticFieldRuns`); the first run initializes with the class as before, each later run
+  assigns after its block. The declaration still carries every static binding (later-run
+  fields as `undefined` slots), so pre-registration, TDZ-shape behavior, and the
+  method-hoisting divergence are all unchanged — only execution order moved. Static METHODS
+  stay hoisted with the class (defining one runs nothing), as do static accessors.
+- Later-run assignments mirror the declaration's own value shape (no boundary, same as if
+  initialized with the class), only later; uninitialized later fields need nothing.
+
+**Sharp edges, all checker-held.** Any block touching a later field is TS2448 (`used before
+its initialization`) in BOTH modes — js mode does not suppress it (TDZ is unmodelled by
+design, step 2a(c)'s open half) — so only non-touching shapes reach the new lowering, and a
+block write to a later field (`C.a = 5` before `static a = 1`) is refused the same way
+Node's TDZ would fail it at run time. Verified: `static { C.a }` + later `static a`
+refuses identically in ts and js.
+
+## 275. Abstract classes and members land via throw-stubs (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** `abstract` classes with abstract methods and properties compile in both
+modes (decision fixtures `subset_abstract_class_{ts,js}.ts`, both `static`; golden
+`tests/golden/ts/abstract_class.ts` — three-level chain with a middle abstract class, an
+abstract property, base-typed reads, an inherited concrete method, statics, `instanceof` —
+byte-for-byte vs Node 26.7.0):
+
+- Gate (`gate.ts`): a bodiless method with the `abstract` modifier skips the
+  overload-signature arm (the implementation lives in a subclass, not in this class). The
+  override check above still runs, so abstract-over-field stays refused; abstract properties
+  needed no change (uninitialized fields already lower to `undefined` slots).
+- Predicate (`frontend/types.ts`): `hasAbstractModifier`, beside `isStaticMember` (shared
+  home — gate and lowering both use it, no duplication).
+- Lowering (`lower/index.ts`): abstract members collect into `abstractStubs` (dropped for
+  generic carriers like every other member list) and lower to a synthesized throw-stub —
+  receiver parameter zero, mirrored parameter list, `throw new TypeError('abstract method
+  …')`. The stub keeps the base's method table complete and gives direct calls a target;
+  virtual dispatch always lands on the runtime class's concrete entry, and every path that
+  could reach the stub is checker-refused first (abstract construction TS2511, missing
+  override TS2515, `super.m()` on abstract — all verified `STA0012` in both modes).
+- Async/generator flags stay false on the stub (a synchronous throw transfers before any
+  promise or iterator is built); parameter defaults are dropped (a default that runs means
+  the call reached a body that never runs).
+
+**Deliberately not in this change: abstract ACCESSORS.** An accessor re-declaring an
+inherited name stays refused (`overriding the inherited member 'y'`), because accessor
+reads dispatch `direct` (`accessorCall`) while methods virtualize — abstract accessors
+cannot override without virtual accessor dispatch, which is its own slice. The bodiless
+rule still refuses them with the existing message; the lowering's stub list already accepts
+the shape when that slice lands.
+
+## 274. TS2416 override-widening lands: inferred method-method suppression + call widening (2026-09-16)
+
+**Plan:** §8 step 12(d) (override rules) + step 2a(b) wake (plan-notes 68, 272). `plan.md` NOT
+edited in this change — no task language changes; the 12(d) remainder stays open.
+
+**What landed.** js mode no longer rejects legal JavaScript when an INFERRED override narrows
+a return type (`subset_override_widening_js.js` out of expected-fail, `static`; new ts twin
+`subset_override_widening_ts.ts` pins `STA0012`; golden
+`tests/golden/js/class_override_widening.js` byte-for-byte vs Node 26.7.0):
+
+- `program.ts`: a 2416-shaped suppression with a fail-closed predicate
+  (`isInferredMethodOverrideMismatch`) — both members bodied `MethodDeclaration`s with
+  identifier names, neither carrying a TS or JSDoc type (`methodIsUnannotated`), base found
+  through the `extends` chain (aliases included). Anything else keeps `STA0012`, exactly per
+  note 68 ("an error about an annotation the user wrote must still be an error"): annotated
+  pairs (verified: `m(): string` vs `m(): number` still refuses in js), field-field pairs (one
+  slot, two types — no call-widening can defend that shape), accessor pairs (the gate refuses
+  them on its own), computed names, bodiless members, unresolvable bases.
+- Both declarations' symbols seed `runtimeDynamicSymbols`; the lowering's returns edge widens
+  calls resolving to either (`collectDynamicReturnsPass`: a `MethodDeclaration` whose own FQN
+  is seeded marks its calls — methods only, so no existing variable/parameter seed can reach
+  the arm). Declarations keep their types (the step-45 shape), so overload and vtable
+  contracts are untouched; a base-typed read of a derived instance (JSDoc `@param {A}`)
+  answers the derived value instead of garbage (probed `1`/`x`, matching Node).
+- The file verdict is honestly `static`: the widened call feeds an export edge whose tag
+  check settles it (`boundary-check` reports the type it produced), so no Unknown survives —
+  a virtual call plus a check, no shape table. Unannotated/dynamic receivers stay dynamic as
+  before (the golden covers both).
+
+**Not in this change.** Field-involved 2416 stays `STA0012` in js too (real refusal, one slot
+two types — same judgment shape as wave 4's field-vs-method TS2416). Function-scope
+method-override keeps the gate's `STA1214` (per-evaluation tables); the suppression may move
+such a program from `STA0012` to that `STA1214`, which names the true blocker.
+
+## 272. Step-12(e)/41-42 drift check: no contradiction, only breadth; 2a(b) closed; Phase-5 header updated (2026-09-16)
+
+**Plan:** §8 Phase 5 header, step 2a(b), step 12(e). `plan.md` edited in this change.
+
+**No contradiction between 12(e) and steps 41-42.** Step 41 is bare GENERICS as value
+(done.md → Phase 5 wave 5), not class-as-value; step 42 is the `super.m` tear-off, while bare
+`super` stays refused (`gate.ts:471,4749`) — correctly, since a memberless `super` is a
+JavaScript SyntaxError with no value to lower. Opaque class uses stay refused
+(`gate.ts:893,908,5048`; done.md → Phase 5 wave 4; `subset_class_alias_opaque_*` pin the
+verdict). So 12(e)'s "still open are a class used as a value and `super` as a value" remains
+true and is narrowed by this edit to name exactly the open shapes: opaque class uses
+(including class expressions) and bare `super`.
+
+**Step 2a(b) is closed — all three buckets landed.** 2683 went in as the OPTION
+`noImplicitThis: mode === 'ts'` (`program.ts:351`; done.md → Phase 5 wave 4, dynamic `this`),
+2769 as the overload-fallback acceptance (`hasFunctionImplementation` in `gate.ts`; wave 4),
+2464 as a js-mode suppression (`JS_MODE_RUNTIME_CODES`, `program.ts:190`). 2464 verified
+end-to-end on the pinned Node 26.7.0: `{ [kObj]: 1 }` under `--mode=js` compiles and prints
+`{"[object Object]":1}` (ToPropertyKey coercion, matching Node byte-for-byte); the same
+source under `--mode=ts` keeps `STA0012`. Fully-dynamic computed keys in both modes take the
+dynamic path (`{ [k]: v }` with `k: string` compiles and runs in ts and js).
+
+**Genuinely open in (b)'s wake:** TS2416 override-widening
+(`tests/subset/subset_override_widening_js.js`, plan-notes 68) — a bucket the (b) sweep never
+named, owned by 12(d)'s override rules: js mode still rejects legal JavaScript when an
+INFERRED override narrows a return type. Landing it (suppression gated on both members being
+unannotated, per note 68's "an error about an annotation the user wrote must still be an
+error", plus call-widening so base-typed reads stay sound) is this session's first family.
+
+**Header fixed.** §8's "still OPEN … steps 18–38" predates waves 5–7 (steps 39–46) and the (b)
+landings; rewritten to the current open set. Step 12(c)'s spread residue and 12(f) are
+untouched — other agents own them.
+
+Baselines at branch start (`agent/p5-class-surface`, pinned Node 26.7.0): subset 675
+fixtures (637 passed, 38 expected-fail, 0 failed), golden 386/386, unit 564/564.
+
+
 ## 242. CI run 34778195179: shard 1 died in the checker's stack overflow through the in-process path 213 missed (2026-09-14)
 
 **Plan:** §9 Task 6.1 (the Test262 heartbeat) and the CI decomposition map in
