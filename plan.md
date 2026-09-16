@@ -1026,7 +1026,8 @@ Full survey: plan-notes 239. Short form:
 §15.4 with measured evidence; add a second RegExp engine beside libregexp; spread Zig beyond
 the memory core without a new card.
 
-Open for the creator: `mlugg/setup-zig@v2` as a CI dependency (noted in 238).
+CI installs Zig 0.16.0 via `mlugg/setup-zig@v2` in `.github/actions/setup`
+(skipped on Windows, which never builds the runtime); the version matches the mise pin.
 
 ---
 
