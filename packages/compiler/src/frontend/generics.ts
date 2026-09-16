@@ -244,11 +244,12 @@ export function genericNewInstantiation(
  * parameter's function type.
  *
  * The tuple unifies the generic's declared signature against the PARAMETER (not a call): the
- * parameter is the only static description of how the value will be used. Direct identifiers in
- * positional arguments only — a spread element has no single parameter to read, and a rest
- * parameter's element type is not the value's type — and the parameter must itself be
- * function-typed (anything else is a checker error first). Raw like every other instantiation:
- * the caller substitutes the enclosing scope. */
+ * parameter is the only static description of how the value will be used. A named generic in a
+ * positional argument, or an inline generic arrow or function expression passed directly (which
+ * names its own call site and takes a position-derived key) — a spread element has no single
+ * parameter to read, and a rest parameter's element type is not the value's type — and the
+ * parameter must itself be function-typed (anything else is a checker error first). Raw like
+ * every other instantiation: the caller substitutes the enclosing scope. */
 export function genericArgumentTuple(
   argument: ts.Expression,
   outerCall: ts.CallExpression,
@@ -262,12 +263,39 @@ export function genericArgumentTuple(
     }
   | undefined {
   if (!ts.isIdentifier(argument)) {
-    return undefined;
+    return inlineGenericTuple(argument, checker);
   }
   const generic = genericAliasTarget(argument, checker);
   if (generic === undefined) {
     return undefined;
   }
+  const key = ts.isFunctionDeclaration(generic)
+    ? (generic.name?.text ?? '')
+    : genericArrowKey(generic);
+  if (key === undefined) {
+    return undefined;
+  }
+  return instantiateAtParameter(generic, key, argument, outerCall, checker);
+}
+
+/** The tuple a generic argument takes at its parameter's function type, shared by the named
+ * and inline paths: the parameter must exist, must not be a rest parameter, and must itself
+ * be function-typed (anything else is a checker error first). Raw like every other
+ * instantiation: the caller substitutes the enclosing scope. */
+function instantiateAtParameter(
+  generic: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction,
+  key: string,
+  argument: ts.Expression,
+  outerCall: ts.CallExpression,
+  checker: ts.TypeChecker,
+):
+  | {
+      readonly declaration: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+      readonly key: string;
+      readonly typeArguments: readonly HType[];
+      readonly substitution: ReadonlyMap<string, HType>;
+    }
+  | undefined {
   const outer = checker.getResolvedSignature(outerCall);
   if (outer === undefined) {
     return undefined;
@@ -296,12 +324,6 @@ export function genericArgumentTuple(
   if (declaredFn.kind !== 'fn' || parameterFn.kind !== 'fn') {
     return undefined;
   }
-  const key = ts.isFunctionDeclaration(generic)
-    ? (generic.name?.text ?? '')
-    : genericArrowKey(generic);
-  if (key === undefined) {
-    return undefined;
-  }
   const substitution = new Map<string, HType>();
   bindReferenceArguments(
     [checker.getTypeAtLocation(argument), checker.getTypeOfSymbolAtLocation(parameter, argument)],
@@ -322,6 +344,276 @@ export function genericArgumentTuple(
   return { declaration: generic, key, typeArguments, substitution };
 }
 
+/** What an inline generic arrow or function expression passed directly as a call argument
+ * resolves to: `[1].map(<T>(x: T): T => x)` specializes the arrow at the callback parameter's
+ * function type, exactly as a named generic would.
+ *
+ * The arrow literal IS its own use site, so one tuple suffices and the key is the position
+ * rather than a variable: `arrow@<file>#<offset>`, unspellable from source like every other
+ * specialization key. The file base rides along because collection merges specializations
+ * across files by name — two files can hold an arrow at one offset, and sharing one body
+ * between them would be a miscompile, not a saving.
+ *
+ * Three refusals, each a shape no module-level specialization could honour. A callee, a
+ * conditional branch, a `new` argument, or any other non-argument position has no single
+ * parameter type to read. A body that reads an enclosing scope — a parameter or local of an
+ * enclosing function, `this`, `super`, a `new.target`, or a binding a block scopes away from
+ * the module top level — would resolve to no binding in a module-level function (STA4035),
+ * so the gate refuses it here rather than manufacture that internal error. `let`-held and
+ * nested arrows stay refused with it: reassignment could change the value under a collected
+ * tuple, and a nesting's scope the module-level specializations would leak. */
+export function inlineGenericTuple(
+  argument: ts.Expression,
+  checker: ts.TypeChecker,
+):
+  | {
+      readonly declaration: ts.FunctionExpression | ts.ArrowFunction;
+      readonly key: string;
+      readonly typeArguments: readonly HType[];
+      readonly substitution: ReadonlyMap<string, HType>;
+    }
+  | undefined {
+  // Through parentheses to the function: `f((<T>(x: T): T => x))` specializes the arrow, not
+  // the parenthesized expression. Anything else — a conditional, a satisfaction, a nested
+  // call — is not a direct argument and has no single parameter type.
+  let unwrapped: ts.Expression = argument;
+  while (ts.isParenthesizedExpression(unwrapped)) {
+    unwrapped = unwrapped.expression;
+  }
+  if (
+    (!ts.isFunctionExpression(unwrapped) && !ts.isArrowFunction(unwrapped)) ||
+    unwrapped.typeParameters === undefined ||
+    unwrapped.typeParameters.length === 0
+  ) {
+    return undefined;
+  }
+  let current: ts.Node = unwrapped;
+  while (ts.isParenthesizedExpression(current.parent)) {
+    current = current.parent;
+  }
+  const parent = current.parent;
+  // Sound: the walk starts at an expression and steps only through parenthesized
+  // expressions, which are expressions too — so the chain's top is the argument the call
+  // holds, and the parameter lookup below pairs by that position.
+  const raw = current as ts.Expression;
+  if (
+    parent === undefined ||
+    !ts.isCallExpression(parent) ||
+    parent.expression === current ||
+    parent.arguments.indexOf(raw) === -1
+  ) {
+    return undefined;
+  }
+  if (capturesEnclosingScope(unwrapped, checker)) {
+    return undefined;
+  }
+  // `raw`, not `argument`: the parameter lookup pairs by the argument's own position,
+  // and through parentheses that position is the chain's top, which is what the call holds.
+  const instantiated = instantiateAtParameter(
+    unwrapped,
+    inlineGenericKey(unwrapped),
+    raw,
+    parent,
+    checker,
+  );
+  if (instantiated === undefined) {
+    return undefined;
+  }
+  return { ...instantiated, declaration: unwrapped };
+}
+
+/** The position-derived specialization key for an inline generic: `arrow@test.ts#128`.
+ *
+ * The offset is content-derived, so identical input keys identically (plan.md §9 Task 6.9);
+ * `@` and `#` are unspellable in identifiers, so the key can never collide with a variable
+ * the way two same-named declarations could. */
+function inlineGenericKey(fn: ts.FunctionExpression | ts.ArrowFunction): string {
+  const sourceFile = fn.getSourceFile();
+  const base = sourceFile.fileName.split('/').pop() ?? sourceFile.fileName;
+  const kind = ts.isArrowFunction(fn) ? 'arrow' : 'fn';
+  return `${kind}@${base}#${String(fn.getStart(sourceFile))}`;
+}
+
+/** Whether the arrow's body reads anything a module-level specialization could not see.
+ *
+ * Every free reference in the body resolves by symbol; a reference is safe exactly when its
+ * declaration is the arrow's own or is visible from module scope. Types erase, so type
+ * positions are skipped whole — a type argument mentioning an enclosing `T` is a substitution
+ * the enclosing specialization applies, not a value the body reads. `this`, `super`, and
+ * `new.target` are always captures: an arrow's `this` is its encloser's by definition. */
+function capturesEnclosingScope(
+  fn: ts.FunctionExpression | ts.ArrowFunction,
+  checker: ts.TypeChecker,
+): boolean {
+  let captured = false;
+  const visit = (node: ts.Node): void => {
+    if (captured || ts.isTypeNode(node)) {
+      return;
+    }
+    if (
+      node.kind === ts.SyntaxKind.ThisKeyword ||
+      node.kind === ts.SyntaxKind.SuperKeyword ||
+      (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.NewKeyword)
+    ) {
+      captured = true;
+      return;
+    }
+    if (ts.isMetaProperty(node)) {
+      return;
+    }
+    if (ts.isIdentifier(node) && isValueReference(node)) {
+      const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration;
+      if (
+        declaration !== undefined &&
+        (!isModuleVisible(declaration, fn) || isSpecializationBlindSpot(declaration, fn))
+      ) {
+        captured = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(fn, visit);
+  return captured;
+}
+
+/** Whether an identifier in the arrow reads a value, rather than naming a member or declaring
+ * one. Member names (`o.y`, `{ y: 1 }`, `class C { y() {} }`) resolve to declarations the
+ * object — not the arrow — owns, so only the object side can be a capture; declaration names
+ * resolve to themselves. Defaults to a read: an unlisted position may over-refuse a
+ * compilable program, never accept an uncompilable one. */
+function isValueReference(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  if (parent === undefined) {
+    return true;
+  }
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+    return false;
+  }
+  // A shorthand `{ y }` reads its binding — it is a value, not a member name. Checked
+  // before the property-assignment arm below so the two can never overlap.
+  if (ts.isShorthandPropertyAssignment(parent)) {
+    return true;
+  }
+  if (ts.isPropertyAssignment(parent) && parent.name === node) {
+    return false;
+  }
+  // A declaration binds its own name: the name resolves to itself, contained wherever the
+  // declaration sits, so it can never be a capture of an enclosing scope.
+  if (
+    (ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent) ||
+      ts.isClassDeclaration(parent) ||
+      ts.isClassExpression(parent) ||
+      ts.isVariableDeclaration(parent) ||
+      ts.isParameter(parent) ||
+      ts.isTypeParameterDeclaration(parent) ||
+      ts.isInterfaceDeclaration(parent) ||
+      ts.isTypeAliasDeclaration(parent) ||
+      ts.isEnumDeclaration(parent) ||
+      ts.isModuleDeclaration(parent)) &&
+    parent.name === node
+  ) {
+    return false;
+  }
+  if (
+    (ts.isMethodDeclaration(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent) ||
+      ts.isPropertyDeclaration(parent) ||
+      ts.isMethodSignature(parent) ||
+      ts.isPropertySignature(parent) ||
+      ts.isEnumMember(parent)) &&
+    parent.name === node
+  ) {
+    return false;
+  }
+  if (ts.isLabeledStatement(parent)) {
+    return false;
+  }
+  if ((ts.isBreakStatement(parent) || ts.isContinueStatement(parent)) && parent.label === node) {
+    return false;
+  }
+  return true;
+}
+
+/** Whether a declaration is visible from a module-level specialization: the arrow's own, or
+ * a binding whose scope chain to its file's top level crosses nothing opaque. Function and
+ * class bodies, namespaces, enums, and — the reason blocks are here — block scopes all hide
+ * their bindings from the module top level: `if (c) { const y = 1; run(<T>(x: T): T => y); }`
+ * would otherwise resolve `y` to no binding (STA4035). Imports, globals, and statement-level
+ * bindings reach their file's top level untouched. */
+function isModuleVisible(declaration: ts.Node, fn: ts.Node): boolean {
+  if (containsNode(fn, declaration)) {
+    return true;
+  }
+  let current: ts.Node | undefined = declaration.parent;
+  while (current !== undefined) {
+    if (ts.isSourceFile(current)) {
+      return true;
+    }
+    if (isScopeBoundary(current)) {
+      return false;
+    }
+    current = current.parent;
+  }
+  return true;
+}
+
+/** Whether a module-visible binding is nevertheless unreadable from a specialization body.
+ *
+ * Specialization bodies lower before their own file's statements — and verify before those
+ * statements' bindings exist — so only hoisted bindings are reachable in time: function and
+ * class declarations, imports, and globals. A same-file `let`, `const`, or `var` resolves to
+ * no binding there (`STA4035` from the lowering for the first two, `STA4002` from the
+ * verifier for the third, whose hoist feeds one stage but not the other), so the gate refuses
+ * the read here rather than manufacture those internal errors. Cross-file bindings are
+ * already registered — dependencies lower before their importers — as are ambient globals.
+ * Named generics predate this rule and still accept-then-fail on the same reads; that gap is
+ * recorded in plan-notes, not widened here. */
+function isSpecializationBlindSpot(declaration: ts.Node, fn: ts.Node): boolean {
+  if (!ts.isVariableDeclaration(declaration)) {
+    return false;
+  }
+  return declaration.getSourceFile() === fn.getSourceFile();
+}
+
+/** Whether `ancestor` textually contains `descendant`. Positions, not identity: two bindings
+ * sharing a spelling are two nodes, and only containment tells which scope owns which. */
+function containsNode(ancestor: ts.Node, descendant: ts.Node): boolean {
+  return descendant.getStart() >= ancestor.getStart() && descendant.getEnd() <= ancestor.getEnd();
+}
+
+/** Scopes a module-level specialization cannot read through: every function shape, every
+ * class shape, every block shape, and the declaration forms that scope their contents. Loop
+ * statements are here for their headers — `for (const y of …)` scopes `y` to the loop, not
+ * to any block under it. */
+function isScopeBoundary(node: ts.Node): boolean {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isClassDeclaration(node) ||
+    ts.isClassExpression(node) ||
+    ts.isEnumDeclaration(node) ||
+    ts.isModuleDeclaration(node) ||
+    ts.isBlock(node) ||
+    ts.isCaseBlock(node) ||
+    ts.isModuleBlock(node) ||
+    ts.isCatchClause(node) ||
+    ts.isForStatement(node) ||
+    ts.isForInStatement(node) ||
+    ts.isForOfStatement(node) ||
+    ts.isWhileStatement(node) ||
+    ts.isDoStatement(node) ||
+    ts.isSwitchStatement(node)
+  );
+}
+
 /** What a named generic resolves to where it is READ as a value: `console.log(box)`,
  * `take(box)` for an untyped parameter, a rest argument.
  *
@@ -334,8 +626,9 @@ export function genericArgumentTuple(
  *
  * Only a generic with a home to specialize under qualifies — a declaration, an assigned
  * arrow or function expression, or a `const` alias chain to either (all through
- * `genericAliasTarget`). An unassigned arrow has nowhere to build even one copy for and
- * stays refused at the gate. `undefined` for anything else. */
+ * `genericAliasTarget`). An unassigned arrow anywhere else has nowhere to build even one copy
+ * for and stays refused at the gate; at a direct call argument it takes the parameter's tuple
+ * instead (`inlineGenericTuple`). `undefined` for anything else. */
 export function genericValueInstantiation(
   node: ts.Identifier,
   checker: ts.TypeChecker,
@@ -406,8 +699,10 @@ export function classReferenceTuple(
  * the variable holding it: `const id = <T>(x: T): T => x` specializes `id` per tuple, exactly
  * as a declaration specializes its own name. Anything else — an inline arrow, a callback, a
  * `let` that reassignment could change under a collected tuple, a nesting whose scope the
- * module-level specializations would leak — has no home to specialize under and stays refused
- * at the gate. Returns the variable's name, which keys the specializations. */
+ * module-level specializations would leak — has no home to specialize under and answers
+ * `undefined` here. The gate refuses those shapes except an inline arrow at a direct call
+ * argument, which takes the parameter's tuple under a position-derived key
+ * (`inlineGenericTuple`). Returns the variable's name, which keys the specializations. */
 export function genericArrowKey(node: ts.Expression): string | undefined {
   let fn: ts.Expression = node;
   while (ts.isParenthesizedExpression(fn)) {

@@ -30,6 +30,7 @@ import {
   genericCallInstantiation,
   genericNewInstantiation,
   genericValueInstantiation,
+  inlineGenericTuple,
 } from './generics.ts';
 import { assertedBy, isCheckable } from './narrowing.ts';
 import {
@@ -371,6 +372,7 @@ function gateConstruct(
     case ts.SyntaxKind.ArrowFunction:
       return gateFunction(
         node as ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction,
+        typeChecker,
       );
 
     case ts.SyntaxKind.ObjectBindingPattern:
@@ -383,9 +385,10 @@ function gateConstruct(
       return gateParameter(node as ts.ParameterDeclaration);
 
     // `<T>` itself. It is not a type NODE -- it DECLARES one -- so it reaches this switch rather
-    // than the annotation skip above. A constraint or a default is refused: `<T extends Shape>`
-    // bounds what a specialization may be built for, and `<T = string>` supplies a tuple element no
-    // call site wrote, and neither is anything monomorphization can honour by substitution alone.
+    // than the annotation skip above. A constraint is enforced by the checker at every call site
+    // and a default supplies the tuple element no call site wrote, so neither needs a rule here
+    // beyond the method case below: monomorphization substitutes the resolved tuple, whatever
+    // constrained or defaulted it (plan.md §8 step 12(f)).
     case ts.SyntaxKind.TypeParameter:
       return gateTypeParameter(node as ts.TypeParameterDeclaration);
 
@@ -2831,6 +2834,7 @@ function hasFunctionImplementation(
  * binding form the HIR has no node for, not a judgement about the function itself. */
 function gateFunction(
   fn: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction,
+  typeChecker: ts.TypeChecker,
 ): GateResult {
   // The extern marker outside a `.d.ts` (docs/FFI.md §1): placement is refused before the body
   // check below, so a bodiless `declare function` with the tag reads as misplaced (STA1121)
@@ -2857,13 +2861,17 @@ function gateFunction(
   // A generic is compiled by MONOMORPHIZATION: one specialization per concrete type tuple a call
   // asks for (Task 3.4). That needs a home to specialize under — a named, hoisted declaration the
   // lowering can lower again with a substitution in scope, or a `const` at module scope holding
-  // the arrow, which names the specializations the same way. Any other shape (inline, callback,
-  // `let`, nested) has nowhere to build a second copy for.
+  // the arrow, which names the specializations the same way. An inline arrow or function
+  // expression passed directly as a call argument is its own use site: it takes the parameter's
+  // tuple under a position-derived key (`inlineGenericTuple`). Any other homeless shape (a
+  // `let`, a nesting, a branch, a body that reads an enclosing scope) has nowhere to build a
+  // second copy for.
   if (
     fn.typeParameters !== undefined &&
     fn.typeParameters.length > 0 &&
     !ts.isFunctionDeclaration(fn) &&
-    genericArrowKey(fn) === undefined
+    genericArrowKey(fn) === undefined &&
+    inlineGenericTuple(fn, typeChecker) === undefined
   ) {
     return notYet('a generic function expression or arrow is not yet supported', 5);
   }
