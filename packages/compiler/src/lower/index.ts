@@ -1910,6 +1910,7 @@ function lowerForOf(
   if (!iterable) {
     return null;
   }
+  const dispatched = wrapDynamicIterator(iterable);
 
   const list = node.initializer;
   const declaration = ts.isVariableDeclarationList(list) ? list.declarations[0] : undefined;
@@ -1941,7 +1942,7 @@ function lowerForOf(
   // because that is what the emitter allocates the slot under.
   const hirBinding = inner.declare(
     binding,
-    forOfElementType(iterable.type, peeled === undefined ? 'identity' : peeled.view),
+    forOfElementType(dispatched.type, peeled === undefined ? 'identity' : peeled.view),
   );
   hirNameOfDeclaration.set(declaration, hirBinding);
 
@@ -1956,7 +1957,7 @@ function lowerForOf(
     span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
     binding: hirBinding,
     declKind: (list.flags & ts.NodeFlags.Const) !== 0 ? 'const' : 'let',
-    iterable,
+    iterable: dispatched,
     view: peeled === undefined ? 'identity' : peeled.view,
     body,
     ...(label !== undefined && { label }),
@@ -2023,6 +2024,34 @@ function wrapUserIterator(
     args: [],
   };
   return call;
+}
+
+/** `for (const x of u)` where no static walk covers `u`: wrap the operand in the runtime
+ * GetIterator dispatch (plan.md §8 step 2a(c)). The gate admits exactly these operands in js
+ * mode -- an Unknown value, a union the model widened to one, or a statically-known
+ * non-iterable the suppressed TS2488 let through -- so reaching here with one is the policy
+ * working, and the wrapper is its lowering half rather than a second policy. Everything a
+ * static walk covers (arrays, strings, Maps, Sets, stored iterators, user-iterable objects)
+ * passes through untouched, which is also why a peeled view can never meet the wrapper:
+ * `peelIteratorView` only peels statically-typed receivers. */
+function wrapDynamicIterator(iterable: Expression): Expression {
+  const kind = iterable.type.kind;
+  if (
+    kind === 'array' ||
+    kind === 'string' ||
+    kind === 'map' ||
+    kind === 'set' ||
+    kind === 'iterator' ||
+    userIteratorMethod(iterable.type) !== undefined
+  ) {
+    return iterable;
+  }
+  return {
+    kind: 'get-iterator',
+    type: hIterator(hUnknown(false)),
+    span: iterable.span,
+    target: iterable,
+  };
 }
 
 function peelIteratorView(

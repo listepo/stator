@@ -4,6 +4,82 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 277. Step 2a(c) 2488 lands: runtime GetIterator dispatch for unknown iterables (2026-09-16)
+
+**Plan:** §8 step 2a(c), the 2488 half (the 2454 half landed in wave 3 — verified green below,
+its prose updated here too). `plan.md` edited in this change (§8 step 2a(c) bullets, §8:296
+header). Scope coordination: this is Agent 2's slice (`agent/p5-spread-generics`); 12(d)/12(e),
+Phase 6/7/9/10 untouched. Numbered past the highest entry known (276) to avoid colliding with
+concurrent agents' notes; merge resolves any race.
+
+**What landed.** `for (const x of u)` where `u` has no static walk compiles in js mode and
+matches Node byte-for-byte; ts mode keeps the checker's refusal:
+
+- Runtime: `jsrt_get_iterator` (`runtime/src/jsrt_iterator.c`, declared in `jsrt_value.h`,
+  documented in `docs/VALUE.md` §4.13) — generators and stored boxes pass through; arrays,
+  strings, Maps, Sets box into their specialized walks; any other object resolves `__@iterator`
+  through the shape table (fixed method table or dynamic one, the same read a dynamic method
+  call makes) and calls it with the receiver; the method result must be a generator or a box
+  (else Node-verbatim `TypeError: Result of the Symbol.iterator method is not an object`); the
+  rest throw catchable `X is not iterable` through a shared `jsrt_throw_not_iterable`
+  (extracted from `jsrt_require_array_iterable`'s body, which now calls it — one rendering for
+  every for-of refusal, and no new clone for the 1.0% `cpd` gate to trip on).
+- Compiler: a `get-iterator` HIR node (`nodes.ts`, always typed `iterator` with an Unknown
+  element) so the existing boxed walk takes it with no new emission arm — verifier pins the
+  contract (`STA4045`), codegen counts/emits one rooted temp, `rewrite.ts` and `explain.ts`
+  carry their arms. Gate admits non-walkable operands in js mode only (`gateForOf` takes the
+  mode); lowering wraps them (`wrapDynamicIterator`); `program.ts` suppresses TS2488 in js.
+- Two gate refinements the landing forced, both principled rather than expedient. (1) In ts
+  mode the gate refuses only what the checker ACCEPTED (asked via the checker's own property
+  list normalized through `hirPropertyName`, since `__@iterator@<id>` suffixing defeats exact
+  lookup and the HType mapping drops interface methods — `Iterable<T>` is the case that
+  proved it): everything else was refused by TS2488/TS2571 first, and the gate staying silent
+  there leaves that STA0012 speaking alone, which matters because `explain` ranks a not-yet
+  above an error-class diagnostic. (2) A `for-of` binding is not an annotation site
+  (`annotationSiteOf` returns null for one): `for (const x: T of ...)` is a grammar error, so
+  the checker's recovery-`any` on a refused iteration is not implicit-any, and reporting
+  STA1003 for it buried the STA0012 naming the real refusal. No hole: explicit `any` is
+  STA1001 even in ambient declarations (probed), every other any-binding has a companion
+  diagnostic, and the evolving-array shape never fired STA1003 anyway.
+- Custom `{ next() }` objects stay STA1214 by card (a statically-known one is still refused in
+  both modes — probed; a dynamically-encountered one is the method-result TypeError above,
+  not a new box kind, per the VALUE.md contract).
+
+**Proof.** Decision fixtures `subset_for_of_unknown_{js (dynamic), ts (error STA0012)}`; js
+golden `tests/golden/js/for_of_unknown.js` (arrays, strings incl. emoji code points, Map
+entries, Set, generators with finally-on-break/throw, user classes, stored boxes, `.keys()`
+views, unions, async/generator-unit loops, capture and early-return through the dispatched
+boxed walk, and every TypeError path — name/instanceof where Node's message is
+source-text, message-exact for the direct nullish/number spellings) byte-for-byte vs Node
+26.7.0, including under ASan. Test262 per-slice before/after (pristine worktree at the base
+commit vs this branch; `ratchet.json` untouched per plan.md:416-422):
+
+| slice | before (passed/skipped/failed) | after | movement |
+|---|---|---|---|
+| `for-of` (829) | 87 / 675 / 67 | 87 / 708 / 34 | 33 failed→skipped |
+| `spread` (331) | 8 / 286 / 37 | 8 / 286 / 37 | none |
+| `iterat` (623) | 2 / 598 / 23 | 2 / 607 / 14 | 9 failed→skipped |
+| `generator` (1849) | 110 / 1688 / 51 | 110 / 1700 / 39 | 12 failed→skipped |
+
+54 failed→skipped, zero passed→failed, zero new passes: the honest direction (checker lint →
+Stator's own schedule), per-code evidence rather than a ratchet claim.
+
+**Wake the suppression caused, caught and pinned.** Suppressing 2488 moved directly-`unknown`
+array spread in js mode from STA0012 to the lowering's precise STA1214 (the gate stays silent
+there by design) — the legitimate §1.3 landing, same shape as the delete reclassification
+(note 196). Pinned by `subset_spread_direct_unknown_{js (not-yet STA1214), ts (error
+STA0012)}`. Spread-of-unknown otherwise stays STA1214 per the 12(c) residue card (all
+`subset_spread_*` + 16 spread goldens green, unchanged); the gate comment that named
+GetIterator as future work now names the card instead.
+
+**Verified, not built (the prove half).** 2454: wave-3 suppression + widening green
+(`subset_definite_assignment_*`, both goldens). 12(f): every named construct green —
+constrained/defaulted/explicit/undetermined/nested (static goldens) and escape/selfapply/
+instanceof/heritage-subclass (not-yet STA1214 fixtures, deliberate representation
+impossibilities per SUBSET.md, not my card to close). Full gate on this branch: subset 679
+(641/38/0), unit 564/564, goldens green incl. ASan 387/387, `tsc` both projects, oxlint/oxfmt
+clean, `cpd` 0.9%.
+
 ## 242. CI run 34778195179: shard 1 died in the checker's stack overflow through the in-process path 213 missed (2026-09-14)
 
 **Plan:** §9 Task 6.1 (the Test262 heartbeat) and the CI decomposition map in

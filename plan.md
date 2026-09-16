@@ -293,8 +293,10 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, and **steps 18–38** —
-the twenty-one added by the 2026-09-14 bug hunt (plan-notes 249–251). The two
+What is still OPEN in this phase is **step 2a(b)** and **step 12 (c)–(f)** residue — step 2a(c)
+is closed (both buckets landed; the bullets below say where), and the twenty-one steps 18–38
+added by the 2026-09-14 bug hunt (plan-notes 249–251) plus steps 39–46 added after it have all
+landed (struck stubs below; evidence in [done.md](done.md) → Phase 5). The two
 shipped-construct defects the bug hunt of 2026-09-11 found (steps 15 and 16) both landed the same
 day — plan-notes 225 and 226.
 Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
@@ -382,13 +384,25 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `STA4035`. Reading an undeclared name now throws a catchable `ReferenceError`, `typeof` answers
    `"undefined"` without throwing, and the three WRITE forms the suppression newly admitted were
    caught manufacturing `STA4034` and fixed in the same change — the TS2403 rule again, asked of 24
-   syntactic positions instead of one fixture. · **2488 `Symbol.iterator`**
-   needs runtime dispatch for unknown iterables, not only a panic-to-throw conversion.
+   syntactic positions instead of one fixture. · ~~**2488 `Symbol.iterator`**~~ ✅ **landed
+   2026-09-16** (plan-notes 277; evidence in [done.md](done.md) → Phase 5 step 2a(c),
+   unknown-iterable dispatch): js mode suppresses the checker's refusal and lowers `for-of`
+   over any operand with no static walk through a `get-iterator` HIR node to the runtime
+   GetIterator dispatch (`jsrt_get_iterator` — collections box, generators and stored
+   iterators drive as-is, a user-iterable method resolves and runs, the rest throw Node's
+   catchable `TypeError`), proved by `tests/golden/js/for_of_unknown.js` byte-for-byte and a
+   both-modes decision pair (`subset_for_of_unknown_*`: `dynamic` in js, `error STA0012` in
+   ts). ts mode keeps the refusal, and the gate there refuses only what the checker accepted
+   (a custom `{ next() }` object, an `Iterable<T>` interface) so the STA0012 speaks alone; a
+   `for-of` binding is not an annotation site, so the checker's recovery-`any` no longer
+   buries it under STA1003.
    **2454 definite assignment** rejects an uninitialized annotated binding whose runtime value is
    `undefined`; it is **not TDZ**. True syntactic TDZ is 2448 (closure-mediated TDZ may have no
    checker diagnostic), and there is no runtime TDZ sentinel/check to convert. Suppressing 2454
    additionally requires sound dynamic method receivers rather than trusting the annotation
-   (plan-notes 200, correcting note 195's premise). Both buckets remain open.
+   (plan-notes 200, correcting note 195's premise).~~ ✅ **landed in wave 3** ([done.md](done.md)
+   → Phase 5 wave 3: suppressed in js as a code plus binding widening; verified green in
+   plan-notes 277 — `subset_definite_assignment_*`, both goldens). Both buckets are closed.
    · ~~**`missing.a = 1` and `missing[0] = 1` raise `STA4035`**~~ ✅ **fixed 2026-09-05**
    (plan-notes 199; [done.md](done.md) → Phase 5 step 2a(c), inferred JS namespaces).
    ~~**Check:** `typeof unresolvableName` answers `"undefined"` without throwing and a bare
@@ -401,8 +415,9 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `TypeError`, caught by `tests/golden/js/property_errors.js` and
    `tests/golden/js/iterator_receiver_error.js`. The same conversion later reached the string-length
    builtins: `repeat`/`padStart`/`padEnd` throw a catchable `RangeError` matching Node instead of
-   aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets stay
-   open for the reasons above, which are not panics. ~~**Check:** the two delete buckets (2704, 2790)
+   aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets
+   below were still open then, being not panics — both have since landed (2488: plan-notes 277;
+   2454: wave 3). ~~**Check:** the two delete buckets (2704, 2790)
    land with the `delete` OPERATOR — lowering plus whatever
    answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
    returns Node's boolean and the subsequent read answers `undefined`.~~ ✅ **2026-09-09**
