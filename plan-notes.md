@@ -8038,3 +8038,39 @@ condition the justfile/runners already assume (Windows never builds the runtime)
 **Not in this PR by design** (awaits the approval above): the setup-action hunk,
 and only that hunk. The stale worktree's other `.github` changes (ci.yml trigger
 narrowing, nightly.yml rescheduling) are unrelated and stay out regardless.
+
+## 273. T9.1 re-apply: what changed against the `.worktrees/t9-1` plan (2026-09-16)
+
+**Base.** Re-applied onto `9f2eba4`, not merged from the stale worktree (`82d833f`-era
+base, T9.1 living as uncommitted changes mixed with unrelated phase work). Four commits,
+one per move step: justfile+GC (steps 1–2), buffers (3), shape table (4), alloc helpers
+(5). `mise.toml`/`docs/TOOLCHAIN.md` already pinned/listed zig on main; the justfile
+`rm -f libjsrt.a` recreate and the `print_ffi_strings` corpus also already existed there,
+so those stale hunks were dropped (no `print_classes` corpus exists on main either).
+
+**Adaptation 1 — no `jsrt_shape_array_index`.** Since `82d833f`, main gained the shared
+`jsrt_key_is_array_index` (jsrt_value.h), used by fixed-shape enumeration, `jsrt_in`,
+`jsrt_delete`, `index_of` and object spread. The Zig ordering (`before`) calls through
+to it instead of exporting a second copy of the 12-line rule; `src/jsrt_mem.h` does not
+declare it. One spelling, still in C because fixed-shape code that stays in C needs it.
+
+**Adaptation 2 — no `jsrt_dynobj_new_class`, no `bool dynamic`.** The stale tree's
+`JSRTClass.dynamic` field and `jsrt_dynobj_new_class` belong to index-signature-class
+work that does not exist on main (main distinguishes dynamic objects by descriptor
+pointer). `jsrt_alloc.zig` ports only the constructors main has (`jsrt_dynobj_new`,
+`jsrt_null_proto_new`); the panic-on-non-dynamic guard has nothing to guard yet.
+
+**Verified.** `zig 0.16.0 @cImport`s the current headers unchanged (flexible members,
+`static inline` helpers and tag macros all translate as in the stale tree). `nm`: all
+30 Zig exports defined exactly once in `libjsrt.a`. Byte-identity holds for numbers,
+objects, shapes and maps via the print corpus (rel + ASan) and the golden/subset gates
+(full `pnpm run ci` green — numbers in `done.md` §11a).
+
+**Host note.** `mise exec node -- pnpm …` breaks on this machine (mise's pnpm native
+binary; plan-notes 204). The green run used the pinned Node first on PATH:
+`PATH="<mise>/installs/node/26.7.0/bin:$PATH" pnpm run ci`.
+
+**Corollary.** Closing T9.1 trips `tests/unit/phases.test.ts`: `done.md` is the authority
+and `src/support/phases.ts` its projection, so the `## Phase 9 ✅ COMPLETE` heading
+requires adding 9 to `COMPLETED_PHASES` in the same change (no diagnostic names Phase 9,
+so the delivery invariant holds vacuously).

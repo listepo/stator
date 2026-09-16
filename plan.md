@@ -988,39 +988,7 @@ codegen↔runtime contract, and generated code stays C. Boehm GC stays: Zig call
 its C ABI. Zig 0.16.0 is pinned in stator's `mise.toml`; a global 0.14.1 (if present) is
 untouched. This reopens the settled C11-runtime decision (§15.4) on the creator's direction.
 
-**Do not merge the `.worktrees/t9-1` Zig implementation from this planning change.** The
-sources stay in that worktree until a follow-up PR.
-
-### T9.1. Runtime memory core in Zig — **[D3]**
-
-In scope:
-
-- the GC glue (`jsrt_gc.c`);
-- the allocation helpers behind `jsrt_value.h`;
-- the shape tables (`jsrt_shape.c`);
-- the growable buffers in print, JSON and string ops.
-
-Steps:
-
-1. Pin zig 0.16.0 in `mise.toml` and list it in `docs/TOOLCHAIN.md`. Teach the justfile to build
-   the Zig objects into `libjsrt.a` for both the `runtime` and `runtime-asan` flavors.
-2. Move `jsrt_gc.c` first.
-3. Move the print/JSON/string buffers.
-4. Move the shape tables.
-5. Move the allocation helpers.
-
-Every step keeps the golden fixtures and the runtime print corpus byte-identical.
-
-**Check:** `pnpm run ci` is green, including `test:runtime` and `test:asan`. No C file still
-holds moved code. `docs/TOOLCHAIN.md` lists zig.
-
-**Progress** (worktree `.worktrees/t9-1`, branch `agent/t9-1`, plan-notes 238): steps 1–5 are in
-place in that worktree. The Zig root `src/jsrt_mem.zig` builds one object, `jsrt_zig.o`, from
-`jsrt_gc.zig`, `jsrt_buf.zig`, `jsrt_shape.zig` and `jsrt_alloc.zig`, declared for C in
-`src/jsrt_mem.h`; `jsrt_gc.c` is deleted there. The string ops have no growable buffer, so
-nothing there moved. Property semantics stay in `jsrt_shape.c` and builtin-specific constructors
-stay with their builtins. Open for the creator: the `mlugg/setup-zig@v2` CI action. **Main does
-not yet contain the Zig objects** — that is a separate PR.
+### ~~T9.1. Runtime memory core in Zig~~ ✅ — landed; record in `done.md` (§11a).
 
 ### Language & library boundaries
 
@@ -1398,7 +1366,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | Conformance visible (Phase 6) | Test262 dashboard, nightly fuzz, bench page | +3–4 wk, then continuous |
 | FFI (Phase 7) | SQLite demo, header gen | +4–6 wk |
 | Dynamic tier (Phase 8) | QuickJS-NG fallback | +6–10 wk *if gated in* |
-| Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | in progress in `.worktrees/t9-1` |
+| Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | landed (`done.md` §11a) |
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
