@@ -3,6 +3,40 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 273. Phase 7 closes: 7.1/7.2/7.3 Checks re-verified, evidence moved to done.md (2026-09-16)
+
+**Plan:** §10 Phase 7 (stamped ✅ COMPLETE). `plan.md` edited in this change (§10 compressed
+to stub + Check; full step text moved to `done.md` → Phase 7, which gains the three records
+§10 cited but never wrote: 7.1 steps 1–2, 7.1 steps 6–9, 7.2 steps 3–8).
+
+**Verification (all on `9f2eba4`, pinned Node 26.7.0, branch `agent/infra-next`; docs-only
+changes since, so the numbers stand):** `packages/tests/ffi/run.ts` → 5 checks, 5 passed,
+0 failed, 0 not run; `example-c-consumer/c-consumer.ts` → `ffi c-consumer: ok`;
+`examples/ffi/sqlite/sqlite-c-main.ts` → `ffi sqlite-c-main: ok`;
+`sqlite-demo.ts` → `sqlite demo: ok`; libm/stat examples ok; full `pnpm run ci` green
+(check-node v26.7.0; typecheck/lint/dupes clean; unit 564/564; runtime corpus matches Node;
+subset 677 — 639 passed, 38 expected-fail, 0 failed; golden 386/386 + 2 intl skipped;
+builtins 223/238; leak 10M plateau 3664 KB; golden-asan green). The CI side of the Check is
+structural (`.github/workflows/ci.yml` ffi job: `test:ffi` + both C-main runners) and was not
+re-run remotely here — the job definition is unchanged since the 7.3 landing.
+
+**Two honesty notes.** (1) §15.1's top-down rule gates phase STARTS; Phases 5 and 6 are still
+open while 7 closes. This stamp records completed work, it does not start anything, so the
+rule does not apply to it — stated here so the overlap reads as deliberate, not drift.
+(2) The close-out names two follow-ups as explicitly unowned (ambient `CString`/`Out` lib
+declarations; generator convention transfer — plan-notes 271): never Check items, no phase
+owner, a future card owns them.
+
+**§15.9 reassignment (same change, not a second card).** The stamp surfaced three `phase: 7`
+sites under `src/`, which the rule forbids leaving behind: the optional extern call is
+DELIVERED (direct C call — `?.` on an always-linked callee cannot short-circuit, so there
+is no conditional to model; gate identifier arm + call arm + lowering agree, `STA4031`
+landing-pad removed), while extern-as-value (STA1217) and bare package imports (STA1214)
+go PHASELESS — messages name the blocker (no C value representation; v1 npm non-goal),
+never a phase number, since no open phase owns either. `COMPLETED_PHASES` gains 7 in the
+same change (`phases.test.ts` pins the pair). Proof: `subset_extern_optional_call_{ts,js}`
+at `static`, the `?.` lines in both `extern_libm` goldens byte-exact, `phases.test.ts` 4/4.
+
 
 ## 278. Bound class expressions land via descriptor erasure (2026-09-16)
 
