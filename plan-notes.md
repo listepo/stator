@@ -4,6 +4,66 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 280. Agent 6 standing outputs: Test262 ratchet holds, fuzz clean, third-host bench spread 9.0%, weekly artifact alive (2026-09-16)
+
+**Plan:** §9 Phase 6 (standing outputs 6.1/6.2; noise-floor residue). `plan.md` NOT edited —
+the residue-narrowing edit is PR #8's contested ground (see the artifact correction below);
+this entry records measurements.
+
+**Test262 (clean tree, pinned corpus 77100523, Node v26.7.0).**
+`test262: 2372 passed, 49057 skipped, 2151 failed — pass rate 52.4%`, exit 0, totals sum to
+53,580. Ratchet (`2372/3070/48138`) holds: passed equal, failed 919 below. Failed rows are
+2150 × `STA0012` (step-2a(b)/residue checker refusals) plus exactly one `STA4072` — the
+already-recorded note-213 case (`generator-prop-name-yield-expr.js`, upstream checker stack
+overflow converted by design). Delta vs the checked-in Sep-15 scratch `results.json`
+(2371/2159/49050, untracked file): 9 paths, all honest-direction — `__proto__-duplicate.js`
+skipped→passed (the note-265 protodup fix restoring the ratchet number) and 8 ×
+spread-obj getter/override tests failed→skipped (spread reclassification). Zero new
+divergences, so nothing was added to `differential/corpus/` — the negative result, recorded
+rather than filled.
+
+**Differential fuzz (seed-fixed, ≥1h).** First attempt (shared checkout, seed=7) died at seed
+623 in `run.ts:110` — not a divergence: another agent's half-written `generics.ts` edit was
+imported mid-run (`SyntaxError: Identifier 'key' has already been declared`), the note-269
+phantom verbatim, no failure files written. Re-ran isolated (worktree at 9f2eba4, own
+runtime archive, shared corpus read-only): `--seed=7 --minutes=60 --mode=both` →
+`differential: 3935 cases — 0 divergences`, exit 0 (~30 min per mode by the budget split).
+
+**Bench noise floor, third host.** Five `bench:record` repeats of 9f2eba4 on darwin/arm64
+(Apple M3 Max, Node v26.7.0, clang 21.1.8), quiet box: stator geomeans 24.061 / 23.156 /
+24.290 / 22.277 / 22.893 ms (6 programs — the suite grew since the 5-program numbers, so
+cross-host geomeans do not compare, only spreads do). Max spread **9.0%**. Worst seen across
+hosts is now 9.0% (4.0%, 7.4%, 9.0%) — the 20% gate stands with ~2.2× headroom; no measured
+evidence moves it. Per-program values in `bench/results/2026-09-16T08-58-*.json`
+(gitignored scratch runs; `baseline.json`/`README.md` churn reverted, not committed).
+
+**Weekly-artifact correction (PR #8's Phase-6 note — its plan-notes 274 — finding (2) is wrong).**
+`GET actions/runs/34745879941/artifacts` returns `benchmark-13` (id 10314016231, 1103
+bytes, `expired:false`, `expires_at:2026-12-12`): downloaded, parsed — 5 programs, stator
+geomean **21.208 ms** on linux-x64 (AMD EPYC 7763, Azure), i.e. the weekly job's numbers ARE
+retrievable with ~90-day retention. The ephemerality half of that note stands (a fresh VM
+weekly, so same-machine repeats name no stable entity); the "artifacts do not survive /
+retention is the unblock" half does not — reviewed on PR #8 as a blocking comment. The
+21.208 ms point sits just under this entry's host-2 range, sustaining rather than moving the
+gate.
+
+**Reviews (review-only, never pushed to their branches):** PR #7 comment
+(`pullrequestreview-5219904117`: scope/plan clean, two precision questions) plus follow-up
+withdrawing the subset-arithmetic one (clean-tree baseline is 675 fixtures, so 675+4=679 as
+cited; PR #8's note 273 cited 677, which counted 2 transient files on its tree); PR #8 comment
+(`pullrequestreview-5219906790`, `--request-changes` blocked by the self-review rule so
+filed as a blocking comment: the note-273 verification gap on PR #8's side + the artifact correction above).
+Neither merged.
+
+**Method note for parallel agents.** All measurements above ran in an isolated worktree
+(`git worktree add --detach` at the base commit) with `node_modules` symlinked from the
+main checkout (same commit, same install), `STATOR_TEST262` pointed at the shared corpus
+read-only, and the runtime archive built inside the worktree — after the shared checkout
+proved unmeasurable (mid-edit imports, branch switches underfoot). Pin launches with
+`mise exec node --` so the oracle stays v26.7.0.
+)
+
+
 ## 278. Bound class expressions land via descriptor erasure (2026-09-16)
 
 **Plan:** §8 step 12(d) (class member surface: anonymous classes, extends forms) + 12(e)
@@ -211,8 +271,6 @@ untouched — other agents own them.
 
 Baselines at branch start (`agent/p5-class-surface`, pinned Node 26.7.0): subset 675
 fixtures (637 passed, 38 expected-fail, 0 failed), golden 386/386, unit 564/564.
-
-
 ## 242. CI run 34778195179: shard 1 died in the checker's stack overflow through the in-process path 213 missed (2026-09-14)
 
 **Plan:** §9 Task 6.1 (the Test262 heartbeat) and the CI decomposition map in
