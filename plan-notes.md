@@ -3,6 +3,35 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 274. Phase 6 residue narrowed: fuzz clause met on nightly output; noise floor stands on ephemerality (2026-09-16)
+
+**Plan:** §9 Phase 6 (intro + noise-floor residue; phase stays open). `plan.md` edited in this
+change (fuzz-clause citation; residue narrowed, Check kept).
+
+**Fuzzing clause — met, cited.** The nightly `evidence` job (`.github/workflows/nightly.yml`,
+`--minutes=60`) is green with zero divergences on consecutive days: 2026-09-14 run
+34819549697 (`differential: 4316 cases — 0 divergences`, 1h0m53s) and 2026-09-15 run
+34942356204 (`differential: 4128 cases — 0 divergences`, 1h1m50s). Zero divergences means
+zero *unexplained* ones. The clause no longer holds the phase open; the noise floor does.
+
+**Noise floor — narrowed, not closed.** Two findings from the weekly-job side:
+
+1. The weekly bench runs, but its machine does not persist. The 2026-09-13 Sunday run
+   (34745879941) recorded 5 programs (`2026-09-13T07-43-08-…-linux-x64-….json`) and uploaded
+   artifact `benchmark-13` (1103 bytes, upload finalized in-log) on an ephemeral
+   `ubuntu-24.04` VM (Azure westus2, fresh worker per run). "Repeats on the machine that runs
+   the weekly job" therefore names no stable entity — every week is a different VM.
+2. The artifacts do not survive anyway. Two days later that run's artifact list reads
+   `{"total_count":0,"artifacts":[]}`, and no 03:xx Sunday bench output is retrievable beyond
+   the run log — so week-to-week spreads cannot be computed after the fact either.
+
+Neither finding moves the gate: the 20% threshold stands on the 4.0% + 7.4% local spreads
+(~2.7× headroom over the worst seen), and tightening toward 10% still leaves ~1.3× with no
+multi-host data (plan-notes 246). The concrete unblock is retention, not another local
+repeat: keep `benchmark-*` artifacts (or land the weekly result on a non-main branch) until
+repeats accumulate on the same image — then the Check's literal form can pass. Proposed as
+follow-up, not done here.
+
 ## 273. Phase 7 closes: 7.1/7.2/7.3 Checks re-verified, evidence moved to done.md (2026-09-16)
 
 **Plan:** §10 Phase 7 (stamped ✅ COMPLETE). `plan.md` edited in this change (§10 compressed

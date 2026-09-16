@@ -614,11 +614,13 @@ The tasks are independent and the phase's Check has one clause per task.
 
 **All four tasks have landed** (6.1, 6.2, 6.2a, 6.3); their evidence is in [done.md](done.md) →
 Phase 6, and the titles stay here so `§9 Task 6.N` references resolve. The phase is **not closed**:
-its Check's fuzzing clause says *≥1 h nightly with zero unexplained divergences*, and what exists is
-the scheduled job plus local runs — the clause passes on a nightly run's own output, cited here.
-Task 6.3 also carries one named residue (its regression threshold's noise floor). Test262 tracking
-is the standing output of 6.1 and does not close. Difficulty (§14 legend): the fuzzing clause is
-**D1** (cite a nightly run's own output), the noise-floor residue **D2**.
+its Check's fuzzing clause says *≥1 h nightly with zero unexplained divergences* — met on the
+nightly job's own output, cited here: 2026-09-14 (run 34819549697, 4316 cases, 0 divergences,
+1h0m53s) and 2026-09-15 (run 34942356204, 4128 cases, 0 divergences, 1h1m50s), both green
+(plan-notes 274). What keeps the phase open is Task 6.3's named residue (the regression
+threshold's noise floor) below. Test262 tracking is the standing output of 6.1 and does not
+close. Difficulty (§14 legend): the noise-floor residue is **D2** (the fuzzing clause was D1
+and is met).
 
 ~~**Task 6.1 — Test262 runner.**~~ ✅ **landed 2026-09-03** — evidence in [done.md](done.md) → Phase 6.
 First pinned number: **2379 passed, 10,513 failed, 40,688 skipped — 18.5%** over `passed + failed`,
@@ -677,8 +679,17 @@ previous result for the same host and fails above `thresholdPercent: 20`. The st
 threshold to sit above a **measured** spread; what has been measured is one repeat on one host
 (22.358 → 21.458 ms, **4.0%**, same commit — done.md) plus five repeats on a second host
 (21.215–22.778 ms, **7.4%** max spread — plan-notes 246), and the 20% gate stands on both with
-~3× headroom. Still open, narrowed: the Check names the machine that runs the weekly job, and
-neither host is it. **Check:** a handful of repeats of one commit
+~3× headroom. Still open, narrowed twice: the Check names the machine that runs the weekly job,
+and neither host is it — and the weekly-job machine is not a stable entity to repeat on. The
+Sunday bench runs on ephemeral `ubuntu-24.04` VMs (a fresh VM per run; the 2026-09-13 run's
+provisioner log reads Azure westus2, worker `4fa6f57c…`), and its result artifact does not
+survive: that run recorded 5 programs and uploaded `benchmark-13` (1103 bytes), yet two days
+later the run's artifact list is empty, so week-to-week repeats are not retrievable
+(plan-notes 274). The concrete unblock is retention, not more local repeats: keep
+`benchmark-*` artifacts (or land the weekly result on a non-main branch) until repeats
+accumulate on the same image — then the Check's literal form can pass. Until then the 20%
+gate stands on the two measured spreads (~2.7× headroom over the worst 7.4%).
+**Check:** a handful of repeats of one commit
 on the machine that runs the weekly job, the observed spread recorded in `plan-notes.md`, and the
 gate set from it. A gate below the noise floor fires on noise, and an alarm that fires on noise is
 one people learn to ignore — which costs more than having no gate at all.
