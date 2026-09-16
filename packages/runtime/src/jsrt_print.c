@@ -22,6 +22,8 @@
 
 #include "jsrt.h"
 
+#include "jsrt_mem.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,57 +142,8 @@ static void format_double(double d, char *buf, size_t buflen, bool negative_zero
  * Output buffer
  * ============================================================================ */
 
-/* A growable byte buffer. Array layout cannot be decided until every element has been rendered
- * and measured, so output is built up rather than streamed. Plain malloc on purpose: this holds
- * bytes, never jsrt_values, so it is not something the collector needs to see. */
-typedef struct {
-  char *data;
-  size_t len;
-  size_t cap;
-} Buf;
-
-static void buf_init(Buf *b) {
-  b->data = NULL;
-  b->len = 0;
-  b->cap = 0;
-}
-
-static void buf_free(Buf *b) {
-  free(b->data);
-  buf_init(b);
-}
-
-static void buf_append(Buf *b, const char *bytes, size_t n) {
-  if (b->len + n + 1 > b->cap) {
-    size_t cap = b->cap == 0 ? 64 : b->cap;
-    while (b->len + n + 1 > cap) {
-      cap *= 2;
-    }
-    char *grown = (char *)realloc(b->data, cap);
-    if (grown == NULL) {
-      jsrt_panic("out of memory: print buffer");
-    }
-    b->data = grown;
-    b->cap = cap;
-  }
-  memcpy(b->data + b->len, bytes, n);
-  b->len += n;
-  b->data[b->len] = '\0';
-}
-
-static void buf_puts(Buf *b, const char *s) {
-  buf_append(b, s, strlen(s));
-}
-
-static void buf_putc(Buf *b, char c) {
-  buf_append(b, &c, 1);
-}
-
-static void buf_repeat(Buf *b, char c, size_t n) {
-  for (size_t i = 0; i < n; i++) {
-    buf_putc(b, c);
-  }
-}
+/* Output is built up in a JSRTBuf (jsrt_mem.h) rather than streamed: array layout cannot be
+ * decided until every element has been rendered and measured. */
 
 /* ============================================================================
  * UTF-16 -> UTF-8 output
@@ -199,27 +152,27 @@ static void buf_repeat(Buf *b, char c, size_t n) {
 /* UTF-8 encoding of one resolved code point, shared by append_string (whose surrogate
  * fixup runs first) and json_quote (whose escapes run first): the four arms are one rule,
  * not two. */
-static void append_utf8(Buf *out, uint32_t cp) {
+static void append_utf8(JSRTBuf *out, uint32_t cp) {
   if (cp < 0x80u) {
-    buf_putc(out, (char)cp);
+    jsrt_buf_putc(out, (char)cp);
   } else if (cp < 0x800u) {
-    buf_putc(out, (char)(0xC0u | (cp >> 6)));
-    buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+    jsrt_buf_putc(out, (char)(0xC0u | (cp >> 6)));
+    jsrt_buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
   } else if (cp < 0x10000u) {
-    buf_putc(out, (char)(0xE0u | (cp >> 12)));
-    buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
-    buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+    jsrt_buf_putc(out, (char)(0xE0u | (cp >> 12)));
+    jsrt_buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
+    jsrt_buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
   } else {
-    buf_putc(out, (char)(0xF0u | (cp >> 18)));
-    buf_putc(out, (char)(0x80u | ((cp >> 12) & 0x3Fu)));
-    buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
-    buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
+    jsrt_buf_putc(out, (char)(0xF0u | (cp >> 18)));
+    jsrt_buf_putc(out, (char)(0x80u | ((cp >> 12) & 0x3Fu)));
+    jsrt_buf_putc(out, (char)(0x80u | ((cp >> 6) & 0x3Fu)));
+    jsrt_buf_putc(out, (char)(0x80u | (cp & 0x3Fu)));
   }
 }
 
 /* Appends one JSString as UTF-8. Unpaired surrogates become U+FFFD: they cannot be represented in
  * well-formed UTF-8, and a JS string is allowed to contain them. */
-static void append_string(Buf *out, const JSString *str) {
+static void append_string(JSRTBuf *out, const JSString *str) {
   for (uint32_t i = 0; i < str->length; i++) {
     uint32_t cp = str->data[i];
 
@@ -254,8 +207,8 @@ static void append_string(Buf *out, const JSString *str) {
 #define INSPECT_COMPACT 3
 #define SEPARATOR_SPACE 2 /* ", " between two entries */
 
-static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent);
-static void append_key(Buf *out, const char *key);
+static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent);
+static void append_key(JSRTBuf *out, const char *key);
 
 /* Node's quote choice, shared by append_quoted (UTF-16 string contents) and append_key
  * (NUL-terminated key bytes): single quotes, unless the text contains one and no double
@@ -278,30 +231,30 @@ static char choose_quote(bool has_single, bool has_double, bool has_backtick) {
  * keys): Node escapes both identically -- short escapes, "\x0B" for VT (never "\v"), "\xXX"
  * uppercase for every other C0 control and DEL. Quote/backslash handling stays at the call
  * sites because the chosen quote differs per string. */
-static void append_control_escape(Buf *out, uint32_t cp) {
+static void append_control_escape(JSRTBuf *out, uint32_t cp) {
   switch (cp) {
     case '\n':
-      buf_puts(out, "\\n");
+      jsrt_buf_puts(out, "\\n");
       break;
     case '\t':
-      buf_puts(out, "\\t");
+      jsrt_buf_puts(out, "\\t");
       break;
     case '\r':
-      buf_puts(out, "\\r");
+      jsrt_buf_puts(out, "\\r");
       break;
     case '\b':
-      buf_puts(out, "\\b");
+      jsrt_buf_puts(out, "\\b");
       break;
     case '\f':
-      buf_puts(out, "\\f");
+      jsrt_buf_puts(out, "\\f");
       break;
     case 0x0B:
-      buf_puts(out, "\\x0B");
+      jsrt_buf_puts(out, "\\x0B");
       break;
     default: {
       char hex[8];
       snprintf(hex, sizeof hex, "\\x%02X", cp);
-      buf_puts(out, hex);
+      jsrt_buf_puts(out, hex);
     }
   }
 }
@@ -309,7 +262,7 @@ static void append_control_escape(Buf *out, uint32_t cp) {
 /* Quoting follows Node: single quotes, unless the string contains one and no double quote, and
  * backticks only when it contains both. The quote actually chosen is then the only quote that
  * needs escaping inside. */
-static void append_quoted(Buf *out, const JSString *str) {
+static void append_quoted(JSRTBuf *out, const JSString *str) {
   bool has_single = false;
   bool has_double = false;
   bool has_backtick = false;
@@ -320,12 +273,12 @@ static void append_quoted(Buf *out, const JSString *str) {
   }
   const char quote = choose_quote(has_single, has_double, has_backtick);
 
-  buf_putc(out, quote);
+  jsrt_buf_putc(out, quote);
   for (uint32_t i = 0; i < str->length; i++) {
     uint16_t c = str->data[i];
     if (c == (uint16_t)quote || c == '\\') {
-      buf_putc(out, '\\');
-      buf_putc(out, (char)c);
+      jsrt_buf_putc(out, '\\');
+      jsrt_buf_putc(out, (char)c);
     } else if (c < 0x20 || c == 0x7F) {
       append_control_escape(out, c);
     } else if (c >= 0xD800u && c <= 0xDFFFu &&
@@ -335,7 +288,7 @@ static void append_quoted(Buf *out, const JSString *str) {
        * substitutes U+FFFD (append_string) and JSON escapes it per well-formed stringify. */
       char esc[8];
       snprintf(esc, sizeof esc, "\\u%04x", c);
-      buf_puts(out, esc);
+      jsrt_buf_puts(out, esc);
     } else {
       /* Hand the code unit -- with its partner, when it starts a surrogate pair -- to the same
        * UTF-8 writer the unquoted path uses, so a pair still comes out as one code point. A
@@ -353,17 +306,17 @@ static void append_quoted(Buf *out, const JSString *str) {
       append_string(out, piece);
     }
   }
-  buf_putc(out, quote);
+  jsrt_buf_putc(out, quote);
 }
 
 /* Everything that is not an array renders the same inside an array as it does at the top level,
  * except a string, which is quoted here and bare there. */
-static void inspect_scalar(Buf *out, jsrt_value v, bool quote_strings) {
+static void inspect_scalar(JSRTBuf *out, jsrt_value v, bool quote_strings) {
   char buf[64];
 
   if (jsrt_is_double(v)) {
     format_double(jsrt_to_double(v), buf, sizeof buf, true);
-    buf_puts(out, buf);
+    jsrt_buf_puts(out, buf);
   } else if (jsrt_is(v, JSRT_TAG_STRING)) {
     const JSString *str = (const JSString *)jsrt_ptr(v);
     if (quote_strings) {
@@ -372,31 +325,31 @@ static void inspect_scalar(Buf *out, jsrt_value v, bool quote_strings) {
       append_string(out, str);
     }
   } else if (jsrt_is(v, JSRT_TAG_BOOL)) {
-    buf_puts(out, jsrt_as_bool(v) ? "true" : "false");
+    jsrt_buf_puts(out, jsrt_as_bool(v) ? "true" : "false");
   } else if (jsrt_is(v, JSRT_TAG_NULL)) {
-    buf_puts(out, "null");
+    jsrt_buf_puts(out, "null");
   } else if (jsrt_is(v, JSRT_TAG_UNDEFINED)) {
-    buf_puts(out, "undefined");
+    jsrt_buf_puts(out, "undefined");
   } else if (jsrt_is(v, JSRT_TAG_INT32)) {
     snprintf(buf, sizeof buf, "%d", jsrt_as_int32(v));
-    buf_puts(out, buf);
+    jsrt_buf_puts(out, buf);
   } else if (jsrt_is(v, JSRT_TAG_CLOSURE)) {
     const char *name = jsrt_as_closure(v)->name;
     if (name[0] == '\0') {
-      buf_puts(out, "[Function (anonymous)]");
+      jsrt_buf_puts(out, "[Function (anonymous)]");
     } else {
       snprintf(buf, sizeof buf, "[Function: %s]", name);
-      buf_puts(out, buf);
+      jsrt_buf_puts(out, buf);
     }
   } else {
-    buf_puts(out, "[object Object]");
+    jsrt_buf_puts(out, "[object Object]");
   }
 }
 
 /* Zeroed entry buffers for the inspect layouts below (array, object, map, grouped rows):
  * every layout allocates the same way and aborts the same way, so the check lives once. */
-static Buf *alloc_entries(size_t count) {
-  Buf *entries = (Buf *)calloc(count, sizeof(Buf));
+static JSRTBuf *alloc_entries(size_t count) {
+  JSRTBuf *entries = (JSRTBuf *)calloc(count, sizeof(JSRTBuf));
   if (entries == NULL) {
     jsrt_panic("out of memory: print buffer");
   }
@@ -405,9 +358,9 @@ static Buf *alloc_entries(size_t count) {
 
 /* Release entry buffers and the vector itself. emit_braced consumes its entries; inspect_array
  * frees both the entries and, when grouping fired, the rows. */
-static void free_entries(Buf *entries, size_t count) {
+static void free_entries(JSRTBuf *entries, size_t count) {
   for (size_t i = 0; i < count; i++) {
-    buf_free(&entries[i]);
+    jsrt_buf_free(&entries[i]);
   }
   free(entries);
 }
@@ -418,8 +371,8 @@ static void free_entries(Buf *entries, size_t count) {
  *
  * `count` counts the entries that hold elements; a trailing "... n more items" is excluded from
  * the grouping and appended afterwards, which is why it is passed separately as `total`. */
-static size_t group_entries(const Buf *entries, size_t count, size_t total, size_t indent,
-                            bool all_numbers, Buf *rows) {
+static size_t group_entries(const JSRTBuf *entries, size_t count, size_t total, size_t indent,
+                            bool all_numbers, JSRTBuf *rows) {
   size_t total_length = 0;
   size_t max_length = 0;
   for (size_t i = 0; i < count; i++) {
@@ -478,29 +431,29 @@ static size_t group_entries(const Buf *entries, size_t count, size_t total, size
   size_t rows_written = 0;
   for (size_t i = 0; i < count; i += columns) {
     const size_t max = (i + columns < count) ? i + columns : count;
-    Buf *row = &rows[rows_written++];
-    buf_init(row);
+    JSRTBuf *row = &rows[rows_written++];
+    jsrt_buf_init(row);
     size_t j = i;
     for (; j + 1 < max; j++) {
       const size_t padding = column_width[j - i];
       const size_t written = entries[j].len + SEPARATOR_SPACE;
       if (all_numbers && padding > written) {
-        buf_repeat(row, ' ', padding - written);
+        jsrt_buf_repeat(row, ' ', padding - written);
       }
-      buf_append(row, entries[j].data, entries[j].len);
-      buf_puts(row, ", ");
+      jsrt_buf_append(row, entries[j].data, entries[j].len);
+      jsrt_buf_puts(row, ", ");
       if (!all_numbers && padding > written) {
-        buf_repeat(row, ' ', padding - written);
+        jsrt_buf_repeat(row, ' ', padding - written);
       }
     }
     /* The last entry on a row carries no separator, so its column is two narrower. */
     if (all_numbers) {
       const size_t padding = column_width[j - i] - SEPARATOR_SPACE;
       if (padding > entries[j].len) {
-        buf_repeat(row, ' ', padding - entries[j].len);
+        jsrt_buf_repeat(row, ' ', padding - entries[j].len);
       }
     }
-    buf_append(row, entries[j].data, entries[j].len);
+    jsrt_buf_append(row, entries[j].data, entries[j].len);
   }
 
   free(column_width);
@@ -513,7 +466,7 @@ static size_t group_entries(const Buf *entries, size_t count, size_t total, size
 /* `prefix` is Node's `braces[0].length + base.length`: one for the bracket or brace, plus the class
  * name a class instance prints in front of it. A longer name really does make the same fields break
  * onto separate lines, so it has to be in the budget. */
-static bool fits_one_line(const Buf *entries, size_t count, size_t indent, size_t prefix) {
+static bool fits_one_line(const JSRTBuf *entries, size_t count, size_t indent, size_t prefix) {
   const size_t start = count + indent + prefix + 10;
   size_t total = count + start;
   if (total + count > INSPECT_BREAK_LENGTH) {
@@ -536,34 +489,34 @@ static bool fits_one_line(const Buf *entries, size_t count, size_t indent, size_
 
 /* The two joins are shared by emit_braced (`{ }`) and inspect_array (`[ ]`): same separators,
  * same indentation, only the brackets differ, which is why they arrive as parameters. */
-static void join_one_line(Buf *out, const char *open, const char *close, const Buf *entries,
+static void join_one_line(JSRTBuf *out, const char *open, const char *close, const JSRTBuf *entries,
                            size_t count) {
-  buf_puts(out, open);
+  jsrt_buf_puts(out, open);
   for (size_t i = 0; i < count; i++) {
     if (i > 0) {
-      buf_puts(out, ", ");
+      jsrt_buf_puts(out, ", ");
     }
-    buf_append(out, entries[i].data, entries[i].len);
+    jsrt_buf_append(out, entries[i].data, entries[i].len);
   }
-  buf_puts(out, close);
+  jsrt_buf_puts(out, close);
 }
 
-static void join_multi_line(Buf *out, const char *open_line, char close, const Buf *entries,
+static void join_multi_line(JSRTBuf *out, const char *open_line, char close, const JSRTBuf *entries,
                              size_t count, size_t indent) {
-  buf_puts(out, open_line);
+  jsrt_buf_puts(out, open_line);
   for (size_t i = 0; i < count; i++) {
     if (i > 0) {
-      buf_puts(out, ",\n");
+      jsrt_buf_puts(out, ",\n");
     }
-    buf_repeat(out, ' ', indent + 2);
-    buf_append(out, entries[i].data, entries[i].len);
+    jsrt_buf_repeat(out, ' ', indent + 2);
+    jsrt_buf_append(out, entries[i].data, entries[i].len);
   }
-  buf_putc(out, '\n');
-  buf_repeat(out, ' ', indent);
-  buf_putc(out, close);
+  jsrt_buf_putc(out, '\n');
+  jsrt_buf_repeat(out, ' ', indent);
+  jsrt_buf_putc(out, close);
 }
 
-static void emit_braced(Buf *out, Buf *entries, size_t count, size_t indent, size_t prefix) {
+static void emit_braced(JSRTBuf *out, JSRTBuf *entries, size_t count, size_t indent, size_t prefix) {
   if (fits_one_line(entries, count, indent, prefix)) {
     join_one_line(out, "{ ", " }", entries, count);
   } else {
@@ -576,14 +529,14 @@ static void emit_braced(Buf *out, Buf *entries, size_t count, size_t indent, siz
 
 /* The "... N more items" tail shared by inspect_array and inspect_map: same 64-byte scratch,
  * same singular/plural rule, written into the already-counted trailing entry. */
-static void init_more_entry(Buf *entry, uint32_t remaining) {
+static void init_more_entry(JSRTBuf *entry, uint32_t remaining) {
   char more[64];
   snprintf(more, sizeof more, "... %u more item%s", remaining, remaining == 1 ? "" : "s");
-  buf_init(entry);
-  buf_puts(entry, more);
+  jsrt_buf_init(entry);
+  jsrt_buf_puts(entry, more);
 }
 
-static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
+static void inspect_array(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTArray *a = jsrt_as_array(v);
   const uint32_t length = a->length;
   const size_t shown = length > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : length;
@@ -597,18 +550,18 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   /* Emptiness first: Node prints an empty container in full past the depth cap
    * (`[[[[]]]]` is `[ [ [ [] ] ] ]`), abbreviating only the non-empty ones. */
   if (count == 0) {
-    buf_puts(out, "[]");
+    jsrt_buf_puts(out, "[]");
     return;
   }
   if (recurse > INSPECT_MAX_DEPTH) {
-    buf_puts(out, "[Array]");
+    jsrt_buf_puts(out, "[Array]");
     return;
   }
 
-  Buf *entries = alloc_entries(count);
+  JSRTBuf *entries = alloc_entries(count);
   bool all_numbers = true;
   for (size_t i = 0; i < shown; i++) {
-    buf_init(&entries[i]);
+    jsrt_buf_init(&entries[i]);
     /* Elements are rendered two columns deeper: that indent is what a multi-line layout uses,
      * and it also shortens the budget a nested array has before it breaks. */
     inspect_value(&entries[i], a->elements[i], recurse + 1, indent + 2);
@@ -620,10 +573,10 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
   if (props > 0) {
     const JSRTShape **links = jsrt_shape_property_order(a->shape, (uint32_t)props);
     for (size_t i = 0; i < props; i++) {
-      Buf *entry = &entries[shown + (truncated ? 1 : 0) + i];
-      buf_init(entry);
+      JSRTBuf *entry = &entries[shown + (truncated ? 1 : 0) + i];
+      jsrt_buf_init(entry);
       append_key(entry, links[i]->key);
-      buf_puts(entry, ": ");
+      jsrt_buf_puts(entry, ": ");
       inspect_value(entry, a->slots[links[i]->offset], recurse + 1, indent + 2);
     }
     free(links);
@@ -631,19 +584,19 @@ static void inspect_array(Buf *out, jsrt_value v, int recurse, size_t indent) {
 
   /* Grouping is attempted first, because whether it fired decides the layout below: if it changed
    * the number of lines, the single-line form is not even considered. */
-  Buf *rows = NULL;
+  JSRTBuf *rows = NULL;
   size_t row_count = 0;
   if (count > 6 && props == 0) {
     rows = alloc_entries(count);
     row_count = group_entries(entries, shown, count, indent, all_numbers, rows);
     if (row_count > 0 && truncated) {
-      buf_init(&rows[row_count]);
-      buf_append(&rows[row_count], entries[shown].data, entries[shown].len);
+      jsrt_buf_init(&rows[row_count]);
+      jsrt_buf_append(&rows[row_count], entries[shown].data, entries[shown].len);
       row_count++;
     }
   }
 
-  const Buf *lines = row_count > 0 ? rows : entries;
+  const JSRTBuf *lines = row_count > 0 ? rows : entries;
   const size_t line_count = row_count > 0 ? row_count : count;
 
   if (row_count == 0 && fits_one_line(entries, count, indent, 1 /* "[" */)) {
@@ -686,9 +639,9 @@ static bool key_is_identifier(const char *key) {
   return true;
 }
 
-static void append_key(Buf *out, const char *key) {
+static void append_key(JSRTBuf *out, const char *key) {
   if (key_is_identifier(key)) {
-    buf_puts(out, key);
+    jsrt_buf_puts(out, key);
     return;
   }
   bool has_single = false;
@@ -700,7 +653,7 @@ static void append_key(Buf *out, const char *key) {
     has_backtick = has_backtick || key[i] == '`';
   }
   const char quote = choose_quote(has_single, has_double, has_backtick);
-  buf_putc(out, quote);
+  jsrt_buf_putc(out, quote);
   /* Keys arrive as NUL-terminated bytes (WTF-8: a lone surrogate is its 3-byte ED A0-BF 80-BF
    * form), so this walk decodes where append_quoted reads code units. The escape set is the
    * same one -- short escapes, "\x0B" for VT, "\xXX" for the other controls, "\uXXXX" for a
@@ -714,24 +667,24 @@ static void append_key(Buf *out, const char *key) {
                               (unsigned int)((unsigned char)key[i + 2] & 0x3F);
       char esc[8];
       snprintf(esc, sizeof esc, "\\u%04x", cp);
-      buf_puts(out, esc);
+      jsrt_buf_puts(out, esc);
       i += 3;
       continue;
     }
     if (b == (unsigned char)quote || b == '\\') {
-      buf_putc(out, '\\');
-      buf_putc(out, (char)b);
+      jsrt_buf_putc(out, '\\');
+      jsrt_buf_putc(out, (char)b);
     } else if (b < 0x20 || b == 0x7F) {
       append_control_escape(out, b);
     } else {
-      buf_putc(out, (char)b);
+      jsrt_buf_putc(out, (char)b);
     }
     i++;
   }
-  buf_putc(out, quote);
+  jsrt_buf_putc(out, quote);
 }
 
-static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
+static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTObject *o = jsrt_as_object(v);
   const JSRTClass *cls = o->cls;
 
@@ -740,7 +693,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
    * iterator kinds keep `Iterator {}`; their remaining-contents form is not this step. */
   if (cls == &jsrt_class_iterator) {
     const JSRTIterator *it = (const JSRTIterator *)o;
-    buf_puts(out, it->kind == JSRT_ITER_MATCH_ALL ? "Object [RegExp String Iterator] {}"
+    jsrt_buf_puts(out, it->kind == JSRT_ITER_MATCH_ALL ? "Object [RegExp String Iterator] {}"
                                                   : "Iterator {}");
     return;
   }
@@ -785,10 +738,10 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
   if (count == 0) {
     free(fixed_order);
     if (named) {
-      buf_puts(out, name);
-      buf_putc(out, ' ');
+      jsrt_buf_puts(out, name);
+      jsrt_buf_putc(out, ' ');
     }
-    buf_puts(out, "{}");
+    jsrt_buf_puts(out, "{}");
     return;
   }
 
@@ -796,22 +749,22 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
     /* `[Deep]`, not `[Object]`: past the cap Node still names the constructor it stopped at --
      * and for a literal, which has no constructor, that name IS `Object`. */
     free(fixed_order);
-    buf_putc(out, '[');
-    buf_puts(out, named ? name : "Object");
-    buf_putc(out, ']');
+    jsrt_buf_putc(out, '[');
+    jsrt_buf_puts(out, named ? name : "Object");
+    jsrt_buf_putc(out, ']');
     return;
   }
 
-  Buf *entries = alloc_entries(count);
+  JSRTBuf *entries = alloc_entries(count);
   size_t next = 0;
   if (dyn != NULL) {
     /* Dynamic keys follow OrdinaryOwnPropertyKeys: integer indices first, then insertion order. */
     const JSRTShape **links = jsrt_shape_property_order(dyn->shape, (uint32_t)count);
     for (size_t i = 0; i < count; i++) {
-      Buf *entry = &entries[next++];
-      buf_init(entry);
+      JSRTBuf *entry = &entries[next++];
+      jsrt_buf_init(entry);
       append_key(entry, links[i]->key);
-      buf_puts(entry, ": ");
+      jsrt_buf_puts(entry, ": ");
       inspect_value(entry, dyn->slots[links[i]->offset], recurse + 1, indent + 2);
     }
     free(links);
@@ -822,14 +775,14 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
       /* Enumeration order, not slot order: integer indices first, then the insertion sequence
        * the layout's key_order records (jsrt_value.h, JSRTClass::key_order). */
       const uint32_t slot = fixed_order[i];
-      Buf *entry = &entries[next++];
-      buf_init(entry);
+      JSRTBuf *entry = &entries[next++];
+      jsrt_buf_init(entry);
       /* A class field's name is an identifier by construction, but an object literal's is only a
        * key: `{ "a-b": 1 }` has a fixed layout and a name no identifier could spell, and
        * `util.inspect` quotes exactly that. Same helper the dynamic path uses, so one rule
        * decides quoting for both. */
       append_key(entry, cls->fields[slot]);
-      buf_puts(entry, ": ");
+      jsrt_buf_puts(entry, ": ");
       inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
     }
     free(fixed_order);
@@ -839,8 +792,8 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
    * literal contributes neither, so its budget is one character wider. */
   const size_t prefix = named ? strlen(name) + 1 /* the space */ + 1 : 1 /* "{" */;
   if (named) {
-    buf_puts(out, name);
-    buf_putc(out, ' ');
+    jsrt_buf_puts(out, name);
+    jsrt_buf_putc(out, ' ');
   }
   emit_braced(out, entries, count, indent, prefix);
 }
@@ -855,7 +808,7 @@ static void inspect_object(Buf *out, jsrt_value v, int recurse, size_t indent) {
  *
  * Entries print in insertion order because that is what the structure stores; the dead ones a
  * deletion left behind are skipped here exactly as they are skipped by a lookup. */
-static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
+static void inspect_map(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTMap *m = jsrt_as_map(v);
   const bool is_map = m->cls == &jsrt_class_map;
 
@@ -865,35 +818,35 @@ static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
   /* Emptiness first, like inspect_array: Node prints `Map(0) {}` in full past the depth cap
    * (plan.md §8 step 30 A11), abbreviating only the non-empty ones below. */
   if (m->size == 0) {
-    buf_puts(out, base);
-    buf_putc(out, ' ');
-    buf_puts(out, "{}");
+    jsrt_buf_puts(out, base);
+    jsrt_buf_putc(out, ' ');
+    jsrt_buf_puts(out, "{}");
     return;
   }
 
   if (recurse > INSPECT_MAX_DEPTH) {
-    buf_puts(out, is_map ? "[Map]" : "[Set]");
+    jsrt_buf_puts(out, is_map ? "[Map]" : "[Set]");
     return;
   }
 
-  buf_puts(out, base);
-  buf_putc(out, ' ');
+  jsrt_buf_puts(out, base);
+  jsrt_buf_putc(out, ' ');
 
   const size_t shown = m->size > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : m->size;
   const bool truncated = m->size > shown;
   const size_t count = shown + (truncated ? 1 : 0);
 
-  Buf *entries = alloc_entries(count);
+  JSRTBuf *entries = alloc_entries(count);
   size_t next = 0;
   for (uint32_t i = 0; i < m->used && next < shown; i++) {
     if (!m->entries[i].live) {
       continue;
     }
-    Buf *entry = &entries[next++];
-    buf_init(entry);
+    JSRTBuf *entry = &entries[next++];
+    jsrt_buf_init(entry);
     inspect_value(entry, m->entries[i].key, recurse + 1, indent + 2);
     if (is_map) {
-      buf_puts(entry, " => ");
+      jsrt_buf_puts(entry, " => ");
       inspect_value(entry, m->entries[i].value, recurse + 1, indent + 2);
     }
   }
@@ -910,54 +863,54 @@ static void inspect_map(Buf *out, jsrt_value v, int recurse, size_t indent) {
  * the top level and inside a structure, and without quotes in either place. The source is already
  * in its escaped form: `jsrt_regexp_new` stores what it was given, and the one value that has no
  * spelling as a literal -- the empty pattern -- is normalized to `(?:)` there. */
-static void inspect_regexp(Buf *out, jsrt_value v) {
+static void inspect_regexp(JSRTBuf *out, jsrt_value v) {
   const JSRTRegExp *re = jsrt_as_regexp(v);
-  buf_putc(out, '/');
+  jsrt_buf_putc(out, '/');
   append_string(out, (const JSString *)jsrt_ptr(re->source));
-  buf_putc(out, '/');
+  jsrt_buf_putc(out, '/');
   append_string(out, (const JSString *)jsrt_ptr(re->flags));
 }
 
-static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent);
+static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent);
 
 /* `Promise { 42 }`, `Promise { <pending> }`, `Promise { <rejected> 'boom' }`. The settled value
  * is inspected, not printed bare -- a fulfilled string shows its quotes, exactly as it does inside
  * an array -- and the two angle-bracket forms are Node's own markers, not values. */
-static void inspect_promise(Buf *out, jsrt_value v, int recurse, size_t indent) {
+static void inspect_promise(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTPromise *p = jsrt_as_promise(v);
-  buf_puts(out, "Promise { ");
+  jsrt_buf_puts(out, "Promise { ");
   if (p->state == JSRT_PROMISE_PENDING) {
-    buf_puts(out, "<pending>");
+    jsrt_buf_puts(out, "<pending>");
   } else {
     if (p->state == JSRT_PROMISE_REJECTED) {
-      buf_puts(out, "<rejected> ");
+      jsrt_buf_puts(out, "<rejected> ");
     }
     inspect_value(out, p->value, recurse + 1, indent);
   }
-  buf_puts(out, " }");
+  jsrt_buf_puts(out, " }");
 }
 
 /* Node prints a Date as its ISO string with NO quotes, at top level and nested alike --
  * `console.log(d)` is `2024-02-29T13:45:06.789Z` and `console.log([d])` is
  * `[ 2024-02-29T13:45:06.789Z ]`. An Invalid Date prints `Invalid Date`, which is why this cannot
  * simply call `jsrt_date_to_iso_string` (that one panics, per the spec's RangeError). */
-static void inspect_date(Buf *out, jsrt_value v) {
+static void inspect_date(JSRTBuf *out, jsrt_value v) {
   const jsrt_value text = jsrt_date_to_json(v);
   if (text == JSRT_NULL) {
-    buf_puts(out, "Invalid Date");
+    jsrt_buf_puts(out, "Invalid Date");
     return;
   }
   append_string(out, (const JSString *)jsrt_ptr(text));
 }
 
-static void inspect_value(Buf *out, jsrt_value v, int recurse, size_t indent) {
+static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   /* An accessor cell is a SLOT value, never a value the language can hold, so this is the one
    * place it can surface -- and util.inspect never calls a getter to print it. Node writes what
    * the descriptor has, not what it would return. */
   if (jsrt_is_accessor_cell(v)) {
     const JSRTAccessorCell *cell = (const JSRTAccessorCell *)jsrt_ptr(v);
     const bool has_get = cell->get != JSRT_UNDEFINED;
-    buf_puts(out, has_get ? (cell->set != JSRT_UNDEFINED ? "[Getter/Setter]" : "[Getter]")
+    jsrt_buf_puts(out, has_get ? (cell->set != JSRT_UNDEFINED ? "[Getter/Setter]" : "[Getter]")
                           : "[Setter]");
     return;
   }
@@ -1018,7 +971,7 @@ static void write_grouped(const char *text, size_t len, FILE *stream) {
  * quotes, so `console.log("a")` is `a` while `console.log(["a"])` is `[ 'a' ]`. console.dir has
  * no such exception -- it inspects whatever it is given, which is the whole difference between
  * the two entry points. */
-static void print_one(Buf *out, jsrt_value v, bool bare) {
+static void print_one(JSRTBuf *out, jsrt_value v, bool bare) {
   if (jsrt_is_date(v)) {
     inspect_date(out, v);
   } else if (jsrt_is_regexp(v)) {
@@ -1037,12 +990,12 @@ static void print_one(Buf *out, jsrt_value v, bool bare) {
 }
 
 static void print_to(jsrt_value v, FILE *stream, bool bare) {
-  Buf out;
-  buf_init(&out);
+  JSRTBuf out;
+  jsrt_buf_init(&out);
   print_one(&out, v, bare);
-  buf_putc(&out, '\n');
+  jsrt_buf_putc(&out, '\n');
   write_grouped(out.data, out.len, stream);
-  buf_free(&out);
+  jsrt_buf_free(&out);
 }
 
 void jsrt_print(jsrt_value v) { print_to(v, stdout, true); }
@@ -1056,17 +1009,17 @@ void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
  * newline, which is what `console.log()` is. One buffer for the whole line, so a multi-line
  * inspect still passes through `write_grouped` once and the group indent lands per line. */
 static void print_many_to(uint32_t count, const jsrt_value *args, FILE *stream) {
-  Buf out;
-  buf_init(&out);
+  JSRTBuf out;
+  jsrt_buf_init(&out);
   for (uint32_t i = 0; i < count; i++) {
     if (i > 0) {
-      buf_putc(&out, ' ');
+      jsrt_buf_putc(&out, ' ');
     }
     print_one(&out, args[i], true);
   }
-  buf_putc(&out, '\n');
+  jsrt_buf_putc(&out, '\n');
   write_grouped(out.data, out.len, stream);
-  buf_free(&out);
+  jsrt_buf_free(&out);
 }
 
 void jsrt_print_many(uint32_t count, const jsrt_value *args) {
@@ -1142,16 +1095,16 @@ static CountEntry *count_entry(const char *label) {
 /* Both entry points answer `undefined` -- console methods are void, and the emitter needs a
  * value-shaped result for the expression position a call sits in. */
 static void count_print(const char *label, uint32_t count) {
-  Buf out;
-  buf_init(&out);
-  buf_puts(&out, label);
-  buf_puts(&out, ": ");
+  JSRTBuf out;
+  jsrt_buf_init(&out);
+  jsrt_buf_puts(&out, label);
+  jsrt_buf_puts(&out, ": ");
   char digits[16];
   snprintf(digits, sizeof digits, "%u", count);
-  buf_puts(&out, digits);
-  buf_putc(&out, '\n');
+  jsrt_buf_puts(&out, digits);
+  jsrt_buf_putc(&out, '\n');
   write_grouped(out.data, out.len, stdout);
-  buf_free(&out);
+  jsrt_buf_free(&out);
 }
 
 jsrt_value jsrt_console_count(jsrt_value label) {
@@ -1227,16 +1180,16 @@ static TimerEntry *timer_entry(const char *label, bool create) {
  * Reproduced rather than simplified to `ms` -- the VALUE cannot match Node, but the shape can, and
  * a ten-minute build printing `600000.000ms` would differ from Node in a way that is not the
  * measurement's fault. */
-static void format_time(Buf *out, double ms) {
+static void format_time(JSRTBuf *out, double ms) {
   char text[64];
   if (ms < 1000.0) {
     snprintf(text, sizeof text, "%.3fms", ms);
-    buf_puts(out, text);
+    jsrt_buf_puts(out, text);
     return;
   }
   if (ms < 60000.0) {
     snprintf(text, sizeof text, "%.3fs", ms / 1000.0);
-    buf_puts(out, text);
+    jsrt_buf_puts(out, text);
     return;
   }
   const bool hours = ms >= 3600000.0;
@@ -1249,7 +1202,7 @@ static void format_time(Buf *out, double ms) {
   } else {
     snprintf(text, sizeof text, "%d:%06.3f (m:ss.mmm)", m, seconds);
   }
-  buf_puts(out, text);
+  jsrt_buf_puts(out, text);
 }
 
 jsrt_value jsrt_console_time(jsrt_value label) {
@@ -1274,14 +1227,14 @@ jsrt_value jsrt_console_time_end(jsrt_value label) {
     return JSRT_UNDEFINED;
   }
   entry->running = false;
-  Buf out;
-  buf_init(&out);
-  buf_puts(&out, name);
-  buf_puts(&out, ": ");
+  JSRTBuf out;
+  jsrt_buf_init(&out);
+  jsrt_buf_puts(&out, name);
+  jsrt_buf_puts(&out, ": ");
   format_time(&out, now - entry->started_ms);
-  buf_putc(&out, '\n');
+  jsrt_buf_putc(&out, '\n');
   write_grouped(out.data, out.len, stdout);
-  buf_free(&out);
+  jsrt_buf_free(&out);
   return JSRT_UNDEFINED;
 }
 
@@ -1290,21 +1243,21 @@ jsrt_value jsrt_console_time_end(jsrt_value label) {
  * `jsrt_uncaught` already made and for the same reason, that inventing frames would be worse than
  * omitting them. The observable contract kept here is the stream and the prefix. */
 void jsrt_console_trace(jsrt_value message) {
-  Buf out;
-  buf_init(&out);
-  buf_puts(&out, "Trace: ");
+  JSRTBuf out;
+  jsrt_buf_init(&out);
+  jsrt_buf_puts(&out, "Trace: ");
   inspect_scalar(&out, message, false);
-  buf_putc(&out, '\n');
+  jsrt_buf_putc(&out, '\n');
   write_grouped(out.data, out.len, stderr);
-  buf_free(&out);
+  jsrt_buf_free(&out);
 }
 
 void jsrt_console_trace_bare(void) {
-  Buf out;
-  buf_init(&out);
-  buf_puts(&out, "Trace\n");
+  JSRTBuf out;
+  jsrt_buf_init(&out);
+  jsrt_buf_puts(&out, "Trace\n");
   write_grouped(out.data, out.len, stderr);
-  buf_free(&out);
+  jsrt_buf_free(&out);
 }
 
 /* console.assert: nothing at all when the condition holds, `Assertion failed` on STDERR when it
@@ -1314,21 +1267,21 @@ void jsrt_console_trace_bare(void) {
  * `undefined` is "anything else", which is why the message-less form is its own entry point
  * instead of a JSRT_UNDEFINED sentinel here. */
 static void assert_failed(jsrt_value message, bool has_message) {
-  Buf out;
-  buf_init(&out);
-  buf_puts(&out, "Assertion failed");
+  JSRTBuf out;
+  jsrt_buf_init(&out);
+  jsrt_buf_puts(&out, "Assertion failed");
   if (has_message) {
     if (jsrt_is(message, JSRT_TAG_STRING)) {
-      buf_puts(&out, ": ");
+      jsrt_buf_puts(&out, ": ");
       append_string(&out, (const JSString *)jsrt_ptr(message));
     } else {
-      buf_putc(&out, ' ');
+      jsrt_buf_putc(&out, ' ');
       inspect_scalar(&out, message, true);
     }
   }
-  buf_putc(&out, '\n');
+  jsrt_buf_putc(&out, '\n');
   write_grouped(out.data, out.len, stderr);
-  buf_free(&out);
+  jsrt_buf_free(&out);
 }
 
 void jsrt_console_assert(jsrt_value condition, jsrt_value message) {
@@ -1362,59 +1315,14 @@ void jsrt_console_assert_bare(jsrt_value condition) {
  * a Map, a separate `Key` column -- a different table, not a wider one. The gate refuses it
  * (`STA1214`) rather than this drawing something Node does not. */
 
-/* A growable list of owned strings -- column names, and one row's rendered cells. */
-typedef struct {
-  char **items;
-  size_t len;
-  size_t cap;
-} StrVec;
-
-static void sv_init(StrVec *v) {
-  v->items = NULL;
-  v->len = 0;
-  v->cap = 0;
-}
-
-static void sv_push(StrVec *v, char *owned) {
-  if (v->len == v->cap) {
-    v->cap = v->cap == 0 ? 8 : v->cap * 2;
-    char **grown = (char **)realloc(v->items, v->cap * sizeof(char *));
-    if (grown == NULL) {
-      jsrt_panic("out of memory building a console.table");
-    }
-    v->items = grown;
-  }
-  v->items[v->len++] = owned;
-}
-
-static void sv_free(StrVec *v) {
-  for (size_t i = 0; i < v->len; i++) {
-    free(v->items[i]);
-  }
-  free(v->items);
-}
-
-static size_t sv_find(const StrVec *v, const char *name) {
-  for (size_t i = 0; i < v->len; i++) {
-    if (strcmp(v->items[i], name) == 0) {
-      return i;
-    }
-  }
-  return SIZE_MAX;
-}
-
-/* A NUL-terminated copy of a buffer's contents, and the buffer released. */
-static char *buf_take(Buf *b) {
-  buf_putc(b, '\0');
-  return b->data;
-}
+/* Column names and one row's rendered cells are JSRTStrVecs (jsrt_mem.h): owned strings. */
 
 /* One value rendered the way a table CELL renders it: inspect form, strings quoted. */
 static char *cell_of(jsrt_value v) {
-  Buf b;
-  buf_init(&b);
+  JSRTBuf b;
+  jsrt_buf_init(&b);
   inspect_value(&b, v, 1, 0);
-  return buf_take(&b);
+  return jsrt_buf_take(&b);
 }
 
 /* Node pads by DISPLAY width, not byte count: a column holding `'日本'` is as wide as one holding
@@ -1459,32 +1367,32 @@ static bool tabular_row(jsrt_value v) {
          !jsrt_is_regexp(v) && !jsrt_is_promise(v) && !jsrt_is_date(v);
 }
 
-/* `n` copies of `s`, for the horizontal rules. The existing `buf_repeat` takes a CHAR, and a box
+/* `n` copies of `s`, for the horizontal rules. The existing `jsrt_buf_repeat` takes a CHAR, and a box
  * rule is drawn with U+2500, which is three bytes. */
-static void buf_repeat_utf8(Buf *b, const char *s, size_t n) {
+static void buf_repeat_utf8(JSRTBuf *b, const char *s, size_t n) {
   for (size_t i = 0; i < n; i++) {
-    buf_puts(b, s);
+    jsrt_buf_puts(b, s);
   }
 }
 
 /* One cell: a space, the content, padding to `width`, a space. */
-static void buf_cell(Buf *b, const char *text, size_t width) {
-  buf_putc(b, ' ');
-  buf_puts(b, text);
+static void buf_cell(JSRTBuf *b, const char *text, size_t width) {
+  jsrt_buf_putc(b, ' ');
+  jsrt_buf_puts(b, text);
   for (size_t pad = cell_width(text); pad < width; pad++) {
-    buf_putc(b, ' ');
+    jsrt_buf_putc(b, ' ');
   }
-  buf_putc(b, ' ');
+  jsrt_buf_putc(b, ' ');
 }
 
-static void buf_rule(Buf *b, const char *left, const char *mid, const char *right,
+static void buf_rule(JSRTBuf *b, const char *left, const char *mid, const char *right,
                      const size_t *widths, size_t count) {
-  buf_puts(b, left);
+  jsrt_buf_puts(b, left);
   for (size_t c = 0; c < count; c++) {
     buf_repeat_utf8(b, "─", widths[c] + 2);
-    buf_puts(b, c + 1 == count ? right : mid);
+    jsrt_buf_puts(b, c + 1 == count ? right : mid);
   }
-  buf_putc(b, '\n');
+  jsrt_buf_putc(b, '\n');
 }
 
 void jsrt_console_table(jsrt_value v) {
@@ -1497,18 +1405,18 @@ void jsrt_console_table(jsrt_value v) {
   }
 
   /* Snapshot keys, not getter results: read each row only when it is about to be processed. */
-  StrVec labels;
-  sv_init(&labels);
-  StrVec row_values; /* the `Values` cell, or an empty string when the row has key columns */
-  sv_init(&row_values);
-  StrVec columns;
-  sv_init(&columns);
+  JSRTStrVec labels;
+  jsrt_strvec_init(&labels);
+  JSRTStrVec row_values; /* the `Values` cell, or an empty string when the row has key columns */
+  jsrt_strvec_init(&row_values);
+  JSRTStrVec columns;
+  jsrt_strvec_init(&columns);
   /* cells[row * columns.len + col] once the column set is known -- built after the walk, because
    * a column discovered by the last row still needs an empty cell in the first. */
-  StrVec keys_flat; /* every row's keys, run-length delimited by `key_counts` */
-  sv_init(&keys_flat);
-  StrVec vals_flat;
-  sv_init(&vals_flat);
+  JSRTStrVec keys_flat; /* every row's keys, run-length delimited by `key_counts` */
+  jsrt_strvec_init(&keys_flat);
+  JSRTStrVec vals_flat;
+  jsrt_strvec_init(&vals_flat);
   size_t *key_counts = NULL;
   size_t row_count = 0;
   bool any_values = false;
@@ -1528,10 +1436,10 @@ void jsrt_console_table(jsrt_value v) {
   for (uint32_t i = 0; i < row_count; i++) {
     jsrt_value value;
     if (from_array) {
-      Buf label;
-      buf_init(&label);
+      JSRTBuf label;
+      jsrt_buf_init(&label);
       inspect_scalar(&label, jsrt_number((double)i), false);
-      sv_push(&labels, buf_take(&label));
+      jsrt_strvec_push(&labels, jsrt_buf_take(&label));
       value = row_list->elements[i];
     } else {
       const jsrt_value key = row_list->elements[i];
@@ -1539,27 +1447,27 @@ void jsrt_console_table(jsrt_value v) {
       if (jsrt_pending()) {
         goto cleanup;
       }
-      Buf label;
-      buf_init(&label);
+      JSRTBuf label;
+      jsrt_buf_init(&label);
       inspect_scalar(&label, key, false); /* a key prints unquoted */
-      sv_push(&labels, buf_take(&label));
+      jsrt_strvec_push(&labels, jsrt_buf_take(&label));
     }
 
     if (!tabular_row(value)) {
-      sv_push(&row_values, cell_of(value));
+      jsrt_strvec_push(&row_values, cell_of(value));
       any_values = true;
       continue;
     }
-    sv_push(&row_values, strdup(""));
+    jsrt_strvec_push(&row_values, strdup(""));
     /* An ARRAY row's keys are its indices, which is why `[[1,2]]` tables as columns `0` and `1`. */
     if (jsrt_is(value, JSRT_TAG_ARRAY)) {
       const JSRTArray *inner = jsrt_as_array(value);
       for (uint32_t k = 0; k < inner->length; k++) {
-        Buf name;
-        buf_init(&name);
+        JSRTBuf name;
+        jsrt_buf_init(&name);
         inspect_scalar(&name, jsrt_number((double)k), false);
-        sv_push(&keys_flat, buf_take(&name));
-        sv_push(&vals_flat, cell_of(inner->elements[k]));
+        jsrt_strvec_push(&keys_flat, jsrt_buf_take(&name));
+        jsrt_strvec_push(&vals_flat, cell_of(inner->elements[k]));
         key_counts[i]++;
       }
       continue;
@@ -1571,24 +1479,24 @@ void jsrt_console_table(jsrt_value v) {
     const JSRTArray *entries = jsrt_as_array(row_entries);
     for (uint32_t k = 0; k < entries->length; k++) {
       const JSRTArray *pair = jsrt_as_array(entries->elements[k]);
-      Buf name;
-      buf_init(&name);
+      JSRTBuf name;
+      jsrt_buf_init(&name);
       inspect_scalar(&name, pair->elements[0], false);
-      sv_push(&keys_flat, buf_take(&name));
-      sv_push(&vals_flat, cell_of(pair->elements[1]));
+      jsrt_strvec_push(&keys_flat, jsrt_buf_take(&name));
+      jsrt_strvec_push(&vals_flat, cell_of(pair->elements[1]));
       key_counts[i]++;
     }
   }
 
   /* Column order is FIRST-SEEN across rows, with `Values` last if any row needed it. */
   for (size_t k = 0; k < keys_flat.len; k++) {
-    if (sv_find(&columns, keys_flat.items[k]) == SIZE_MAX) {
-      sv_push(&columns, strdup(keys_flat.items[k]));
+    if (jsrt_strvec_find(&columns, keys_flat.items[k]) == SIZE_MAX) {
+      jsrt_strvec_push(&columns, strdup(keys_flat.items[k]));
     }
   }
   const size_t values_col = any_values ? columns.len : SIZE_MAX;
   if (any_values) {
-    sv_push(&columns, strdup("Values"));
+    jsrt_strvec_push(&columns, strdup("Values"));
   }
 
   /* Widths: the index column plus one per data column, each the widest of its header and cells. */
@@ -1606,7 +1514,7 @@ void jsrt_console_table(jsrt_value v) {
   for (size_t i = 0; i < row_count; i++) {
     widths[0] = widths[0] > cell_width(labels.items[i]) ? widths[0] : cell_width(labels.items[i]);
     for (size_t k = 0; k < key_counts[i]; k++, flat++) {
-      const size_t c = sv_find(&columns, keys_flat.items[flat]);
+      const size_t c = jsrt_strvec_find(&columns, keys_flat.items[flat]);
       grid[i * columns.len + c] = vals_flat.items[flat];
     }
     if (values_col != SIZE_MAX && row_values.items[i][0] != '\0') {
@@ -1619,40 +1527,40 @@ void jsrt_console_table(jsrt_value v) {
     }
   }
 
-  Buf out;
-  buf_init(&out);
+  JSRTBuf out;
+  jsrt_buf_init(&out);
   buf_rule(&out, "┌", "┬", "┐", widths, total);
-  buf_puts(&out, "│");
+  jsrt_buf_puts(&out, "│");
   buf_cell(&out, "(index)", widths[0]);
   for (size_t c = 0; c < columns.len; c++) {
-    buf_puts(&out, "│");
+    jsrt_buf_puts(&out, "│");
     buf_cell(&out, columns.items[c], widths[c + 1]);
   }
-  buf_puts(&out, "│\n");
+  jsrt_buf_puts(&out, "│\n");
   buf_rule(&out, "├", "┼", "┤", widths, total);
   for (size_t i = 0; i < row_count; i++) {
-    buf_puts(&out, "│");
+    jsrt_buf_puts(&out, "│");
     buf_cell(&out, labels.items[i], widths[0]);
     for (size_t c = 0; c < columns.len; c++) {
       const char *cell = grid[i * columns.len + c];
-      buf_puts(&out, "│");
+      jsrt_buf_puts(&out, "│");
       buf_cell(&out, cell == NULL ? "" : cell, widths[c + 1]);
     }
-    buf_puts(&out, "│\n");
+    jsrt_buf_puts(&out, "│\n");
   }
   buf_rule(&out, "└", "┴", "┘", widths, total);
   write_grouped(out.data, out.len, stdout);
 
-  buf_free(&out);
+  jsrt_buf_free(&out);
   free(grid);
   free(widths);
 cleanup:
   free(key_counts);
-  sv_free(&labels);
-  sv_free(&row_values);
-  sv_free(&columns);
-  sv_free(&keys_flat);
-  sv_free(&vals_flat);
+  jsrt_strvec_free(&labels);
+  jsrt_strvec_free(&row_values);
+  jsrt_strvec_free(&columns);
+  jsrt_strvec_free(&keys_flat);
+  jsrt_strvec_free(&vals_flat);
 }
 
 _Noreturn void jsrt_uncaught(void) {
@@ -1660,31 +1568,31 @@ _Noreturn void jsrt_uncaught(void) {
    * because stdout is the program's output and an uncaught exception is not part of it. The text
    * intentionally does not chase Node's (which prints source excerpts and stack frames this
    * runtime does not have); the OBSERVABLE contract is stderr + exit 1. */
-  Buf out;
-  buf_init(&out);
-  buf_puts(&out, "Uncaught ");
+  JSRTBuf out;
+  jsrt_buf_init(&out);
+  jsrt_buf_puts(&out, "Uncaught ");
   inspect_value(&out, jsrt_take_exception(), 0, 0);
-  buf_putc(&out, '\n');
+  jsrt_buf_putc(&out, '\n');
   fwrite(out.data, 1, out.len, stderr);
-  buf_free(&out);
+  jsrt_buf_free(&out);
   exit(1);
 }
 
 /* Array.prototype.join (§23.1.3.16), which is also Array#toString: `undefined` separator means
  * ",", and `null`/`undefined` ELEMENTS join as empty text, not as their names. Lives here rather
- * than with the other array builtins because joining IS stringification — it needs Buf and the
+ * than with the other array builtins because joining IS stringification — it needs JSRTBuf and the
  * recursive ToString below. */
 jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
   const JSRTArray *a = jsrt_require_array(array, "join");
   if (a == NULL) {
     return JSRT_UNDEFINED;
   }
-  Buf joined;
-  buf_init(&joined);
+  JSRTBuf joined;
+  jsrt_buf_init(&joined);
   for (uint32_t i = 0; i < a->length; i++) {
     if (i > 0) {
       if (jsrt_is(separator, JSRT_TAG_UNDEFINED)) {
-        buf_putc(&joined, ',');
+        jsrt_buf_putc(&joined, ',');
       } else {
         append_string(&joined, (const JSString *)jsrt_ptr(separator));
       }
@@ -1698,7 +1606,7 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
   }
   const jsrt_value result = jsrt_string_from_utf8(joined.data == NULL ? "" : joined.data,
                                                   joined.len);
-  buf_free(&joined);
+  jsrt_buf_free(&joined);
   return result;
 }
 
@@ -1706,7 +1614,7 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
  * JSON.stringify (§25.5.2) — SerializeJSONProperty over the value graph
  * ============================================================================
  *
- * Lives here for jsrt_array_join's reason: serialization IS stringification, and it needs Buf,
+ * Lives here for jsrt_array_join's reason: serialization IS stringification, and it needs JSRTBuf,
  * format_double and the UTF-16 walk. Two departures from the inspect code above are the whole
  * point: numbers hide the minus of `-0` ("0", where inspect shows "-0"), and strings are QUOTED
  * per §25.5.2.2 — `"` and `\\` escaped, controls as their short escapes or \u00XX, and a LONE
@@ -1728,8 +1636,8 @@ static bool json_unserializable(jsrt_value v) {
   return jsrt_is(v, JSRT_TAG_UNDEFINED) || jsrt_is(v, JSRT_TAG_CLOSURE);
 }
 
-static void json_quote(Buf *out, const JSString *str) {
-  buf_putc(out, '"');
+static void json_quote(JSRTBuf *out, const JSString *str) {
+  jsrt_buf_putc(out, '"');
   for (uint32_t i = 0; i < str->length; i++) {
     uint32_t cp = str->data[i];
     if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < str->length && str->data[i + 1] >= 0xDC00u &&
@@ -1739,28 +1647,28 @@ static void json_quote(Buf *out, const JSString *str) {
       i++;
     }
     if (cp == '"' || cp == '\\') {
-      buf_putc(out, '\\');
-      buf_putc(out, (char)cp);
+      jsrt_buf_putc(out, '\\');
+      jsrt_buf_putc(out, (char)cp);
     } else if (cp == '\b') {
-      buf_puts(out, "\\b");
+      jsrt_buf_puts(out, "\\b");
     } else if (cp == '\f') {
-      buf_puts(out, "\\f");
+      jsrt_buf_puts(out, "\\f");
     } else if (cp == '\n') {
-      buf_puts(out, "\\n");
+      jsrt_buf_puts(out, "\\n");
     } else if (cp == '\r') {
-      buf_puts(out, "\\r");
+      jsrt_buf_puts(out, "\\r");
     } else if (cp == '\t') {
-      buf_puts(out, "\\t");
+      jsrt_buf_puts(out, "\\t");
     } else if (cp < 0x20u || (cp >= 0xD800u && cp <= 0xDFFFu)) {
       /* Controls without a short escape, and LONE surrogates (well-formed JSON.stringify). */
       char esc[8];
       snprintf(esc, sizeof esc, "\\u%04x", cp);
-      buf_puts(out, esc);
+      jsrt_buf_puts(out, esc);
     } else {
       append_utf8(out, cp);
     }
   }
-  buf_putc(out, '"');
+  jsrt_buf_putc(out, '"');
 }
 
 static void json_check_cycle(const void *ptr, const JSONAncestor *chain) {
@@ -1772,7 +1680,7 @@ static void json_check_cycle(const void *ptr, const JSONAncestor *chain) {
   }
 }
 
-static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
+static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
   /* §25.5.2.2 step 2: SerializeJSONProperty calls the value's own `toJSON` before doing anything
    * else, and `Date.prototype.toJSON` is the only one the subset has. It answers a STRING, or
    * `null` for an Invalid Date -- which is why `JSON.stringify(new Date(NaN))` is "null" and not
@@ -1783,22 +1691,22 @@ static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
     return;
   }
   if (jsrt_is(v, JSRT_TAG_NULL)) {
-    buf_puts(out, "null");
+    jsrt_buf_puts(out, "null");
     return;
   }
   if (jsrt_is(v, JSRT_TAG_BOOL)) {
-    buf_puts(out, v == JSRT_TRUE ? "true" : "false");
+    jsrt_buf_puts(out, v == JSRT_TRUE ? "true" : "false");
     return;
   }
   if (jsrt_is_double(v)) {
     double d = jsrt_to_double(v);
     if (isnan(d) || isinf(d)) {
-      buf_puts(out, "null"); /* §25.5.2.2: non-finite serializes as null */
+      jsrt_buf_puts(out, "null"); /* §25.5.2.2: non-finite serializes as null */
       return;
     }
     char num[64];
     format_double(d, num, sizeof num, false); /* false: JSON spells -0 as "0" */
-    buf_puts(out, num);
+    jsrt_buf_puts(out, num);
     return;
   }
   if (jsrt_is(v, JSRT_TAG_STRING)) {
@@ -1809,14 +1717,14 @@ static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
     const JSRTArray *a = jsrt_as_array(v);
     json_check_cycle(a, chain);
     const JSONAncestor here = {a, chain};
-    buf_putc(out, '[');
+    jsrt_buf_putc(out, '[');
     for (uint32_t i = 0; i < a->length; i++) {
       if (i > 0) {
-        buf_putc(out, ',');
+        jsrt_buf_putc(out, ',');
       }
       /* An unserializable ELEMENT is null, not skipped -- indices must keep their meaning. */
       if (json_unserializable(a->elements[i])) {
-        buf_puts(out, "null");
+        jsrt_buf_puts(out, "null");
       } else {
         json_value(out, a->elements[i], &here);
         if (jsrt_pending()) {
@@ -1824,19 +1732,19 @@ static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
         }
       }
     }
-    buf_putc(out, ']');
+    jsrt_buf_putc(out, ']');
     return;
   }
   if (jsrt_is(v, JSRT_TAG_OBJECT)) {
     if (jsrt_is_map_or_set(v) || jsrt_is_regexp(v) || jsrt_is_promise(v)) {
-      buf_puts(out, "{}"); /* no enumerable own properties, Node's own answer */
+      jsrt_buf_puts(out, "{}"); /* no enumerable own properties, Node's own answer */
       return;
     }
     json_check_cycle(jsrt_ptr(v), chain);
     const JSONAncestor here = {jsrt_ptr(v), chain};
     /* A nested value may throw during serialization. Later getters must not run before it. */
     const JSRTArray *keys = jsrt_as_array(jsrt_object_keys(v));
-    buf_putc(out, '{');
+    jsrt_buf_putc(out, '{');
     bool first = true;
     for (uint32_t i = 0; i < keys->length; i++) {
       const jsrt_value key = keys->elements[i];
@@ -1848,17 +1756,17 @@ static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
         continue; /* an unserializable VALUE drops its key */
       }
       if (!first) {
-        buf_putc(out, ',');
+        jsrt_buf_putc(out, ',');
       }
       first = false;
       json_quote(out, (const JSString *)jsrt_ptr(key));
-      buf_putc(out, ':');
+      jsrt_buf_putc(out, ':');
       json_value(out, value, &here);
       if (jsrt_pending()) {
         return;
       }
     }
-    buf_putc(out, '}');
+    jsrt_buf_putc(out, '}');
     return;
   }
   jsrt_panic("STA2005: JSON.stringify of undefined at the top level is not yet supported; the "
@@ -1866,15 +1774,15 @@ static void json_value(Buf *out, jsrt_value v, const JSONAncestor *chain) {
 }
 
 jsrt_value jsrt_json_stringify(jsrt_value v) {
-  Buf out;
-  buf_init(&out);
+  JSRTBuf out;
+  jsrt_buf_init(&out);
   json_value(&out, v, NULL);
   if (jsrt_pending()) {
-    buf_free(&out);
+    jsrt_buf_free(&out);
     return JSRT_UNDEFINED;
   }
   const jsrt_value result = jsrt_string_from_utf8(out.data == NULL ? "" : out.data, out.len);
-  buf_free(&out);
+  jsrt_buf_free(&out);
   return result;
 }
 
