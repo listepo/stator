@@ -8201,7 +8201,7 @@ function lowerClass(
   // `#private` owner and span-lookup name. Its instance type comes from the construct
   // signature's return: the variable binds the static side, and the inner name (if any)
   // is visible only inside, so neither names the instance from here.
-  const displayName = ts.isClassExpression(node) ? expressionClassName(node) : node.name?.text;
+  const displayName = classDisplayName(node);
   let self: ts.Type | undefined;
   if (displayName !== undefined) {
     if (ts.isClassExpression(node)) {

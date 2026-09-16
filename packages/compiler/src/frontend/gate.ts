@@ -1513,22 +1513,24 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
         return notYet('instanceof against anything but a class name is not yet supported', 5);
       }
       const declaration = classDeclarationOf(typeChecker.getTypeAtLocation(bin.right));
-      // A bound class expression names its descriptor like a declaration does (`o instanceof
-      // C` on `const C = class …`; plan.md §8 step 12(d)). Generic expressions have one
+      // A bound class expression — or an anonymous default export — names its descriptor
+      // like a declaration does (plan.md §8 step 12(d)). Generic expressions have one
       // descriptor per tuple exactly like generic declarations, so the bare name identifies
       // nothing in both cases.
-      const expression =
-        declaration === undefined
+      const like =
+        declaration ??
+        classLikeOf(typeChecker.getTypeAtLocation(bin.right)) ??
+        (ts.isIdentifier(bin.right)
           ? (classExpressionTarget(bin.right, typeChecker) ??
             innerClassExpression(bin.right, typeChecker))
-          : undefined;
-      const typeParameters = declaration?.typeParameters ?? expression?.typeParameters;
+          : undefined);
+      const typeParameters =
+        declaration?.typeParameters ??
+        (like !== undefined && ts.isClassExpression(like) ? like.typeParameters : undefined);
       if (typeParameters !== undefined && typeParameters.length > 0) {
         return notYet('instanceof against a generic class is not yet supported', 5);
       }
-      return declaration !== undefined ||
-        expression !== undefined ||
-        INSTANCEOF_BUILTINS.has(bin.right.text)
+      return like !== undefined || INSTANCEOF_BUILTINS.has(bin.right.text)
         ? { kind: 'accept' }
         : notYet('instanceof against anything but a class name is not yet supported', 5);
     }
@@ -3538,8 +3540,11 @@ function gateClass(
 ): GateResult {
   if (declaration.name === undefined) {
     // Only a bound expression has an identity (Node's `.name`: the variable it binds);
-    // an unbound one — a heritage base, a call argument, a parenthesized default export —
-    // has no layout key, and nominal equality has nothing to hold onto.
+    // an unbound one — a heritage base, a call argument, a parenthesized expression — has
+    // no layout key, and nominal equality has nothing to hold onto. An anonymous
+    // DECLARATION stays refused here too: its only identity would be `default`, whose
+    // uses arrive through default imports, which name Phase 5's module-namespace residue
+    // (plan-notes 278).
     if (ts.isClassExpression(declaration) && expressionClassName(declaration) !== undefined) {
       // fall through to member vetting below
     } else {
@@ -4630,15 +4635,11 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
     return notYet('new on anything but a named class is not yet supported', 5);
   }
   if (classDeclarationOf(checker.getTypeAtLocation(node)) === undefined) {
-    // A bound class expression constructs its descriptor like a declaration does (`new C` on
-    // `const C = class …`); an unbound one has no identity to construct (plan.md §8 step 12(d)).
+    // A bound class expression — or an anonymous default export, whose identity is Node's
+    // `.name` — constructs its descriptor like a named declaration does (plan.md §8 step
+    // 12(d)); anything without an identity has no descriptor to construct.
     const like = classLikeOf(checker.getTypeAtLocation(node));
-    const named =
-      like !== undefined &&
-      (ts.isClassDeclaration(like)
-        ? like.name !== undefined
-        : expressionClassName(like) !== undefined);
-    if (!named) {
+    if (like === undefined || classDisplayName(like) === undefined) {
       return notYet('new on this type is not yet supported', 5);
     }
   }
