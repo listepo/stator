@@ -496,7 +496,12 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     methods).
     **Computed keys landed 2026-09-12** (plan-notes 229; evidence in [done.md](done.md) → Phase 5
     step 12c computed keys).
-    **Residue:** a spread of anything but a variable of fixed shape stays `STA1214`.
+    **Residue:** a spread of an unknown value (`gate.ts:3221,3446`), of a value with no fixed
+    shape (`gate.ts:3225,3448`), and the methods-order shapes (`gate.ts` spread-prefix arms)
+    stay `STA1214` — all need the dynamic tier (step 39), not this slice. Spread of any
+    fixed-shape EXPRESSION compiles — variable, call, or member access, evaluated once via
+    a scratch slot (`tests/golden/ts|js/spread_call_result.*`, `gate.test.ts` spread-call
+    acceptance) — so the old "anything but a variable" line is retired here.
     (d) **[D5] The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an
@@ -505,6 +510,17 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     override rules, anonymous classes, and the `extends` forms. The `this`/`super`/`new` position
     sites ride here (`this` in a static member or outside a class member; `super` on anything but
     an inherited method; `new` on anything but a named class).
+    **Five slices landed 2026-09-16 on `agent/p5-class-surface`** (plan-notes 272–278; evidence
+    in [done.md](done.md) → Phase 5 step 12d): js override-widening for inferred method
+    overrides (274), abstract classes/members via throw-stubs (275), static fields after static
+    blocks in source order (276), branch `super` in init-free derived ctors with exactly-once
+    refusal (273), and bound class expressions via descriptor erasure (278). **Residue:**
+    abstract accessors (`gate.ts:3670` override arm — need virtual accessor dispatch),
+    switch-guarded supers (the branch rule's `checkCtorList` covers `if`/`else`/blocks only —
+    a `switch` stays `STA1214`), `super` in a static block (`gate.ts:3730`), `this` in a static
+    member or block (`gate.ts:4711,4715`), bare `super` (`gate.ts:482,4984` — a JavaScript
+    SyntaxError, stays refused), opaque class values (`gate.ts:904,919,940,5283` — need the
+    class object), and anonymous defaults (`gate.ts:3584` — blocked on default imports).
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~,
     ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~,
     ~~calling a class field~~, and ~~named function expressions~~ **landed** (evidence in

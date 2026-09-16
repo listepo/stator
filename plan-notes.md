@@ -4,6 +4,48 @@ Evidence log for contradictions between `plan.md` and reality, and for decisions
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
 
+## 281. Phase-5 leftover reconciliation: definitive open-list after PRs #7/#9/#11 (2026-09-16)
+
+**Plan:** §8 header, steps 2a(b)/(c), 12(c)/(d)/(e)/(f). `plan.md` edited in this change
+(12(c) residue narrowed, 12(d) landed-slices recorded with residue; header already closed
+both 2a buckets in the merge resolution). Scope: `agent/p5-leftovers` stacked on PRs
+#7 (2488), #9 (12d), #11 (12f); no PR branch touched.
+
+**Definitive open-list, each with file:line evidence on this branch:**
+
+- **2a(b): closed.** 2683 (`noImplicitThis` option), 2769 (overload fallback), 2464 (js
+  suppression + `ToPropertyKey`) all landed per plan-notes 272; `program.ts` and
+  `gate.ts` verified green by the merged subset (`subset_override_widening_*`,
+  computed-key goldens). No code here.
+- **2a(c): closed.** 2488 landed in PR #7 (`jsrt_get_iterator`, `get-iterator` HIR,
+  `subset_for_of_unknown_*`, `tests/golden/js/for_of_unknown.js`); 2454 landed in wave 3
+  (`subset_definite_assignment_*`). No code here.
+- **12(c): residue narrowed, no code.** Spread of a call or member already compiles
+  (`gate.test.ts` spread-call acceptance, `tests/golden/ts|js/spread_call_result.*`
+  byte-for-byte; lowering evaluates once via scratch slots). What stays `STA1214` is
+  exactly: unknown array/object spread (`gate.ts:3221,3446`), no-fixed-shape
+  (`gate.ts:3225,3448`), and the methods-order shapes — all dynamic-tier (step 39).
+  The old "anything but a variable" lines in `plan.md` and `docs/SUBSET.md` retired here.
+- **12(d): five slices landed, seven shapes stay.** Landed on `agent/p5-class-surface`
+  (273–278): override widening, abstract throw-stubs, static source order, branch super,
+  bound class expressions. Staying `STA1214` (all probed): abstract accessors
+  (`gate.ts:3670` — need virtual accessor dispatch), switch-guarded supers
+  (`checkCtorList` covers `if`/`else`/blocks only), `super` in a static block
+  (`gate.ts:3730`), `this` in a static member/block (`gate.ts:4711,4715`), bare `super`
+  (`gate.ts:482,4984` — SyntaxError, stays refused), opaque class values
+  (`gate.ts:904,919,940,5283` — need the class object), anonymous defaults
+  (`gate.ts:3584` — blocked on default imports). `plan.md` 12(d) records both halves here.
+- **12(e): already narrowed by PR #9** (opaque + bare super); no edit here.
+- **12(f): inline landed (279), named/homed refused (280).** Remaining residue as the
+  (f) bullet lists (homeless elsewhere, escape, self-application, generic `instanceof`,
+  generic-subclass surface). No code here beyond 280.
+
+**Proof for this reconciliation (no behavior change):** `tsc` both projects, oxlint/oxfmt
+clean, `cpd` 0.9%, subset 704 (667/37/0), golden 393/393 sharded, unit 579/579, runtime
+built. The `subset_generic_constrained_*` pair guards the one load-bearing invariant this
+edit relies on (a `let` INSIDE a generic body is part of the specialization, not a
+blind-spot read).
+
 ## 280. Named generics refuse module-order-blind reads at the gate (2026-09-16)
 
 **Plan:** §8 step 12(f). `plan.md` edited in this change (the (f) residue names the named
