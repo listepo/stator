@@ -6,6 +6,9 @@
 
 Identity: electric indigo-blue + cool gray. Not neon purple; calm engineering blue.
 
+
+**Shared visual lock (Listepo landing v1):** **nerd + ai + glass + flat** — same family as ketch brand v1. IBM Plex Mono eyebrows/labels/chips, hairline borders, mono CLI cards; subtle agent/compute cues (soft accent glow, gradient hairline, status chips) using **indigo `#5B7CFF` only** (no purple AI gradients); translucent glass panels with `backdrop-filter` plus opaque `@media (prefers-reduced-transparency: reduce)` fallbacks; flat CTAs, 4/8pt spacing, surface ladder, radii 8–12.
+
 ## Colors
 
 ### Light
