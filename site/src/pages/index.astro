@@ -50,6 +50,9 @@ const pipeline = [
   <main>
     <section class="hero wrap">
       <img class="hero-mark" src={`${base}logo-wordmark.svg`} alt="stator" width="250" height="64" />
+      <div class="hero-meta">
+        <span class="status-chip">aot compile</span>
+      </div>
       <h1>TS/JS → native. Ahead of time.</h1>
       <p class="lede">
         stator is an AOT compiler from TypeScript and JavaScript to native binaries —
@@ -76,7 +79,7 @@ const pipeline = [
     </section>
 
     <section id="build" class="sample wrap">
-      <h2 class="mono section-label">build</h2>
+      <h2 class="mono section-label hairline-grad">build</h2>
       <pre class="code" tabindex="0"><code><span class="prompt">$</span> stator build ./app.ts
 <span class="dim"># → native binary, ahead of time</span></code></pre>
     </section>
@@ -96,8 +99,11 @@ const pipeline = [
 
 <style>
   .top {
-    border-bottom: 1px solid var(--st-border-hairline);
-    background: var(--st-bg-elevated);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    border-bottom: 1px solid var(--st-glass-border);
+    /* glass fill/blur from global .top */
   }
 
   .top-inner {
@@ -154,6 +160,13 @@ const pipeline = [
   .hero {
     padding: 4.25rem 0 3.25rem;
     text-align: center;
+  }
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+    margin: 0 0 1rem;
   }
 
   .hero-mark {
@@ -238,9 +251,16 @@ const pipeline = [
   .step {
     padding: 1.25rem 1.3rem;
     border-radius: var(--st-radius-lg);
-    background: var(--st-bg-elevated);
-    border: 1px solid var(--st-border-hairline);
-    box-shadow: var(--st-shadow);
+    background: var(--st-glass-fill);
+    border: 1px solid var(--st-glass-border);
+    box-shadow: var(--st-elev-1);
+    backdrop-filter: blur(12px) saturate(1.15);
+    -webkit-backdrop-filter: blur(12px) saturate(1.15);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .step:hover {
+    border-color: var(--st-accent);
+    box-shadow: var(--st-elev-2);
   }
 
   .step-num {
@@ -326,6 +346,14 @@ const pipeline = [
 
   .muted {
     color: var(--st-fg-subtle);
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .step {
+      background: var(--st-bg-elevated);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
   }
 
   @media (max-width: 720px) {

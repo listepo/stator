@@ -27,6 +27,11 @@
   --st-code-fg: #A8B8FF;
   --st-shadow: 0 1px 2px rgba(18, 21, 28, 0.06), 0 4px 12px rgba(18, 21, 28, 0.04);
   --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.4);
+  --st-glass-fill: rgba(255, 255, 255, 0.72);
+  --st-glass-border: rgba(216, 220, 230, 0.9);
+  --st-elev-1: 0 1px 2px rgba(18, 21, 28, 0.04), 0 1px 3px rgba(18, 21, 28, 0.06);
+  --st-elev-2: 0 4px 12px rgba(18, 21, 28, 0.06), 0 1px 3px rgba(18, 21, 28, 0.04);
+  --st-accent-glow: 0 0 0 3px var(--st-accent-soft), 0 0 18px rgba(91, 124, 255, 0.25);
   --st-radius: 8px;
   --st-radius-lg: 12px;
   --st-font-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
@@ -58,6 +63,11 @@
   --st-code-fg: #C5D0FF;
   --st-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.28);
   --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.45);
+  --st-glass-fill: rgba(18, 21, 28, 0.72);
+  --st-glass-border: rgba(30, 36, 48, 0.9);
+  --st-elev-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.25);
+  --st-elev-2: 0 4px 14px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --st-accent-glow: 0 0 0 3px var(--st-accent-soft), 0 0 20px rgba(91, 124, 255, 0.32);
 }
 
 /* System preference when data-theme is "system" or unset (before FOUC boot). */
@@ -88,6 +98,11 @@
     --st-code-fg: #C5D0FF;
     --st-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.28);
     --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.45);
+  --st-glass-fill: rgba(18, 21, 28, 0.72);
+  --st-glass-border: rgba(30, 36, 48, 0.9);
+  --st-elev-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.25);
+  --st-elev-2: 0 4px 14px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --st-accent-glow: 0 0 0 3px var(--st-accent-soft), 0 0 20px rgba(91, 124, 255, 0.32);
   }
 }
 
@@ -118,5 +133,10 @@
     --st-code-fg: #A8B8FF;
     --st-shadow: 0 1px 2px rgba(18, 21, 28, 0.06), 0 4px 12px rgba(18, 21, 28, 0.04);
     --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.4);
+  --st-glass-fill: rgba(255, 255, 255, 0.72);
+  --st-glass-border: rgba(216, 220, 230, 0.9);
+  --st-elev-1: 0 1px 2px rgba(18, 21, 28, 0.04), 0 1px 3px rgba(18, 21, 28, 0.06);
+  --st-elev-2: 0 4px 12px rgba(18, 21, 28, 0.06), 0 1px 3px rgba(18, 21, 28, 0.04);
+  --st-accent-glow: 0 0 0 3px var(--st-accent-soft), 0 0 18px rgba(91, 124, 255, 0.25);
   }
 }
