@@ -1,6 +1,8 @@
 # Docs
 
-How Stator is specified. [`plan.md`](../plan.md) is the authority for what is still open; these files operationalize it. Getting started is the [project README](../README.md).
+How stator is specified. [`plan.md`](../plan.md) is the authority for what is still open; these files operationalize it.
+
+**Getting started:** [project README](../README.md). **Contributing:** [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 | File | What it is |
 |---|---|
