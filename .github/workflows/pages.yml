@@ -1,0 +1,87 @@
+name: site
+
+# Build on PRs that touch the site; only main deploys.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "docs/brand/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - "docs/brand/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the Node pin from mise.toml
+        id: node_pin
+        run: |
+          version=$(grep '^node = ' mise.toml | cut -d '"' -f2)
+          [ -n "$version" ] || { echo "no node pin found in mise.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.node_pin.outputs.version }}
+
+      - name: Enable corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@12.3.4 --activate
+          pnpm --version
+
+      - name: Install
+        working-directory: site
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure Pages
+        id: pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v6
+
+      - name: Build
+        working-directory: site
+        run: pnpm build
+
+      - name: Check the build produced what it should
+        run: |
+          cd site/dist
+          for required in index.html favicon.svg logo.svg logo-wordmark.svg; do
+            [ -s "$required" ] || { echo "missing or empty: $required" >&2; exit 1; }
+          done
+          grep -q 'TS/JS' index.html
+          echo "site ok: $(find . -name '*.html' | wc -l) pages"
+
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

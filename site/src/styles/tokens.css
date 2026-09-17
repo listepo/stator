@@ -1,0 +1,84 @@
+/* Wired from docs/brand/tokens.css — keep in sync when brand tokens change. */
+/* stator — electric indigo-blue + cool gray */
+:root,
+[data-theme="light"] {
+  --st-bg: #F5F6F9;
+  --st-bg-elevated: #FFFFFF;
+  --st-surface-1: #EBEDF2;
+  --st-surface-2: #DDE1EA;
+  --st-surface-3: #CCD2DE;
+  --st-border: #B4BBC9;
+  --st-border-hairline: #D8DCE6;
+  --st-fg: #12151C;
+  --st-fg-muted: #4A5160;
+  --st-fg-subtle: #787F90;
+  --st-accent: #3D5CE5;
+  --st-accent-hover: #2E4ACC;
+  --st-accent-muted: #5B7CFF;
+  --st-accent-soft: #E8ECFF;
+  --st-cool: #8BA3FF;
+  --st-success: #2F7A4A;
+  --st-warning: #C87941;
+  --st-danger: #C0403A;
+  --st-info: #3D5CE5;
+  --st-code-bg: #12151C;
+  --st-code-fg: #A8B8FF;
+  --st-shadow: 0 1px 2px rgba(18, 21, 28, 0.06), 0 4px 12px rgba(18, 21, 28, 0.04);
+  --st-radius: 8px;
+  --st-radius-lg: 12px;
+  --st-font-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
+  --st-font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+}
+
+[data-theme="dark"] {
+  --st-bg: #0C0E14;
+  --st-bg-elevated: #12151C;
+  --st-surface-1: #1A1E28;
+  --st-surface-2: #242936;
+  --st-surface-3: #303848;
+  --st-border: #3C4558;
+  --st-border-hairline: #1E2430;
+  --st-fg: #E8EBF2;
+  --st-fg-muted: #9AA3B5;
+  --st-fg-subtle: #646E82;
+  --st-accent: #5B7CFF;
+  --st-accent-hover: #8BA3FF;
+  --st-accent-muted: #3D5CE5;
+  --st-accent-soft: #1A2040;
+  --st-cool: #A8B8FF;
+  --st-success: #5BBF7A;
+  --st-warning: #E8A05C;
+  --st-danger: #E07068;
+  --st-info: #7A94FF;
+  --st-code-bg: #080A10;
+  --st-code-fg: #C5D0FF;
+  --st-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.28);
+}
+
+/* System preference when no explicit data-theme is set on <html>. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --st-bg: #0C0E14;
+    --st-bg-elevated: #12151C;
+    --st-surface-1: #1A1E28;
+    --st-surface-2: #242936;
+    --st-surface-3: #303848;
+    --st-border: #3C4558;
+    --st-border-hairline: #1E2430;
+    --st-fg: #E8EBF2;
+    --st-fg-muted: #9AA3B5;
+    --st-fg-subtle: #646E82;
+    --st-accent: #5B7CFF;
+    --st-accent-hover: #8BA3FF;
+    --st-accent-muted: #3D5CE5;
+    --st-accent-soft: #1A2040;
+    --st-cool: #A8B8FF;
+    --st-success: #5BBF7A;
+    --st-warning: #E8A05C;
+    --st-danger: #E07068;
+    --st-info: #7A94FF;
+    --st-code-bg: #080A10;
+    --st-code-fg: #C5D0FF;
+    --st-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.28);
+  }
+}

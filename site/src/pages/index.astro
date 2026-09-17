@@ -1,0 +1,305 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const base = import.meta.env.BASE_URL;
+const pipeline = [
+  { step: '01', label: 'type', detail: 'TS/JS surface' },
+  { step: '02', label: 'IR', detail: 'checked mid-form' },
+  { step: '03', label: 'bits', detail: 'native binary' },
+];
+---
+
+<BaseLayout>
+  <header class="top">
+    <div class="wrap top-inner">
+      <a class="brand" href={base}>
+        <img src={`${base}logo.svg`} alt="" width="40" height="40" />
+        <span class="mono brand-name">stator</span>
+      </a>
+      <nav class="nav mono" aria-label="Primary">
+        <a href="https://github.com/listepo/stator">GitHub</a>
+        <a href={`${base}#pipeline`}>Pipeline</a>
+        <a href={`${base}#build`}>Build</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <img class="hero-mark" src={`${base}logo-wordmark.svg`} alt="stator" width="250" height="64" />
+      <h1>TS/JS → native. Ahead of time.</h1>
+      <p class="lede">
+        stator is an AOT compiler from TypeScript and JavaScript to native binaries —
+        types in, machine code out.
+      </p>
+      <div class="cta-row">
+        <a class="cta mono" href="https://github.com/listepo/stator">compile</a>
+        <a class="ghost mono" href={`${base}#build`}>see the command</a>
+      </div>
+    </section>
+
+    <section id="pipeline" class="strip">
+      <div class="wrap strip-grid">
+        {
+          pipeline.map((item) => (
+            <article class="step">
+              <span class="mono step-num">{item.step}</span>
+              <h2 class="mono step-label">{item.label}</h2>
+              <p>{item.detail}</p>
+            </article>
+          ))
+        }
+      </div>
+    </section>
+
+    <section id="build" class="sample wrap">
+      <h2 class="mono section-label">build</h2>
+      <pre class="code" tabindex="0"><code><span class="prompt">$</span> stator build ./app.ts
+<span class="dim"># → native binary, ahead of time</span></code></pre>
+      <p class="note">Minimal landing scaffold — screenshots and polish land with design review.</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <p>
+        <span class="mono">Listepo</span>
+        <span class="sep">·</span>
+        <a href="https://github.com/listepo/stator">docs on GitHub</a>
+      </p>
+      <p class="muted">Indigo mark: stator ring → type → bits.</p>
+    </div>
+  </footer>
+</BaseLayout>
+
+<style>
+  .top {
+    border-bottom: 1px solid var(--st-border-hairline);
+    background: var(--st-bg-elevated);
+  }
+
+  .top-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 0;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.65rem;
+    color: var(--st-fg);
+  }
+
+  .brand:hover {
+    color: var(--st-fg);
+  }
+
+  .brand img {
+    border-radius: var(--st-radius-lg);
+  }
+
+  .brand-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+  }
+
+  .nav {
+    display: flex;
+    gap: 1.25rem;
+    font-size: 0.8125rem;
+  }
+
+  .nav a {
+    color: var(--st-fg-muted);
+  }
+
+  .nav a:hover {
+    color: var(--st-accent);
+  }
+
+  .hero {
+    padding: 4.5rem 0 3.5rem;
+    text-align: center;
+  }
+
+  .hero-mark {
+    margin: 0 auto 1.75rem;
+  }
+
+  .hero h1 {
+    margin: 0 0 0.75rem;
+    font-size: clamp(1.75rem, 4vw, 2.5rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+  }
+
+  .lede {
+    margin: 0 auto 1.75rem;
+    max-width: 36rem;
+    color: var(--st-fg-muted);
+    font-size: 1.0625rem;
+  }
+
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+  }
+
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.5rem;
+    padding: 0.55rem 1.15rem;
+    border-radius: var(--st-radius);
+    background: var(--st-accent);
+    color: #fff;
+    font-weight: 500;
+    font-size: 0.875rem;
+  }
+
+  .cta:hover {
+    background: var(--st-accent-hover);
+    color: #fff;
+  }
+
+  .ghost {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.5rem;
+    padding: 0.55rem 1rem;
+    border-radius: var(--st-radius);
+    border: 1px solid var(--st-border);
+    color: var(--st-fg-muted);
+    font-size: 0.875rem;
+    background: var(--st-bg-elevated);
+  }
+
+  .ghost:hover {
+    border-color: var(--st-accent-muted);
+    color: var(--st-accent);
+  }
+
+  .strip {
+    padding: 2rem 0;
+    background: var(--st-surface-1);
+    border-block: 1px solid var(--st-border-hairline);
+  }
+
+  .strip-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .step {
+    padding: 1.25rem;
+    border-radius: var(--st-radius-lg);
+    background: var(--st-bg-elevated);
+    border: 1px solid var(--st-border-hairline);
+    box-shadow: var(--st-shadow);
+  }
+
+  .step-num {
+    display: block;
+    color: var(--st-cool);
+    font-size: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .step-label {
+    margin: 0 0 0.35rem;
+    font-size: 1.125rem;
+    font-weight: 600;
+  }
+
+  .step p {
+    margin: 0;
+    color: var(--st-fg-muted);
+    font-size: 0.9375rem;
+  }
+
+  .sample {
+    padding: 3.5rem 0 4rem;
+  }
+
+  .section-label {
+    margin: 0 0 1rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--st-fg-subtle);
+  }
+
+  .code {
+    margin: 0;
+    padding: 1.25rem 1.35rem;
+    border-radius: var(--st-radius-lg);
+    background: var(--st-code-bg);
+    color: var(--st-code-fg);
+    border: 1px solid var(--st-border);
+    font-size: 0.9rem;
+    line-height: 1.65;
+    overflow-x: auto;
+  }
+
+  .prompt {
+    color: var(--st-cool);
+    user-select: none;
+  }
+
+  .dim {
+    color: var(--st-fg-subtle);
+  }
+
+  .note {
+    margin: 0.85rem 0 0;
+    color: var(--st-fg-subtle);
+    font-size: 0.875rem;
+  }
+
+  .footer {
+    border-top: 1px solid var(--st-border-hairline);
+    background: var(--st-bg-elevated);
+  }
+
+  .footer-inner {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 1.25rem 0;
+    font-size: 0.875rem;
+  }
+
+  .footer p {
+    margin: 0;
+  }
+
+  .sep {
+    margin: 0 0.4rem;
+    color: var(--st-fg-subtle);
+  }
+
+  .muted {
+    color: var(--st-fg-subtle);
+  }
+
+  @media (max-width: 720px) {
+    .strip-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .nav {
+      gap: 0.85rem;
+    }
+  }
+</style>
