@@ -1,7 +1,9 @@
 /* Wired from docs/brand/tokens.css — keep in sync when brand tokens change. */
 /* stator — electric indigo-blue + cool gray */
+/* Explicit light + default :root (before boot / no preference). */
 :root,
 [data-theme="light"] {
+  color-scheme: light;
   --st-bg: #F5F6F9;
   --st-bg-elevated: #FFFFFF;
   --st-surface-1: #EBEDF2;
@@ -24,6 +26,7 @@
   --st-code-bg: #12151C;
   --st-code-fg: #A8B8FF;
   --st-shadow: 0 1px 2px rgba(18, 21, 28, 0.06), 0 4px 12px rgba(18, 21, 28, 0.04);
+  --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.4);
   --st-radius: 8px;
   --st-radius-lg: 12px;
   --st-font-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
@@ -31,6 +34,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --st-bg: #0C0E14;
   --st-bg-elevated: #12151C;
   --st-surface-1: #1A1E28;
@@ -53,11 +57,14 @@
   --st-code-bg: #080A10;
   --st-code-fg: #C5D0FF;
   --st-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.28);
+  --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.45);
 }
 
-/* System preference when no explicit data-theme is set on <html>. */
+/* System preference when data-theme is "system" or unset (before FOUC boot). */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]),
+  [data-theme="system"] {
+    color-scheme: dark;
     --st-bg: #0C0E14;
     --st-bg-elevated: #12151C;
     --st-surface-1: #1A1E28;
@@ -80,5 +87,36 @@
     --st-code-bg: #080A10;
     --st-code-fg: #C5D0FF;
     --st-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.28);
+    --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.45);
+  }
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]),
+  [data-theme="system"] {
+    color-scheme: light;
+    --st-bg: #F5F6F9;
+    --st-bg-elevated: #FFFFFF;
+    --st-surface-1: #EBEDF2;
+    --st-surface-2: #DDE1EA;
+    --st-surface-3: #CCD2DE;
+    --st-border: #B4BBC9;
+    --st-border-hairline: #D8DCE6;
+    --st-fg: #12151C;
+    --st-fg-muted: #4A5160;
+    --st-fg-subtle: #787F90;
+    --st-accent: #3D5CE5;
+    --st-accent-hover: #2E4ACC;
+    --st-accent-muted: #5B7CFF;
+    --st-accent-soft: #E8ECFF;
+    --st-cool: #8BA3FF;
+    --st-success: #2F7A4A;
+    --st-warning: #C87941;
+    --st-danger: #C0403A;
+    --st-info: #3D5CE5;
+    --st-code-bg: #12151C;
+    --st-code-fg: #A8B8FF;
+    --st-shadow: 0 1px 2px rgba(18, 21, 28, 0.06), 0 4px 12px rgba(18, 21, 28, 0.04);
+    --st-focus-ring: 0 0 0 3px rgba(91, 124, 255, 0.4);
   }
 }
