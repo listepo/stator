@@ -56,7 +56,7 @@ const pipeline = [
       <h1>TS/JS → native. Ahead of time.</h1>
       <p class="lede">
         stator is an AOT compiler from TypeScript and JavaScript to native binaries —
-        types in, machine code out.
+        typed code to unboxed values; untyped code stays dynamic instead of being rejected.
       </p>
       <div class="cta-row">
         <a class="cta mono" href="https://github.com/listepo/stator">compile</a>
@@ -80,8 +80,10 @@ const pipeline = [
 
     <section id="build" class="sample wrap">
       <h2 class="mono section-label hairline-grad">build</h2>
-      <pre class="code" tabindex="0"><code><span class="prompt">$</span> stator build ./app.ts
-<span class="dim"># → native binary, ahead of time</span></code></pre>
+      <pre class="code" tabindex="0"><code><span class="prompt">$</span> stator build ./app.ts -o app
+<span class="dim"># → native binary (--mode=ts by default)</span>
+<span class="prompt">$</span> stator build ./app.js -o app --mode=js
+<span class="dim"># → same pipeline; untyped code is dynamic</span></code></pre>
     </section>
   </main>
 
