@@ -246,14 +246,20 @@ only when the flag is passed, which the decision runner never passes).
 
 ---
 
-## `std` — systems library (Phase 10, T10.1 — docs skeleton only, nothing implemented)
+## `std` — systems library (Phase 10, T10.1 — `std/env` + `std/path` wired)
 
-Stub rows for the T10.1 surface (`docs/STD.md` is the contract). No `STA` code is allocated
-here — codes are allocated with the implementing task, which also wires the gate arms. Until
-then `std/*` imports fail like any unrecognized module edge.
+`docs/STD.md` is the contract. T10.1 step 2 has landed: `std/env` (real libc
+`getenv`/`setenv`/`unsetenv` under `std`-shaped names) and `std/path` (pure-C POSIX
+string walking) compile to direct C calls through the extern surface — declarations
+in `.d.ts`, thin TS wrappers, byte-for-byte goldens (`std_env`, `std_path`). No `STA`
+code was allocated: every signature is accepted, so no gate arm was needed. `std/*`
+*import* syntax still fails like any unrecognized module edge — the surface is
+`declare` + wrapper, not `import … from 'std/…'` (that edge is a later slice).
 
 | Feature | `ts` mode | `js` mode | Notes |
 |---|---|---|---|
+| `std/env` (`get`/`set`/`unset` over real libc) | static (+ unchecked-boundary flag) | static + flag (same — the surface is `.ts` declarations either way) | Decision fixtures `subset_std_env_ts` (+ js twin when the surface gains one); golden `std_env` holds the `@statorError null` throw message byte-for-byte. |
+| `std/path` (`isAbsolute`/`basename`/`dirname`/`join` over fixture C shims) | static (+ unchecked-boundary flag) | static + flag (same) | Decision fixture `subset_std_path_ts`; golden `std_path` holds all ten lines byte-for-byte. `join` is two-segment here; the variadic form is a later slice. |
 | `import … from 'std/env'` / `'std/path'` / `'std/process'` / `'std/fs'` / `'std/time'` | not-yet (Phase 10) | not-yet (Phase 10) | First-party modules, not packages: the `std/` prefix is reserved and recognized at the module-graph edge (`docs/STD.md` §1). Unknown `std/foo` will be a hard error. |
 | `import … from 'std/sync'` / `'std/thread'` | not-yet (Phase 10, T10.2) | not-yet (Phase 10, T10.2) | Needs the OS-threads ↔ async bridge; refuses until it exists (`docs/STD.md` §5). |
 
