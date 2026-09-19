@@ -3,6 +3,34 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 282. Step 12(d) refusal pins: abstract accessors, static-block super/this (2026-09-19)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no
+task language changes; the 12(d) remainder stays open. `docs/SUBSET.md` edited in the
+same change (accessor row names the abstract pair; statics row names the landed block
+and its two refusals).
+
+**What landed.** No code change: six decision fixtures pin the precise `STA1214`
+refusals the gate already emits (verified `not-yet`/`STA1214` in both modes via
+`explain --json` before landing):
+
+- Abstract accessors (`subset_abstract_accessor_{ts,js}`): refused twice over — the
+  base's bodiless pair hits the bodiless-accessor arm (`an accessor with no body`),
+  and the subclass override hits the override arm (`overriding the inherited member
+  'x'`). Virtual accessor dispatch is its own slice: accessor reads dispatch
+  `direct` (`accessorCall`) while methods virtualize, so a base-typed read could not
+  land on the override (plan-notes 275 named this residue; this pins it).
+- `this` in a static block (`subset_static_block_this_{ts,js}`) and `super` in a
+  static block (`subset_static_block_super_{ts,js}`): both need the class object the
+  static model does not build (`gateThis` / the static-block `super` arm). The
+  accepted shape — blocks touching statics through the class name — stays pinned by
+  `subset_static_block_{ts,js}` plus the unit invariants in `class-members.test.ts`.
+
+**Not in this change.** Virtual accessor dispatch itself; any block form beyond the
+class-name spelling; goldens for refused shapes (a refused construct has no output
+to compare byte-for-byte, so the decision row plus the existing accepted-shape
+goldens `abstract_class.ts` / `class_static_block.ts` are the coverage).
+
 ## 281. Step 12(f) named/homed capture refusal lands at the gate (2026-09-19)
 
 **Plan:** §8 step 12(f) residue. `plan.md` edited in this change (the residue bullet now
