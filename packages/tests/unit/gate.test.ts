@@ -313,7 +313,9 @@ void test('a derived constructor may validate before super(...)', () => {
   // it must not read the receiver -- but validating or transforming the parameters is the shape
   // real constructors take. With no initializers to splice, the call may also sit in `if`/`else`
   // arms (one per arm, every arm covered); with initializers it keeps the top-level rule
-  // (plan.md §8 step 12(d), plan-notes 277).
+  // (plan.md §8 step 12(d), plan-notes 277). A `switch` guards arms the same way but stays
+  // refused: clause fallthrough is not one path per clause, so the coverage analysis counts
+  // only `if`/`else` arms and blocks.
   const base = 'class A {\n  n: number;\n  constructor(n: number) {\n    this.n = n;\n  }\n}\n';
   assert.deepEqual(
     codesFor(
@@ -336,6 +338,12 @@ void test('a derived constructor may validate before super(...)', () => {
   assert.deepEqual(
     codesFor(
       `${base}class B extends A {\n  doubled = 0;\n  constructor(n: number) {\n    if (n > 0) {\n      super(n);\n    } else {\n      super(0);\n    }\n  }\n}\nconsole.log(new B().n);`,
+    ),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    codesFor(
+      `${base}class B extends A {\n  constructor(tag: number, n: number) {\n    switch (tag) {\n      case 0:\n        super(n);\n        break;\n      default:\n        super(0);\n        break;\n    }\n  }\n}\nconsole.log(new B().n);`,
     ),
     ['STA1214'],
   );

@@ -583,6 +583,29 @@ test('a super call nested in an arrow stays not-yet', () => {
   );
 });
 
+test('a super call guarded by switch stays not-yet', () => {
+  // One `super(...)` per clause with a `default` is the `if`/`else` shape, but clause
+  // fallthrough means a clause's statements are not one path and a missing `default`
+  // leaves the no-match path uncovered — so the coverage analysis counts only
+  // `if`/`else` arms and blocks, and `nestedSuperCall` refuses the switch
+  // (plan.md §8 step 12(d), plan-notes 277 residue).
+  const source = `${LATE_SUPER}class D extends B {
+    constructor(tag: number, n: number) {
+      switch (tag) {
+        case 0:
+          super(n);
+          break;
+        default:
+          super(n * 2);
+          break;
+      }
+    }
+  }
+  `;
+  assert.deepEqual(gateCodes(source, 'ts'), ['STA1214']);
+  assert.deepEqual(gateCodes(source, 'js'), ['STA1214']);
+});
+
 const SHADOW = `class B {
   x: number = 1;
   static n: number = 10;

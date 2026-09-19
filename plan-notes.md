@@ -3,6 +3,33 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 284. Step 12(d) refusal pin: switch-guarded super (2026-09-19)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no
+task language changes; the 12(d) remainder stays open. `docs/SUBSET.md` edited in the
+same change (inheritance row names the `switch`-guarded refusal and its fixtures).
+
+**What landed.** No gate or lowering change: two decision fixtures plus unit pins record
+the precise `STA1214` refusal the gate already emits (verified `not-yet`/`STA1214` in
+both modes via `explain --json` before landing):
+
+- `switch`-guarded `super(...)` (`subset_class_super_switch_{ts,js}`): one call per
+  clause with a `default` is the `if`/`else` shape, but clause fallthrough means a
+  clause's statements are not one path, a missing `default` leaves the no-match path
+  uncovered, and a discriminant or case test reading `this`/`super` runs before any
+  call. The coverage analysis (`checkCtorList` in gate.ts) counts only `if`/`else`
+  arms and bare blocks, so `nestedSuperCall` refuses the switch statement as a
+  nested position — honestly deferred while `if`/`else` arms land (plan-notes 277
+  named this residue; this pins it).
+- Unit pins: a `switch` case in `class-members.test.ts` (both modes) and in the
+  `validate before super` case in `gate.test.ts` (`ts`); both assert `['STA1214']`.
+
+**Not in this change.** Switch-arm coverage itself (fallthrough edges, default
+presence, discriminant reads — its own slice with its own golden, not a rider on a
+pinning change); goldens for refused shapes (a refused construct has no output to
+compare byte-for-byte, so the decision rows plus the existing accepted-shape golden
+`class_super_late.{ts,js}` are the coverage).
+
 ## 283. Step 12(e)+(d) owner pins: opaque class uses, typeof C, bind, default imports (2026-09-19)
 
 **Plan:** §8 steps 12(e) (opaque class values) and 12(d) (anonymous defaults). `plan.md`
