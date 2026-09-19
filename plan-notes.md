@@ -3,6 +3,47 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 287. TS extern fixtures go per-kind .d.ts; re-exports/json-boundary repinned (2026-09-19)
+
+**Plan:** §10 Task 7.1 (FFI surface) + §4 Task 1.4 (decision tests). `plan.md` NOT edited in
+this change — no plan wording was stale; only fixtures/helpers were.
+
+**What landed (p5-10 zone only; JS twins + helper_extern_ffi.d.ts untouched for p5-11).**
+Five new per-kind helpers, one verdict family per file (the helper_extern_direct.d.ts
+only-accepted rule generalized, cf. helper_extern_ptrret.d.ts precedent): 
+`helper_extern_call.d.ts` (cAdd, accept), `helper_extern_overload.d.ts` (cPick x2, STA1118),
+`helper_extern_chain.d.ts` (extOpenDb/extQuery/extClose triple, accept),
+`helper_extern_any.d.ts` (cTakeAny, STA1114), `helper_extern_unknown.d.ts` (cTakeUnknown,
+STA1114). The five TS fixtures drop their inline markers for `/// <reference path />` and
+pin honestly: call_ts not-yet/STA1217 → static (direct C call; probe-verified),
+ptrchain_ts not-yet/STA1217 → static (borrow-only step 6; probe-verified), overload_ts
+stale static → error STA1118 (declaration walk reports EVERY bad signature where written,
+so the second overload's bare `string` decides the file even though the call matches the
+first — first-wins applies at the call-site arm only), any_ts/unknown_ts keep error
+STA1114 with markers removed (all five expected-fail markers removed, all five pass).
+No bulk flip: object/array/fn/string/catchall/varargs TS-inline fixtures untouched.
+Names announced to p5-11 via mailbox as proposed shared per-kind files both twins can
+reference (reply pending; no collision today — helper_extern_call/overload/chain/any/
+unknown exist nowhere else in tree).
+
+**Re-exports + json-boundary (ex-p5-13 zone).** subset_re_exports_ts: stale static →
+not-yet STA1214 (gate names no re-export arm; measured on this branch), marker removed.
+subset_json_parse_boundary_ts: stale dynamic → error STA1001 (entry's own explicit `: any`
+return is what the mode-wide hasExplicitAny walk fires on first, before any call-site
+rule; measured on this branch), marker removed. The supported spelling stays
+subset_json_parse_annotated_ts (`unknown`). Codes are DIAGNOSTICS.md-allocated (sole
+allocator; runner enforces). arguments_binding/jsx_syntax measured (both ts twins answer
+error STA1003 today vs STA1105/STA1111 pins) but LEFT for the subset-pins owner per zone
+split — announced via mailbox.
+
+**Verify.** `subset --filter extern_call_ts|extern_overload_ts|extern_ptrchain_ts|
+extern_any_ts|extern_unknown_ts`: 1 passed each. `--filter re_export`: 1 passed
+(ts) + 1 expected-fail (js, p5-13/pins zone). `--filter json_parse`: 7 passed.
+`--filter extern`: 87 fixtures, 72 passed / 15 expected-fail / 0 failed.
+`--filter arguments_binding|jsx_syntax`: expected-fail only (not mine). typecheck +
+lint clean.
+
+
 ## 286. Step 12(f) homeless-arrow + escape/self-apply/instanceof residue pinned STA1214 (2026-09-19)
 
 **Plan:** §8 step 12(f) (generics beyond monomorphization). `plan.md` NOT edited in this
