@@ -8953,3 +8953,49 @@ unreachable until the gate admits a producer — no test can reach them yet by d
 **Verified.** `pnpm run ci` green: typecheck clean, oxlint 0/0 + oxfmt clean, cpd 0.7%,
 unit 598/598, runtime print corpus matches Node, subset 742 (705/37/0), golden 395/395,
 builtins, leak plateaus, golden-asan 395/395.
+
+## 284. T10.1 step 2 lands: `std/env` + `std/path` end to end (2026-09-19)
+
+**Plan:** §11b T10.1 steps 2–4 + Check (goldens for env/path/process/fs sync; subset
+rows match; no Node polyfill). `plan.md` NOT edited in this change — the card stays
+open (steps 3–4: `std/process`, sync `std/fs` + `std/time`); `docs/SUBSET.md` edited
+(the `std` section's header + two landed rows).
+
+**What landed.** `std/env` (real libc `getenv`/`setenv`/`unsetenv` under `std`-shaped
+TS names, `get` throwing through the `@statorError null` convention) and `std/path`
+(`isAbsolute`/`basename`/`dirname`/two-segment `join` over tiny pure-C POSIX walkers)
+compile to direct C calls through the EXISTING extern surface — no compiler change,
+no new runtime file, no new `STA` code, no Node polyfill:
+
+- `std_env` golden (`packages/tests/golden/ts/std_env/`: `env.d.ts` with the
+  `<stdlib.h>` pragma + `env.ts` wrapper + `main.ts` entry): `TZ` read, scratch
+  set/read/unset/throw cycle — byte-for-byte vs the pinned Node 26.7.0, `TZ=UTC`
+  pinned both sides by the runner. The `#include <stdlib.h>` pragma is load-bearing:
+  without the true prototypes the emitter's fallbacks (`double setenv(...)`)
+  conflict with libc at the clang line (probed).
+- `std_path` golden (`packages/tests/golden/ts/std_path/`: `path.d.ts` + `path.ts`
+  wrapper + `path.c` fixture shims + direct-call `main.ts` + `node_shim.mjs`): ten
+  lines byte-for-byte. The shims are headerless `char *`/`double` (the extern_ptr
+  `ffi.c` rule — no `jsrt_value.h` in fixture C); `isAbsolute` answers `double` 1/0
+  because a `bool` return needs `<stdbool.h>` in the emitted prologue, which only
+  library builds include (probed: `true/true` for both inputs before the fix).
+- Decision fixtures `subset_std_env_ts` + `subset_std_path_ts` (`static`, via
+  `helper_std_env.d.ts` / `helper_std_path.d.ts` — one verdict family per file, the
+  `helper_extern_direct.d.ts` rule).
+
+**Two traps the landing exposed, both now in comments.** (1) The oracle channel:
+`--import node_shim.mjs` only DEFINES globals — an entry calling ambient externs
+directly (extern_libm/extern_ptr shape) runs under it, but an entry importing a
+WRAPPER that calls them does not (the wrapper's `declare` erases to nothing and the
+shim's globals are never consulted — probed as `Maximum call stack` recursion when
+the shim re-imported the wrapper). Goldens here call the shims directly; wrappers
+are the importable surface the subset fixtures pin. (2) The link channel: fixture
+`.c` beside the entry links automatically (`compileFixtureC`); no pragma carries
+object paths (`collectLinkFlags` reads only `flags` lines).
+
+**Proof.** `golden --filter std_`: 2 passed, 0 failed. `subset --filter std_`: 2
+passed, 0 failed. `tsc` both projects clean. Full `subset` + full `golden` + ASan
+in the gatekeeper pass.
+
+**Still open (T10.1 steps 3–4):** `std/process` (`exit`/`pid`), sync `std/fs` +
+`std/time`. Promise twins stay not-yet per step 5 (recorded choice, not a gap).
