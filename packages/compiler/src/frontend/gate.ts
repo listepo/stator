@@ -25,6 +25,7 @@ import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromFile, diagnosticFromNode } from '../support/diagnostics.ts';
 import { intlEnabled } from '../support/features.ts';
 import {
+  capturesEnclosingScope,
   genericAliasTarget,
   genericArrowKey,
   genericCallInstantiation,
@@ -2892,6 +2893,23 @@ function gateFunction(
       return { kind: 'accept' };
     }
     return notYet('overload signatures are not yet supported', 5);
+  }
+  // A specialization is a module-level function lowered before its file's statements, so a
+  // generic whose body reads an enclosing scope or a same-file `let`/`const`/`var` has no
+  // binding to read there (plan.md §8 step 12(f)): the inline path refuses those reads in
+  // `inlineGenericTuple`, and named declarations and homed arrows refused nothing — they
+  // accepted and failed downstream as `STA4035`/`STA4002`. Refuse here instead, with the
+  // same owner. Functions, classes, imports, and globals hoist or pre-register and stay
+  // accepted; only the blind-spot and out-of-module reads refuse.
+  if (
+    fn.typeParameters !== undefined &&
+    fn.typeParameters.length > 0 &&
+    capturesEnclosingScope(fn, typeChecker)
+  ) {
+    return notYet(
+      'a generic function that reads an enclosing scope or a same-file binding is not yet supported',
+      5,
+    );
   }
   // An arrow's expression body (`(x) => x * 2`) is a Block in the HIR with a single return; the
   // lowering synthesises it, so nothing is gated here beyond what the expression itself gates.

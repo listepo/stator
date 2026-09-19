@@ -487,6 +487,61 @@ test('an inline arrow that reads a module-level let is refused', () => {
   );
 });
 
+test('a named generic that reads a same-file binding is refused, not an internal error', () => {
+  // Named declarations predated the module-order rule the inline path enforces: they accepted
+  // and failed downstream as STA4035 (let/const) or STA4002 (var, whose hoist feeds the
+  // lowering but not the verifier). The gate now refuses both shapes with the same owner.
+  assert.deepEqual(
+    gateCodes(`
+      let base = 100;
+      function id<T>(x: T): T { console.log(base); return x; }
+      console.log(id(5));
+    `),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(`
+      const base = 100;
+      function id<T>(x: T): T { console.log(base); return x; }
+      console.log(id(5));
+    `),
+    ['STA1214'],
+  );
+  // A homed arrow reads through the same rule: its specialization is module-level too.
+  assert.deepEqual(
+    gateCodes(`
+      let base = 100;
+      const id = <T,>(x: T): T => { console.log(base); return x; };
+      console.log(id(5));
+    `),
+    ['STA1214'],
+  );
+  // Hoisted bindings stay accepted: a function declaration is reachable in time.
+  assert.deepEqual(
+    gateCodes(`
+      function dbl(n: number): number { return n * 2; }
+      function id<T>(x: T): T { console.log(dbl(2)); return x; }
+      console.log(id(5));
+    `),
+    [],
+  );
+});
+
+test('a named generic that reads an enclosing scope is refused', () => {
+  // A specialization is a module-level function, so an enclosing parameter or local has no
+  // binding to read there — the same rule the inline path enforces.
+  assert.deepEqual(
+    gateCodes(`
+      function outer(y: number): void {
+        function id<T>(x: T): T { console.log(y); return x; }
+        console.log(id(5));
+      }
+      outer(1);
+    `),
+    ['STA1214'],
+  );
+});
+
 test('an inline arrow away from a direct argument is refused', () => {
   // A branch, a spread, and a constructor argument have no single parameter type to read.
   assert.deepEqual(

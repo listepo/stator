@@ -3,6 +3,29 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 281. Step 12(f) named/homed capture refusal lands at the gate (2026-09-19)
+
+**Plan:** §8 step 12(f) residue. `plan.md` edited in this change (the residue bullet now
+names the named/homed shapes as gate-refused) and `docs/SUBSET.md` edited (the generics
+row's residue covers inline, named, and homed reads).
+
+**What landed.** `capturesEnclosingScope` generalizes from arrows to the whole function
+union (exported from `frontend/generics.ts`; the blind-spot arm gains the own-bindings
+containment guard so a `let` inside the body is not a module-order read), and
+`gateFunction` refuses a generic whose body reads an enclosing scope or a same-file
+`let`/`const`/`var` with `STA1214` (Phase 5). Before, those shapes accepted and failed
+downstream as `STA4035`/`STA4002` (probed: `let base` + `function id<T>` reading it
+lowers to `STA4035`); the inline path already refused the same reads in
+`inlineGenericTuple`, so the two paths now share one rule. Hoisted bindings (functions,
+classes, imports, globals) and own-body bindings stay accepted (probed).
+
+**Proof.** Unit: two new `generics.test.ts` cases (same-file `let`/`const`, homed arrow,
+hoisted-function acceptance; enclosing parameter/local). Decision: six new fixtures —
+`subset_generic_named_capture_{ts,js}`, `subset_generic_named_module_binding_{ts,js}`,
+`subset_generic_homed_module_binding_{ts,js}` — all `not-yet STA1214`. The `js` twins
+carry `.ts` syntax (type parameters) because `.js` cannot spell a generic; the runner
+runs them under `--mode=js` anyway, where they refuse identically.
+
 ## 276. T10.1 docs-first skeleton: `docs/STD.md` lands, no implementation (2026-09-16)
 
 **Plan:** §11b T10.1 step 1 (docs part only). `plan.md` NOT edited — the step stays open; this
