@@ -57,6 +57,7 @@ Dev runs TypeScript directly on the pinned Node — no `pnpm run build` step for
 | | |
 |---|---|
 | [docs/README.md](docs/README.md) | index of the spec docs |
+| [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | how the pipeline works + usage examples |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | pipeline diagrams (D2) |
 | [docs/MODES.md](docs/MODES.md) | `ts` vs `js` |
 | [docs/SUBSET.md](docs/SUBSET.md) | what compiles, what is error, what is not-yet |
