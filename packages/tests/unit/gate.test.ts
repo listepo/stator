@@ -138,6 +138,24 @@ void test('spread unknowns carry their own messages', () => {
   assert.match(objectDiags[0]?.message ?? '', /an object spread of an unknown value/);
 });
 
+void test('spread twins land together: class instances and unknown casts', () => {
+  // Step 12(c) residue pins (plan-notes 285): a class instance spreads its fields, and a
+  // dropped `as` cast to an object shape refuses as the unknown value the lowering
+  // actually spreads. The class-spread halves are pinned by the decision fixtures alone
+  // (`subset_spread_class_{ts,js}`, both `static` under the real program options): the
+  // unit helper's program collapses bare class fields to implicit-any STA1003, so no
+  // spelling here isolates the spread arm. The unknown-cast half pins cleanly in js
+  // (in ts mode an unannotated `JSON.parse` is already STA1003, pinned by
+  // `subset_spread_unknown_ts.ts`).
+  assert.deepEqual(
+    codesFor(
+      "const u = JSON.parse('[1, 2]');\nconst b = { ...(u as { x: number }) };\nconsole.log(b);",
+      'js',
+    ),
+    ['STA1214'],
+  );
+});
+
 void test('switch, case, default and do/while are all accepted syntax', () => {
   assert.deepEqual(
     codesFor('let x: number = 0;\nswitch (x) { case 1: break; default: break; }'),

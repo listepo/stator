@@ -3,6 +3,50 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 285. Step 12(c) spread residue: unknown / no-fixed-shape stays STA1214 (2026-09-19)
+
+**Plan:** §8 step 12(c) (object literal forms). `plan.md` edited in the same change (the
+12(c) residue line, which still said "a spread of anything but a variable of fixed shape",
+now names what stays `STA1214` and what lands). `docs/SUBSET.md` edited in the same
+change (object-literals-with-static-keys row names the landed shapes and the pinned
+refusals with their fixtures).
+
+**What landed.** No gate or lowering change — the residue wording was stale, and two
+fixture pairs were half-landed:
+
+- The gate's object-spread arm (`gateObjectLiteral` in gate.ts) judges the operand by
+  its TYPE (`spreadOperandType`), not by its spelling: any expression of fixed-shape
+  object type lands — a variable, a call result (`subset_spread_call_result_*`,
+  golden `spread_call_result` byte-for-byte), a member access, a class instance
+  (fields only; prototype members and `#private` fields are not own). The stale
+  "variable of fixed shape" phrasing (gate.ts comment + SUBSET row + plan residue)
+  is corrected in all three places.
+- `subset_spread_class_js.js` (new): the js twin of `subset_spread_class_ts.ts`
+  (`static` in both modes, verified via `explain --json` before landing).
+- `subset_spread_unknown_cast_ts.ts` (new): the ts twin of
+  `subset_spread_unknown_cast_js.ts` (`not-yet`/`STA1214` in both modes, verified
+  via `explain --json` before landing; the file was misnamed `_js.ts` for a
+  both-modes fixture, left in place so the subset runner still discovers it).
+- Unit backstop in `gate.test.ts` (`spread twins land together`): the dropped-cast
+  object spread refuses `STA1214` in js (the class-spread halves are pinned by the
+  decision fixtures alone — the unit helper's program collapses bare class fields
+  to implicit-any `STA1003`, so no spelling there isolates the spread arm).
+
+**Why not the dynamic tier.** Routing an unknown/no-fixed-shape spread through
+`jsrt_dynobj_spread` would need a shape-table enumeration of a dynamically-typed
+value (null-skipping per §12.3.4, primitive boxing, accessor invocation) that no
+entry point implements — `jsrt_dynobj_spread` panics on exactly that input
+(`object spread of a value with no fixed shape`). The honest verdict is the precise
+`STA1214` the gate already emits (`an object spread of an unknown value` vs `of a
+value with no fixed shape`, mirrored for arrays), pinned by `subset_spread_dynamic_*`,
+`subset_spread_unknown_*`, and `subset_spread_unknown_cast_*` in both modes.
+
+**Not in this change.** Spread-call (`f(...arr)`, methods, constructors — step 37's
+dynamic argv), string/tuple/non-array array-spread (`subset_spread_*` cover the
+verdicts; twins not added), goldens for refused shapes (a refused construct has no
+output to compare, so the decision rows plus golden `spread_call_result` are the
+coverage).
+
 ## 284. Step 12(d) refusal pin: switch-guarded super (2026-09-19)
 
 **Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no

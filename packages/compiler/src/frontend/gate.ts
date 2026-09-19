@@ -550,8 +550,10 @@ function gateConstruct(
     // `{ x }`, whose name IS its value. Same reasoning: the literal was vetted above, and the
     // identifier underneath is gated as the ordinary identifier it desugars to.
     case ts.SyntaxKind.ShorthandPropertyAssignment:
-    // `{ ...a }`. gateObjectLiteral already held the operand to a variable of fixed shape; the
-    // identifier underneath is gated as the ordinary read the expansion makes of it.
+    // `{ ...a }`. gateObjectLiteral already held the operand to a fixed shape (any
+    // expression whose type names the keys — a variable, call result, or member access;
+    // plan.md §8 step 12c); the identifier underneath is gated as the ordinary read the
+    // expansion makes of it.
     case ts.SyntaxKind.SpreadAssignment:
     // `...x` in an array literal. gateArrayLiteral vetted the operand type; the expression
     // underneath is gated normally.

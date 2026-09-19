@@ -492,7 +492,7 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     methods).
     **Computed keys landed 2026-09-12** (plan-notes 229; evidence in [done.md](done.md) → Phase 5
     step 12c computed keys).
-    **Residue:** a spread of anything but a variable of fixed shape stays `STA1214`.
+    **Residue:** a spread of an unknown value or of a value with no fixed shape stays `STA1214` (plan-notes 285 pins the `subset_spread_dynamic_*` / `subset_spread_unknown_*` / `subset_spread_unknown_cast_*` refusals in both modes; a spread of any fixed-shape expression — variable, call result, member access, class instance — lands, golden `spread_call_result`).
     (d) **[D5] The class member surface** — the largest family, and the reason rung 6 shipped as 6a/6b:
     static getters and setters, accessors with no body, computed and `#private` accessor names,
     index signatures, static initialization blocks, computed member names, a `#private` name an
