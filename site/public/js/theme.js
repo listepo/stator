@@ -3,8 +3,8 @@
    Persist key: localStorage["stator-theme"] = "system" | "light" | "dark"
 */
 (function () {
-  const KEY = "stator-theme";
-  const ORDER = ["system", "light", "dark"];
+  const KEY = 'stator-theme';
+  const ORDER = ['system', 'light', 'dark'];
 
   function stored() {
     try {
@@ -15,39 +15,37 @@
   }
 
   function resolve(preference) {
-    if (preference === "light" || preference === "dark") return preference;
-    return window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
+    if (preference === 'light' || preference === 'dark') return preference;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
   function apply(preference) {
-    const pref = ORDER.includes(preference) ? preference : "system";
+    const pref = ORDER.includes(preference) ? preference : 'system';
     const resolved = resolve(pref);
     const root = document.documentElement;
-    root.setAttribute("data-theme", pref);
-    root.setAttribute("data-theme-resolved", resolved);
+    root.setAttribute('data-theme', pref);
+    root.setAttribute('data-theme-resolved', resolved);
     root.style.colorScheme = resolved;
     syncToggle(pref, resolved);
   }
 
   function syncToggle(pref, resolved) {
-    const btn = document.getElementById("theme-toggle");
+    const btn = document.getElementById('theme-toggle');
     if (!btn) return;
     const labels = {
-      system: "Theme: system (follows OS)",
-      light: "Theme: light",
-      dark: "Theme: dark",
+      system: 'Theme: system (follows OS)',
+      light: 'Theme: light',
+      dark: 'Theme: dark',
     };
-    btn.setAttribute("aria-label", labels[pref] || labels.system);
+    btn.setAttribute('aria-label', labels[pref] || labels.system);
     btn.dataset.theme = pref;
     btn.dataset.resolved = resolved;
-    const label = btn.querySelector("[data-theme-label]");
+    const label = btn.querySelector('[data-theme-label]');
     if (label) label.textContent = pref;
   }
 
   function cycle() {
-    const current = stored() || "system";
+    const current = stored() || 'system';
     const idx = ORDER.indexOf(current);
     const next = ORDER[(idx + 1) % ORDER.length];
     try {
@@ -60,19 +58,17 @@
 
   window.__statorTheme = { apply, cycle, resolve, KEY };
 
-  document.addEventListener("DOMContentLoaded", () => {
-    apply(stored() || "system");
-    const btn = document.getElementById("theme-toggle");
-    if (btn) btn.addEventListener("click", cycle);
+  document.addEventListener('DOMContentLoaded', () => {
+    apply(stored() || 'system');
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.addEventListener('click', cycle);
   });
 
   try {
-    window
-      .matchMedia("(prefers-color-scheme: dark)")
-      .addEventListener("change", () => {
-        const pref = stored() || "system";
-        if (pref === "system") apply("system");
-      });
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      const pref = stored() || 'system';
+      if (pref === 'system') apply('system');
+    });
   } catch {
     /* older Safari */
   }

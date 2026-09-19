@@ -6,13 +6,15 @@ on:
     branches: [main]
     paths:
       - "site/**"
-      - "docs/brand/**"
+      - "docs/**"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
       - "site/**"
-      - "docs/brand/**"
+      - "docs/**"
       - ".github/workflows/pages.yml"
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -74,7 +76,7 @@ jobs:
 
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       pages: write
