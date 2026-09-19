@@ -1,5 +1,5 @@
 // @mode: ts
-// @verdict: not-yet
+// @verdict: static
 // @code: STA1214
 // SUBSET.md: Static methods and static class members
 // Writing an inherited static through a subclass creates the subclass's OWN property in

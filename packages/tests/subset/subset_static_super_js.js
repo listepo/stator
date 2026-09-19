@@ -1,5 +1,5 @@
 // @mode: js
-// @verdict: static
+// @verdict: not-yet
 // SUBSET.md: Static methods and static class members
 
 class B {

@@ -1,5 +1,5 @@
 // @mode: ts
-// @verdict: not-yet
+// @verdict: static
 // @code: STA1214
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // `declare x: T` is erased -- no define, no slot -- yet its type still claims a value: a read would be

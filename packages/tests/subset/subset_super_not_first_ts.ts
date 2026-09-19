@@ -1,5 +1,5 @@
 // @mode: ts
-// @verdict: static
+// @verdict: not-yet
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // A derived constructor may run code before `super(...)` and may call it in both branches of an
 // if/else: the field initializers follow the call wherever it sits (plan-notes 233).

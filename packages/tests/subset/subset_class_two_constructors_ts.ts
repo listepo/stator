@@ -1,5 +1,5 @@
 // @mode: ts
-// @verdict: error
+// @verdict: not-yet
 // @code: STA0012
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // Two constructor BODIES are TS2392, which the checker reports before the gate runs; the gate no

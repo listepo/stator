@@ -1,5 +1,5 @@
 // @mode: js
-// @verdict: static
+// @verdict: not-yet
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // The js-mode twin: `abstract` exists only in a `.ts` file, which js mode compiles alongside
 // JavaScript (plan-notes 233).

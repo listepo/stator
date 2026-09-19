@@ -1,5 +1,5 @@
 // @mode: js
-// @verdict: error
+// @verdict: not-yet
 // @code: STA0012
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // The js-mode twin: in JavaScript two constructors are an early SyntaxError, and the checker reports

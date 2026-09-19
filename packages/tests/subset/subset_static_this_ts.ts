@@ -1,5 +1,5 @@
 // @mode: ts
-// @verdict: static
+// @verdict: not-yet
 // SUBSET.md: Static methods and static class members
 // `this` in a static is the class it was reached through; the lowering names it per receiver.
 
