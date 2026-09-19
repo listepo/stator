@@ -1,0 +1,13 @@
+// @mode: ts
+// @verdict: static
+// @code: STA1214
+// SUBSET.md: Static methods and static class members
+// Writing an inherited static through a subclass creates the subclass's OWN property in
+// JavaScript (Node prints `0 5`); one binding per static cannot hold the second value.
+
+class S {
+  static count = 0;
+}
+class T extends S {}
+T.count = 5;
+console.log(S.count, T.count);
