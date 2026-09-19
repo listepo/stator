@@ -1,8 +1,9 @@
-// Shared declarations for the subset_extern_{any,unknown,object,array,fn,string,catchall,
-// varargs,call,overload}_js decision fixtures (docs/FFI.md sections 1-2): the extern
-// signatures whose call sites the fixtures pin. Pulled into each entry's program with a
-// `/// <reference path />`; the gate walks every marked declaration where it is written
-// (gate.ts gateExternDeclarations), so each fixture's verdict is its own call-site diagnostic
+// Shared declarations for the subset_extern_{object,array,fn,string,catchall,
+// varargs}_js + subset_extern_{object,array,fn,string,catchall,varargs}_ts decision
+// fixtures (docs/FFI.md sections 1-2): the extern signatures whose call sites the
+// fixtures pin. Pulled into each entry's program with a `/// <reference path />`; the
+// gate walks every marked declaration where it is written (gate.ts
+// gateExternDeclarations), so each fixture's verdict is its own call-site diagnostic
 // plus the shared declaration walk — adjudicated per fixture, never bulk.
 // The C symbols never need to exist: decision fixtures run `explain`, never a link.
 

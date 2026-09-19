@@ -3,6 +3,50 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 288. JS extern twins share p5-10's per-kind helpers; stale js/ts pins repinned (2026-09-19)
+
+**Plan:** §10 Task 7.1 (FFI surface) + §4 Task 1.4 (decision tests). `plan.md` NOT edited
+in this change — no plan wording was stale; only fixtures/helpers were.
+
+**Extern JS twins (reuse, no duplicates).** Per the mailbox exchange, the five JS twins
+reference p5-10's per-kind helpers directly instead of the shared helper_extern_ffi.d.ts,
+whose declaration walk reported EVERY bad signature (first cTakeAny/STA1114) over each
+file's own verdict: subset_extern_call_js → helper_extern_call.d.ts (not-yet/STA1217 →
+static, direct C call — measured on this branch, marker removed), subset_extern_overload_js
+→ helper_extern_overload.d.ts (stale static → error STA1118, the second overload's bare
+`string` deciding the file via the declaration walk — measured, marker removed, matching
+the TS twin), subset_extern_ptrchain_js → helper_extern_chain.d.ts (not-yet/STA1217 →
+static borrow-only triple — measured, marker removed), subset_extern_any_js →
+helper_extern_any.d.ts and subset_extern_unknown_js → helper_extern_unknown.d.ts (both
+keep error STA1114, now their own row's verdict rather than the shared walk's; comments
+rewritten, both pass). Helper header comments widened `*_ts` → `*_{ts,js}` (one line
+each); helper_extern_ffi.d.ts's header fixture list narrowed to the remaining
+object/array/fn/string/catchall/varargs families (both modes). No C symbols involved:
+decision fixtures run `explain`, never a link.
+
+**Stale pins repinned to measured actuals, no feature work.** bigint twins (both):
+not-yet/STA1213 → error STA4031 — the gate accepts the literal but the lowering has no
+BigInt arm, so it falls through to the internal unexpected-kind diagnostic (SUBSET.md
+row 125 still promises STA1213; the pin names the compiler's answer, not the roadmap).
+decorators twins (both): error STA1112 → not-yet STA1214 — the parser path reaches the
+generic subset boundary before the v1-non-goal arm. proxy twins: js not-yet STA1203 →
+STA1214, ts error STA1106 → not-yet STA1214 — `new Proxy` has no dedicated gate arm yet.
+prototype twins: js not-yet STA1204 → STA1214, ts error STA1107 → not-yet STA1214 —
+`setPrototypeOf`ditto. arguments_binding js: not-yet STA1202 → STA1214 (generic
+boundary); arguments_binding ts: error STA1105 → error STA1003 (checker-first: the
+untyped `f()` trips implicit-any before the arguments arm — concurs with p5-10's scope
+note). jsx js: error STA1111 → not-yet STA1214 (generic boundary); jsx ts: error
+STA1111 → error STA1003 (checker-first on the untyped `el` binding — concurs with
+p5-10). commonjs js: error STA1110 → not-yet STA1214 (boundary first); commonjs ts:
+error STA1110 → error STA0012 (no `require` binding in scope, checker passthrough
+first). All codes DIAGNOSTICS.md-allocated (sole allocator; runner enforces). All
+markers removed — every repinned fixture passes, so none is expected-fail.
+
+**Verify.** `subset --filter extern`: 87 fixtures, 75 passed / 12 expected-fail / 0
+failed. `--filter bigint|decorators|proxy|prototype|jsx_syntax|arguments_binding|
+commonjs`: each family 2 passed / 0 failed (full outputs in the report). tsc (compiler
+project) + oxlint clean.
+
 ## 287. TS extern fixtures go per-kind .d.ts; re-exports/json-boundary repinned (2026-09-19)
 
 **Plan:** §10 Task 7.1 (FFI surface) + §4 Task 1.4 (decision tests). `plan.md` NOT edited in

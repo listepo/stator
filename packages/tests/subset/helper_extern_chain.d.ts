@@ -1,4 +1,4 @@
-// Shared declarations for the subset_extern_ptrchain_ts decision fixture (docs/FFI.md
+// Shared declarations for the subset_extern_ptrchain_{ts,js} decision fixtures (docs/FFI.md
 // section 2 `T*` row): the branded-pointer CHAIN — open returns the handle, query and
 // close each consume it. Kept whole in one file (splitting across helper_extern_ffi.d.ts
 // and helper_extern_ptr.d.ts would duplicate `type sqlite3`) and apart from the refusal

@@ -1,4 +1,4 @@
-// Shared declarations for the subset_extern_unknown_ts decision fixture (docs/FFI.md
+// Shared declarations for the subset_extern_unknown_{ts,js} decision fixtures (docs/FFI.md
 // section 2): `unknown` in an extern signature — it would need boxing, so it is refused
 // as STA1114 rather than silently boxed. Kept apart from the accepted helpers (whose
 // only-accepted rule the refusal would violate) and from helper_extern_ffi.d.ts: one

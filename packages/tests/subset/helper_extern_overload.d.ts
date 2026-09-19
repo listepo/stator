@@ -1,4 +1,4 @@
-// Shared declarations for the subset_extern_overload_ts decision fixture (docs/FFI.md
+// Shared declarations for the subset_extern_overload_{ts,js} decision fixtures (docs/FFI.md
 // section 1 rule 4): an overloaded extern resolves to the FIRST marked declaration.
 // The second overload wears a bare `string` that earns STA1118 on its own — the
 // declaration walk reports every bad signature where it is written, so the file's
