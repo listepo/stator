@@ -365,6 +365,37 @@ void test('statics are accepted; what has no class object to read is not', () =>
   assert.deepEqual(codesFor('class C {\n  static n = 1;\n}\nconsole.log(C.name);'), ['STA1214']);
 });
 
+void test('opaque class uses and Function.prototype.bind stay STA1214 (step 12e)', () => {
+  // Opaque class uses — `f(C)`, `typeof C` — read the class object rung 6b never allocated
+  // (plan.md §8 step 12e); `bind`/`call`/`apply` need its two-slot env (docs/VALUE.md §4.16).
+  // Pinned here so the decision fixtures have a unit backstop for the exact message.
+  assert.deepEqual(
+    codesFor(
+      'class C {\n  x: number = 1;\n}\nfunction f(v: unknown): void { console.log(v); }\nf(C);\n',
+    ),
+    ['STA1214'],
+  );
+  assert.deepEqual(codesFor('class C {\n  x: number = 1;\n}\nconsole.log(typeof C);\n'), [
+    'STA1214',
+  ]);
+  const { program: bindProgram } = createProgram(
+    'function add(a: number, b: number): number {\n  return a + b;\n}\nconst bound = add.bind(undefined, 1);\nconsole.log(bound(2));\n',
+  );
+  const bindDiags = gateProgram(bindProgram, 'ts');
+  assert.deepEqual(
+    bindDiags.map((d) => d.code),
+    ['STA1214'],
+  );
+  assert.match(bindDiags[0]?.message ?? '', /Function\.prototype\.bind is not yet supported/);
+  // A user class's own `bind` method is an ordinary method call, not the builtin.
+  assert.deepEqual(
+    codesFor(
+      'class S {\n  bind(x: number): number {\n    return x;\n  }\n}\nconst s = new S();\nconsole.log(s.bind(1));\n',
+    ),
+    [],
+  );
+});
+
 void test('a class alias erases in place and stays not-yet as a value', () => {
   // `const K = C` binds no value: every in-place use erases to the target declaration, so the
   // three spellings below compile exactly as the direct ones (plan.md §8 step 12e). Anything

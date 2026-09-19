@@ -2682,6 +2682,25 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     if (staticMemberOf(callee, typeChecker, true) !== undefined) {
       return { kind: 'accept' };
     }
+    // `fn.bind(…)` / `o.m.bind(…)` — `Function.prototype.bind` builds a bound closure whose
+    // env holds the receiver in slot 0 and the target in slot 1 (docs/VALUE.md §4.16,
+    // plan.md §8 step 12e). Asked before the class-declaration lookup below, because the
+    // callee's own type answers "method of Function.prototype" nowhere the arms above
+    // model, and the fallthrough would otherwise report it as a generic "method calls"
+    // refusal. Gated on the receiver being function-typed, so a user class's own `bind`
+    // method still vets as an ordinary method call below. Owns `call`/`apply` by the same
+    // token: the same bound-closure work lands them.
+    if (
+      (callee.name.text === 'bind' ||
+        callee.name.text === 'call' ||
+        callee.name.text === 'apply') &&
+      typeChecker.getSignaturesOfType(
+        typeChecker.getTypeAtLocation(callee.expression),
+        ts.SignatureKind.Call,
+      ).length > 0
+    ) {
+      return notYet(`Function.prototype.${callee.name.text} is not yet supported`, 5);
+    }
     if (
       callee.name.text === 'next' ||
       callee.name.text === 'return' ||

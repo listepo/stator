@@ -3,6 +3,50 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 283. Step 12(e)+(d) owner pins: opaque class uses, typeof C, bind, default imports (2026-09-19)
+
+**Plan:** §8 steps 12(e) (opaque class values) and 12(d) (anonymous defaults). `plan.md`
+NOT edited in this change — no task language changes; both remainders stay open.
+`docs/SUBSET.md` edited in the same change (method-value row names the
+`bind`/`call`/`apply` refusal and its fixtures).
+
+**What landed.** Eight decision fixtures plus one small gate refinement, pinning the
+precise `STA1214` refusals the gate already emits (verified `not-yet`/`STA1214` in both
+modes via `explain --json` before landing):
+
+- Opaque class-declaration uses (`subset_class_opaque_{ts,js}`): `f(C)` reads the class
+  object rung 6b never allocated. The alias (`subset_class_alias_opaque_*`) and
+  expression (`subset_class_expression_opaque_*`) twins already pinned the same value
+  read through their spellings; the declaration itself had no fixture.
+- `typeof C` (`subset_class_typeof_{ts,js}`): the same class-object read through the
+  `typeof` operator. The `TypeOfExpression` gate arm accepts every other operand, so
+  this read refuses at the identifier arm (`using a class as a value`), not there.
+- `Function.prototype.bind` (`subset_function_bind_{ts,js}`) plus a one-arm gate edit:
+  `add.bind(...)` used to refuse as generic "method calls are not yet supported", which
+  names no owner and no mechanism. `gateCall` now answers
+  `Function.prototype.bind/call/apply is not yet supported` (same `STA1214`, Phase 5)
+  when the receiver is function-typed — a user class's own `bind` method still vets as
+  an ordinary method call below (unit-pinned). The two-slot env design (receiver slot
+  0, target slot 1, one shared thunk) stays docs/VALUE.md §4.16's; `call`/`apply`
+  ride with `bind` because the same work lands them.
+- Default imports (`subset_default_import_{ts,js}`): refused because the export is
+  anonymous and name-based merging cannot honor the spelling — the same identity gap
+  that keeps the anonymous default-export declaration (`subset_class_anonymous_*`)
+  refused. The formation `const K = C` keeps its erasure: `K` in `new K`/`K.static`/
+  `o instanceof K` is not a value read and stays accepted.
+
+**Why not the implementation.** A class object is a value with identity, `prototype`,
+`name`, and static-side dispatch — a runtime representation plus the descriptor
+erasure's inverse — and `bind` is a two-slot env plus its thunk: each its own slice
+with its own golden, not a rider on a pinning change. The smallest honest slice here
+is the refusal surface both modes agree on, owned by step 12(e) (class object, bind
+env) and step 12(d) (anonymous default identity via the module-namespace residue).
+
+**Not in this change.** The class object itself; the `bind` env and thunk;
+`call`/`apply` semantics beyond the shared refusal; any default-import or namespace
+machinery; goldens for refused shapes (a refused construct has no output to compare
+byte-for-byte).
+
 ## 282. Step 12(d) refusal pins: abstract accessors, static-block super/this (2026-09-19)
 
 **Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no
