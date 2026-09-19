@@ -3,7 +3,52 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 286. Step 12(f) homeless-arrow + escape/self-apply/instanceof residue pinned STA1214 (2026-09-19)
+
+**Plan:** §8 step 12(f) (generics beyond monomorphization). `plan.md` NOT edited in this
+change — the 12(f) residue line already names exactly these shapes (`let`, nesting,
+branch, spread, constructor argument; escape; self-application; `instanceof` vs a
+generic class), and `docs/SUBSET.md`'s generics row already lists them as `not-yet
+(STA1214)`. No wording was stale; only decision fixtures were missing.
+
+**What landed.** No gate or lowering change — every shape refused `STA1214` in both
+modes before this change (verified via `explain --json` per probe, ts and js), and
+position-derived keys were deliberately NOT extended:
+
+- Six new decision pairs (`*_ts.ts` + `*_js.ts`, all `not-yet`/`STA1214`, all passing —
+  subset filter `generic`: 60 → 72 fixtures, 0 failed): `homeless_let` (a `let` could be
+  reassigned under a collected tuple), `homeless_nesting` (a nested `const` lives in a
+  scope the module-level specializations would leak), `homeless_branch` (a conditional
+  is not a direct call argument — no single parameter type to read), `homeless_spread`
+  (a tuple element carries no parameter position), `homeless_ctor_arg` (a `new`
+  argument: `inlineGenericTuple` pairs call arguments only; extending it to the
+  construct signature would name a specialization the constructor's `new` lowering
+  never collects), and `escape_stored` (a generic stored in an array escapes every use
+  site that could name a tuple — the stored companion to the returned shape
+  `subset_generic_escape_*` already pins).
+- Escape (returned), self-application `box(box)`, and `instanceof` vs a generic class
+  were already pinned by `subset_generic_escape_*`, `subset_generic_selfapply_*`, and
+  `subset_generic_instanceof_*`; the homeless branch/ctor-arg shapes were already
+  pinned at unit level (`an inline arrow away from a direct argument is refused`), and
+  `let`/nesting by `a generic arrow in a let or a nesting is still refused`. This
+  change adds the decision-fixture twins the Check asks for without touching those
+  pins — no bulk flips, no verdict changes.
+- The `*_js.ts` twins carry `.ts` syntax (type parameters) because `.js` cannot spell
+  a generic; the runner runs them under `--mode=js` anyway, where they refuse
+  identically (same convention as `subset_generic_homed_module_binding_js.ts`).
+
+**Why not position-derived keys here.** A `let` key would be unsound (reassignment
+under a collected tuple); a nesting key would leak scope (the specialization lowers
+at module level); a branch/spread key has no single parameter type to unify against;
+a constructor-argument key would need `genericNewInstantiation`'s construct-signature
+path to collect a function-typed parameter's tuple, which it does not. The honest
+verdict is the `STA1214` the gate already emits.
+
+**Not in this change.** Goldens for refused shapes (a refused construct has no output
+to compare — the decision rows are the coverage); `let`-reassignment narrowing or
+construct-signature inline keys (Phase-8 tier work, not this pin).
 ## 285. Step 12(c) spread residue: unknown / no-fixed-shape stays STA1214 (2026-09-19)
+
 
 **Plan:** §8 step 12(c) (object literal forms). `plan.md` edited in the same change (the
 12(c) residue line, which still said "a spread of anything but a variable of fixed shape",
