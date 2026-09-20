@@ -15,14 +15,17 @@ This is a research compiler under active construction (Phase 5 of [`plan.md`](pl
 | Speed | unboxed values inside checked code | same, wherever the checker can infer a type |
 
 ```
+# Dev (no build step): run the CLI from TypeScript on the pinned Node
 node packages/compiler/src/cli/main.ts build app.ts -o app
 node packages/compiler/src/cli/main.ts build app.js -o app --mode=js
 node packages/compiler/src/cli/main.ts explain app.ts --json
+
+# After `pnpm run build`, the same commands are available as `stator …`
 ```
 
 `explain` reports per-construct verdicts: `static`, `dynamic`, `error`, or `not-yet`. Decision tests in `packages/tests/subset/` are that matrix.
 
-## Requirements
+## Setup
 
 Pinned in [`.node-version`](.node-version) and [`mise.toml`](mise.toml): Node 26.7.0, pnpm 12.3.4, LLVM clang 21.1.8, just 1.58.0. Full table: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md).
 
@@ -54,6 +57,7 @@ Dev runs TypeScript directly on the pinned Node — no `pnpm run build` step for
 | | |
 |---|---|
 | [docs/README.md](docs/README.md) | index of the spec docs |
+| [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | how the pipeline works + usage examples |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | pipeline diagrams (D2) |
 | [docs/MODES.md](docs/MODES.md) | `ts` vs `js` |
 | [docs/SUBSET.md](docs/SUBSET.md) | what compiles, what is error, what is not-yet |
@@ -61,6 +65,7 @@ Dev runs TypeScript directly on the pinned Node — no `pnpm run build` step for
 | [docs/FFI.md](docs/FFI.md) | calling C from TS: extern surface, ABI table, ownership |
 | [plan.md](plan.md) | roadmap (open work only) |
 | [AGENTS.md](AGENTS.md) | conventions for humans and agents working in this repo |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | short contributor checklist |
 
 ## License
 

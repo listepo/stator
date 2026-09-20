@@ -244,14 +244,20 @@ void test('a dynamically-typed argument makes the file dynamic, flag included', 
   }
 });
 
-void test('an optional call to an extern is STA1217 in the call arm too', async () => {
+void test('an optional call to an extern is a direct call, not STA1217', async () => {
   const { work, entry } = writeExternProgram({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(extSqrt?.(4));\nexport {};\n',
     'helper.d.ts': DIRECT_HELPER,
   });
   try {
+    // The callee always links, so `?.` is a proven no-op: same verdict, same flag, same
+    // direct C call as the plain form (Phase 7 close-out).
     const result = await explainFile(entry, 'ts');
-    assert.deepEqual([result.verdict, result.code], ['not-yet', 'STA1217']);
+    assert.equal(result.verdict, 'static');
+    assert.deepEqual(result.externCalls, [{ name: 'extSqrt', line: 2 }]);
+    const compiled = await compileToC(entry, 'ts');
+    assert.ok(compiled !== null, 'an optional extern call emits C');
+    assert.ok(compiled.c.includes('extSqrt('), 'the optional call is a direct C call');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
