@@ -66,6 +66,16 @@
   },
   "overrides": [
     {
+      // Astro layouts load global CSS via side-effect import; assigning it does nothing useful.
+      "files": ["site/**/*.{astro,ts,js,mjs}"],
+      "rules": {
+        "import/no-unassigned-import": [
+          "error",
+          { "allow": ["**/*.css", "**/*.scss", "**/*.sass"] }
+        ]
+      }
+    },
+    {
       // An empty program is the measurement: `bench/programs/startup.ts` times what the runtime
       // costs before it does anything, so the file has to stay empty.
       "files": ["packages/tests/bench/programs/*.ts"],

@@ -122,14 +122,14 @@ importers:
         specifier: 2.11.0
         version: 2.11.0(@opentelemetry/api@1.9.1)
       '@types/node':
-        specifier: 26.4.0
-        version: 26.4.0
+        specifier: 26.5.1
+        version: 26.5.1
       '@types/react':
         specifier: 19.3.0
         version: 19.3.0
       cpd:
-        specifier: 5.0.16
-        version: 5.0.16
+        specifier: 5.2.0
+        version: 5.2.0
       dotenv:
         specifier: 17.4.2
         version: 17.4.2
@@ -682,8 +682,8 @@ packages:
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
 
-  '@types/node@26.4.0':
-    resolution: {integrity: sha512-faiGnoIrLH/V8cibOMEAZ8pMw6oXqSukl29ra4mN8GdaB2ZewzeaLj+INpV5N+Z1eKWzY+IzaIZH2EIR6YZRNQ==}
+  '@types/node@26.5.1':
+    resolution: {integrity: sha512-CzNm2FezW4VR/LjG6yUdiEgLE/rAQ9Slj5gCu/C2VrdcW7I0ahNZ8DRbHT7zOZ6r3ONgd/bsQIeSaoDGrd1C6g==}
 
   '@types/react@19.3.0':
     resolution: {integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==}
@@ -728,8 +728,8 @@ packages:
     resolution: {integrity: sha512-rcQ1bsQO9799wq24uE5AM2tAILy4gXGIK/njFWcVQkGNZ96edlpY+A7bjwvzjYvLDyzmG1MmMLZhpcsb+klNMQ==}
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
 
-  cpd@5.0.16:
-    resolution: {integrity: sha512-b+YlDJw2MpFtgBevfnDf51PSztvtUTsG6dljk2cL96b5pKi44NQyj1zPtCBcK3T5ZSGzIfsMpe4XhX904WCDNg==}
+  cpd@5.2.0:
+    resolution: {integrity: sha512-o5QAlq/TELW65iNu53TOU7x2UBPZtjFnurx+f/wqZ5bUrCRsDqUQtURpMcIK9S9nsCSk/KJlD3Aj4iDyRBFfSg==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -819,36 +819,47 @@ packages:
     resolution: {integrity: sha512-mE00Gnza5EEB3Ds0HfMyllZzbBrmLOX3vfWoj9A9PEnTfratQ/BcaJOuMhnkhjXvb2+FkY3VuHqtAGpTPmglFQ==}
     engines: {node: '>=18'}
 
-  jscpd-darwin-arm64@5.0.16:
-    resolution: {integrity: sha512-Tu6OAg3Rp6m7LCZqOtPViJxYGTKXTLrI/xMyjEKe79N9L7GpbI3XhgotGDpoE+PjLRbgJgGhRKbkKK18FPySmQ==}
+  jscpd-darwin-arm64@5.2.0:
+    resolution: {integrity: sha512-QnEDfTH2MymizVHiEQpqfYEj63k1DW7QC0QBZoevh+o/iHQrHxKlgrakMysUIwIJlnmvqPB6iP/G3dBpFmnmeQ==}
     cpu: [arm64]
     os: [darwin]
 
-  jscpd-darwin-x64@5.0.16:
-    resolution: {integrity: sha512-3btQ1aG8K7+9rvJjyaRJRcSBD0DvHgZOUVlecjnyO99FYzMvdFREq67UIl5CAXFeYf5EY8TSorCMZQxL6TBD0w==}
+  jscpd-darwin-x64@5.2.0:
+    resolution: {integrity: sha512-P2lYEK0Yyn+0z7618+9A0NErywjaPrwSYcId3gRSt5l0cyKBwhMmyFLX/2t3G2HRi+GX+OT2A/YpWvvTzLJJ1A==}
     cpu: [x64]
     os: [darwin]
 
-  jscpd-linux-arm64-gnu@5.0.16:
-    resolution: {integrity: sha512-L1F9CNHxRPqGJCKgGRA4gtZcESACFkS2lgfPgWn9fG+4CkiewLcYyy/oxrafJJL1/PPTQ24sbLuzPaKUxJuvuw==}
+  jscpd-linux-arm64-gnu@5.2.0:
+    resolution: {integrity: sha512-UhdX9vvCFwoG1cViNqFyvxfqNtJ+xWbGsgZ5PbcgUx2OLWnvjhkjihPw/fOUM9IoxHaT66AE5pipaV/oQE/76A==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  jscpd-linux-x64-gnu@5.0.16:
-    resolution: {integrity: sha512-BruP+sAr0+6QsEQZvOkgcS+xR23y4s1hLA0xfkcO1zFFXdnmQdJ4w23/U8VlPwqO2dFRaAEseYEXjHs5oQQGFw==}
+  jscpd-linux-arm64-musl@5.2.0:
+    resolution: {integrity: sha512-13DsZCQ58fOMUX6mU8DZtiTdIk+9Gp2xLu6mtc6fmqqZRJoRHQSSDvMqRVedCqArquxc0I+tqQtZO4n7/8QJxA==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  jscpd-linux-x64-gnu@5.2.0:
+    resolution: {integrity: sha512-p88BpA5QzyZzyF8uYeVCz9ZBoZYg8s6AwcDc3NkIDNTbrrF0sKqgGjclGWAoJvYAiGExiFNqV768pVHsE//l0Q==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  jscpd-linux-x64-musl@5.0.16:
-    resolution: {integrity: sha512-T36RtMnF695Y1/T3cLEhgvspHdKoiF+oxK/lklGJWriLieImZolSOjGXsecW2bp7MNMMGlqLLRzr2RNgnwy+Hg==}
+  jscpd-linux-x64-musl@5.2.0:
+    resolution: {integrity: sha512-6DgIxJpS7L4bb1DkYrqC0SflMY2/2/3Dl0kZJ1In6SeSENcTaZ12W1zX3kNf7wVUDFgPi94TuSxrw3N2TqRhRg==}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  jscpd-windows-x64-msvc@5.0.16:
-    resolution: {integrity: sha512-BcrY18r6uje+TjgBKdFZJz6qfAAh9QT24KZYZk+jk6tuIKOYIm6oRMeQEu3Tzr/len9ZethN2h1bKmv+EfHcGw==}
+  jscpd-windows-arm64-msvc@5.2.0:
+    resolution: {integrity: sha512-DI84oCG+L5sYhmYanXjjydXlFzC194/NJA6F7W8cmOI1rKSnWrgIjUtvTmXumygwTK/eAXkK7rFBqFnyiLEzdw==}
+    cpu: [arm64]
+    os: [win32]
+
+  jscpd-windows-x64-msvc@5.2.0:
+    resolution: {integrity: sha512-EH4chck2EIehosfy7q6hxaKgzlaZv/dZhUHtjBmBf81d5/ZDfa6BsKw2gM8PSoNC0QXznWXv9uQcFWsV+P9v8A==}
     cpu: [x64]
     os: [win32]
 
@@ -993,8 +1004,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici-types@8.3.0:
-    resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   unicorn-magic@0.3.0:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
@@ -1385,9 +1396,9 @@ snapshots:
 
   '@sindresorhus/merge-streams@4.0.0': {}
 
-  '@types/node@26.4.0':
+  '@types/node@26.5.1':
     dependencies:
-      undici-types: 8.3.0
+      undici-types: 8.9.0
 
   '@types/react@19.3.0':
     dependencies:
@@ -1422,14 +1433,16 @@ snapshots:
 
   convert-to-spaces@2.0.1: {}
 
-  cpd@5.0.16:
+  cpd@5.2.0:
     optionalDependencies:
-      jscpd-darwin-arm64: 5.0.16
-      jscpd-darwin-x64: 5.0.16
-      jscpd-linux-arm64-gnu: 5.0.16
-      jscpd-linux-x64-gnu: 5.0.16
-      jscpd-linux-x64-musl: 5.0.16
-      jscpd-windows-x64-msvc: 5.0.16
+      jscpd-darwin-arm64: 5.2.0
+      jscpd-darwin-x64: 5.2.0
+      jscpd-linux-arm64-gnu: 5.2.0
+      jscpd-linux-arm64-musl: 5.2.0
+      jscpd-linux-x64-gnu: 5.2.0
+      jscpd-linux-x64-musl: 5.2.0
+      jscpd-windows-arm64-msvc: 5.2.0
+      jscpd-windows-x64-msvc: 5.2.0
 
   csstype@3.2.3: {}
 
@@ -1523,22 +1536,28 @@ snapshots:
 
   is-unicode-supported@2.1.0: {}
 
-  jscpd-darwin-arm64@5.0.16:
+  jscpd-darwin-arm64@5.2.0:
     optional: true
 
-  jscpd-darwin-x64@5.0.16:
+  jscpd-darwin-x64@5.2.0:
     optional: true
 
-  jscpd-linux-arm64-gnu@5.0.16:
+  jscpd-linux-arm64-gnu@5.2.0:
     optional: true
 
-  jscpd-linux-x64-gnu@5.0.16:
+  jscpd-linux-arm64-musl@5.2.0:
     optional: true
 
-  jscpd-linux-x64-musl@5.0.16:
+  jscpd-linux-x64-gnu@5.2.0:
     optional: true
 
-  jscpd-windows-x64-msvc@5.0.16:
+  jscpd-linux-x64-musl@5.2.0:
+    optional: true
+
+  jscpd-windows-arm64-msvc@5.2.0:
+    optional: true
+
+  jscpd-windows-x64-msvc@5.2.0:
     optional: true
 
   memfs@4.75.0:
@@ -1695,7 +1714,7 @@ snapshots:
 
   typescript@6.0.3: {}
 
-  undici-types@8.3.0: {}
+  undici-types@8.9.0: {}
 
   unicorn-magic@0.3.0: {}
 

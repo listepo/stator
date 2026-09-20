@@ -2,10 +2,11 @@
 
 How stator is specified. [`plan.md`](../plan.md) is the authority for what is still open; these files operationalize it.
 
-**Getting started:** [project README](../README.md). **Contributing:** [`CONTRIBUTING.md`](../CONTRIBUTING.md).
+**Getting started:** [project README](../README.md) → [`HOW-IT-WORKS.md`](HOW-IT-WORKS.md). **Contributing:** [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 | File | What it is |
 |---|---|
+| [HOW-IT-WORKS.md](HOW-IT-WORKS.md) | Pipeline narrative + CLI and example walkthroughs (todo, FFI) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | D2 gallery: pipeline, `stator build`, packages, value boxing |
 | [MODES.md](MODES.md) | `--mode=ts` vs `--mode=js`: file acceptance, diagnostics, mixed-graph boundaries |
 | [SUBSET.md](SUBSET.md) | Feature × mode matrix (`static` / `dynamic` / `error` / `not-yet`) |
