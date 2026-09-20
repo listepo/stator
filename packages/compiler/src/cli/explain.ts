@@ -612,6 +612,11 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
     case 'iterator-next':
       return expressionHasUnknown(expr.target) || expressionHasUnknown(expr.sent);
+    // The dispatch answers an iterator over Unknown elements, which the type check at the top
+    // of this function has already answered; this arm completes the switch and reports the
+    // operand for the same reason `iterator-next` reports its own.
+    case 'get-iterator':
+      return expressionHasUnknown(expr.target);
     case 'date-new':
     case 'error-new':
     case 'json-stringify':

@@ -338,6 +338,14 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // widened to Unknown below so no use trusts the annotation; every use then takes the dynamic
   // path (reads, index, calls) or a null-validated static one (array ops via STA2008).
   2454, // Variable 'X' is used before being assigned.
+  // Unknown-iterable `for-of` (slice 2488, plan.md §8 step 2a(c)): `for (const x of u)` where `u`
+  // is Unknown, a union, or any other type without a static walk is ordinary JavaScript with an
+  // exact runtime answer -- the GetIterator dispatch (`jsrt_get_iterator`) boxes collections,
+  // drives generators and stored iterators, calls a user-iterable method, and throws Node's
+  // catchable `TypeError` for the rest. Like the suppressed-2349 call of plan.md §8 step 37, a
+  // statically-known non-iterable (a number, `undefined`) compiles to that same runtime throw
+  // rather than a compile error. ts mode keeps the refusal (STA0012).
+  2488, // Type 'X' must have a '[Symbol.iterator]()' method that returns an iterator.
 ]);
 
 /** Checker refusals Stator answers with exact runtime semantics in BOTH modes, unlike the

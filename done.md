@@ -1218,6 +1218,59 @@ was `STA1214` or `STA0012`, so no passing test could have contained one) and the
 a working copy with the step-12(e) landing whose new shadowing refusal has exactly that shape. Full
 evidence and the re-measure condition: plan-notes 210.
 
+### Step 2a(c) — unknown-iterable GetIterator dispatch, 2488 (2026-09-16)
+
+**The Check that closed** (`plan.md` §8 step 2a(c)): *each suppression lands with a both-modes
+decision fixture (`error` in ts, `dynamic` in js) and a golden proving js mode compiles it to
+Node's answer.* The 2488 suppression does exactly that; the 2454 half had landed in wave 3 and
+is verified green here. Design record: plan-notes 280.
+
+**What was there before.** `for-of` over anything without a static walk was `STA1214` in both
+modes, and `c[Symbol.iterator]` on an unknown receiver a precise Phase-8 refusal (wave 4). The
+checker's TS2488 fired for every one of these shapes in both modes.
+
+**The dispatch, end to end.** A `get-iterator` HIR node (`target`, always typed `iterator` with
+an Unknown element) wraps any `for-of` operand no static walk covers — an Unknown value, a
+union, or a checker-refused non-iterable js mode admitted. The gate admits those in js mode
+only (`gateForOf` takes the mode); the lowering wraps them (`wrapDynamicIterator`); `program.ts`
+suppresses TS2488 in js; ts mode keeps the refusal. The node emits one `jsrt_get_iterator` call
+ahead of the existing boxed walk, so no emission arm was added: the verifier pins the
+node-type contract (`STA4045`), codegen counts one rooted temp, `rewrite.ts` and `explain.ts`
+carry their arms. The runtime (`runtime/src/jsrt_iterator.c`) passes generators and stored
+boxes through, boxes arrays/strings/Maps/Sets into their specialized walks, resolves
+`__@iterator` through the shape table and calls it with the receiver (a non-generator,
+non-box result is Node-verbatim `TypeError: Result of the Symbol.iterator method is not an
+object`), and throws catchable `X is not iterable` otherwise — rendered by the shared
+`jsrt_throw_not_iterable` the `STA2009` path now also uses. A custom `{ next() }` object stays
+`STA1214` by card; driving one is the Phase-8 tier, not this dispatch.
+
+**Two gate refinements the landing forced.** In ts mode the gate refuses only what the checker
+accepted (asked via the checker's property list, since `__@iterator@<id>` suffixing defeats
+exact lookup and the HType mapping drops interface methods — `Iterable<T>` proved it), leaving
+a lone STA0012 otherwise, because `explain` ranks not-yet above error-class. And a `for-of`
+binding is not an annotation site (`annotationSiteOf`), so the checker's recovery-`any` no
+longer buries that STA0012 under STA1003 — every other any-binding has a companion diagnostic,
+so nothing goes silent.
+
+**Check evidence, Node v26.7.0.** Decision fixtures `subset_for_of_unknown_js` (`dynamic`) and
+`subset_for_of_unknown_ts` (`error STA0012`); `tests/golden/js/for_of_unknown.js` matches Node
+byte-for-byte (collections, code-point strings, Map entries, Set, generators with
+finally-on-break/throw, user classes, stored boxes, `.keys()` views, unions, every TypeError
+path). The suppression's wake on spread — directly-`unknown` array spread moving STA0012 →
+lowering STA1214 in js — is pinned by `subset_spread_direct_unknown_{js,ts}`. Test262 per-slice before/after (pristine
+worktree at the base commit vs this branch): `for-of` 87/675/67 → 87/708/34, `spread` 8/286/37
+unchanged, `iterat` 2/598/23 → 2/607/14, `generator` 110/1688/51 → 110/1700/39 — 54
+failed→skipped, zero passed→failed; `ratchet.json` untouched per plan.md:416-422.
+
+```text
+tests 564; pass 564; fail 0
+114 clones · 0.9% duplication
+runtime: print corpus matches Node
+subset: 679 fixtures — 641 passed, 38 expected-fail, 0 failed
+golden: 387 fixtures — 387 passed, 0 failed
+golden: 387 fixtures — 387 passed, 0 failed   (ASan/UBSan)
+```
+
 ### Step 15 — Suspension inside a per-iteration-env loop (2026-09-11)
 
 **The Check that closed** (`plan.md` §8 step 15): *a golden where an async function awaits inside a
@@ -2341,7 +2394,102 @@ reopen has the full picture.
 Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output names
 `differential/run.ts` among analyzed files.
 
-## Phase 7 — FFI (in progress)
+## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
+
+**Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is
+itself callable from a C `main()` — built and run in CI* (plan.md §10). The demo
+(`examples/ffi/sqlite/`: generated binding from the curated `sqlite_mini.h` + `demo.ts` +
+C `main.c`) opens `:memory:`, creates/fills/selects/prints, finalizes, and closes —
+byte-identical to the pinned Node 26.7.0 — and answers from a C `main()` through the 7.2
+header (success + `last_error` paths). The CI proof is the ffi job's own steps
+(`.github/workflows/ci.yml`: `test:ffi`, the C-consumer runner, the SQLite C-main runner).
+
+Re-verified at close-out (2026-09-16 on `9f2eba4`, docs-only changes since):
+`test:ffi` 5 checks — 5 passed, 0 failed, 0 not run; `c-consumer.ts` → `ffi c-consumer: ok`;
+`sqlite-c-main.ts` → `ffi sqlite-c-main: ok`; `sqlite-demo.ts` → `sqlite demo: ok`; libm/stat
+examples ok; full `pnpm run ci` green (check-node v26.7.0; typecheck/lint/dupes clean; unit
+564/564; runtime corpus matches Node; subset 677 — 639 passed, 38 expected-fail, 0 failed;
+golden 386/386 + 2 intl skipped; builtins 223/238; leak 10M-object plateau 3664 KB;
+golden-asan green).
+
+Task records below: 7.1 steps 1–2 (surface docs), 3–5 (converters/lowering), 6–10
+(ownership/link/explain/js-checks/tests), 7.2 steps 1–2 (header flags), 3–8
+(stubs/init/throws/frames/threads/mangling/determinism), step 9 (CI example), 7.3
+(`Out<T>`, generator, demo). The contract lives on in `docs/FFI.md`, the codes in
+`docs/DIAGNOSTICS.md`, the matrix rows in `docs/SUBSET.md`.
+
+**Residue, named not owned.** Two follow-ups were never Check items and have no phase owner:
+the ambient `CString`/`CStringOwned` (+ `Out`) declarations in the stator lib (fixtures
+declare brands locally until then — FFI.md §7.3), and generator convention transfer (the
+demo hand-checks every unconventioned return code until then — plan-notes 271); the
+TS-name/brand alias policies are mechanical deltas documented there too. A future card owns
+them; the phase does not stay open for them.
+
+**§15.9 reassignment in the same change.** Closing the phase forced the rule's question —
+three `phase: 7` sites survived under `src/` (plan-notes 273): the optional extern call
+DELIVERED as a direct C call (`?.` on an always-linked callee is a proven no-op;
+`isDirectCalleePosition` + `gateExternCall` + `lowerExternCall` agree, proved by
+`subset_extern_optional_call_{ts,js}` at `static` and the new `?.` lines in the
+`extern_libm` goldens both modes), and the extern-as-value STA1217 plus the bare-package
+STA1214 reassigned PHASELESS (no open phase owns either; messages name the blocker, never
+a phase number). `COMPLETED_PHASES` gains 7; `tests/unit/phases.test.ts` green.
+
+### Task 7.1 steps 1–2 — Extern surface frozen in docs ✅ (landed 2026-09-14, `a732cd5`)
+
+Docs before code (§15.6): `docs/FFI.md` §§1–2 (the `@statorExtern` marker — per declaration,
+C symbol defaulting to the TS name with trailing-text override, `.d.ts`-only — and the ABI
+table with `string`-maps-to-nothing and per-kind refusal codes), `docs/SUBSET.md` FFI rows,
+`docs/DIAGNOSTICS.md` STA1114–STA1121 (`never`) + STA1217 (`not-yet` Phase 7). No compiler
+code in the commit — the surface existed on paper before the lowering was allowed to start.
+
+### Task 7.1 steps 6–9 — Ownership, link plumbing, explain mark, js checks ✅ (landed 2026-09-14/15)
+
+- **Step 6, borrow-only pointers** (`0357121` extern-borrow surface): brands classify as the
+  `pointer` ABI kind; generated code evaluates arguments into rooted frame slots and passes
+  handles through untouched and unretained (`docs/FFI.md` §6 — the emitter guarantees, by
+  construction, no load through the handle and no copy beside the slot). STA1217 now names
+  only extern-as-value and optional-call positions.
+- **Step 7, headers and link flags** (`docs/FFI.md` §9; reader
+  `packages/compiler/src/frontend/extern.ts:432`): one `// @statorLink` pragma per `.d.ts`
+  (flags form + single-`#include` header form, STA1119 shape rules) plus the repeatable
+  `--link=` CLI hatch (`packages/compiler/src/cli/main.ts:33,125`); `linkExecutable`
+  assembles recorded flags, then pragma flags in program order, then CLI flags — dedup
+  first-wins on `-l`, never sorted. `libm` needs no pragma (`-lm` rides `link-flags.txt`).
+- **Step 8, the honest boundary** (`83e2272` field, §5 semantics): `stator explain` carries
+  `externCalls` alongside the verdict (`packages/compiler/src/cli/explain.ts:47,107,178`) —
+  ts calls `static` + flag, js calls `static`/`dynamic` + flag by argument provenance, slots
+  always `static`; refusals carry no flag.
+- **Step 9, js-mode checks** (no new mechanism): each dynamic argument is wrapped in the
+  call-edge boundary check the mixed-graph rule owns
+  (`packages/compiler/src/lower/index.ts:9595` — `maybeBoundary`, STA2001 at run time on
+  mismatch). The declaration is identical in both modes; only the checks differ.
+- **Step 10** is the test-infra record below (libm both modes, self-compiled `.c` through
+  `--link=`, real `--emit-header` double build, ASan buffer ownership — all passing checks
+  in `packages/tests/ffi/run.ts`).
+
+### Task 7.2 steps 3–8 — Init, throws, frames, threads, mangling, determinism ✅ (landed 2026-09-15)
+
+Stubs in `39da02f` (361-line `tests/unit/export-stubs.test.ts`: in-process shape plus a
+linked C `main()` proving init→call→error), header rules in `4445956`/`a42c198`, all restated
+normatively in `docs/FFI.md` §8:
+
+- **Step 3, init:** `stator_init_<unit>()` — GC, globals frame, module environment, the same
+  top-level emission `main` runs (never a second copy), microtask drain, exported-const
+  stores; idempotent via a set-before guard; declared first; calling anything before it is UB
+  (`packages/compiler/src/codegen/index.ts:1205`).
+- **Step 4, throws:** `stator_<unit>_last_error()` (NULL = success) plus a zero-value
+  sentinel per C spelling; cleared on entry, `_Thread_local`, valid until the next call; the
+  stub funnels every throw path through one `_jsrt_err` epilogue into a rooted slot — never
+  abort, never unwind (`codegen/index.ts:1147`).
+- **Step 5, frames:** every stub opens one `JSRT_FRAME` and pops it on every exit including
+  step 4's; arguments convert into frame slots; stubs never `JSRT_GLOBALS_ENTER`.
+- **Step 6, threads:** every emitted header carries the sentence — calling in from a second
+  thread is UB until T10.2 (`packages/compiler/src/frontend/export.ts:592`).
+- **Step 7, mangling:** `stator_<unit>_<name>` with `--unit-name` prefix/sanitization,
+  STA1124 on sanitized-symbol collision, `stator_<unit>_abi_v<V>` version symbol the header
+  declares and the object defines (skew fails at link time).
+- **Step 8, determinism:** no timestamps/paths/hash order — proved by the real double build
+  in `packages/tests/ffi/run.ts`, not only the unit byte-compare.
 
 ### Task 7.3 — Bindings, generator, and the SQLite Check demo ✅ (landed 2026-09-15)
 

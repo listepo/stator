@@ -33,6 +33,7 @@ import type {
   FieldAssignment,
   ForOfStatement,
   FunctionExpr,
+  GetIterator,
   IndexAccess,
   IndexAssignment,
   IteratorNext,
@@ -520,6 +521,7 @@ class Emitter {
     | ConditionalExpr
     | UpdateExpr
     | DynFieldAccess
+    | GetIterator
     | OptionalChain,
     number
   > = new Map();
@@ -2252,6 +2254,13 @@ class Emitter {
         this.countExpression(expr.target);
         break;
       case 'dyn-field-access':
+        this.tempSlots.set(expr, this.slotCount++);
+        this.countExpression(expr.target);
+        break;
+      // The dispatch allocates (it boxes collections) and can throw (a non-iterable leaves a
+      // catchable TypeError pending), so the operand and the result each need a rooted slot for
+      // the same reason a dynamic property read does.
+      case 'get-iterator':
         this.tempSlots.set(expr, this.slotCount++);
         this.countExpression(expr.target);
         break;
@@ -4067,6 +4076,22 @@ class Emitter {
         );
         this.emitPendingCheck(expr.span);
         return this.slotAt(base);
+      }
+
+      // Dynamic GetIterator dispatch (plan.md §8 step 2a(c)): the operand stays rooted in its
+      // own slot across the call, which boxes collections and runs the resolved
+      // `__@iterator` method -- both of which allocate -- and a non-iterable leaves the
+      // catchable TypeError pending for the check below, exactly like a dynamic property read.
+      case 'get-iterator': {
+        const slot = this.tempSlots.get(expr);
+        if (slot === undefined) {
+          throw new Error('get-iterator was not registered during counting');
+        }
+        const result = this.slotAt(slot);
+        this.appendLine(`${result} = ${this.emitExpression(expr.target)};`, expr.span);
+        this.appendLine(`${result} = jsrt_get_iterator(${result});`, expr.span);
+        this.emitPendingCheck(expr.span);
+        return result;
       }
 
       // The site's cache is a static JSRTIC: a hit is one pointer compare and one load, a miss

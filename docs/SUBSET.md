@@ -34,7 +34,7 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 | `if` statements | static | static | Condition is evaluated; predicate narrowing is type-driven. |
 | `while`, `do`/`while` loops | static | static | Control flow only. |
 | `for` loop (C-style) **[proposed]** | static | static | Loop variable and bounds are typed; control flow is unboxed. |
-| `for`...`of` loop over an array, a string, a Map, a Set, or a user class with `[Symbol.iterator]()` | static if the yielded type is typed, else dynamic | same | Specialized loops (docs/VALUE.md §4.13), no iterator object. Array length is re-read each step so a body that shortens the array stops early; strings are immutable so the bound is `jsrt_string_length`. A string yields **code points**, not UTF-16 units (`"👍"` is one iteration). A Set yields the element. A Map yields a `[key, value]` pair, which the HIR has no tuple for, so that binding is Unknown and a file that uses it is dynamic even when K and V are typed. Labels work on it like any other loop. A user class whose `[Symbol.iterator]()` returns a Generator (or a boxed specialized iterator) calls that method and drives the result with the existing iterator walk. The explicit `c[Symbol.iterator]` spelling dispatches statically on a known user-iterable class (the read is the method's value, the call its invocation); `Symbol.iterator` as any other stored value stays `not-yet(STA1212)`, and on an unknown receiver resolving it needs runtime GetIterator dispatch (`not-yet(STA1214, Phase 8)`). |
+| `for`...`of` loop over an array, a string, a Map, a Set, or a user class with `[Symbol.iterator]()` | static if the yielded type is typed, else dynamic | same | Specialized loops (docs/VALUE.md §4.13), no iterator object. Array length is re-read each step so a body that shortens the array stops early; strings are immutable so the bound is `jsrt_string_length`. A string yields **code points**, not UTF-16 units (`"👍"` is one iteration). A Set yields the element. A Map yields a `[key, value]` pair, which the HIR has no tuple for, so that binding is Unknown and a file that uses it is dynamic even when K and V are typed. Labels work on it like any other loop. A user class whose `[Symbol.iterator]()` returns a Generator (or a boxed specialized iterator) calls that method and drives the result with the existing iterator walk. `for-of` over anything with no static walk -- an Unknown value, a union, or a checker-refused non-iterable js mode admitted -- lowers through a `get-iterator` node to the runtime GetIterator dispatch (docs/VALUE.md §4.13): collections box, generators and stored iterators drive as-is, a user-iterable method resolves and runs, and the rest throw Node's catchable `TypeError` (plan.md §8 step 2a(c)). The explicit `c[Symbol.iterator]` spelling dispatches statically on a known user-iterable class (the read is the method's value, the call its invocation); `Symbol.iterator` as any other stored value stays `not-yet(STA1212)`, and the same spelling on an unknown receiver stays `not-yet(STA1214, Phase 8)` -- that spelling names the method without calling it, which is a value the dispatch does not build. |
 | `for`...`in` loop | static if the object is typed, else dynamic | same | **Implemented (Phase 5 step 12 family b).** Desugars to `Object.keys` plus a counting `for`; key order is the Object.keys walk. An index-signature annotation is still not-yet (family d). |
 | `switch` statement **[proposed]** | static | static if cases are typed, else dynamic | Control flow; case evaluation is type-driven. A clause that falls through into a later non-empty clause is a **ts-mode error** (`STA0012`, `noFallthroughCasesInSwitch`) and legal in js mode: it is valid JavaScript, so refusing it there would break §1.2's contract that untyped code is dynamic and never rejected (plan-notes 175). |
 | `break` and `continue` **[proposed]** | static | static | Unlabeled and labeled control-flow redirection. |
@@ -175,7 +175,7 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 
 | Feature | `ts` mode | `js` mode | Notes |
 |---|---|---|---|
-| `import` declarations (plain named) | static | static | **Implemented (Task 3.11).** Whole-program v0: files merge into one module in topological order, so an import binds nothing — the name resolves to the exporting file's own top-level binding. Relative specifiers must name their file extension (Node's own ESM rule; extensionless is error STA1113). Bare (package) specifiers are not-yet(STA1214, Phase 7). |
+| `import` declarations (plain named) | static | static | **Implemented (Task 3.11).** Whole-program v0: files merge into one module in topological order, so an import binds nothing — the name resolves to the exporting file's own top-level binding. Relative specifiers must name their file extension (Node's own ESM rule; extensionless is error STA1113). Bare (package) specifiers are not-yet(STA1214, no phase — npm-ecosystem compatibility is a v1 non-goal, no open phase owns it). |
 | Renamed/default/namespace imports (`x as y`, `import d from`, `import * as ns`) | not-yet(STA1214, Phase 5) | not-yet(STA1214, Phase 5) | Every aliasing shape is refused: name-based merging cannot honor a rename. `import type` renames are fine — erased, nothing to resolve. |
 | `export` declarations (named) | static | static | **Implemented (Task 3.11).** `export` is a no-op marker in the merged program; renamed specifiers (`export { x as y }`) are not-yet(STA1214, Phase 5). |
 | `export default <literal>` | static | static | **Implemented (Task 3.11).** Lowers to nothing (nothing can import it without a default import, which is refused). Non-literal default exports are not-yet(STA1214, Phase 5). |
@@ -203,16 +203,17 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 
 ---
 
-## FFI — calling C from TS (Phase 7)
+## FFI — calling C from TS (Phase 7 ✅ COMPLETE 2026-09-16)
 
 The extern surface contract lives in `docs/FFI.md` (plan §10 Task 7.1 steps
 1–2, docs-before-code); the rows below are its feature × mode projection.
-Steps 4–7 have landed: the declaration row compiles (direct C calls, error conventions,
+All ten Task 7.1 steps have landed: the declaration row compiles (direct C calls, error conventions,
 the explain flag), opaque pointers cross borrow-only (step 6), headers and libraries ride
 the `@statorLink` pragma plus `--link=` (step 7, `docs/FFI.md` §9), and every refusal row
 is a live gate verdict with decision fixtures in
-both modes. What still defers is extern-as-value and the optional call (STA1217), and
-anything steps 5+ do not cover. Task 7.2 steps 1–2 have landed alongside: `--emit-header`
+both modes. What still defers is extern-as-value only (STA1217, phaseless — no open phase
+owns a C value representation); the optional call delivered at close-out as a direct call.
+Task 7.2 steps 1–9 have landed alongside: `--emit-header`
 generates the reverse-direction header (`docs/FFI.md` §8), and its refusal rows are live
 verdicts of the header step with unit tests (not decision fixtures — the header step runs
 only when the flag is passed, which the decision runner never passes).
@@ -244,6 +245,17 @@ only when the flag is passed, which the decision runner never passes).
 | Two exports colliding on one C symbol under `--emit-header` | error(STA1124) | error(STA1124) | A collision is a compile error, never last-writer-wins. |
 
 ---
+
+## `std` — systems library (Phase 10, T10.1 — docs skeleton only, nothing implemented)
+
+Stub rows for the T10.1 surface (`docs/STD.md` is the contract). No `STA` code is allocated
+here — codes are allocated with the implementing task, which also wires the gate arms. Until
+then `std/*` imports fail like any unrecognized module edge.
+
+| Feature | `ts` mode | `js` mode | Notes |
+|---|---|---|---|
+| `import … from 'std/env'` / `'std/path'` / `'std/process'` / `'std/fs'` / `'std/time'` | not-yet (Phase 10) | not-yet (Phase 10) | First-party modules, not packages: the `std/` prefix is reserved and recognized at the module-graph edge (`docs/STD.md` §1). Unknown `std/foo` will be a hard error. |
+| `import … from 'std/sync'` / `'std/thread'` | not-yet (Phase 10, T10.2) | not-yet (Phase 10, T10.2) | Needs the OS-threads ↔ async bridge; refuses until it exists (`docs/STD.md` §5). |
 
 ## Out of scope for v1
 
@@ -301,7 +313,7 @@ All codes in this range reused from plan.md except those listed below.
 | STA1212 | `Symbol` primitive type | both | Phase 5 | Well-known symbols as values, Symbol.for/Symbol.keyFor, and registry. `[Symbol.iterator]()` as a class method name is not this code. |
 | STA1213 | `BigInt` primitive type | both | Phase 5 | Separate numeric type with dedicated arithmetic. |
 | STA1216 | other `Promise.prototype` members; `new Promise` not arity 1 | both | Phase 5 | `then`/`catch`/`finally` and arity-1 `new Promise` landed in step 11. The code stays allocated for the rest. |
-| STA1217 | Extern function declarations and calls | both | Phase 7 | The FFI surface code (plan §10 Task 7.1 steps 1–2). Steps 4–7 landed the lowering, the borrow-only pointer crossing (step 6), and header/link plumbing (step 7), so it now names only extern-as-value and optional-call positions — never the call itself. The `STA1114`–`STA1121` refusals above are the design limits that stay `never` after it. |
+| STA1217 | Extern function as a value | both | none | The FFI surface code (plan §10 Task 7.1 steps 1–2). Phase 7 landed the lowering, the borrow-only pointer crossing (step 6), header/link plumbing (step 7), and — at close-out — the optional call (`?.` on an always-linked callee is a proven no-op), so it now names only the extern-as-value position — never the call itself. No open phase owns a C value representation for externs, so the code carries no phase. The `STA1114`–`STA1121` refusals above are the design limits that stay `never` after it. |
 
 `STA1102` appeared in an early draft of this matrix for eval-in-`js`-mode. It is **retired** and must never be reused — it put a "not yet" verdict inside the `STA11xx` "never" range, which is exactly the confusion the two ranges exist to prevent. See the retired-codes table in `docs/DIAGNOSTICS.md`.
 

@@ -908,6 +908,33 @@ type. `return`/`throw` on a specialized iterator are out of scope: the object do
 them (Node answers a TypeError from their absence), so the gate refuses the calls with their own
 not-yet rather than a silent no-op.
 
+### Unknown iterables — runtime GetIterator dispatch (Phase 5 step 2a(c))
+
+`for (const x of u)` where `u` has no static walk (Unknown, a union, or a checker-refused
+non-iterable js mode admitted) lowers its operand through a `get-iterator` HIR node, which emits
+one `jsrt_get_iterator` call ahead of the existing boxed walk:
+
+- a generator or a stored box passes through untouched;
+- an array, a string, a Map or a Set boxes into the specialized walk the static loop would have
+  inlined (array-values, string code points, Map entries, Set values);
+- any other object resolves its `__@iterator` method through the shape table — the fixed method
+  table or the dynamic one, the same read a dynamic method call makes — and calls it with the
+  receiver; the result must be a generator or a box, else Node's
+  `TypeError: Result of the Symbol.iterator method is not an object`;
+- anything else (nullish, numbers, closures, an object with no method) leaves a catchable
+  `X is not iterable` pending, rendered the way STA2009 renders it (Node-exact for
+  nullish/number/boolean, best-effort past that for the source-text reason).
+
+A custom `{ next() }` object is the method-result error above, not a new box kind: driving one
+needs a callback into compiled code per step, which is the Phase-8 dynamic tier (a
+statically-known one stays `STA1214`). Closing the dispatched iterator is the existing
+`jsrt_iterator_close` — a no-op except for generators, whose `finally` blocks run. Overriding
+`arr[Symbol.iterator]` on an instance is not observed: an array value takes the array walk the
+way the static loop does (prototype mutation is out of scope either way). A user class that
+extends Map or Set is not a Map or Set here either: its instances carry the subclass's own
+descriptor (field layout, not the collection table), so the dispatch answers the same
+not-iterable `TypeError` the static walk's `STA1214` always gave those shapes.
+
 One more boxed kind never comes from a member call: `JSRT_ITER_STRING`, the string code-point
 walk. A **suspendable unit** (async or generator) boxes EVERY specialized for-of — array, string,
 Map, Set — because the loop's cursor cannot live on a C frame that a `yield`/`await` pops: the
