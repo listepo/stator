@@ -3,7 +3,486 @@
 Evidence log for contradictions between `plan.md` and reality, and for decisions the plan told
 us to record. Newest first. Every entry names the plan section it touches and says whether
 `plan.md` was edited in the same change (AGENTS.md golden rule 6).
+## 276. T10.1 docs-first skeleton: `docs/STD.md` lands, no implementation (2026-09-16)
 
+## 280. Agent 6 standing outputs: Test262 ratchet holds, fuzz clean, third-host bench spread 9.0%, weekly artifact alive (2026-09-16)
+
+**Plan:** §9 Phase 6 (standing outputs 6.1/6.2; noise-floor residue). `plan.md` NOT edited —
+the residue-narrowing edit is PR #8's contested ground (see the artifact correction below);
+this entry records measurements.
+
+**Test262 (clean tree, pinned corpus 77100523, Node v26.7.0).**
+`test262: 2372 passed, 49057 skipped, 2151 failed — pass rate 52.4%`, exit 0, totals sum to
+53,580. Ratchet (`2372/3070/48138`) holds: passed equal, failed 919 below. Failed rows are
+2150 × `STA0012` (step-2a(b)/residue checker refusals) plus exactly one `STA4072` — the
+already-recorded note-213 case (`generator-prop-name-yield-expr.js`, upstream checker stack
+overflow converted by design). Delta vs the checked-in Sep-15 scratch `results.json`
+(2371/2159/49050, untracked file): 9 paths, all honest-direction — `__proto__-duplicate.js`
+skipped→passed (the note-265 protodup fix restoring the ratchet number) and 8 ×
+spread-obj getter/override tests failed→skipped (spread reclassification). Zero new
+divergences, so nothing was added to `differential/corpus/` — the negative result, recorded
+rather than filled.
+
+**Differential fuzz (seed-fixed, ≥1h).** First attempt (shared checkout, seed=7) died at seed
+623 in `run.ts:110` — not a divergence: another agent's half-written `generics.ts` edit was
+imported mid-run (`SyntaxError: Identifier 'key' has already been declared`), the note-269
+phantom verbatim, no failure files written. Re-ran isolated (worktree at 9f2eba4, own
+runtime archive, shared corpus read-only): `--seed=7 --minutes=60 --mode=both` →
+`differential: 3935 cases — 0 divergences`, exit 0 (~30 min per mode by the budget split).
+
+**Bench noise floor, third host.** Five `bench:record` repeats of 9f2eba4 on darwin/arm64
+(Apple M3 Max, Node v26.7.0, clang 21.1.8), quiet box: stator geomeans 24.061 / 23.156 /
+24.290 / 22.277 / 22.893 ms (6 programs — the suite grew since the 5-program numbers, so
+cross-host geomeans do not compare, only spreads do). Max spread **9.0%**. Worst seen across
+hosts is now 9.0% (4.0%, 7.4%, 9.0%) — the 20% gate stands with ~2.2× headroom; no measured
+evidence moves it. Per-program values in `bench/results/2026-09-16T08-58-*.json`
+(gitignored scratch runs; `baseline.json`/`README.md` churn reverted, not committed).
+
+**Weekly-artifact correction (PR #8's Phase-6 note — its plan-notes 274 — finding (2) is wrong).**
+`GET actions/runs/34745879941/artifacts` returns `benchmark-13` (id 10314016231, 1103
+bytes, `expired:false`, `expires_at:2026-12-12`): downloaded, parsed — 5 programs, stator
+geomean **21.208 ms** on linux-x64 (AMD EPYC 7763, Azure), i.e. the weekly job's numbers ARE
+retrievable with ~90-day retention. The ephemerality half of that note stands (a fresh VM
+weekly, so same-machine repeats name no stable entity); the "artifacts do not survive /
+retention is the unblock" half does not — reviewed on PR #8 as a blocking comment. The
+21.208 ms point sits just under this entry's host-2 range, sustaining rather than moving the
+gate.
+
+**Reviews (review-only, never pushed to their branches):** PR #7 comment
+(`pullrequestreview-5219904117`: scope/plan clean, two precision questions) plus follow-up
+withdrawing the subset-arithmetic one (clean-tree baseline is 675 fixtures, so 675+4=679 as
+cited; PR #8's note 273 cited 677, which counted 2 transient files on its tree); PR #8 comment
+(`pullrequestreview-5219906790`, `--request-changes` blocked by the self-review rule so
+filed as a blocking comment: the note-273 verification gap on PR #8's side + the artifact correction above).
+Neither merged.
+
+**Method note for parallel agents.** All measurements above ran in an isolated worktree
+(`git worktree add --detach` at the base commit) with `node_modules` symlinked from the
+main checkout (same commit, same install), `STATOR_TEST262` pointed at the shared corpus
+read-only, and the runtime archive built inside the worktree — after the shared checkout
+proved unmeasurable (mid-edit imports, branch switches underfoot). Pin launches with
+`mise exec node --` so the oracle stays v26.7.0.
+)
+
+**Plan:** §11b T10.1 step 1 (docs part only). `plan.md` NOT edited — the step stays open; this
+is the doc it asks for, ahead of code.
+
+**What landed:** `docs/STD.md` (DRAFT SKELETON — marked so on its first line): the four
+freezes Design A demands — `std/*` reserved prefix (§1: NOT `@stator/std`, which reads as a
+package and would collide with the bare-import refusal), sync-first with Promise twins at
+T10.2 and no sync-under-async lie (§2), throw-with-`code` error shape with per-module
+vocabularies left open (§3), POSIX-first (§4) — plus the v0 module table and wire order
+(§5), the three implementation layers (§6), the not-Node/not-FFI boundaries (§7), and four
+explicit open questions (§8: error codes, path edges, fd-vs-path, invalid-byte policy).
+`docs/README.md` indexes it; `docs/SUBSET.md` gains a stub `std` section whose rows name
+Phase 10 with NO allocated code (codes and gate arms arrive with the implementing task —
+allocating a code no gate arm emits would be drift). No runtime code, no compiler edge, no
+`THREADS.md` (T10.2's doc, not this step's).
+
+## 275. T9.1 verified in `.worktrees/t9-1`, not merged: steps 1–5 present, scope clean, rebase required (2026-09-16)
+
+**Plan:** §11a T9.1 (open; plan.md:991-992 forbids merging from the planning change).
+`plan.md` NOT edited — the card and its Progress paragraph already describe this state; this
+entry is the merge-ready diff summary and CI-action decision the card asks for. Main is
+untouched by Zig: `packages/runtime/src/*.zig` does not exist there, `jsrt_gc.c` stands.
+
+**Steps verified (worktree branch `agent/t9-1`, all T9.1 content UNCOMMITTED — 5 `.zig` +
+`jsrt_mem.h` untracked, justfile/CI/mise/C-side modifications in the working copy):**
+
+1. Pin + flavors. `zig 0.16.0` in `mise.toml` (also already on main) and `docs/TOOLCHAIN.md`
+   lists it on main — the merge needs no TOOLCHAIN change. The justfile builds one object,
+   `jsrt_zig.o`, from `src/jsrt_mem.zig` inside the shared `_runtime` recipe, so rel, asan
+   AND intl flavors all get it; `ReleaseSafe` for asan, `ReleaseFast` otherwise; the zig
+   version joins the `cflags.txt` key; `zig fmt --check` is the style gate; the archive is
+   rebuilt from scratch (`ar r` would keep a stale `jsrt_gc.o` beside the new symbols).
+2. `jsrt_gc.c` deleted; `jsrt_gc.zig` carries the GC glue behind the same C ABI.
+3. `jsrt_buf.zig`: `JSRTBuf`, `JSRTStrVec`, `JSRTUnitBuf` (print/JSON growables; string ops
+   have no growable buffer, nothing there moved).
+4. `jsrt_shape.zig`: root, transitions, slot growth, enumeration, delete replay; property
+   semantics (ICs, accessors, TypeErrors) stay in `jsrt_shape.c`.
+5. `jsrt_alloc.zig`: object/array/env/closure/rest/dynobj/null-proto constructors;
+   builtin-specific constructors stay with their builtins. `jsrt_mem.h` + `jsrt_mem.zig`
+   root `@cImport` the headers — no mirrored layouts (one `@cDefine` rename for the
+   translate-c `slots` collision).
+
+**Scope containment (plan-notes 239) holds:** the only regexp/math/builtin/codegen matches
+in `*.zig` are comments ("a RegExp match is…", "the emitter only calls this…"). No C file
+defines moved code — the remaining `jsrt_shape.c`/`jsrt_value.c` bodies are property
+semantics and builtin constructors; everything else is a caller.
+
+**Functional proof on this host (Darwin arm64, zig 0.16.0, Node 26.7.0):** worktree
+`just runtime` builds; release AND asan archives carry `jsrt_zig.o` with no `jsrt_gc.o`;
+4/4 sampled print corpora (numbers, objects, shapes, maps — the last two exercise the Zig
+shape table and alloc paths) link against the Zig archive and MATCH the pinned Node
+byte-for-byte. Caveat: the worktree justfile predates the 266 Darwin SDK retry, so its own
+`runtime-test` corpus link fails on this host's Xcode 26 SDK; the proof above linked the
+same archive manually with `-isysroot` at the readable CLT SDK. The merge inherits main's
+already-fixed justfile section, so this is a rebase artifact, not a Zig defect.
+
+**Why the follow-up is a re-application, not a merge.** The worktree base is `82d833f`-era:
+its `gate.ts` differs from main by 3764 lines, and the C-side adaptations were made against
+old `jsrt_shape.c`/`jsrt_value.c` (main has since changed both — compare the
+`jsrt_class_dynamic` initializers). A wholesale merge would revert weeks of main (old
+`ci.yml`/`nightly.yml` triggers, `AGENTS.md`, docs). The PR must start from current main and
+carry over ONLY: the 5 `.zig` + `jsrt_mem.h`, the `jsrt_gc.c` deletion, the justfile Zig
+block (keeping the 266 retry), the C adaptations re-applied, the `print_classes` corpus
+(union with main's `print_ffi_strings` — each side has one the other lacks), and the setup
+action below. T9.1's Check (full ci green in that tree) is the merge gate and was NOT run
+here — the worktree was never green as a whole, only the runtime slice above.
+
+**CI-action decision: recommend `mlugg/setup-zig@v2`, creator approves.** The worktree's
+`.github/actions/setup/action.yml` hunk is minimal and correct: official Zig installer,
+pinned `version: 0.16.0` (matches `mise.toml`), `if: runner.os != 'Windows'` (Windows never
+builds the runtime). No alternative was found that avoids a third-party action (mise cannot
+install tools inside GitHub runners). This entry files the recommendation with rationale;
+the approval itself stays the creator's, as `docs/TOOLCHAIN.md` already records.
+
+## 274. Phase 6 residue narrowed: fuzz clause met on nightly output; noise floor stands on ephemerality (2026-09-16)
+
+**Plan:** §9 Phase 6 (intro + noise-floor residue; phase stays open). `plan.md` edited in this
+change (fuzz-clause citation; residue narrowed, Check kept).
+
+**Fuzzing clause — met, cited.** The nightly `evidence` job (`.github/workflows/nightly.yml`,
+`--minutes=60`) is green with zero divergences on consecutive days: 2026-09-14 run
+34819549697 (`differential: 4316 cases — 0 divergences`, 1h0m53s) and 2026-09-15 run
+34942356204 (`differential: 4128 cases — 0 divergences`, 1h1m50s). Zero divergences means
+zero *unexplained* ones. The clause no longer holds the phase open; the noise floor does.
+
+**Noise floor — narrowed, not closed.** Two findings from the weekly-job side:
+
+1. The weekly bench runs, but its machine does not persist. The 2026-09-13 Sunday run
+   (34745879941) recorded 5 programs (`2026-09-13T07-43-08-…-linux-x64-….json`) and uploaded
+   artifact `benchmark-13` (1103 bytes, upload finalized in-log) on an ephemeral
+   `ubuntu-24.04` VM (Azure westus2, fresh worker per run). "Repeats on the machine that runs
+   the weekly job" therefore names no stable entity — every week is a different VM.
+2. The artifacts do not survive anyway. Two days later that run's artifact list reads
+   `{"total_count":0,"artifacts":[]}`, and no 03:xx Sunday bench output is retrievable beyond
+   the run log — so week-to-week spreads cannot be computed after the fact either.
+
+Neither finding moves the gate: the 20% threshold stands on the 4.0% + 7.4% local spreads
+(~2.7× headroom over the worst seen), and tightening toward 10% still leaves ~1.3× with no
+multi-host data (plan-notes 246). The concrete unblock is retention, not another local
+repeat: keep `benchmark-*` artifacts (or land the weekly result on a non-main branch) until
+repeats accumulate on the same image — then the Check's literal form can pass. Proposed as
+follow-up, not done here.
+
+## 273. Phase 7 closes: 7.1/7.2/7.3 Checks re-verified, evidence moved to done.md (2026-09-16)
+
+**Plan:** §10 Phase 7 (stamped ✅ COMPLETE). `plan.md` edited in this change (§10 compressed
+to stub + Check; full step text moved to `done.md` → Phase 7, which gains the three records
+§10 cited but never wrote: 7.1 steps 1–2, 7.1 steps 6–9, 7.2 steps 3–8).
+
+**Verification (all on `9f2eba4`, pinned Node 26.7.0, branch `agent/infra-next`; docs-only
+changes since, so the numbers stand):** `packages/tests/ffi/run.ts` → 5 checks, 5 passed,
+0 failed, 0 not run; `example-c-consumer/c-consumer.ts` → `ffi c-consumer: ok`;
+`examples/ffi/sqlite/sqlite-c-main.ts` → `ffi sqlite-c-main: ok`;
+`sqlite-demo.ts` → `sqlite demo: ok`; libm/stat examples ok; full `pnpm run ci` green
+(check-node v26.7.0; typecheck/lint/dupes clean; unit 564/564; runtime corpus matches Node;
+subset 677 — 639 passed, 38 expected-fail, 0 failed; golden 386/386 + 2 intl skipped;
+builtins 223/238; leak 10M plateau 3664 KB; golden-asan green). The CI side of the Check is
+structural (`.github/workflows/ci.yml` ffi job: `test:ffi` + both C-main runners) and was not
+re-run remotely here — the job definition is unchanged since the 7.3 landing.
+
+**Two honesty notes.** (1) §15.1's top-down rule gates phase STARTS; Phases 5 and 6 are still
+open while 7 closes. This stamp records completed work, it does not start anything, so the
+rule does not apply to it — stated here so the overlap reads as deliberate, not drift.
+(2) The close-out names two follow-ups as explicitly unowned (ambient `CString`/`Out` lib
+declarations; generator convention transfer — plan-notes 271): never Check items, no phase
+owner, a future card owns them.
+
+**§15.9 reassignment (same change, not a second card).** The stamp surfaced three `phase: 7`
+sites under `src/`, which the rule forbids leaving behind: the optional extern call is
+DELIVERED (direct C call — `?.` on an always-linked callee cannot short-circuit, so there
+is no conditional to model; gate identifier arm + call arm + lowering agree, `STA4031`
+landing-pad removed), while extern-as-value (STA1217) and bare package imports (STA1214)
+go PHASELESS — messages name the blocker (no C value representation; v1 npm non-goal),
+never a phase number, since no open phase owns either. `COMPLETED_PHASES` gains 7 in the
+same change (`phases.test.ts` pins the pair). Proof: `subset_extern_optional_call_{ts,js}`
+at `static`, the `?.` lines in both `extern_libm` goldens byte-exact, `phases.test.ts` 4/4.
+
+
+## 280. Step 2a(c) 2488 lands: runtime GetIterator dispatch for unknown iterables (2026-09-16)
+
+**Plan:** §8 step 2a(c), the 2488 half (the 2454 half landed in wave 3 — verified green below,
+its prose updated here too). `plan.md` edited in this change (§8 step 2a(c) bullets, §8:296
+header). Scope coordination: this is Agent 2's slice (`agent/p5-spread-generics`); 12(d)/12(e),
+Phase 6/7/9/10 untouched. Numbered 277 at write time, then 279 after the first rebase; main had meanwhile
+taken 277–279, so this entry is 280 (references in plan.md/done.md updated).
+
+**What landed.** `for (const x of u)` where `u` has no static walk compiles in js mode and
+matches Node byte-for-byte; ts mode keeps the checker's refusal:
+
+- Runtime: `jsrt_get_iterator` (`runtime/src/jsrt_iterator.c`, declared in `jsrt_value.h`,
+  documented in `docs/VALUE.md` §4.13) — generators and stored boxes pass through; arrays,
+  strings, Maps, Sets box into their specialized walks; any other object resolves `__@iterator`
+  through the shape table (fixed method table or dynamic one, the same read a dynamic method
+  call makes) and calls it with the receiver; the method result must be a generator or a box
+  (else Node-verbatim `TypeError: Result of the Symbol.iterator method is not an object`); the
+  rest throw catchable `X is not iterable` through a shared `jsrt_throw_not_iterable`
+  (extracted from `jsrt_require_array_iterable`'s body, which now calls it — one rendering for
+  every for-of refusal, and no new clone for the 1.0% `cpd` gate to trip on).
+- Compiler: a `get-iterator` HIR node (`nodes.ts`, always typed `iterator` with an Unknown
+  element) so the existing boxed walk takes it with no new emission arm — verifier pins the
+  contract (`STA4045`), codegen counts/emits one rooted temp, `rewrite.ts` and `explain.ts`
+  carry their arms. Gate admits non-walkable operands in js mode only (`gateForOf` takes the
+  mode); lowering wraps them (`wrapDynamicIterator`); `program.ts` suppresses TS2488 in js.
+- Two gate refinements the landing forced, both principled rather than expedient. (1) In ts
+  mode the gate refuses only what the checker ACCEPTED (asked via the checker's own property
+  list normalized through `hirPropertyName`, since `__@iterator@<id>` suffixing defeats exact
+  lookup and the HType mapping drops interface methods — `Iterable<T>` is the case that
+  proved it): everything else was refused by TS2488/TS2571 first, and the gate staying silent
+  there leaves that STA0012 speaking alone, which matters because `explain` ranks a not-yet
+  above an error-class diagnostic. (2) A `for-of` binding is not an annotation site
+  (`annotationSiteOf` returns null for one): `for (const x: T of ...)` is a grammar error, so
+  the checker's recovery-`any` on a refused iteration is not implicit-any, and reporting
+  STA1003 for it buried the STA0012 naming the real refusal. No hole: explicit `any` is
+  STA1001 even in ambient declarations (probed), every other any-binding has a companion
+  diagnostic, and the evolving-array shape never fired STA1003 anyway.
+- Custom `{ next() }` objects stay STA1214 by card (a statically-known one is still refused in
+  both modes — probed; a dynamically-encountered one is the method-result TypeError above,
+  not a new box kind, per the VALUE.md contract).
+
+**Proof.** Decision fixtures `subset_for_of_unknown_{js (dynamic), ts (error STA0012)}`; js
+golden `tests/golden/js/for_of_unknown.js` (arrays, strings incl. emoji code points, Map
+entries, Set, generators with finally-on-break/throw, user classes, stored boxes, `.keys()`
+views, unions, async/generator-unit loops, capture and early-return through the dispatched
+boxed walk, and every TypeError path — name/instanceof where Node's message is
+source-text, message-exact for the direct nullish/number spellings) byte-for-byte vs Node
+26.7.0, including under ASan. Test262 per-slice before/after (pristine worktree at the base
+commit vs this branch; `ratchet.json` untouched per plan.md:416-422):
+
+| slice | before (passed/skipped/failed) | after | movement |
+|---|---|---|---|
+| `for-of` (829) | 87 / 675 / 67 | 87 / 708 / 34 | 33 failed→skipped |
+| `spread` (331) | 8 / 286 / 37 | 8 / 286 / 37 | none |
+| `iterat` (623) | 2 / 598 / 23 | 2 / 607 / 14 | 9 failed→skipped |
+| `generator` (1849) | 110 / 1688 / 51 | 110 / 1700 / 39 | 12 failed→skipped |
+
+54 failed→skipped, zero passed→failed, zero new passes: the honest direction (checker lint →
+Stator's own schedule), per-code evidence rather than a ratchet claim.
+
+**Wake the suppression caused, caught and pinned.** Suppressing 2488 moved directly-`unknown`
+array spread in js mode from STA0012 to the lowering's precise STA1214 (the gate stays silent
+there by design) — the legitimate §1.3 landing, same shape as the delete reclassification
+(note 196). Pinned by `subset_spread_direct_unknown_{js (not-yet STA1214), ts (error
+STA0012)}`. Spread-of-unknown otherwise stays STA1214 per the 12(c) residue card (all
+`subset_spread_*` + 16 spread goldens green, unchanged); the gate comment that named
+GetIterator as future work now names the card instead.
+
+**Verified, not built (the prove half).** 2454: wave-3 suppression + widening green
+(`subset_definite_assignment_*`, both goldens). 12(f): every named construct green —
+constrained/defaulted/explicit/undetermined/nested (static goldens) and escape/selfapply/
+instanceof/heritage-subclass (not-yet STA1214 fixtures, deliberate representation
+impossibilities per SUBSET.md, not my card to close). Landing gate: subset 679
+(641/38/0), unit 564/564, goldens green incl. ASan 387/387, `tsc` both projects, oxlint/oxfmt
+clean, `cpd` 0.9%. Post-rebase confirmations (onto 974db9a, then c30c253): subset 690→698,
+unit 566→577+, goldens green; see the merge report for the final numbers.## 278. Bound class expressions land via descriptor erasure (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface: anonymous classes, extends forms) + 12(e)
+(class-as-value remainder, narrowed). `plan.md` NOT edited in this change — no task language
+changes; 12(d)/12(e) remainders stay open.
+
+**What landed.** `const C = class …` (named or not) emits the same descriptor a declaration
+does, under Node's `.name` (inner name, else variable), and binds no value: every in-place
+use (`new C`, `C.static`, `o instanceof C`, `extends C`, the inner name in the class body)
+erases to the expression (decision fixtures `subset_class_expression_{ts,js}` flipped to
+`static`, plus opaque/`let`/generic refusal pairs; goldens `class_expression.{ts,js}`
+byte-for-byte vs Node 26.7.0; `docs/SUBSET.md` row added):
+
+- Type model (`frontend/types.ts`): `classTypeToHType` names bound expressions (unbound stay
+  Unknown); `ancestry`/`heritageSubstitution`/`baseDescriptorName`/`methodDeclaringClass`/
+  `accessorDeclaringClass`/`staticMemberOf`/`baseClassOf` widen to `ClassLike`; new
+  `classExpressionTarget` (variable→expression, single-`const`, alias-chasing),
+  `innerClassExpression` (inner name + lexical containment, no scope work),
+  `expressionClassName`, `classLikeOf`, `classDisplayName`.
+- Gate (`gate.ts`): bound non-generic expressions vet like declarations; the formation must
+  be single-`const`-bound (else the old messages); identifier uses erase in place and refuse
+  opaque as class-as-value (import/export specifiers exempt, like aliases); `new`,
+  `instanceof`, `super.m`, computed keys, assignability, and `#brand` all resolve
+  expressions.
+- Lowering (`lower/index.ts`): the formation emits the class (display-name scope
+  registration for shadowing, no value binding); instance type from the construct
+  signature's return; `lowerClass` widened (identity, layout, vtable, statics, stubs all
+  ride); owner/dispatch resolution via `receiverClassLike`; abstract stubs and static runs
+  compose (verified by probe, not separately pinned).
+- Printing answers Node's name (`D { … }` for `const C = class D`), shadowing renames per
+  step 23, cross-file imports erase through the alias, `extends C` grounds prefix layouts
+  with virtual dispatch, and `#private` mangles by display name.
+
+**Still refused (all probed):** unbound expressions (no identity), `let`/`var` formations
+(reassignable), generic expressions (no specialization home — 12(f)), anonymous default
+declarations (12(d) residue), opaque uses incl. `typeof C` and `C.prototype` (class object
+— 12(e)), `switch`-guarded and loop/arrow supers, `super` in static blocks, `this` in
+static members.
+
+**Observed adjacent, NOT caused, NOT fixed:** a nested class (declaration OR expression)
+whose method captures a local segfaults (`counter()` probe, exit 139 — the declaration
+twin crashes identically on unmodified logic). No golden covers it; filing here so the
+capture owner finds it. Nested-class capture is outside this session's scope.
+
+## 277. Derived constructors may call super from if/else arms when no initializers splice (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** `derivedConstructorOrderOk` is now a recursive coverage analysis instead of
+a top-level scan (gate.ts only — the lowering already lowers arm-supers as ordinary
+statements, and its empty-prologue splice is a no-op exactly when the rule allows arms):
+
+- A class with NO instance field initializers (public or `#private`) may call `super(...)`
+  in `if`/`else` arms: one call per arm, every arm covered, no `this`/`super` read before
+  the call on any path (nesting and `else if` chains recurse free). Uninitialized fields
+  need no splicing; statics never enter the constructor.
+- The invariant is now EXACTLY-once per path, uniformly: a second call on a covered path —
+  straight-line (`super(); super();`) or branch (`super(); if (f) super();`) — is refused,
+  closing a live divergence (Node throws ReferenceError on a re-run; Stator double-ran the
+  base). Coverage is tri-state (`covered`/`conditional`/`none`) so a call after a
+  half-covering `if` still refuses, at any nesting depth.
+- Still refused, each probed: initializers + arms, loops, arrows/nested functions, `try`,
+  `switch`, `super` or `this` in a condition, reads before the call, missing-`else` paths.
+  Condition-`this` and arrow-super are checker-refused first (both modes); the gate checks
+  are defense in depth for shapes the checker misses.
+
+**Tests.** Decision fixtures `subset_class_super_late_{ts,js}` extended (branch ctors);
+goldens `class_super_late.{ts,js}` extended (nesting, `else if`, unbraced arms, post-`if`
+reads) — byte-for-byte vs Node. Unit pins in `class-members.test.ts` rewritten to the new
+rule (acceptance + HIR shape; initializer and re-run refusals) — the two failures that
+surfaced the behavior change, fixed in the same commit, never in bulk.
+
+**Not in this change.** `switch` arms (same principle, unbuilt), `try`-guarded calls, and
+explicit-object-return paths (refused as before).
+
+## 276. Static fields after static blocks initialize in source order (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** The gate's `a static field after a static initialization block` refusal is
+gone; fields and blocks execute in source order (subset fixtures
+`subset_static_block_{ts,js}` extended, both `static`; golden
+`tests/golden/ts/class_static_block.ts` extended with a two-block interleave plus an
+uninitialized later field — byte-for-byte vs Node 26.7.0):
+
+- Lowering (`lower/index.ts`): static field initializers partition into runs split by blocks
+  (`staticFieldRuns`); the first run initializes with the class as before, each later run
+  assigns after its block. The declaration still carries every static binding (later-run
+  fields as `undefined` slots), so pre-registration, TDZ-shape behavior, and the
+  method-hoisting divergence are all unchanged — only execution order moved. Static METHODS
+  stay hoisted with the class (defining one runs nothing), as do static accessors.
+- Later-run assignments mirror the declaration's own value shape (no boundary, same as if
+  initialized with the class), only later; uninitialized later fields need nothing.
+
+**Sharp edges, all checker-held.** Any block touching a later field is TS2448 (`used before
+its initialization`) in BOTH modes — js mode does not suppress it (TDZ is unmodelled by
+design, step 2a(c)'s open half) — so only non-touching shapes reach the new lowering, and a
+block write to a later field (`C.a = 5` before `static a = 1`) is refused the same way
+Node's TDZ would fail it at run time. Verified: `static { C.a }` + later `static a`
+refuses identically in ts and js.
+
+## 275. Abstract classes and members land via throw-stubs (2026-09-16)
+
+**Plan:** §8 step 12(d) (class member surface). `plan.md` NOT edited in this change — no task
+language changes; the 12(d) remainder stays open.
+
+**What landed.** `abstract` classes with abstract methods and properties compile in both
+modes (decision fixtures `subset_abstract_class_{ts,js}.ts`, both `static`; golden
+`tests/golden/ts/abstract_class.ts` — three-level chain with a middle abstract class, an
+abstract property, base-typed reads, an inherited concrete method, statics, `instanceof` —
+byte-for-byte vs Node 26.7.0):
+
+- Gate (`gate.ts`): a bodiless method with the `abstract` modifier skips the
+  overload-signature arm (the implementation lives in a subclass, not in this class). The
+  override check above still runs, so abstract-over-field stays refused; abstract properties
+  needed no change (uninitialized fields already lower to `undefined` slots).
+- Predicate (`frontend/types.ts`): `hasAbstractModifier`, beside `isStaticMember` (shared
+  home — gate and lowering both use it, no duplication).
+- Lowering (`lower/index.ts`): abstract members collect into `abstractStubs` (dropped for
+  generic carriers like every other member list) and lower to a synthesized throw-stub —
+  receiver parameter zero, mirrored parameter list, `throw new TypeError('abstract method
+  …')`. The stub keeps the base's method table complete and gives direct calls a target;
+  virtual dispatch always lands on the runtime class's concrete entry, and every path that
+  could reach the stub is checker-refused first (abstract construction TS2511, missing
+  override TS2515, `super.m()` on abstract — all verified `STA0012` in both modes).
+- Async/generator flags stay false on the stub (a synchronous throw transfers before any
+  promise or iterator is built); parameter defaults are dropped (a default that runs means
+  the call reached a body that never runs).
+
+**Deliberately not in this change: abstract ACCESSORS.** An accessor re-declaring an
+inherited name stays refused (`overriding the inherited member 'y'`), because accessor
+reads dispatch `direct` (`accessorCall`) while methods virtualize — abstract accessors
+cannot override without virtual accessor dispatch, which is its own slice. The bodiless
+rule still refuses them with the existing message; the lowering's stub list already accepts
+the shape when that slice lands.
+
+## 274. TS2416 override-widening lands: inferred method-method suppression + call widening (2026-09-16)
+
+**Plan:** §8 step 12(d) (override rules) + step 2a(b) wake (plan-notes 68, 272). `plan.md` NOT
+edited in this change — no task language changes; the 12(d) remainder stays open.
+
+**What landed.** js mode no longer rejects legal JavaScript when an INFERRED override narrows
+a return type (`subset_override_widening_js.js` out of expected-fail, `static`; new ts twin
+`subset_override_widening_ts.ts` pins `STA0012`; golden
+`tests/golden/js/class_override_widening.js` byte-for-byte vs Node 26.7.0):
+
+- `program.ts`: a 2416-shaped suppression with a fail-closed predicate
+  (`isInferredMethodOverrideMismatch`) — both members bodied `MethodDeclaration`s with
+  identifier names, neither carrying a TS or JSDoc type (`methodIsUnannotated`), base found
+  through the `extends` chain (aliases included). Anything else keeps `STA0012`, exactly per
+  note 68 ("an error about an annotation the user wrote must still be an error"): annotated
+  pairs (verified: `m(): string` vs `m(): number` still refuses in js), field-field pairs (one
+  slot, two types — no call-widening can defend that shape), accessor pairs (the gate refuses
+  them on its own), computed names, bodiless members, unresolvable bases.
+- Both declarations' symbols seed `runtimeDynamicSymbols`; the lowering's returns edge widens
+  calls resolving to either (`collectDynamicReturnsPass`: a `MethodDeclaration` whose own FQN
+  is seeded marks its calls — methods only, so no existing variable/parameter seed can reach
+  the arm). Declarations keep their types (the step-45 shape), so overload and vtable
+  contracts are untouched; a base-typed read of a derived instance (JSDoc `@param {A}`)
+  answers the derived value instead of garbage (probed `1`/`x`, matching Node).
+- The file verdict is honestly `static`: the widened call feeds an export edge whose tag
+  check settles it (`boundary-check` reports the type it produced), so no Unknown survives —
+  a virtual call plus a check, no shape table. Unannotated/dynamic receivers stay dynamic as
+  before (the golden covers both).
+
+**Not in this change.** Field-involved 2416 stays `STA0012` in js too (real refusal, one slot
+two types — same judgment shape as wave 4's field-vs-method TS2416). Function-scope
+method-override keeps the gate's `STA1214` (per-evaluation tables); the suppression may move
+such a program from `STA0012` to that `STA1214`, which names the true blocker.
+
+## 272. Step-12(e)/41-42 drift check: no contradiction, only breadth; 2a(b) closed; Phase-5 header updated (2026-09-16)
+
+**Plan:** §8 Phase 5 header, step 2a(b), step 12(e). `plan.md` edited in this change.
+
+**No contradiction between 12(e) and steps 41-42.** Step 41 is bare GENERICS as value
+(done.md → Phase 5 wave 5), not class-as-value; step 42 is the `super.m` tear-off, while bare
+`super` stays refused (`gate.ts:471,4749`) — correctly, since a memberless `super` is a
+JavaScript SyntaxError with no value to lower. Opaque class uses stay refused
+(`gate.ts:893,908,5048`; done.md → Phase 5 wave 4; `subset_class_alias_opaque_*` pin the
+verdict). So 12(e)'s "still open are a class used as a value and `super` as a value" remains
+true and is narrowed by this edit to name exactly the open shapes: opaque class uses
+(including class expressions) and bare `super`.
+
+**Step 2a(b) is closed — all three buckets landed.** 2683 went in as the OPTION
+`noImplicitThis: mode === 'ts'` (`program.ts:351`; done.md → Phase 5 wave 4, dynamic `this`),
+2769 as the overload-fallback acceptance (`hasFunctionImplementation` in `gate.ts`; wave 4),
+2464 as a js-mode suppression (`JS_MODE_RUNTIME_CODES`, `program.ts:190`). 2464 verified
+end-to-end on the pinned Node 26.7.0: `{ [kObj]: 1 }` under `--mode=js` compiles and prints
+`{"[object Object]":1}` (ToPropertyKey coercion, matching Node byte-for-byte); the same
+source under `--mode=ts` keeps `STA0012`. Fully-dynamic computed keys in both modes take the
+dynamic path (`{ [k]: v }` with `k: string` compiles and runs in ts and js).
+
+**Genuinely open in (b)'s wake:** TS2416 override-widening
+(`tests/subset/subset_override_widening_js.js`, plan-notes 68) — a bucket the (b) sweep never
+named, owned by 12(d)'s override rules: js mode still rejects legal JavaScript when an
+INFERRED override narrows a return type. Landing it (suppression gated on both members being
+unannotated, per note 68's "an error about an annotation the user wrote must still be an
+error", plus call-widening so base-typed reads stay sound) is this session's first family.
+
+**Header fixed.** §8's "still OPEN … steps 18–38" predates waves 5–7 (steps 39–46) and the (b)
+landings; rewritten to the current open set. Step 12(c)'s spread residue and 12(f) are
+untouched — other agents own them.
+
+Baselines at branch start (`agent/p5-class-surface`, pinned Node 26.7.0): subset 675
+fixtures (637 passed, 38 expected-fail, 0 failed), golden 386/386, unit 564/564.
 ## 242. CI run 34778195179: shard 1 died in the checker's stack overflow through the in-process path 213 missed (2026-09-14)
 
 **Plan:** §9 Task 6.1 (the Test262 heartbeat) and the CI decomposition map in
@@ -8098,3 +8577,84 @@ mise pin). One shared action covers runtime/asan/intl/ffi/frontend jobs; no `ci.
 change needed. `docs/TOOLCHAIN.md` (Zig row + "Not yet required" list) and the
 `plan.md` §11 line that held the decision open now record the install as landed.
 No frontend, justfile, or Zig-source changes; no Zig growth past the memory core.
+## 279. Inline generic arrows land: the 12(f) callback slice (2026-09-16)
+
+**Plan:** §8 step 12(f). `plan.md` edited in this change (the (f) bullet records the landed
+shape and the narrowed residue). Scope coordination: this is Agent 4's slice
+(`agent/p5-generics`); 12(d)/12(e), 2488, and Phase 6/7/9/10 files untouched. Numbered past
+the highest entry known (278 on `agent/p5-class-surface`); merge resolves any race. Step
+12(c)'s spread residue and the (b) close-out belong to their owners' edits — this note
+concurs on (b) by verification rather than re-editing it (notes 272, 277).
+
+**What landed.** An inline generic arrow or function expression passed directly as a call
+argument specializes at the parameter's function type: `[1].map(<T>(x: T): T => x)` and
+`run(<T>(x: T): T => x, 5)` compile `static` and match Node byte-for-byte, in both modes.
+
+- Frontend (`src/frontend/generics.ts`): `genericArgumentTuple` keeps the identifier path
+  untouched and delegates every other argument to `inlineGenericTuple`, which unwraps
+  parentheses, requires a direct non-spread argument position with a single parameter type,
+  and shares the parameter lookup, unification, and `finishTuple` recovery through a common
+  `instantiateAtParameter` — so the named and inline paths cannot disagree about what a
+  parameter determines. The key is the position (`arrow@<file>#<offset>`), unspellable from
+  source like every other specialization key, with the file base disambiguating the
+  cross-file merge in `lowerProgram` (same-name dedupe is load-bearing there).
+- Two refusals keep the gate/lowering contract (note 194's rule: a suppression that
+  manufactures an `STA4xxx` is a bug report, not a landing). A body that reads an enclosing
+  scope — an enclosing function's parameter or local, `this`, `super`, `new.target`, or a
+  binding a block scopes away from the module top level — would resolve to no binding in a
+  module-level specialization (`STA4035`), so the gate refuses it; the check is by symbol,
+  so shadowing is safe, types erase (skipped whole), and member names are not reads (only
+  the object side can be a capture). And a same-file `let`/`const`/`var` read is refused
+  too: specialization bodies lower before their file's own statements, so only hoisted
+  bindings are reachable in time — functions, classes, imports, and globals (all probed
+  green). A `var` is the sharp case: its hoist feeds the lowering but not the verifier, so
+  it fails as `STA4002` rather than `STA4035`.
+- Lowering (`src/lower/index.ts`): no collection or use-site change — `requestArgument`
+  and both argument-lowering paths already route through `genericArgumentTuple`. The one
+  lowering edit is the display name: a homeless arrow keeps no name (Node prints anonymous
+  for a callback-position arrow, as a non-generic inline arrow lowers today) while a named
+  function expression keeps its own.
+- Gate (`src/frontend/gate.ts`): `gateFunction` accepts exactly what the probe accepts
+  (same function, both sides), and takes the checker as a parameter to do it. `let`-held,
+  nested, branched, spread, and constructor-argument arrows stay `STA1214`, as do
+  capturing and module-binding reads. Parenthesized arguments pair by the chain's top:
+  the first cut paired by the bare arrow, found no parameter, and refused — caught by a
+  probe (`run((<T>(x: T): T => x), 3)`), fixed, unit-pinned.
+
+**Proof.** Unit: 12 new cases in `tests/unit/generics.test.ts` (tuple recovery with
+computed position keys, separate specializations per literal, anonymous display, nested
+compile, enclosing-tuple substitution, `STA4054`-clean, parenthesized pairing, three
+refusal shapes) and the `anywhere-but-a-const` test narrowed to `let`/nesting. Decision: the
+`subset_generic_arrow_bare_*` pair flips `not-yet` → `static`; four new pairs
+(`inline_fnexpr`, `inline_nested` static; `inline_capture`, `inline_module_binding`
+`not-yet` `STA1214`). Golden: `tests/golden/ts/generic_inline.ts` +
+`tests/golden/js/generic_inline/main.ts` match the pinned Node 26.7.0 byte-for-byte.
+Suites on this branch: unit 575/575, subset 683 (645 passed, 38 expected-fail, 0 failed),
+golden 388/388 (and the same 388 under ASan/UBSan), `tsc` both projects, oxlint/oxfmt
+clean, `cpd` 0.9%, builtins 223/238 (standing residue), leak plateau, runtime corpus match,
+differential 24 cases with 0 divergences. Test262 `arrow-function` slice before/after
+(pristine worktree at the base commit vs this branch): 75 passed / 466 skipped / 25 failed
+of 566 on both — zero movement, as the mechanism predicts (a `.js` parse cannot produce
+syntactic type parameters, so the inline path is unreachable there; the identifier path is
+the same body). `ratchet.json` untouched.
+
+**Drift reconciled in this change.** The `TypeParameter` gate comment still said a
+constraint or default "is refused" — true of no code in the tree (`gateTypeParameter`
+accepts both; the constraint is the checker's, the default fills the tuple in
+`finishTuple`) — reworded to the landed semantics. `docs/SUBSET.md`'s generics row now
+names the inline shape and the narrowed residue. The 12(f) plan bullet, which listed all
+six constructs as open with no mention of waves 4–5, now records the landed shapes with
+their evidence and the residue above.
+
+**Verified, not built (the prove half).** 2454 (suppression + widening), 2683 (option),
+2769 (overload fallback), 2464 (js suppression + `ToPropertyKey` coercion), and every
+landed 12(f) shape (constrained/defaulted/explicit/undetermined/classes/value) are green
+in this branch's subset + golden runs — concurring with notes 272 and 277, whose edits
+carry the (b) close-out and the 12(e) narrowing respectively.
+
+**Pre-existing gap found, not widened.** A NAMED generic whose body reads a same-file
+`let`/`const`/`var` is accepted by the gate and fails downstream: `const base = 100` with a
+generic body reading `base` fails as `STA4035` (a `var` in js mode as `STA4002`, whose hoist
+feeds the lowering but not the verifier). The inline path refuses those reads; the named
+path predates the rule. Follow-up (not this slice): refuse module-order-blind reads for
+named generics at the gate, or lower specialization bodies after their file's statements.

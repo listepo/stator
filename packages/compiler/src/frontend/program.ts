@@ -59,6 +59,110 @@ function isDuplicateProtoDataProperty(source: ts.SourceFile, position: number): 
   return count >= 2;
 }
 
+/** A TS2416 override-incompatibility diagnostic js mode may drop (plan.md §8 step 12(d),
+ * plan-notes 68/272): both members are bodied METHODS neither side annotated, so the
+ * disagreement comes from inference over unannotated code rather than from a type the user
+ * wrote. Anything else keeps STA0012: a field or accessor on either side (a field shares one
+ * slot for two types, which no call-widening can defend; an accessor override the gate
+ * refuses on its own), an explicit annotation (TS or JSDoc) anywhere on either member, a
+ * computed name (the lowering keys call marks by declared name), a missing body (overload,
+ * abstract, or ambient — each with its own gate story), or an unresolvable base. Fail closed:
+ * the suppression admits a hierarchy the checker proved inconsistent, and only the
+ * method-method shape has a lowering defense (per-class vtable entries + widened calls). */
+function isInferredMethodOverrideMismatch(
+  source: ts.SourceFile,
+  position: number,
+  checker: ts.TypeChecker,
+): { derived: ts.Symbol; base: ts.Symbol } | undefined {
+  const member = identifierAt(source, position)?.parent;
+  if (member === undefined || !ts.isMethodDeclaration(member)) {
+    return undefined;
+  }
+  const name = member.name;
+  if (name === undefined || !ts.isIdentifier(name) || !methodIsUnannotated(member)) {
+    return undefined;
+  }
+  const classDecl = member.parent;
+  if (
+    classDecl === undefined ||
+    (!ts.isClassDeclaration(classDecl) && !ts.isClassExpression(classDecl))
+  ) {
+    return undefined;
+  }
+  const baseMember = findBaseMethod(classDecl, name.text, checker);
+  if (baseMember === undefined || !methodIsUnannotated(baseMember)) {
+    return undefined;
+  }
+  const baseName = baseMember.name;
+  if (baseName === undefined || !ts.isIdentifier(baseName)) {
+    return undefined;
+  }
+  const derivedSymbol = checker.getSymbolAtLocation(name);
+  const baseSymbol = checker.getSymbolAtLocation(baseName);
+  if (derivedSymbol === undefined || baseSymbol === undefined) {
+    return undefined;
+  }
+  return { derived: derivedSymbol, base: baseSymbol };
+}
+
+/** Whether a method declaration carries no user-written type: no return annotation, no
+ * parameter annotation, no JSDoc `@returns`/`@param` type. A doc comment with no type is not
+ * an annotation — only a type makes the disagreement about something the user wrote. */
+function methodIsUnannotated(member: ts.MethodDeclaration): boolean {
+  if (member.body === undefined || member.type !== undefined) {
+    return false;
+  }
+  if (member.parameters.some((param) => param.type !== undefined)) {
+    return false;
+  }
+  if (ts.getJSDocReturnType(member) !== undefined) {
+    return false;
+  }
+  return !ts
+    .getJSDocCommentsAndTags(member)
+    .some((doc) => ts.isJSDocParameterTag(doc) && doc.typeExpression !== undefined);
+}
+
+/** The same-named method declaration up the `extends` chain (through aliases), or `undefined`.
+ * Only declarations with identifier names qualify — a computed name has no stable spelling for
+ * the lowering's call marks. A same-named FIELD or accessor is not a method and does not
+ * qualify either (the caller keeps STA0012 for those shapes). */
+function findBaseMethod(
+  classDecl: ts.ClassDeclaration | ts.ClassExpression,
+  name: string,
+  checker: ts.TypeChecker,
+): ts.MethodDeclaration | undefined {
+  const heritage = classDecl.heritageClauses?.find(
+    (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+  );
+  const baseExpr = heritage?.types[0]?.expression;
+  if (baseExpr === undefined) {
+    return undefined;
+  }
+  const baseSymbol = checker.getSymbolAtLocation(baseExpr);
+  const baseDecls = baseSymbol?.declarations ?? [];
+  for (const baseDecl of baseDecls) {
+    if (!ts.isClassDeclaration(baseDecl) && !ts.isClassExpression(baseDecl)) {
+      continue;
+    }
+    for (const baseMember of baseDecl.members) {
+      if (
+        ts.isMethodDeclaration(baseMember) &&
+        baseMember.name !== undefined &&
+        ts.isIdentifier(baseMember.name) &&
+        baseMember.name.text === name
+      ) {
+        return baseMember;
+      }
+    }
+    const higher = findBaseMethod(baseDecl, name, checker);
+    if (higher !== undefined) {
+      return higher;
+    }
+  }
+  return undefined;
+}
+
 /** The coercing compound operators: `-=`, `*=`, `/=`, `%=`, `**=`. `+=` concatenates rather
  * than coerces, and the logical and nullish forms assign their right side as-is. */
 function isCoercingCompound(kind: ts.SyntaxKind): boolean {
@@ -234,6 +338,14 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // widened to Unknown below so no use trusts the annotation; every use then takes the dynamic
   // path (reads, index, calls) or a null-validated static one (array ops via STA2008).
   2454, // Variable 'X' is used before being assigned.
+  // Unknown-iterable `for-of` (slice 2488, plan.md §8 step 2a(c)): `for (const x of u)` where `u`
+  // is Unknown, a union, or any other type without a static walk is ordinary JavaScript with an
+  // exact runtime answer -- the GetIterator dispatch (`jsrt_get_iterator`) boxes collections,
+  // drives generators and stored iterators, calls a user-iterable method, and throws Node's
+  // catchable `TypeError` for the rest. Like the suppressed-2349 call of plan.md §8 step 37, a
+  // statically-known non-iterable (a number, `undefined`) compiles to that same runtime throw
+  // rather than a compile error. ts mode keeps the refusal (STA0012).
+  2488, // Type 'X' must have a '[Symbol.iterator]()' method that returns an iterator.
 ]);
 
 /** Checker refusals Stator answers with exact runtime semantics in BOTH modes, unlike the
@@ -439,9 +551,35 @@ function createProgramUncached(
       diag.file !== undefined &&
       diag.start !== undefined &&
       isDuplicateProtoDataProperty(diag.file, diag.start);
+    // TS2416 override widening (plan.md §8 step 12(d), plan-notes 272): an inferred
+    // method-method disagreement is legal JavaScript with per-class vtable entries, so js mode
+    // drops the refusal — but both declarations' CALLS must stop trusting one side's return,
+    // or a base-typed read of a derived instance answers garbage. Seeding names the
+    // declarations; the lowering's returns edge widens the calls (the step-45 shape, which
+    // leaves the declarations — the overload and vtable contracts — untouched). Any other
+    // 2416 shape keeps STA0012.
+    let overrideWidened = false;
+    if (
+      mode === 'js' &&
+      diag.code === 2416 &&
+      diag.file !== undefined &&
+      diag.start !== undefined
+    ) {
+      const pair = isInferredMethodOverrideMismatch(
+        diag.file,
+        diag.start,
+        program.getTypeChecker(),
+      );
+      if (pair !== undefined) {
+        runtimeDynamicSymbols.add(pair.derived);
+        runtimeDynamicSymbols.add(pair.base);
+        overrideWidened = true;
+      }
+    }
     if (
       !keepProtoRefusal &&
-      (BOTH_MODES_RUNTIME_CODES.has(diag.code) ||
+      (overrideWidened ||
+        BOTH_MODES_RUNTIME_CODES.has(diag.code) ||
         (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code)))
     ) {
       // An inferred binding that TypeScript says has an incompatible assignment must be dynamic

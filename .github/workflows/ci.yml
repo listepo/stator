@@ -1,8 +1,9 @@
 name: ci
 
 on:
-  push:
-    branches: [main]
+  # PRs get the same gate as main pushes (plan-notes: ci.yml ran only on main, so PRs
+  # #7-#11 showed no remote CI). The revert job stays push-only by its event guard below.
+  pull_request:
   workflow_dispatch:
 
 # A push that supersedes an in-flight run cancels it: six platforms times five jobs is a lot of

@@ -299,13 +299,11 @@ test('a generic arrow or function expression assigned to a const specializes', (
   assert.deepEqual(emittedFunctions(source), ['box<number>', 'box<string>']);
 });
 
-test('a generic arrow anywhere but a top-level const is refused', () => {
-  assert.deepEqual(
-    gateCodes(`
-      console.log([1].map(<T,>(item: T): T => item));
-    `),
-    ['STA1214'],
-  );
+test('a generic arrow in a let or a nesting is still refused', () => {
+  // A `let` could be reassigned under a collected tuple, and a nested `const` lives in a scope
+  // the module-level specializations would leak — neither has a home to specialize under. An
+  // inline arrow at a direct call argument is the exception: it takes the parameter's tuple
+  // under a position-derived key (tested below), so the callback shape is no longer here.
   assert.deepEqual(
     gateCodes(`
       let box = <T,>(item: T): T => item;
@@ -341,4 +339,182 @@ test('a generic that instantiates itself at a larger type is capped, not looped'
     ['STA2003'],
   );
   assert.match(diagnostics[0]?.message ?? '', /grow<number\[\]\[\]/);
+});
+
+/** The position-derived key an inline generic takes: `arrow@test.ts#<offset><tuple>`. The
+ * offset is the arrow's own start in the source, so the expectation is computed, not copied
+ * from a failure message. */
+function inlineKey(source: string, arrow: string, tuple: string, kind = 'arrow'): string {
+  const offset = source.indexOf(arrow);
+  assert.notEqual(offset, -1);
+  return `${kind}@test.ts#${String(offset)}<${tuple}>`;
+}
+
+test('an inline generic arrow at a callback specializes at the parameter type', () => {
+  // The arrow literal is its own use site, so one tuple suffices and the key is the position
+  // rather than a variable. The parameter's `(value: number, …) => number` binds `T` to
+  // `number` exactly as a named generic passed there would.
+  const source = `
+    console.log([1].map(<T,>(item: T): T => item));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), [
+    inlineKey(source, '<T,>(item: T): T => item', 'number'),
+  ]);
+});
+
+test('an inline generic function expression specializes too', () => {
+  const source = `
+    console.log([1].map(function twice<T,>(item: T): T[] { return [item, item]; }));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), [
+    inlineKey(source, 'function twice<T,>(item: T): T[] { return [item, item]; }', 'number', 'fn'),
+  ]);
+});
+
+test('two inline arrows at one tuple specialize separately', () => {
+  // Positions are the identity: two literals with one tuple are two specializations, because
+  // sharing one body between two literals would answer one literal's closure with the other's.
+  const source = `
+    console.log([1].map(<T,>(item: T): T => item));
+    console.log([2].map(<T,>(item: T): T => item));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  const first = source.indexOf('<T,>(item: T): T => item');
+  const second = source.indexOf('<T,>(item: T): T => item', first + 1);
+  assert.deepEqual(emittedFunctions(source), [
+    `arrow@test.ts#${String(first)}<number>`,
+    `arrow@test.ts#${String(second)}<number>`,
+  ]);
+});
+
+test('an inline arrow keeps no display name', () => {
+  // The key is a position, not a name: back-filling it as the display name would print
+  // `[Function: arrow@test.ts#…]` where Node prints `[Function (anonymous)]`, so an
+  // anonymous arrow lowers with no name at all — exactly as a non-generic inline arrow does.
+  // A named function expression keeps its own name, which is what Node prints for it.
+  const [arrow] = loweredStatements(`
+    console.log([1].map(<T,>(item: T): T => item));
+  `);
+  assert.equal(arrow?.kind, 'function-declaration');
+  assert.equal((arrow as FunctionDeclaration).fn.name, undefined);
+  const [named] = loweredStatements(`
+    console.log([1].map(function twice<T,>(item: T): T { return item; }));
+  `);
+  assert.equal(named?.kind, 'function-declaration');
+  assert.equal((named as FunctionDeclaration).fn.name, 'twice');
+});
+
+test('an inline arrow nested in a function compiles when it captures nothing', () => {
+  const source = `
+    function f() { return [1].map(<T,>(item: T): T => item); }
+    console.log(f());
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), [
+    inlineKey(source, '<T,>(item: T): T => item', 'number'),
+    'f',
+  ]);
+});
+
+test('an inline arrow inside a generic body substitutes the enclosing tuple', () => {
+  // The arrow's `U` binds through the enclosing `T`: the worklist walks the specialization
+  // body with its substitution in scope, so one literal yields one specialization per tuple.
+  const source = `
+    function outer<T>(x: T): T[] { return [x].map(<U,>(y: U): U => y); }
+    console.log(outer(7));
+    console.log(outer("s"));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), [
+    'outer<number>',
+    'outer<string>',
+    inlineKey(source, '<U,>(y: U): U => y', 'number'),
+    inlineKey(source, '<U,>(y: U): U => y', 'string'),
+  ]);
+});
+
+test('no type parameter survives from an inline specialization', () => {
+  const { module } = lowerSource(`
+    console.log([1].map(<T,>(item: T): T => item));
+  `);
+  assert.deepEqual(
+    verifyHir(module)
+      .filter((p) => p.code === 'STA4054')
+      .map((p) => p.message),
+    [],
+  );
+});
+
+test('an inline arrow that reads an enclosing binding is refused', () => {
+  // A specialization is a module-level function: the body's `y` would resolve to no binding
+  // there (STA4035), so the gate refuses the arrow rather than manufacture that error.
+  assert.deepEqual(
+    gateCodes(`
+      function f() { const y = 1; return [1].map(<T,>(item: T): number => item as number + y); }
+      console.log(f());
+    `),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(`
+      class C { v = 1; m() { return [1].map(<T,>(item: T): number => (item as number) + this.v); } }
+      console.log(new C().m());
+    `),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(`
+      const c = true;
+      if (c) { const y = 1; console.log([1].map(<T,>(item: T): number => (item as number) + y)); }
+    `),
+    ['STA1214'],
+  );
+});
+
+test('an inline arrow that reads a module-level let is refused', () => {
+  // Specialization bodies lower before their file's own statements, so a same-file `let`
+  // (and a `const`, and a `var`, whose hoist feeds the lowering but not the verifier) is no
+  // binding yet where the body reads it. Functions, classes, imports, and globals hoist or
+  // pre-register and stay accepted.
+  assert.deepEqual(
+    gateCodes(`
+      const base = 100;
+      console.log([1].map(<T,>(item: T): number => (item as number) + base));
+    `),
+    ['STA1214'],
+  );
+});
+
+test('an inline arrow away from a direct argument is refused', () => {
+  // A branch, a spread, and a constructor argument have no single parameter type to read.
+  assert.deepEqual(
+    gateCodes(`
+      function run(f: (x: number) => number, v: number): number { return f(v); }
+      console.log(run((1 > 0 ? <T,>(x: T): T => x : (x: number) => x + 1), 1));
+    `),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(`
+      class Box { constructor(f: (x: number) => number) { console.log(f(1)); } }
+      new Box(<T,>(x: T): T => x);
+    `),
+    ['STA1214'],
+  );
+});
+
+test('a parenthesized inline arrow specializes at the same tuple', () => {
+  // The parameter pairs by the argument's own position, which through parentheses is the
+  // chain's top — pairing by the bare arrow instead finds no parameter and refuses.
+  const source = `
+    function run(f: (x: number) => number, v: number): number { return f(v); }
+    console.log(run((<T,>(x: T): T => x), 3));
+  `;
+  assert.deepEqual(gateCodes(source), []);
+  assert.deepEqual(emittedFunctions(source), [
+    inlineKey(source, '<T,>(x: T): T => x', 'number'),
+    'run',
+  ]);
 });

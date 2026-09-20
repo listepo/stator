@@ -2171,6 +2171,24 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
+    case 'get-iterator': {
+      verifyExpression(expr.target, problems, bindings);
+      // The node IS the dynamic dispatch, so its type is always an iterator with an Unknown
+      // element: the boxed for-of walk takes it, and the binding stays dynamic. A concrete
+      // element would type the binding against values the runtime never promised -- the for-of
+      // case below copies this type onto the binding with no further check, so the lie would be
+      // silent rather than a failed verification.
+      if (expr.type.kind !== 'iterator' || expr.type.element.kind !== 'unknown') {
+        problems.push({
+          kind: 'get-iterator',
+          span: expr.span,
+          code: 'STA4045',
+          message: `get-iterator has type '${hTypeName(expr.type)}', not an iterator with an Unknown element`,
+        });
+      }
+      break;
+    }
+
     case 'conditional': {
       verifyExpression(expr.condition, problems, bindings);
       verifyExpression(expr.consequent, problems, bindings);

@@ -168,9 +168,10 @@ export function externDeclarationOfCall(
 
 /** Whether this identifier use is the callee of the call it belongs to — the only position an
  * extern name may appear in (docs/FFI.md §1). An extern has no VALUE: aliasing one, passing
- * one, or reading one is STA1217, decided by the identifier arm, not the call arm. Optional
- * chains and non-null assertions are not direct calls either: the lowering builds one direct C
- * call, not a conditional one. */
+ * one, or reading one is STA1217, decided by the identifier arm, not the call arm. An optional
+ * chain IS a direct callee position: the callee always links, so `?.` is a proven no-op, and
+ * the call arm agrees (it lowers `ext?.()` to the same direct C call). Non-null assertions
+ * are not: the lowering builds one direct C call from a plain callee shape. */
 export function isDirectCalleePosition(node: ts.Identifier): boolean {
   let current: ts.Expression = node;
   let parent = node.parent;
@@ -178,12 +179,7 @@ export function isDirectCalleePosition(node: ts.Identifier): boolean {
     current = parent;
     parent = parent.parent;
   }
-  return (
-    parent !== undefined &&
-    ts.isCallExpression(parent) &&
-    parent.expression === current &&
-    parent.questionDotToken === undefined
-  );
+  return parent !== undefined && ts.isCallExpression(parent) && parent.expression === current;
 }
 
 /** `CString` / `CStringOwned` by alias (docs/FFI.md §2): the documented wrapper spellings.

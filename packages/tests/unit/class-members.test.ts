@@ -444,13 +444,28 @@ test('super in a static block stays not-yet', () => {
   );
 });
 
-test('a static field after a static block stays not-yet', () => {
-  // In ts mode the checker also refuses this (`used before its initialization`); the gate owns
-  // the js-mode refusal, where the layout would otherwise initialize the field after the block
-  // that already wrote it.
-  const source = `class C {\n  static {\n    C.n = 1;\n  }\n  static n = 2;\n}\n`;
-  assert.deepEqual(gateCodes(source, 'js'), ['STA1214']);
-  assert.deepEqual(gateCodes(source, 'ts'), ['STA1214']);
+test('a static field after a static block initializes after it', () => {
+  // Source order is execution order: the later field's slot is `undefined` in the declaration
+  // and assigns after its block (plan.md §8 step 12(d), plan-notes 276). A block that touches
+  // a later field is still refused — by the checker (`used before its initialization`, both
+  // modes), not the gate — so the gate accepts the ordering shape here.
+  const source = `class C {
+    static a = 1;
+    static {
+      C.a = C.a + 1;
+    }
+    static b = C.a * 10;
+  }
+  `;
+  assert.deepEqual(gateCodes(source, 'ts'), []);
+  assert.deepEqual(gateCodes(source, 'js'), []);
+  const [wrapper] = verifiedStatements(source).filter((s) => s.kind === 'block');
+  assert.ok(wrapper !== undefined && wrapper.kind === 'block');
+  const kinds = wrapper.statements.map((s) => s.kind);
+  assert.deepEqual(kinds, ['class-declaration', 'block', 'assignment']);
+  const assignment = wrapper.statements[2];
+  assert.ok(assignment !== undefined && assignment.kind === 'assignment');
+  assert.equal(assignment.target, 'C.b');
 });
 
 const LATE_SUPER = `class B {
@@ -481,16 +496,64 @@ test('pre-super parameter validation is accepted', () => {
   assert.ok(kinds.indexOf('super-call') < kinds.indexOf('field-assignment'));
 });
 
-test('a super call nested in a branch stays not-yet', () => {
+test('a super call in if/else arms is accepted when no initializers need splicing', () => {
+  // A class with no field initializers has nothing to splice after the call, so one super per
+  // arm, every arm covered, is a fixed enough position (plan.md §8 step 12(d), plan-notes 277).
+  const source = `${LATE_SUPER}class D extends B {
+    constructor(n: number) {
+      if (n > 0) {
+        super(n);
+      } else {
+        super(0);
+      }
+    }
+  }
+  `;
+  assert.deepEqual(gateCodes(source, 'ts'), []);
+  const [, derived] = verifiedStatements(source).filter(
+    (s): s is ClassDeclaration => s.kind === 'class-declaration',
+  );
+  assert.ok(derived?.ctor !== undefined);
+  const ifNode = derived.ctor.fn.body.statements.find((s) => s.kind === 'if-statement');
+  assert.ok(ifNode !== undefined && ifNode.kind === 'if-statement', 'the branch survives');
+  for (const arm of [ifNode.consequent, ifNode.alternate]) {
+    assert.ok(arm !== undefined, 'both arms exist');
+    const kinds = hirNodes(arm).map((n) => n.kind);
+    assert.ok(kinds.includes('super-call'), 'each arm calls super');
+    assert.ok(!kinds.includes('field-assignment'), 'nothing splices with no initializers');
+  }
+});
+
+test('a super call in a branch stays not-yet when initializers need splicing', () => {
+  // The same branch with a field initializer has no fixed splice position: the initializer
+  // cannot follow the call into both arms (plan.md §8 step 12(d)).
   assert.deepEqual(
     gateCodes(
       `${LATE_SUPER}class D extends B {
+        doubled = 0;
         constructor(n: number) {
           if (n > 0) {
             super(n);
           } else {
             super(0);
           }
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+});
+
+test('a second super call on a covered path stays not-yet', () => {
+  // Re-running the base constructor is a ReferenceError in Node, not a second initialization.
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(n: number) {
+          super(n);
+          super(n);
         }
       }
       `,
