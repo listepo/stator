@@ -293,8 +293,7 @@ depend on.
 Steps (1–11 detailed 2026-09-01 against the live substrate; plan-notes 131. Step 12 was added the
 same day from Task 4.7's inventory; plan-notes 136). **Steps 1–11 have landed**; their evidence is
 in [done.md](done.md) → Phase 5. Numbers and titles stay here so `§8 step N` references resolve.
-What is still OPEN in this phase is **step 2a(b)/(c)**, **step 12 (c)–(f)**, and **steps 18–38** —
-the twenty-one added by the 2026-09-14 bug hunt (plan-notes 249–251). The two
+What is still OPEN in this phase is **step 12(d)'s class-member remainder and 12(e)'s opaque-class remainder** (Agent 1: `agent/p5-class-surface`, plan-notes 272), and **step 12(c)'s spread residue and 12(f)** (other agents) — step 2a(c) is closed (2488 landed in plan-notes 280, 2454 in wave 3; the bullets below say where), all three step-2a(b) buckets have landed (2683/2769/2464, plan-notes 272), and steps 18–46 have all landed (struck stubs below; evidence in [done.md](done.md) → Phase 5). The two
 shipped-construct defects the bug hunt of 2026-09-11 found (steps 15 and 16) both landed the same
 day — plan-notes 225 and 226.
 Step 13 was added and landed on 2026-09-04 (plan-notes 193); step 14 was added on 2026-09-09
@@ -346,10 +345,11 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    ~~The remaining buckets were swept 2026-09-04; four more codes landed (18050, 2403, 2695,
    8024/8029) and the strict-mode family was judged a **real refusal Stator keeps**.~~
    ✅ **the sweep is complete** (plan-notes 194, 196) — evidence in [done.md](done.md) → Phase 5
-   step 2a. **Still open in (b):** three buckets **judged correct but blocked on a Stator not-yet**,
-   not on the judgment — 2683 (`this` implicitly any — and when it is taken it goes in as the OPTION
-   `noImplicitThis: mode === 'ts'`, **not** as a code), 2769 (`No overload matches this call`) and
-   2464 (computed property name), all three waiting on step 12(c)/(d)/(e) surface. What is left after
+   step 2a. **All three (b) buckets have landed since** (plan-notes 272): 2683 went in as the
+   OPTION `noImplicitThis: mode === 'ts'` (done.md → Phase 5 wave 4, dynamic `this`), 2769 as the
+   overload-fallback acceptance (done.md → wave 4), and 2464 as a js-mode suppression with
+   dynamic-path coercion. (b) is closed; the override-widening bucket it never named (TS2416,
+   plan-notes 68) is owned by step 12(d). What is left after
    those is one shared blocker, not a set of buckets — see (c).
    (c) **[D4] The error-object model, and the buckets that sat behind it** (added 2026-09-04 from the (b)
    sweep; plan-notes 194).
@@ -382,13 +382,25 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `STA4035`. Reading an undeclared name now throws a catchable `ReferenceError`, `typeof` answers
    `"undefined"` without throwing, and the three WRITE forms the suppression newly admitted were
    caught manufacturing `STA4034` and fixed in the same change — the TS2403 rule again, asked of 24
-   syntactic positions instead of one fixture. · **2488 `Symbol.iterator`**
-   needs runtime dispatch for unknown iterables, not only a panic-to-throw conversion.
+   syntactic positions instead of one fixture. · ~~**2488 `Symbol.iterator`**~~ ✅ **landed
+   2026-09-16** (plan-notes 280; evidence in [done.md](done.md) → Phase 5 step 2a(c),
+   unknown-iterable dispatch): js mode suppresses the checker's refusal and lowers `for-of`
+   over any operand with no static walk through a `get-iterator` HIR node to the runtime
+   GetIterator dispatch (`jsrt_get_iterator` — collections box, generators and stored
+   iterators drive as-is, a user-iterable method resolves and runs, the rest throw Node's
+   catchable `TypeError`), proved by `tests/golden/js/for_of_unknown.js` byte-for-byte and a
+   both-modes decision pair (`subset_for_of_unknown_*`: `dynamic` in js, `error STA0012` in
+   ts). ts mode keeps the refusal, and the gate there refuses only what the checker accepted
+   (a custom `{ next() }` object, an `Iterable<T>` interface) so the STA0012 speaks alone; a
+   `for-of` binding is not an annotation site, so the checker's recovery-`any` no longer
+   buries it under STA1003.
    **2454 definite assignment** rejects an uninitialized annotated binding whose runtime value is
    `undefined`; it is **not TDZ**. True syntactic TDZ is 2448 (closure-mediated TDZ may have no
    checker diagnostic), and there is no runtime TDZ sentinel/check to convert. Suppressing 2454
    additionally requires sound dynamic method receivers rather than trusting the annotation
-   (plan-notes 200, correcting note 195's premise). Both buckets remain open.
+   (plan-notes 200, correcting note 195's premise).~~ ✅ **landed in wave 3** ([done.md](done.md)
+   → Phase 5 wave 3: suppressed in js as a code plus binding widening; verified green in
+   plan-notes 280 — `subset_definite_assignment_*`, both goldens). Both buckets are closed.
    · ~~**`missing.a = 1` and `missing[0] = 1` raise `STA4035`**~~ ✅ **fixed 2026-09-05**
    (plan-notes 199; [done.md](done.md) → Phase 5 step 2a(c), inferred JS namespaces).
    ~~**Check:** `typeof unresolvableName` answers `"undefined"` without throwing and a bare
@@ -401,8 +413,9 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    `TypeError`, caught by `tests/golden/js/property_errors.js` and
    `tests/golden/js/iterator_receiver_error.js`. The same conversion later reached the string-length
    builtins: `repeat`/`padStart`/`padEnd` throw a catchable `RangeError` matching Node instead of
-   aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets stay
-   open for the reasons above, which are not panics. ~~**Check:** the two delete buckets (2704, 2790)
+   aborting (plan-notes 203; `tests/golden/{js,ts}/string_range_error`). The 2488/2454 buckets
+   below were still open then, being not panics — both have since landed (2488: plan-notes 280;
+   2454: wave 3). ~~**Check:** the two delete buckets (2704, 2790)
    land with the `delete` OPERATOR — lowering plus whatever
    answer a fixed-shape object gives when it loses a field — proved by a golden where `delete o.a`
    returns Node's boolean and the subsequent read answers `undefined`.~~ ✅ **2026-09-09**
@@ -491,18 +504,36 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~,
     ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~,
     ~~calling a class field~~, and ~~named function expressions~~ **landed** (evidence in
-    [done.md](done.md) → Phase 5 step 12e); still open are a class used as a value and `super` as a
-    value.
+    [done.md](done.md) → Phase 5 step 12e); still open are an OPAQUE class use — anything but
+    the in-place spellings (`new K`, `K.static`, `o instanceof K`, alias formation), which need
+    the class object — and BARE `super` (the `super.m` tear-off landed as step 42; a `super`
+    with no member is a JavaScript SyntaxError and stays refused).
     Method values use the method's own `JSRTClosure` with `has_receiver` so `jsrt_call` shifts when
     the receiver is omitted (`docs/VALUE.md` §4.16, plan-notes 208, 230); that is still not
     `Function.prototype.bind`'s two-slot `JSRTEnv` (which INSERTS a receiver where this DROPS one),
     which stays not-yet. A class used as a value and `super` as a value are blocked on the class
     object instead, which is family (d)'s. Named function expressions bind the function's own name
     inside its body only (plan-notes 231).
-    (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above:
-    constrained and defaulted type parameters, generic classes, generic function expressions and
-    arrows, a generic function used as a value, explicit type arguments on a call or a `new`, and a
-    generic call whose type arguments no argument determines.
+    (f) **[D4] Generics beyond monomorphization** last, because they multiply everything above.
+    Constrained and defaulted type parameters specialize like any other call — the constraint
+    is the checker's, the default fills what no call determines (`finishTuple`, `Unknown`
+    when nothing does). Generic classes specialize per concrete tuple at each `new` site,
+    inferred or explicit (evidence: done.md → Phase 5 waves 4–5). A generic function used as
+    a value takes the canonical tuple, sharing its specialization with an undetermined call
+    (step 41); explicit type arguments on a call or a `new` name the same specialization
+    inference would; generic arrows and function expressions specialize under a module-scope
+    `const` home. **An inline generic arrow or function expression passed directly as a call
+    argument landed 2026-09-16** (plan-notes 279): it specializes at the parameter's function
+    type under a position-derived key (`subset_generic_arrow_bare_*` now `static`, four new
+    decision pairs, `tests/golden/ts|js/generic_inline.*` byte-for-byte).
+    **Residue:** a homeless arrow anywhere else (`let`, a nesting, a branch, a spread, a
+    constructor argument — no single parameter type to read), one whose body reads an
+    enclosing scope or a same-file `let`/`const`/`var` (no binding a module-level
+    specialization could read), a generic that escapes further (returned, stored — the
+    dynamic tier), a generic call at a generic type (self-application — no monomorphic
+    spelling), `instanceof` against a generic class (one descriptor per tuple), and the
+    class-surface residue (a generic subclass of a generic base, raw or partial bounds —
+    family (d)'s).
     **Check (step 12):** one golden fixture per family matching the pinned Node byte-for-byte; the
     decision-test rows for every construct named above out of expected-fail; and `gate.ts` emits no
     `not-yet` for any construct this step names.
@@ -593,11 +624,13 @@ The tasks are independent and the phase's Check has one clause per task.
 
 **All four tasks have landed** (6.1, 6.2, 6.2a, 6.3); their evidence is in [done.md](done.md) →
 Phase 6, and the titles stay here so `§9 Task 6.N` references resolve. The phase is **not closed**:
-its Check's fuzzing clause says *≥1 h nightly with zero unexplained divergences*, and what exists is
-the scheduled job plus local runs — the clause passes on a nightly run's own output, cited here.
-Task 6.3 also carries one named residue (its regression threshold's noise floor). Test262 tracking
-is the standing output of 6.1 and does not close. Difficulty (§14 legend): the fuzzing clause is
-**D1** (cite a nightly run's own output), the noise-floor residue **D2**.
+its Check's fuzzing clause says *≥1 h nightly with zero unexplained divergences* — met on the
+nightly job's own output, cited here: 2026-09-14 (run 34819549697, 4316 cases, 0 divergences,
+1h0m53s) and 2026-09-15 (run 34942356204, 4128 cases, 0 divergences, 1h1m50s), both green
+(plan-notes 274). What keeps the phase open is Task 6.3's named residue (the regression
+threshold's noise floor) below. Test262 tracking is the standing output of 6.1 and does not
+close. Difficulty (§14 legend): the noise-floor residue is **D2** (the fuzzing clause was D1
+and is met).
 
 ~~**Task 6.1 — Test262 runner.**~~ ✅ **landed 2026-09-03** — evidence in [done.md](done.md) → Phase 6.
 First pinned number: **2379 passed, 10,513 failed, 40,688 skipped — 18.5%** over `passed + failed`,
@@ -656,8 +689,17 @@ previous result for the same host and fails above `thresholdPercent: 20`. The st
 threshold to sit above a **measured** spread; what has been measured is one repeat on one host
 (22.358 → 21.458 ms, **4.0%**, same commit — done.md) plus five repeats on a second host
 (21.215–22.778 ms, **7.4%** max spread — plan-notes 246), and the 20% gate stands on both with
-~3× headroom. Still open, narrowed: the Check names the machine that runs the weekly job, and
-neither host is it. **Check:** a handful of repeats of one commit
+~3× headroom. Still open, narrowed twice: the Check names the machine that runs the weekly job,
+and neither host is it — and the weekly-job machine is not a stable entity to repeat on. The
+Sunday bench runs on ephemeral `ubuntu-24.04` VMs (a fresh VM per run; the 2026-09-13 run's
+provisioner log reads Azure westus2, worker `4fa6f57c…`), and its result artifact does not
+survive: that run recorded 5 programs and uploaded `benchmark-13` (1103 bytes), yet two days
+later the run's artifact list is empty, so week-to-week repeats are not retrievable
+(plan-notes 274). The concrete unblock is retention, not more local repeats: keep
+`benchmark-*` artifacts (or land the weekly result on a non-main branch) until repeats
+accumulate on the same image — then the Check's literal form can pass. Until then the 20%
+gate stands on the two measured spreads (~2.7× headroom over the worst 7.4%).
+**Check:** a handful of repeats of one commit
 on the machine that runs the weekly job, the observed spread recorded in `plan-notes.md`, and the
 gate set from it. A gate below the noise floor fires on noise, and an alarm that fires on noise is
 one people learn to ignore — which costs more than having no gate at all.
@@ -690,32 +732,22 @@ one people learn to ignore — which costs more than having no gate at all.
 
 ---
 
-## 10. Phase 7 — FFI (est. +4–6 weeks)
+## 10. Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
-Research verdict: only Static Hermes has bidirectional, header-driven FFI — and even there the binding generator is an experimental in-tree script. A differentiator worth building properly; emitting C makes it natural.
+All three tasks landed and the phase Check is met. **Evidence: [done.md](done.md) → Phase 7.**
+Titles stay here so `§10 Task 7.N` references resolve; the extern contract itself lives in
+`docs/FFI.md` (authoritative), the codes in `docs/DIAGNOSTICS.md`, the matrix rows in
+`docs/SUBSET.md`. Order was 7.1 → 7.2 → 7.3 and was load-bearing: 7.2 reuses 7.1's type
+mapping in reverse, and 7.3 generates the declarations 7.1 consumes.
 
-"Emitting C makes it natural" is true of the CALL and false of everything around it. The call itself
-is a line of C. The phase is four weeks because of what surrounds it, and all four surprises are the
-same shape — a thing that is implicit inside the compiled world and must become explicit at the
-edge:
+- ~~**Task 7.1 — Calling C from TS.**~~ ✅
+- ~~**Task 7.2 — Exposing TS to C.**~~ ✅
+- ~~**Task 7.3 — Bindings for existing headers.**~~ ✅
 
-- **Memory.** Inside, Boehm sees every pointer because generated code keeps them in `JSRT_FRAME`
-  slots. A pointer handed to C is invisible to the collector for the duration of the call, and the
-  callee may keep it after returning. Every FFI signature therefore has to say who owns what and
-  for how long — the compiler cannot infer it, and getting it wrong is a use-after-free, not a
-  diagnostic.
-- **Strings.** The runtime's strings are UTF-16 (a settled decision, §15.4); C wants bytes. There is
-  no free conversion, so there is no implicit one.
-- **Errors.** C reports failure by return value, `errno`, or an out-param, and it never unwinds.
-  A JS exception must never propagate into a C frame, and a C error code only becomes an exception
-  if the declaration says how.
-- **Direction asymmetry.** 7.1 (calling out) is a compile-time question. 7.2 (being called in) is a
-  runtime-lifecycle question: initialization, stack roots, threads, and what a C caller sees when
-  TS throws. They share the ABI table and nothing else.
-
-Order is 7.1 → 7.2 → 7.3 and it is not arbitrary: 7.2 reuses 7.1's type mapping in reverse, and 7.3
-generates the declarations 7.1 consumes — a generator built before the shape of a hand-written
-binding is known would be generating guesses.
+**Check:** ✅ **met 2026-09-15, re-verified 2026-09-16** — `examples/ffi/sqlite/`
+(generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node;
+the CI proof is the ffi job's own run (plan-notes 271): an example that statically links
+SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
 **Out of scope for v0, stated here so it is a decision rather than an omission** (each may return as
 its own task, with a `plan-notes.md` entry and a `SUBSET.md` row):
@@ -727,185 +759,6 @@ its own task, with a `plan-notes.md` entry and a `SUBSET.md` row):
 | C++ symbols, name mangling, exceptions | A second ABI, not an extension of this one |
 | C **calling back into** a JS closure | Needs a trampoline plus a GC root for the closure that outlives the call. Task 7.2's exported functions are the supported way for C to call in |
 | Threads | v0 FFI stays single-threaded (Task 7.2 step 6); **OS threads + async bridge are Phase 10** (T10.2), which reopens this |
-
-**[D4] Task 7.1 — Calling C from TS.** `declare` + a marker (mirroring `$SHBuiltin.extern_c`) lowers to a direct call — no boxing for primitives; ownership rules for pointers/strings documented per-signature.
-
-Steps (detailed 2026-09-01; plan-notes 131):
-1. **Decide the surface before writing lowering, and write it down first.** Nothing under
-   `src/frontend/` handles ambient `declare function` today, so this is new gate surface rather
-   than a tweak to an existing path. Pick the marker — a `declare function` in a `.d.ts` plus an
-   explicit per-declaration marker, TS-native, rather than Static Hermes's `$SHBuiltin.extern_c`
-   call form — and land it in `docs/SUBSET.md` + a new `docs/FFI.md` **before** any code. Per
-   §15.6, inventing this convention in code instead of in the docs is the failure mode. Three
-   sub-decisions the doc has to settle, because each becomes unchangeable once bindings exist:
-   where the marker attaches (declaration, or a whole `.d.ts` file), how the C symbol name is
-   spelled when it differs from the TS name, and whether an extern declaration is legal outside a
-   `.d.ts` (recommend no — keeping it in declaration files is what makes 7.3's generator's output a
-   drop-in).
-
-   Steps 1–2 ✅ landed 2026-09-14 in `a732cd5`: `docs/FFI.md` (marker, ABI table, lifetimes, errors,
-   boundary rules), `docs/SUBSET.md` FFI rows, `docs/DIAGNOSTICS.md` codes STA1114–STA1121 (never)
-   + STA1217 (not-yet Phase 7). Steps 3–5 ✅ landed 2026-09-14 (runtime converters + corpus,
-   gate refusals, extern-call lowering with error mapping; evidence in [done.md](done.md) →
-   Phase 7 steps 4–5). Steps 6–9 landed: borrow-only opaque-pointer pass-through (§6), `@statorLink`/`--link=` plumbing (§9), the `explain` unchecked-boundary mark (§5), and `js`-mode boundary checks at extern calls (evidence: [done.md](done.md) → Phase 7, plan-notes 266). Step 10 landed 2026-09-15: libm goldens in both modes, the self-compiled `.c` fixture through the `--link=` channel, the ASan buffer-ownership check, and a real `--emit-header` double build — all as passing checks in `packages/tests/ffi/run.ts` (plan-notes 266).
-2. **The ABI table is the contract, and it is small on purpose.** It lives in `docs/FFI.md`
-   (§2 — this table below is the original sketch; the doc is authoritative where they differ):
-
-   | TS type | C type | Notes |
-   |---|---|---|
-   | `number` | `double` | The unmarked case; no conversion |
-   | `number` + `i32` refinement | `int32_t` | The refinement already exists (`docs/NUMERIC.md`) |
-   | `boolean` | `bool` | `<stdbool.h>` |
-   | `void` | `void` | Return position only |
-   | branded pointer type | `T*` | Opaque; never dereferenced by generated code |
-   | explicit `CString`-style wrapper | `const char*` | Allocates; see step 3 |
-   | anything else | — | Compile error |
-
-   **`string` deliberately maps to nothing.** UTF-16 in, bytes out means a real conversion with a
-   real allocation, so it is spelled at the declaration and never inferred. `Unknown`, objects,
-   arrays, and closures are errors here by construction — they are the cases that would need
-   boxing, and "no boxing for primitives" is only meaningful if the non-primitives are refused
-   rather than silently boxed. Each refusal gets its own code, allocated in `docs/DIAGNOSTICS.md`
-   (the sole allocator — never here).
-3. **String conversion, both directions, with the lifetime written down.** In: allocate a NUL-
-   terminated UTF-8 copy for the call and free it after (the callee gets a borrow; if it stores the
-   pointer, the declaration must say so and the copy must be transferred instead). Out: a
-   `const char*` return is copied into a runtime string at the boundary — never wrapped, because a
-   wrapper's lifetime belongs to the C library and nothing in the runtime can track it. Embedded
-   NULs and invalid UTF-8 need a stated answer, not an accident.
-4. **Errors: C returns codes, and only the declaration knows what they mean.** Fix the policy here
-   or every binding invents its own. Default: the return value is a plain value and a failing call
-   is not an exception. Opt in per declaration to one of a closed set of conventions — nonzero is
-   an error, negative is an error, NULL is an error, `errno` carries it — and the lowering emits
-   the throw. Two absolutes: a JS exception must **never** unwind through a C frame (the call is
-   made outside any construct that could throw across it), and an unmapped nonzero return must not
-   be silently discarded.
-5. **Lowering and the emitter.** An extern-marked call becomes a direct C call: typed values are
-   already unboxed, so the work is making sure the emitter does not route them through `jsrt_value`
-   on the way out, that the `#include` reaches the emitted translation unit, and that argument
-   evaluation order and any temporaries (step 3's string copies) are freed on **every** exit path,
-   landing pads included — the same discipline `JSRT_FRAME` already demands of generated code.
-6. **GC and ownership, per signature, in the declaration.** A pointer handed to C is invisible to
-   Boehm for the duration of the call; the frame that owns it must stay live across the call, and
-   the callee must not retain it past return unless the declaration says it takes ownership. Two
-   options only — **borrowed for the call** or **copied/transferred** — because a third would be a
-   lifetime the compiler cannot express. This is documentation the compiler cannot check, which is
-   exactly why it is per-signature rather than one global paragraph. A binding that keeps a pointer
-   (SQLite's statement handles) uses the branded-pointer type, whose lifetime is the C library's,
-   not the collector's.
-7. **Link plumbing.** An extern declaration needs a header to include and a library to link.
-   `linkExecutable` in `src/cli/build.ts` already assembles the clang link line (and already
-   handles conditional `-lgc`), so extern-declared libraries append there; flags come from the
-   declaration file plus a `--link=` CLI escape hatch. Duplicate libraries are deduplicated while
-   preserving order — link order is load-bearing for static archives, and a "helpful" sort here
-   breaks builds in a way that looks like a missing symbol.
-8. **Name the trust boundary honestly.** §0 rule 2 says never trust an annotation without a
-   boundary — but a C return value **cannot** be runtime-checked, so FFI is the one boundary where
-   the annotation is asserted by a human and not verified. Do not paper over that: `stator explain`
-   marks extern calls as an **unchecked boundary** so an audit can enumerate every one of them, and
-   `docs/FFI.md` states the asymmetry in the same words. This is also the honest answer to "why is
-   FFI not available in `ts` mode's safety story" — it is, with the caveat printed.
-9. **`js` mode.** Arguments arriving from untyped code are dynamic, so they get a boundary check at
-   the call and `STA2001` on mismatch — the existing runtime trap doing its existing job, not a new
-   mechanism. The extern declaration itself is identical in both modes; only the checks differ.
-10. **Tests.** Decision tests in both modes (extern call, refused non-primitive, refused varargs).
-   The golden test links **libm** — `sqrt`, `fmod` — and a two-function `.c` fixture the harness
-   compiles itself, so the golden suite depends on nothing installed; SQLite belongs to Task 7.3
-   and the phase Check. At least one ASan test where C writes into a buffer the runtime owns, since
-   that is the failure this design is most likely to produce and the ASan job already exists.
-
-**[D4] Task 7.2 — Exposing TS to C.** `--emit-header` generates a `.h` for exported functions (Static Hermes `--exported-unit` model); values crossing out are C ABI types where sound, `jsrt_value` otherwise.
-
-Steps 1–2 ✅ landed 2026-09-15 (`4445956`; evidence in [done.md](done.md) → Phase 7 Task 7.2 steps 1–2). Steps 3–8 landed: init contract, throws companion + sentinel, frame/stack roots, the single-thread sentence, mangling + `--unit-name` + version symbol, and header determinism including a real double build in `packages/tests/ffi/run.ts` (evidence: [done.md](done.md) → Phase 7, docs/FFI.md §8, plan-notes 266). Step 9 landed 2026-09-15: the C-consumer example (`packages/tests/ffi/example-c-consumer/`, success + `last_error` paths, header `cmp`) wired into the ffi CI job (plan-notes 266).
-
-Steps (detailed 2026-09-01; plan-notes 131):
-1. **`--emit-header` in the CLI**, reusing Task 7.1's ABI table in the other direction: an exported
-   function whose WHOLE signature is in the table gets a plain C prototype; anything else takes and
-   returns `jsrt_value`. One table, two directions — a second, subtly different mapping is how the
-   two halves drift apart. The flag also implies a build-mode change: the output is a linkable
-   object/archive rather than an executable, since a unit exposed to C usually has no `main`.
-2. **Decide what is exportable, and refuse the rest with a diagnostic.** Exported `function`
-   declarations with in-table signatures are the core. Exported `const` of a primitive type can be
-   a `#define`-free `extern const`. Classes, closures, generics, and mutable module state are NOT
-   exported in v0 — a generic has no single C signature, and a closure has captured state with a
-   lifetime C cannot hold. Refusing them loudly is the difference between a small feature and a
-   half-working one.
-3. **The init contract is the load-bearing part.** A C `main()` must initialize the runtime — GC,
-   interned strings, and every module's top-level side effects **in dependency order** — before
-   calling anything. Emit `stator_init_<unit>(void)`, declare it first in the header, make it
-   idempotent (a second call is a no-op, because a library's init being called by two independent
-   consumers is normal), and state in the header's own comment that calling an exported function
-   first is undefined behavior. Getting this wrong is silent, not loud — which is why it is a
-   generated declaration rather than a line in a doc.
-4. **What C sees when TS throws.** Exceptions cannot cross the C ABI, so decide once and generate
-   the same thing everywhere: an exported function's generated stub catches everything at the
-   boundary. In-table signatures have no room in the return value for an error, so the escape is a
-   companion `stator_last_error(void)` (NULL when the last call succeeded) plus a documented
-   sentinel return, and the header says the call must be checked. The alternative — abort the
-   process on an uncaught exception — is defensible for v0 but must be a written choice, not the
-   default that happens if nobody decides. Whatever is chosen, an exception must never unwind into
-   the C caller's frame.
-5. **Frame and stack roots.** A function entered from C has no parent `JSRT_FRAME`, and Boehm needs
-   that thread's stack base to scan conservatively; the generated entry stub establishes both, and
-   pops the frame on every exit path including the one step 4 introduces.
-6. **Threads: single-threaded in v0, said out loud.** Calling in from a second thread is undefined
-   until a task says otherwise, and the generated header carries that sentence. Discovering it
-   from a crash is the expensive way to learn it.
-7. **Name mangling and ABI identity.** Exported `foo` from unit `m` becomes `stator_m_foo`;
-   `--unit-name` sets the prefix (the `--exported-unit` model). A collision is a compile error,
-   never a silent last-writer-wins. Emit a version symbol the header asserts against, so a header
-   from one build linked against an archive from another fails at link time instead of at runtime.
-8. **The header must be deterministic.** Same input, byte-identical output — no timestamps, no
-   absolute paths, no hash-ordered iteration. A generated file that changes on every build cannot be
-   committed, diffed, or reviewed, and this one is the artifact users will commit.
-9. **CI example.** A small `main.c` + the emitted header, compiled and run inside the existing
-   `runtime` job (which already has clang and the archive), asserting both a successful call and
-   the step-4 error path. An FFI story that is not built in CI decays within a month.
-
-**[D5] Task 7.3 — Bindings for existing headers.** ✅ **landed 2026-09-15** — evidence in [done.md](done.md) → Phase 7 Task 7.3 (plan-notes 271). Start **manual** (hand-written `declare` files for the demo libs). A libclang-driven generator (functions + scalars + structs-by-pointer only) is built only after ≥3 manual bindings exist to define its spec.
-
-Steps (detailed 2026-09-01; plan-notes 131):
-1. **Three manual bindings, chosen for three different shapes** — that is what makes them a spec
-   rather than three examples of the same case:
-   - **libm** — scalars only, no allocation, no lifetime. Proves the plain path and needs nothing
-     installed (it is also Task 7.1's golden test).
-   - **SQLite** — opaque handles (`sqlite3*`, `sqlite3_stmt*`), out-params, strings in both
-     directions, and error codes. It exercises every hard rule at once, which is why the phase
-     Check uses it.
-   - **A struct-by-pointer library** — POSIX `stat`, or zlib. Proves the one aggregate shape v0
-     supports, including field offsets the binding must not guess.
-   Each lands in `examples/ffi/` as a `.d.ts` with its link pragma plus a runnable example.
-2. **Record every ambiguity as it is hit**, in `plan-notes.md`, while writing the bindings — those
-   notes ARE the generator's requirements document, they are what "define its spec" means in the
-   task line, and they are unrecoverable afterwards. Expect them to cluster on: which pointers the
-   library retains, which returned strings the caller must free, and which error codes mean
-   "failure" versus "no more rows".
-3. **Then choose the generator's front end, cheapest rung first.** libclang via napi bindings is a
-   new native dependency, and the dependency budget is `typescript` only. `clang -Xclang
-   -ast-dump=json` needs **no** new dependency, and clang is already a hard requirement of every
-   build. Start there; overturning it needs measured evidence that the JSON AST cannot express
-   something the bindings need — recorded in `plan-notes.md` (§15.3), not a preference.
-4. **The generator's shape:** parse the header's declarations into a small IR, map each C type
-   through Task 7.1's ABI table **in reverse**, and print a `.d.ts`. Everything the table cannot
-   map is refused, not approximated. Typedef chains resolve to their underlying type; an anonymous
-   struct behind a typedef is still a branded pointer. Output must be deterministic and stable
-   across runs (same rule as 7.2 step 8) — a generated binding is a file people commit.
-5. **Scope limits are enforced, not documented.** Functions, scalars, and structs-by-pointer only.
-   Varargs, function pointers, unions, bitfields, macro constants, and inline functions are
-   **rejected with a diagnostic naming the construct and its header line** — a generator that
-   silently skips what it cannot express produces a binding that looks complete and is not, which
-   is the single worst failure mode available to this task. A summary line reports how many
-   declarations were emitted and how many refused, per reason.
-6. **The manual bindings become the generator's oracle.** Regenerate SQLite's binding and diff it
-   against the hand-written one; every difference is either a generator bug or a manual-binding bug,
-   and each one gets resolved rather than tolerated. This is the only cheap test that the generator
-   understands real headers, and it costs nothing because both files already exist.
-7. **The phase Check's SQLite demo is assembled from GENERATED bindings** once the generator exists;
-   the manual binding stays in the tree as step 6's oracle. The demo also exercises Task 7.2 (the
-   same example is called from a C `main()`), which is what makes the Check one example instead of
-   two.
-
-**Check:** ✅ **met 2026-09-15** — `examples/ffi/sqlite/` (generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node; the CI proof is the ffi job's own run (plan-notes 271): an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
 ---
 
