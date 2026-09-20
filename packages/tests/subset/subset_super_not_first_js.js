@@ -1,5 +1,6 @@
 // @mode: js
 // @verdict: not-yet
+// @code: STA1214
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // The js-mode twin: code before `super(...)`, and the call in both branches of an if/else
 // (plan-notes 233).

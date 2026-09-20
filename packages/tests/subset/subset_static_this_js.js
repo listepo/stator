@@ -1,5 +1,6 @@
 // @mode: js
 // @verdict: not-yet
+// @code: STA1214
 // SUBSET.md: Static methods and static class members
 
 class S {

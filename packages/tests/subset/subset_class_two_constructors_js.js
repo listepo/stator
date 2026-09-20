@@ -1,6 +1,6 @@
 // @mode: js
 // @verdict: not-yet
-// @code: STA0012
+// @code: STA1214
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // The js-mode twin: in JavaScript two constructors are an early SyntaxError, and the checker reports
 // it for a `.js` file too (plan-notes 233).

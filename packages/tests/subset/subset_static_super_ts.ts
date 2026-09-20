@@ -1,5 +1,6 @@
 // @mode: ts
 // @verdict: not-yet
+// @code: STA1214
 // SUBSET.md: Static methods and static class members
 // `super.m()` in a static starts the lookup at the base and keeps `this` as the receiver.
 

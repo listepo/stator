@@ -1,5 +1,6 @@
 // @mode: ts
 // @verdict: not-yet
+// @code: STA1214
 // SUBSET.md: Static methods and static class members
 // `this` in a static is the class it was reached through; the lowering names it per receiver.
 

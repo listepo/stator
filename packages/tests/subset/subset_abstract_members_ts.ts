@@ -1,5 +1,6 @@
 // @mode: ts
 // @verdict: not-yet
+// @code: STA1214
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // An abstract method or accessor declares a name and no function (plan-notes 233). The abstract
 // method's slot is filled by each concrete descendant's table, so a call through the base is virtual.
