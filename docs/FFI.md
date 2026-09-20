@@ -291,9 +291,9 @@ one place `js` mode refuses where it would otherwise check: no runtime test can 
 slot address, so there is nothing for STA2001 to do.
 A call that does not compile — a refusal — carries no flag: it is not a
 boundary, it is a refusal, and its code already names it. Refusals surface at the
-**declaration** (STA1114–21); STA1217 additionally
-surfaces at value-use and optional-call sites, which are call positions the declaration
-verdict does not cover.
+**declaration** (STA1114–21); STA1217 additionally surfaces at value-use sites, the one
+call position the declaration verdict does not cover. (An optional call `ext?.()` is a
+direct call, not a refusal: the callee always links, so `?.` is a proven no-op.)
 
 This is also the honest answer to "why is FFI not available in `ts` mode's
 safety story" — it is, with the caveat printed. (`docs/MODES.md`'s rule that
@@ -316,8 +316,8 @@ not retain it past return unless the declaration says it takes ownership —
 `CString` (borrow) versus `CStringOwned` (transfer) in §3 is this rule worked
 out for strings. Opaque handles are borrow-only in v0: there is no transfer
 spelling for a branded pointer, so every one crosses untouched and unretained,
-and any use that would retain one past the call — aliasing the extern as a value,
-the optional call — stays STA1217.
+and any use that would retain one past the call — aliasing the extern as a value —
+stays STA1217 (phaseless: no open phase owns a C value representation for externs).
 
 What the emitter guarantees, by construction rather than by audit
 (plan §10 Task 7.1 step 6):
@@ -362,7 +362,9 @@ demands it (§15.3, §15.6):
    (STA1119), and direct-callee-position only (STA1217 elsewhere). Step 6 landed
    separately and closed the pointer deferral: brands classify as the `pointer` ABI
    kind (borrow-only, §6), so STA1217 names only extern-as-value and optional-call
-   positions now. Step 7 landed with §9.
+   positions now. Step 7 landed with §9. (Phase 7 close-out, 2026-09-16: the optional
+   call delivered as a direct call — `?.` is a proven no-op on an always-linked callee —
+   so STA1217 is extern-as-value only, phaseless since no open phase owns it.)
 2. ~~Decision fixtures in both modes for every `docs/SUBSET.md` extern row
    (extern call, each refusal kind, varargs, outside-`.d.ts`, the
    unchecked-boundary mark) — `// @expected-fail: true` until the gate lands

@@ -30,6 +30,8 @@ If `src/` does not exist yet, the project is pre-Phase-1: the only files may be 
 6. **Plan changes by edit, not drift.** A contradiction between reality and `plan.md` goes to `plan-notes.md` with evidence, and the plan is edited in the same change. Settled decisions (plan §15.4) reopen only with new measured evidence.
 7. **The human is the only author.** No agent adds a `Co-Authored-By` trailer, a "Generated with …" line or itself as author to a commit, merge or PR — whatever its harness defaults to.
 
+8. **Docs stay in lockstep with the tree.** After any change that affects user-visible behavior, the public CLI, subset verdicts, diagnostics, toolchain, architecture diagrams, or examples: update the matching documentation in the **same** change (`README.md` and/or `docs/*`, plus example READMEs when those examples change). Do not leave docs describing a previous pipeline, flag set, or subset matrix. Spec authority for open work remains `plan.md`; operational docs in `docs/` must not contradict what the tree ships.
+
 ## Repo map
 
 ```
@@ -39,7 +41,7 @@ done.md            completion record for finished tasks (archive; not normative)
 AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
-docs/              README.md (index) ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md FFI.md
+docs/              README.md (index) HOW-IT-WORKS.md ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md FFI.md
 .moon/             moon workspace: workspace.yml, toolchain.yml (orchestrator; plan-notes 204)
 packages/compiler/ the compiler package "statorc" — holds src/ + the locked tsconfig.json
   src/cli/         argument parsing, build/explain drivers
@@ -155,7 +157,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 
 1. Find the first unmet Check in `plan.md` (phases in order, tasks in order). That's the current task, unless the human directs otherwise. A struck-through stub is done — its evidence is in `done.md`; don't redo it.
 2. Before coding, read the docs the task references (`docs/VALUE.md`, `docs/NUMERIC.md`, …). If the task leaves you guessing, that's a plan bug — fix `plan.md` via `plan-notes.md`, don't invent conventions in code.
-3. Implement with tests (see Testing rules). Run `pnpm run ci` locally.
+3. Implement with tests (see Testing rules). Run `pnpm run ci` locally. If the change affects behavior, CLI, subset, diagnostics, toolchain, architecture, or examples, update the matching docs in this same change (golden rule 8).
 4. Move the finished task's record from `plan.md` to `done.md` (golden rule 1), leaving the stub behind.
 5. Report: what changed, the Check command + its output, any `plan-notes.md` entries added.
 6. Commit style: short imperative subject naming the task (`phase2: emit JSRT_FRAME prologue (task 2.4)`); one task per commit where practical; no agent attribution (golden rule 7).
@@ -170,3 +172,4 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 - Don't let mode logic leak below the frontend gate — if a pass or the emitter needs to know the mode, the design is wrong (plan §0.8).
 - Don't duplicate code or logic — find the existing helper and reuse it, or extract one shared helper at the responsible layer. `pnpm run dupes` fails above 1% copy/paste duplication; a clone you write today is a CI failure tomorrow.
 - Don't draw the compiler pipeline in Mermaid or a new ASCII sketch — D2 in `docs/architecture/` is the diagram language.
+- Don't ship a behavior/CLI/subset/diagnostics/architecture change without updating the matching docs in the same change (golden rule 8).

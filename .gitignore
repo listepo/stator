@@ -28,3 +28,8 @@ packages/tests/.asan-last-green.json
 
 # Isolated agent worktrees (parallel Phase 5 slices)
 .worktrees/
+
+# Astro landing (site/)
+site/dist/
+site/node_modules/
+site/.astro/

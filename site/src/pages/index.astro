@@ -1,0 +1,374 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const base = import.meta.env.BASE_URL;
+const pipeline = [
+  { step: '01', label: 'type', detail: 'TS/JS surface' },
+  { step: '02', label: 'IR', detail: 'checked mid-form' },
+  { step: '03', label: 'bits', detail: 'native binary' },
+];
+---
+
+<BaseLayout>
+  <header class="top">
+    <div class="wrap top-inner">
+      <a class="brand" href={base}>
+        <img src={`${base}logo.svg`} alt="" width="40" height="40" />
+        <span class="mono brand-name">stator</span>
+      </a>
+      <div class="header-actions">
+        <nav class="nav mono" aria-label="Primary">
+          <a href="https://github.com/listepo/stator">GitHub</a>
+          <a href={`${base}#pipeline`}>Pipeline</a>
+          <a href={`${base}#build`}>Build</a>
+        </nav>
+        <button
+          type="button"
+          id="theme-toggle"
+          class="theme-toggle"
+          data-theme="system"
+          aria-label="Theme: system (follows OS)"
+          title="Cycle theme: system → light → dark"
+        >
+          <svg class="theme-toggle-icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"></circle>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+          </svg>
+          <svg class="theme-toggle-icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M21 14.5A8.5 8.5 0 1 1 9.5 3a7 7 0 0 0 11.5 11.5z"></path>
+          </svg>
+          <svg class="theme-toggle-icon icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="12" rx="2"></rect>
+            <path d="M8 20h8M12 16v4"></path>
+          </svg>
+          <span data-theme-label>system</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <img class="hero-mark" src={`${base}logo-wordmark.svg`} alt="stator" width="250" height="64" />
+      <div class="hero-meta">
+        <span class="status-chip">aot compile</span>
+      </div>
+      <h1>TS/JS → native. Ahead of time.</h1>
+      <p class="lede">
+        stator is an AOT compiler from TypeScript and JavaScript to native binaries —
+        typed code to unboxed values; untyped code stays dynamic instead of being rejected.
+      </p>
+      <div class="cta-row">
+        <a class="cta mono" href="https://github.com/listepo/stator">compile</a>
+        <a class="ghost mono" href={`${base}#build`}>see the command</a>
+      </div>
+    </section>
+
+    <section id="pipeline" class="strip">
+      <div class="wrap strip-grid">
+        {
+          pipeline.map((item) => (
+            <article class="step">
+              <span class="mono step-num">{item.step}</span>
+              <h2 class="mono step-label">{item.label}</h2>
+              <p>{item.detail}</p>
+            </article>
+          ))
+        }
+      </div>
+    </section>
+
+    <section id="build" class="sample wrap">
+      <h2 class="mono section-label hairline-grad">build</h2>
+      <pre class="code" tabindex="0"><code><span class="prompt">$</span> stator build ./app.ts -o app
+<span class="dim"># → native binary (--mode=ts by default)</span>
+<span class="prompt">$</span> stator build ./app.js -o app --mode=js
+<span class="dim"># → same pipeline; untyped code is dynamic</span></code></pre>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <p>
+        <span class="mono">Listepo</span>
+        <span class="sep">·</span>
+        <a href="https://github.com/listepo/stator">docs on GitHub</a>
+      </p>
+      <p class="muted">Indigo mark: stator ring → type → bits.</p>
+    </div>
+  </footer>
+</BaseLayout>
+
+<style>
+  .top {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    border-bottom: 1px solid var(--st-glass-border);
+    /* glass fill/blur from global .top */
+  }
+
+  .top-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.65rem;
+    color: var(--st-fg);
+    border-radius: var(--st-radius);
+  }
+
+  .brand:hover {
+    color: var(--st-fg);
+  }
+
+  .brand img {
+    border-radius: var(--st-radius-lg);
+  }
+
+  .brand-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+  }
+
+  .nav {
+    display: flex;
+    gap: 1.25rem;
+    font-size: 0.8125rem;
+  }
+
+  .nav a {
+    color: var(--st-fg-muted);
+    border-radius: var(--st-radius);
+  }
+
+  .nav a:hover {
+    color: var(--st-accent);
+  }
+
+  .hero {
+    padding: 4.25rem 0 3.25rem;
+    text-align: center;
+  }
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+    margin: 0 0 1rem;
+  }
+
+  .hero-mark {
+    margin: 0 auto 1.5rem;
+  }
+
+  .hero h1 {
+    margin: 0 0 0.65rem;
+    font-size: clamp(1.85rem, 4.2vw, 2.65rem);
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    line-height: 1.15;
+  }
+
+  .lede {
+    margin: 0 auto 1.85rem;
+    max-width: 34rem;
+    color: var(--st-fg-muted);
+    font-size: 1.0625rem;
+    line-height: 1.6;
+  }
+
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+  }
+
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.5rem;
+    padding: 0.55rem 1.15rem;
+    border-radius: var(--st-radius);
+    background: var(--st-accent);
+    color: #fff;
+    font-weight: 500;
+    font-size: 0.875rem;
+  }
+
+  .cta:hover {
+    background: var(--st-accent-hover);
+    color: #fff;
+  }
+
+  .cta:focus-visible,
+  .ghost:focus-visible {
+    box-shadow: var(--st-focus-ring);
+  }
+
+  .ghost {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.5rem;
+    padding: 0.55rem 1rem;
+    border-radius: var(--st-radius);
+    border: 1px solid var(--st-border);
+    color: var(--st-fg-muted);
+    font-size: 0.875rem;
+    background: var(--st-bg-elevated);
+  }
+
+  .ghost:hover {
+    border-color: var(--st-accent-muted);
+    color: var(--st-accent);
+  }
+
+  .strip {
+    padding: 2.15rem 0;
+    background: var(--st-surface-1);
+    border-block: 1px solid var(--st-border-hairline);
+  }
+
+  .strip-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .step {
+    padding: 1.25rem 1.3rem;
+    border-radius: var(--st-radius-lg);
+    background: var(--st-glass-fill);
+    border: 1px solid var(--st-glass-border);
+    box-shadow: var(--st-elev-1);
+    backdrop-filter: blur(12px) saturate(1.15);
+    -webkit-backdrop-filter: blur(12px) saturate(1.15);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .step:hover {
+    border-color: var(--st-accent);
+    box-shadow: var(--st-elev-2);
+  }
+
+  .step-num {
+    display: block;
+    color: var(--st-cool);
+    font-size: 0.75rem;
+    margin-bottom: 0.45rem;
+  }
+
+  .step-label {
+    margin: 0 0 0.3rem;
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .step p {
+    margin: 0;
+    color: var(--st-fg-muted);
+    font-size: 0.9375rem;
+  }
+
+  .sample {
+    padding: 3.25rem 0 3.75rem;
+  }
+
+  .section-label {
+    margin: 0 0 0.85rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--st-fg-subtle);
+  }
+
+  .code {
+    margin: 0;
+    padding: 1.25rem 1.35rem;
+    border-radius: var(--st-radius-lg);
+    background: var(--st-code-bg);
+    color: var(--st-code-fg);
+    border: 1px solid var(--st-border);
+    font-size: 0.9rem;
+    line-height: 1.65;
+    overflow-x: auto;
+  }
+
+  .code:focus-visible {
+    box-shadow: var(--st-focus-ring);
+  }
+
+  .prompt {
+    color: var(--st-cool);
+    user-select: none;
+  }
+
+  .dim {
+    color: var(--st-fg-subtle);
+  }
+
+  .footer {
+    border-top: 1px solid var(--st-border-hairline);
+    background: var(--st-bg-elevated);
+  }
+
+  .footer-inner {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 1.25rem 0;
+    font-size: 0.875rem;
+  }
+
+  .footer p {
+    margin: 0;
+  }
+
+  .sep {
+    margin: 0 0.4rem;
+    color: var(--st-fg-subtle);
+  }
+
+  .muted {
+    color: var(--st-fg-subtle);
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .step {
+      background: var(--st-bg-elevated);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .strip-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .nav {
+      gap: 0.75rem;
+    }
+
+    .header-actions {
+      gap: 0.5rem;
+    }
+  }
+</style>

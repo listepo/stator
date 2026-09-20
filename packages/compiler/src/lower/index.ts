@@ -9936,11 +9936,9 @@ function lowerExternCall(
   if (!classified.ok) {
     return fail(`extern call the gate refused reached the lowering (${classified.code})`);
   }
-  // The gate refuses optional chains on externs (there is no conditional direct call); a `?.`
-  // reaching here is the same gate/lowering disagreement as a bad signature.
-  if (node.questionDotToken !== undefined) {
-    return fail('optional call to an extern function reached the lowering');
-  }
+  // The gate accepts an optional chain on an extern (`ext?.()`): the callee always links,
+  // so `?.` is a proven no-op and the call lowers to the same direct C call — there is no
+  // conditional for the HIR to model and no flag for ExternCall to carry.
   const signature = classified.signature;
   if (node.arguments.length !== signature.params.length) {
     return fail('extern call with an arity the gate refused reached the lowering');

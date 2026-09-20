@@ -36,3 +36,7 @@ try {
   console.log("caught: " + e.message);
 }
 console.log(sqrtErrno(4));
+// An optional call to an extern is a direct call (Phase 7 close-out): the callee always
+// links, so `?.` is a proven no-op — same lines, same bytes as the plain form above.
+console.log(sqrt?.(2));
+console.log(fmod2?.(5.5, 2));
