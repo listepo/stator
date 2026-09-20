@@ -11,6 +11,7 @@
  * which is a crash, not a diagnostic). */
 
 #include "jsrt.h"
+#include "jsrt_mem.h"
 #include "jsrt_value.h"
 
 #include <stdio.h>
@@ -59,25 +60,7 @@ static void expect(Parser *p, uint16_t unit, const char *what) {
 
 /* ------------------------------------------------------------------ strings */
 
-/* Growable unit buffer for string contents; plain malloc — it holds no jsrt_values, so the
- * collector never needs to see it, and it is freed before the parser returns. */
-typedef struct {
-  uint16_t *units;
-  uint32_t len;
-  uint32_t cap;
-} UnitBuf;
-
-static void units_push(UnitBuf *b, uint16_t unit) {
-  if (b->len == b->cap) {
-    b->cap = b->cap == 0 ? 16 : b->cap * 2;
-    uint16_t *grown = (uint16_t *)realloc(b->units, (size_t)b->cap * sizeof(uint16_t));
-    if (grown == NULL) {
-      jsrt_panic("out of memory: JSON.parse string");
-    }
-    b->units = grown;
-  }
-  b->units[b->len++] = unit;
-}
+/* String contents collect in a JSRTUnitBuf (jsrt_mem.h), freed before the parser returns. */
 
 static uint16_t hex4(Parser *p) {
   uint16_t out = 0;
@@ -101,7 +84,7 @@ static uint16_t hex4(Parser *p) {
 
 /* The quoted-string production, contents decoded into `out` as UTF-16 units. Shared by string
  * values and object keys; the caller owns (and frees) the buffer. */
-static void parse_string_units(Parser *p, UnitBuf *out) {
+static void parse_string_units(Parser *p, JSRTUnitBuf *out) {
   expect(p, '"', "an unquoted string");
   for (;;) {
     if (p->pos >= p->len) {
@@ -117,7 +100,7 @@ static void parse_string_units(Parser *p, UnitBuf *out) {
     }
     p->pos++;
     if (c != '\\') {
-      units_push(out, c);
+      jsrt_units_push(out, c);
       continue;
     }
     uint16_t esc = peek(p);
@@ -126,25 +109,25 @@ static void parse_string_units(Parser *p, UnitBuf *out) {
       case '"':
       case '\\':
       case '/':
-        units_push(out, esc);
+        jsrt_units_push(out, esc);
         break;
       case 'b':
-        units_push(out, 0x08);
+        jsrt_units_push(out, 0x08);
         break;
       case 'f':
-        units_push(out, 0x0C);
+        jsrt_units_push(out, 0x0C);
         break;
       case 'n':
-        units_push(out, 0x0A);
+        jsrt_units_push(out, 0x0A);
         break;
       case 'r':
-        units_push(out, 0x0D);
+        jsrt_units_push(out, 0x0D);
         break;
       case 't':
-        units_push(out, 0x09);
+        jsrt_units_push(out, 0x09);
         break;
       case 'u':
-        units_push(out, hex4(p));
+        jsrt_units_push(out, hex4(p));
         break;
       default:
         p->pos--;
@@ -154,7 +137,7 @@ static void parse_string_units(Parser *p, UnitBuf *out) {
 }
 
 static jsrt_value parse_string(Parser *p) {
-  UnitBuf buf = {NULL, 0, 0};
+  JSRTUnitBuf buf = {NULL, 0, 0};
   parse_string_units(p, &buf);
   jsrt_value s = jsrt_string_from_units(buf.units, buf.len);
   free(buf.units);

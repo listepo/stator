@@ -8485,6 +8485,98 @@ declare locally until §7.3 owns the binding set — FFI.md §7.3), generator co
 transfer (manual rc checks until then), and the TS-name/brand alias policies
 (mechanical, documented; human aliases live in manual bindings).
 
+## 272. T9.1 re-apply: CI decision on `mlugg/setup-zig@v2` (2026-09-16)
+
+**Plan:** T9.1 (the justfile builds `src/jsrt_mem.zig` into `libjsrt.a` from this PR on);
+docs/TOOLCHAIN.md "Not yet required". **Recommendation for the creator: approve
+`mlugg/setup-zig@v2` pinned at v2 with `version: 0.16.0`, gated `if: runner.os !=
+'Windows'`, in the shared `.github/actions/setup/action.yml`** — exactly the hunk the
+`.worktrees/t9-1` planning change already carried and this re-apply deliberately does
+not copy (below).
+
+**Why it is needed.** From this PR the runtime archive cannot build without Zig
+0.16.0: the justfile's `_runtime` recipe runs `zig fmt --check` + `zig build-obj`,
+and the C tree no longer contains the moved code (`jsrt_gc.c` is deleted in the
+first commit; print/JSON buffers, the shape table and the alloc helpers follow in
+the same PR). Local builds get Zig from `mise install` (pin already on main). CI
+has no mise Zig: the setup action installs only Node/pnpm, `extractions/setup-just`
+gives just, apt gives clang on Linux. So every CI job that builds `libjsrt.a`
+(runtime, sanitizer, golden, FFI, intl) fails at `zig: command not found` until the
+action lands. There is no graceful-degradation option: a runtime without its memory
+core is missing symbols, not slower, so falling back to "no Zig" would be a
+different (broken) archive, not a degraded one.
+
+**Why setup-zig and not mise in CI.** The established pattern is one purpose-built
+setup action per tool (setup-node, setup-just); mise is a dev-host tool here, not a
+CI tool. `mlugg/setup-zig` is the action Zig's own docs point at, v2 is current,
+and the version request (`0.16.0`) matches the mise pin, so local and CI compile
+the same compiler. Risk is the standard third-party-action risk; mitigation is the
+v2 major pin plus the exact-version request. Windows is excluded by the same
+condition the justfile/runners already assume (Windows never builds the runtime).
+
+**Not in this PR by design** (awaits the approval above): the setup-action hunk,
+and only that hunk. The stale worktree's other `.github` changes (ci.yml trigger
+narrowing, nightly.yml rescheduling) are unrelated and stay out regardless.
+
+## 273. T9.1 re-apply: what changed against the `.worktrees/t9-1` plan (2026-09-16)
+
+**Base.** Re-applied onto `9f2eba4`, not merged from the stale worktree (`82d833f`-era
+base, T9.1 living as uncommitted changes mixed with unrelated phase work). Four commits,
+one per move step: justfile+GC (steps 1–2), buffers (3), shape table (4), alloc helpers
+(5). `mise.toml`/`docs/TOOLCHAIN.md` already pinned/listed zig on main; the justfile
+`rm -f libjsrt.a` recreate and the `print_ffi_strings` corpus also already existed there,
+so those stale hunks were dropped (no `print_classes` corpus exists on main either).
+
+**Adaptation 1 — no `jsrt_shape_array_index`.** Since `82d833f`, main gained the shared
+`jsrt_key_is_array_index` (jsrt_value.h), used by fixed-shape enumeration, `jsrt_in`,
+`jsrt_delete`, `index_of` and object spread. The Zig ordering (`before`) calls through
+to it instead of exporting a second copy of the 12-line rule; `src/jsrt_mem.h` does not
+declare it. One spelling, still in C because fixed-shape code that stays in C needs it.
+
+**Adaptation 2 — no `jsrt_dynobj_new_class`, no `bool dynamic`.** The stale tree's
+`JSRTClass.dynamic` field and `jsrt_dynobj_new_class` belong to index-signature-class
+work that does not exist on main (main distinguishes dynamic objects by descriptor
+pointer). `jsrt_alloc.zig` ports only the constructors main has (`jsrt_dynobj_new`,
+`jsrt_null_proto_new`); the panic-on-non-dynamic guard has nothing to guard yet.
+
+**Verified.** `zig 0.16.0 @cImport`s the current headers unchanged (flexible members,
+`static inline` helpers and tag macros all translate as in the stale tree). `nm`: all
+30 Zig exports defined exactly once in `libjsrt.a`. Byte-identity holds for numbers,
+objects, shapes and maps via the print corpus (rel + ASan) and the golden/subset gates
+(full `pnpm run ci` green — numbers in `done.md` §11a).
+
+**Host note.** `mise exec node -- pnpm …` breaks on this machine (mise's pnpm native
+binary; plan-notes 204). The green run used the pinned Node first on PATH:
+`PATH="<mise>/installs/node/26.7.0/bin:$PATH" pnpm run ci`.
+
+**Corollary.** Closing T9.1 trips `tests/unit/phases.test.ts`: `done.md` is the authority
+and `src/support/phases.ts` its projection, so the `## Phase 9 ✅ COMPLETE` heading
+requires adding 9 to `COMPLETED_PHASES` in the same change (no diagnostic names Phase 9,
+so the delivery invariant holds vacuously).
+
+## 274. T9.1 CI fix: land `mlugg/setup-zig@v2` in the setup action (2026-09-16)
+
+**Failure.** Dispatch run 35073736083 on PR #10 (`agent/t9-1-reapply`): every job
+that builds `libjsrt.a` failed identically — `justfile` `_runtime` line 185
+`zig: command not found` (runtime, asan, intl, ffi on all Unix platforms, plus the
+frontend jobs' `pnpm run runtime` archive step). Windows stayed green (never builds
+the runtime). Test262 shards stayed green (no native code).
+
+**Root cause.** The re-apply deliberately omitted the setup-action hunk (entry 272:
+"awaits the approval above"), so CI had no Zig while the justfile unconditionally
+runs `zig fmt --check` + `zig build-obj` and the C tree no longer contains the moved
+code (`jsrt_gc.c` deleted; buffers, shape table, alloc helpers in Zig). `mise.toml`
+already pins `zig 0.16.0`, but CI never runs `mise install` — the setup action
+installs only Node/pnpm, `extractions/setup-just` gives just, apt gives clang.
+
+**Fix (branch `agent/t9-1-fix`, runtime+toolchain scope only).**
+`.github/actions/setup/action.yml` gains the hunk entry 272 specified, adapted to the
+current action pins (`pnpm/action-setup@v6`, `actions/setup-node@v7`):
+`mlugg/setup-zig@v2`, `if: runner.os != 'Windows'`, `version: 0.16.0` (matches the
+mise pin). One shared action covers runtime/asan/intl/ffi/frontend jobs; no `ci.yml`
+change needed. `docs/TOOLCHAIN.md` (Zig row + "Not yet required" list) and the
+`plan.md` §11 line that held the decision open now record the install as landed.
+No frontend, justfile, or Zig-source changes; no Zig growth past the memory core.
 ## 279. Inline generic arrows land: the 12(f) callback slice (2026-09-16)
 
 **Plan:** §8 step 12(f). `plan.md` edited in this change (the (f) bullet records the landed

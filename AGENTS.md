@@ -136,7 +136,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 ## Implementation standards — C runtime (`runtime/`)
 
 - C11, `clang -Wall -Wextra -Werror`; ASan/UBSan job in CI is mandatory and blocking. The full flag set is the rule for code we WRITE (`runtime/src/`); `runtime/vendor/` compiles with `-Wall` alone, because upstream source is not ours to fix and a warning flag is not a correctness flag (plan-notes 101). ASan/UBSan cover both.
-- T9.1 (plan-notes 238) moves the memory core to Zig 0.16.0. The Zig sources live in `.worktrees/t9-1` until a follow-up PR; do not invent a second memory core or grow Zig past that card (plan-notes 239).
+- T9.1 (plan-notes 238) landed the memory core in Zig 0.16.0 (`runtime/src/*.zig`): the GC glue, the growable buffers, the shape table and the allocation helpers. It `@cImport`s the C headers rather than mirroring any layout, exports only the C ABI declared in `jsrt.h`, `jsrt_value.h` and `src/jsrt_mem.h`, and passes `zig fmt --check`. Zig has no warnings, only errors; the ASan flavor builds it `ReleaseSafe`, so its safety checks stand in for the sanitizers it cannot take. Do not invent a second memory core or grow Zig past that card (plan-notes 239).
 - All value access goes through `jsrt_value.h` accessors; no hand-rolled bit twiddling outside it.
 - GC rooting discipline: every generated function opens `JSRT_FRAME(n)`; locals via `JSRT_LOCAL`; frames pop on **every** exit path including landing pads. The runtime may assume it; codegen must guarantee it.
 - Generated C is never hand-edited — fix the emitter and re-emit.
