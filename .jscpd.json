@@ -3,9 +3,7 @@
   "minLines": 5,
   "mode": "strict",
   "crossFormats": "js-ts",
-  "reporters": [
-    "ai"
-  ],
+  "reporters": ["ai"],
   "threshold": 1,
   "ignore": [
     "**/.claude/worktrees/**",
