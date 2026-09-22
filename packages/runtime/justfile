@@ -176,7 +176,7 @@ _runtime flavor:
 
     # -fPIC and -mcpu=baseline match what clang gives the C objects by default: the archive links
     # into PIE executables on Linux, and it must run wherever the C half of it runs.
-    ZIG_FLAGS="-O ${ZIG_OPT} ${ZIG_TARGET} -lc -fPIC -mcpu=baseline ${ZIG_C} -ffunction-sections -fdata-sections"
+    ZIG_FLAGS="-O ${ZIG_OPT} ${ZIG_TARGET} -lc -fPIC -mcpu=baseline ${ZIG_C} -ffunction-sections -fdata-sections -fno-stack-check"
 
     mkdir -p "${DIR}"
     # A flag change (the LTO probe flipping, Boehm appearing) must rebuild every object: the
