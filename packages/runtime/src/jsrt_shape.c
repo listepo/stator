@@ -20,19 +20,19 @@
 
 #include <assert.h>
 
-const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
+const JSRTClass jsrt_class_dynamic = {"", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
 
 /* Identical to `jsrt_class_dynamic` in every field that means anything -- the SHAPE owns the layout
  * -- and distinct from it by address, which is the whole job: it marks the objects §22.2.7.2 builds
  * with a null prototype so the printer writes Node's `[Object: null prototype]` prefix. */
-const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
+const JSRTClass jsrt_class_null_proto = {"", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
 
 /* The descriptor that marks an accessor CELL (docs/VALUE.md §4.15). Like the two above it means
  * nothing by its fields and everything by its address: a property read tests the value it just
  * loaded against this pointer to tell a get/set pair from an ordinary property value. Nothing in
  * the language can build one, so the test cannot be fooled -- jsrt_define_accessor is the only
  * producer. */
-const JSRTClass jsrt_class_accessor = {"", 0, NULL, NULL, 0, NULL, NULL, NULL};
+const JSRTClass jsrt_class_accessor = {"", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
 
 /* A property is an array index exactly when its canonical decimal spelling round-trips through
  * ToUint32 and is not 2^32-1. Shape keys are UTF-8, so non-ASCII bytes and any leading zero make
@@ -290,6 +290,60 @@ uint32_t jsrt_closure_arity(jsrt_value v) {
   return jsrt_as_closure(v)->arity;
 }
 
+/* The statics entry for `key` on a class object (docs/VALUE.md §4.17), or NULL.
+ *
+ * The lookup walks the class's own descriptor and then its `parent`s -- statics are inherited in
+ * JavaScript, and the gate refuses a static override, so one name is one binding per chain. Own
+ * statics shadow the Function fallbacks exactly like own properties shadow a prototype (a
+ * `static name = 5` hides the class's own name in JavaScript), which is why the table is asked
+ * first. A name's getter wins a read and its setter wins a write; a same-named FIELD/METHOD is
+ * the fallback when no accessor half matches. */
+static const JSRTStaticEntry *class_static_find(const JSRTClosure *c, const char *key,
+                                                bool for_write) {
+  if (c->klass == NULL) {
+    return NULL;
+  }
+  const JSRTStaticEntry *plain = NULL;
+  for (const JSRTClass *k = c->klass; k != NULL && plain == NULL; k = k->parent) {
+    if (k->statics == NULL) {
+      continue;
+    }
+    for (const JSRTStaticEntry *e = k->statics; e->name != NULL; e++) {
+      if (strcmp(e->name, key) != 0) {
+        continue;
+      }
+      const uint8_t wanted = for_write ? JSRT_STATIC_SETTER : JSRT_STATIC_GETTER;
+      if (e->kind == wanted) {
+        return e;
+      }
+      if (e->kind == JSRT_STATIC_FIELD || e->kind == JSRT_STATIC_METHOD) {
+        plain = e;
+      }
+    }
+  }
+  return plain;
+}
+
+/* True when some accessor half declares `key` with no matching half for this direction -- a
+ * getter-only name being written (or a setter-only name being read). */
+static bool class_static_other_half(const JSRTClosure *c, const char *key, bool for_write) {
+  if (c->klass == NULL) {
+    return false;
+  }
+  const uint8_t other = for_write ? JSRT_STATIC_GETTER : JSRT_STATIC_SETTER;
+  for (const JSRTClass *k = c->klass; k != NULL; k = k->parent) {
+    if (k->statics == NULL) {
+      continue;
+    }
+    for (const JSRTStaticEntry *e = k->statics; e->name != NULL; e++) {
+      if (strcmp(e->name, key) == 0 && e->kind == other) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   if (jsrt_is_nullish(obj)) {
     char message[256];
@@ -301,12 +355,27 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   if (jsrt_is(obj, JSRT_TAG_ARRAY) && strcmp(key, "length") == 0) {
     return jsrt_number((double)jsrt_as_array(obj)->length);
   }
-  /* `fn.length` on a function value is its declared arity -- the closure's own field, which
-   * never counts a method's receiver (docs/VALUE.md §4.16, plan.md §8 step 21b). A closure has
-   * no shape, so without this the read falls through to the table walk and answers
-   * `undefined` where Node answers the arity. */
-  if (jsrt_is(obj, JSRT_TAG_CLOSURE) && strcmp(key, "length") == 0) {
-    return jsrt_number((double)jsrt_as_closure(obj)->arity);
+  /* A closure's own answers (`fn.length`, and `fn.name` for every function): the closure's own
+   * fields, which never count a method's receiver (docs/VALUE.md §4.16, plan.md §8 step 21b). A
+   * closure has no shape, so without these the read falls through to the table walk and answers
+   * `undefined` where Node answers the arity or the name. A class object's statics shadow both
+   * (`static name = 5` hides the class name in JavaScript), so its table is asked first. */
+  if (jsrt_is(obj, JSRT_TAG_CLOSURE)) {
+    const JSRTClosure *c = jsrt_as_closure(obj);
+    const JSRTStaticEntry *entry = class_static_find(c, key, false);
+    if (entry != NULL) {
+      if (entry->kind == JSRT_STATIC_GETTER) {
+        return jsrt_call(*entry->slot, 1, &obj);
+      }
+      return *entry->slot;
+    }
+    if (strcmp(key, "length") == 0) {
+      return jsrt_number((double)c->arity);
+    }
+    if (strcmp(key, "name") == 0) {
+      return jsrt_string_from_utf8(c->name, strlen(c->name));
+    }
+    return JSRT_UNDEFINED;
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
@@ -353,6 +422,24 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
 bool jsrt_has_prop(jsrt_value obj, const char *key) {
   if (jsrt_is_nullish(obj)) {
     return false;
+  }
+  if (jsrt_is(obj, JSRT_TAG_CLOSURE)) {
+    /* The same presence `jsrt_get_prop` reads through: a class object's statics (own and
+     * inherited), then the closure's own `length`/`name`. */
+    const JSRTClosure *c = jsrt_as_closure(obj);
+    if (c->klass != NULL) {
+      for (const JSRTClass *k = c->klass; k != NULL; k = k->parent) {
+        if (k->statics == NULL) {
+          continue;
+        }
+        for (const JSRTStaticEntry *e = k->statics; e->name != NULL; e++) {
+          if (strcmp(e->name, key) == 0) {
+            return true;
+          }
+        }
+      }
+    }
+    return strcmp(key, "length") == 0 || strcmp(key, "name") == 0;
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
@@ -423,6 +510,31 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
     snprintf(msg, sizeof msg, "Cannot assign to read only property '%s' of object '#<Object>'", key);
     jsrt_throw_error(&jsrt_class_type_error, msg);
     return;
+  }
+  if (jsrt_is(obj, JSRT_TAG_CLOSURE) && jsrt_as_closure(obj)->klass != NULL) {
+    /* A class object's statics write through the same slots the named spelling writes
+     * (docs/VALUE.md §4.17); a setter runs with the class object as receiver. Node's strict-mode
+     * answer to writing a getter-only name is a TypeError, and adding a NEW static is the same
+     * growth a fixed shape refuses below (STA2004, Phase 8's surface). */
+    const JSRTClosure *c = jsrt_as_closure(obj);
+    const JSRTStaticEntry *entry = class_static_find(c, key, true);
+    if (entry != NULL) {
+      if (entry->kind == JSRT_STATIC_SETTER) {
+        jsrt_value args[2] = {obj, value};
+        (void)jsrt_call(*entry->slot, 2, args);
+        return;
+      }
+      *entry->slot = value;
+      return;
+    }
+    if (class_static_other_half(c, key, true)) {
+      char msg[256];
+      snprintf(msg, sizeof msg, "Cannot set property %s of #<class %s> which has only a getter",
+               key, c->name);
+      jsrt_throw_error(&jsrt_class_type_error, msg);
+      return;
+    }
+    jsrt_panic("STA2004: a class object cannot grow a new static; planned for Phase 8");
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {

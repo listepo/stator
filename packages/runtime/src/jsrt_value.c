@@ -100,6 +100,15 @@ jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv
     jsrt_panic("TypeError: callee is not a function");
   }
   const JSRTClosure *c = jsrt_as_closure(callee);
+  /* A class object is callable -- `typeof` is "function" -- but calling one without `new` is
+   * Node's catchable TypeError, never the constructor body (docs/VALUE.md §4.17). */
+  if (c->klass != NULL) {
+    char message[256];
+    (void)snprintf(message, sizeof message, "Class constructor %s cannot be invoked without 'new'",
+                   c->name);
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return JSRT_UNDEFINED;
+  }
   /* `env` is NULL for a non-capturing function; the callee takes the parameter either way, so
    * dispatch here does not have to know which kind it is holding. */
   if (c->has_receiver) {
@@ -122,6 +131,74 @@ jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv
 
 jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv) {
   return jsrt_call_at(callee, argc, argv, NULL);
+}
+
+jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv) {
+  if (!jsrt_is(ctor, JSRT_TAG_CLOSURE)) {
+    /* Node's wording names the operand's rendered value (`5 is not a constructor`). */
+    const char *shown = jsrt_shape_key(jsrt_to_string(ctor));
+    char message[256];
+    (void)snprintf(message, sizeof message, "%s is not a constructor", shown);
+    free((void *)shown);
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return JSRT_UNDEFINED;
+  }
+  const JSRTClosure *c = jsrt_as_closure(ctor);
+  if (c->klass == NULL) {
+    /* An ordinary function reached through `new`: JavaScript splits its own answer (`new f()`
+     * constructs for a `function` value and raises `X is not a constructor` for an arrow or a
+     * method), and the split is not visible on a `JSRTClosure`. Every branch needs `f.prototype`
+     * -- the constructed object's identity IS its prototype slot -- which is Phase 8's
+     * descriptor/prototype surface, so v0 raises for all of them and records the `function`
+     * half as residue (docs/VALUE.md §4.17). */
+    char message[256];
+    (void)snprintf(message, sizeof message, "%s is not a constructor",
+                   c->name[0] != '\0' ? c->name : "(intermediate value)");
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return JSRT_UNDEFINED;
+  }
+  /* The fresh instance must survive whatever the constructor allocates, so it is rooted before
+   * the call exactly as a generated `new` roots its object slot (docs/VALUE.md §4.17). */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = jsrt_object_new(c->klass);
+  if (c->fn != NULL) {
+    /* Receiver at argv[0]: every class constructor declares one (`this` is parameter zero).
+     * No arity guessing here, unlike jsrt_call's shift -- the callee is dynamic, so the
+     * convention is "receiver slot filled, `jsrt_arg` pads the rest" and no argc is ambiguous. */
+    jsrt_value call_argv[argc + 1U];
+    call_argv[0] = JSRT_LOCAL(0);
+    for (uint32_t i = 0; i < argc; i++) {
+      call_argv[i + 1U] = argv[i];
+    }
+    (void)c->fn(argc + 1U, call_argv, c->env);
+  }
+  /* The constructor's return is ignored: the gate admits no explicit object return in a class
+   * constructor, so the fresh instance IS the constructed value. */
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
+  return out;
+}
+
+bool jsrt_instanceof_ctor(jsrt_value obj, jsrt_value ctor) {
+  if (jsrt_is(ctor, JSRT_TAG_CLOSURE)) {
+    const JSRTClosure *c = jsrt_as_closure(ctor);
+    if (c->klass != NULL) {
+      return jsrt_instanceof(obj, c->klass);
+    }
+    /* An ordinary function: Node answers through `f.prototype`, which is the Phase 8
+     * descriptor/prototype surface (a `new f()` instance can answer `true` there). `false` is
+     * the answer for every instance this subset can build; the residue is recorded. */
+    return false;
+  }
+  /* Node distinguishes "not an object" (a primitive right operand) from "not callable" (an
+   * object that is not a function); both are catchable TypeErrors. */
+  const bool primitive = jsrt_is_double(ctor) || jsrt_is(ctor, JSRT_TAG_INT32) ||
+                         jsrt_is(ctor, JSRT_TAG_BOOL) || jsrt_is(ctor, JSRT_TAG_STRING) ||
+                         jsrt_is(ctor, JSRT_TAG_NULL) || jsrt_is(ctor, JSRT_TAG_UNDEFINED);
+  jsrt_throw_error(&jsrt_class_type_error,
+                   primitive ? "Right-hand side of 'instanceof' is not an object"
+                             : "Right-hand side of 'instanceof' is not callable");
+  return false;
 }
 
 /* The allocation helpers jsrt_value.h declares -- objects, arrays and their growth, environments,

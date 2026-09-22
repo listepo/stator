@@ -314,6 +314,12 @@ typedef struct JSRTClass {
    *
    * Length is field_count when present; every slot appears exactly once. */
   const uint32_t *key_order;
+  /* This class's OWN static members for a runtime class value to resolve (docs/VALUE.md §4.17;
+  * `struct JSRTStaticEntry` is declared below), or NULL when it has none. Inherited statics are
+  * the `parent` walk a lookup makes -- sound because the gate refuses a static override, so one
+  * name is one binding per chain. Last in the layout so every positional initializer above
+  * keeps its meaning and merely gains a zero. */
+  const struct JSRTStaticEntry *statics;
 } JSRTClass;
 
 /* The slot the i-th enumerated property lives in. Identity when a class declares no reordering --
@@ -729,6 +735,16 @@ static inline bool jsrt_instanceof(jsrt_value v, const JSRTClass *cls) {
   }
   return false;
 }
+
+/* `o instanceof v` where `v` is a VALUE (a class object reached at run time), not a name the
+ * emitter resolved (docs/VALUE.md §4.17). A class object walks the same chain `jsrt_instanceof`
+ * walks, against the descriptor the value carries. The right operand of `instanceof` must be
+ * callable with a prototype in JavaScript; a non-callable answers Node's catchable TypeError
+ * (`Right-hand side of 'instanceof' is not an object` -- or `not callable` for an object that is
+ * not a function), and an ordinary function answers `false` here. That last answer is the one
+ * case Node's prototype surface can make `true` (`new f() instanceof f`): `f.prototype` is
+ * Phase 8's descriptor/prototype surface, recorded as residue. */
+bool jsrt_instanceof_ctor(jsrt_value obj, jsrt_value ctor);
 
 /* ---------------------------------------------------------------- errors */
 
@@ -1233,6 +1249,32 @@ JSRTEnv *jsrt_env_clone(JSRTEnv *env);
  * next clone starts from the updated bindings. */
 void jsrt_env_copy_slots(JSRTEnv *dst, const JSRTEnv *src);
 
+/* One STATIC member of a class (docs/VALUE.md §4.17).
+ *
+ * A class's statics stay ordinary bindings wherever the compiler can NAME them (`C.count` reads
+ * the declaring class's binding directly); this table is how a RUNTIME class value answers the
+ * same questions -- an untyped `v.count`, or `this.count` inside a static method whose receiver
+ * may be absent (a tear-off call). `slot` points at the binding's own storage (a module global
+ * for a module-level class), so a write through the table and a write through the binding are
+ * the same write. A descriptor carries its class's OWN statics; inheritance is the `parent` walk
+ * a lookup makes, which is sound because statics cannot be overridden in this subset (one name
+ * is one binding per chain). The table is terminated by a NULL `name`.
+ *
+ * `kind` says what the member is, which decides two behaviours: a read of a getter (or a write
+ * of a setter) CALLS the slot's closure with the class object as receiver instead of loading
+ * the slot, and `console.log` of a class prints its data fields only (Node's inspector skips
+ * methods and accessors). */
+#define JSRT_STATIC_FIELD 0
+#define JSRT_STATIC_METHOD 1
+#define JSRT_STATIC_GETTER 2
+#define JSRT_STATIC_SETTER 3
+
+typedef struct JSRTStaticEntry {
+  const char *name; /* the property name as written; NULL terminates the table */
+  jsrt_value *slot; /* the binding's storage -- read/written in place */
+  uint8_t kind;
+} JSRTStaticEntry;
+
 /* A callable.
  *
  * `env` is NULL for a function that captures nothing, and such a closure stays a file-static
@@ -1241,13 +1283,22 @@ void jsrt_env_copy_slots(JSRTEnv *dst, const JSRTEnv *src);
  * two evaluations close over different variables.
  *
  * `fn` takes the environment even when it is NULL: `jsrt_call` dispatches through this pointer
- * without knowing which kind of closure it holds, so the signature cannot vary between them. */
+ * without knowing which kind of closure it holds, so the signature cannot vary between them.
+ *
+ * `klass` is NULL for every ordinary function and names the descriptor for a CLASS OBJECT
+ * (docs/VALUE.md §4.17) -- the value a class evaluates to. `fn` is then the class's constructor
+ * (NULL when the class declares none, which constructs by allocation alone) and MUST NOT be
+ * reached through `jsrt_call`: calling a class without `new` is Node's catchable TypeError.
+ * `jsrt_construct` is the only caller of a class's `fn`. `arity`/`name` are the constructor's
+ * declared arity and Node's `.name` for the class, so `Function.prototype.length`, `.name` and
+ * `typeof` need no class-specific answer. The class's statics hang off `klass`'s descriptor. */
 typedef struct JSRTClosure {
   jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env);
   uint32_t arity;   /* declared parameters, i.e. Function.prototype.length -- never counts `this` */
   const char *name; /* "" for an anonymous function */
   JSRTEnv *env;     /* NULL when the function captures nothing */
   bool has_receiver; /* parameter zero is `this`; `jsrt_call` shifts when the caller omits it */
+  const struct JSRTClass *klass;      /* NULL unless this is a class object */
 } JSRTClosure;
 
 static inline jsrt_value jsrt_closure(const JSRTClosure *c) {
@@ -1287,11 +1338,24 @@ jsrt_value jsrt_args_rest(uint32_t argc, const jsrt_value *argv, uint32_t from);
 /* Calling a non-function is a TypeError. Until Phase 5 step 11 gives the runtime a catch around
  * user code, it is fatal -- loud and located, rather than a jump through a garbage pointer.
  * (Phase 6 until 2026-09-01: the phase restructuring of plan-notes 116 moved the mechanism, and
- * Phase 6 is conformance fuzzing. Corrected in plan-notes 125.) */
+ * Phase 6 is conformance fuzzing. Corrected in plan-notes 125.)
+ *
+ * A class object is a closure, but calling one without `new` is Node's catchable TypeError
+ * (`Class constructor K cannot be invoked without 'new'`), never its constructor body: `fn` is
+ * reached only through `jsrt_construct` below (docs/VALUE.md §4.17). */
 jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
 /* Same as jsrt_call, with a `file:line` baked in so a non-function callee names the site
  * (STA2006). `loc` may be NULL, which keeps the unlocated TypeError for builtin-internal calls. */
 jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv, const char *loc);
+
+/* `new v(...)`: the one caller of a class object's constructor (docs/VALUE.md §4.17).
+ *
+ * A class object allocates its instance (`jsrt_object_new`), then runs `fn` with the instance as
+ * receiver and the arguments after it; the constructor's return is ignored, because the gate
+ * admits no explicit object return in a constructor. A value that is not a class object leaves
+ * Node's catchable `X is not a constructor` TypeError pending -- including an ordinary function,
+ * whose legacy-construct answer would need `f.prototype` to be right (Phase 8's surface). */
+jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv);
 
 /* ------------------------------------------------------------ promises */
 

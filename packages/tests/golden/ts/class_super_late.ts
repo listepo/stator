@@ -66,3 +66,49 @@ console.log(new F(21).y);
 console.log(new F(5).y);
 console.log(new F(-21).y);
 console.log(new F(0).y);
+
+// plan.md §8 step 12(d): the `switch` twin of the arm rule — one call per path through the
+// clauses, `default` covering the unmatched path, grouped cases sharing one call. A `case`
+// that falls through into another `super(...)` would re-run the base and is refused.
+class G extends A {
+  z: number;
+  constructor(x: number) {
+    switch (x) {
+      case 1:
+        super(1);
+        break;
+      case 2:
+      case 3:
+        super(x * 10);
+        break;
+      default:
+        super(0);
+    }
+    this.z = this.x + 1;
+  }
+}
+class H extends A {
+  constructor(n: number) {
+    if (n > 0) {
+      switch (n) {
+        case 1:
+          super(1);
+          break;
+        default:
+          super(n);
+      }
+    } else if (n < 0) {
+      super(n);
+    } else {
+      super(0);
+    }
+  }
+}
+console.log(new G(1).z);
+console.log(new G(2).z);
+console.log(new G(3).z);
+console.log(new G(9).z);
+console.log(new H(1).x);
+console.log(new H(5).x);
+console.log(new H(-5).x);
+console.log(new H(0).x);

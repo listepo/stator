@@ -278,15 +278,33 @@ export interface IndexAccess extends Node {
 /** `new C(a, b)`.
  *
  * `className` names the class, not an expression: the emitter has to reach a specific `JSRTClass`
- * descriptor and a specific constructor, and `new (cond ? A : B)()` cannot resolve to either. The
- * node's `type` is the resulting HObject.
+ * descriptor and a specific constructor. The node's `type` is the resulting HObject.
  *
  * `args` are the CONSTRUCTOR's arguments and do not include the receiver. The object is allocated
  * before the constructor runs -- it has to be, because the constructor's whole job is to assign
- * into it -- and the emitter is what puts it in front of `args`. */
+ * into it -- and the emitter is what puts it in front of `args`.
+ *
+ * The callee a NAME resolves is this node; a callee that is a VALUE -- `new v()` where `v` holds
+ * a class object -- is `NewValue`, which dispatches at run time and cannot name a descriptor. */
 export interface NewExpr extends Node {
   readonly kind: 'new';
   readonly className: string;
+  readonly args: readonly Expression[];
+}
+
+/** `new v(a, b)` where `v` is a class-object VALUE rather than a name (docs/VALUE.md §4.17).
+ *
+ * The instance's CLASS is a run-time fact: `v` may name one class statically and hold another
+ * (a `typeof Base` parameter receiving a subclass's object constructs the subclass in
+ * JavaScript), so the allocation and the constructor dispatch through the value -- one runtime
+ * entry (`jsrt_construct`) instead of the descriptor pair `NewExpr` emits. `type` is the
+ * checker's construct result (an Unknown when the callee was untyped), exactly as `NewExpr`'s
+ * is its class's layout.
+ *
+ * `args` do not include the receiver, exactly as on `NewExpr`. */
+export interface NewValue extends Node {
+  readonly kind: 'new-value';
+  readonly target: Expression;
   readonly args: readonly Expression[];
 }
 
@@ -294,8 +312,7 @@ export interface NewExpr extends Node {
  *
  * `className` names the class for the same reason `new` does: the emitter reaches a specific
  * `JSRTClass` descriptor, and there is one per class in the whole program, so the test is a pointer
- * comparison against it. A class as a VALUE would be needed for `x instanceof f()`, which is why
- * that spelling is a `not-yet` at the gate rather than an expression here.
+ * comparison against it. A right operand that is a VALUE rather than a name is `InstanceOfValue`.
  *
  * `target` is any expression at all, including a primitive: `1 instanceof C` is `false`, not an
  * error, so nothing about this node requires the target to be an object. The node's `type` is
@@ -308,6 +325,37 @@ export interface InstanceOf extends Node {
   readonly target: Expression;
   readonly className: string;
   readonly builtin?: true;
+}
+
+/** `x instanceof v` where the right operand is a class-object VALUE rather than a name
+ * (docs/VALUE.md §4.17).
+ *
+ * The class being tested against is a run-time fact for exactly the reason `NewValue` exists:
+ * `v` may hold a subclass's object where its type names the base, and the prototype question is
+ * about the VALUE. The emitter answers through one runtime entry (`jsrt_instanceof_ctor`), which
+ * raises Node's TypeError for a right operand that is not a constructor and answers `false` for
+ * an ordinary function (the `f.prototype` case is Phase 8's surface). The node's `type` is always
+ * `boolean`, and `target` may be any expression at all, exactly as on `InstanceOf`. */
+export interface InstanceOfValue extends Node {
+  readonly kind: 'instanceof-value';
+  readonly target: Expression;
+  readonly ctor: Expression;
+}
+
+/** The class object a class evaluates to (`docs/VALUE.md` §4.17) -- `K` in a value position.
+ *
+ * One file-scope constant per class: the same closure-shaped value `typeof` answers "function"
+ * for, `.name` and `.length` read, `jsrt_construct` builds through, and `jsrt_call` refuses with
+ * Node's `Class constructor K cannot be invoked without 'new'`. `className` is the HIR name (the
+ * key `ClassDeclaration` registers under), never the source spelling a shadow rename displaced.
+ *
+ * The node has no subexpression and captures nothing: the value is a constant wherever the gate
+ * admits one, which is why a class whose evaluation can repeat (a class inside a function or a
+ * loop) is refused at the gate rather than lowered here -- one constant per program cannot carry
+ * per-evaluation identity. */
+export interface ClassValue extends Node {
+  readonly kind: 'class-value';
+  readonly className: string;
 }
 
 /** `o.x` as a READ.
@@ -1752,7 +1800,10 @@ export type Expression =
   | ObjectStaticCall
   | IndexAccess
   | NewExpr
+  | NewValue
   | InstanceOf
+  | InstanceOfValue
+  | ClassValue
   | FieldAccess
   | MethodCall
   | DynMethodCall
@@ -1896,14 +1947,22 @@ export interface ClassDeclaration extends Node {
    *
    * A static belongs to the class OBJECT, not to any instance: it is not a slot in the layout, it
    * is ONE binding for the whole program, and `C.count` reads it by name. A static method is the
-   * same thing with a function for a value and no receiver. Modelling them this way is why they
-   * needed no node, no verifier case and no emitter case of their own -- a static read is an
-   * `Identifier`, a static write is an `Assignment`, and a static call is a `CallExpr`.
+   * same thing with a function for a value -- whose parameter zero is the class object, so a
+   * `this` inside one reads the receiver a call threads (`docs/VALUE.md` §4.17). Modelling them
+   * this way is why they needed no node and no verifier case of their own -- a static read is an
+   * `Identifier`, a static write is an `Assignment`, and a static call is a `CallExpr` with the
+   * class object as its first argument.
    *
    * They ride on the class rather than being spliced into the enclosing statement list so that a
    * class stays one statement in source order; the enclosing scope reaches them by walking here,
    * which is also what fixes WHEN they are initialized -- where the class declaration sits. */
   readonly statics: readonly Declaration[];
+  /** The class's own static members as the class OBJECT's table sees them (docs/VALUE.md §4.17):
+   * property name as written, the `statics` binding each resolves to, and what kind of member it
+   * is. This is how a run-time class value answers `v.count` / `v.m()` where no name resolves --
+   * the emitter builds the `JSRTStaticEntry` table from it. Parallel to `statics`, which carries
+   * the bindings' VALUES; an accessor contributes one entry per half. */
+  readonly staticProps: readonly StaticProp[];
   /** The method table, in slot order: one entry per method this class responds to, inherited ones
    * first and in the base's own order. Each entry names the class whose body IMPLEMENTS the method
    * for THIS class, which is where an override differs from its base -- same name, same slot,
@@ -1920,6 +1979,19 @@ export interface ClassDeclaration extends Node {
 export interface VtableEntry {
   readonly name: string;
   readonly className: string;
+}
+
+/** One row of a class object's statics table (docs/VALUE.md §4.17).
+ *
+ * `name` is the property name as JavaScript spells it; `binding` is the unspellable HIR binding
+ * (`C.count`, `C get x`) whose storage the row points at. `kind` distinguishes what the runtime
+ * does with it: a field or method loads the slot, an accessor half CALLS it with the class
+ * object as receiver, and `console.log` prints fields only (Node's class inspector skips
+ * methods and accessors). */
+export interface StaticProp {
+  readonly name: string;
+  readonly binding: string;
+  readonly kind: 'field' | 'method' | 'get' | 'set';
 }
 
 /** Expression statement (wraps an expression). */

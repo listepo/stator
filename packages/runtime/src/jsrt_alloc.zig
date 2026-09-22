@@ -110,6 +110,9 @@ export fn jsrt_closure_new(
         .name = name,
         .env = env,
         .has_receiver = has_receiver,
+        // A heap closure is never a class object: class objects are file-scope constants the
+        // emitter writes with their descriptor (docs/VALUE.md §4.17).
+        .klass = null,
     };
     return c.jsrt_closure(closure);
 }

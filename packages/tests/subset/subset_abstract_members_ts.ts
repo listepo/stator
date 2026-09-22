@@ -1,10 +1,10 @@
 // @mode: ts
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: static
 // SUBSET.md: Class member signatures (overloads, abstract and optional members, `super(...)` placement)
 // An abstract method or accessor declares a name and no function (plan-notes 233). The abstract
-// method's slot is filled by each concrete descendant's table, so a call through the base is virtual.
-// Implementing an abstract ACCESSOR is an accessor override, which lands with the override rules.
+// member's slot is filled by each concrete descendant's table, so a call through the base is
+// virtual. An abstract ACCESSOR lowers to the same throw-stub and its implementing subclass is
+// an accessor override (plan.md §8 step 12(d)).
 
 abstract class Animal {
   abstract sound(): string;
