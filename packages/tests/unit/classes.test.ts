@@ -494,6 +494,60 @@ console.log(new B().m());
   assert.equal((left as MethodCall).target.kind, 'identifier');
 });
 
+const ACCESSOR_OVERRIDE = `class A {
+  get x(): number { return 1; }
+  set x(v: number) {}
+}
+class B extends A {
+  override get x(): number { return 2; }
+  override set x(v: number) {}
+}
+`;
+
+test('an accessor override keeps each half slot and takes over both entries', () => {
+  // Each half is its own row of the table (`get x`, `set x`), so the override is the same
+  // move a method's is: same slot, new implementor (plan.md §8 step 12(d)).
+  const code = `${ACCESSOR_OVERRIDE}const a: A = new B();\nconsole.log(a.x);\n`;
+  assert.deepEqual(
+    classNamed(code, 'A').vtable,
+    [
+      { name: 'get x', className: 'A' },
+      { name: 'set x', className: 'A' },
+    ],
+    'the base implements its own pair',
+  );
+  assert.deepEqual(
+    classNamed(code, 'B').vtable,
+    [
+      { name: 'get x', className: 'B' },
+      { name: 'set x', className: 'B' },
+    ],
+    'same halves, same order, and both entries move to the subclass',
+  );
+});
+
+test('an accessor read on an overriding family is virtual, base-typed references included', () => {
+  const code = `${ACCESSOR_OVERRIDE}const a: A = new B();\nconsole.log(a.x);\n`;
+  const call = (lastExpression(code) as Extract<Expression, { kind: 'console-log' }>).args[0];
+  assert.equal(call?.kind, 'method-call');
+  assert.equal((call as MethodCall).method, 'get x');
+  assert.equal((call as MethodCall).dispatch, 'virtual');
+});
+
+test('an accessor write on an overriding family is virtual too', () => {
+  const code = `${ACCESSOR_OVERRIDE}const a: A = new B();\na.x = 1;\n`;
+  const call = lastExpression(code);
+  assert.equal(call.kind, 'method-call');
+  assert.equal((call as MethodCall).method, 'set x');
+  assert.equal((call as MethodCall).dispatch, 'virtual');
+});
+
+test('an accessor nothing overrides stays direct', () => {
+  const code = `class A {\n  get x(): number { return 1; }\n}\nconst a = new A();\nconsole.log(a.x);\n`;
+  const call = (lastExpression(code) as Extract<Expression, { kind: 'console-log' }>).args[0];
+  assert.equal((call as MethodCall).dispatch, 'direct');
+});
+
 const ACCESSORS = `class C {
   raw: number = 0;
   get value(): number { return this.raw; }

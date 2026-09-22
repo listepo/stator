@@ -63,8 +63,9 @@ function isDuplicateProtoDataProperty(source: ts.SourceFile, position: number): 
  * plan-notes 68/272): both members are bodied METHODS neither side annotated, so the
  * disagreement comes from inference over unannotated code rather than from a type the user
  * wrote. Anything else keeps STA0012: a field or accessor on either side (a field shares one
- * slot for two types, which no call-widening can defend; an accessor override the gate
- * refuses on its own), an explicit annotation (TS or JSDoc) anywhere on either member, a
+ * slot for two types, which no call-widening can defend; an accessor pair has no call
+ * widening at all — a getter READ is not a call the method marks cover), an explicit
+ * annotation (TS or JSDoc) anywhere on either member, a
  * computed name (the lowering keys call marks by declared name), a missing body (overload,
  * abstract, or ambient — each with its own gate story), or an unresolvable base. Fail closed:
  * the suppression admits a hierarchy the checker proved inconsistent, and only the

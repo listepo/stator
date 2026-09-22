@@ -815,7 +815,7 @@ class Emitter {
       );
       out.push(
         `static const JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
-          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}};`,
+          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}, NULL};`,
       );
     }
     if (this.functions.length > 0) {
@@ -862,7 +862,17 @@ class Emitter {
       out.push(
         `static const JSRTClass _jsrt_class_${id} = {${cNameLiteral(descriptorName(cls.name))}, ` +
           `${cls.fields.length}, _jsrt_fields_${id}, ${this.baseDescriptor(cls, id)}, ${table}, ` +
-          `${keyOrder === undefined ? 'NULL' : `_jsrt_keys_${id}`}};`,
+          `${keyOrder === undefined ? 'NULL' : `_jsrt_keys_${id}`}, NULL};`,
+      );
+      // The class OBJECT (docs/VALUE.md §4.17): the closure-shaped value a class evaluates
+      // to. Its `fn` is the constructor (NULL when the class declares none), reachable only
+      // through `jsrt_construct`; its `klass` is this descriptor, which is how the runtime
+      // answers `.name`/`.length`/`typeof`, statics, and value dispatch. A capturing ctor
+      // has no file-static `_jsrt_closure_N` — but the gate refuses class values for classes
+      // whose evaluation can repeat, which is exactly the surface that could capture here.
+      out.push(
+        `static const JSRTClosure _jsrt_class_object_${id} = {${cls.ctor === undefined ? 'NULL' : `_jsrt_fn_${String(this.functionId(cls.ctor.fn))}`}, ` +
+          `${cls.ctor === undefined ? 0 : String(closureMeta(cls.ctor.fn).arity)}, ${cNameLiteral(cls.name)}, NULL, false, &_jsrt_class_${id}};`,
       );
     }
     if (this.classes.length > 0) {
@@ -2252,6 +2262,21 @@ class Emitter {
       // nothing allocated between evaluating the target and using it.
       case 'instanceof':
         this.countExpression(expr.target);
+        break;
+      // The lowering never constructs these (class-object construction lands here only once
+      // the gate admits it): each counts its operands exactly like the named spelling it
+      // generalizes — one rooted slot per evaluated child, no call slots of its own.
+      case 'new-value':
+        this.countExpression(expr.target);
+        for (const arg of expr.args) {
+          this.countExpression(arg);
+        }
+        break;
+      case 'instanceof-value':
+        this.countExpression(expr.target);
+        this.countExpression(expr.ctor);
+        break;
+      case 'class-value':
         break;
       case 'dyn-field-access':
         this.tempSlots.set(expr, this.slotCount++);
@@ -4935,6 +4960,29 @@ class Emitter {
         return `jsrt_bool(jsrt_instanceof(${this.emitExpression(expr.target)}, &_jsrt_class_${id}))`;
       }
 
+      // `new v(...)` where `v` is a class-object value: allocation and the constructor both
+      // dispatch through the value (one runtime entry) because the instance's class is a
+      // run-time fact. Operands are counted above; slots follow the named-`new` counting rule
+      // (receiver slot holds the result, arguments after it) rather than inline C temporaries,
+      // so nothing the constructor's arguments allocate can collect the half-built object.
+      case 'new-value': {
+        return `jsrt_construct(${this.emitExpression(expr.target)}, ${expr.args.length}${expr.args.length === 0 ? '' : `, ${expr.args.map((arg) => this.emitExpression(arg)).join(', ')}`})`;
+      }
+
+      // `o instanceof v` where `v` is a class-object value: the chain walk against the
+      // descriptor the value carries, or Node's TypeError when it carries no constructor.
+      case 'instanceof-value': {
+        return `jsrt_bool(jsrt_instanceof_ctor(${this.emitExpression(expr.target)}, ${this.emitExpression(expr.ctor)}))`;
+      }
+
+      // One file-scope constant per class (docs/VALUE.md §4.17): the closure-shaped class
+      // object `classAt` registered, whose `fn` is the constructor `jsrt_construct` calls.
+      case 'class-value': {
+        this.classAt(expr.className);
+        const id = String(this.classIds.get(expr.className));
+        return `jsrt_closure(&_jsrt_class_object_${id})`;
+      }
+
       default: {
         const _exhaustive: never = expr;
         throw new Error(
@@ -5340,6 +5388,7 @@ class Emitter {
       fields,
       methods: expr.methods,
       statics: [],
+      staticProps: [],
       vtable: [],
     });
   }

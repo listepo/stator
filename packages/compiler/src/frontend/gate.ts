@@ -39,8 +39,10 @@ import {
   baseClassOf,
   classDeclarationOf,
   classDisplayName,
+  classEvaluationRepeatable,
   classExpressionTarget,
   classLikeOf,
+  classNamedBy,
   computedKeyStaticName,
   elementStaticKey,
   expressionClassName,
@@ -418,6 +420,15 @@ function gateConstruct(
           code: 'STA1125',
           message: 'returning an out-slot is outside the out-slot contract (docs/FFI.md)',
         };
+      }
+      // A constructor's `return e` makes `new` yield `e` when it is an object (Node:
+      // `new C()` answers the returned `{...}`, not the instance), and this subset's `new`
+      // yields the allocated object and ignores what a constructor returns
+      // (`codegen/index.ts`), so accepting one would compile a program that silently
+      // answers differently. A bare `return;` returns no value and is ruled on by the
+      // constructor-super coverage rule instead.
+      if (returned !== undefined && enclosingFunctionIsConstructor(node)) {
+        return notYet('a constructor that returns a value is not yet supported', 5);
       }
       return { kind: 'accept' };
     }
@@ -890,6 +901,82 @@ function aliasedDeclaration(
  * two cannot disagree about which declarators bind nothing. Defined in `./types.ts`, where the
  * alias resolution that also asks this question lives. */
 export { isSingleConstDeclarator } from './types.ts';
+
+/** Whether every constituent of `type` is a class CONSTRUCTOR type (`typeof K`): exactly one
+ * construct signature, whose result is a named class's instance. A built-in constructor
+ * interface (`typeof TypeError`) is not one -- its value has no class object in this subset (the
+ * error constructors are runtime entries, not descriptors) -- and neither is a plain function,
+ * which constructs nothing the checker can name (TS7009 asks for `new` on one). */
+function classConstructorTypeOf(type: ts.Type): boolean {
+  const kinds = type.isUnion() ? type.types : [type];
+  return kinds.every((constituent) => {
+    const signatures = constituent.getConstructSignatures();
+    const signature = signatures.length === 1 ? signatures[0] : undefined;
+    if (signature === undefined) {
+      return false;
+    }
+    const like = classLikeOf(signature.getReturnType());
+    return like !== undefined && classDisplayName(like) !== undefined;
+  });
+}
+
+/** Whether `member`'s body reads `this` (at any depth -- an arrow inside it reads the same one).
+ * A `this` read is what makes the member depend on the receiver a call threads. */
+function memberUsesThis(member: ts.ClassElement): boolean {
+  const roots: (ts.Node | undefined)[] = [];
+  if (
+    ts.isMethodDeclaration(member) ||
+    ts.isGetAccessorDeclaration(member) ||
+    ts.isSetAccessorDeclaration(member)
+  ) {
+    roots.push(member.body);
+  } else if (ts.isPropertyDeclaration(member)) {
+    roots.push(member.initializer);
+  }
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const n = stack.pop();
+    if (n === undefined) {
+      continue;
+    }
+    if (n.kind === ts.SyntaxKind.ThisKeyword) {
+      return true;
+    }
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isClassDeclaration(n) ||
+      ts.isClassExpression(n)
+    ) {
+      continue; // a plain function or class body owns a different `this`
+    }
+    n.forEachChild((child) => {
+      stack.push(child);
+    });
+  }
+  return false;
+}
+
+/** The call-threading guard (docs/VALUE.md §4.17). A `this`-reading static member takes the
+ * identity of the receiver's class object, and a call through a class whose EVALUATION can
+ * repeat would hand every evaluation the one constant identity -- so those stay refused here
+ * even though `this` uses in their OWN members are refused one layer down: `class D extends B {}`
+ * inside a function, calling `D.self()` for a `static self() { return this }` on B, reads `this`
+ * from B (admitted) with D's shared constant (the wrong identity per evaluation). */
+function repeatableThisGuard(
+  receiver: ts.Expression,
+  member: ts.ClassElement,
+  checker: ts.TypeChecker,
+): GateResult {
+  const owner = classLikeOf(checker.getTypeAtLocation(receiver));
+  if (owner !== undefined && classEvaluationRepeatable(owner) && memberUsesThis(member)) {
+    return notYet(
+      'calling a `this`-reading static through a class whose evaluation can repeat is not yet supported',
+      5,
+    );
+  }
+  return { kind: 'accept' };
+}
 
 /** Cross-function references are what rung 4b implements, so an identifier is accepted on its own.
  * The one shape held back: a binding declared inside a loop is a FRESH binding per iteration, and
@@ -3644,7 +3731,10 @@ function gateClass(
     // layout does not already have -- which is why the limits below are about the class object and
     // the name, not about accessors as such.
     if (ts.isGetAccessor(member) || ts.isSetAccessor(member)) {
-      if (member.body === undefined) {
+      // An `abstract` accessor declares; a subclass implementation runs (plan.md §8 step 12(d)),
+      // and the lowering gives it the throw-stub plan-notes 275 established for abstract members.
+      // Without `abstract`, a bodiless accessor has no implementation anywhere (`declare`).
+      if (member.body === undefined && !hasAbstractModifier(member)) {
         return notYet('an accessor with no body is not yet supported', 5);
       }
       // A computed name with a static name (`get [k]` with `k: "x"`) IS the name the direct
@@ -3703,16 +3793,26 @@ function gateClass(
         }
         continue;
       }
-      // An accessor re-declaring an inherited name is overriding, and an accessor is dispatched
-      // directly -- the method table is indexed only where the lowering proved a method is
-      // declared twice, which it asks of method DECLARATIONS.
+      // An accessor re-declaring an inherited name is overriding: each half joins the method
+      // table under its mangled name (`get x`, `set x`) exactly like a method -- one slot, one
+      // entry per class, virtual dispatch wherever the family declares the half twice (plan.md
+      // §8 step 12(d)). The pair must stay WHOLE across the override, and the family needs one
+      // table per class, which is the method rule's module-scope limit.
       {
         const overrideName = classMemberStaticName(member, checker);
         if (overrideName !== undefined && inheritedInstance.has(overrideName)) {
-          return notYet(
-            `overriding the inherited member '${overrideName}' is not yet supported`,
-            5,
-          );
+          if (!accessorOverrideKeepsPair(overrideName, declaration, checker)) {
+            return notYet(
+              `overriding the inherited member '${overrideName}' is not yet supported`,
+              5,
+            );
+          }
+          if (!isClassAtModuleScope(declaration)) {
+            return notYet(
+              'overriding a method in a class declared inside a function is not yet supported',
+              5,
+            );
+          }
         }
       }
       continue;
@@ -3792,10 +3892,10 @@ function gateClass(
       // touching `this`. JavaScript forbids the touch, and the lowering splices the field
       // initializers right after the call -- which is only a fixed position when the call is
       // one, so a class WITH initializers keeps the top-level rule while a class WITHOUT may
-      // call from `if`/`else` arms instead (one per arm, every arm covered). Statements
-      // before it may validate or transform the parameters, which is the shape real
-      // constructors take; a `super()` nested in an arrow, a loop, or any other uncountable
-      // position does not count.
+      // call from `if`/`else` arms or `switch` clauses instead (one call per path, every
+      // path covered). Statements before it may validate or transform the parameters, which
+      // is the shape real constructors take; a `super()` nested in an arrow, a loop, or any
+      // other uncountable position does not count.
       if (
         baseClassOf(declaration, checker) !== undefined &&
         !derivedConstructorOrderOk(member, declaration)
@@ -4310,6 +4410,43 @@ function privateStaticPairComplete(
   return true;
 }
 
+/** Whether an accessor re-declaring an inherited accessor keeps the pair WHOLE: this class
+ * declares exactly the halves the inherited declaration does (get-only over get-only, set-only
+ * over set-only, pair over pair).
+ *
+ * A dropped half is where the method table would disagree with Node: the derived accessor
+ * SHADOWS the inherited pair, so a write to a get-only shadow throws (compiled modules are
+ * strict) and a read of a set-only one answers `undefined`, while the table would dispatch the
+ * missing half to the base's body. An ADDED half has no slot in a base-typed layout for a
+ * base-typed site to index (the checker types a read of a set-only base, and refuses a write to
+ * a get-only one). Half-for-half the VARIANCE is the checker's (get covariant, set
+ * contravariant -- its TS2416 is the refusal); what is decided here is only the shape.
+ */
+function accessorOverrideKeepsPair(
+  name: string,
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+  checker: ts.TypeChecker,
+): boolean {
+  const base = baseClassOf(declaration, checker);
+  const inherited = base === undefined ? undefined : accessorDeclaringClass(base, name, checker);
+  if (inherited === undefined) {
+    return false; // a field or method owns the name; the kind mismatch is its own refusal
+  }
+  let get = false;
+  let set = false;
+  for (const m of declaration.members) {
+    if (isStaticMember(m) || classMemberStaticName(m, checker) !== name) {
+      continue;
+    }
+    if (ts.isGetAccessorDeclaration(m)) {
+      get = true;
+    } else if (ts.isSetAccessorDeclaration(m)) {
+      set = true;
+    }
+  }
+  return get === inherited.get && set === inherited.set;
+}
+
 /** Whether a derived constructor calls `super(...)` exactly once on every completion path
  * before touching `this` — and, when the class declares instance field initializers, from a
  * single fixed position.
@@ -4317,12 +4454,19 @@ function privateStaticPairComplete(
  * Field initializers splice right after the super call, which is only a fixed position when
  * the call is a top-level statement: a class WITH initializers keeps the old rule (one
  * top-level `super(...)`, nothing nested). A class with NONE has nothing to splice, so the
- * call may sit in `if`/`else` arms instead — one per arm, every arm covered, no reads before
- * it on any path — which is the shape real validating constructors take. Anything with no
- * fixed count (loops, a second call on an already-covered path — Node throws ReferenceError
- * on a re-run) or no fixed position (arrows, nested functions, `try`, `switch`, a `super`
- * in a condition) stays refused: skipping the call leaves `this` unbound, and re-running
- * the base constructor re-initializes its fields, and both are silent if admitted. */
+ * call may sit in `if`/`else` arms or `switch` clauses instead — one call per path, every
+ * path covered, no reads before it on any path — which is the shape real validating
+ * constructors take. Anything with no fixed count (loops, a second call on a path that
+ * already ran one — Node answers `ReferenceError: Super constructor may only be called
+ * once` on a re-run) or no fixed position (arrows, nested functions, `try`, a `super` in a
+ * condition) stays refused: skipping the call leaves `this` unbound — Node answers
+ * `ReferenceError` when such a constructor completes, which this runtime does not, so the
+ * gate refuses rather than compile a program that silently answers differently — and
+ * re-running the base constructor re-initializes its fields. Completion is what owes the
+ * call: a path that leaves by `throw` propagates exactly as Node's does and owes nothing,
+ * while a `return` completes the construction (`new` yields the receiver), so a return
+ * before the call is the skipped-call shape. A VALUE return is refused one level up, at the
+ * ReturnStatement arm — `new` cannot honor one at all. */
 function derivedConstructorOrderOk(
   ctor: ts.ConstructorDeclaration,
   declaration: ts.ClassDeclaration | ts.ClassExpression,
@@ -4336,114 +4480,234 @@ function derivedConstructorOrderOk(
       !isStaticMember(member) &&
       member.initializer !== undefined,
   );
-  return checkCtorList(ctor.body?.statements ?? [], flexible).coverage === 'covered';
+  const exits = checkCtorList(ctor.body?.statements ?? [], flexible, 'zero');
+  return exits !== null && exits.brk === null && (exits.fall === null || exits.fall === 'one');
 }
 
-/** The verdict for one statement list: accepted, and how much super it guarantees —
- * every path (`covered`), some path (`conditional`, from an `if` without a covering
- * `else`), or none. A later top-level call after `conditional` is a re-run on the covered
- * paths, so the distinction is load-bearing, not bookkeeping. */
-interface CtorSuperCheck {
-  readonly ok: boolean;
-  readonly coverage: 'covered' | 'conditional' | 'none';
+/** How many `super(...)` calls the surviving paths have run: none, one (the base is
+ * initialized), or both — the merge of paths that disagree, where a further call or a
+ * receiver read is indistinguishable from a re-run or a pre-call read and refused as such. */
+type SuperCount = 'zero' | 'one' | 'mixed';
+
+/** Where the paths through a statement list leave it, or `null` when the rule refuses.
+ * `fall` holds the call count of the paths falling out the bottom (`null`: every path left
+ * earlier); `brk` the count of the paths a `break` carried out toward the nearest enclosing
+ * `switch` (`null`: none). Return and throw paths are checked where they leave and then
+ * dropped: both exit the constructor, one owing exactly one call and the other at most one. */
+type CtorFlow = { readonly fall: SuperCount | null; readonly brk: SuperCount | null } | null;
+
+/** Join the call counts of two path sets. `null` is the empty set — the identity — because
+ * a merge only constrains the paths that exist. */
+function mergeSuper(a: SuperCount | null, b: SuperCount | null): SuperCount | null {
+  if (a === null || b === null) {
+    return a === null ? b : a;
+  }
+  return a === b ? a : 'mixed';
 }
 
-const CTOR_SUPER_FAIL: CtorSuperCheck = { ok: false, coverage: 'none' };
-
-/** The straight-line rule, plus `if`/`else` arms when `flexible` (see above). An arm is
- * checked by the same rule recursively, so nesting and `else if` chains cost nothing extra;
- * a missing `else` degrades its `if` to `conditional`, which later reads and a later call
- * both refuse. */
-function checkCtorList(statements: readonly ts.Statement[], flexible: boolean): CtorSuperCheck {
-  let coverage: 'covered' | 'conditional' | 'none' = 'none';
-  const cover = (next: 'covered' | 'conditional'): CtorSuperCheck | undefined => {
-    // A call on an already-covering path re-runs the base constructor; Node answers
-    // ReferenceError, so the gate answers no. Straight-line double calls
-    // (`super(); super();`) land here too — same re-run, same refusal.
-    if (coverage !== 'none') {
-      return CTOR_SUPER_FAIL;
-    }
-    coverage = next;
-    return undefined;
-  };
+/** The straight-line rule, plus `if`/`else` arms and `switch` clauses when `flexible` (see
+ * above). Arms and clause chains are checked by the same rule recursively at the count the
+ * surrounding paths carry in, so nesting costs nothing extra; a missing `else` (or
+ * `default`) passes its uncovered paths through at that count, which a later call then
+ * covers — or a later read refuses. */
+function checkCtorList(
+  statements: readonly ts.Statement[],
+  flexible: boolean,
+  entry: SuperCount,
+): CtorFlow {
+  let count = entry;
+  let breaks: SuperCount | null = null;
   for (const stmt of statements) {
     if (isTopLevelSuperCall(stmt)) {
-      const refused = cover('covered');
-      if (refused !== undefined) {
-        return refused;
+      // A call on a path that already ran one re-runs the base constructor; Node answers
+      // ReferenceError, so the gate answers no. Straight-line double calls
+      // (`super(); super();`) land here too — same re-run, same refusal.
+      if (count !== 'zero') {
+        return null;
       }
+      // Arguments evaluate before the call binds `this`, so a receiver read among them is a
+      // read before the call — and a nested `super(...)` among them is the re-run above.
+      const call = stmt.expression;
+      if (ts.isCallExpression(call) && call.arguments.some((arg) => readsThisOrSuper(arg))) {
+        return null;
+      }
+      count = 'one';
       continue;
     }
-    // A bare block groups statements without branching them: its coverage merges like
+    // A `break` leaves for the enclosing `switch`, where the clause-chain analysis joins it
+    // with the other continuing exits. It truncates: nothing after it runs on these paths.
+    if (ts.isBreakStatement(stmt)) {
+      // A labeled break names a jump whose target sits outside every list this analysis
+      // sees; only a checker-missed label can spell one here.
+      if (stmt.label !== undefined) {
+        return null;
+      }
+      return { fall: null, brk: mergeSuper(breaks, count) };
+    }
+    if (ts.isContinueStatement(stmt)) {
+      return null;
+    }
+    // `return` COMPLETES the construction — `new` yields the receiver — so a return before
+    // the call is exactly the skipped-call path Node answers ReferenceError for, and a
+    // return after it retires the path with its one call spent.
+    if (ts.isReturnStatement(stmt)) {
+      if (count !== 'one') {
+        return null;
+      }
+      return { fall: null, brk: breaks };
+    }
+    // A `throw` propagates out of the construction exactly as Node's does, so the path owes
+    // no call at all and retires with whatever count it holds (never above one).
+    if (ts.isThrowStatement(stmt)) {
+      return { fall: null, brk: breaks };
+    }
+    // A bare block groups statements without branching them: its exits merge like
     // straight-line code. Like an `if` arm, a block hides the call from the splicer's
     // top-level scan, so it counts only when there is nothing to splice (`flexible`).
     if (flexible && ts.isBlock(stmt)) {
-      const inner = checkCtorList(stmt.statements, flexible);
-      if (!inner.ok) {
-        return CTOR_SUPER_FAIL;
+      const inner = checkCtorList(stmt.statements, flexible, count);
+      if (inner === null) {
+        return null;
       }
-      if (inner.coverage !== 'none') {
-        const refused = cover(inner.coverage);
-        if (refused !== undefined) {
-          return refused;
-        }
-      } else if (coverage === 'none' && readsThisOrSuper(stmt)) {
-        return CTOR_SUPER_FAIL;
+      breaks = mergeSuper(breaks, inner.brk);
+      if (inner.fall === null) {
+        return { fall: null, brk: breaks };
       }
+      count = inner.fall;
       continue;
     }
     if (flexible && ts.isIfStatement(stmt) && !nestedSuperCall(stmt.expression)) {
       // A `super` in the condition runs unconditionally but in expression position, where
       // the initializers cannot follow it; a `this` there reads before any call. Both are
       // the nested shapes below wearing a condition's clothes.
-      if (coverage === 'none' && readsThisOrSuper(stmt.expression)) {
-        return CTOR_SUPER_FAIL;
+      if (count !== 'one' && readsThisOrSuper(stmt.expression)) {
+        return null;
       }
-      const thenCheck = checkCtorList([stmt.thenStatement], true);
-      if (!thenCheck.ok) {
-        return CTOR_SUPER_FAIL;
+      const thenFlow = checkCtorList([stmt.thenStatement], flexible, count);
+      if (thenFlow === null) {
+        return null;
       }
-      const elseCheck =
-        stmt.elseStatement === undefined ? undefined : checkCtorList([stmt.elseStatement], true);
-      if (elseCheck !== undefined && !elseCheck.ok) {
-        return CTOR_SUPER_FAIL;
+      // A missing `else` is a path straight through at the count the arms were entered
+      // with — the uncovered path the end criterion later refuses unless a call covers it.
+      const elseFlow =
+        stmt.elseStatement === undefined
+          ? { fall: count, brk: null }
+          : checkCtorList([stmt.elseStatement], flexible, count);
+      if (elseFlow === null) {
+        return null;
       }
-      const thenCoverage = thenCheck.coverage;
-      const elseCoverage = elseCheck?.coverage ?? 'none';
-      if (thenCoverage === 'covered' && elseCoverage === 'covered') {
-        const refused = cover('covered');
-        if (refused !== undefined) {
-          return refused;
+      breaks = mergeSuper(mergeSuper(breaks, thenFlow.brk), elseFlow.brk);
+      const merged = mergeSuper(thenFlow.fall, elseFlow.fall);
+      if (merged === null) {
+        return { fall: null, brk: breaks };
+      }
+      count = merged;
+      continue;
+    }
+    if (flexible && ts.isSwitchStatement(stmt)) {
+      // The discriminant and every case test evaluate at the entry count, before any clause
+      // body runs; a `super(...)` among them would run mid-dispatch.
+      const tests: ts.Expression[] = [stmt.expression];
+      for (const clause of stmt.caseBlock.clauses) {
+        if (ts.isCaseClause(clause)) {
+          tests.push(clause.expression);
         }
-      } else if (thenCoverage !== 'none' || elseCoverage !== 'none') {
-        const refused = cover('conditional');
-        if (refused !== undefined) {
-          return refused;
-        }
-      } else if (coverage === 'none' && readsThisOrSuper(stmt)) {
-        return CTOR_SUPER_FAIL;
       }
+      for (const test of tests) {
+        if (nestedSuperCall(test) || (count !== 'one' && readsThisOrSuper(test))) {
+          return null;
+        }
+      }
+      // Execution enters exactly one clause body (or the `default`, wherever it sits) and
+      // falls through every body below it until a `break`, `return` or `throw` leaves. So
+      // each clause ENTRY is a path of its own — the concatenation of the bodies from that
+      // clause down, which is what makes a fall-through re-run visible: a case that ran
+      // `super(...)` and falls into another case's call concatenates two calls and is
+      // refused by the straight-line rule. A break or the end of the last body both leave
+      // for the statement after the switch, so each chain's continuing exits join there.
+      const clauses = stmt.caseBlock.clauses;
+      let fall: SuperCount | null = null;
+      for (const [index] of clauses.entries()) {
+        const chain: ts.Statement[] = [];
+        for (const later of clauses.slice(index)) {
+          chain.push(...later.statements);
+        }
+        const flow = checkCtorList(chain, flexible, count);
+        if (flow === null) {
+          return null;
+        }
+        fall = mergeSuper(fall, mergeSuper(flow.fall, flow.brk));
+      }
+      // With no `default` the unmatched path runs no body at all: it leaves at the entry
+      // count, so a super-carrying switch without one never certifies coverage. An empty
+      // `default` is no cover either — its path leaves just as uncovered.
+      if (!clauses.some((clause) => ts.isDefaultClause(clause))) {
+        fall = mergeSuper(fall, count);
+      }
+      if (fall === null) {
+        return { fall: null, brk: breaks };
+      }
+      count = fall;
       continue;
     }
     // A `super()` nested anywhere but a nested class (whose own constructor owns it) re-runs
     // the base constructor from a position the initializers cannot follow.
     if (nestedSuperCall(stmt)) {
-      return CTOR_SUPER_FAIL;
+      return null;
     }
-    if (coverage === 'none' && readsThisOrSuper(stmt)) {
-      return CTOR_SUPER_FAIL;
+    // Loops and the remaining compound statements are opaque here: a receiver read or a
+    // `return` buried in one fires before the statement retires on the paths that reach it,
+    // so the entry count governs both — and `one` is spent before the first iteration.
+    if (count !== 'one' && (readsThisOrSuper(stmt) || containsReturn(stmt))) {
+      return null;
     }
   }
-  return { ok: true, coverage };
+  return { fall: count, brk: breaks };
 }
 
 /** `super(...)` as a statement of its own, rather than nested in another expression. */
-function isTopLevelSuperCall(stmt: ts.Statement): boolean {
+function isTopLevelSuperCall(stmt: ts.Statement): stmt is ts.ExpressionStatement {
   return (
     ts.isExpressionStatement(stmt) &&
     ts.isCallExpression(stmt.expression) &&
     stmt.expression.expression.kind === ts.SyntaxKind.SuperKeyword
   );
+}
+
+/** Whether `node` hides a `return` that completes the enclosing function — the one this
+ * constructor analysis stands in. Every function-like bounds the walk (arrows included:
+ * their `return` completes the arrow), as does a nested class body, whose members return
+ * from their own functions. */
+function containsReturn(node: ts.Node): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      found ||
+      ts.isFunctionLike(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      return;
+    }
+    if (ts.isReturnStatement(node)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(node);
+  return found;
+}
+
+/** Whether this node's nearest enclosing function-like is a constructor. A return inside a
+ * nested function or arrow completes THAT body and is no constructor return. */
+function enclosingFunctionIsConstructor(node: ts.Node): boolean {
+  for (let owner: ts.Node = node; owner.kind !== ts.SyntaxKind.SourceFile; owner = owner.parent) {
+    if (ts.isFunctionLike(owner)) {
+      return ts.isConstructorDeclaration(owner);
+    }
+  }
+  return false;
 }
 
 /** Whether `node` hides a `super(...)` call in a nested position. Nested class bodies are
@@ -4671,7 +4935,11 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
       return notYet('explicit type arguments on a constructor call are not yet supported', 5);
     }
   }
-  if (!ts.isIdentifier(node.expression)) {
+  // The callee NAMES a class -- `new C` for a declaration, an alias, or a bound class
+  // expression, each constructing its one descriptor directly. Anything else (`new v()`,
+  // `new (make())()`) holds a class OBJECT, which dispatches at run time through the value
+  // (docs/VALUE.md §4.17) and has no lowering yet -- so it stays refused here.
+  if (classNamedBy(node.expression, checker) === undefined) {
     return notYet('new on anything but a named class is not yet supported', 5);
   }
   if (classDeclarationOf(checker.getTypeAtLocation(node)) === undefined) {
@@ -5173,7 +5441,16 @@ function gateMemberAccess(
   // declaration is what separates them.
   const asStatic = staticMemberOf(access, checker, undefined);
   if (asStatic !== undefined) {
-    return { kind: 'accept' };
+    return repeatableThisGuard(access.expression, asStatic.member, checker);
+  }
+  // `v.count` where the receiver is a class OBJECT (docs/VALUE.md §4.17): it would dispatch
+  // at run time through the class object's table, but the lowering has no value-receiver arm
+  // yet -- so every member read through a constructor-typed receiver stays refused here, with
+  // the prototype surface keeping its Phase-8 code.
+  if (classConstructorTypeOf(checker.getTypeAtLocation(access.expression))) {
+    return access.name.text === 'prototype'
+      ? notYet('the prototype surface is not yet supported', 8)
+      : notYet('a member read through a class object is not yet supported', 5);
   }
   // `m.size`, and the method names that are only ever callees. `size` is a READ of a count the
   // structure keeps, so it is accepted as a value; a method is not, for the reason a class method is

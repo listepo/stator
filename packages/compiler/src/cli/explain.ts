@@ -547,6 +547,13 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expressionHasUnknown(expr.callee) || expr.args.some(expressionHasUnknown);
     case 'new':
       return expr.args.some(expressionHasUnknown);
+    // A class-object value is never Unknown-typed, so both value spellings answer through
+    // their operands, exactly like the named `new`.
+    case 'new-value':
+      return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
+    // A file-scope constant per class (docs/VALUE.md §4.17): no subexpression can be dynamic.
+    case 'class-value':
+      return false;
     // The object's own type stops the deep walk (hTypeHasUnknown does not recurse into a class,
     // since it can be cyclic), so the READ is where a dynamic field surfaces -- and the type check
     // at the top of this function has already answered it for this node.
@@ -574,6 +581,9 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'regexp-read':
     case 'instanceof':
       return expressionHasUnknown(expr.target);
+    // The answer is a boolean whatever the operands are, so only the operands can be dynamic.
+    case 'instanceof-value':
+      return expressionHasUnknown(expr.target) || expressionHasUnknown(expr.ctor);
     // A literal's own type stops the deep walk for the same reason a class's does, so what makes
     // one dynamic is a value it was built from -- which is exactly what a read of it will find.
     case 'object-literal':

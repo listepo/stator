@@ -1289,6 +1289,30 @@ export function classDisplayName(
 /** The class-like (declaration or expression) a type came from, or `undefined` for anything
  * else. Beside `classDeclarationOf`: existing declaration-only consumers keep their shape,
  * and only the use sites class expressions newly reach migrate to this one. */
+/** The class an expression NAMES, or `undefined` when the expression is a VALUE rather than a
+ * name: `new C` / `o instanceof C` for a declaration, a `const K = C` alias (which erases to its
+ * target), a bound class expression (`const C = class …`), or a class expression's inner name all
+ * name one fixed descriptor the emitter can reach directly. `new v()` / `o instanceof v` for a
+ * variable, parameter, call result or index read holds a class OBJECT instead and dispatches at
+ * run time (docs/VALUE.md §4.17) -- its type may name one class while its value holds another. */
+export function classNamedBy(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+): ts.ClassDeclaration | ts.ClassExpression | undefined {
+  if (!ts.isIdentifier(expression)) {
+    return undefined;
+  }
+  const direct = checker.getSymbolAtLocation(expression)?.valueDeclaration;
+  if (direct !== undefined && (ts.isClassDeclaration(direct) || ts.isClassExpression(direct))) {
+    return direct;
+  }
+  return (
+    aliasedClassDeclaration(expression, checker) ??
+    classExpressionTarget(expression, checker) ??
+    innerClassExpression(expression, checker)
+  );
+}
+
 export function classLikeOf(type: ts.Type): ts.ClassDeclaration | ts.ClassExpression | undefined {
   const declaration = type.getSymbol()?.valueDeclaration;
   return declaration !== undefined &&
@@ -1379,6 +1403,44 @@ export function staticMemberOf(
   return undefined;
 }
 
+/** Whether the class's declaration or expression can be EVALUATED more than once -- anything
+ * inside a function-like body (the function may run twice) or a loop (the body may iterate).
+ * A class evaluated at most once (a module-top-level statement, even inside a block or `if`) has
+ * one identity for its whole run, which is exactly what a one-constant-per-program class object
+ * can carry; a repeatable evaluation would share identity and static state across evaluations,
+ * where JavaScript gives each evaluation its own class. The gate refuses class VALUES out of
+ * those, and the lowering never threads their object into a `this` (plan.md §8 step 12(e)). */
+export function classEvaluationRepeatable(
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+): boolean {
+  for (let n: ts.Node | undefined = declaration.parent; n !== undefined; n = n.parent) {
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isArrowFunction(n) ||
+      ts.isConstructorDeclaration(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n)
+    ) {
+      return true;
+    }
+    if (
+      ts.isForStatement(n) ||
+      ts.isForInStatement(n) ||
+      ts.isForOfStatement(n) ||
+      ts.isWhileStatement(n) ||
+      ts.isDoStatement(n)
+    ) {
+      return true;
+    }
+    if (ts.isSourceFile(n)) {
+      return false;
+    }
+  }
+  return false;
+}
+
 /** Which class in `declaration`'s ancestry declares the method `name` that `declaration` responds
  * to -- the MOST DERIVED one, since the walk starts at `declaration` itself.
  *
@@ -1397,7 +1459,8 @@ export function methodDeclaringClass(
   // INHERITED accessor in a subclass that never declared it and threw STA4072. The walk below can
   // only match a method declaration, so the mangled form is routed to the accessor resolver, which
   // speaks the source name. `accessorDeclaringClass` answers the most derived declaration, which
-  // is still the implementor: an accessor override is refused at the gate, so one class declares it.
+  // is the implementation this class's receivers run -- the same answer the method walk below
+  // gives for methods, override family or not.
   const property = accessorProperty(name);
   if (property !== undefined) {
     return accessorDeclaringClass(declaration, property, checker)?.owner;
@@ -1570,10 +1633,17 @@ function functionTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: numb
   }
   const signatures = type.getCallSignatures();
   const signature = signatures.length === 1 ? signatures[0] : undefined;
-  if (signature === undefined) {
+  // A class CONSTRUCTOR type (`typeof K`) never calls -- it constructs -- so its one construct
+  // signature is its callable shape, and the return is the INSTANCE a `new` through the value
+  // builds (docs/VALUE.md §4.17). Multi-signature refusal is the rule for both halves alike: an
+  // overloaded constructor is two functions sharing a name exactly as an overloaded call is.
+  const chosen =
+    signature ??
+    (type.getConstructSignatures().length === 1 ? type.getConstructSignatures()[0] : undefined);
+  if (chosen === undefined) {
     return null;
   }
-  const params = signature.getParameters().map((symbol) => {
+  const params = chosen.getParameters().map((symbol) => {
     const declaration = symbol.valueDeclaration;
     if (declaration === undefined) {
       return hUnknown(false);
@@ -1584,7 +1654,7 @@ function functionTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: numb
       depth + 1,
     );
   });
-  return hFunction(params, tsTypeToHType(signature.getReturnType(), checker, depth + 1));
+  return hFunction(params, tsTypeToHType(chosen.getReturnType(), checker, depth + 1));
 }
 
 /** Check if a type is implicitly any (no annotation, inferred as any).

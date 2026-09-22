@@ -40,3 +40,25 @@ class E extends B {
 
 const e = new E(true, 21);
 export const y = e.n + new E(false, 21).n;
+
+// The `switch` twin of the arm rule (plan.md §8 step 12(d)): one call per path through the
+// clauses, `default` covering the unmatched path, no reads before the call. A `case` that
+// falls through into another `super(...)` would re-run the base and is refused instead
+// (subset_super_switch_fallthrough_*).
+class G extends B {
+  constructor(flag: number, n: number) {
+    switch (flag) {
+      case 1:
+        super(n);
+        break;
+      case 2:
+      case 3:
+        super(n * 2);
+        break;
+      default:
+        super(0);
+    }
+  }
+}
+
+export const z = new G(1, 21).n + new G(2, 21).n + new G(3, 21).n + new G(9, 21).n;
