@@ -1,5 +1,5 @@
 name: Stator Node and pnpm setup
-description: Install the repository-pinned pnpm and Node toolchain
+description: Install the repository-pinned pnpm, Node and (Unix) Zig toolchain
 runs:
   using: composite
   steps:
@@ -8,3 +8,10 @@ runs:
       with:
         node-version-file: .node-version
         cache: pnpm
+    # The runtime's memory core is Zig (plan-notes 238, T9.1): every job that
+    # builds libjsrt.a needs it. Windows never builds the runtime, so it skips
+    # the download. Version matches the mise pin in mise.toml.
+    - uses: mlugg/setup-zig@v2
+      if: runner.os != 'Windows'
+      with:
+        version: 0.16.0

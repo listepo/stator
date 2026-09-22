@@ -1,5 +1,5 @@
-# Stator C11 runtime → runtime/build/libjsrt.a (release), build-asan/, and
-# build-intl/ (the ICU feature build, `just runtime-intl` — off by default).
+# Stator runtime (C11, with a Zig memory core) → runtime/build/libjsrt.a (release), build-asan/,
+# and build-intl/ (the ICU feature build, `just runtime-intl` — off by default).
 # Generated C is never hand-edited; the archive is the codegen↔runtime contract's other half.
 #
 # Replaces runtime/Makefile. Incrementality is a timestamp walk of each .c and the -MMD
@@ -112,6 +112,25 @@ _runtime flavor:
     fi
     rm -rf "${probe}"
 
+    # The memory core is Zig (plan-notes 238): one object from src/jsrt_mem.zig, archived beside the
+    # C objects. It takes the same -I/-D flags the C objects do -- that is how -DJSRT_HAVE_BOEHM and
+    # the bdw-gc include path reach its @cImport -- and Zig has no warnings, only errors, which is
+    # -Werror's job here. Runtime safety checks are on in the sanitized flavor (ReleaseSafe), where a
+    # failure should point at a line, and off in the others, which match the C objects' -O2.
+    ZIG_C='-Isrc'
+    for f in ${CFLAGS_COMMON}; do
+      case "${f}" in -I*|-D*) ZIG_C="${ZIG_C} ${f}" ;; esac
+    done
+    ZIG_OPT=ReleaseFast
+    # Zig's native target is the running OS release (macOS 26.6.2); clang's is its deployment
+    # target (26.0, or MACOSX_DEPLOYMENT_TARGET). Linking objects from both warns on every program
+    # link, so the Zig object takes clang's.
+    ZIG_TARGET=''
+    if [[ "$(uname -s)" == 'Darwin' ]]; then
+      MACOS_MIN="$(${CC} -### -x c -c /dev/null 2>&1 | grep -oE 'apple-macosx[0-9.]+' | head -1)"
+      ZIG_TARGET="-target native-macos.${MACOS_MIN#apple-macosx}"
+    fi
+
     case "${FLAVOR}" in
       rel)
         DIR=build
@@ -128,6 +147,7 @@ _runtime flavor:
         LTO_STATUS='no LTO (sanitized build)'
         CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O1 -g -fsanitize=address,undefined"
         VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O1 -g -fsanitize=address,undefined"
+        ZIG_OPT=ReleaseSafe
         EXTRA_LIBS="${GC_LIBS} ${SYS_LIBS}"
         LABEL='Runtime (ASan) built with'
         ;;
@@ -154,11 +174,15 @@ _runtime flavor:
         ;;
     esac
 
+    # -fPIC and -mcpu=baseline match what clang gives the C objects by default: the archive links
+    # into PIE executables on Linux, and it must run wherever the C half of it runs.
+    ZIG_FLAGS="-O ${ZIG_OPT} ${ZIG_TARGET} -lc -fPIC -mcpu=baseline ${ZIG_C} -ffunction-sections -fdata-sections -fno-stack-check"
+
     mkdir -p "${DIR}"
     # A flag change (the LTO probe flipping, Boehm appearing) must rebuild every object: the
     # timestamp walk cannot see it, and a mixed archive links fine while silently lacking what the
     # flag was for.
-    CFLAGS_KEY="${CC_ID}"$'\n'"${CFLAGS} ${VFLAGS}"
+    CFLAGS_KEY="${CC_ID}"$'\n'"${CFLAGS} ${VFLAGS}"$'\n'"zig $(zig version) ${ZIG_FLAGS}"
     if [[ "$(cat "${DIR}/cflags.txt" 2>/dev/null || true)" != "${CFLAGS_KEY}" ]]; then
       rm -f "${DIR}"/*.o "${DIR}"/*.d
       printf '%b\n' "${CFLAGS_KEY}" > "${DIR}/cflags.txt"
@@ -202,6 +226,12 @@ _runtime flavor:
         ${CC} ${VFLAGS} -c "${src}" -o "${obj}"
       fi
     done
+
+    # No timestamp walk for Zig: its own cache tracks every input, the @cImport'ed headers included,
+    # so an unchanged tree costs one cache lookup. `fmt --check` is the Zig side's style gate.
+    zig fmt --check src/*.zig
+    zig build-obj ${ZIG_FLAGS} --cache-dir "${DIR}/zig-cache" -femit-bin="${DIR}/jsrt_zig.o" src/jsrt_mem.zig
+    objs+=("${DIR}/jsrt_zig.o")
 
     # Recreated, never incrementally updated: `ar r` replaces matching members but keeps
     # stale ones, so an object removed from the source list (or dropped in by an experiment)

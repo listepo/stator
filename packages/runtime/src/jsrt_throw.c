@@ -27,7 +27,7 @@ void jsrt_throw(jsrt_value v) {
  * static storage is as invisible to the collector as one in the heap (plan-notes 108), and this
  * cell is by definition the last reference to what it holds: the scope that threw has been left,
  * and a `finally` running on the way out allocates freely. Published here rather than reached
- * from jsrt_gc.c directly so that the cell stays private to the mailbox that owns it. */
+ * from jsrt_gc.zig directly so that the cell stays private to the mailbox that owns it. */
 jsrt_value *jsrt_pending_slot(void) {
   return &pending_value;
 }

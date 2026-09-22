@@ -804,7 +804,7 @@ C checks `jsrt_pending()` after the op (Phase 5 step 11).
 ## 4.12 The collector — Boehm, and the two hooks that make it see a value
 
 Everything above assumes the collector can find what is live. A conservative collector and a
-NaN-boxed value do not meet on their own (§4.1); `runtime/src/jsrt_gc.c` is where they are made to.
+NaN-boxed value do not meet on their own (§4.1); `runtime/src/jsrt_gc.zig` is where they are made to.
 
 **One allocation seam.** `jsrt_gc_alloc(bytes, what)` (`runtime/include/jsrt.h`) is the runtime's
 only collected allocation, and the only place that knows whether a collector is configured at all.
