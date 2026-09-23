@@ -583,6 +583,293 @@ test('a super call nested in an arrow stays not-yet', () => {
   );
 });
 
+test('a super call in switch clauses is accepted when no initializers need splicing', () => {
+  // The `switch` twin of the arm rule (plan.md §8 step 12(d)): one call per path through
+  // the clauses, a `default` covering the unmatched path, grouped cases sharing one body.
+  const source = `${LATE_SUPER}class D extends B {
+    constructor(x: number) {
+      switch (x) {
+        case 1:
+          super(1);
+          break;
+        case 2:
+        case 3:
+          super(2);
+          break;
+        default:
+          super(0);
+      }
+    }
+  }
+  `;
+  assert.deepEqual(gateCodes(source, 'ts'), []);
+  const [, derived] = classesOf(source);
+  assert.ok(derived?.ctor !== undefined);
+  const switchNode = derived.ctor.fn.body.statements.find((s) => s.kind === 'switch-statement');
+  assert.ok(
+    switchNode !== undefined && switchNode.kind === 'switch-statement',
+    'the switch survives',
+  );
+  const kinds = hirNodes(switchNode).map((n) => n.kind);
+  assert.equal(kinds.filter((k) => k === 'super-call').length, 3, 'one call per clause body');
+  assert.ok(!kinds.includes('field-assignment'), 'nothing splices with no initializers');
+});
+
+test('switch and if nest in both directions like the arm rule', () => {
+  const source = `${LATE_SUPER}class D extends B {
+    constructor(x: number) {
+      if (x > 10) {
+        switch (x) {
+          case 11:
+            super(11);
+            break;
+          default:
+            super(12);
+        }
+      } else if (x > 0) {
+        super(x);
+      } else {
+        super(0);
+      }
+    }
+  }
+  `;
+  assert.deepEqual(gateCodes(source, 'ts'), []);
+  const inCase = `${LATE_SUPER}class D extends B {
+    constructor(x: number) {
+      switch (x) {
+        case 1:
+          if (x > 0) {
+            super(1);
+          } else {
+            super(2);
+          }
+          break;
+        default:
+          super(3);
+      }
+    }
+  }
+  `;
+  assert.deepEqual(gateCodes(inCase, 'ts'), []);
+});
+
+test('a case that falls through into a later super call stays not-yet', () => {
+  // The falling path re-runs the base constructor; Node answers ReferenceError
+  // ("Super constructor may only be called once"), so a chain may call at most once.
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(x: number) {
+          switch (x) {
+            case 1:
+              super(1);
+            case 2:
+              super(2);
+              break;
+            default:
+              super(3);
+          }
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+});
+
+test('a switch without default leaves its unmatched path uncovered and stays not-yet', () => {
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(x: number) {
+          switch (x) {
+            case 1:
+              super(1);
+              break;
+            case 2:
+              super(2);
+              break;
+          }
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+  // An EMPTY default is no cover either: its path completes with the base never run.
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(x: number) {
+          switch (x) {
+            case 1:
+              super(1);
+              break;
+            default:
+          }
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+});
+
+test('a super call in a switch stays not-yet when initializers need splicing', () => {
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        doubled = 0;
+        constructor(x: number) {
+          switch (x) {
+            case 1:
+              super(1);
+              break;
+            default:
+              super(0);
+          }
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+});
+
+test('a try-guarded super call stays not-yet', () => {
+  // A `try` body can abort after the call and before it, so a catch that re-calls re-runs
+  // the base on one path (Node: ReferenceError) and retries it on the other (legal) — no
+  // one handler body is right for both, and abort points are every checked call (plan.md
+  // §8 step 12(d)).
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(n: number) {
+          try {
+            super(n);
+          } catch (e) {
+            super(0);
+          }
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+});
+
+test('a return that completes a path before the call stays not-yet', () => {
+  // A bare `return` completes the construction with `this` unbound — Node answers
+  // ReferenceError where the compiled constructor would return an instance (plan.md §8
+  // step 12(d)). The call after it cannot rescue the returning path, at any nesting.
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(n: number) {
+          if (n > 0) {
+            return;
+          }
+          super(n);
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(n: number) {
+          while (n > 0) {
+            return;
+          }
+          super(n);
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+});
+
+test('a return after the call is accepted; a value return stays not-yet', () => {
+  // A bare return past the call retires its path with the base initialized. A VALUE return
+  // cannot land at all: `new` yields the allocated object and ignores what a constructor
+  // returns (codegen/index.ts), where Node substitutes the returned object (plan.md §8
+  // step 12(d)). A nested arrow's return completes the arrow and is nobody else's.
+  const bare = `${LATE_SUPER}class D extends B {
+    constructor(n: number) {
+      super(n);
+      if (n > 0) {
+        return;
+      }
+      this.n = 0;
+    }
+  }
+  `;
+  assert.deepEqual(gateCodes(bare, 'ts'), []);
+  assert.deepEqual(
+    gateCodes(
+      `class C {
+        constructor() {
+          const o = { a: 1 };
+          return o;
+        }
+      }
+      export const x = 1;
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+  assert.deepEqual(
+    gateCodes(
+      `class C {
+        constructor() {
+          const f = (): { a: number } => {
+            return { a: 1 };
+          };
+          console.log(f().a);
+        }
+      }
+      export const x = 1;
+      `,
+      'ts',
+    ),
+    [],
+  );
+});
+
+test('super-carrying paths may not read the receiver before the call in switch shapes', () => {
+  assert.deepEqual(
+    gateCodes(
+      `${LATE_SUPER}class D extends B {
+        constructor(x: number) {
+          switch (x) {
+            case 1:
+              console.log(this.n);
+              super(1);
+              break;
+            default:
+              super(0);
+          }
+        }
+      }
+      `,
+      'ts',
+    ),
+    ['STA1214'],
+  );
+});
+
 const SHADOW = `class B {
   x: number = 1;
   static n: number = 10;
@@ -687,4 +974,80 @@ test('an undeclared member without an index signature is still the checkers busi
   // No behavior change where no signature exists: the checker rejects first, and the gate's
   // accept set is untouched.
   assert.deepEqual(gateCodes(`class C {\n  x: number = 1;\n}\n`, 'ts'), []);
+});
+
+const ABSTRACT_ACCESSOR = `abstract class A {
+  raw: number = 0;
+  abstract get value(): number;
+  abstract set value(v: number);
+}
+class B extends A {
+  override get value(): number { return this.raw; }
+  override set value(v: number) { this.raw = v; }
+}
+const a: A = new B();
+a.value = 1;
+export const y = a.value;
+`;
+
+test('an abstract accessor pair is accepted in both modes', () => {
+  assert.deepEqual(gateCodes(ABSTRACT_ACCESSOR, 'ts'), []);
+  assert.deepEqual(gateCodes(ABSTRACT_ACCESSOR, 'js'), []);
+});
+
+test('an abstract accessor lowers to a throw-stub per half, plan-notes 275 style', () => {
+  // The stub gives the base class a complete table and a direct-call target; a virtual call
+  // lands on the runtime class's entry, and every path that could reach the stub is
+  // checker-refused first (TS2511 construction, TS2515 missing override, TS2513 super).
+  const [base, derived] = classesOf(ABSTRACT_ACCESSOR);
+  assert.ok(base !== undefined && derived !== undefined);
+  assert.deepEqual(
+    base.methods.map((m) => m.name),
+    ['get value', 'set value'],
+    'the abstract pair is two member functions under the mangled half names',
+  );
+  for (const half of base.methods) {
+    const kinds = hirNodes(half.fn.body).map((n) => n.kind);
+    assert.ok(kinds.includes('throw-statement'), 'the stub body throws');
+    assert.ok(kinds.includes('error-new'), 'Node answers a catchable TypeError');
+  }
+  assert.deepEqual(
+    derived.methods.map((m) => m.name),
+    ['get value', 'set value'],
+    'the implementing subclass emits the same pair under its own entry',
+  );
+});
+
+test('an accessor override keeps the pair whole: get-only, set-only, and pair shapes', () => {
+  const getOnly = `abstract class A {\n  abstract get x(): string;\n}\nclass B extends A {\n  get x(): string {\n    return 'b';\n  }\n}\nexport const y = new B().x;\n`;
+  const setOnly = `abstract class A {\n  abstract set x(v: number);\n}\nclass B extends A {\n  n: number = 0;\n  set x(v: number) {\n    this.n = v;\n  }\n}\nconst b = new B();\nb.x = 1;\nexport const y = b.n;\n`;
+  for (const source of [getOnly, setOnly]) {
+    assert.deepEqual(gateCodes(source, 'ts'), []);
+    assert.deepEqual(gateCodes(source, 'js'), []);
+  }
+});
+
+test('a dropped or added accessor half over an inherited pair stays not-yet', () => {
+  // The derived accessor SHADOWS the inherited pair in Node: a write to a get-only shadow
+  // throws (compiled modules are strict) and a read of a set-only one answers `undefined`,
+  // where the table would dispatch the missing half to the base's body. An added half has no
+  // slot in the base's layout for a base-typed site to index.
+  const dropped = `class A {\n  get x(): number { return 1; }\n  set x(v: number) {}\n}\nclass B extends A {\n  override get x(): number { return 2; }\n}\nexport const y = new B().x;\n`;
+  const added = `class A {\n  get x(): number { return 1; }\n}\nclass B extends A {\n  override get x(): number { return 2; }\n  set x(v: number) {}\n}\nexport const y = new B().x;\n`;
+  assert.deepEqual(gateCodes(dropped, 'ts'), ['STA1214']);
+  assert.deepEqual(gateCodes(added, 'ts'), ['STA1214']);
+});
+
+test('a partial implementation of an abstract pair stays not-yet', () => {
+  // Checker-clean (TS reads the pair as one abstract member) and refused on the pair rule:
+  // the missing half's entry cannot answer what Node's shadowing accessor does.
+  const partial = `abstract class A {\n  abstract get x(): number;\n  abstract set x(v: number);\n}\nclass B extends A {\n  override get x(): number { return 2; }\n}\nexport const y = new B().x;\n`;
+  assert.deepEqual(gateCodes(partial, 'ts'), ['STA1214']);
+});
+
+test('an accessor with no body and no abstract stays not-yet', () => {
+  assert.deepEqual(
+    gateCodes(`declare class C {\n  get x(): number;\n}\nexport const y = 1;\n`, 'ts'),
+    ['STA1214'],
+  );
 });

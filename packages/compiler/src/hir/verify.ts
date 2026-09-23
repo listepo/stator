@@ -1376,6 +1376,33 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
+    case 'new-value': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      break;
+    }
+
+    case 'instanceof-value': {
+      verifyExpression(expr.target, problems, bindings);
+      verifyExpression(expr.ctor, problems, bindings);
+      // Same shape as the named arm: the answer is a boolean whatever the operands are.
+      if (!hTypeEquals(expr.type, H_BOOLEAN)) {
+        problems.push({
+          kind: 'instanceof-value',
+          span: expr.span,
+          code: 'STA4050',
+          message: `instanceof has type '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
+    case 'class-value': {
+      break;
+    }
+
     // Every entry is a slot in the literal's own shape, in the order it was written. The check is
     // the one a field access gets, run once per entry at construction: an entry whose position is
     // not the slot its name occupies would build an object every later read misindexes.

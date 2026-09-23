@@ -903,6 +903,60 @@ static void inspect_date(JSRTBuf *out, jsrt_value v) {
   append_string(out, (const JSString *)jsrt_ptr(text));
 }
 
+/* `[class Point] { count: 0 }` -- a class object (docs/VALUE.md §4.17).
+ *
+ * The label names the class and, past a base, what it extends; Node then shows the class's OWN
+ * data statics (never inherited ones, never a method or accessor) as `name: value` entries in
+ * declaration order, breaking onto one entry per line exactly like an object when the line
+ * budget does not hold. A class with no data statics prints its label alone -- no braces at
+ * all, which is where Node's empty-object rules stop applying here. */
+static void inspect_class(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
+  const JSRTClosure *c = jsrt_as_closure(v);
+  const char *name = c->name[0] != '\0' ? c->name : "(anonymous)";
+  char label[256];
+  const JSRTClass *base = c->klass == NULL ? NULL : c->klass->parent;
+  if (base != NULL && base->name[0] != '\0') {
+    snprintf(label, sizeof label, "[class %s extends %s]", name, base->name);
+  } else {
+    snprintf(label, sizeof label, "[class %s]", name);
+  }
+
+  size_t count = 0;
+  if (c->klass != NULL && c->klass->statics != NULL) {
+    for (const JSRTStaticEntry *e = c->klass->statics; e->name != NULL; e++) {
+      if (e->kind == JSRT_STATIC_FIELD) {
+        count++;
+      }
+    }
+  }
+  if (count == 0) {
+    jsrt_buf_puts(out, label);
+    return;
+  }
+  if (recurse > INSPECT_MAX_DEPTH) {
+    jsrt_buf_puts(out, label);
+    return;
+  }
+
+  JSRTBuf *entries = alloc_entries(count);
+  size_t next = 0;
+  for (const JSRTStaticEntry *e = c->klass->statics; e->name != NULL; e++) {
+    if (e->kind != JSRT_STATIC_FIELD) {
+      continue;
+    }
+    JSRTBuf *entry = &entries[next++];
+    jsrt_buf_init(entry);
+    append_key(entry, e->name);
+    jsrt_buf_puts(entry, ": ");
+    inspect_value(entry, *e->slot, recurse + 1, indent + 2);
+  }
+  /* The label and the space after it are part of the prefix Node measures, along with the `{` --
+   * the same accounting a named instance's class name gets. */
+  jsrt_buf_puts(out, label);
+  jsrt_buf_putc(out, ' ');
+  emit_braced(out, entries, count, indent, strlen(label) + 1 /* the space */ + 1 /* "{" */);
+}
+
 static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   /* An accessor cell is a SLOT value, never a value the language can hold, so this is the one
    * place it can surface -- and util.inspect never calls a getter to print it. Node writes what
@@ -912,6 +966,11 @@ static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
     const bool has_get = cell->get != JSRT_UNDEFINED;
     jsrt_buf_puts(out, has_get ? (cell->set != JSRT_UNDEFINED ? "[Getter/Setter]" : "[Getter]")
                           : "[Setter]");
+    return;
+  }
+  /* A class object prints `[class …]`, not the `[Function: …]` every other closure gets. */
+  if (jsrt_is(v, JSRT_TAG_CLOSURE) && jsrt_as_closure(v)->klass != NULL) {
+    inspect_class(out, v, recurse, indent);
     return;
   }
   if (jsrt_is_date(v)) {

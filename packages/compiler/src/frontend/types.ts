@@ -1397,7 +1397,8 @@ export function methodDeclaringClass(
   // INHERITED accessor in a subclass that never declared it and threw STA4072. The walk below can
   // only match a method declaration, so the mangled form is routed to the accessor resolver, which
   // speaks the source name. `accessorDeclaringClass` answers the most derived declaration, which
-  // is still the implementor: an accessor override is refused at the gate, so one class declares it.
+  // is the implementation this class's receivers run -- the same answer the method walk below
+  // gives for methods, override family or not.
   const property = accessorProperty(name);
   if (property !== undefined) {
     return accessorDeclaringClass(declaration, property, checker)?.owner;
@@ -1570,10 +1571,17 @@ function functionTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: numb
   }
   const signatures = type.getCallSignatures();
   const signature = signatures.length === 1 ? signatures[0] : undefined;
-  if (signature === undefined) {
+  // A class CONSTRUCTOR type (`typeof K`) never calls -- it constructs -- so its one construct
+  // signature is its callable shape, and the return is the INSTANCE a `new` through the value
+  // builds (docs/VALUE.md §4.17). Multi-signature refusal is the rule for both halves alike: an
+  // overloaded constructor is two functions sharing a name exactly as an overloaded call is.
+  const chosen =
+    signature ??
+    (type.getConstructSignatures().length === 1 ? type.getConstructSignatures()[0] : undefined);
+  if (chosen === undefined) {
     return null;
   }
-  const params = signature.getParameters().map((symbol) => {
+  const params = chosen.getParameters().map((symbol) => {
     const declaration = symbol.valueDeclaration;
     if (declaration === undefined) {
       return hUnknown(false);
@@ -1584,7 +1592,7 @@ function functionTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: numb
       depth + 1,
     );
   });
-  return hFunction(params, tsTypeToHType(signature.getReturnType(), checker, depth + 1));
+  return hFunction(params, tsTypeToHType(chosen.getReturnType(), checker, depth + 1));
 }
 
 /** Check if a type is implicitly any (no annotation, inferred as any).

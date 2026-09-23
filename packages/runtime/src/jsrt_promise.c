@@ -24,7 +24,7 @@
 
 #include <stdio.h>
 
-const JSRTClass jsrt_class_promise = {"Promise", 0, NULL, NULL, 0, NULL, NULL, NULL};
+const JSRTClass jsrt_class_promise = {"Promise", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
 
 /* ------------------------------------------------------------ microtasks */
 

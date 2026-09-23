@@ -171,6 +171,7 @@ import {
 import type { HField, HObject, HType } from '../hir/types.ts';
 import {
   accessorName,
+  accessorProperty,
   fieldSlot,
   H_BOOLEAN,
   H_NUMBER,
@@ -3023,6 +3024,7 @@ function memberAssignment(
             span,
             targetNode,
             sourceFile,
+            checker,
             diagnostics,
           )
         : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
@@ -3041,6 +3043,7 @@ function memberAssignment(
           span,
           targetNode,
           sourceFile,
+          checker,
           diagnostics,
         );
         // `accessorCall` already reported; a null here would be the same miss the read
@@ -3147,6 +3150,7 @@ function memberAssignment(
           span,
           targetNode,
           sourceFile,
+          checker,
           diagnostics,
         )
       : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
@@ -3165,6 +3169,7 @@ function memberAssignment(
         span,
         targetNode,
         sourceFile,
+        checker,
         diagnostics,
       );
       // `accessorCall` already reported; a null here would be the same miss the read survived.
@@ -4169,6 +4174,7 @@ function lowerClassMemberRead(
       makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       node,
       sourceFile,
+      checker,
       diagnostics,
     );
   }
@@ -7555,10 +7561,26 @@ function declaresMethod(
   if (isPrivateMemberName(name)) {
     return false;
   }
-  return declaration.members.some(
-    (m) =>
-      ts.isMethodDeclaration(m) && !isStaticMember(m) && instanceMethodName(m, checker) === name,
-  );
+  // An accessor half declares under its mangled name (`get x`), which no method declaration can
+  // carry -- so a mangled name asks about halves and a plain name keeps asking about methods,
+  // and the two families never share an override question.
+  const property = accessorProperty(name);
+  return declaration.members.some((m) => {
+    if (isStaticMember(m) || m.name === undefined) {
+      return false;
+    }
+    const declared = instanceMethodName(m, checker);
+    if (declared === undefined) {
+      return false;
+    }
+    if (ts.isGetAccessorDeclaration(m)) {
+      return accessorName('get', declared) === name;
+    }
+    if (ts.isSetAccessorDeclaration(m)) {
+      return accessorName('set', declared) === name;
+    }
+    return property === undefined && ts.isMethodDeclaration(m) && declared === name;
+  });
 }
 
 function className(declaration: ts.ClassDeclaration | ts.ClassExpression): string {
@@ -7598,9 +7620,13 @@ function isOverridden(
 
 /** `o.x` and `o.x = v` on an accessor: a call to the member function the mangled name holds.
  *
- * Dispatch is direct because an accessor cannot be overridden here -- the gate refuses a subclass
- * that re-declares an inherited accessor -- so the name resolves to one function. The slot is
- * resolved anyway, so that the node is a well-formed method call and the verifier's check on it
+ * Each half is its own slot and its own table entry (`get x`, `set x`), so an accessor override
+ * dispatches exactly like a method override -- virtual where any chain containing the receiver's
+ * class declares the half twice, direct where one body serves the whole family. `#private`
+ * halves never virtualize (`isOverridden` excludes the mangled private spelling: each class's
+ * pair is its own), and `super.x` never reaches here (the gate admits `super` only on an
+ * inherited method), so no call needs super's skip-the-override rule. The slot is resolved
+ * anyway, so that the node is a well-formed method call and the verifier's check on it
  * means the same thing it means everywhere else. */
 function accessorCall(
   kind: 'get' | 'set',
@@ -7612,12 +7638,14 @@ function accessorCall(
   span: Span,
   at: ts.Node,
   sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
   diagnostics: Diagnostic[],
 ): MethodCall | null {
   const method = accessorName(kind, property);
+  const objectType = target.type.kind === 'object' ? target.type : undefined;
   const slot =
-    target.type.kind === 'object' ? target.type.methods.findIndex((m) => m.name === method) : -1;
-  if (slot < 0) {
+    objectType === undefined ? -1 : objectType.methods.findIndex((m) => m.name === method);
+  if (objectType === undefined || slot < 0) {
     diagnostics.push(
       lowerDiagnostic(
         at,
@@ -7637,7 +7665,7 @@ function accessorCall(
     className: owner,
     method,
     slot,
-    dispatch: 'direct',
+    dispatch: isOverridden(objectType.name, method, sourceFile, checker) ? 'virtual' : 'direct',
     args,
   };
 }
@@ -7721,6 +7749,7 @@ function lowerPrivateRead(
       span,
       node,
       sourceFile,
+      checker,
       diagnostics,
     );
   }
@@ -8706,6 +8735,7 @@ function lowerClass(
     ...(ctor !== undefined && { ctor }),
     methods,
     statics,
+    staticProps: [],
     vtable,
   };
 
