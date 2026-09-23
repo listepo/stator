@@ -49,7 +49,7 @@ static const JSRTClassObject NARROW = CLASS("Narrow", NULL, 2, w_names, n_cells)
 
 /* An instance holding a class in its one field -- the nesting for the depth cases. */
 static const char *const k_field[] = {"k"};
-static const JSRTClass H = {"H", 1, k_field, NULL, 0, NULL, NULL};
+static const JSRTClass H = {"H", 1, k_field, NULL, 0, NULL, NULL, NULL};
 
 static jsrt_value holder(jsrt_value k) {
   jsrt_value o = jsrt_object_new(&H);

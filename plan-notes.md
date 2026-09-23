@@ -8917,3 +8917,39 @@ dropped: they exercise 12(d) residue (`STA1214` not-yet), so they cannot build u
 those shapes land.
 
 **Verified.** `pnpm run ci` on the merged tree — evidence in the PR.
+
+## 283. Step 12(d): abstract accessors, switch supers, ctor returns land; class-object value surface stays refused (2026-09-23)
+
+**Plan:** §8 step 12(d). `plan.md`'s 12(d) residue list already names these shapes; this
+change lands the backed ones and re-closes the gate on the unbacked ones.
+
+**Landed.** Abstract accessors (`abstract get`/`set` declare via the throw-stub model of
+plan-notes 275; concrete implementations run; each half joins the method table under its
+mangled name with virtual dispatch, including overrides — `subset_abstract_members_*`
+flips to `static`, new `subset_abstract_accessor_*` + `subset_accessor_override_*`
+fixtures, `abstract_accessor` goldens both modes). Switch-guarded `super(...)` in
+init-free derived ctors (extends the plan-notes-273 arm analysis to `switch`: fallthrough
+into a later `super` and missing-`default` stay `STA1214` — fixtures
+`subset_super_switch_fallthrough_*`, `subset_super_switch_nodefault_*`). `try`-guarded
+`super` stays refused (abort points defeat exactly-once — `subset_super_in_try_*`).
+Constructor value-returns and bare returns before `super` stay refused
+(`subset_ctor_value_return_*`, `subset_ctor_return_before_super_*`). HIR gains
+`NewValue`/`InstanceOfValue`/`ClassValue` nodes (declared, verified, rewritten,
+counted, emitted via the new `jsrt_construct`/`jsrt_instanceof_ctor` runtime entries)
+and `ClassDeclaration.staticProps` (populated empty; the class-object table it will
+carry is future work). Runtime: `JSRTClosure.klass` + `JSRTClass.statics` fields,
+class-call refusal, value construction/instanceof dispatch.
+
+**Re-closed in this change.** The WIP opened the gate for the class-object VALUE surface
+(`this` in statics/blocks, class-as-value reads, `new v()`, member reads through a
+constructor-typed receiver) with no lowering behind it — probes failed `STA4061`/`STA4031`
+or the `STA4002` internal error, and two `gate.test.ts` pins caught the double refusal.
+Those arms return to their `STA1214` refusals; the speculative helpers went with them
+(`classValueUse`, `classNamedBy`, `staticMemberOf(Type|Super)`, `nearestClassLike`,
+`memberUsesThis`, `repeatableThisGuard`, `classEvaluationRepeatable`). The `super`-in-static
+arm is untouched (still refused, still passing). New-HIR-node emission arms exist but are
+unreachable until the gate admits a producer — no test can reach them yet by design.
+
+**Verified.** `pnpm run ci` green: typecheck clean, oxlint 0/0 + oxfmt clean, cpd 0.7%,
+unit 598/598, runtime print corpus matches Node, subset 742 (705/37/0), golden 395/395,
+builtins, leak plateaus, golden-asan 395/395.

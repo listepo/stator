@@ -39,10 +39,8 @@ import {
   baseClassOf,
   classDeclarationOf,
   classDisplayName,
-  classEvaluationRepeatable,
   classExpressionTarget,
   classLikeOf,
-  classNamedBy,
   computedKeyStaticName,
   elementStaticKey,
   expressionClassName,
@@ -918,64 +916,6 @@ function classConstructorTypeOf(type: ts.Type): boolean {
     const like = classLikeOf(signature.getReturnType());
     return like !== undefined && classDisplayName(like) !== undefined;
   });
-}
-
-/** Whether `member`'s body reads `this` (at any depth -- an arrow inside it reads the same one).
- * A `this` read is what makes the member depend on the receiver a call threads. */
-function memberUsesThis(member: ts.ClassElement): boolean {
-  const roots: (ts.Node | undefined)[] = [];
-  if (
-    ts.isMethodDeclaration(member) ||
-    ts.isGetAccessorDeclaration(member) ||
-    ts.isSetAccessorDeclaration(member)
-  ) {
-    roots.push(member.body);
-  } else if (ts.isPropertyDeclaration(member)) {
-    roots.push(member.initializer);
-  }
-  const stack = [...roots];
-  while (stack.length > 0) {
-    const n = stack.pop();
-    if (n === undefined) {
-      continue;
-    }
-    if (n.kind === ts.SyntaxKind.ThisKeyword) {
-      return true;
-    }
-    if (
-      ts.isFunctionDeclaration(n) ||
-      ts.isFunctionExpression(n) ||
-      ts.isClassDeclaration(n) ||
-      ts.isClassExpression(n)
-    ) {
-      continue; // a plain function or class body owns a different `this`
-    }
-    n.forEachChild((child) => {
-      stack.push(child);
-    });
-  }
-  return false;
-}
-
-/** The call-threading guard (docs/VALUE.md §4.17). A `this`-reading static member takes the
- * identity of the receiver's class object, and a call through a class whose EVALUATION can
- * repeat would hand every evaluation the one constant identity -- so those stay refused here
- * even though `this` uses in their OWN members are refused one layer down: `class D extends B {}`
- * inside a function, calling `D.self()` for a `static self() { return this }` on B, reads `this`
- * from B (admitted) with D's shared constant (the wrong identity per evaluation). */
-function repeatableThisGuard(
-  receiver: ts.Expression,
-  member: ts.ClassElement,
-  checker: ts.TypeChecker,
-): GateResult {
-  const owner = classLikeOf(checker.getTypeAtLocation(receiver));
-  if (owner !== undefined && classEvaluationRepeatable(owner) && memberUsesThis(member)) {
-    return notYet(
-      'calling a `this`-reading static through a class whose evaluation can repeat is not yet supported',
-      5,
-    );
-  }
-  return { kind: 'accept' };
 }
 
 /** Cross-function references are what rung 4b implements, so an identifier is accepted on its own.
@@ -4935,11 +4875,7 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
       return notYet('explicit type arguments on a constructor call are not yet supported', 5);
     }
   }
-  // The callee NAMES a class -- `new C` for a declaration, an alias, or a bound class
-  // expression, each constructing its one descriptor directly. Anything else (`new v()`,
-  // `new (make())()`) holds a class OBJECT, which dispatches at run time through the value
-  // (docs/VALUE.md §4.17) and has no lowering yet -- so it stays refused here.
-  if (classNamedBy(node.expression, checker) === undefined) {
+  if (!ts.isIdentifier(node.expression)) {
     return notYet('new on anything but a named class is not yet supported', 5);
   }
   if (classDeclarationOf(checker.getTypeAtLocation(node)) === undefined) {
@@ -5441,7 +5377,7 @@ function gateMemberAccess(
   // declaration is what separates them.
   const asStatic = staticMemberOf(access, checker, undefined);
   if (asStatic !== undefined) {
-    return repeatableThisGuard(access.expression, asStatic.member, checker);
+    return { kind: 'accept' };
   }
   // `v.count` where the receiver is a class OBJECT (docs/VALUE.md §4.17): it would dispatch
   // at run time through the class object's table, but the lowering has no value-receiver arm
