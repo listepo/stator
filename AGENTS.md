@@ -173,3 +173,9 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 - Don't duplicate code or logic — find the existing helper and reuse it, or extract one shared helper at the responsible layer. `pnpm run dupes` fails above 1% copy/paste duplication; a clone you write today is a CI failure tomorrow.
 - Don't draw the compiler pipeline in Mermaid or a new ASCII sketch — D2 in `docs/architecture/` is the diagram language.
 - Don't ship a behavior/CLI/subset/diagnostics/architecture change without updating the matching docs in the same change (golden rule 8).
+
+## Parent rules and config files
+
+If a directory above this repository contains an `AGENTS.md` or `CLAUDE.md`, follow it too. If it conflicts with this file, ask the creator.
+
+**Config files.** A config file this project owns has a schema generated from its types (Rust: `schemars`), committed and checked by a drift test, and one module owns all config loading, validation and editing. A config file another program owns (an agent host's or an editor's) gets no schema from us: check only our own entry in it and leave the rest byte-for-byte, comments included.
