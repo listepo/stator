@@ -1,10 +1,16 @@
 # Weekly version updates; the reasoning is plan-notes 212.
+#
+# .github/workflows/dependabot.yml runs the full CI on every pull request below
+# and merges a patch update once that run is green; minor and major updates are
+# labelled `needs-review` and wait for a human. Patch and minor updates are
+# grouped separately so a patch-only pull request can merge on its own.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: / # the pnpm workspace root covers every package
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
     cooldown:
       default-days: 7 # compromised npm releases were pulled within days; don't pin one on day one
     versioning-strategy: increase # exact pins stay exact; `auto` guesses app vs library per package
@@ -16,14 +22,33 @@ updates:
       toolchain:
         patterns: [typescript, "@types/node", oxlint, oxlint-tsgolint, oxfmt, cpd]
         update-types: [minor, patch]
-      libraries:
+      libraries-patch:
         patterns: ["*"]
-        update-types: [minor, patch]
+        update-types: [patch]
+      libraries-minor:
+        patterns: ["*"]
+        update-types: [minor]
     ignore:
       - dependency-name: typescript # latest is 7.x/tsgo, ruled out by plan.md §0.3
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/node" # follows the Node pin in .node-version
         update-types: ["version-update:semver-major"]
+
+  # The Astro landing page: not a workspace member, it keeps its own site/pnpm-lock.yaml.
+  - package-ecosystem: npm
+    directory: /site
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: deps
+    groups:
+      site-patch:
+        update-types: [patch]
+      site-minor:
+        update-types: [minor]
 
   - package-ecosystem: github-actions
     directories: ["/", "/.github/actions/*"] # "/" alone skips the composite setup action
@@ -31,8 +56,11 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    open-pull-requests-limit: 5
     commit-message:
       prefix: ci
     groups:
+      actions-patch:
+        update-types: [patch]
       actions:
-        patterns: ["*"]
+        update-types: [minor, major]
