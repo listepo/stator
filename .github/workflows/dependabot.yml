@@ -9,8 +9,8 @@
 # - Only `version-update:semver-patch` (version or security update) is merged:
 #   a squash merge (the repository allows only squash), pinned to the head
 #   commit CI tested. Minor and major updates get the `needs-review` label
-#   and wait for a human, and so does a
-#   patch in the `toolchain` group (see .github/dependabot.yml).
+#   and wait for a human, and so does a patch in the `toolchain` group (see
+#   .github/dependabot.yml).
 # - Notifications: @listepo becomes a participant (assignee plus a mention)
 #   only on pull requests that need him: a major update (his review is also
 #   requested) or a failed CI or merge job. Patch and minor pull requests do
