@@ -1,5 +1,7 @@
 # Stator
 
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=listepo_stator&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=listepo_stator) [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=listepo_stator&metric=coverage)](https://sonarcloud.io/component_measures?id=listepo_stator&metric=coverage) [![Tests](https://img.shields.io/sonar/tests/listepo_stator?server=https%3A%2F%2Fsonarcloud.io&compact_message)](https://sonarcloud.io/component_measures?id=listepo_stator&metric=tests)
+
 An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 
 Typed code compiles to unboxed machine values. Untyped code compiles too — through a dynamic representation (NaN-boxed values, shape tables, inline caches) — instead of being rejected or heroically analyzed. One pipeline; the mode is a policy layer on top.
