@@ -5,11 +5,17 @@ on:
   # #7-#11 showed no remote CI). The revert job stays push-only by its event guard below.
   pull_request:
   workflow_dispatch:
+  # Dependabot pull requests: dependabot.yml calls this workflow so they get the
+  # same jobs before its patch-only auto-merge.
+  workflow_call:
 
 # A push that supersedes an in-flight run cancels it: six platforms times five jobs is a lot of
 # runner time to spend proving something about a commit nobody is waiting on any more.
 concurrency:
-  group: ci-${{ github.ref }}
+  # github.workflow, not a literal: called from dependabot.yml it names the
+  # caller, so that run does not cancel (or get cancelled by) this workflow's
+  # own pull_request run on the same ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 # `pnpm run ci` is ONE SERIAL CHAIN by design -- it is the gate a human runs before claiming a task
@@ -35,6 +41,12 @@ concurrency:
 # default, plan.md Task 4.4) and therefore had no coverage at all until this job existed.
 # Same for `test:ffi`: it needs clang and the built archive, so it lives in its own job and in
 # `moon run tests:ci`, not in the serial gate — which stays offline-runnable.
+
+# Build and test jobs need only to read the repository; a job that needs more
+# (revert-on-failure) declares its own. This also caps these jobs when
+# dependabot.yml calls this workflow with wider permissions.
+permissions:
+  contents: read
 
 jobs:
   # Test262 is intentionally separate from pnpm run ci: a missing corpus must not make the local
