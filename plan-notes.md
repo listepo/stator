@@ -9246,3 +9246,52 @@ platform-gap report. Until then `--node` is `STA0005` (unknown flag).
 **Check:** `pnpm run test` (vitest, 599 tests incl. the new `explain lists every diagnostic`
 case) and `test:subset` (744 fixtures: 707 passed, 37 expected-fail, 0 failed) pass.
 
+## 298. Phase 13: a Web API package with a pluggable render API; Clay is the default renderer (2026-10-02)
+
+**Plan:** new §11e Phase 13 (T13.0 design, T13.1 DOM, T13.2 CSS, T13.3 render API + recording
+renderer, T13.4 `renderer-clay`), §14 effort row, changelog v4.14.
+
+**Creator's direction:** implement the Web API as a separate package with a render API, so any
+renderer can be plugged in. DOM and CSS first; the other Web APIs at low priority. The first
+renderer is Clay, the default, in its own package. The `webapi` package is written in strict
+TypeScript.
+
+**What the card fixes in place, and why:**
+
+- **Two packages, one seam.** `packages/webapi` never draws, measures fonts or calls C; everything
+  device-side crosses the `Renderer` interface it owns. That is what makes the renderer
+  replaceable, and it keeps `webapi` pure strict TS (§0.9, §0.10) compiled by Stator, like
+  `node:*` (§11c).
+- **Renderers are linked at build time.** Typed code has no run-time plugin loading, so
+  `--renderer` selects a package at build time; the default is `clay`.
+- **Clay's C stays vendored C; the glue is Zig.** `clay.h` is upstream C under `vendor/` rules
+  (plan-notes 101: `-Wall` alone, patches only via plan-notes). The arena, the text-measure
+  callback and the drawing backend are memory and cross-platform work, so they are Zig (§0.5).
+- **Layout placement, the drawing backend, the frame loop and the oracle are open.** They are
+  T13.0's questions rather than decisions here, because each needs the spike's measurements.
+
+**Clay facts** (primary source: the repository, <https://github.com/nicbarker/clay>, checked
+2026-10-02):
+
+- Description "High performance UI layout library in C."; license Zlib (GitHub API `license.spdx_id`);
+  not archived.
+- Latest release **v0.14**, published 2025-06-06 (`/releases`); earlier v0.13 (2025-02-12), v0.12
+  (2024-10-22). `main` is 99 commits ahead of v0.14 (`/compare/v0.14...main`); last commit
+  `e6cc36941ab2`, 2026-05-20. T13.4 pins a tag or a commit with that gap in mind.
+- `clay.h` at v0.14 is 4 393 lines (raw file at the tag). The README says "Single 4.8k LOC
+  clay.h file with zero dependencies (including no standard library linking)", the figure
+  apparently counting `main`. The v0.14 header includes `<stdint.h>`, `<stdbool.h>`, `<stddef.h>`
+  and SIMD headers (`<emmintrin.h>`, `<arm_neon.h>`), all header-only.
+- Layout model, from the README: "Flex-box like layout model … including text wrapping, scrolling
+  containers and aspect ratio scaling"; Wasm builds with clang.
+- Output (v0.14 `clay.h`): `Clay_EndLayout` returns a `Clay_RenderCommandArray`; command types are
+  `RECTANGLE`, `BORDER`, `TEXT`, `IMAGE`, `SCISSOR_START`, `SCISSOR_END`, `CUSTOM` (plus `NONE`).
+  Sizing types `FIT`, `GROW`, `PERCENT`, `FIXED`; floating elements attach to `PARENT`,
+  `ELEMENT_WITH_ID` or `ROOT`. The host supplies text measurement via
+  `Clay_SetMeasureTextFunction`; setup order `Clay_MinMemorySize` →
+  `Clay_CreateArenaWithCapacityAndMemory` → `Clay_Initialize` → `Clay_SetMeasureTextFunction`.
+- Render commands carry the element id and are culled to the viewport by default (README), which
+  is what T13.0 §2's damage tracking builds on.
+- Drawing backends in `renderers/` at `main`: GLES3, SDL2, SDL3, cairo, playdate, raylib, sokol,
+  termbox2, terminal, web, win32_gdi.
+
