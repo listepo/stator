@@ -9279,8 +9279,8 @@ TypeScript.
   (2024-10-22). `main` is 99 commits ahead of v0.14 (`/compare/v0.14...main`); last commit
   `e6cc36941ab2`, 2026-05-20. T13.4 pins a tag or a commit with that gap in mind.
 - `clay.h` at v0.14 is 4 393 lines (raw file at the tag). The README says "Single 4.8k LOC
-  clay.h file with zero dependencies (including no standard library linking)", the figure
-  apparently counting `main`. The v0.14 header includes `<stdint.h>`, `<stdbool.h>`, `<stddef.h>`
+  clay.h file with zero dependencies (including no standard library linking)", a figure that
+  matches `main` (5 058 lines, raw file checked 2026-10-02), not the tag. The v0.14 header includes `<stdint.h>`, `<stdbool.h>`, `<stddef.h>`
   and SIMD headers (`<emmintrin.h>`, `<arm_neon.h>`), all header-only.
 - Layout model, from the README: "Flex-box like layout model … including text wrapping, scrolling
   containers and aspect ratio scaling"; Wasm builds with clang.
