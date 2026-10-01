@@ -551,14 +551,14 @@ export function splitEmittedFunctions(
   return found;
 }
 
-/** A `node:test` option object that skips a test which compiles and runs a native binary.
+/** A test option object that skips a test which compiles and runs a native binary (no native
+ * toolchain on Windows).
  *
  * Producing one needs `runtime/build/libjsrt.a` and clang, a toolchain the justfile does
  * not target on Windows. Every OTHER unit test is portable TypeScript, so gating these few HERE is
  * what lets `pnpm run test` run on all six CI platforms instead of only the Unix four — a skipped
  * proof is visible in the runner's output, a whole unrun file is not. */
-export const NATIVE_ONLY =
-  process.platform === 'win32' ? { skip: 'no native toolchain on Windows' } : {};
+export const NATIVE_ONLY = { skip: process.platform === 'win32' };
 
 /** Compile `source` in ts mode, run the binary, and hand back both streams separately.
  *

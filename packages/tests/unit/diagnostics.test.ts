@@ -11,7 +11,7 @@
  *    not carried through as `undefined` (exactOptionalPropertyTypes distinguishes the two). */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import {
   diagnosticFromFile,
   diagnosticFromNode,
@@ -19,7 +19,7 @@ import {
 } from '../../compiler/src/support/diagnostics.ts';
 import { createProgram } from './helpers.ts';
 
-void test('diagnosticFromNode converts 0-indexed ts positions to 1-indexed line/column', () => {
+test('diagnosticFromNode converts 0-indexed ts positions to 1-indexed line/column', () => {
   const { sourceFile } = createProgram(
     'let a: number = 1;\nlet b: number = 2;\n  let c: number = 3;',
   );
@@ -31,7 +31,7 @@ void test('diagnosticFromNode converts 0-indexed ts positions to 1-indexed line/
   assert.equal(d.column, 3); // two leading spaces before `let c`
 });
 
-void test('phase is present only for a not-yet diagnostic, never for any other class', () => {
+test('phase is present only for a not-yet diagnostic, never for any other class', () => {
   const { sourceFile } = createProgram('let a: number = 1;');
   const stmt = sourceFile.statements[0];
   assert.ok(stmt);
@@ -49,12 +49,12 @@ void test('phase is present only for a not-yet diagnostic, never for any other c
   assert.equal('phase' in noPhase, false);
 });
 
-void test('diagnosticFromFile defaults to a zero-length span at the origin when none is given', () => {
+test('diagnosticFromFile defaults to a zero-length span at the origin when none is given', () => {
   const d = diagnosticFromFile('/x.ts', 5, 1, 'STA0001', 'error', 'ts', 'missing file');
   assert.deepEqual(d.span, { start: 0, length: 0 });
 });
 
-void test('diagnosticFromFile applies the same phase-presence rule as diagnosticFromNode', () => {
+test('diagnosticFromFile applies the same phase-presence rule as diagnosticFromNode', () => {
   const withPhase = diagnosticFromFile(
     '/x.ts',
     1,
@@ -82,7 +82,7 @@ void test('diagnosticFromFile applies the same phase-presence rule as diagnostic
   assert.equal('phase' in wrongClass, false);
 });
 
-void test('renderDiagnostic formats as file:line:col CODE [mode] message', () => {
+test('renderDiagnostic formats as file:line:col CODE [mode] message', () => {
   const d = diagnosticFromFile('/x.ts', 4, 7, 'STA1001', 'error', 'ts', "'any' is a compile error");
   assert.equal(renderDiagnostic(d), "/x.ts:4:7 STA1001 [ts] 'any' is a compile error");
 });

@@ -9,7 +9,7 @@
  * directly. This file guards the document in the meantime, and afterwards guards it against edits.
  */
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from '../support/rs.ts';
 
 /** `==` between unrelated types is exactly what §6.3 is about, and exactly what TypeScript
  * refuses to typecheck (TS2367). Widening to `unknown` is the narrowest way to ask the question:
@@ -90,8 +90,7 @@ const CLAIMS: readonly (readonly [string, () => boolean, boolean])[] = [
 ];
 
 for (const [name, evaluate, expected] of CLAIMS) {
-  // `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-  void test(`NUMERIC.md: ${name}`, () => {
+  test(`NUMERIC.md: ${name}`, () => {
     assert.equal(evaluate(), expected);
   });
 }

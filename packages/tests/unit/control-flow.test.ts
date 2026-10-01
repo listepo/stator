@@ -7,7 +7,7 @@
  * emitting it). Nothing here asserts emitted C spelling — see plan-notes 41. */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import type {
   Block,
   BreakStatement,
@@ -18,7 +18,7 @@ import { H_NUMBER, H_UNDEFINED } from '../../compiler/src/hir/types.ts';
 import { verifyHir } from '../../compiler/src/hir/verify.ts';
 import { block, id, lowerSource, makeModule, num, span, whileStmt } from './helpers.ts';
 
-void test('compound assignment folds to the equivalent binary operation', () => {
+test('compound assignment folds to the equivalent binary operation', () => {
   const { module } = lowerSource('let x: number = 1;\nx += 2;');
 
   const stmt = module.statements[1];
@@ -37,7 +37,7 @@ void test('compound assignment folds to the equivalent binary operation', () => 
   assert.equal(stmt.value.right.kind, 'number-literal');
 });
 
-void test('++ coerces with unary + before adding, which += does not', () => {
+test('++ coerces with unary + before adding, which += does not', () => {
   const { module } = lowerSource('let x: number = 1;\nx++;');
 
   const stmt = module.statements[1];
@@ -57,7 +57,7 @@ void test('++ coerces with unary + before adding, which += does not', () => {
   }
 });
 
-void test('prefix and postfix decrement lower identically when the value is discarded', () => {
+test('prefix and postfix decrement lower identically when the value is discarded', () => {
   // Spans differ — the operand sits at a different offset in `x--` than in `--x` — so this
   // compares the structure, which is the part that has to agree.
   const shape = (code: string): string => {
@@ -67,7 +67,7 @@ void test('prefix and postfix decrement lower identically when the value is disc
   assert.equal(shape('x--;'), shape('--x;'));
 });
 
-void test('a label is carried on the loop, not wrapped around it', () => {
+test('a label is carried on the loop, not wrapped around it', () => {
   const { module } = lowerSource('outer: while (true) { break outer; }');
 
   const stmt = module.statements[0];
@@ -84,7 +84,7 @@ void test('a label is carried on the loop, not wrapped around it', () => {
   }
 });
 
-void test('a for header keeps all three slots, and an absent condition stays absent', () => {
+test('a for header keeps all three slots, and an absent condition stays absent', () => {
   const full = lowerSource('for (let i: number = 0; i < 3; i++) { }').module.statements[0];
   assert.ok(full);
   assert.equal(full.kind, 'for-statement');
@@ -106,7 +106,7 @@ void test('a for header keeps all three slots, and an absent condition stays abs
   }
 });
 
-void test('switch keeps clauses in source order with default in place', () => {
+test('switch keeps clauses in source order with default in place', () => {
   const { module } = lowerSource(
     'const x: number = 1;\nswitch (x) { case 1: break; default: break; case 2: break; }',
   );
@@ -124,7 +124,7 @@ void test('switch keeps clauses in source order with default in place', () => {
   assert.ok(stmt.clauses[2]?.test);
 });
 
-void test('verifier rejects a break naming a label that encloses nothing', () => {
+test('verifier rejects a break naming a label that encloses nothing', () => {
   const brk: BreakStatement = {
     kind: 'break-statement',
     type: H_UNDEFINED,
@@ -137,7 +137,7 @@ void test('verifier rejects a break naming a label that encloses nothing', () =>
   assert.equal(problems[0]?.code, 'STA4029');
 });
 
-void test('verifier rejects continue outside any loop, but allows it inside a switch in a loop', () => {
+test('verifier rejects continue outside any loop, but allows it inside a switch in a loop', () => {
   const cont: ContinueStatement = {
     kind: 'continue-statement',
     type: H_UNDEFINED,
@@ -159,7 +159,7 @@ void test('verifier rejects continue outside any loop, but allows it inside a sw
   assert.deepEqual(verifyHir(makeModule([whileStmt(num(1), wrapped)])), []);
 });
 
-void test('verifier rejects a switch with two default clauses', () => {
+test('verifier rejects a switch with two default clauses', () => {
   const twoDefaults: SwitchStatement = {
     kind: 'switch-statement',
     type: H_UNDEFINED,
@@ -172,7 +172,7 @@ void test('verifier rejects a switch with two default clauses', () => {
   assert.ok(problems.some((p) => p.code === 'STA4040'));
 });
 
-void test('a labelled break in a doubly-nested loop reaches past the inner loop by name', () => {
+test('a labelled break in a doubly-nested loop reaches past the inner loop by name', () => {
   const brk: BreakStatement = {
     kind: 'break-statement',
     type: H_UNDEFINED,
@@ -187,7 +187,7 @@ void test('a labelled break in a doubly-nested loop reaches past the inner loop 
   assert.deepEqual(verifyHir(makeModule([outer])), []);
 });
 
-void test('continue cannot target a label that belongs to a switch, even reaching through a loop', () => {
+test('continue cannot target a label that belongs to a switch, even reaching through a loop', () => {
   const cont: ContinueStatement = {
     kind: 'continue-statement',
     type: H_UNDEFINED,

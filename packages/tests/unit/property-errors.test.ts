@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 
 import { emitC } from '../../compiler/src/codegen/index.ts';
 import { lowerSource } from './helpers.ts';

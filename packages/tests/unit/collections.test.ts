@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import ts from 'typescript';
 import { tsTypeToHType } from '../../compiler/src/frontend/types.ts';
 import type {
@@ -38,7 +38,7 @@ function lastOperation(code: string): CollectionOp {
   return op as CollectionOp;
 }
 
-void test('a construction carries the key and value types the checker resolved', () => {
+test('a construction carries the key and value types the checker resolved', () => {
   const value = declaredValue('const m = new Map<string, number>();\nconsole.log(m.size);');
   assert.equal(value.kind, 'collection-new');
   assert.equal((value as CollectionNew).collection, 'map');
@@ -49,12 +49,12 @@ void test('a construction carries the key and value types the checker resolved',
   assert.equal(hTypeName(set.type), 'Set<string>');
 });
 
-void test('a nested collection is a type, not a special case', () => {
+test('a nested collection is a type, not a special case', () => {
   const value = declaredValue('const m = new Map<string, Set<number>>();\nconsole.log(m.size);');
   assert.equal(hTypeName(value.type), 'Map<string, Set<number>>');
 });
 
-void test('the operations lower to one node naming the operation, receiver first', () => {
+test('the operations lower to one node naming the operation, receiver first', () => {
   const op = lastOperation("const m = new Map<string, number>();\nm.set('a', 1);");
   assert.equal(op.collection, 'map');
   assert.equal(op.op, 'set');
@@ -69,7 +69,7 @@ void test('the operations lower to one node naming the operation, receiver first
   assert.equal(size.args.length, 0);
 });
 
-void test('`add` on a Set is its own operation, distinct from `set`', () => {
+test('`add` on a Set is its own operation, distinct from `set`', () => {
   const op = lastOperation("const s = new Set<string>();\ns.add('a');");
   assert.equal(op.collection, 'set');
   assert.equal(op.op, 'add');
@@ -80,7 +80,7 @@ void test('`add` on a Set is its own operation, distinct from `set`', () => {
 // LOOKS like one, and must stay an ordinary class. It is asked of the type mapping rather than the
 // gate because shadowing the global takes a MODULE -- at the top level of a script `class Map` is a
 // duplicate identifier, and TypeScript rejects the file before any of this is reached.
-void test('a user class named Map is a class, not a collection', () => {
+test('a user class named Map is a class, not a collection', () => {
   const { program } = createProgram(
     'export {};\nclass Map {\n  n: number;\n  constructor() {\n    this.n = 1;\n  }\n}\nconst m = new Map();\n',
     '/test.ts',
@@ -103,7 +103,7 @@ void test('a user class named Map is a class, not a collection', () => {
   assert.equal(hTypeName(type), 'Map');
 });
 
-void test('a method the runtime does not implement is refused, not accepted silently', () => {
+test('a method the runtime does not implement is refused, not accepted silently', () => {
   assert.deepEqual(
     gateCodes('const m = new Map<string, number>();\nconsole.log(m.entries());'),
     [],
@@ -111,7 +111,7 @@ void test('a method the runtime does not implement is refused, not accepted sile
   assert.deepEqual(gateCodes('const s = new Set<string>();\nconsole.log(s.forEach);'), ['STA1214']);
 });
 
-void test('for-of over a Map or Set lowers to a for-of-statement', () => {
+test('for-of over a Map or Set lowers to a for-of-statement', () => {
   assert.deepEqual(
     gateCodes('const m = new Map<string, number>();\nfor (const e of m) { console.log(e); }'),
     [],
@@ -124,12 +124,12 @@ void test('for-of over a Map or Set lowers to a for-of-statement', () => {
   assert.equal((loop as { iterable: { type: { kind: string } } }).iterable.type.kind, 'map');
 });
 
-void test('a wrong argument count is refused: there is no argv to pad', () => {
+test('a wrong argument count is refused: there is no argv to pad', () => {
   assert.deepEqual(gateCodes("const m = new Map<string, number>();\nm.set('a');"), ['STA1214']);
   assert.deepEqual(gateCodes("const s = new Set<string>();\ns.add('a', 'b');"), ['STA1214']);
 });
 
-void test('constructing from an iterable is refused, and says so once', () => {
+test('constructing from an iterable is refused, and says so once', () => {
   assert.deepEqual(
     gateCodes("const m = new Map<string, number>([['a', 1]]);\nconsole.log(m.size);"),
     ['STA1214'],

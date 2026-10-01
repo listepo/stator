@@ -7,7 +7,7 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import type { ClassDeclaration, Statement } from '../../compiler/src/hir/nodes.ts';
 import { gateCodes, hirNodes, verifiedStatements } from './helpers.ts';
 

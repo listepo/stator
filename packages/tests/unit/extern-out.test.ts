@@ -9,7 +9,7 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import * as ts from 'typescript';
 import type { ExternClassified } from '../../compiler/src/frontend/extern.ts';
 import {
@@ -61,7 +61,7 @@ function firstCall(
   return found === undefined ? undefined : { call: found, checker };
 }
 
-void test('Out<brand> and Out<CString> params map to out-pointer; returns refuse', () => {
+test('Out<brand> and Out<CString> params map to out-pointer; returns refuse', () => {
   const ok = classifyFirst(
     PRELUDE +
       '/** @statorExtern open */\ndeclare function openDb(n: CString, db: Out<Db>): number;',
@@ -93,7 +93,7 @@ void test('Out<brand> and Out<CString> params map to out-pointer; returns refuse
   assert.equal(ret.code, 'STA1119');
 });
 
-void test('malformed Out spellings refuse as STA1125, not the catch-all', () => {
+test('malformed Out spellings refuse as STA1125, not the catch-all', () => {
   for (const bad of [
     'Out<number>',
     'Out<string>',
@@ -112,7 +112,7 @@ void test('malformed Out spellings refuse as STA1125, not the catch-all', () => 
   }
 });
 
-void test('the cast tags ride the parameter spelling', () => {
+test('the cast tags ride the parameter spelling', () => {
   const { program, sourceFile } = createProgram(
     PRELUDE + '/** @statorExtern f */\ndeclare function f(a: Out<Db>, b: Out<CString>): number;',
   );
@@ -129,7 +129,7 @@ void test('the cast tags ride the parameter spelling', () => {
   }
 });
 
-void test('outSlotInner accepts brands and CString wrappers, nothing else', () => {
+test('outSlotInner accepts brands and CString wrappers, nothing else', () => {
   const { program, sourceFile } = createProgram(
     PRELUDE +
       'declare const a: Out<Db>;\ndeclare const b: Out<CString>;\ndeclare const c: Out<number>;\ndeclare const d: { readonly value: Db };\ndeclare const e: Db;\n',
@@ -160,7 +160,7 @@ void test('outSlotInner accepts brands and CString wrappers, nothing else', () =
   );
 });
 
-void test('the constructor is recognized by declaration shape, not by name alone', () => {
+test('the constructor is recognized by declaration shape, not by name alone', () => {
   const good = firstCall(PRELUDE + 'declare const s: Out<Db>;\nconst t = outSlot<Db>();\n');
   assert.notEqual(good, undefined);
   if (good === undefined) {

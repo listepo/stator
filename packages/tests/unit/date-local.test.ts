@@ -9,7 +9,7 @@
 // Sunday of March and October since 1996. Asia/Kolkata is the no-DST half-hour control.
 
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { describe, it } from '../support/rs.ts';
 import { compileAndRunLines, NATIVE_ONLY } from './helpers.ts';
 
 const BERLIN = 'Europe/Berlin';

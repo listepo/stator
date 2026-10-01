@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import { clearProgramCache, createProgram } from '../../compiler/src/frontend/program.ts';
 
 /** A whole-second mtime: float milliseconds round-trip through the syscall exactly, so two
@@ -18,8 +18,7 @@ function entryText(entry: string, mode: 'ts' | 'js'): string {
   return source.getFullText();
 }
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('the program cache keys on content, not mtime', () => {
+test('the program cache keys on content, not mtime', () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-program-cache-'));
   try {
     clearProgramCache();

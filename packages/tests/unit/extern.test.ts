@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import * as ts from 'typescript';
 import { build, compileToC } from '../../compiler/src/cli/build.ts';
 import { explainFile } from '../../compiler/src/cli/explain.ts';
@@ -64,7 +64,7 @@ function assertRefused(source: string, code: string): void {
   assert.equal(classified.code, code);
 }
 
-void test('the covered scalar positions map to their ABI kinds under the TS name', () => {
+test('the covered scalar positions map to their ABI kinds under the TS name', () => {
   assert.deepEqual(
     assertOk('/** @statorExtern */\ndeclare function add(a: number, b: number): number;'),
     { cName: 'add', params: ['number', 'number'], ret: 'number', error: undefined },
@@ -83,7 +83,7 @@ void test('the covered scalar positions map to their ABI kinds under the TS name
   });
 });
 
-void test('the tag override renames the C symbol and the CString brands map by alias', () => {
+test('the tag override renames the C symbol and the CString brands map by alias', () => {
   const brands =
     'type CString = string & { readonly __statorCstr: "CString" };\n' +
     'type CStringOwned = string & { readonly __statorCstrOwned: "CStringOwned" };\n';
@@ -101,7 +101,7 @@ void test('the tag override renames the C symbol and the CString brands map by a
   );
 });
 
-void test('each error convention is admitted on the return it reads', () => {
+test('each error convention is admitted on the return it reads', () => {
   const decl = (convention: string, ret: string): string =>
     `/** @statorExtern @statorError ${convention} */\ndeclare function f(): ${ret};`;
   assert.equal(assertOk(decl('nonzero', 'number')).error, 'nonzero');
@@ -116,7 +116,7 @@ void test('each error convention is admitted on the return it reads', () => {
   );
 });
 
-void test('every refusal kind keeps its never-code', () => {
+test('every refusal kind keeps its never-code', () => {
   const cases: ReadonlyArray<readonly [string, string]> = [
     ['declare function f(x: unknown): number;', 'STA1114'],
     ['declare function f(o: { x: number }): number;', 'STA1115'],
@@ -148,7 +148,7 @@ void test('every refusal kind keeps its never-code', () => {
   }
 });
 
-void test('a branded pointer classifies as a pointer, not as a refusal', () => {
+test('a branded pointer classifies as a pointer, not as a refusal', () => {
   const classified = classifyFirst(
     'type sqlite3 = { readonly __brand: "sqlite3" };\n' +
       '/** @statorExtern */\ndeclare function f(db: sqlite3): number;',
@@ -160,7 +160,7 @@ void test('a branded pointer classifies as a pointer, not as a refusal', () => {
   assert.deepEqual([...classified.signature.params], ['pointer']);
 });
 
-void test('an unmarked declaration is not an extern signature', () => {
+test('an unmarked declaration is not an extern signature', () => {
   // No marker: the classifier still answers (the gate only calls it on marked declarations),
   // mapping the signature as written rather than inventing a refusal.
   const classified = classifyFirst('declare function add(a: number, b: number): number;');
@@ -200,7 +200,7 @@ const DIRECT_HELPER =
   'declare function extCheckStr(s: CString): number;\n' +
   '/** @statorExtern */\ndeclare function extTake(s: CStringOwned): void;\n';
 
-void test('explain marks every compiled extern call as an unchecked boundary', async () => {
+test('explain marks every compiled extern call as an unchecked boundary', async () => {
   const { work, entry } = writeExternProgram({
     'main.ts':
       '/// <reference path="./helper.d.ts" />\n' +
@@ -222,7 +222,7 @@ void test('explain marks every compiled extern call as an unchecked boundary', a
   }
 });
 
-void test('a dynamically-typed argument makes the file dynamic, flag included', async () => {
+test('a dynamically-typed argument makes the file dynamic, flag included', async () => {
   const { work, entry } = writeExternProgram(
     {
       'main.js':
@@ -244,7 +244,7 @@ void test('a dynamically-typed argument makes the file dynamic, flag included', 
   }
 });
 
-void test('an optional call to an extern is a direct call, not STA1217', async () => {
+test('an optional call to an extern is a direct call, not STA1217', async () => {
   const { work, entry } = writeExternProgram({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(extSqrt?.(4));\nexport {};\n',
     'helper.d.ts': DIRECT_HELPER,
@@ -263,7 +263,7 @@ void test('an optional call to an extern is a direct call, not STA1217', async (
   }
 });
 
-void test('bool and void externs emit unboxed C calls with matching prototypes', async () => {
+test('bool and void externs emit unboxed C calls with matching prototypes', async () => {
   const { work, entry } = writeExternProgram({
     'main.ts':
       '/// <reference path="./helper.d.ts" />\n' +
@@ -291,7 +291,7 @@ void test('bool and void externs emit unboxed C calls with matching prototypes',
   }
 });
 
-void test('a borrowed copy is freed before the throw; a transfer never is', async () => {
+test('a borrowed copy is freed before the throw; a transfer never is', async () => {
   const { work, entry } = writeExternProgram({
     'main.ts':
       '/// <reference path="./helper.d.ts" />\n' +
@@ -327,7 +327,7 @@ void test('a borrowed copy is freed before the throw; a transfer never is', asyn
   }
 });
 
-void test('the errno sequence zeroes, calls, reads immediately, then checks', async () => {
+test('the errno sequence zeroes, calls, reads immediately, then checks', async () => {
   const { work, entry } = writeExternProgram({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(extErrno(4));\nexport {};\n',
     'helper.d.ts': DIRECT_HELPER,
@@ -356,7 +356,7 @@ void test('the errno sequence zeroes, calls, reads immediately, then checks', as
   }
 });
 
-void test(
+test(
   'a dynamic argument that fails its boundary check aborts with STA2001',
   NATIVE_ONLY,
   async () => {

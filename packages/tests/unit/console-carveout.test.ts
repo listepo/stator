@@ -14,10 +14,10 @@
  * satisfies the shape and fails the ordering check; one printing to stdout fails the stream check.
  */
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import { compileAndRunStreams, NATIVE_ONLY } from './helpers.ts';
 
-void test('console.time/timeEnd echo the label with a duration in ms', NATIVE_ONLY, () => {
+test('console.time/timeEnd echo the label with a duration in ms', NATIVE_ONLY, () => {
   const { stdout } = compileAndRunStreams(
     "console.time('alpha');\nconsole.timeEnd('alpha');\nconsole.time();\nconsole.timeEnd();\n",
     'console',
@@ -31,7 +31,7 @@ void test('console.time/timeEnd echo the label with a duration in ms', NATIVE_ON
   assert.match(lines[1] ?? '', /^default: \d+\.\d{3}ms$/);
 });
 
-void test(
+test(
   'a longer interval measures longer, and a timer that never started prints nothing',
   NATIVE_ONLY,
   () => {
@@ -70,7 +70,7 @@ void test(
   },
 );
 
-void test('console.trace writes its prefix to stderr, not stdout', NATIVE_ONLY, () => {
+test('console.trace writes its prefix to stderr, not stdout', NATIVE_ONLY, () => {
   const { stdout, stderr } = compileAndRunStreams(
     "console.trace('why');\nconsole.trace();\n",
     'console',

@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 import { BuildError, build } from '../../compiler/src/cli/build.ts';
@@ -54,45 +54,39 @@ function packageJson(): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('the published binary is named stator even though the package is not', () => {
+test('the published binary is named stator even though the package is not', () => {
   const pkg = packageJson();
   assert.deepEqual(pkg['bin'], { stator: 'dist/cli/main.js' });
   assert.equal(pkg['name'], 'statorc', 'npm name "stator" is taken — see plan-notes.md');
 });
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('--version prints the package version', async () => {
+test('--version prints the package version', async () => {
   const pkg = packageJson();
   const { status, stdout } = await stator('--version');
   assert.equal(status, 0);
   assert.equal(stdout.trim(), pkg['version']);
 });
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('--help names both modes', async () => {
+test('--help names both modes', async () => {
   const { status, stdout } = await stator('--help');
   assert.equal(status, 0);
   assert.match(stdout, /--mode=ts\|js/);
 });
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('an unknown command fails with a stable STA code, not a stack trace', async () => {
+test('an unknown command fails with a stable STA code, not a stack trace', async () => {
   const { status, stderr } = await stator('frobnicate');
   assert.equal(status, 1);
   assert.match(stderr, /^stator: STA0003 /);
   assert.doesNotMatch(stderr, /at .*\.ts:\d+/, 'diagnostics must never leak a stack trace');
 });
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('an invalid mode is rejected', async () => {
+test('an invalid mode is rejected', async () => {
   const { status, stderr } = await stator('build', 'x.ts', '-o', 'x', '--mode=wasm');
   assert.equal(status, 1);
   assert.match(stderr, /^stator: STA0002 /);
 });
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('build and explain report a missing entry file as a path error', async () => {
+test('build and explain report a missing entry file as a path error', async () => {
   // Both commands must fail on the PATH before either tries to build a program, so the user gets
   // "no such file" rather than a checker diagnostic about a file that was never there.
   // The two spawns touch no shared state (a missing file is never written), so they run together;
@@ -108,8 +102,7 @@ void test('build and explain report a missing entry file as a path error', async
   }
 });
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test(
+test(
   'a builtin the program never references is not in the binary (Task 3.12)',
   NATIVE_ONLY,
   async () => {
@@ -135,8 +128,7 @@ void test(
   },
 );
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('a relative entry path resolves its imports (module graph is cwd-independent)', async () => {
+test('a relative entry path resolves its imports (module graph is cwd-independent)', async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-relative-'));
   try {
     writeFileSync(join(work, 'dep.ts'), 'export function five(): number {\n  return 5;\n}\n');
@@ -158,28 +150,24 @@ void test('a relative entry path resolves its imports (module graph is cwd-indep
 // Phase 5 step 4 lifted STA2004 for *reads* of an existing field: the shape-table entry points
 // walk the class descriptor. Growing a NEW key on a fixed layout still cannot invent a slot, so
 // that write stays STA2004 (Phase 8).
-void test(
-  'a fixed-shape object answers an aliased read of an existing field',
-  NATIVE_ONLY,
-  async () => {
-    const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
-    try {
-      const entry = join(work, 'alias.ts');
-      writeFileSync(
-        entry,
-        'const a: { x: number } = { x: 1 };\nconst b: { x?: number } = a;\nconsole.log(b.x);\n',
-      );
-      const binary = join(work, 'alias');
-      const run = await buildAndRun(entry, binary);
-      assert.equal(run.status, 0, run.stderr);
-      assert.equal(run.stdout, '1\n');
-    } finally {
-      rmSync(work, { recursive: true, force: true });
-    }
-  },
-);
+test('a fixed-shape object answers an aliased read of an existing field', NATIVE_ONLY, async () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
+  try {
+    const entry = join(work, 'alias.ts');
+    writeFileSync(
+      entry,
+      'const a: { x: number } = { x: 1 };\nconst b: { x?: number } = a;\nconsole.log(b.x);\n',
+    );
+    const binary = join(work, 'alias');
+    const run = await buildAndRun(entry, binary);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout, '1\n');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
 
-void test(
+test(
   'adding a new key to a fixed-shape object still aborts with STA2004',
   NATIVE_ONLY,
   async () => {
@@ -201,7 +189,7 @@ void test(
   },
 );
 
-void test(
+test(
   'calling a non-function through an Unknown callee aborts with STA2006 at the site',
   NATIVE_ONLY,
   async () => {
@@ -221,7 +209,7 @@ void test(
   },
 );
 
-void test(
+test(
   'a dynamic value reaching an annotated .ts binding aborts with STA2001',
   NATIVE_ONLY,
   async () => {
@@ -256,7 +244,7 @@ void test(
  * worth pinning: JSDoc is an annotation by the same author in a second spelling, so a fully
  * documented `.js` function grades `typed`, and only the PARTLY documented one is `inferred`
  * (plan-notes 140). */
-void test('explain --json grades every function typed, inferred or dynamic', async () => {
+test('explain --json grades every function typed, inferred or dynamic', async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-provenance-'));
   try {
     // One statement per call: `console.log` takes one argument until plan §8 step 12 lands the rest.
@@ -311,7 +299,7 @@ void test('explain --json grades every function typed, inferred or dynamic', asy
   }
 });
 
-void test('a fully JSDoc-annotated .js module has file verdict static', async () => {
+test('a fully JSDoc-annotated .js module has file verdict static', async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-jsdoc-'));
   try {
     const entry = join(work, 'freebie.js');
@@ -332,7 +320,7 @@ void test('a fully JSDoc-annotated .js module has file verdict static', async ()
   }
 });
 
-void test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not tsc's allowJs error", async () => {
+test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not tsc's allowJs error", async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-js-under-ts-'));
   try {
     const entry = join(work, 'entry.js');
@@ -361,8 +349,7 @@ void test("a .js entry under default ts mode is STA1002 with a --mode=js hint, n
   }
 });
 
-// `void`: node:test returns a promise the runner owns; we are not awaiting it here.
-void test('an exception inside the checker is STA4072, not a Node stack trace', async () => {
+test('an exception inside the checker is STA4072, not a Node stack trace', async () => {
   // `var yield` plus a generator method whose computed key is `[yield]` makes the TypeScript
   // checker recurse without a depth guard until the JS stack is gone (upstream: `tsc` 6.0.3 dies on
   // the same file, Test262's generator-prop-name-yield-expr.js). Stator cannot fix that, but
@@ -392,7 +379,7 @@ void test('an exception inside the checker is STA4072, not a Node stack trace', 
   }
 });
 
-void test('an in-process build whose checker overflows is BuildError STA4072, not a throw', async () => {
+test('an in-process build whose checker overflows is BuildError STA4072, not a throw', async () => {
   // Same crashing construct as the CLI test above, through the path the Test262 runner uses:
   // `build()` in-process never passes through `main()`'s catch-all, so without `compileToC`'s own
   // guard the RangeError escapes, kills the shard, and no artifact is uploaded.

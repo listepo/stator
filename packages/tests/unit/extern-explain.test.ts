@@ -9,7 +9,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import { explainFile } from '../../compiler/src/cli/explain.ts';
 
 /** A scratch program of entry + `.d.ts` helper: the only placement the gate accepts. */
@@ -32,7 +32,7 @@ const HELPER =
   '/** @statorExtern */\ndeclare function extSqrt(x: number): number;\n' +
   '/** @statorExtern c_atof */\ndeclare function extAtof(s: CString): number;\n';
 
-void test('a module with an extern call reports the C symbol and line', async () => {
+test('a module with an extern call reports the C symbol and line', async () => {
   const { work, entry } = writeProgram({
     'main.ts':
       '/// <reference path="./helper.d.ts" />\n' +
@@ -54,7 +54,7 @@ void test('a module with an extern call reports the C symbol and line', async ()
   }
 });
 
-void test('a module without extern calls carries no externCalls key', async () => {
+test('a module without extern calls carries no externCalls key', async () => {
   const { work, entry } = writeProgram({
     'main.ts': 'console.log(40 + 2);\nexport {};\n',
   });
@@ -69,7 +69,7 @@ void test('a module without extern calls carries no externCalls key', async () =
   }
 });
 
-void test('a refused extern program carries verdict and code but no flag', async () => {
+test('a refused extern program carries verdict and code but no flag', async () => {
   const { work, entry } = writeProgram({
     'main.ts':
       '/// <reference path="./helper.d.ts" />\n' +

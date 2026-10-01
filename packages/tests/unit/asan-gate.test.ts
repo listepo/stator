@@ -14,7 +14,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import {
   formatSkipLine,
   greenMatches,
@@ -63,7 +63,7 @@ function sampleRecord(hash: string): AsanGreenRecord {
   };
 }
 
-void test('the gate hash is deterministic and sensitive to every input', () => {
+test('the gate hash is deterministic and sensitive to every input', () => {
   const base = sampleInputs();
   assert.equal(hashGateInputs(base), hashGateInputs(sampleInputs()));
   const variants: GateInputs[] = [
@@ -109,7 +109,7 @@ void test('the gate hash is deterministic and sensitive to every input', () => {
   }
 });
 
-void test('member and file order do not move the hash (sorted lists)', () => {
+test('member and file order do not move the hash (sorted lists)', () => {
   const base = sampleInputs();
   const shuffled: GateInputs = {
     ...base,
@@ -119,7 +119,7 @@ void test('member and file order do not move the hash (sorted lists)', () => {
   assert.equal(hashGateInputs(shuffled), hashGateInputs(base));
 });
 
-void test('a green record round-trips through the tmp+rename write', () => {
+test('a green record round-trips through the tmp+rename write', () => {
   const dir = mkdtempSync(join(tmpdir(), 'stator-asan-gate-'));
   try {
     const path = join(dir, '.asan-last-green.json');
@@ -132,7 +132,7 @@ void test('a green record round-trips through the tmp+rename write', () => {
   }
 });
 
-void test('a hash mismatch — or a corrupt record — is not green', () => {
+test('a hash mismatch — or a corrupt record — is not green', () => {
   const dir = mkdtempSync(join(tmpdir(), 'stator-asan-gate-'));
   try {
     const record = sampleRecord('ab'.repeat(32));
@@ -153,7 +153,7 @@ void test('a hash mismatch — or a corrupt record — is not green', () => {
   }
 });
 
-void test('only STATOR_ASAN_FORCE=1 forces the full pass', () => {
+test('only STATOR_ASAN_FORCE=1 forces the full pass', () => {
   assert.equal(isForceRequested({ STATOR_ASAN_FORCE: '1' }), true);
   assert.equal(isForceRequested({}), false);
   assert.equal(isForceRequested({ STATOR_ASAN_FORCE: '0' }), false);
@@ -161,7 +161,7 @@ void test('only STATOR_ASAN_FORCE=1 forces the full pass', () => {
   assert.equal(isForceRequested({ STATOR_ASAN_FORCE: 'true' }), false);
 });
 
-void test('the skip line carries the hash prefix, provenance, and force escape', () => {
+test('the skip line carries the hash prefix, provenance, and force escape', () => {
   const hash = '0123456789abcdef'.repeat(4);
   const line = formatSkipLine(sampleRecord(hash), hash);
   assert.match(line, /0123456789ab/);

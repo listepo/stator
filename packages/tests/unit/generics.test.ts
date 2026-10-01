@@ -12,7 +12,7 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import type { FunctionDeclaration } from '../../compiler/src/hir/nodes.ts';
 import { hTypeName } from '../../compiler/src/hir/types.ts';
 import { verifyHir } from '../../compiler/src/hir/verify.ts';

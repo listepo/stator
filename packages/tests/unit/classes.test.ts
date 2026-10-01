@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import type {
   Block,
   ClassDeclaration,

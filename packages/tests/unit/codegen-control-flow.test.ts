@@ -10,7 +10,7 @@
  * evaluation count, each of which is a real invariant a correct refactor must preserve. */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import { emitC } from '../../compiler/src/codegen/index.ts';
 import type {
   Block,
@@ -23,7 +23,7 @@ import type {
 import { H_UNDEFINED } from '../../compiler/src/hir/types.ts';
 import { assign, block, decl, exprStmt, makeModule, num, whileStmt } from './helpers.ts';
 
-void test('a loop with no break or continue emits no jump labels at all', () => {
+test('a loop with no break or continue emits no jump labels at all', () => {
   const c = emitC(makeModule([whileStmt(num(1), block([decl('x', num(1))]))]));
 
   // -Wall -Wextra -Werror treats an unused label as an error, so this is not cosmetic: an
@@ -33,7 +33,7 @@ void test('a loop with no break or continue emits no jump labels at all', () => 
   assert.doesNotMatch(c, /goto/);
 });
 
-void test('break alone emits a break label and no continue label', () => {
+test('break alone emits a break label and no continue label', () => {
   const brk: BreakStatement = {
     kind: 'break-statement',
     type: H_UNDEFINED,
@@ -46,7 +46,7 @@ void test('break alone emits a break label and no continue label', () => {
   assert.doesNotMatch(c, /cont_\d+/);
 });
 
-void test('continue in a for-loop lands between the body and the update, so the update still runs', () => {
+test('continue in a for-loop lands between the body and the update, so the update still runs', () => {
   const cont: ContinueStatement = {
     kind: 'continue-statement',
     type: H_UNDEFINED,
@@ -75,7 +75,7 @@ void test('continue in a for-loop lands between the body and the update, so the 
   assert.ok(contIndex < updateIndex, 'continue label must come before the update');
 });
 
-void test('continue in a do/while jumps to the test, not past it', () => {
+test('continue in a do/while jumps to the test, not past it', () => {
   const cont: ContinueStatement = {
     kind: 'continue-statement',
     type: H_UNDEFINED,
@@ -100,7 +100,7 @@ void test('continue in a do/while jumps to the test, not past it', () => {
   assert.ok(markerIndex < contIndex && contIndex < testIndex);
 });
 
-void test('the switch discriminant is evaluated once, not once per clause', () => {
+test('the switch discriminant is evaluated once, not once per clause', () => {
   const clauses = [1, 2, 3].map((n) => ({ test: num(n), statements: [] as readonly Statement[] }));
   const stmt: SwitchStatement = {
     kind: 'switch-statement',
@@ -117,7 +117,7 @@ void test('the switch discriminant is evaluated once, not once per clause', () =
   assert.equal(occurrences, 1, 'discriminant must be materialized into a slot once, then reused');
 });
 
-void test('for (;;) never calls jsrt_truthy: an absent condition is not a synthesized true', () => {
+test('for (;;) never calls jsrt_truthy: an absent condition is not a synthesized true', () => {
   const forStmt: ForStatement = {
     kind: 'for-statement',
     type: H_UNDEFINED,
@@ -133,7 +133,7 @@ void test('for (;;) never calls jsrt_truthy: an absent condition is not a synthe
   assert.doesNotMatch(c, /jsrt_truthy/);
 });
 
-void test('emitC refuses a break/continue with no enclosing loop or switch, rather than emit a dangling goto', () => {
+test('emitC refuses a break/continue with no enclosing loop or switch, rather than emit a dangling goto', () => {
   // This HIR shape is impossible from the lowering and is caught earlier by the verifier
   // (STA4029) — this is the emitter's own backstop for a later pass that skips verification.
   // Without it, a `goto` to a label the emitter never wrote would fail in clang against

@@ -24,7 +24,7 @@
 import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { test } from '../support/rs.ts';
 import { fileURLToPath } from 'node:url';
 
 import { emitC } from '../../compiler/src/codegen/index.ts';
@@ -81,7 +81,7 @@ function corpus(): { name: string; c: string }[] {
 
 const EMITTED = corpus();
 
-void test('every emitted slot is inside the frame that roots it', () => {
+test('every emitted slot is inside the frame that roots it', () => {
   for (const { name, c } of EMITTED) {
     for (const fn of functionsIn(c)) {
       const frame = /JSRT_FRAME\((\d+)\)/.exec(fn.body);
@@ -101,7 +101,7 @@ void test('every emitted slot is inside the frame that roots it', () => {
   }
 });
 
-void test('a frame is exactly as large as the locals it roots', () => {
+test('a frame is exactly as large as the locals it roots', () => {
   for (const { name, c } of EMITTED) {
     for (const fn of functionsIn(c)) {
       const frame = /JSRT_FRAME\((\d+)\)/.exec(fn.body);
@@ -127,7 +127,7 @@ void test('a frame is exactly as large as the locals it roots', () => {
   }
 });
 
-void test('the module frame is exactly as large as the globals it roots', () => {
+test('the module frame is exactly as large as the globals it roots', () => {
   for (const { name, c } of EMITTED) {
     // An async module keeps named bindings in the globals array and temps in a heap environment
     // (Phase 5 step 9). Slot accounting is not "every declared global is written in main".
@@ -157,7 +157,7 @@ void test('the module frame is exactly as large as the globals it roots', () => 
   }
 });
 
-void test('every path out of a framed function pops its frame', () => {
+test('every path out of a framed function pops its frame', () => {
   for (const { name, c } of EMITTED) {
     for (const fn of functionsIn(c)) {
       if (!fn.body.includes('JSRT_FRAME(')) {
