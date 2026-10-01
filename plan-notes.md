@@ -9110,3 +9110,37 @@ unmeasured.
 need no reopened decision. Compiling TypeScript from its `.ts` sources in `ts` mode is not an
 alternative. Its public declarations alone (`lib/typescript.d.ts`) carry 73 `enum`s and 58 `any`s,
 and `ts` mode refuses both by design.
+
+## 287. T11.0 research lands: `--node` is a platform flag over a `std`-first layer; go for P0 + N1, defer N2, no-go N3 (2026-10-02)
+
+**Plan:** §11c T11.0 execution steps 1–3. `plan.md` edited (the card's status line); the Check
+stays open until the creator's decision is recorded here.
+
+**Evidence.** `docs/research/node-mode.md` (every fact with its primary source and the date
+checked) and the corpus scan in `docs/research/node-mode/` (`scan.ts` → `scan.json`,
+`scan.md`; 12 packages from this repo's install, measured on Node 26.7.0):
+
+- 36 built-in modules across the corpus. `path` is used by 10 of 12 packages, `fs` by 9, `url` 9,
+  `util` 8, `os` 7. `process` appears in all 12 (858 uses).
+- `tsc` 6.0.3 needs 15 sync `fs` functions plus watchers, `path.join/dirname/resolve`,
+  `os.platform/EOL`, `crypto.createHash`, `performance`, ~10 `process` members, `Buffer.from`,
+  `setTimeout`, and one computed `require`. A non-watch run needs no event loop.
+- Two prerequisites the plan does not have yet: typed arrays (`Buffer` is a `Uint8Array`
+  subclass; no `Uint8Array` exists in the tree), and a real `std/*` import edge (284 landed
+  `std/env` / `std/path` as `declare`-extern fixtures, not an importable package).
+
+**Recommendation (for the creator, not a decision).**
+
+- `--node` is orthogonal to `--mode`.
+- `node:*` modules are Stator TS over typed `std/*` modules, with no C of their own.
+- libuv (v1.53.0, MIT) backs a single `std/loop`, with microtasks drained after every callback.
+- CJS cycles are exempt from `STA3001` under `--node`, and `STA1110` narrows to "without
+  `--node`".
+- Order: **go** P0 (STA4072, js-mode coverage, typed arrays, `std` edge) → N1 (sync `tsc`).
+  **Defer** N2 (loop, child processes, streams). **No-go for now** N3 (net/http/tls/zlib,
+  `worker_threads`, `vm`).
+
+**Open conflict surfaced.** T10.2's planned worker pool plus MPSC completion queue, and libuv's
+own thread pool, would be two pools. One must own the other; settle it before either lands.
+
+**Decision:** pending — the creator.

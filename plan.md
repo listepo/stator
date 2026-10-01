@@ -1314,6 +1314,10 @@ loop are likely new rows.
    backing), the `node:*` → `std` mapping, the mode shape, CommonJS semantics, the oracle,
    diagnostics, cost per slice and the go / no-go.
 
+**Status:** execution steps 1–3 are done — `docs/research/node-mode.md`, corpus under
+`docs/research/node-mode/`, summary in plan-notes 287. The Check stays open until the creator's
+decision is recorded.
+
 **Check:** `docs/research/node-mode.md` exists with sources for every fact and ends in a
 go / no-go recommendation; the creator's decision is recorded in `plan-notes.md`. If the answer
 is go, the T11.1+ cards are written here, and §0, `STA1110` and §11b A are edited in the same
