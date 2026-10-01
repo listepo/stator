@@ -46,9 +46,9 @@ Fields:
 ### JSON format
 
 `--diagnostics=json` turns the *diagnostic stream* into an array of diagnostic objects. This is
-not the same thing as `stator explain --json`, which reports a per-construct verdict array plus
-a file-level rollup — that schema is specified in `docs/MODES.md` §6 and is what
-`tests/subset/run.ts` consumes. A diagnostic is "what went wrong"; an explain verdict is "how
+not the same thing as `stator explain --json`, which reports a file verdict, every diagnostic of
+the stage that decided it, and per-function rows — that schema is specified in `docs/MODES.md` §6,
+and its `verdict` + `code` are what `tests/subset/run.ts` consumes. A diagnostic is "what went wrong"; an explain verdict is "how
 this construct would compile", and most constructs produce a verdict without producing any
 diagnostic at all.
 

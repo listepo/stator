@@ -1,6 +1,6 @@
 # Research: `--node`, the Node platform (plan.md §11c, T11.0)
 
-Status: **decided** (plan-notes 288): go P0 + N1, defer N2, no N3; `--node` is a platform flag;
+Status: **decided** (plan-notes 289): go P0 + N1, defer N2, no N3; `--node` is a platform flag;
 `std` backings and the event loop are written in **Zig** (an own loop, not libuv — §4.3's
 recommendation was not taken); `node:*` modules are written from scratch (no vendored Node JS).
 This file is the research record, not normative — `plan.md` §11c is.

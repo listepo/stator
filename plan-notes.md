@@ -9111,7 +9111,7 @@ need no reopened decision. Compiling TypeScript from its `.ts` sources in `ts` m
 alternative. Its public declarations alone (`lib/typescript.d.ts`) carry 73 `enum`s and 58 `any`s,
 and `ts` mode refuses both by design.
 
-## 287. T11.0 research lands: `--node` is a platform flag over a `std`-first layer; go for P0 + N1, defer N2, no-go N3 (2026-10-02)
+## 288. T11.0 research lands: `--node` is a platform flag over a `std`-first layer; go for P0 + N1, defer N2, no-go N3 (2026-10-02)
 
 **Plan:** §11c T11.0 execution steps 1–3. `plan.md` edited (the card's status line); the Check
 stays open until the creator's decision is recorded here.
@@ -9143,9 +9143,9 @@ checked) and the corpus scan in `docs/research/node-mode/` (`scan.ts` → `scan.
 **Open conflict surfaced.** T10.2's planned worker pool plus MPSC completion queue, and libuv's
 own thread pool, would be two pools. One must own the other; settle it before either lands.
 
-**Decision:** recorded in 288.
+**Decision:** recorded in 289.
 
-## 288. Creator's decision on T11.0, and four standing rules (2026-10-02)
+## 289. Creator's decision on T11.0, and four standing rules (2026-10-02)
 
 **Plan:** §0.5, §0.10 (new), §0 non-goals, §9 Tasks 6.15–6.16 (new), §11a, §11b A + T10.1,
 §11c (rewritten: T11.0 → done.md, cards T11.1–T11.6), §14 effort row, changelog v4.10.
@@ -9153,7 +9153,7 @@ Docs: AGENTS.md golden rules 9–11 + commands, `docs/DIAGNOSTICS.md` (`STA1110`
 narrowing), `docs/STD.md` §6, `docs/TOOLCHAIN.md` (cpd row — it still said 5.0.16; the pin is
 5.3.0), `docs/README.md`, `docs/NODE.md` (new, generated).
 
-**The creator's answers to 287's five questions:**
+**The creator's answers to 288's five questions:**
 
 1. Order P0 → N1, N2 deferred, N3 not planned — **yes**.
 2. `--node` is a platform flag orthogonal to `--mode` — **yes**.
@@ -9186,7 +9186,7 @@ narrowing), `docs/STD.md` §6, `docs/TOOLCHAIN.md` (cpd row — it still said 5.
   Zig, `libjsrt_std.a`), new `packages/node` (strict TS over `std` only), `compiler` (flag,
   resolution, CommonJS, js-mode coverage). Dependencies point `node` → `std` → `runtime`.
 
-## 289. `js` mode builds through a bundler; `packages/vite-stator` is the default (2026-10-02)
+## 290. `js` mode builds through a bundler; `packages/vite-stator` is the default (2026-10-02)
 
 **Plan:** new §11d Phase 12 (T12.0 design, T12.1 compiler API, T12.2 `vite-stator`), §11c T11.5
 (depends on T12.0's CommonJS answer), §14 effort row, changelog v4.11.
@@ -9209,4 +9209,40 @@ integrated; write the default integration as a `vite-stator` package.
   `--bundler=none`. T12.0 records the answer, and T11.5 is re-scoped in that change.
 
 **Decision:** the creator's (this entry). The design details are T12.0's.
+
+## 291. `explain` reports every diagnostic that decided the verdict; §1 and MODES.md §6 match the tree (2026-10-02)
+
+**Plan:** §1 (the `explain` bullet), §11c T11.4 Check and T11.5 steps, changelog v4.12;
+`docs/MODES.md` §6, `docs/DIAGNOSTICS.md` (JSON format note).
+
+**Contradiction.** §1 and `docs/MODES.md` §6 promised a per-construct `constructs` array with
+spans, `file` and `mode` fields and a rollup rule. The tree has never shipped it: `explainFile`
+returns `verdict`, the first deciding `code`, per-function rows (`functions`, plan §8 step 1) and
+`externCalls`. A reader of §6 would have written a consumer for fields that do not exist.
+
+**The gap that mattered.** T11.4's Check counts `STA1214` on `_tsc.js`, and `explain` could not:
+`classify` kept the first deciding diagnostic and dropped the rest, so a 1 589-diagnostic program
+and a one-diagnostic program printed the same line.
+
+**Change.** A verdict of `error`/`not-yet` now carries `diagnostics`: every diagnostic of the
+stage that decided it, `{ file, line, column, code, mode, message }`, sorted by file, line,
+column. The fields are `renderDiagnostic`'s (new `DiagnosticSite` type in
+`support/diagnostics.ts`), so the human output reuses the build's rendering instead of a second
+format. Present exactly when `code` is, so `static`/`dynamic` reports are byte-identical.
+Human output prints a count per code first when more than one diagnostic decided.
+
+**Measured** (TypeScript 6.0.3 `lib/_tsc.js`, `--mode=js`, `node --stack-size=7600`, 90.5 s
+wall): `not-yet (STA1214)`, 1 589 diagnostics — 1 541 `STA1214`, 47 `STA0012`, 1 `STA1210`. They
+come from the program + gate stage, so lowering's own count (plan-notes 286) is not reached yet.
+
+**Kept as is.** The `constructs` array is not built: per-function rows already answer "which
+function went dynamic", and a top-level-statement array would duplicate them. If it is wanted
+later it is a card, not a doc promise.
+
+**`--node`.** Not implemented here (T11.5). §6 and T11.5 now say how it surfaces: an unlanded
+`node:*` or Node-global member is a `not-yet` diagnostic naming T11.6, so this same list is the
+platform-gap report. Until then `--node` is `STA0005` (unknown flag).
+
+**Check:** `pnpm run test` (vitest, 599 tests incl. the new `explain lists every diagnostic`
+case) and `test:subset` (744 fixtures: 707 passed, 37 expected-fail, 0 failed) pass.
 

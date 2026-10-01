@@ -63,7 +63,7 @@ golden), then `std/process`, then sync `std/fs` + `std/time`.
 
 `packages/std/*.ts` (types + thin wrappers users import) → compiler recognizes `std/*` as
 a value-import edge into runtime symbols → Zig backings exporting `jsrt_std_*` (plan.md §0.5,
-plan-notes 288), built in `packages/std` as `libjsrt_std.a` and linked only when a program imports
+plan-notes 289), built in `packages/std` as `libjsrt_std.a` and linked only when a program imports
 `std/*` (plan.md §11c T11.2). No
 second RegExp, no Node `fs` semantics chase: match POSIX + document deltas here.
 
