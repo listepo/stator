@@ -1,6 +1,19 @@
 import type * as ts from 'typescript';
 
 type Mode = 'ts' | 'js';
+
+/** Raised for conditions the USER can act on: a missing file, a missing toolchain. Anything the
+ * user cannot act on is a Diagnostic with an STA4xxx code, not an exception. Lives here rather than
+ * in `src/cli/` because the frontend raises one too (STA0013, the TypeScript checker's stack). */
+export class BuildError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'BuildError';
+  }
+}
 type DiagnosticClass = 'error' | 'never' | 'not-yet' | 'runtime' | 'internal';
 
 /** Span in the source: offset (0-indexed UTF-16 units) and length.

@@ -282,11 +282,11 @@ async function buildInProcess(input: string, output: string): Promise<ProcessRes
       if (error instanceof BuildError) {
         return { status: 1, stdout: '', stderr: `stator: ${error.code} ${error.message}\n` };
       }
-      // The upstream checker recurses without a depth guard, so a pathological input (Test262's
-      // generator-prop-name-yield-expr.js shape: `var yield` plus a generator method keyed by
-      // `[yield]`) overflows the JS stack inside `getSemanticDiagnostics` — the same crash the CLI
-      // converts to STA4072. In-process that throw would reject the pool worker and kill the whole
-      // shard, so it becomes the same STA4072-class per-test FAILURE here instead. Matched narrowly
+      // The upstream checker's overflow (Test262's generator-prop-name-yield-expr.js: `var yield`
+      // plus a generator method keyed by `[yield]`) now arrives above as BuildError STA0013
+      // (plan-notes 287). This is the backstop for a stack overflow anywhere else: in-process that
+      // throw would reject the pool worker and kill the whole shard, so it becomes the CLI's
+      // STA4072-class per-test FAILURE here instead. Matched narrowly
       // on the call-stack signature: any other RangeError (an OOM-style or allocator failure) is
       // still rethrown, because swallowing a resource failure as a conformance verdict would lie
       // about the run. STA4072 is not an STA12xx code, so the existing classification below records
