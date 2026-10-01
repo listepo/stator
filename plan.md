@@ -1291,6 +1291,29 @@ questions:
    narrows to "never outside `--node`". Codes are never reused or renumbered.
 7. **Cost and verdict.** An effort estimate per slice, and a go / no-go recommendation.
 
+**Creator's constraint (2026-10-02): two layers, `std` first.** Stator gets its own base
+libraries for files, network, processes, time, OS information and the like, as typed `std/*`
+modules backed by C (the §11b A model, extended past T10.1's v0 table). `node:*` modules are
+thin wrappers over `std`, never C of their own. So the research must answer, per Node module the
+corpus needs, which `std` module and functions would back it. T10.1's `std/fs`, `std/process`
+and `std/time` are the start, and `std/net`, `std/child_process`-style spawning and an event
+loop are likely new rows.
+
+**Execution plan.**
+1. Measure the corpus with a TypeScript-API scanner (`packages/tests/` is not touched; the
+   script and its raw output go under `docs/research/node-mode/`). Count `require` /
+   `node:` specifiers, `process.*` / `Buffer.*` / timer uses, and the members used per
+   module. The corpus is `tsc` 6.0.3 plus other bundled CLIs in this repo's `node_modules`, with
+   versions recorded.
+2. Primary-source research, run in parallel:
+   - Node 26 docs: the module surface, CommonJS loading and cycles, `process`, `Buffer`.
+   - Prior art: Bun, Deno, Static Hermes, Porffor, Node SEA / pkg.
+   - Backing: libuv, and how other systems stdlibs layer files, net and processes.
+   - The oracle: Node's own test suite layout.
+3. Write `docs/research/node-mode.md`. It holds the `std` layer table (module → functions → C
+   backing), the `node:*` → `std` mapping, the mode shape, CommonJS semantics, the oracle,
+   diagnostics, cost per slice and the go / no-go.
+
 **Check:** `docs/research/node-mode.md` exists with sources for every fact and ends in a
 go / no-go recommendation; the creator's decision is recorded in `plan-notes.md`. If the answer
 is go, the T11.1+ cards are written here, and §0, `STA1110` and §11b A are edited in the same
