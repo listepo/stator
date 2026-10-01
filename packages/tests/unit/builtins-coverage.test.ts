@@ -16,7 +16,7 @@
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { CONSOLE_METHODS } from '../../compiler/src/hir/nodes.ts';
 
@@ -72,7 +72,7 @@ function emptyClaims(): { readonly namespace: string; readonly member: string }[
   return empty;
 }
 
-void test('an empty coverage claim means no runtime entry point', () => {
+test('an empty coverage claim means no runtime entry point', () => {
   const declared = declaredSymbols();
   const drifted: string[] = [];
   for (const { namespace, member } of emptyClaims()) {

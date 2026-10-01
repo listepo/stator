@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import * as ts from 'typescript';
 import { classifyFunction, mapCType, tsFunctionName } from '../../compiler/src/ffi-gen/abi.ts';
 import { runClangAstDump } from '../../compiler/src/ffi-gen/ast.ts';
@@ -41,8 +41,9 @@ function hasClang(): boolean {
   }
 }
 
-/** `{ skip }` for every test that shells to clang — a skipped proof stays visible in the runner. */
-const NEEDS_CLANG = hasClang() ? {} : { skip: 'no C compiler on PATH' };
+/** `{ skip }` for every test that shells to clang (none on PATH) — a skipped proof stays visible
+ * in the runner. */
+const NEEDS_CLANG = { skip: !hasClang() };
 
 const EMPTY_MODEL: HeaderModel = {
   basename: 'test.h',
@@ -121,14 +122,14 @@ function refusedCode(
   return `${mapped.refusal.reason}||${mapped.refusal.code ?? 'nocode'}`;
 }
 
-void test('C names camelCase mechanically, never guessing a library prefix', () => {
+test('C names camelCase mechanically, never guessing a library prefix', () => {
   assert.equal(tsFunctionName('sqlite3_step'), 'sqlite3Step');
   assert.equal(tsFunctionName('sqlite3_libversion_number'), 'sqlite3LibversionNumber');
   assert.equal(tsFunctionName('plain_add'), 'plainAdd');
   assert.equal(tsFunctionName('delete'), 'deleteFn');
 });
 
-void test('scalars map through the reverse table; void is return-only', () => {
+test('scalars map through the reverse table; void is return-only', () => {
   assert.equal(mappedType('double', 'param'), 'number');
   assert.equal(mappedType('float', 'return'), 'number');
   assert.equal(mappedType('int', 'param'), 'number');
@@ -141,7 +142,7 @@ void test('scalars map through the reverse table; void is return-only', () => {
   assert.match(refusedCode('void', 'param'), /return position only/);
 });
 
-void test('strings follow the const rule: borrow in, copy out, never mutable', () => {
+test('strings follow the const rule: borrow in, copy out, never mutable', () => {
   assert.equal(mappedType('const char *', 'param'), 'cstring');
   assert.equal(mappedType('const unsigned char *', 'return'), 'cstring');
   assert.equal(mappedType('char *', 'return'), 'cstring');
@@ -149,7 +150,7 @@ void test('strings follow the const rule: borrow in, copy out, never mutable', (
   assert.match(refusedCode('char * const', 'param'), /mutable/);
 });
 
-void test('struct pointers brand; unions, bitfields, and T** refuse', () => {
+test('struct pointers brand; unions, bitfields, and T** refuse', () => {
   const model = modelWith({
     typedefs: new Map([
       ['Node', { name: 'Node', underlying: 'struct Node', anonTagId: undefined }],
@@ -180,7 +181,7 @@ void test('struct pointers brand; unions, bitfields, and T** refuse', () => {
   assert.match(refusedCode('struct Node', 'param', model), /by value/);
 });
 
-void test('an anonymous struct behind a typedef is still a branded pointer', () => {
+test('an anonymous struct behind a typedef is still a branded pointer', () => {
   const model = modelWith({
     typedefs: new Map([
       ['Point', { name: 'Point', underlying: 'struct Point', anonTagId: 'anon1' }],
@@ -195,7 +196,7 @@ void test('an anonymous struct behind a typedef is still a branded pointer', () 
   assert.equal(mappedType('Point *', 'param', model), 'pointer:Ptr_Point');
 });
 
-void test('typedef chains that hide declarator depth re-enter the full analysis', () => {
+test('typedef chains that hide declarator depth re-enter the full analysis', () => {
   const model = modelWith({
     typedefs: new Map([
       [
@@ -218,7 +219,7 @@ void test('typedef chains that hide declarator depth re-enter the full analysis'
   assert.match(refusedCode('cb_t', 'param', model), /\|\|STA1117/);
 });
 
-void test('64-bit integers refuse; size_t widens by documented rule', () => {
+test('64-bit integers refuse; size_t widens by documented rule', () => {
   const model = modelWith({
     typedefs: new Map([
       ['my_ulong', { name: 'my_ulong', underlying: 'unsigned long', anonTagId: undefined }],
@@ -236,7 +237,7 @@ void test('64-bit integers refuse; size_t widens by documented rule', () => {
   assert.equal(mappedType('size_t', 'param'), 'number');
 });
 
-void test('void*, scalar pointers, arrays, fn pointers, and unknowns refuse with their codes', () => {
+test('void*, scalar pointers, arrays, fn pointers, and unknowns refuse with their codes', () => {
   assert.equal(mappedType('void *', 'param'), 'pointer:Ptr_void');
   assert.match(refusedCode('void *', 'return'), /allocator/);
   assert.match(refusedCode('int *', 'param'), /out-param\/array/);
@@ -246,7 +247,7 @@ void test('void*, scalar pointers, arrays, fn pointers, and unknowns refuse with
   assert.equal(mappedType('enum Color', 'return'), 'number');
 });
 
-void test('function-level scope refusals precede the positions, with the gate order inside', () => {
+test('function-level scope refusals precede the positions, with the gate order inside', () => {
   const variadic = classifyFunction(
     cfn('f', ['const char *'], 'int', { variadic: true }),
     EMPTY_MODEL,
@@ -335,7 +336,7 @@ function generateSample(headerName = 'sample.h'): {
   }
 }
 
-void test(
+test(
   'end-to-end: six functions emitted with brands, twelve refusals with lines',
   NEEDS_CLANG,
   () => {
@@ -419,7 +420,7 @@ void test(
   },
 );
 
-void test(
+test(
   'end-to-end: every emitted non-Out declaration passes the real gate classifier',
   NEEDS_CLANG,
   () => {
@@ -453,7 +454,7 @@ void test(
   },
 );
 
-void test('oracle diff: matches, mismatches, and both one-sided rows', NEEDS_CLANG, () => {
+test('oracle diff: matches, mismatches, and both one-sided rows', NEEDS_CLANG, () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-ffi-gen-'));
   try {
     const header = join(work, 'mini.h');
@@ -484,7 +485,7 @@ void test('oracle diff: matches, mismatches, and both one-sided rows', NEEDS_CLA
   }
 });
 
-void test('refusal codes: macros, enum constants, and globals cite STA1130', () => {
+test('refusal codes: macros, enum constants, and globals cite STA1130', () => {
   const model: HeaderModel = {
     basename: 't.h',
     functions: [],
@@ -528,7 +529,7 @@ void test('refusal codes: macros, enum constants, and globals cite STA1130', () 
   assert.match(summaryLine(result), /macro constant: 1/);
 });
 
-void test('refusal codes: gate-equivalent refusals keep their would-be codes', () => {
+test('refusal codes: gate-equivalent refusals keep their would-be codes', () => {
   const model: HeaderModel = {
     basename: 'g.h',
     functions: [
@@ -561,7 +562,7 @@ void test('refusal codes: gate-equivalent refusals keep their would-be codes', (
   }
 });
 
-void test('--lib emits one @statorLink line per lib, in order, after the header comment', () => {
+test('--lib emits one @statorLink line per lib, in order, after the header comment', () => {
   const result = generate(EMPTY_MODEL);
   const plain = renderDts(result);
   assert.ok(!plain.includes('@statorLink: -l'), 'no flag means no link lines');
@@ -582,7 +583,7 @@ void test('--lib emits one @statorLink line per lib, in order, after the header 
   );
 });
 
-void test('T** out-params share one Out alias that precedes its uses', () => {
+test('T** out-params share one Out alias that precedes its uses', () => {
   const model: HeaderModel = {
     basename: 'o.h',
     functions: [
@@ -625,7 +626,7 @@ void test('T** out-params share one Out alias that precedes its uses', () => {
   assert.ok(!withoutOut.includes('type Out<T>'), 'no Out params means no alias');
 });
 
-void test(
+test(
   'cli: --lib is repeatable, output is deterministic, a second header errors',
   NEEDS_CLANG,
   () => {

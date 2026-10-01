@@ -5,11 +5,11 @@
  * that shape so a later pass cannot "simplify" a read-before-write back into a TDZ. */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { verifyHir } from '../../compiler/src/hir/verify.ts';
 import { lowerSource, requireInit } from './helpers.ts';
 
-void test('var at module level hoists a let initialized undefined, then assigns', () => {
+test('var at module level hoists a let initialized undefined, then assigns', () => {
   const { module, diagnostics } = lowerSource('console.log(x);\nvar x = 1;\n', '/test.js');
   assert.deepEqual(
     diagnostics.map((d) => d.code),
@@ -34,7 +34,7 @@ void test('var at module level hoists a let initialized undefined, then assigns'
   assert.deepEqual(verifyHir(module), []);
 });
 
-void test('a second var of the same name is an assignment, not a second slot', () => {
+test('a second var of the same name is an assignment, not a second slot', () => {
   const { module, diagnostics } = lowerSource('var x = 1;\nvar x = 2;\n', '/test.js');
   assert.deepEqual(
     diagnostics.map((d) => d.code),
@@ -48,7 +48,7 @@ void test('a second var of the same name is an assignment, not a second slot', (
   assert.deepEqual(verifyHir(module), []);
 });
 
-void test('var inside a block is visible after it', () => {
+test('var inside a block is visible after it', () => {
   const { module, diagnostics } = lowerSource(
     'if (true) { var y = 7; }\nconsole.log(y);\n',
     '/test.js',
@@ -67,7 +67,7 @@ void test('var inside a block is visible after it', () => {
   assert.deepEqual(verifyHir(module), []);
 });
 
-void test('var that repeats a parameter name does not allocate a second slot', () => {
+test('var that repeats a parameter name does not allocate a second slot', () => {
   const { module, diagnostics } = lowerSource(
     'function f(x) { var x = 2; return x; }\n',
     '/test.js',
@@ -92,7 +92,7 @@ void test('var that repeats a parameter name does not allocate a second slot', (
   assert.deepEqual(verifyHir(module), []);
 });
 
-void test('var without an initializer is a hoist and a no-op at the site', () => {
+test('var without an initializer is a hoist and a no-op at the site', () => {
   const { module, diagnostics } = lowerSource('var x;\nconsole.log(x);\n', '/test.js');
   assert.deepEqual(
     diagnostics.map((d) => d.code),

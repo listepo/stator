@@ -14,7 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { emitC } from '../../compiler/src/codegen/index.ts';
 import { collectUnitExports, renderHeader } from '../../compiler/src/frontend/export.ts';
@@ -81,7 +81,7 @@ function emitLibrary(source: string, unit = 'u'): { c: string; header: string } 
   return { c: emitC(optimized, { unit, exports: unitExports }), header: renderHeader(unitExports) };
 }
 
-void test('the shake keeps C-visible exports nothing in the module calls', () => {
+test('the shake keeps C-visible exports nothing in the module calls', () => {
   const source =
     'export function live(): number { return 1; }\n' +
     'export function dead(): number { return 2; }\n' +
@@ -96,7 +96,7 @@ void test('the shake keeps C-visible exports nothing in the module calls', () =>
   assert.deepEqual(namesOf(eliminateDeadCode(loweredModule(source), ['dead'])), ['live', 'dead']);
 });
 
-void test('the library object has init instead of main, with the guard set before jsrt_init', () => {
+test('the library object has init instead of main, with the guard set before jsrt_init', () => {
   const { c } = emitLibrary(
     'export function add(a: number, b: number): number { return a + b; }\n',
   );
@@ -116,7 +116,7 @@ void test('the library object has init instead of main, with the guard set befor
   assert.ok(c.includes('JSRT_GLOBALS_ENTER(2);'));
 });
 
-void test('a top-level throw in init lands in the error cell instead of exiting', () => {
+test('a top-level throw in init lands in the error cell instead of exiting', () => {
   const { c } = emitLibrary(
     'export function add(a: number, b: number): number { return a + b; }\n' +
       'if (add(1, 1) !== 2) { throw new Error("unreachable"); }\n' +
@@ -128,7 +128,7 @@ void test('a top-level throw in init lands in the error cell instead of exiting'
   assert.ok(!c.includes('jsrt_uncaught();'), 'a library never exits its host');
 });
 
-void test('stubs convert, call through the global, and answer sentinels on the error path', () => {
+test('stubs convert, call through the global, and answer sentinels on the error path', () => {
   const { c } = emitLibrary(
     'export function add(a: number, b: number): number { return a + b; }\n' +
       'export function done(x: number): void {}\n' +
@@ -157,7 +157,7 @@ void test('stubs convert, call through the global, and answer sentinels on the e
   assert.ok(c.includes('const char *stator_u_last_error(void) {'));
 });
 
-void test('a NULL CString argument is a catchable TypeError, never an assert', () => {
+test('a NULL CString argument is a catchable TypeError, never an assert', () => {
   const { c } = emitLibrary(
     'type CString = string & { readonly __statorCstr: "CString" };\n' +
       'export function size(s: CString): number { return 0; }\n',
@@ -167,7 +167,7 @@ void test('a NULL CString argument is a catchable TypeError, never an assert', (
   assert.ok(c.includes('JSRT_LOCAL(0) = jsrt_string_from_cstr(s);'));
 });
 
-void test('exported consts are defined mutable and stored by init from their globals', () => {
+test('exported consts are defined mutable and stored by init from their globals', () => {
   const { c } = emitLibrary(
     'export const VERSION: number = 1;\nexport const NAME = "s";\nconsole.log(VERSION);\n',
   );
@@ -179,7 +179,7 @@ void test('exported consts are defined mutable and stored by init from their glo
   assert.ok(c.indexOf('jsrt_print(') < c.indexOf('stator_u_VERSION = '));
 });
 
-void test('the header declares init first, then the error cell, then the stubs', () => {
+test('the header declares init first, then the error cell, then the stubs', () => {
   const { header } = emitLibrary(
     'export function add(a: number, b: number): number { return a + b; }\n',
   );
@@ -192,7 +192,7 @@ void test('the header declares init first, then the error cell, then the stubs',
   assert.ok(header.includes('function first is undefined behavior.'));
 });
 
-void test('the same library input emits byte-identical C across runs', () => {
+test('the same library input emits byte-identical C across runs', () => {
   const source =
     'export function add(a: number, b: number): number { return a + b; }\n' +
     'export const VERSION: number = 1;\n';
@@ -208,7 +208,7 @@ function functionsIn(c: string): EmittedFunction[] {
   });
 }
 
-void test('every stub frame roots exactly what the stub writes and pops on every exit', () => {
+test('every stub frame roots exactly what the stub writes and pops on every exit', () => {
   const { c } = emitLibrary(
     'export function add(a: number, b: number): number { return a + b; }\n' +
       'export function done(x: number): void {}\n' +
@@ -308,63 +308,59 @@ function archiveSystemFlags(): string[] {
   return flags === '' ? [] : flags.split(/\s+/);
 }
 
-void test(
-  'exported fallible and infallible functions callable through the header',
-  NATIVE_ONLY,
-  () => {
-    assert.ok(existsSync(RUNTIME_ARCHIVE), `runtime archive missing at ${RUNTIME_ARCHIVE}`);
-    const work = mkdtempSync(join(tmpdir(), 'stator-export-stubs-'));
-    try {
-      const entry = join(work, 'widget.ts');
-      const headerPath = join(work, 'widget.h');
-      const out = join(work, 'widget.o');
-      writeFileSync(entry, STUB_FIXTURE);
-      const build = spawnSync(
-        process.execPath,
-        [CLI, 'build', entry, '-o', out, '--emit-header', headerPath, '--unit-name', 'widget'],
-        { encoding: 'utf8' },
-      );
-      assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
-      const mainPath = join(work, 'main.c');
-      writeFileSync(mainPath, STUB_MAIN('widget.h'));
-      const app = join(work, 'app');
-      const linkArgs: string[] = [
-        '-std=c11',
-        '-Wall',
-        '-Wextra',
-        '-Werror',
-        '-I',
-        RUNTIME_INCLUDE,
-        '-I',
-        work,
-        mainPath,
-        out,
-        '-L',
-        RUNTIME_LIB_DIR,
-        '-ljsrt',
-        ...archiveSystemFlags(),
-        '-o',
-        app,
-      ];
-      // The consumer-side link shares the CLI's stale-linker retry (a stale bundled ld
-      // against a newer Xcode SDK fails here exactly as in `build.ts` link()): one retry
-      // under the newest readable CLT SDK, then the original failure stands.
-      let link = spawnSync('clang', linkArgs, { encoding: 'utf8' });
-      const retry = staleLdRetryArgs(linkArgs, link.stderr, {
-        darwin: process.platform === 'darwin',
-        defaultCc: true,
-        sanitized: false,
-      });
-      if (link.status !== 0 && retry !== undefined) {
-        link = spawnSync('clang', retry.args, { encoding: 'utf8' });
-      }
-      assert.equal(link.status, 0, `link failed:\n${link.stdout}${link.stderr}`);
-      const run = spawnSync(app, [], { encoding: 'utf8' });
-      assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
-      assert.equal(run.stdout, 'init-side-effect\ncaptured: Error: neg\n9\nffi-stubs ok\n');
-      assert.equal(run.stderr, '');
-    } finally {
-      rmSync(work, { recursive: true, force: true });
+test('exported fallible and infallible functions callable through the header', NATIVE_ONLY, () => {
+  assert.ok(existsSync(RUNTIME_ARCHIVE), `runtime archive missing at ${RUNTIME_ARCHIVE}`);
+  const work = mkdtempSync(join(tmpdir(), 'stator-export-stubs-'));
+  try {
+    const entry = join(work, 'widget.ts');
+    const headerPath = join(work, 'widget.h');
+    const out = join(work, 'widget.o');
+    writeFileSync(entry, STUB_FIXTURE);
+    const build = spawnSync(
+      process.execPath,
+      [CLI, 'build', entry, '-o', out, '--emit-header', headerPath, '--unit-name', 'widget'],
+      { encoding: 'utf8' },
+    );
+    assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
+    const mainPath = join(work, 'main.c');
+    writeFileSync(mainPath, STUB_MAIN('widget.h'));
+    const app = join(work, 'app');
+    const linkArgs: string[] = [
+      '-std=c11',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-I',
+      RUNTIME_INCLUDE,
+      '-I',
+      work,
+      mainPath,
+      out,
+      '-L',
+      RUNTIME_LIB_DIR,
+      '-ljsrt',
+      ...archiveSystemFlags(),
+      '-o',
+      app,
+    ];
+    // The consumer-side link shares the CLI's stale-linker retry (a stale bundled ld
+    // against a newer Xcode SDK fails here exactly as in `build.ts` link()): one retry
+    // under the newest readable CLT SDK, then the original failure stands.
+    let link = spawnSync('clang', linkArgs, { encoding: 'utf8' });
+    const retry = staleLdRetryArgs(linkArgs, link.stderr, {
+      darwin: process.platform === 'darwin',
+      defaultCc: true,
+      sanitized: false,
+    });
+    if (link.status !== 0 && retry !== undefined) {
+      link = spawnSync('clang', retry.args, { encoding: 'utf8' });
     }
-  },
-);
+    assert.equal(link.status, 0, `link failed:\n${link.stdout}${link.stderr}`);
+    const run = spawnSync(app, [], { encoding: 'utf8' });
+    assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
+    assert.equal(run.stdout, 'init-side-effect\ncaptured: Error: neg\n9\nffi-stubs ok\n');
+    assert.equal(run.stderr, '');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
