@@ -1,7 +1,9 @@
 # Research: `--node`, the Node platform (plan.md §11c, T11.0)
 
-Status: **research complete, decision pending.** The creator records the go/no-go in `plan-notes.md`.
-Everything here is input to that decision. None of it is normative until `plan.md` says so.
+Status: **decided** (plan-notes 288): go P0 + N1, defer N2, no N3; `--node` is a platform flag;
+`std` backings and the event loop are written in **Zig** (an own loop, not libuv — §4.3's
+recommendation was not taken); `node:*` modules are written from scratch (no vendored Node JS).
+This file is the research record, not normative — `plan.md` §11c is.
 
 Checked 2026-10-02. Every fact carries its primary source. Facts with no primary source are marked
 **unverified**. Lines marked *synthesis* are this document's own reasoning, not a source's.

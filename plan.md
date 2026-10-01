@@ -16,13 +16,14 @@
 2. **TypeScript types are unsound. Never trust an annotation without a boundary check.** `as` casts, out-of-date `.d.ts` files, bivariant method params, and `JSON.parse` all let lies into the type system. Trust types *inside* checked code; insert runtime checks wherever untyped/external values enter (Static Hermes model).
 3. **Don't write a parser. Don't write a type checker.** The compiler is TypeScript, so use the `typescript` npm package **in-process**: `ts.createProgram(...)` for parsing + module graph, `program.getTypeChecker()` for types. Lower directly from the TS AST (`ts.Node`) — no ESTree conversion layer. Do **not** build on `tsgo`/TypeScript 7's compiler API (explicitly incomplete as of the TS 7.0 RC) — re-evaluate quarterly in `plan-notes.md`.
 4. **Emit C first, LLVM IR later.** Static Hermes, Porffor, and scriptc all print C: easier debugging, `#line` source mapping for free, clang does the heavy optimization. A direct LLVM backend is a later optimization (and can be plain `.ll` text emission — no bindings needed), not a starting point.
-5. **Never emit Rust, and don't use Rust anywhere in this project.** Rust-as-target was measured and rejected (dyn-dispatch overhead, DSTs, `Rc<RefCell>` aliasing, slow borrow-check on generated megafiles). The compiler is TypeScript; the runtime is **C11 with a Zig memory core** (plan-notes 238 / T9.1). Generated code stays C. The C11-only runtime was reopened on the creator's direction, not measured evidence — C11-only returns only on the same kind of direction. No FFI between compiler components. Do not grow Zig past the memory core without a new plan card.
+5. **Never emit Rust, and don't use Rust anywhere in this project.** Rust-as-target was measured and rejected (dyn-dispatch overhead, DSTs, `Rc<RefCell>` aliasing, slow borrow-check on generated megafiles). The compiler is TypeScript; the runtime is **C11 with a Zig memory core** (plan-notes 238 / T9.1). Generated code stays C. The C11-only runtime was reopened on the creator's direction, not measured evidence — C11-only returns only on the same kind of direction. No FFI between compiler components. **Zig rule (creator's direction 2026-10-02, plan-notes 288):** new runtime code that manages memory or must be cross-platform — typed-array storage, the `std` backings, the event loop, OS abstraction — is written in Zig. C stays for the C ABI headers generated code includes (`jsrt.h`, `jsrt_value.h`), for generated code, for vendored upstream code, and for existing C until a card ports it. No wholesale port of the C runtime without a card.
 6. **The runtime is the moat, not the codegen.** GC, builtins coverage, strings, RegExp, and ICU are where the years go. Budget accordingly; tree-shake builtins from day 1.
 7. **Allocation dominates, not dispatch.** Boa's Cranelift JIT experiment proved it: 10× on numeric loops, <5% on allocation-bound benchmarks; GC tracing 10–16% of time, dispatch only ~13%. This ordering drives the optimization ladder (§12).
 8. **One pipeline, two modes.** A mode is a *policy layer* (which files are accepted, which constructs are errors, how untyped code is typed) over one shared pipeline. If a feature seems to require forking the pipeline per mode, the design is wrong — stop and fix the design (usually: the feature belongs to the dynamic representation or the Phase-8 tier).
 9. **The compiler itself is strict TypeScript.** Locked `tsconfig` (§4 Task 1.0), no `any` in compiler source, vitest for unit tests (dev-only, run on Node's own type stripping — plan-notes 285), runtime dependency budget: the `typescript` package only — **owner-directed exception (2026-09-04, plan-notes 187):** `src/cli/` may use ink + react (human-facing rendering plus per-command help, long-form flags) and dotenv (environment loading), and OpenTelemetry tracing (`@opentelemetry/*`, opt-in via `STATOR_OTEL`, standard OTLP env config — works with Maple and any OTLP backend) is wired through `src/support/telemetry.ts`; execa is dev-only for `tests/unit/cli.test.ts`. The budget still rules everything else: no pass, lowering, or codegen code may depend on these. The compiler must always pass its own `ts` mode's *philosophy*: fully typed, no dynamic escape hatches.
+10. **No JavaScript in the project's own source** (creator's direction 2026-10-02, plan-notes 288). The compiler, runtime, `std`, the `node:*` wrappers, test harnesses, oracle shims and scripts are strict TypeScript, C or Zig. `.js` / `.mjs` / `.cjs` files exist only as: `js`-mode test inputs and examples (the thing under test), vendored upstream code, generated output, and assets a browser loads as-is (`site/public/`). The existing harness `.mjs` files migrate under §9 Task 6.15.
 
-**Non-goals (v1):** npm-ecosystem compatibility; `eval`/`new Function` (never in `ts` mode; `js` mode not before Phase 8); `Proxy`; `with`; prototype mutation after construction; decorators; full Intl; Node API emulation; Windows (POSIX + clang first); self-hosting the compiler.
+**Non-goals (v1):** npm-ecosystem compatibility (Phase 11 targets Node *programs* such as `tsc`, not the npm ecosystem at large); `eval`/`new Function` (never in `ts` mode; `js` mode not before Phase 8); `Proxy`; `with`; prototype mutation after construction; decorators; full Intl; Node API emulation outside Phase 11's `--node` platform (§11c); Windows (POSIX + clang first); self-hosting the compiler.
 
 ---
 
@@ -736,6 +737,23 @@ one people learn to ignore — which costs more than having no gate at all.
 
 ~~**Task 6.14 — A checker stack overflow must fail its test, never its shard.**~~ ✅ **landed 2026-09-14** — evidence in [done.md](done.md) → Phase 6 Task 6.14 (plan-notes 254).
 
+**Task 6.15 — No JavaScript in our own source (§0.10, plan-notes 288).** Port to strict TS (Node
+runs them through type stripping, as it runs every harness today): the oracle shims
+(`packages/tests/golden/*/*/node_shim.mjs`, `examples/ffi/*/node_shim.mjs`), the runtime print
+corpus (`packages/runtime/tests/print_*.mjs`), `scripts/check-node.mjs`,
+`packages/runtime/vendor/update.mjs`, `packages/runtime/vendor/fdlibm/port.mjs` and
+`site/astro.config.mjs`. Exempt: `js`-mode test inputs and examples, vendored upstream code,
+generated output, `site/public/` assets. **Check:** `git ls-files '*.js' '*.mjs' '*.cjs'` lists only
+exempt paths; a lint step (a few lines in `scripts/`) enforces that list in `ci`; `pnpm run ci`
+green.
+
+**Task 6.16 — Work the clone baseline to zero (AGENTS.md golden rule 10).** `.jscpd-baseline.json`
+records 224 clones (identifier-insensitive, tests/vendor/docs excluded — 4.6% of our source, of
+which 1.1% exact) as debt. Extract a shared helper per clone family at the responsible layer
+(`lower/`, `codegen/`, `runtime/src/jsrt_array_ops.c` lead the list) and shrink the baseline with
+`pnpm run dupes:baseline` in the same change. **Check:** the baseline is empty; `pnpm run dupes`
+then runs with no baseline at all.
+
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
@@ -1053,15 +1071,16 @@ Full survey: plan-notes 239. Short form:
 | Emit / link | C; clang + `libjsrt.a` | settled |
 | Generated code | C only | settled |
 | Rust | nowhere, including MMTk | settled (§15.4) |
-| Runtime | C11 + Zig memory core (T9.1 only) | creator direction (238) |
+| Runtime | C11 + Zig: the memory core (T9.1) and all new memory-managing or cross-platform code (§0.5) | creator direction (238, 288) |
 | `std` + OS threads | First-party `jsrt_std_*` + `std/*` modules; threads↔async bridge | Phase 10 (240) |
 | Host compile parallelism | Same TS compiler; `STATOR_COMPILE_JOBS` / worker or process pool | Phase 10 T10.3 (240) |
 | Vendored | QuickJS-NG libregexp/libunicode, fdlibm | settled |
 | Optional native | Boehm; ICU (intl build) | settled |
 | CLI-only | ink/react, dotenv; OTel opt-in | settled (187) |
 
-**Zig (T9.1 only):** GC glue, alloc helpers, shape tables, growable buffers. Same C ABI into
-`libjsrt.a`. Do **not** grow Zig into builtins, math, regexp, or codegen without a new plan task.
+**Zig:** T9.1's GC glue, alloc helpers, shape tables and growable buffers, plus — since plan-notes
+288 — new code that manages memory or must be cross-platform (§0.5). Same C ABI into `libjsrt.a`.
+Existing C builtins, math and regexp stay C until a card ports them; codegen never emits Zig.
 
 **Worth considering later — not tasks yet** (ride §12 / the named tripwire):
 
@@ -1102,7 +1121,7 @@ the existing pipeline (`node:worker_threads` / a process pool), not Zig/Rust/Go 
 
 | Neighbor | How Phase 10 relates |
 |---|---|
-| Phase 7 FFI | `std` is **first-party** runtime C (`jsrt_std_*`), not user `declare` bindings. Phase 7's memory/string/error rules still apply when `std` calls libc. Phase 7's "single-threaded v0" is reopened **only** by T10.2 — FFI callbacks from foreign threads stay undefined until T10.2's bridge exists and 7.2's header is updated. |
+| Phase 7 FFI | `std` is **first-party** runtime code (`jsrt_std_*`, Zig by default per §0.5), not user `declare` bindings. Phase 7's memory/string/error rules still apply when `std` calls libc. Phase 7's "single-threaded v0" is reopened **only** by T10.2 — FFI callbacks from foreign threads stay undefined until T10.2's bridge exists and 7.2's header is updated. |
 | Phase 9 / T9.1 | Threads need a **threads-enabled Boehm** and per-thread stack registration. Prefer landing T9.1's GC glue (or the equivalent C path) before stress-testing T10.2; T10.1's non-thread modules do not wait on Zig. |
 | Task 4.6 async | The resume machine, `jsrt_promise_subscribe`, and `jsrt_run_microtasks` are the async half of the bridge. Do not invent a second event loop. |
 | §12 ladder | Host compile parallelism (T10.3) is a **developer-time** win; it is not a §12 runtime rung. Measure wall time of `stator build` before/after; keep only if geomean moves. |
@@ -1110,7 +1129,7 @@ the existing pipeline (`node:worker_threads` / a process pool), not Zig/Rust/Go 
 
 ### Design: how to implement this best
 
-#### A. `std` is a typed module, backed by C — not Node polyfills
+#### A. `std` is a typed module, backed by Zig — not Node polyfills
 
 1. **Ship `docs/STD.md` before any code** (§15.6). The doc freezes: module path (`std` vs
    `@stator/std`), sync vs Promise APIs, error model (throw `Error` with `code` / `errno`, never
@@ -1127,10 +1146,13 @@ the existing pipeline (`node:worker_threads` / a process pool), not Zig/Rust/Go 
    | `std/time` | `nowMs`, `sleepMs` (sync) | timers in the microtask sense stay out until a macrotask phase exists |
    | `std/sync` | `Mutex`, `CondVar`, `Channel` | with T10.2 |
    | `std/thread` | `spawn`, `join`, `availableParallelism` | with T10.2 |
+   | `std/os`, `std/io`, `std/hash`, `std/encoding` | see §11c T11.3 | Phase 11 N1 |
+   | `std/loop`, `std/child`, `std/net` | see §11c "Deferred" | Phase 11 N2, deferred |
 
 3. **Implementation layers:** `packages/std/*.ts` (types + thin wrappers users import) →
-   compiler recognizes `std/*` as a value-import edge into runtime symbols → `runtime/src/jsrt_std_*.c`
-   (or Zig only if a later card moves buffers there — **not** by default). No second RegExp, no
+   compiler recognizes `std/*` as a value-import edge into runtime symbols → Zig backings exporting
+   `jsrt_std_*` (§0.5; plan-notes 288). The package layout is §11c's: `packages/std` holds both
+   the TS surface and the Zig, and builds `libjsrt_std.a`, linked only when a program imports `std/*`. No second RegExp, no
    Node `fs` semantics chase: match POSIX + document deltas in `STD.md`.
 4. **Gate:** unknown `std/foo` is a hard error; partial modules use `not-yet` codes that name
    **Phase 10** as the blocker owner (§15.9).
@@ -1207,6 +1229,9 @@ Steps:
 5. Promise-flavored `std/fs` APIs: either `not-yet` until T10.2, or implemented as sync under a
    documented lie — **prefer not-yet** so async programs do not block main by accident.
 
+Steps 3–4 land inside `packages/std` once §11c T11.2 creates it (plan-notes 288), not as more
+`declare`-extern fixtures.
+
 **Check:** goldens for env/path/process/fs sync; subset rows match; no Node polyfill dependency.
 
 ### T10.2. OS threads + async bridge — **[D5]**
@@ -1248,80 +1273,199 @@ byte-identical emitted C for the fixture; CI green.
 
 ---
 
-## 11c. Phase 11 — `--node`: the Node platform (research-gated) — **[D5]**
+## 11c. Phase 11 — `--node`: the Node platform — **[D5]**
 
-Creator's direction (2026-10-02, plan-notes 286). Add a `--node` mode in which a program may use
-the Node platform: CommonJS `require` / `module.exports`, `process`, `Buffer`, timers and the
-`node:*` built-in modules. The goal is for real Node programs to compile. The first target is
-TypeScript's own `tsc` bundle.
+Creator's direction (2026-10-02, plan-notes 286, decided in 288). A program may use the Node
+platform: CommonJS `require` / `module.exports`, `process`, `Buffer`, timers and the `node:*`
+built-in modules. The first target is TypeScript 6.0.3's own `tsc` bundle.
 
-**This card reopens three settled positions, and only through research.** They are §0's non-goal
-"npm-ecosystem compatibility", `STA1110` ("CommonJS require() is not supported", a **never**
-code), and §11b A ("`std` is a typed module, backed by C — not Node polyfills"). All three stand
-until T11.0's research lands and the creator approves its recommendation. No code lands before
-that. This is the §15.4 reopening rule: the new measured evidence is plan-notes 286.
+**Decided (plan-notes 288, from T11.0's research `docs/research/node-mode.md`):**
 
-The phase is **not sequenced after Phase 8**. §15.1's top-down rule does not apply, the same
-exception as Phases 9 and 10.
+- `--node` is a **platform flag orthogonal to `--mode`**, not a third mode. It decides which
+  specifiers resolve (`node:*`, bare built-ins, CommonJS `require`), which globals exist, and
+  whether `main` ends by running the loop. Below the frontend gate `node:*` modules are just
+  modules (§0.8 holds).
+- **Two layers, `std` first.** Typed `std/*` modules backed by **Zig** (§0.5). `node:*` modules
+  are strict TypeScript over `std`, with no C or Zig of their own, written **from scratch** — no
+  vendored Node `lib/` JS (§0.10).
+- **Order:** P0 prerequisites → N1 (sync `tsc`). N2 (loop, child processes, streams) is
+  deferred; N3 (net/http/tls/zlib, `worker_threads`, `vm`) is not planned.
+- Coverage is tracked in **`docs/NODE.md`**, generated from the pinned Node and checked in `ci`
+  (AGENTS.md golden rule 11).
 
-### T11.0. Research: what `--node` means and what it costs — **[D3]**
+**Packages.** The work is decomposed by package; each card names the one package it changes
+(tests and docs ride along). Dependencies point one way only:
+`node` → `std` → `runtime`; `compiler` resolves `std/*` and `node:*` but never imports them.
 
-Docs only. The output is `docs/research/node-mode.md`. Every fact in it carries its primary
-source: the URL plus the version or the date it was checked. The research answers these
-questions:
+| Package | Language | Holds | Must not |
+| --- | --- | --- | --- |
+| `packages/runtime` | C11 + Zig | values, GC, builtins, **typed arrays** (T11.1) | know `std` or Node |
+| `packages/std` (new, T11.2) | strict TS surface + Zig backings → `libjsrt_std.a` | `std/env`, `path`, `process`, `fs`, `time`, `os`, `io`, `hash`, `encoding` | know Node; mimic Node option bags or error strings |
+| `packages/node` (new, T11.6) | strict TS only | `node:*` modules, Node globals (`process`, `Buffer`, timers), the CJS runtime helpers | contain C, Zig or JS; reach `runtime` except through `std` |
+| `packages/compiler` | strict TS | `--node` flag, `std/*` + `node:*` resolution, CommonJS lowering (T11.5), js-mode coverage (T11.4) | contain platform semantics (those live in `node`) |
+| `packages/tests` | strict TS | goldens, `node_coverage.json` claims, the `docs/NODE.md` generator | — |
 
-1. **Surface, measured rather than guessed.** Which Node globals and `node:*` modules a corpus
-   actually uses, in priority order. Start from the `tsc` bundle (plan-notes 286), then add a
-   few popular CLIs. Cover sync vs async `fs`, and what `ts.sys` needs.
-2. **Mode shape.** Is `--node` a third `--mode` or a platform flag orthogonal to `ts`/`js`? How
-   does it stay a policy layer above the frontend gate (§0.8)? Cover file acceptance, the
-   diagnostic table, and ambient types (`@types/node` or our own declarations).
-3. **CommonJS semantics.** A literal `require("x")` as a module-graph edge; `module.exports` and
-   `exports` interop with ESM; `__dirname` and `__filename`; `require.resolve`. Computed
-   `require(expr)`, which is how `tsc` loads plugins, is a Phase 8 question. CommonJS cycles
-   are legal and expose partially built exports, which conflicts with `STA3001`.
-4. **Backing.** Which built-ins can sit on `std` (T10.1) C functions, and which need libuv or an
-   event loop on Task 4.6's machinery. Cover how prior art handles this: Bun's and Deno's Node
-   compatibility, Static Hermes, Porffor, and Node SEA / pkg (which bundle Node rather than
-   compile ahead of time).
-5. **Oracle.** How goldens prove Node parity for I/O: byte-exact stdout and stderr, exit codes,
-   the filesystem side effects. Is a slice of Node's own test suite a usable conformance
-   ratchet, the way Test262 is?
-6. **Diagnostics.** Which codes `docs/DIAGNOSTICS.md` must allocate, and whether `STA1110`
-   narrows to "never outside `--node`". Codes are never reused or renumbered.
-7. **Cost and verdict.** An effort estimate per slice, and a go / no-go recommendation.
+Each new package is a pnpm workspace member and a moon project with its own `typecheck`,
+`lint` and build tasks, so moon caches it alone (plan-notes 204). `docs/architecture/packages.d2`
+gains each package in the change that creates it.
 
-**Creator's constraint (2026-10-02): two layers, `std` first.** Stator gets its own base
-libraries for files, network, processes, time, OS information and the like, as typed `std/*`
-modules backed by C (the §11b A model, extended past T10.1's v0 table). `node:*` modules are
-thin wrappers over `std`, never C of their own. So the research must answer, per Node module the
-corpus needs, which `std` module and functions would back it. T10.1's `std/fs`, `std/process`
-and `std/time` are the start, and `std/net`, `std/child_process`-style spawning and an event
-loop are likely new rows.
+~~**T11.0. Research: what `--node` means and what it costs.**~~ ✅ **landed 2026-10-02** —
+evidence in [done.md](done.md) → Phase 11 T11.0 (plan-notes 287, decision 288).
 
-**Execution plan.**
-1. Measure the corpus with a TypeScript-API scanner (`packages/tests/` is not touched; the
-   script and its raw output go under `docs/research/node-mode/`). Count `require` /
-   `node:` specifiers, `process.*` / `Buffer.*` / timer uses, and the members used per
-   module. The corpus is `tsc` 6.0.3 plus other bundled CLIs in this repo's `node_modules`, with
-   versions recorded.
-2. Primary-source research, run in parallel:
-   - Node 26 docs: the module surface, CommonJS loading and cycles, `process`, `Buffer`.
-   - Prior art: Bun, Deno, Static Hermes, Porffor, Node SEA / pkg.
-   - Backing: libuv, and how other systems stdlibs layer files, net and processes.
-   - The oracle: Node's own test suite layout.
-3. Write `docs/research/node-mode.md`. It holds the `std` layer table (module → functions → C
-   backing), the `node:*` → `std` mapping, the mode shape, CommonJS semantics, the oracle,
-   diagnostics, cost per slice and the go / no-go.
+### T11.1. `packages/runtime`: typed arrays — **[D4]**
 
-**Status:** execution steps 1–3 are done — `docs/research/node-mode.md`, corpus under
-`docs/research/node-mode/`, summary in plan-notes 287. The Check stays open until the creator's
-decision is recorded.
+`Buffer` is a `Uint8Array` subclass, and every byte-level API (file reads, hashes, codecs) needs
+a byte container; the tree has none. Steps: `ArrayBuffer` + `Uint8Array` first (constructor
+forms, indexing, `length`, `subarray`, `set`, `slice`, iteration), storage in Zig (§0.5), then the
+rest of the `TypedArray` family only as the corpus needs it. Docs: `docs/SUBSET.md` rows,
+`builtins_coverage.json` namespaces.
 
-**Check:** `docs/research/node-mode.md` exists with sources for every fact and ends in a
-go / no-go recommendation; the creator's decision is recorded in `plan-notes.md`. If the answer
-is go, the T11.1+ cards are written here, and §0, `STA1110` and §11b A are edited in the same
-change.
+**Check:** decision tests (both modes) + goldens for every landed member; `test:builtins` lists
+the new namespaces; ASan clean.
+
+### T11.2. `packages/std`: the real `std/*` package — **[D4]**
+
+Today `std/env` and `std/path` are golden fixtures over `declare` externs (plan-notes 284), not an
+importable package. Steps: create `packages/std` (workspace member + moon project; `src/<module>.ts`
+surface, `zig/<module>.zig` backings building `libjsrt_std.a`); the compiler resolves `std/*` to
+it and links the library only when a program imports `std/*`; unknown `std/foo` stays a hard
+error (STD.md §1); move `std/env` + `std/path` in; land T10.1 steps 3–4 (`std/process`, sync
+`std/fs`, `std/time`) here. Update `docs/STD.md` (no longer a skeleton) and `packages.d2`.
+
+**Check:** `std_env` / `std_path` goldens pass through `import … from 'std/…'` with no
+`declare` fixture; T10.1's Check; a program without `std/*` imports links no `libjsrt_std.a`.
+
+### T11.3. `packages/std`: the N1 modules — **[D3]**
+
+Depends on T11.1, T11.2. Zig backings, POSIX first (STD.md §4). Errors throw with a stable
+`code` (STD.md §3).
+
+| Module | Functions |
+| --- | --- |
+| `std/process` (extend) | `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode` |
+| `std/fs` (extend) | `open`/`read`/`write`/`close` on fds, `readdir`, `realpath`, `utimes`, `unlink`, `exists`, bytes and string reads |
+| `std/os` | `platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol` |
+| `std/io` | `stdin`/`stdout`/`stderr` fds, `write`, `read`, `isatty`, `terminalSize` |
+| `std/hash` | `sha256`, `sha1`, `md5` over bytes or strings; `randomBytes` |
+| `std/encoding` | UTF-8 / latin1 / base64 / base64url / hex ↔ bytes |
+
+**Check:** a golden per module against Node's equivalent (nondeterministic results — `hostname`,
+`pid`, `randomBytes` — proved by unit-test ranges, as `test:builtins` carves them out).
+
+### T11.4. `packages/compiler`: js-mode coverage for the `tsc` bundle — **[D5]**
+
+The largest P0 item (plan-notes 286). Prerequisites run in their own sessions: the `STA4072`
+stack overflow on large inputs and the js-mode false rejections. Then the `STA1214` families on
+`_tsc.js`: method calls on inferred shapes (402), assignment to non-variables (518),
+unsupported globals (111), spreads (~190), Map/Set from iterables (71), `new` on non-class (50),
+index access on non-array (33), `Object.*` (24), destructuring (31), class expressions (~8).
+Each family is its own sub-step with its own fixtures — none of it is Node-specific.
+
+**Check:** `stator explain _tsc.js --mode=js` reports 0 `STA1214` and 0 `STA4072`; every landed
+construct has decision tests in both modes + a golden (Testing rules).
+
+### T11.5. `packages/compiler`: the `--node` flag and CommonJS — **[D4]**
+
+Depends on T11.2 and on T12.0's answer to question 4 (if the bundler converts CommonJS, this card
+shrinks to the flag, the globals and external resolution). Steps: the flag (CLI + `explain`); resolution of `node:*` and bare built-ins
+to `packages/node`; CommonJS per modules.md "All together": each CJS module lowers to one
+function over a module record `(exports, require, module, __filename, __dirname)`; static
+`require('literal')` resolves at compile time; computed `require` is a runtime lookup over the
+bundled records that throws Node's `MODULE_NOT_FOUND`; `package.json` `"type"` decides `.js`;
+CJS-to-CJS cycles are exempt from `STA3001` (partial `exports`, as Node), ESM cycles are not.
+`STA1110` narrows to "without `--node`" (and stays in `ts` mode); new not-yet codes are
+allocated in `docs/DIAGNOSTICS.md`. Docs: `MODES.md` (platform section), `SUBSET.md`,
+`DIAGNOSTICS.md`, `HOW-IT-WORKS.md`.
+
+**Check:** decision tests for `require` in all four mode × platform cells; goldens for a CJS
+cycle, `module.exports` replacement, computed `require` hit and miss — byte-for-byte vs Node.
+
+### T11.6. `packages/node`: the N1 wrappers — **[D4]**
+
+Depends on T11.1, T11.3, T11.5. Create `packages/node` (strict TS over `std`, written from
+scratch). Surface, from the corpus (`docs/NODE.md` **tsc** column): `node:fs` sync subset (the 15
+functions `tsc` calls), `node:path` (posix), `node:os`, `node:perf_hooks.performance`,
+`crypto.createHash`, `process` (`argv`/`env`/`cwd`/`exit`/`exitCode`/`platform`/`pid`/
+`stdout.write`/`memoryUsage`/`nextTick`), `Buffer.from`/`toString`, timers. Without a loop (N2),
+`nextTick` and zero-delay timers drain after `main` like microtasks; a real delay is not-yet.
+Every member lands with a golden and a `node_coverage.json` claim; `docs/NODE.md` regenerates in
+the same change.
+
+**Check:** `tsc --version` and `tsc -p` on a small fixture project, compiled by Stator, print
+byte-for-byte what `node _tsc.js` prints on Node 26.7.0; `docs/NODE.md` slice N1 at 100%.
+
+**Deferred — N2 (not a card yet).** `std/loop` written in Zig (the creator chose an own loop
+over libuv: kqueue/epoll first, Windows when the runtime builds there), real timers and
+immediates, `std/child`, `fs.promises`, `fs.watch`, `node:events`, `node:stream`, `node:util`,
+`node:url`, `node:tty`, `node:readline`. **Open research before its card:** T10.2's worker
+pool + MPSC completion queue versus the loop's own I/O pool — one must own the other (plan-notes
+288). **Not planned — N3:** `net`, `http(s)`, `tls`, `dns`, `zlib`, `worker_threads`, `vm`.
+
+---
+
+## 11d. Phase 12 — `js` mode builds through a bundler — **[D4]**
+
+Creator's direction (2026-10-02, plan-notes 289). In `js` mode the module graph is first bundled
+into **one file** — tree-shaken, CommonJS converted, `node_modules` resolved — and Stator compiles
+that file. Any bundler can plug in through a Stator API; the default integration is a new
+**`packages/vite-stator`** package.
+
+The phase is not sequenced after Phase 8 (§15.1 exception, as Phases 9–11). It touches only
+`js` mode: `ts` mode keeps its own module graph, because a bundler strips the types `ts` mode
+compiles from.
+
+| Package | Holds | Must not |
+| --- | --- | --- |
+| `packages/compiler` | the bundler API (`statorc/api`), the `BundlerAdapter` interface, `--bundler`, source-map-driven `#line` mapping | import any bundler — adapters are loaded by name at run time, so the §0.9 budget stays `typescript` only |
+| `packages/vite-stator` (new) | a Vite plugin (`vite build` → native binary) and the default `BundlerAdapter` | contain compiler logic — it calls `statorc/api` and nothing else |
+
+### T12.0. Design: the bundler contract — **[D3]**
+
+Docs first (§15.6): `docs/BUNDLER.md`, settled with a measured spike — one `js` golden fixture
+bundled by Vite, compiled by Stator, output byte-for-byte equal to Node. Questions it must answer:
+
+1. **Typed code in a mixed graph.** A bundler strips TS types, which would turn typed `.ts` in a
+   `js`-mode graph dynamic. Options: bundle everything (all dynamic), or keep project `.ts` out of
+   the bundle as typed modules and bundle only JS (`node_modules`, `.js`). Measure both.
+2. **Output contract.** One ESM chunk, no code splitting (dynamic `import()` inlined), no
+   minification by default (names show up in diagnostics and stack traces), a source map always.
+3. **Externals.** `std/*`, `node:*` and bare built-ins stay external and are resolved by Stator
+   (§11c packages).
+4. **CommonJS.** If the bundler converts CJS, §11c T11.5 shrinks to the flag, the globals and
+   external resolution — record the re-scope in T11.5 in the same change.
+5. **The API.** `statorc/api` takes the bundle plus its source map; `BundlerAdapter` is
+   `{ name, bundle(entry, options) → { code, map, inputs } }`; `--bundler=vite|none|<module>`; the
+   default is `vite` in `js` mode. What happens when the default adapter is not installed — a
+   `STA0xxx` naming the package, allocated in `docs/DIAGNOSTICS.md`.
+6. **Diagnostics.** Every span in a bundled file maps back to its original file through the
+   source map; a span with no mapping says so rather than pointing into the bundle.
+7. **Caching.** How the bundle step participates in the program cache (Task 6.9) and in moon.
+
+**Check:** `docs/BUNDLER.md` answers 1–7 with the spike's numbers; plan-notes records the choice;
+T12.1–T12.2 are edited to match.
+
+### T12.1. `packages/compiler`: the bundler API — **[D4]**
+
+Depends on T12.0. `statorc/api` (programmatic `compile` over an in-memory bundle + source map),
+the `BundlerAdapter` interface, `--bundler` on `build` and `explain`, adapter loading by name,
+`#line` and diagnostics mapped through the source map. Docs: `HOW-IT-WORKS.md`, `MODES.md`,
+`pipeline.d2` (a bundling stage before the frontend in `js` mode).
+
+**Check:** unit tests drive `compile` through a stub adapter; `--bundler=none` keeps today's
+behavior byte-for-byte (every existing `js` golden passes unchanged); a diagnostic inside a
+bundled module reports the original file and line.
+
+### T12.2. `packages/vite-stator`: the default integration — **[D3]**
+
+Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDependency` (plan-notes
+entry: the integration *is* Vite, no few lines replace it). Ships the `stator()` Vite plugin
+(`vite build` produces the native binary) and the adapter `stator build --mode=js` uses by default.
+An example under `examples/vite/` with its README.
+
+**Check:** every `js` golden passes through the default adapter, byte-for-byte vs Node;
+`examples/vite` builds a binary with `vite build`; tree-shaking measured — the binary of a fixture
+that imports one function from a large module is smaller than with `--bundler=none` (numbers in
+plan-notes).
 
 ---
 
@@ -1498,7 +1642,8 @@ ms/line flat, golden byte-for-byte, full gate green.
 | Dynamic tier (Phase 8) | QuickJS-NG fallback | +6–10 wk *if gated in* |
 | Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | landed (`done.md` §11a) |
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
-| `--node` (Phase 11) | CommonJS `require`, `process`, `Buffer`, `node:*` modules | research first (T11.0); the estimate is one of its outputs |
+| `--node` (Phase 11) | typed arrays, `packages/std` + `packages/node`, CommonJS, sync `tsc` (N1) | T11.1–T11.6; the largest item is T11.4 (js-mode coverage, not Node). N2 deferred, N3 not planned (plan-notes 288) |
+| Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`, one-file `js` builds | T12.0 design first; T12.1–T12.2 (plan-notes 289) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
 
@@ -1662,3 +1807,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 
 - **v4.8** (2026-09-14): **test-speed cards.** §9 gains Tasks 6.4–6.7 (plain-`test` gate, oracle pin, in-process runners, parallel `cli.test.ts`) plus the standing decision that Bun is not a test runner — all from the 241 measurements. 6.4 executes immediately; 6.5→6.6→6.7 in dependency order.
 - **v4.9** (2026-10-02): **Phase 11 card — `--node`, research-gated** (plan-notes 286). Creator-directed. A mode that admits CommonJS `require`, `process`, `Buffer`, timers and `node:*` modules, so real Node programs compile; the first target is TypeScript 6.0.3's `tsc` bundle. Only T11.0 (research) is open. §0's npm non-goal, `STA1110` (never) and §11b A (no Node polyfills) stand until its go / no-go is approved.
+- **v4.10** (2026-10-02): **Phase 11 decided** (plan-notes 287, 288). T11.0 landed; `--node` is a platform flag over two layers — typed `std/*` backed by Zig, `node:*` in strict TS from scratch — decomposed by package (`runtime` typed arrays, new `packages/std`, new `packages/node`, `compiler` flag + CommonJS). Cards T11.1–T11.6; N2 deferred, N3 not planned. Creator rules: Zig for memory/cross-platform runtime code (§0.5), no JavaScript in our source (§0.10, Task 6.15), any new clone fails `dupes` (Task 6.16), `docs/NODE.md` generated and checked in `ci`.
+- **v4.11** (2026-10-02): **Phase 12 card — `js` mode builds through a bundler** (plan-notes 289). Creator-directed: one tree-shaken file per build, any bundler through `statorc/api` + `BundlerAdapter`, `packages/vite-stator` as the default. `ts` mode is untouched. T12.0 (design, docs-first) gates T12.1–T12.2 and may re-scope T11.5's CommonJS work.

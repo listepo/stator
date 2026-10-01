@@ -1,0 +1,4 @@
+{
+  "_comment": "plan.md §11c coverage: node:* module -> member -> golden fixtures exercising it (paths relative to tests/golden/), or {\"nondeterministic\": \"<proof under tests/>\"}. The member list itself is read from the pinned Node by node-coverage.ts, so a member absent here is counted as not covered rather than hidden. A claim is verified like test:builtins: the fixture must exist and mention both the module specifier and the member. Members are spelled as docs/NODE.md lists them: `readFileSync`, `Buffer.from`, `Buffer.prototype.toString`.",
+  "_example": { "fs": { "readFileSync": ["ts/node_fs_sync/main.ts"] } }
+}
