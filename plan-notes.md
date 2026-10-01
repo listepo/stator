@@ -9044,3 +9044,69 @@ the 141 `node:test` calls.
 **Limit.** `--changed` follows static imports. A test that reaches compiler code only through a
 spawned CLI process is not selected, so `test:affected` is an iteration aid and plain `test`
 stays the gate (AGENTS.md, Testing rules).
+
+## 286. TypeScript 6.0.3's `tsc` bundle through `--mode=js`: what blocks it, and the `--node` card (2026-10-02)
+
+Creator's question: what must Stator gain to compile TypeScript 6.0? Creator's direction: put a
+`--node` mode on the roadmap, one that works with Node and `require`, research first (plan.md
+§11c, T11.0). The measurement below is the evidence §15.4 asks for before `STA1110` or §0's npm
+non-goal can reopen.
+
+**Input.** `node_modules/typescript/lib/_tsc.js` from `typescript@6.0.3`: 6,239,091 bytes, one
+`"use strict"` CommonJS script. It was copied out of `node_modules` and run through
+`stator build --mode=js` on `main` at `b36bdf1`, Node 26.7.0, macOS arm64.
+
+**1. The compiler crashes before it reaches a verdict.** `explain` at the default V8 stack fails
+with `STA4072 internal error: Maximum call stack size exceeded` (a compiler bug by definition).
+`--stack-size=7600` gets past it, and `explain` then takes 93 s.
+
+**2. The Node platform is missing.** The checker reports 47 errors (`STA0012`), and all but two
+of them are Node names:
+- `process`: 30.
+- `require`, through 11 call sites: `fs` (3), `path`, `os`, `crypto`, `perf_hooks`, `inspector`,
+  `source-map-support`, and one computed `require(modulePath)` that loads plugins.
+- `Buffer`: 2.
+- `setTimeout` and `clearTimeout`: 2 each.
+
+**3. js mode rejects valid JavaScript.** Two checker errors are JS that Node runs as is:
+- `Cannot assign to 'log' because it is a function`, at the namespace IIFE
+  `})(log = Debug2.log || (Debug2.log = {}))`.
+- `Spread types may only be created from object types`, at
+  `{ ...defaultLevels, ...customLevels }`.
+
+Surfacing `checkJs` semantic errors as hard errors contradicts §1.2: untyped code is never
+rejected.
+
+**4. The gate stops the rest.** Steps 2 and 3 were shimmed for the probe only: an ambient
+`.d.ts` declared `process`, `Buffer`, `require`, the timers and the six modules, and two
+`// @ts-ignore` lines covered the false rejections. The gate then reports 1,575 diagnostics, all
+`STA1214` except one `STA1210` (Date, ICU). The largest groups:
+- Method calls on an inferred receiver type whose method the shape table lacks, e.g.
+  `hasOwnProperty.call(map, key)`: 402.
+- Assignment or compound assignment to anything but a variable: 518, in three message variants.
+- Unsupported globals: 111 uses of 27 names. They are mostly `process`, `parseInt`, `Array`,
+  `String`, `Number`, `isFinite`, `encodeURI`, `require` and `Buffer`, plus TS's own top-level
+  functions referenced as globals (`createProgram`, `toPath`, …).
+- Spreads into calls, method calls, array methods and array literals: about 190.
+- A property that is not a field of the shape: 55.
+- `new Map(iterable)` / `new Set(iterable)`: 71.
+- `new` on a non-class value: 50.
+- Index access on a non-array: 33.
+- `Object.*`: 24.
+- Destructuring in `for-of` and in declarations: 31.
+- Class expressions: about 8.
+
+Lowering and codegen were never reached, so their behaviour at this size (6 MB of JS into C) is
+unmeasured.
+
+**Reading.** TypeScript 6.0 needs three separate things:
+- (a) Compiler robustness at scale: the stack overflow and the 93 s `explain`.
+- (b) js-mode completeness: items 3 and 4, which is Phase 5 residue plus the dynamic path taking
+  over where inference yields a shape Stator cannot model.
+- (c) The Node platform: item 2. Without (c), even a perfect (a) and (b) leave `tsc` unable to
+  read a file.
+
+(c) is what §11c's `--node` card researches. (a) and (b) are ordinary bugs and residue that
+need no reopened decision. Compiling TypeScript from its `.ts` sources in `ts` mode is not an
+alternative. Its public declarations alone (`lib/typescript.d.ts`) carry 73 `enum`s and 58 `any`s,
+and `ts` mode refuses both by design.

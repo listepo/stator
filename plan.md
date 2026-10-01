@@ -1248,6 +1248,56 @@ byte-identical emitted C for the fixture; CI green.
 
 ---
 
+## 11c. Phase 11 — `--node`: the Node platform (research-gated) — **[D5]**
+
+Creator's direction (2026-10-02, plan-notes 286). Add a `--node` mode in which a program may use
+the Node platform: CommonJS `require` / `module.exports`, `process`, `Buffer`, timers and the
+`node:*` built-in modules. The goal is for real Node programs to compile. The first target is
+TypeScript's own `tsc` bundle.
+
+**This card reopens three settled positions, and only through research.** They are §0's non-goal
+"npm-ecosystem compatibility", `STA1110` ("CommonJS require() is not supported", a **never**
+code), and §11b A ("`std` is a typed module, backed by C — not Node polyfills"). All three stand
+until T11.0's research lands and the creator approves its recommendation. No code lands before
+that. This is the §15.4 reopening rule: the new measured evidence is plan-notes 286.
+
+The phase is **not sequenced after Phase 8**. §15.1's top-down rule does not apply, the same
+exception as Phases 9 and 10.
+
+### T11.0. Research: what `--node` means and what it costs — **[D3]**
+
+Docs only. The output is `docs/research/node-mode.md`. Every fact in it carries its primary
+source: the URL plus the version or the date it was checked. The research answers these
+questions:
+
+1. **Surface, measured rather than guessed.** Which Node globals and `node:*` modules a corpus
+   actually uses, in priority order. Start from the `tsc` bundle (plan-notes 286), then add a
+   few popular CLIs. Cover sync vs async `fs`, and what `ts.sys` needs.
+2. **Mode shape.** Is `--node` a third `--mode` or a platform flag orthogonal to `ts`/`js`? How
+   does it stay a policy layer above the frontend gate (§0.8)? Cover file acceptance, the
+   diagnostic table, and ambient types (`@types/node` or our own declarations).
+3. **CommonJS semantics.** A literal `require("x")` as a module-graph edge; `module.exports` and
+   `exports` interop with ESM; `__dirname` and `__filename`; `require.resolve`. Computed
+   `require(expr)`, which is how `tsc` loads plugins, is a Phase 8 question. CommonJS cycles
+   are legal and expose partially built exports, which conflicts with `STA3001`.
+4. **Backing.** Which built-ins can sit on `std` (T10.1) C functions, and which need libuv or an
+   event loop on Task 4.6's machinery. Cover how prior art handles this: Bun's and Deno's Node
+   compatibility, Static Hermes, Porffor, and Node SEA / pkg (which bundle Node rather than
+   compile ahead of time).
+5. **Oracle.** How goldens prove Node parity for I/O: byte-exact stdout and stderr, exit codes,
+   the filesystem side effects. Is a slice of Node's own test suite a usable conformance
+   ratchet, the way Test262 is?
+6. **Diagnostics.** Which codes `docs/DIAGNOSTICS.md` must allocate, and whether `STA1110`
+   narrows to "never outside `--node`". Codes are never reused or renumbered.
+7. **Cost and verdict.** An effort estimate per slice, and a go / no-go recommendation.
+
+**Check:** `docs/research/node-mode.md` exists with sources for every fact and ends in a
+go / no-go recommendation; the creator's decision is recorded in `plan-notes.md`. If the answer
+is go, the T11.1+ cards are written here, and §0, `STA1110` and §11b A are edited in the same
+change.
+
+---
+
 ## 12. Make it better — the optimization ladder (post-MVP, in this order)
 
 Ordering rule (from the Boa deep-dive): **memory first, codegen last**. Each step: measure on the Phase-6 harness before/after; keep the change only if the geomean moves.
@@ -1421,6 +1471,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | Dynamic tier (Phase 8) | QuickJS-NG fallback | +6–10 wk *if gated in* |
 | Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | landed (`done.md` §11a) |
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
+| `--node` (Phase 11) | CommonJS `require`, `process`, `Buffer`, `node:*` modules | research first (T11.0); the estimate is one of its outputs |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
 
@@ -1583,3 +1634,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.6** (2026-09-13): **Phase 9 / T9.1 is now a main-tree card** (plan-notes 238, 239). The runtime is C11 with a Zig memory core — C11-only reopened on the creator's direction, not measured evidence. Generated code stays C; Rust stays forbidden. The language & library survey (239) is the standing boundary so agents do not invent a second compiler language, MMTk/Rust, or Zig past the memory core. Implementation remains in `.worktrees/t9-1` until a follow-up PR; this revision is plan/docs/notes plus the mise Zig 0.16.0 pin.
 
 - **v4.8** (2026-09-14): **test-speed cards.** §9 gains Tasks 6.4–6.7 (plain-`test` gate, oracle pin, in-process runners, parallel `cli.test.ts`) plus the standing decision that Bun is not a test runner — all from the 241 measurements. 6.4 executes immediately; 6.5→6.6→6.7 in dependency order.
+- **v4.9** (2026-10-02): **Phase 11 card — `--node`, research-gated** (plan-notes 286). Creator-directed. A mode that admits CommonJS `require`, `process`, `Buffer`, timers and `node:*` modules, so real Node programs compile; the first target is TypeScript 6.0.3's `tsc` bundle. Only T11.0 (research) is open. §0's npm non-goal, `STA1110` (never) and §11b A (no Node polyfills) stand until its go / no-go is approved.
