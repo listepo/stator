@@ -1473,6 +1473,120 @@ plan-notes).
 
 ---
 
+## 11e. Phase 13 — Web API with a pluggable render API — **[D5]**
+
+Creator's direction (2026-10-02, plan-notes 298). Stator programs get the Web platform's DOM and
+CSS as a **separate package**. That package knows nothing about pixels: it talks to a renderer
+through a **render API**, so any renderer can plug in. The default renderer is
+[Clay](https://github.com/nicbarker/clay), in its own package. DOM and CSS come first. The other
+Web APIs are low priority and get no card yet (end of this section).
+
+The phase is not sequenced after Phase 8 (§15.1 exception, as Phases 9–12). It works in both
+modes: the packages are typed code, and nothing below the frontend gate learns about them (§0.8).
+
+| Package | Holds | Must not |
+| --- | --- | --- |
+| `packages/webapi` (new) | DOM + CSS in **strict TypeScript** (§0.9, §0.10), compiled by Stator like `node:*` (§11c), plus the render API: the `Renderer` interface and the data it exchanges | draw, measure fonts or call C — every pixel, glyph and input event crosses the render API |
+| `packages/renderer-clay` (new) | the default `Renderer`: a strict-TS adapter over FFI (Phase 7) to Zig glue (§0.5) around vendored `clay.h` (C, Zlib) and one drawing backend | hold DOM or CSS semantics — it sees only what the render API hands it |
+
+### T13.0. Design: the render API and the DOM/CSS subset — **[D4]**
+
+Docs first (§15.6): `docs/WEBAPI.md`, settled with a measured spike. The spike renders one fixture
+(a flex row, text, a border, a scroll container) through `renderer-clay` and dumps Clay's render
+commands. Questions it must answer:
+
+1. **Where layout lives.** Clay is a layout engine: it takes a tree of sized boxes and returns
+   positioned render commands (rectangle, border, text, image, scissor start/end, custom). Either
+   `webapi` hands the renderer a styled box tree and the renderer lays it out, or `webapi` lays out
+   and the renderer only draws. Pick one, and say how `getBoundingClientRect` and hit testing get
+   their geometry back.
+2. **The render API.** The `Renderer` interface (`webapi` owns it; renderers implement it):
+   frame begin/end, the tree or command format, text measurement (Clay asks for it through
+   `Clay_SetMeasureTextFunction`), images and fonts as resources, input events coming back, and
+   damage tracking (Clay commands carry element ids so unchanged ones can be skipped). A renderer
+   is chosen at **build** time (`--renderer=clay|<package>`, default `clay`) and linked statically,
+   because typed code has no run-time plugin loading. A missing renderer package is a `STA0xxx`
+   naming it, allocated in `docs/DIAGNOSTICS.md`.
+3. **The DOM subset.** First: `Node`, `Element`, `Text`, `Document`, tree mutation, attributes,
+   `classList`, `textContent`, `querySelector(All)`, events with capture and bubble, `style`,
+   `getBoundingClientRect`. What is a `not-yet` diagnostic (the T11.5 pattern, so `explain` lists
+   the gap) and what is never planned.
+4. **The CSS subset and its Clay mapping.** Selectors (type, class, id, descendant, child),
+   specificity, cascade, inheritance, computed values. Layout properties map onto Clay's model:
+   `display: flex` direction, `gap` → `childGap`, `padding`, `width`/`height` → fixed / percent /
+   grow (`flex-grow`) / fit (`auto`), alignment, `overflow: scroll` → Clay scroll containers,
+   `position: absolute` → Clay floating elements. Plus colors, borders, `border-radius`, fonts.
+   Write the table of properties Clay cannot express, and what each one does instead.
+5. **How a program reaches it.** Explicit imports (`import { document } from 'webapi'`) or a
+   platform flag that makes `document`/`window` global, parallel to `--node` (§11c). Both modes.
+6. **The drawing backend.** Clay does not draw. Its repository ships renderers for raylib, SDL2,
+   SDL3, sokol, cairo, GLES3, win32 GDI, termbox2, terminal, web and Playdate. Pick the first one
+   for macOS, Linux and Windows (§0.5's cross-platform rule), what it adds to the toolchain, and
+   whether a terminal backend serves as the headless test target.
+7. **The frame loop.** Input events and redraw need a loop. Either wait for N2's own loop
+   (§11c, Zig) or run a frame loop inside the renderer first, and say how it hands events to the
+   promise/microtask machinery (Task 4.6) without becoming a second event loop.
+8. **The oracle.** Node has no DOM. DOM semantics: a web-platform-tests (WPT) slice, pinned the
+   way Test262 is (Task 6.1, `packages/tests/test262/pin.json`), or a DOM implementation run under Node as a **dev-only** oracle
+   (allowed: an oracle is not our source, §0.10). Layout: box geometry compared with a headless
+   browser, with the tolerance written down, because Clay's model is not CSS layout.
+9. **Parsing CSS.** An existing parser is JavaScript and cannot ship in `webapi` (§0.10). Confirm
+   there is no strict-TS one that Stator compiles; otherwise write one per CSS Syntax Level 3 and
+   say why in plan-notes.
+
+**Check:** `docs/WEBAPI.md` answers 1–9 with the spike's numbers; plan-notes records the choices;
+T13.1–T13.4 are edited to match; `docs/README.md` lists the new doc.
+
+### T13.1. `packages/webapi`: the DOM — **[D4]**
+
+Depends on T13.0. New workspace package, strict TS (§0.9, §0.10), compiled by Stator. The DOM
+subset from T13.0 §3, against a recording renderer (T13.3's test double) so no pixels are needed.
+Docs: `docs/WEBAPI.md` coverage table, generated and checked in `ci` like `docs/NODE.md`.
+
+**Check:** the T13.0 DOM oracle slice passes in both modes, byte-for-byte against the oracle;
+every unsupported member surfaces in `explain` as `not-yet`, not as `STA0012`.
+
+### T13.2. `packages/webapi`: CSS — **[D4]**
+
+Depends on T13.1. Parsing, selector matching, cascade, inheritance and computed style for the
+T13.0 §4 subset; `getComputedStyle`; `<style>` and inline `style`.
+
+**Check:** the T13.0 CSS oracle slice passes (computed values byte-for-byte); a selector-matching
+benchmark over a 10 000-element tree is recorded in `packages/tests/bench/`.
+
+### T13.3. The render API and a recording renderer — **[D3]**
+
+Depends on T13.0; lands before T13.4. The `Renderer` interface in `packages/webapi`, and a
+recording renderer in `packages/tests` that prints what it is handed, one line per command. It
+is the test double for T13.1–T13.2 and the contract test every renderer must pass.
+
+**Check:** golden fixtures dump the recorded stream for each T13.0 §4 property; a second renderer
+can be written against the interface alone (`docs/WEBAPI.md` has the worked example).
+
+### T13.4. `packages/renderer-clay`: the default renderer — **[D5]**
+
+Depends on T13.3. New workspace package:
+
+- `clay.h` vendored under `vendor/` at a pinned tag (v0.14 unless T13.0 finds a reason to pin a
+  later commit), fetched by the runtime's vendor update script (`pnpm run vendor:update`), patched
+  only via plan-notes. It compiles with `-Wall` alone, as all vendored C (plan-notes 101).
+- Zig glue (§0.5): the arena (`Clay_MinMemorySize` → `Clay_CreateArenaWithCapacityAndMemory` →
+  `Clay_Initialize`), the text-measure callback, and the drawing backend from T13.0 §6. Exports a
+  C ABI only, as `runtime/src/*.zig` does.
+- A strict-TS adapter that implements `Renderer` over the Zig glue through Phase 7 FFI.
+- An example under `examples/webapi/` with its README; `docs/TOOLCHAIN.md` gains the backend.
+
+**Check:** the T13.3 contract test passes; T13.0's layout oracle agrees within the documented
+tolerance on every fixture; `examples/webapi` builds a native binary on macOS, Linux and Windows
+that renders and reacts to a click; ASan/UBSan clean.
+
+**Low priority — the other Web APIs (not cards yet).** `URL`, `TextEncoder`/`TextDecoder`, timers,
+`fetch`, `WebSocket`, storage, `Canvas`, `structuredClone` and the rest. They land in
+`packages/webapi` after T13.4, each as its own card. Where `std/*` (§11b) or `node:*` (§11c)
+already provides the primitive, the Web API wraps it rather than duplicating it.
+
+---
+
 ## 12. Make it better — the optimization ladder (post-MVP, in this order)
 
 Ordering rule (from the Boa deep-dive): **memory first, codegen last**. Each step: measure on the Phase-6 harness before/after; keep the change only if the geomean moves.
@@ -1648,6 +1762,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
 | `--node` (Phase 11) | typed arrays, `packages/std` + `packages/node`, CommonJS, sync `tsc` (N1) | T11.1–T11.6; the largest item is T11.4 (js-mode coverage, not Node). N2 deferred, N3 not planned (plan-notes 289) |
 | Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`, one-file `js` builds | T12.0 design first; T12.1–T12.2 (plan-notes 290) |
+| Web API (Phase 13) | `packages/webapi` (DOM + CSS, strict TS, render API) + `packages/renderer-clay` (default renderer) | T13.0 design first; T13.1–T13.4; other Web APIs low priority (plan-notes 298) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
 
@@ -1814,3 +1929,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.10** (2026-10-02): **Phase 11 decided** (plan-notes 288, 289). T11.0 landed; `--node` is a platform flag over two layers — typed `std/*` backed by Zig, `node:*` in strict TS from scratch — decomposed by package (`runtime` typed arrays, new `packages/std`, new `packages/node`, `compiler` flag + CommonJS). Cards T11.1–T11.6; N2 deferred, N3 not planned. Creator rules: Zig for memory/cross-platform runtime code (§0.5), no JavaScript in our source (§0.10, Task 6.15), any new clone fails `dupes` (Task 6.16), `docs/NODE.md` generated and checked in `ci`.
 - **v4.11** (2026-10-02): **Phase 12 card — `js` mode builds through a bundler** (plan-notes 290). Creator-directed: one tree-shaken file per build, any bundler through `statorc/api` + `BundlerAdapter`, `packages/vite-stator` as the default. `ts` mode is untouched. T12.0 (design, docs-first) gates T12.1–T12.2 and may re-scope T11.5's CommonJS work.
 - **v4.12** (2026-10-02): **`explain` reports every deciding diagnostic** (plan-notes 291). §1's "per top-level construct" promise was never what shipped; the tree reports a file verdict plus per-function rows. `explain` now also lists every diagnostic of the deciding stage, which is what T11.4's Check needs to count `STA1214`; §1, `docs/MODES.md` §6 and T11.4/T11.5 rewritten to match, including how `--node` will surface platform gaps.
+- **v4.14** (2026-10-02): **Phase 13 — Web API with a pluggable render API** (plan-notes 298). New §11e: `packages/webapi` holds DOM + CSS in strict TS and owns the `Renderer` interface; `packages/renderer-clay` is the default renderer (vendored `clay.h` v0.14, Zig glue, TS adapter over FFI). Cards T13.0 (design, `docs/WEBAPI.md`), T13.1 DOM, T13.2 CSS, T13.3 render API + recording renderer, T13.4 Clay renderer; other Web APIs low priority, no cards yet.
