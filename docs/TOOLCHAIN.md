@@ -88,7 +88,7 @@ from the last build rebuilds every object (`packages/runtime/build*/cflags.txt`)
 
 ## CI stages (`.github/workflows/ci.yml`)
 
-CI runs in two stages (plan-notes 286):
+CI runs in two stages (plan-notes 292):
 
 1. **Stage 1, Linux only:** `static analysis` (typecheck, `lint` = oxlint `--deny-warnings` + oxfmt
    check, `dupes`) and `frontend (linux/x64)` (subset tests, runtime archive, unit tests **with

@@ -9045,7 +9045,7 @@ the 141 `node:test` calls.
 spawned CLI process is not selected, so `test:affected` is an iteration aid and plain `test`
 stays the gate (AGENTS.md, Testing rules).
 
-## 286. CI runs in two stages: Linux lint and coverage first, Windows and macOS after (2026-10-02)
+## 292. CI runs in two stages: Linux lint and coverage first, Windows and macOS after (2026-10-02)
 
 Owner-directed (2026-10-02). `ci.yml` was one flat set of jobs, so Windows and macOS runners
 started on every commit even when `lint` or the Linux unit tests would fail in a minute.
