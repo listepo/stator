@@ -86,6 +86,20 @@ LLVMgold plugin, and without it the probe fails and the archive is plain objects
 recipe's status line. Sanitized builds never use LTO. A probe result or Boehm status that differs
 from the last build rebuilds every object (`packages/runtime/build*/cflags.txt`).
 
+## CI stages (`.github/workflows/ci.yml`)
+
+CI runs in two stages (plan-notes 286):
+
+1. **Stage 1, Linux only:** `static analysis` (typecheck, `lint` = oxlint `--deny-warnings` + oxfmt
+   check, `dupes`) and `frontend (linux/x64)` (subset tests, runtime archive, unit tests **with
+   coverage**; uploads the `coverage-lcov` artifact). This is the only job that collects coverage.
+2. **Stage 2, Windows and macOS:** `frontend-desktop` (macOS and Windows, plain `pnpm run test`),
+   plus the `-macos` twins of `runtime`, `asan`, `intl` and `ffi`. Each has
+   `needs: [static, frontend-coverage]`, so none starts unless every stage-1 job passed.
+
+Other Linux jobs (`test262`, Linux arm64 `frontend`, Linux `runtime`/`asan`/`intl`/`ffi`) belong to
+neither stage and run ungated, in parallel with stage 1.
+
 ## Compile-time opt level (`STATOR_OPT` / `--opt`)
 
 The final clang link of generated C defaults to `-O2` (non-asan). Override per build:
