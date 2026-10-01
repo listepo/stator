@@ -16,7 +16,7 @@ tasks:
     options:
       runFromWorkspaceRoot: true
   unit:
-    script: 'node --test "packages/tests/unit/*.test.ts"'
+    script: './node_modules/.bin/vitest run --config packages/tests/vitest.config.ts'
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true
@@ -26,7 +26,7 @@ tasks:
     deps:
       - 'runtime:build'
   coverage:
-    script: 'mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include="packages/compiler/src/**" --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info "packages/tests/unit/*.test.ts"'
+    script: './node_modules/.bin/c8 ./node_modules/.bin/vitest run --config packages/tests/vitest.config.ts'
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true

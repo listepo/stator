@@ -7,7 +7,7 @@
  * capture at all because the globals array already reaches it. */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import * as ts from 'typescript';
 import type { CaptureInfo, CaptureMap, EnvOwner } from '../../compiler/src/lower/captures.ts';
 import { analyzeCaptures, RECEIVER_NAME } from '../../compiler/src/lower/captures.ts';
@@ -54,7 +54,7 @@ function get(named: Map<string, CaptureInfo>, name: string): CaptureInfo {
   return info;
 }
 
-void test('a function nothing reads into needs no environment at all', () => {
+test('a function nothing reads into needs no environment at all', () => {
   const { named } = analyze(`
     function alone(): number {
       const x: number = 1;
@@ -68,7 +68,7 @@ void test('a function nothing reads into needs no environment at all', () => {
   assert.equal(alone.needsEnv, false);
 });
 
-void test('a read from a nested function moves the binding into the declaring environment', () => {
+test('a read from a nested function moves the binding into the declaring environment', () => {
   const { named } = analyze(`
     function outer(): () => number {
       let n: number = 0;
@@ -87,7 +87,7 @@ void test('a read from a nested function moves the binding into the declaring en
   assert.deepEqual(outer.captures, []);
 });
 
-void test('a captured parameter is held in the environment exactly like a captured local', () => {
+test('a captured parameter is held in the environment exactly like a captured local', () => {
   const { named } = analyze(`
     function adder(base: number): (x: number) => number {
       return function (x: number): number {
@@ -99,7 +99,7 @@ void test('a captured parameter is held in the environment exactly like a captur
   assert.deepEqual(get(named, 'adder').envVars, ['base']);
 });
 
-void test('an intermediate function that captures nothing still carries the chain', () => {
+test('an intermediate function that captures nothing still carries the chain', () => {
   const { named, raw } = analyze(`
     function outer(): () => number {
       const tag: number = 7;
@@ -129,7 +129,7 @@ void test('an intermediate function that captures nothing still carries the chai
   );
 });
 
-void test('each env-bearing scope crossed adds exactly one level', () => {
+test('each env-bearing scope crossed adds exactly one level', () => {
   const { raw } = analyze(`
     function a(): number {
       const outerVar: number = 1;
@@ -152,7 +152,7 @@ void test('each env-bearing scope crossed adds exactly one level', () => {
   assert.equal(byName.get('outerVar'), 1);
 });
 
-void test('every capture index addresses the named slot in the owning environment', () => {
+test('every capture index addresses the named slot in the owning environment', () => {
   const { named, raw } = analyze(`
     function owner(): number {
       const zebra: number = 1;
@@ -194,7 +194,7 @@ void test('every capture index addresses the named slot in the owning environmen
   assert.equal(raw.size, again.raw.size);
 });
 
-void test('a module-level binding is never a capture -- the globals array already reaches it', () => {
+test('a module-level binding is never a capture -- the globals array already reaches it', () => {
   const { named } = analyze(`
     const top: number = 5;
     function reader(): number {
@@ -207,7 +207,7 @@ void test('a module-level binding is never a capture -- the globals array alread
   assert.equal(reader.needsEnv, false);
 });
 
-void test('a function referring only to itself recurses without an environment', () => {
+test('a function referring only to itself recurses without an environment', () => {
   const { named } = analyze(`
     function fact(n: number): number {
       if (n < 2) {
@@ -223,7 +223,7 @@ void test('a function referring only to itself recurses without an environment',
   assert.equal(fact.needsEnv, false);
 });
 
-void test('an arrow in a field initializer captures the constructor receiver from the class', () => {
+test('an arrow in a field initializer captures the constructor receiver from the class', () => {
   const { named, raw } = analyze(`
     class Counter {
       n = 0;
@@ -248,7 +248,7 @@ void test('an arrow in a field initializer captures the constructor receiver fro
   assert.equal(arrow?.needsEnv, true);
 });
 
-void test('an explicit constructor carries the field-initializer receiver in its own environment', () => {
+test('an explicit constructor carries the field-initializer receiver in its own environment', () => {
   const { named, raw } = analyze(`
     class Explicit {
       v: number = 1;
@@ -267,7 +267,7 @@ void test('an explicit constructor carries the field-initializer receiver in its
   assert.deepEqual(ctor?.envVars, [RECEIVER_NAME]);
 });
 
-void test('a super use in an arrow captures the enclosing receiver like this does', () => {
+test('a super use in an arrow captures the enclosing receiver like this does', () => {
   const { named, raw } = analyze(`
     class B {
       m(): number {

@@ -5,7 +5,7 @@
  * gets silently wrong. `hTypeName` is what a user reads in a type-mismatch diagnostic. */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import {
   H_BOOLEAN,
   H_NULL,
@@ -20,7 +20,7 @@ import {
   hUnknown,
 } from '../../compiler/src/hir/types.ts';
 
-void test('primitive types are equal to themselves and unequal to every other kind', () => {
+test('primitive types are equal to themselves and unequal to every other kind', () => {
   assert.equal(hTypeEquals(H_NUMBER, H_NUMBER), true);
   assert.equal(hTypeEquals(H_STRING, H_STRING), true);
   assert.equal(hTypeEquals(H_NUMBER, H_STRING), false);
@@ -28,7 +28,7 @@ void test('primitive types are equal to themselves and unequal to every other ki
   assert.equal(hTypeEquals(H_NULL, H_UNDEFINED), false);
 });
 
-void test('Unknown types are equal only when their fromImplicitAny flag matches', () => {
+test('Unknown types are equal only when their fromImplicitAny flag matches', () => {
   // The flag records WHY a value is Unknown (an implicit `any` the gate may reject, vs the js-mode
   // dynamic path it must not) -- two Unknowns that differ only in that flag are not the same type.
   assert.equal(hTypeEquals(hUnknown(true), hUnknown(true)), true);
@@ -36,7 +36,7 @@ void test('Unknown types are equal only when their fromImplicitAny flag matches'
   assert.equal(hTypeEquals(hUnknown(true), hUnknown(false)), false);
 });
 
-void test('fn types compare structurally: same shape equal, any differing part unequal', () => {
+test('fn types compare structurally: same shape equal, any differing part unequal', () => {
   const numToStr = hFunction([H_NUMBER], H_STRING);
   const numToStrAgain = hFunction([H_NUMBER], H_STRING);
   assert.equal(hTypeEquals(numToStr, numToStrAgain), true);
@@ -66,7 +66,7 @@ void test('fn types compare structurally: same shape equal, any differing part u
   );
 });
 
-void test('hTypeName matches the primitive kind name, and formats fn as a signature', () => {
+test('hTypeName matches the primitive kind name, and formats fn as a signature', () => {
   assert.equal(hTypeName(H_NUMBER), 'number');
   assert.equal(hTypeName(H_STRING), 'string');
   assert.equal(hTypeName(H_BOOLEAN), 'boolean');
@@ -80,7 +80,7 @@ void test('hTypeName matches the primitive kind name, and formats fn as a signat
   assert.equal(hTypeName(hFunction([], H_UNDEFINED)), '() => undefined');
 });
 
-void test('unknown[] is assignable to unknown[] even when fromImplicitAny disagrees', () => {
+test('unknown[] is assignable to unknown[] even when fromImplicitAny disagrees', () => {
   // `var xs = []` hoists a binding whose element is implicit-any Unknown and assigns a literal
   // whose element is not; equality would reject that, assignability must not.
   const hoisted = hArray(hUnknown(true));

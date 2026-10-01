@@ -14,7 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import { execa } from 'execa';
@@ -98,7 +98,7 @@ function writeLinkProgram(
 const BRAND = 'type Db = { readonly __brand: "Db" };\n';
 const IBRAND = 'interface IDb { readonly __brand: "IDb" };\n';
 
-void test('a branded pointer maps to the pointer kind in both positions', () => {
+test('a branded pointer maps to the pointer kind in both positions', () => {
   assert.deepEqual(assertOk(`${BRAND}/** @statorExtern */\ndeclare function f(db: Db): Db;`), {
     params: ['pointer'],
     ret: 'pointer',
@@ -106,14 +106,14 @@ void test('a branded pointer maps to the pointer kind in both positions', () => 
   });
 });
 
-void test('an interface brand maps the same as an alias brand', () => {
+test('an interface brand maps the same as an alias brand', () => {
   assert.deepEqual(
     assertOk(`${IBRAND}/** @statorExtern */\ndeclare function f(db: IDb): number;`),
     { params: ['pointer'], ret: 'number', error: undefined },
   );
 });
 
-void test('the null convention guards a pointer return; numeric ones do not fit it', () => {
+test('the null convention guards a pointer return; numeric ones do not fit it', () => {
   assert.deepEqual(
     assertOk(
       `${BRAND}/** @statorExtern @statorError null */\ndeclare function f(seed: number): Db;`,
@@ -130,7 +130,7 @@ void test('the null convention guards a pointer return; numeric ones do not fit 
   );
 });
 
-void test('a flags pragma parses in order with quote grouping', () => {
+test('a flags pragma parses in order with quote grouping', () => {
   const pragmas = pragmasOf(
     '// @statorLink: -lsqlite3 -L/opt/x/lib\n' +
       '//   @statorLink   -lfoo "/p a t h/x.a"\n' +
@@ -142,7 +142,7 @@ void test('a flags pragma parses in order with quote grouping', () => {
   ]);
 });
 
-void test('angle and bare-quote headers parse; a pathed quote resolves against the file', () => {
+test('angle and bare-quote headers parse; a pathed quote resolves against the file', () => {
   const pragmas = pragmasOf(
     '// @statorLink #include <sqlite3.h>\n' +
       '// @statorLink #include "local.h"\n' +
@@ -159,7 +159,7 @@ void test('angle and bare-quote headers parse; a pathed quote resolves against t
   ]);
 });
 
-void test('malformed pragmas parse as invalid, and ordinary comments are not pragmas', () => {
+test('malformed pragmas parse as invalid, and ordinary comments are not pragmas', () => {
   const kinds = (source: string): readonly string[] =>
     pragmasOf(source).map((pragma) => pragma.kind);
   assert.deepEqual(kinds('// @statorLink\ndeclare function f(): void;\n'), ['invalid']);
@@ -181,7 +181,7 @@ void test('malformed pragmas parse as invalid, and ordinary comments are not pra
   );
 });
 
-void test('a valid pragma with a pointer call explains static in both modes', async () => {
+test('a valid pragma with a pointer call explains static in both modes', async () => {
   const helper =
     '// @statorLink: -lsqlite3\n' +
     '// @statorLink #include <sqlite3.h>\n' +
@@ -206,7 +206,7 @@ void test('a valid pragma with a pointer call explains static in both modes', as
   }
 });
 
-void test('a retained-handle use stays STA1217: aliasing the extern as a value', async () => {
+test('a retained-handle use stays STA1217: aliasing the extern as a value', async () => {
   const helper = `${BRAND}/** @statorExtern db_open */\ndeclare function extOpen(seed: number): Db;\n`;
   for (const mode of ['ts', 'js'] as const) {
     const { work, entry } = writeLinkProgram({
@@ -238,7 +238,7 @@ async function explainError(
   }
 }
 
-void test('a malformed pragma is STA1119 at its own line', async () => {
+test('a malformed pragma is STA1119 at its own line', async () => {
   const result = await explainError({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(1);\nexport {};\n',
     'helper.d.ts':
@@ -247,7 +247,7 @@ void test('a malformed pragma is STA1119 at its own line', async () => {
   assert.deepEqual([result.verdict, result.code], ['error', 'STA1119']);
 });
 
-void test('a pragma in a file with no extern declaration is STA1119', async () => {
+test('a pragma in a file with no extern declaration is STA1119', async () => {
   const result = await explainError({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(1);\nexport {};\n',
     'helper.d.ts': '// @statorLink: -lsqlite3\ndeclare function extF(): number;\n',
@@ -255,7 +255,7 @@ void test('a pragma in a file with no extern declaration is STA1119', async () =
   assert.deepEqual([result.verdict, result.code], ['error', 'STA1119']);
 });
 
-void test('a second header in one file is STA1119', async () => {
+test('a second header in one file is STA1119', async () => {
   const result = await explainError({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(1);\nexport {};\n',
     'helper.d.ts':
@@ -264,7 +264,7 @@ void test('a second header in one file is STA1119', async () => {
   assert.deepEqual([result.verdict, result.code], ['error', 'STA1119']);
 });
 
-void test('a pointer crosses as void star and boxes back by bit pattern', async () => {
+test('a pointer crosses as void star and boxes back by bit pattern', async () => {
   const { work, entry } = writeLinkProgram({
     'main.ts':
       '/// <reference path="./helper.d.ts" />\n' +
@@ -295,7 +295,7 @@ void test('a pointer crosses as void star and boxes back by bit pattern', async 
   }
 });
 
-void test('a named header is included and its symbol gets no forward declaration', async () => {
+test('a named header is included and its symbol gets no forward declaration', async () => {
   const { work, entry } = writeLinkProgram({
     'main.ts':
       '/// <reference path="./helper.d.ts" />\n' +
@@ -325,7 +325,7 @@ void test('a named header is included and its symbol gets no forward declaration
   }
 });
 
-void test('a NULL-checked pointer return detects NULL and throws it', async () => {
+test('a NULL-checked pointer return detects NULL and throws it', async () => {
   const { work, entry } = writeLinkProgram({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(extOpen(7));\nexport {};\n',
     'helper.d.ts': `${BRAND}/** @statorExtern db_open @statorError null */\ndeclare function extOpen(seed: number): Db;\n`,
@@ -346,7 +346,7 @@ void test('a NULL-checked pointer return detects NULL and throws it', async () =
   }
 });
 
-void test('a primitive where a handle belongs is STA4098, like the scalar mismatch', async () => {
+test('a primitive where a handle belongs is STA4098, like the scalar mismatch', async () => {
   const { work, entry } = writeLinkProgram(
     {
       'main.js': '/// <reference path="./helper.d.ts" />\nconsole.log(extGet(42));\n',
@@ -366,7 +366,7 @@ void test('a primitive where a handle belongs is STA4098, like the scalar mismat
   }
 });
 
-void test('duplicate libraries dedup first-wins; everything else passes through', () => {
+test('duplicate libraries dedup first-wins; everything else passes through', () => {
   assert.deepEqual(dedupLinkLibs(['-lsqlite3', '-lz', '-lsqlite3']), ['-lsqlite3', '-lz']);
   assert.deepEqual(dedupLinkLibs(['-lm', '-L/x', '-L/x', 'a.o', 'a.o']), [
     '-lm',
@@ -378,7 +378,7 @@ void test('duplicate libraries dedup first-wins; everything else passes through'
   assert.deepEqual(dedupLinkLibs([]), []);
 });
 
-void test(
+test(
   'pragma flags reach the link: a linked object answers through the boundary',
   NATIVE_ONLY,
   async () => {
@@ -424,7 +424,7 @@ void test(
   },
 );
 
-void test('a missing library fails the link naming the extern flags', NATIVE_ONLY, async () => {
+test('a missing library fails the link naming the extern flags', NATIVE_ONLY, async () => {
   const { work, entry } = writeLinkProgram({
     'main.ts': 'console.log(1);\nexport {};\n',
   });
@@ -454,7 +454,7 @@ void test('a missing library fails the link naming the extern flags', NATIVE_ONL
   }
 });
 
-void test('bare and empty --link values are STA0004, before any build', async () => {
+test('bare and empty --link values are STA0004, before any build', async () => {
   for (const args of [
     ['build', 'main.ts', '-o', 'app', '--link'],
     ['build', 'main.ts', '-o', 'app', '--link='],

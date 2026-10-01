@@ -8,7 +8,7 @@
  * exactly the failure mode TS2403 demonstrated when a suppression turned `STA0012` into `STA4004`.
  */
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test } from 'vitest';
 
 import type { Expression, ReferenceErrorRead } from '../../compiler/src/hir/nodes.ts';
 import { lowerSourceFile } from '../../compiler/src/lower/index.ts';

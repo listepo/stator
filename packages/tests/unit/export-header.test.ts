@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import {
   collectUnitExports,
@@ -40,7 +40,7 @@ function codesOf(exports: UnitExports): string[] {
   return exports.diagnostics.map((d) => d.code);
 }
 
-void test('the default unit is the entry basename, sanitized to a C identifier', () => {
+test('the default unit is the entry basename, sanitized to a C identifier', () => {
   assert.equal(defaultUnitName('/some/dir/widget.ts'), 'widget');
   assert.equal(defaultUnitName('main.js'), 'main');
   assert.equal(exportCName('widget', 'add'), 'stator_widget_add');
@@ -53,7 +53,7 @@ void test('the default unit is the entry basename, sanitized to a C identifier',
   assert.equal(sanitizeUnitName(defaultUnitName('/d/my-lib.ts')), 'my_lib');
 });
 
-void test('exported foo from unit m mangles to stator_m_foo, sanitized totally', () => {
+test('exported foo from unit m mangles to stator_m_foo, sanitized totally', () => {
   assert.equal(exportCName('m', 'foo'), 'stator_m_foo');
   // `$` is legal in a TS name but not in C, and non-ASCII scrambles the same way, so the
   // mangling is total: every TS name lands on a spellable C symbol (collisions are the
@@ -68,7 +68,7 @@ void test('exported foo from unit m mangles to stator_m_foo, sanitized totally',
   assert.ok(header.includes('double stator_u_f(double _int);'));
 });
 
-void test('an in-table signature spells plain C types under the mangled name', () => {
+test('an in-table signature spells plain C types under the mangled name', () => {
   const header = renderHeader(
     collect(
       'export function add(a: number, b: number): number { return a + b; }\n' +
@@ -83,7 +83,7 @@ void test('an in-table signature spells plain C types under the mangled name', (
   assert.ok(!header.includes('#include "jsrt_value.h"'));
 });
 
-void test('a branded pointer and a CString spell the table types', () => {
+test('a branded pointer and a CString spell the table types', () => {
   const header = renderHeader(
     collect(
       'type db = { readonly __brand: "sqlite3" };\n' +
@@ -96,7 +96,7 @@ void test('a branded pointer and a CString spell the table types', () => {
   assert.ok(header.includes('double stator_u_size(const char * s);'));
 });
 
-void test('anything outside the table falls back to jsrt_value, per position', () => {
+test('anything outside the table falls back to jsrt_value, per position', () => {
   const header = renderHeader(
     collect(
       'export function greet(name: string): string { return name; }\n' +
@@ -110,7 +110,7 @@ void test('anything outside the table falls back to jsrt_value, per position', (
   assert.ok(header.includes('#include "jsrt_value.h"'));
 });
 
-void test('const number and boolean spell extern const; const string spells jsrt_value', () => {
+test('const number and boolean spell extern const; const string spells jsrt_value', () => {
   const header = renderHeader(
     collect(
       'export const VERSION: number = 1;\nexport const ON = true;\nexport const NAME = "s";\n',
@@ -121,7 +121,7 @@ void test('const number and boolean spell extern const; const string spells jsrt
   assert.ok(header.includes('extern const jsrt_value stator_u_NAME;'));
 });
 
-void test('a CString const spells one const, not two', () => {
+test('a CString const spells one const, not two', () => {
   // `const char *` already carries its `const`; doubling it is a
   // `-Wduplicate-decl-specifier` error in the consumer (found via a C main, not the header).
   const header = renderHeader(
@@ -134,7 +134,7 @@ void test('a CString const spells one const, not two', () => {
   assert.ok(!header.includes('const const'));
 });
 
-void test('classes, generics, closures, and default/re-export forms are STA1122', () => {
+test('classes, generics, closures, and default/re-export forms are STA1122', () => {
   const cases: readonly string[] = [
     'export class Box { v: number = 1; }\n',
     'export function id<T>(x: T): T { return x; }\n',
@@ -148,7 +148,7 @@ void test('classes, generics, closures, and default/re-export forms are STA1122'
   }
 });
 
-void test('mutable and non-primitive exported state is STA1123', () => {
+test('mutable and non-primitive exported state is STA1123', () => {
   const cases: readonly string[] = [
     'export let count: number = 0;\n',
     'export const point = { x: 1 };\n',
@@ -159,7 +159,7 @@ void test('mutable and non-primitive exported state is STA1123', () => {
   }
 });
 
-void test('two exports mangling to one C symbol are STA1124', () => {
+test('two exports mangling to one C symbol are STA1124', () => {
   // `$` is a legal TS identifier character but not a C one, so `$foo` and `_foo` sanitize
   // alike and collide on `stator_u__foo`.
   const sanitized = collect('export function _foo(): void {}\nexport function $foo(): void {}\n');
@@ -181,7 +181,7 @@ void test('two exports mangling to one C symbol are STA1124', () => {
   assert.equal(overload.functions.length, 1);
 });
 
-void test('STA1124 covers the collision matrix: fn/const and const/const share one table', () => {
+test('STA1124 covers the collision matrix: fn/const and const/const share one table', () => {
   // Functions and consts claim from the same `seen` table, so a sanitized collision across
   // the two kinds refuses the same way as within one kind.
   const fnConst = collect('export function foo_bar(): void {}\nexport const foo$bar = 1;\n');
@@ -193,7 +193,7 @@ void test('STA1124 covers the collision matrix: fn/const and const/const share o
   assert.deepEqual(codesOf(unicode), ['STA1124']);
 });
 
-void test('the header says single-threaded v0 out loud, naming T10.2', () => {
+test('the header says single-threaded v0 out loud, naming T10.2', () => {
   const header = renderHeader(
     collect('export function add(a: number, b: number): number { return a + b; }\n'),
   );
@@ -201,7 +201,7 @@ void test('the header says single-threaded v0 out loud, naming T10.2', () => {
   assert.ok(header.includes('calling in from a second thread is undefined behavior until T10.2.'));
 });
 
-void test('the header declares the ABI-identity symbol the object defines', () => {
+test('the header declares the ABI-identity symbol the object defines', () => {
   // Pinned at 0: bumping the export ABI means a new symbol name, so the bump edits this
   // test, the header, and the recorded link proof together — never silently.
   assert.equal(EXPORT_ABI_VERSION, 0);
@@ -218,7 +218,7 @@ void test('the header declares the ABI-identity symbol the object defines', () =
   assert.ok(header.includes('extern const int stator_m_abi_v0;'));
 });
 
-void test('refusals carry a span, the mode, and the never class', () => {
+test('refusals carry a span, the mode, and the never class', () => {
   const exports = collect('export class Box { v: number = 1; }\n');
   assert.equal(exports.diagnostics.length, 1);
   const [diag] = exports.diagnostics;
@@ -229,7 +229,7 @@ void test('refusals carry a span, the mode, and the never class', () => {
   assert.equal(diag.line, 1);
 });
 
-void test('the same input collects to a byte-identical header across runs', () => {
+test('the same input collects to a byte-identical header across runs', () => {
   const source =
     'export function add(a: number, b: number): number { return a + b; }\n' +
     'export function greet(name: string): string { return name; }\n' +
@@ -293,7 +293,7 @@ const EXPECTED_HEADER =
   '\n' +
   '#endif\n';
 
-void test(
+test(
   '--emit-header on a clean fixture writes the expected header and an object',
   NATIVE_ONLY,
   () => {
@@ -325,7 +325,7 @@ void test(
   },
 );
 
-void test('--emit-header double build is byte-identical across runs', NATIVE_ONLY, () => {
+test('--emit-header double build is byte-identical across runs', NATIVE_ONLY, () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-export-det-'));
   try {
     const entry = join(work, 'widget.ts');
@@ -362,36 +362,32 @@ void test('--emit-header double build is byte-identical across runs', NATIVE_ONL
   }
 });
 
-void test(
-  '--emit-header on a class export refuses with STA1122 and writes nothing',
-  NATIVE_ONLY,
-  () => {
-    const work = mkdtempSync(join(tmpdir(), 'stator-export-refuse-'));
-    try {
-      const entry = join(work, 'bad.ts');
-      const headerPath = join(work, 'bad.h');
-      writeFileSync(
-        entry,
-        'export function ok(x: number): number {\n  return x;\n}\n' +
-          'export class Box {\n  v: number = 1;\n}\n',
-      );
-      const build = statorBuild([
-        'build',
-        entry,
-        '-o',
-        join(work, 'bad.o'),
-        `--emit-header=${headerPath}`,
-      ]);
-      assert.equal(build.status, 1);
-      assert.match(build.stderr, /STA1122/);
-      assert.ok(!existsSync(headerPath), 'a refused unit writes no header');
-    } finally {
-      rmSync(work, { recursive: true, force: true });
-    }
-  },
-);
+test('--emit-header on a class export refuses with STA1122 and writes nothing', NATIVE_ONLY, () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-export-refuse-'));
+  try {
+    const entry = join(work, 'bad.ts');
+    const headerPath = join(work, 'bad.h');
+    writeFileSync(
+      entry,
+      'export function ok(x: number): number {\n  return x;\n}\n' +
+        'export class Box {\n  v: number = 1;\n}\n',
+    );
+    const build = statorBuild([
+      'build',
+      entry,
+      '-o',
+      join(work, 'bad.o'),
+      `--emit-header=${headerPath}`,
+    ]);
+    assert.equal(build.status, 1);
+    assert.match(build.stderr, /STA1122/);
+    assert.ok(!existsSync(headerPath), 'a refused unit writes no header');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
 
-void test(
+test(
   '--emit-header on colliding exports refuses with STA1124 and writes nothing',
   NATIVE_ONLY,
   () => {
@@ -423,7 +419,7 @@ void test(
   },
 );
 
-void test('--unit-name sets the stator_<unit>_<name> prefix, sanitized', NATIVE_ONLY, () => {
+test('--unit-name sets the stator_<unit>_<name> prefix, sanitized', NATIVE_ONLY, () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-export-unit-'));
   try {
     const entry = join(work, 'm.ts');
@@ -448,7 +444,7 @@ void test('--unit-name sets the stator_<unit>_<name> prefix, sanitized', NATIVE_
   }
 });
 
-void test('--emit-header without a value is STA0004, not a crash', () => {
+test('--emit-header without a value is STA0004, not a crash', () => {
   const build = statorBuild(['build', 'x.ts', '-o', 'x', '--emit-header']);
   assert.equal(build.status, 1);
   assert.match(build.stderr, /STA0004/);

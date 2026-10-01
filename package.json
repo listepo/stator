@@ -10,8 +10,9 @@
     "build": "tsc -p packages/compiler/tsconfig.json",
     "lint": "oxlint --deny-warnings . && oxfmt --check \"**/*.{ts,tsx,js,mjs,cjs,json,jsonc}\"",
     "format": "oxlint --fix . && oxfmt \"**/*.{ts,tsx,js,mjs,cjs,json,jsonc}\"",
-    "test": "node --test \"packages/tests/unit/*.test.ts\"",
-    "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include=\"packages/compiler/src/**\" --test-reporter=spec --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=coverage/lcov.info \"packages/tests/unit/*.test.ts\"",
+    "test": "vitest run --config packages/tests/vitest.config.ts",
+    "test:affected": "vitest run --config packages/tests/vitest.config.ts --changed",
+    "test:coverage": "c8 vitest run --config packages/tests/vitest.config.ts",
     "test:subset": "node packages/tests/subset/run.ts",
     "test:golden": "node packages/tests/golden/run.ts",
     "test262": "node packages/tests/test262/run.ts",
@@ -36,6 +37,7 @@
     "@opentelemetry/sdk-trace-node": "2.11.0",
     "@types/node": "26.6.2",
     "@types/react": "19.3.0",
+    "c8": "12.0.0",
     "cpd": "5.3.0",
     "dotenv": "18.0.1",
     "execa": "10.0.1",
@@ -45,7 +47,8 @@
     "oxlint": "1.83.0",
     "oxlint-tsgolint": "7.0.2002",
     "react": "19.3.0",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vitest": "5.0.3"
   },
   "engines": {
     "node": ">=24"

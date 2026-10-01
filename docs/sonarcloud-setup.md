@@ -67,9 +67,9 @@ once the dashboard looks sane:
 
 ## 7. Coverage
 
-Coverage **is wired**, with no new dependencies: the workflow runs the existing
-`pnpm run test:coverage` script (Node's built-in test runner with
-`--experimental-test-coverage` and the LCOV reporter), the same one the ci.yml
+Coverage **is wired**: the workflow runs the existing
+`pnpm run test:coverage` script (vitest under c8, which collects V8 coverage from the test
+workers and every CLI subprocess the tests spawn; plan-notes 285), the same one the ci.yml
 `frontend` job runs on linux/x64. It writes `coverage/lcov.info`, which Sonar reads via
 **`sonar.javascript.lcov.reportPaths`**. Before that the workflow builds the runtime
 archive (`pnpm run runtime`), because a few unit tests compile and run native binaries.

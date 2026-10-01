@@ -12,12 +12,12 @@
  * plausible ways to get this wrong.
  */
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { compileAndRunLines, NATIVE_ONLY } from './helpers.ts';
 
 const SAMPLES = 2000;
 
-void test('Math.random stays in [0, 1) and varies', NATIVE_ONLY, () => {
+test('Math.random stays in [0, 1) and varies', NATIVE_ONLY, () => {
   const lines = compileAndRunLines(
     `for (let i = 0; i < ${String(SAMPLES)}; i++) {\n  console.log(Math.random());\n}\n`,
     'random',

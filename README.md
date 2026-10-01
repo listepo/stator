@@ -43,7 +43,8 @@ Boehm GC is optional (`pkg-config bdw-gc`); without it the runtime still builds,
 
 ```
 pnpm run ci              # typecheck, lint, dupes, coverage, subset, golden, sanitizers, leak
-pnpm run test            # unit tests
+pnpm run test            # unit tests (vitest)
+pnpm run test:affected   # only the unit tests your changes reach
 pnpm run test:subset     # feature × mode decision matrix
 pnpm run test:golden     # compile + run vs the pinned Node, byte-for-byte
 pnpm run test262         # Test262 slice (CI heartbeat; corpus fetched separately)

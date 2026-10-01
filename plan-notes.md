@@ -8999,3 +8999,48 @@ in the gatekeeper pass.
 
 **Still open (T10.1 steps 3–4):** `std/process` (`exit`/`pid`), sync `std/fs` +
 `std/time`. Promise twins stay not-yet per step 5 (recorded choice, not a gap).
+
+## 285. Unit tests move from `node:test` to vitest; `test:affected` runs only what a diff reaches (2026-10-02)
+
+Owner-directed (2026-10-02): add a way to run only the unit tests affected by changed files, with
+vitest. `node:test` has no affected-files mode, and vitest cannot run `node:test` files, so the 44
+unit files move to vitest. This edits plan.md §0 item 9 (`node:test` → vitest) in the same change.
+
+**Dependencies (dev-only, exact pins).** `vitest@5.0.3` (root + `packages/tests`, since the test
+files import it) and `c8@12.0.0` (root). The runtime budget is unchanged. Rejected:
+`@vitest/coverage-v8` and rstest 0.12.3 (`@rstest/core`). Both measure only their own workers and
+miss the CLI subprocesses that `cli`, `export-header`, `export-stubs` and the native proofs spawn:
+with the built-in provider, line coverage fell to 79.0% and `cli/main.ts` to 0%. rstest also has
+no `test(name, { skip }, fn)` form, which `NATIVE_ONLY` and `NEEDS_CLANG` rely on, and it bundles
+tests through Rspack. Under rstest, `@opentelemetry/api` had to be externalized, and `c8` saw only
+53.7%.
+
+**Shape.** `packages/tests/vitest.config.ts` sets `experimental.viteModuleRunner: false`, so test
+files load through Node's own type stripping, as the CLI does. That keeps the `erasableSyntaxOnly`
+runtime guard the Bun decision (plan-notes 241) relied on, and lets `c8` read V8 coverage with no
+source maps. `testTimeout: 0` matches `node:test`, which had no per-test timeout. A runtime C
+change reruns everything (`forceRerunTriggers`), because the native proofs link `libjsrt.a`
+outside the TS graph. `packages/tests/support/coverage-flush.ts` calls `v8.takeCoverage()` in
+`afterAll`: vitest ends its workers before V8's exit-time dump. Without it, `c8` saw only the
+subprocesses (53.7%).
+
+**Code changes.** Only the import changed (`'node:test'` → `'vitest'`). `NATIVE_ONLY` and
+`NEEDS_CLANG` became `{ skip: boolean }`, because vitest types `skip` as a boolean; the reason now
+lives in the doc comment. The `void test(...)` wrappers went away. vitest's `test()` returns
+`void`, so `typescript/no-floating-promises` is back on with zero findings. It was off only for
+the 141 `node:test` calls.
+
+**Evidence (this host, Node 26.7.0).**
+- `node --test`: 598 pass, 17.9 s.
+- `pnpm run test` (vitest): 44 files, 598 pass, 17.1–20.6 s.
+- `test:affected` after touching `passes/dce.ts`: 7 files, 95 tests, 10.9 s. rstest picked the
+  same 7 files and 95 tests.
+- Coverage: `c8` over vitest gives 85.88% lines, 82.32% branches, 95.31% functions. `c8` over the
+  OLD `node --test` gives the same numbers to the hundredth.
+- Node's built-in reporter printed 90.08% lines for that same run. That gap is the reporter's
+  line counting, not lost coverage. SonarCloud's figure moves accordingly.
+- `test:coverage`: 81.2 s, about 4x plain `test` (was ~3.4x).
+
+**Limit.** `--changed` follows static imports. A test that reaches compiler code only through a
+spawned CLI process is not selected, so `test:affected` is an iteration aid and plain `test`
+stays the gate (AGENTS.md, Testing rules).

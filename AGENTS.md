@@ -55,7 +55,7 @@ packages/runtime/  C11 + Zig memory core (plan-notes 238 / T9.1; NOT an npm pack
   include/jsrt_value.h   mirrors docs/VALUE.md — the codegen↔runtime contract
   vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
 packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
-  unit/            node:test unit tests (*.test.ts)
+  unit/            vitest unit tests (*.test.ts; config: packages/tests/vitest.config.ts)
   subset/          decision tests (feature × mode matrix)
   golden/ts|js     machine-checked vs Node, byte-for-byte
   differential/    fuzzer corpus       bench/  baselines + results
@@ -98,8 +98,9 @@ pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lint + format (must be clean)
 pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)
 pnpm run dupes                  # cpd copy/paste detector (fails above 1% duplication)
-pnpm run test                   # unit tests (node --test) — the default; use this for iteration and the gate
-pnpm run test:coverage          # same + packages/compiler/src coverage table; writes coverage/lcov.info — ONLY when the coverage table is the question (it costs ~3.4x wall time)
+pnpm run test                   # unit tests (vitest) — the default; use this for the gate
+pnpm run test:affected          # only the unit tests your uncommitted changes reach (append a commit, e.g. origin/main, for a whole branch) — iteration, never the gate
+pnpm run test:coverage          # same under c8 + packages/compiler/src coverage table; writes coverage/lcov.info — ONLY when the coverage table is the question (it costs ~4x wall time)
 pnpm run test:subset            # decision tests → verdict matrix
 pnpm run test:golden            # compile + run vs Node, byte-for-byte
 pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-for-byte
@@ -148,6 +149,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 - Every new language construct lands with: decision test(s) for both modes + at least one golden test + HIR-verifier-clean build. Non-trivial runtime code lands with a unit test.
 - Differential ground truth is the pinned Node LTS in `.node-version` — that Node, and only that Node.
 - **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (linux/x64 `frontend` job owns the lcov artifact), not on every local run.
+- **`test:affected` is for iteration only.** It follows the import graph from your diff, so it cannot see a test that reaches compiler code only through a spawned CLI process; plain `test` stays the gate.
 
 ## Diagnostics conventions
 

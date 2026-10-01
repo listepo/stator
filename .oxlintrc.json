@@ -38,9 +38,10 @@
     // arm; `allowEmptyCase` keeps that legal while a case that runs code and falls through stays an
     // error.
     "no-fallthrough": ["error", { "allowEmptyCase": true }],
+    // Was off for 141 findings, all `node:test` calls returning a runner-owned promise; vitest's
+    // `test()` returns void, so it holds with zero exceptions (plan-notes 285).
+    "typescript/no-floating-promises": "error",
     // --- Off, with the count of existing findings that made each one a policy decision ---
-    // 141, all in `node:test` bodies: the runner owns `test()`'s promise (Biome kept this nursery).
-    "typescript/no-floating-promises": "off",
     // 114: `as` after a runtime guard is how the lowering narrows `ts.Type` to a known method name.
     "typescript/no-unsafe-type-assertion": "off",
     // 56: redundant but deliberate `as` annotations that document what a guard proved.

@@ -7,7 +7,7 @@
  * `stator explain`/`build` would, so a passing test here is a claim about the actual gate. */
 
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { gateProgram } from '../../compiler/src/frontend/gate.ts';
 import { createProgram } from './helpers.ts';
 
@@ -18,32 +18,32 @@ function codesFor(source: string, mode: 'ts' | 'js' = 'ts', fileName?: string): 
 
 // `x++`, `--x`, `x += e` all read-then-write-then-produce-a-value. Statement position still
 // folds to Assignment; value position is an UpdateExpr.
-void test('++ and -- are accepted where their value is discarded', () => {
+test('++ and -- are accepted where their value is discarded', () => {
   assert.deepEqual(codesFor('let x: number = 0;\nx++;'), []);
   assert.deepEqual(codesFor('let x: number = 0;\n--x;'), []);
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i++) { }'), []);
 });
 
-void test('++ and -- are accepted where their value is USED', () => {
+test('++ and -- are accepted where their value is USED', () => {
   assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = x++;'), []);
   assert.deepEqual(codesFor('let n: number = 0;\nlet y: number = (n = 1);'), []);
   assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = --x;'), []);
 });
 
-void test('compound assignment is accepted in statement and value position', () => {
+test('compound assignment is accepted in statement and value position', () => {
   assert.deepEqual(codesFor('let x: number = 0;\nx += 1;'), []);
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i += 1) { }'), []);
   assert.deepEqual(codesFor('let x: number = 0;\nlet y: number = (x += 1);'), []);
 });
 
-void test('compound assignment to anything but a bare identifier is deferred, not accepted', () => {
+test('compound assignment to anything but a bare identifier is deferred, not accepted', () => {
   // No object model exists yet for the target to reach the fold soundly, so `.length` — the one
   // property this subset already exposes — has to be refused rather than silently miscompiled.
   assert.deepEqual(codesFor('let s: string = "x";\ns.length += 1;'), ['STA1214']);
 });
 
 // A label exists only to be named by `break`/`continue`. Loops, switches, and blocks carry one.
-void test('a label on a loop, switch, or block is accepted', () => {
+test('a label on a loop, switch, or block is accepted', () => {
   assert.deepEqual(codesFor('outer: while (false) { break outer; }'), []);
   assert.deepEqual(codesFor('let x: number = 0;\nouter: switch (x) { }'), []);
   assert.deepEqual(codesFor('outer: { }'), []);
@@ -54,7 +54,7 @@ void test('a label on a loop, switch, or block is accepted', () => {
 // what is actually missing (plan-notes 44). for-of over an ARRAY landed with rung 5, over a
 // STRING/Map/Set with Phase 5 step 8; a class with `[Symbol.iterator]()` is a user iterable; for-in
 // desugars to Object.keys plus a counting for.
-void test('for-of and for-in report distinctly from the for loop they are not', () => {
+test('for-of and for-in report distinctly from the for loop they are not', () => {
   assert.deepEqual(codesFor('for (const x of [1, 2]) { }'), []);
   assert.deepEqual(codesFor("for (const c of 'ab') { }"), []);
   assert.deepEqual(
@@ -80,7 +80,7 @@ void test('for-of and for-in report distinctly from the for loop they are not', 
 
 // Index access is admitted only where the target is genuinely an array. `s[0]` and `o['k']` are
 // the same syntax reaching a different runtime operation, and neither has an HIR node yet.
-void test('index access is accepted on an array and not-yet on anything else', () => {
+test('index access is accepted on an array and not-yet on anything else', () => {
   assert.deepEqual(codesFor('const a: number[] = [1];\nconsole.log(a[0]);'), []);
   assert.deepEqual(codesFor("const s: string = 'ab';\nconsole.log(s[0]);"), ['STA1214']);
   // A hole is rejected: a dense array cannot be absent. Array spread of a typed array is accepted.
@@ -95,7 +95,7 @@ void test('index access is accepted on an array and not-yet on anything else', (
 // be refused here rather than accepted into an STA4082 (and STA4068 for the object twin). The
 // refusal names Phase 5 — spreading needs the GetIterator dispatch step 8 owns for unknown
 // iterables — like every other refusal in the spread arms.
-void test('spread of an unknown value is not-yet rather than an internal error', () => {
+test('spread of an unknown value is not-yet rather than an internal error', () => {
   // An `any` operand is silent at the checker and fatal at the verifier: the gate speaks.
   assert.deepEqual(codesFor('const u = JSON.parse("[1]");\nconst b = [...u];', 'js'), ['STA1214']);
   // An `as` assertion to an array type is never checkable, so the lowering drops it and spreads
@@ -123,7 +123,7 @@ void test('spread of an unknown value is not-yet rather than an internal error',
   assert.deepEqual(codesFor('const a: unknown[] = [1];\nconst b: unknown[] = [...a];', 'js'), []);
 });
 
-void test('spread unknowns carry their own messages', () => {
+test('spread unknowns carry their own messages', () => {
   const { program: arrayProgram } = createProgram(
     'declare const u: unknown;\nconst b = [...(u as number[])];',
     '/test.ts',
@@ -138,7 +138,7 @@ void test('spread unknowns carry their own messages', () => {
   assert.match(objectDiags[0]?.message ?? '', /an object spread of an unknown value/);
 });
 
-void test('switch, case, default and do/while are all accepted syntax', () => {
+test('switch, case, default and do/while are all accepted syntax', () => {
   assert.deepEqual(
     codesFor('let x: number = 0;\nswitch (x) { case 1: break; default: break; }'),
     [],
@@ -146,7 +146,7 @@ void test('switch, case, default and do/while are all accepted syntax', () => {
   assert.deepEqual(codesFor('let x: number = 0;\ndo { x++; } while (x < 1);'), []);
 });
 
-void test('try/catch/finally and throw are accepted, including a destructured catch', () => {
+test('try/catch/finally and throw are accepted, including a destructured catch', () => {
   assert.deepEqual(codesFor("try { throw 'boom'; } catch { console.log('handled'); }"), []);
   assert.deepEqual(codesFor("try { throw 'boom'; } catch (e) { console.log(typeof e); }"), []);
   assert.deepEqual(codesFor('try { console.log(1); } finally { console.log(2); }'), []);
@@ -156,7 +156,7 @@ void test('try/catch/finally and throw are accepted, including a destructured ca
 // `var` is banned in ts mode BY DESIGN (STA1104, a 'never' code, no phase) — function-scoped
 // hoisting with `undefined` initialization is the dynamic-scoping behaviour strict mode exists
 // to exclude. js mode accepts it (plan.md §8 step 3).
-void test('var is a permanent rejection in ts mode and is accepted in js mode', () => {
+test('var is a permanent rejection in ts mode and is accepted in js mode', () => {
   assert.deepEqual(codesFor('var x = 1;'), ['STA1104']);
   assert.deepEqual(codesFor('var x = 1;', 'js'), []);
   assert.deepEqual(codesFor('var x;', 'js'), []);
@@ -177,7 +177,7 @@ void test('var is a permanent rejection in ts mode and is accepted in js mode', 
 });
 
 // The HIR's Declaration carries exactly one name. Destructuring still has no shape to lower into.
-void test('simple destructuring is accepted; nested and rest stay deferred', () => {
+test('simple destructuring is accepted; nested and rest stay deferred', () => {
   assert.deepEqual(
     codesFor('const p: { x: number; y: number } = { x: 1, y: 2 }; const { x, y } = p;'),
     [],
@@ -193,13 +193,13 @@ void test('simple destructuring is accepted; nested and rest stay deferred', () 
 
 // Mirrors the compound-assignment-to-non-identifier test above, but for plain `=`: HIR Assignment
 // only ever targets a bare name, so `obj.x = 1` needs an object model this subset doesn't have.
-void test('plain assignment to anything but a bare identifier is deferred, not accepted', () => {
+test('plain assignment to anything but a bare identifier is deferred, not accepted', () => {
   assert.deepEqual(codesFor('let s: string = "x";\ns.length = 2;'), ['STA1214']);
 });
 
 // Loose equality is accepted alongside strict equality (docs/NUMERIC.md §6.3): its ToPrimitive
 // half is unreachable while every value is a primitive, so it needs no object model to be sound.
-void test('loose equality (== and !=) is accepted, not deferred pending an object model', () => {
+test('loose equality (== and !=) is accepted, not deferred pending an object model', () => {
   assert.deepEqual(codesFor('let x: number = 1;\nconsole.log(x == 1);'), []);
   assert.deepEqual(codesFor('let x: number = 1;\nconsole.log(x != 2);'), []);
 });
@@ -207,7 +207,7 @@ void test('loose equality (== and !=) is accepted, not deferred pending an objec
 // `.length` is the one gate rule that consults the type checker instead of syntax alone: the same
 // PropertyAccessExpression is legal on a string and meaningless on anything else, so only the
 // checker's answer -- not the shape of the code -- can tell the two apart.
-void test('.length is accepted on a string type and deferred on anything else', () => {
+test('.length is accepted on a string type and deferred on anything else', () => {
   assert.deepEqual(codesFor('let s: string = "hi";\nconsole.log(s.length);'), []);
   assert.deepEqual(codesFor('let b: boolean = true;\nconsole.log(b.length);'), ['STA1214']);
 });
@@ -217,7 +217,7 @@ void test('.length is accepted on a string type and deferred on anything else', 
 // it lowers, so an accepted `String` reached `STA4035 used before declaration` — an internal error
 // raised by legal source. These tests are position tests, and every one of them once passed the
 // gate (plan-notes 61).
-void test('a global the compiler does not model is a not-yet, never an internal error', () => {
+test('a global the compiler does not model is a not-yet, never an internal error', () => {
   assert.deepEqual(codesFor('const s: string = String(1);\nconsole.log(s);'), ['STA1214']);
   assert.deepEqual(codesFor('console.log(parseInt("4"));'), ['STA1214']);
   // Declared nowhere at all rather than in a lib file — the checker synthesizes it, and
@@ -228,7 +228,7 @@ void test('a global the compiler does not model is a not-yet, never an internal 
   assert.deepEqual(codesFor('console.log(NaN);'), []);
 });
 
-void test('the three spellings that only MENTION a global name still pass', () => {
+test('the three spellings that only MENTION a global name still pass', () => {
   // `undefined` is the one global with a lowering: it answers with an undefined-literal, and the
   // gate exempts it by name so both sides agree on the same single exception.
   assert.deepEqual(codesFor('const u = undefined;\nconsole.log(u);'), []);
@@ -243,7 +243,7 @@ void test('the three spellings that only MENTION a global name still pass', () =
   assert.deepEqual(codesFor('const xs: Array<number> = [1];\nconsole.log(xs.length);'), []);
 });
 
-void test('a user binding that shadows a global name is a user binding', () => {
+test('a user binding that shadows a global name is a user binding', () => {
   // The rule is "declared nowhere in the module", not "spelled like a global": the check is over
   // where the symbol's declarations LIVE, so a name declared in user code stays a normal binding
   // even when a lib global answers to it too.
@@ -255,7 +255,7 @@ void test('a user binding that shadows a global name is a user binding', () => {
   );
 });
 
-void test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is shared', () => {
+test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is shared', () => {
   const chain = `class A {\n  n = 1;\n  m(): number {\n    return this.n;\n  }\n}\n`;
   assert.deepEqual(
     codesFor(`${chain}class B extends A {\n  k = 2;\n}\nconsole.log(new B().m());`),
@@ -289,14 +289,14 @@ void test('inheritance, overriding and super.m() are accepted; a re-declared FIE
   );
 });
 
-void test('a method table is a file-scope constant, so an override inside a function is not', () => {
+test('a method table is a file-scope constant, so an override inside a function is not', () => {
   // A class declared in a function may have methods that CAPTURE, and a captured environment is
   // per evaluation of the declaration -- there is no one table for the class to point at.
   const nested = `function f(): number {\n  class A {\n    m(): number {\n      return 1;\n    }\n  }\n  class B extends A {\n    override m(): number {\n      return 2;\n    }\n  }\n  return new B().m();\n}\nconsole.log(f());`;
   assert.deepEqual(codesFor(nested), ['STA1214']);
 });
 
-void test('super is a marker on two forms, not a value', () => {
+test('super is a marker on two forms, not a value', () => {
   const chain = `class A {\n  n = 1;\n  m(): number {\n    return this.n;\n  }\n}\n`;
   // `super.n` is the same SLOT as `this.n` -- the spelling would promise a distinction the layout
   // cannot make -- and `super.m` as a value would need a bound method object nothing builds.
@@ -308,7 +308,7 @@ void test('super is a marker on two forms, not a value', () => {
   );
 });
 
-void test('a derived constructor may validate before super(...)', () => {
+test('a derived constructor may validate before super(...)', () => {
   // Field initializers are spliced after the super call wherever it stands, so statements before
   // it must not read the receiver -- but validating or transforming the parameters is the shape
   // real constructors take. With no initializers to splice, the call may also sit in `if`/`else`
@@ -341,7 +341,7 @@ void test('a derived constructor may validate before super(...)', () => {
   );
 });
 
-void test('statics are accepted; what has no class object to read is not', () => {
+test('statics are accepted; what has no class object to read is not', () => {
   const cls = 'class C {\n  static n = 1;\n  static m(): number {\n    return C.n;\n  }\n}\n';
   assert.deepEqual(codesFor(`${cls}console.log(C.m());`), []);
   // A static initialization block runs at class-definition time against the statics, which are
@@ -365,7 +365,7 @@ void test('statics are accepted; what has no class object to read is not', () =>
   assert.deepEqual(codesFor('class C {\n  static n = 1;\n}\nconsole.log(C.name);'), ['STA1214']);
 });
 
-void test('a class alias erases in place and stays not-yet as a value', () => {
+test('a class alias erases in place and stays not-yet as a value', () => {
   // `const K = C` binds no value: every in-place use erases to the target declaration, so the
   // three spellings below compile exactly as the direct ones (plan.md §8 step 12e). Anything
   // else reads the alias as a value, which is the class object -- the same STA1214.
@@ -441,7 +441,7 @@ void test('a class alias erases in place and stays not-yet as a value', () => {
   }
 });
 
-void test('a bound class expression is vetted like a declaration and compiles', () => {
+test('a bound class expression is vetted like a declaration and compiles', () => {
   // `const C = class { … }` used to fall into the describeKind catch-all ("classes is not yet
   // supported"). It now runs through gateClass like a declaration: a broken member reads as
   // the member problem, and a well-formed bound expression is accepted — the formation emits
@@ -529,7 +529,7 @@ void test('a bound class expression is vetted like a declaration and compiles', 
   assert.match(decl[0]?.message ?? '', /an anonymous class is not yet supported/);
 });
 
-void test('this is gated, not left to the lowering', () => {
+test('this is gated, not left to the lowering', () => {
   // `this` is a TOKEN, and the gate short-circuits tokens. It is exempted by name, without which
   // its case is dead code and `this` outside a class reaches an internal error instead.
   assert.deepEqual(codesFor('console.log(this);'), ['STA1214']);
@@ -541,7 +541,7 @@ void test('this is gated, not left to the lowering', () => {
   );
 });
 
-void test('#private members are accepted, re-declared down the chain included', () => {
+test('#private members are accepted, re-declared down the chain included', () => {
   assert.deepEqual(
     codesFor(`class C {
   #n: number = 0;
@@ -565,7 +565,7 @@ console.log(new D().d() + new D().b());
   );
 });
 
-void test('the #brand-in-object test is an instanceof against the declaring class', () => {
+test('the #brand-in-object test is an instanceof against the declaring class', () => {
   // `#n in o` is not a property read: it asks whether o carries the brand, which is exactly
   // whether o is an instance of the class that declares it -- so it lowers to `instanceof`.
   assert.deepEqual(
@@ -579,7 +579,7 @@ console.log(C.has(new C()));
   );
 });
 
-void test('accessors are accepted, in statement position and as statics', () => {
+test('accessors are accepted, in statement position and as statics', () => {
   const body = `  raw: number = 0;\n  get value(): number {\n    return this.raw;\n  }\n  set value(v: number) {\n    this.raw = v;\n  }\n`;
   assert.deepEqual(
     codesFor(`class C {\n${body}}\nconst c = new C();\nc.value = 1;\nconsole.log(c.value);`),
@@ -611,13 +611,13 @@ void test('accessors are accepted, in statement position and as statics', () => 
   );
 });
 
-void test('an object literal is accepted exactly where its shape is a fixed slot list', () => {
+test('an object literal is accepted exactly where its shape is a fixed slot list', () => {
   assert.deepEqual(codesFor("const p = { x: 1, y: 'two' };\nconsole.log(p.x);"), []);
   assert.deepEqual(codesFor('const e = {};\nconsole.log(e);'), []);
   assert.deepEqual(codesFor('const t = { c: { d: 1 } };\nconsole.log(t.c.d);'), []);
 });
 
-void test('every literal form that is not a fixed slot list is a not-yet', () => {
+test('every literal form that is not a fixed slot list is a not-yet', () => {
   // Methods landed in step 12(c); a computed key needs the key set at RUNTIME. A spread of a
   // call result landed with the spread-call-result golden (one evaluation per operand): the
   // expansion reads the operand once, so an operand with an effect runs exactly once.
@@ -630,7 +630,7 @@ void test('every literal form that is not a fixed slot list is a not-yet', () =>
   );
 });
 
-void test('object literal computed keys are accepted on the dynamic shape path', () => {
+test('object literal computed keys are accepted on the dynamic shape path', () => {
   assert.deepEqual(codesFor("const k = 'x';\nconst o = { [k]: 1 };\nconsole.log(o.x);"), []);
   assert.deepEqual(codesFor('const o = { b: 1, [0]: 2 };\nconsole.log(o);'), []);
 });
@@ -639,7 +639,7 @@ void test('object literal computed keys are accepted on the dynamic shape path',
 // pair lives in the object's slot (docs/VALUE.md §4.15), which no fixed layout has room for. The
 // one refusal left is a position typed as a fixed shape: TypeScript calls `{ get at() {…} }`
 // assignable to `{ at: number }`, and there is no conversion that could honor it.
-void test('an object literal accessor is accepted, except into a fixed-shape position', () => {
+test('an object literal accessor is accepted, except into a fixed-shape position', () => {
   assert.deepEqual(
     codesFor('const o = {\n  get x(): number {\n    return 1;\n  },\n};\nconsole.log(o.x);'),
     [],
@@ -661,7 +661,7 @@ void test('an object literal accessor is accepted, except into a fixed-shape pos
 // plan.md §8 step 12 family (c): shorthand is `{ x: x }` -- the same key, the same value, and no
 // layout question of its own -- and a string-literal key is the only spelling TypeScript gives a
 // key no identifier can express. Both are fixed slot lists, and `o["a-b"]` reads one back.
-void test('shorthand and string-literal keys are fixed slot lists', () => {
+test('shorthand and string-literal keys are fixed slot lists', () => {
   assert.deepEqual(codesFor('const x = 1;\nconst o = { x };\nconsole.log(o.x);'), []);
   assert.deepEqual(codesFor('const a = { x: 1 };\nconst b = { ...a };\nconsole.log(b.x);'), []);
   assert.deepEqual(codesFor('const o = { "a-b": 1, ok: 2 };\nconsole.log(o["a-b"] + o.ok);'), []);
@@ -673,24 +673,24 @@ void test('shorthand and string-literal keys are fixed slot lists', () => {
 // dynamic path — shape table + inline caches (docs/VALUE.md §4.10). The gate's job is drawing the
 // line: optional or indexed shapes are dynamic, all-required shapes stay fixed, and everything a
 // shape table alone cannot serve (methods, calls through it) stays deferred.
-void test('an object literal typed by an optional shape is accepted', () => {
+test('an object literal typed by an optional shape is accepted', () => {
   assert.deepEqual(codesFor('const o: { x?: number } = { x: 1 };\nconsole.log(o);'), []);
   // The empty literal is the canonical dynamic object: nothing to build a layout FROM.
   assert.deepEqual(codesFor('const o: { x?: number } = {};\nconsole.log(o);'), []);
 });
 
-void test('reads and plain writes through a dynamic shape are accepted', () => {
+test('reads and plain writes through a dynamic shape are accepted', () => {
   const source = 'const o: { x?: number; y?: number } = { x: 1 };\no.y = 2;\nconsole.log(o.x);';
   assert.deepEqual(codesFor(source), []);
 });
 
-void test('compound assignment through a dynamic shape is accepted', () => {
+test('compound assignment through a dynamic shape is accepted', () => {
   // UpdateExpr evaluates the receiver once, so a shape-table entry is a legal place.
   const source = 'const o: { x?: number } = { x: 1 };\no.x += 1;';
   assert.deepEqual(codesFor(source), []);
 });
 
-void test('an object literal method member is accepted; method-as-value stays not-yet', () => {
+test('an object literal method member is accepted; method-as-value stays not-yet', () => {
   assert.deepEqual(
     codesFor('const o = { v: 1, m() { return this.v; } };\nconsole.log(o.m());'),
     [],
@@ -700,7 +700,7 @@ void test('an object literal method member is accepted; method-as-value stays no
   assert.deepEqual(codesFor('const o = { m() { return 1; } };\nconst f = o.m;'), ['STA1214']);
 });
 
-void test('an Unknown receiver accepts property get, set, index, and call', () => {
+test('an Unknown receiver accepts property get, set, index, and call', () => {
   // plan.md §8 step 4: untyped `o.x` / `o.x = v` / `o[k]` / `o.m()` take the shape-table path.
   // A typed dynamic shape still refuses a CALL through the table (bound methods wait).
   assert.deepEqual(codesFor('function f(o) { return o.x; }', 'js'), []);
@@ -710,7 +710,7 @@ void test('an Unknown receiver accepts property get, set, index, and call', () =
   assert.deepEqual(codesFor('let o = {};\no.x = 1;\nconsole.log(o.x);', 'js'), []);
 });
 
-void test('the contextual type decides: a fully-required literal under an optional annotation is dynamic', () => {
+test('the contextual type decides: a fully-required literal under an optional annotation is dynamic', () => {
   // `{ x: 1 }` alone is a perfectly good layout — but every later read of `o` goes through the
   // annotation, so the literal must build the dynamic object those reads resolve against.
   assert.deepEqual(codesFor('const o: { x?: number } = { x: 1 };\nconsole.log(o.x);'), []);
@@ -718,14 +718,14 @@ void test('the contextual type decides: a fully-required literal under an option
 
 // Task 4.2, Math slice: methods exist only as callees, constants only as reads, and the
 // declaration-file test keeps a user binding named Math on the ordinary identifier path.
-void test('Math methods and constants in the landed set are accepted', () => {
+test('Math methods and constants in the landed set are accepted', () => {
   assert.deepEqual(codesFor('console.log(Math.floor(2.5));'), []);
   assert.deepEqual(codesFor('console.log(Math.min(1, 2, 3));'), []);
   assert.deepEqual(codesFor('console.log(Math.PI);'), []);
   assert.deepEqual(codesFor('console.log(NaN);\nconsole.log(Infinity);'), []);
 });
 
-void test('the bit-exact Math members are accepted', () => {
+test('the bit-exact Math members are accepted', () => {
   assert.deepEqual(codesFor('console.log(Math.clz32(7));'), []);
   assert.deepEqual(codesFor('console.log(Math.imul(3, 4));'), []);
   assert.deepEqual(codesFor('console.log(Math.fround(0.1));'), []);
@@ -734,14 +734,14 @@ void test('the bit-exact Math members are accepted', () => {
 // The approximated transcendentals used to be deferred here, waiting on vendored fdlibm. They
 // landed with it (plan-notes 117), so this now pins the opposite: they must be ACCEPTED, and the
 // host libm must not be what answers them.
-void test('the approximated transcendentals are accepted', () => {
+test('the approximated transcendentals are accepted', () => {
   assert.deepEqual(codesFor('console.log(Math.sin(1));'), []);
   assert.deepEqual(codesFor('console.log(Math.log2(8));'), []);
   assert.deepEqual(codesFor('console.log(Math.atan2(1, 2));'), []);
   assert.deepEqual(codesFor('console.log(Math.random());'), []);
 });
 
-void test('a Math method as a VALUE and an unfoldable variadic stay deferred', () => {
+test('a Math method as a VALUE and an unfoldable variadic stay deferred', () => {
   assert.deepEqual(codesFor('const f = Math.floor;\nconsole.log(f(1));'), ['STA1214']);
   assert.deepEqual(codesFor('const xs = [1, 2];\nconsole.log(Math.min(...xs));'), ['STA1214']);
   // hypot is not associative, so unlike min/max its variadic form cannot be folded into nested
@@ -755,14 +755,14 @@ void test('a Math method as a VALUE and an unfoldable variadic stay deferred', (
 
 // Task 4.2, String slice: the closed STRING_OPS set is accepted only in callee position on a
 // string-typed receiver; everything else on String.prototype stays deferred.
-void test('String.prototype ops in the landed set are accepted', () => {
+test('String.prototype ops in the landed set are accepted', () => {
   assert.deepEqual(codesFor('console.log("abc".indexOf("b", 1));'), []);
   assert.deepEqual(codesFor('const s: string = "a,b";\nconsole.log(s.split(","));'), []);
   assert.deepEqual(codesFor('console.log("a-b".replaceAll("-", "+"));'), []);
   assert.deepEqual(codesFor('console.log("x".padStart(3, "0"));'), []);
 });
 
-void test('String.prototype residue stays deferred', () => {
+test('String.prototype residue stays deferred', () => {
   // A method as a VALUE: there is no bound-function object to hand out yet.
   assert.deepEqual(codesFor('const f = "abc".trim;\nconsole.log(f());'), ['STA1214']);
   // A member outside the landed set. `match` and `matchAll` are in the table; a string pattern
@@ -783,7 +783,7 @@ void test('String.prototype residue stays deferred', () => {
 
 // Task 4.2, Array slice: the closed ARRAY_OPS set on an array-typed receiver, with the refusals
 // that keep the fixed-arity table honest.
-void test('the at/codePointAt/concat/identity string ops are accepted', () => {
+test('the at/codePointAt/concat/identity string ops are accepted', () => {
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.at(-1));'), []);
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.codePointAt(0));'), []);
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.concat("b"));'), []);
@@ -793,7 +793,7 @@ void test('the at/codePointAt/concat/identity string ops are accepted', () => {
   assert.deepEqual(codesFor('const s: string = "a";\nconsole.log(s.concat());'), []);
 });
 
-void test('String.fromCharCode lands with any count; the rest of String is named', () => {
+test('String.fromCharCode lands with any count; the rest of String is named', () => {
   // Plan.md §8 step 19: the multi-code form, the single-code form (previously the catch-all),
   // and the zero-argument empty string.
   assert.deepEqual(codesFor('console.log(String.fromCharCode(65, 66));'), []);
@@ -807,7 +807,7 @@ void test('String.fromCharCode lands with any count; the rest of String is named
   assert.deepEqual(codesFor('console.log(String(42));'), ['STA1214']);
 });
 
-void test('Array.prototype ops in the landed set are accepted', () => {
+test('Array.prototype ops in the landed set are accepted', () => {
   assert.deepEqual(codesFor('const xs: number[] = [1];\nconsole.log(xs.push(2));'), []);
   assert.deepEqual(codesFor('const xs: number[] = [1, 2];\nconsole.log(xs.indexOf(2, 1));'), []);
   assert.deepEqual(codesFor('const xs: number[] = [1, 2];\nconsole.log(xs.join("-"));'), []);
@@ -860,7 +860,7 @@ void test('Array.prototype ops in the landed set are accepted', () => {
   );
 });
 
-void test('the locale-sensitive trio follows the ICU feature build', () => {
+test('the locale-sensitive trio follows the ICU feature build', () => {
   // Off by default, and refused by NAME rather than by the generic subset-boundary code: the
   // program is not waiting for a phase, it is waiting for a build flag the message spells out.
   assert.deepEqual(codesFor('console.log("a".localeCompare("b", "en"));'), ['STA1215']);
@@ -891,7 +891,7 @@ void test('the locale-sensitive trio follows the ICU feature build', () => {
   }
 });
 
-void test('Array.prototype residue stays deferred', () => {
+test('Array.prototype residue stays deferred', () => {
   // The thisArg form of a callback method lowers with none of them.
   assert.deepEqual(
     codesFor(
@@ -951,7 +951,7 @@ void test('Array.prototype residue stays deferred', () => {
 
 // Task 4.2, console slice: the eleven members whose output a golden test can hold to Node
 // byte-for-byte lower; the rest of console stays deferred.
-void test('console methods in the landed set are accepted, the rest deferred', () => {
+test('console methods in the landed set are accepted, the rest deferred', () => {
   assert.deepEqual(codesFor('console.error("e");'), []);
   assert.deepEqual(codesFor('console.warn("w");'), []);
   assert.deepEqual(codesFor('console.info("i");\nconsole.debug("d");'), []);
@@ -1056,7 +1056,7 @@ test('gate: Date lands the UTC and local surfaces and refuses the ICU forms by n
 
 // Task 4.2: Map/Set forEach takes a CALLBACK, not an iterator — the distinction that lets it land
 // without waiting on the boxed-iterator form of keys/values/entries (Phase 5 step 8).
-void test('Map and Set forEach are accepted; keys/values/entries are accepted as iterator boxes', () => {
+test('Map and Set forEach are accepted; keys/values/entries are accepted as iterator boxes', () => {
   const map = 'const m = new Map<string, number>();\nm.set("a", 1);\n';
   const set = 'const s = new Set<number>();\ns.add(1);\n';
   assert.deepEqual(
@@ -1086,7 +1086,7 @@ void test('Map and Set forEach are accepted; keys/values/entries are accepted as
 });
 
 // Task 4.2, the ES2025 set operations: the only collection ops whose argument is a COLLECTION.
-void test('the ES2025 set operations are accepted over two Sets, and refused over anything else', () => {
+test('the ES2025 set operations are accepted over two Sets, and refused over anything else', () => {
   const two = 'const a = new Set<number>();\na.add(1);\nconst b = new Set<number>();\nb.add(2);\n';
   assert.deepEqual(codesFor(`${two}console.log(a.union(b));`), []);
   assert.deepEqual(codesFor(`${two}console.log(a.intersection(b));`), []);
@@ -1111,7 +1111,7 @@ void test('the ES2025 set operations are accepted over two Sets, and refused ove
 });
 
 // Task 4.2, Object slice: the landed namespace, over the two object layouts only.
-void test('Object namespace methods are accepted, the rest deferred', () => {
+test('Object namespace methods are accepted, the rest deferred', () => {
   assert.deepEqual(codesFor('console.log(Object.keys({ x: 1 }));'), []);
   assert.deepEqual(codesFor('console.log(Object.values({ x: 1 }));'), []);
   assert.deepEqual(codesFor('console.log(Object.entries({ x: 1 }));'), []);
@@ -1164,7 +1164,7 @@ void test('Object namespace methods are accepted, the rest deferred', () => {
 });
 
 // Task 4.2, JSON slice: stringify's single-argument form only.
-void test('JSON.stringify is accepted, its other forms deferred', () => {
+test('JSON.stringify is accepted, its other forms deferred', () => {
   assert.deepEqual(codesFor('console.log(JSON.stringify({ x: 1 }));'), []);
   assert.deepEqual(codesFor('console.log(JSON.stringify([1, 2]));'), []);
   assert.deepEqual(codesFor('console.log(JSON.stringify("s"));'), []);
@@ -1185,7 +1185,7 @@ void test('JSON.stringify is accepted, its other forms deferred', () => {
 });
 
 // Task 4.2, JSON.parse slice: the single-argument form, whose result is Unknown.
-void test('JSON.parse is accepted in its single-argument form', () => {
+test('JSON.parse is accepted in its single-argument form', () => {
   assert.deepEqual(codesFor('const v: unknown = JSON.parse("[1]");\nconsole.log(typeof v);'), []);
   // Any string-ish argument, not just the `string` type itself.
   assert.deepEqual(
@@ -1211,7 +1211,7 @@ void test('JSON.parse is accepted in its single-argument form', () => {
   assert.deepEqual(codesFor('console.log(typeof JSON.rawJSON);'), ['STA1214']);
 });
 
-void test('a user binding named Math shadows the global and stays on the ordinary path', () => {
+test('a user binding named Math shadows the global and stays on the ordinary path', () => {
   // The local wins at runtime, so it must win at the gate: inside the function this is a property
   // read on a shape, not a builtin. (Function-scoped, because at the top level of a SCRIPT a
   // `const Math` is a TS redeclaration error against the global `var Math` — the checker then
@@ -1223,7 +1223,7 @@ void test('a user binding named Math shadows the global and stays on the ordinar
 
 // Task 4.3, the RegExp slice: `test` is the landed surface, and everything else on the prototype
 // keeps the family's own code (STA1211) rather than the generic subset-boundary one.
-void test('regexp literals and test are accepted, the rest of the prototype deferred', () => {
+test('regexp literals and test are accepted, the rest of the prototype deferred', () => {
   assert.deepEqual(codesFor('const re = /ab+c/gi;\nconsole.log(re.test("abbc"));'), []);
   // A literal is a value: it lives in a binding, an array, and an argument position.
   assert.deepEqual(codesFor('console.log(/x/.test("x"));'), []);
@@ -1283,7 +1283,7 @@ void test('regexp literals and test are accepted, the rest of the prototype defe
 
 // Task 4.3, second slice: a pattern position takes a string OR a regexp, and everything else in
 // an argument position is still a string.
-void test('the regexp forms of the pattern-taking string methods are accepted', () => {
+test('the regexp forms of the pattern-taking string methods are accepted', () => {
   assert.deepEqual(codesFor("console.log('a1b'.split(/\\d/));"), []);
   assert.deepEqual(codesFor("console.log('a1b'.replace(/\\d/, '#'));"), []);
   assert.deepEqual(codesFor("console.log('a1b'.replaceAll(/\\d/g, '#'));"), []);
@@ -1302,21 +1302,21 @@ void test('the regexp forms of the pattern-taking string methods are accepted', 
 
 // Phase 5 step 2: the diagnostic table is a function of mode. The same source that is a never in
 // ts mode is either a dynamic value or a not-yet in js mode — never the other mode's code.
-void test('explicit any is STA1001 in ts mode and accepted in js mode', () => {
+test('explicit any is STA1001 in ts mode and accepted in js mode', () => {
   // Type annotations are TypeScript syntax, so the js-mode case has to live in a .ts file; a .js
   // file would be a parse error rather than a mode decision.
   assert.deepEqual(codesFor('const x: any = 42;'), ['STA1001']);
   assert.deepEqual(codesFor('const x: any = 42;', 'js', '/test.ts'), []);
 });
 
-void test('as any is explicit STA1001, not implicit STA1003', () => {
+test('as any is explicit STA1001, not implicit STA1003', () => {
   // `const x = 1 as any` has no annotation on the BINDING. Before this step the binding fired
   // STA1003 (implicit) and the AsExpression fired STA1001, and classify picked the first never.
   assert.deepEqual(codesFor('const x = 1 as any;'), ['STA1001']);
   assert.deepEqual(codesFor('const x = 1 as any;', 'js', '/test.ts'), []);
 });
 
-void test('eval is STA1101 never in ts mode and STA1206 not-yet in js mode', () => {
+test('eval is STA1101 never in ts mode and STA1206 not-yet in js mode', () => {
   assert.deepEqual(codesFor('eval("1 + 1");'), ['STA1101']);
   assert.deepEqual(codesFor('eval("1 + 1");', 'js'), ['STA1206']);
   assert.deepEqual(codesFor('globalThis.eval("1");'), ['STA1101']);
@@ -1326,14 +1326,14 @@ void test('eval is STA1101 never in ts mode and STA1206 not-yet in js mode', () 
   assert.deepEqual(codesFor('const e = eval;', 'js'), ['STA1206']);
 });
 
-void test('Function and new Function are STA1103 in ts mode and STA1206 in js mode', () => {
+test('Function and new Function are STA1103 in ts mode and STA1206 in js mode', () => {
   assert.deepEqual(codesFor('const f = new Function("return 42");'), ['STA1103']);
   assert.deepEqual(codesFor('const f = new Function("return 42");', 'js'), ['STA1206']);
   assert.deepEqual(codesFor('const f = Function("return 42");'), ['STA1103']);
   assert.deepEqual(codesFor('const f = Function("return 42");', 'js'), ['STA1206']);
 });
 
-void test('a .js file under ts mode is STA1002 with a --mode=js hint', () => {
+test('a .js file under ts mode is STA1002 with a --mode=js hint', () => {
   const { program } = createProgram('console.log(1);', '/test.js');
   const diags = gateProgram(program, 'ts');
   assert.deepEqual(
@@ -1343,12 +1343,12 @@ void test('a .js file under ts mode is STA1002 with a --mode=js hint', () => {
   assert.match(diags[0]?.message ?? '', /`--mode=js`/);
 });
 
-void test('for-of over a string is accepted', () => {
+test('for-of over a string is accepted', () => {
   assert.deepEqual(codesFor('for (const c of "ab") { console.log(c); }\n'), []);
   assert.deepEqual(codesFor('for (const c of "ab") { console.log(c); }\n', 'js'), []);
 });
 
-void test('for-of over a Map or a Set is accepted', () => {
+test('for-of over a Map or a Set is accepted', () => {
   assert.deepEqual(
     codesFor(
       'const m = new Map<string, number>();\nm.set("a", 1);\nfor (const e of m) { console.log(e); }\n',
@@ -1372,7 +1372,7 @@ void test('for-of over a Map or a Set is accepted', () => {
   );
 });
 
-void test('function* declarations and yield are accepted; methods and yield* are not', () => {
+test('function* declarations and yield are accepted; methods and yield* are not', () => {
   assert.deepEqual(
     codesFor(
       'function* g(): Generator<number> { yield 1; }\nfor (const x of g()) { console.log(x); }\n',
@@ -1395,18 +1395,18 @@ void test('function* declarations and yield are accepted; methods and yield* are
   ]);
 });
 
-void test('a declaration without an initializer is accepted', () => {
+test('a declaration without an initializer is accepted', () => {
   assert.deepEqual(codesFor('let n: number; n = 1;'), []);
   assert.deepEqual(codesFor('let n; n = 1;', 'js'), []);
 });
 
-void test('default and optional parameters are accepted', () => {
+test('default and optional parameters are accepted', () => {
   assert.deepEqual(codesFor('function greet(name: string = "world"): string { return name; }'), []);
   assert.deepEqual(codesFor('function greet(name = "world") { return name; }', 'js'), []);
   assert.deepEqual(codesFor('function f(x?: number): number { return 0; }'), []);
 });
 
-void test('rest parameters are accepted', () => {
+test('rest parameters are accepted', () => {
   assert.deepEqual(
     codesFor('function sum(a: number, ...rest: number[]): number { return a; }'),
     [],
@@ -1414,14 +1414,14 @@ void test('rest parameters are accepted', () => {
   assert.deepEqual(codesFor('function sum(a, ...rest) { return a; }', 'js'), []);
 });
 
-void test('Promise.prototype.then/catch/finally and new Promise(executor) are accepted', () => {
+test('Promise.prototype.then/catch/finally and new Promise(executor) are accepted', () => {
   assert.deepEqual(codesFor('Promise.resolve(1).then((n: number) => n);'), []);
   assert.deepEqual(codesFor('Promise.reject(1).catch((e: number) => e);'), []);
   assert.deepEqual(codesFor('Promise.resolve(1).finally(() => undefined);'), []);
   assert.deepEqual(codesFor('const p = new Promise<number>((resolve) => { resolve(1); });'), []);
 });
 
-void test('Object.freeze and Object.isFrozen are accepted', () => {
+test('Object.freeze and Object.isFrozen are accepted', () => {
   assert.deepEqual(
     codesFor(
       'class C { x: number = 1; }\nconst o = new C();\nObject.freeze(o);\nconsole.log(Object.isFrozen(o));',
@@ -1430,13 +1430,13 @@ void test('Object.freeze and Object.isFrozen are accepted', () => {
   );
 });
 
-void test('literal import() is accepted; a computed specifier is STA1207', () => {
+test('literal import() is accepted; a computed specifier is STA1207', () => {
   assert.deepEqual(codesFor('const m = import("./x.ts");\n'), []);
   assert.deepEqual(codesFor('const m = import("./x.ts");\n', 'js'), []);
   assert.deepEqual(codesFor('const m = import("x" + ".ts");\n'), ['STA1207']);
 });
 
-void test('top-level await is accepted; await in a non-async function is not', () => {
+test('top-level await is accepted; await in a non-async function is not', () => {
   assert.deepEqual(codesFor('const x: number = await Promise.resolve(1);\nconsole.log(x);\n'), []);
   assert.deepEqual(codesFor('const x = await Promise.resolve(1);\nconsole.log(x);\n', 'js'), []);
   assert.deepEqual(codesFor('function f() { return await Promise.resolve(1); }\n'), ['STA1214']);

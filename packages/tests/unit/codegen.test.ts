@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 
 import { emitC } from '../../compiler/src/codegen/index.ts';
 import { H_BOOLEAN, H_NUMBER, H_STRING, hUnknown } from '../../compiler/src/hir/types.ts';
@@ -25,7 +25,7 @@ import {
   whileStmt,
 } from './helpers.ts';
 
-void test('prologue includes jsrt_init and the globals frame', () => {
+test('prologue includes jsrt_init and the globals frame', () => {
   const module = makeModule([]);
   const c = emitC(module);
 
@@ -38,7 +38,7 @@ void test('prologue includes jsrt_init and the globals frame', () => {
   assert.match(c, /return 0;/);
 });
 
-void test('console.log(1 + 2 * 3) emits correct calls', () => {
+test('console.log(1 + 2 * 3) emits correct calls', () => {
   const module = makeModule([
     exprStmt(consoleLog([binary('+', num(1), binary('*', num(2), num(3)))]), H_NUMBER),
   ]);
@@ -53,14 +53,14 @@ void test('console.log(1 + 2 * 3) emits correct calls', () => {
   assert.ok(!c.includes(' == ') || c.includes('jsrt_strict_equals'));
 });
 
-void test('=== operator uses jsrt_strict_equals', () => {
+test('=== operator uses jsrt_strict_equals', () => {
   const module = makeModule([exprStmt(binary('===', num(1), num(1), H_BOOLEAN), H_BOOLEAN)]);
 
   const c = emitC(module);
   assert.match(c, /jsrt_strict_equals/);
 });
 
-void test('!== operator uses jsrt_strict_equals with negation', () => {
+test('!== operator uses jsrt_strict_equals with negation', () => {
   const module = makeModule([exprStmt(binary('!==', num(1), num(2), H_BOOLEAN), H_BOOLEAN)]);
 
   const c = emitC(module);
@@ -68,14 +68,14 @@ void test('!== operator uses jsrt_strict_equals with negation', () => {
   assert.match(c, /!\s*jsrt_strict_equals/);
 });
 
-void test('#line directives appear with correct line numbers', () => {
+test('#line directives appear with correct line numbers', () => {
   const module = makeModule([decl('x', num(42, 5), 'let', H_NUMBER, 5)]);
 
   const c = emitC(module);
   assert.match(c, /#line 5 "\/test\.ts"/);
 });
 
-void test('#line directives escape backslashes in filenames', () => {
+test('#line directives escape backslashes in filenames', () => {
   const module = makeModule([decl('x', num(1), 'let')]);
   // Override fileName to test backslash escaping
   const backslashModule = {
@@ -87,7 +87,7 @@ void test('#line directives escape backslashes in filenames', () => {
   assert.match(c, /#line 1 "\/path\\\\with\\\\backslash\.ts"/);
 });
 
-void test('slot allocation for declarations', () => {
+test('slot allocation for declarations', () => {
   const module = makeModule([
     decl('x', num(1), 'let', H_NUMBER, 1),
     decl('y', num(2), 'let', H_NUMBER, 2),
@@ -102,7 +102,7 @@ void test('slot allocation for declarations', () => {
   assert.match(c, /JSRT_GLOBAL\(1\)/);
 });
 
-void test('arithmetic operators convert with jsrt_to_number and rewrap with jsrt_number', () => {
+test('arithmetic operators convert with jsrt_to_number and rewrap with jsrt_number', () => {
   // `-` and not `+`: `+` concatenates when given a string, so it dispatches in the runtime and
   // emits no conversion of its own. The other four are numeric unconditionally.
   const module = makeModule([exprStmt(binary('-', num(1), num(2)), H_NUMBER)]);
@@ -118,7 +118,7 @@ void test('arithmetic operators convert with jsrt_to_number and rewrap with jsrt
   assert.match(c, /jsrt_number/);
 });
 
-void test('+ dispatches to the runtime, because a string operand makes it concatenation', () => {
+test('+ dispatches to the runtime, because a string operand makes it concatenation', () => {
   const module = makeModule([exprStmt(binary('+', num(1), num(2)), H_NUMBER)]);
 
   const c = emitC(module);
@@ -129,7 +129,7 @@ void test('+ dispatches to the runtime, because a string operand makes it concat
   assert.doesNotMatch(c, /jsrt_to_number\(.*\) \+ /);
 });
 
-void test('string literals use jsrt_string_from_utf8 with byte length', () => {
+test('string literals use jsrt_string_from_utf8 with byte length', () => {
   const module = makeModule([decl('s', str('hello'), 'const', H_STRING)]);
 
   const c = emitC(module);
@@ -140,7 +140,7 @@ void test('string literals use jsrt_string_from_utf8 with byte length', () => {
 // Conditions run ToBoolean, not `jsrt_as_bool`. `jsrt_as_bool` reads bit 0 of the value, which
 // is the payload only for a boxed boolean; for a boxed double it is a mantissa bit, so `if (1)`
 // took the ELSE branch while these tests asserted the old spelling.
-void test('if statement uses jsrt_truthy on condition', () => {
+test('if statement uses jsrt_truthy on condition', () => {
   const module = makeModule([ifStmt(bool(true), block([]), undefined, H_NUMBER)]);
 
   const c = emitC(module);
@@ -148,7 +148,7 @@ void test('if statement uses jsrt_truthy on condition', () => {
   assert.doesNotMatch(c, /jsrt_as_bool/);
 });
 
-void test('while statement uses jsrt_truthy on condition', () => {
+test('while statement uses jsrt_truthy on condition', () => {
   const module = makeModule([whileStmt(bool(true), block([]), H_NUMBER)]);
 
   const c = emitC(module);
@@ -156,7 +156,7 @@ void test('while statement uses jsrt_truthy on condition', () => {
   assert.doesNotMatch(c, /jsrt_as_bool/);
 });
 
-void test('main does not pop the globals frame, but an emitted function pops its own', () => {
+test('main does not pop the globals frame, but an emitted function pops its own', () => {
   // The globals frame is pushed once and outlives every call, because a function body may read a
   // module-level binding. Popping it in main would unroot values still reachable from a callee.
   const mainOnly = emitC(makeModule([decl('x', num(1), 'let')]));
@@ -170,7 +170,7 @@ void test('main does not pop the globals frame, but an emitted function pops its
   assert.match(withFn, /JSRT_LOCAL\(\d+\) = .*\), JSRT_FRAME_POP\(\), JSRT_LOCAL\(\d+\)\);/);
 });
 
-void test('a call dispatches to jsrt_call with its own argc, and passes NULL when there are none', () => {
+test('a call dispatches to jsrt_call with its own argc, and passes NULL when there are none', () => {
   // argc is the CALL SITE's argument count, not the callee's declared arity: JavaScript drops
   // extras and fills missing parameters with undefined, so the emitter must not pad or truncate
   // to match the function it thinks it is calling (docs/HIR.md, HFunction).
@@ -188,7 +188,7 @@ void test('a call dispatches to jsrt_call with its own argc, and passes NULL whe
   assert.doesNotMatch(twoArgs, /jsrt_call_at\([^,]+, 2, \(jsrt_value\[\]\)/);
 });
 
-void test('a call evaluates arguments left to right, and dispatches only once all are rooted', () => {
+test('a call evaluates arguments left to right, and dispatches only once all are rooted', () => {
   // C leaves argument evaluation order unspecified, so the emitter imposes the language's order
   // itself. Distinctive literals make the emitted positions readable without pinning how any
   // individual operand is spelled.
@@ -210,7 +210,7 @@ void test('a call evaluates arguments left to right, and dispatches only once al
   assert.ok(secondArg < dispatch, 'dispatch comes after every argument is evaluated and rooted');
 });
 
-void test('console.log at any width reaches a runtime entry point', () => {
+test('console.log at any width reaches a runtime entry point', () => {
   // The five printing methods are variadic (plan.md §8 step 18): one argument keeps the
   // positional entry point, and any other width takes `(count, argv)` over the rooted slots —
   // `console.log()` is `(0, NULL)`. A width with no entry point throws instead.
@@ -225,7 +225,7 @@ void test('console.log at any width reaches a runtime entry point', () => {
   assert.match(none, /jsrt_print_many\(0, NULL\)/);
 });
 
-void test('relational operators dispatch to the runtime and wrap in jsrt_bool', () => {
+test('relational operators dispatch to the runtime and wrap in jsrt_bool', () => {
   const module = makeModule([exprStmt(binary('<', num(1), num(2), H_BOOLEAN), H_BOOLEAN)]);
 
   const c = emitC(module);
@@ -235,7 +235,7 @@ void test('relational operators dispatch to the runtime and wrap in jsrt_bool', 
   assert.match(c, /jsrt_bool\(jsrt_op_lt\(/);
 });
 
-void test('boolean literals emit jsrt_bool(true) or jsrt_bool(false)', () => {
+test('boolean literals emit jsrt_bool(true) or jsrt_bool(false)', () => {
   const moduleTrue = makeModule([exprStmt(bool(true), H_BOOLEAN)]);
 
   const cTrue = emitC(moduleTrue);
@@ -247,7 +247,7 @@ void test('boolean literals emit jsrt_bool(true) or jsrt_bool(false)', () => {
   assert.match(cFalse, /jsrt_bool\(false\)/);
 });
 
-void test('assignment updates correct slot', () => {
+test('assignment updates correct slot', () => {
   const module = makeModule([
     decl('x', num(1), 'let', H_NUMBER, 1),
     assign('x', num(2), H_NUMBER, 2),
@@ -262,14 +262,14 @@ void test('assignment updates correct slot', () => {
   assert.ok(matches && matches.length >= 2, 'x should be declared and assigned in slot 0');
 });
 
-void test('modulo operator uses fmod', () => {
+test('modulo operator uses fmod', () => {
   const module = makeModule([exprStmt(binary('%', num(10), num(3)), H_NUMBER)]);
 
   const c = emitC(module);
   assert.match(c, /fmod/);
 });
 
-void test('string escaping handles special characters', () => {
+test('string escaping handles special characters', () => {
   const module = makeModule([
     decl('s', str('line1\nline2\ttab"quote\\backslash'), 'const', H_STRING),
   ]);
@@ -280,7 +280,7 @@ void test('string escaping handles special characters', () => {
   assert.match(c, /line1\\nline2\\ttab\\"quote\\\\backslash/);
 });
 
-void test('string literals travel as WTF-8 octal escapes', () => {
+test('string literals travel as WTF-8 octal escapes', () => {
   // An unpaired surrogate is a legal UTF-16 code unit that UTF-8 cannot carry, so the emitter must
   // spell it rather than write it: raw, the .c file's UTF-8 encoding replaced it with U+FFFD and
   // `charCodeAt(0)` answered 65533 instead of 55296 (plan-notes 178). Octal and not `\x`, because a
@@ -294,7 +294,7 @@ void test('string literals travel as WTF-8 octal escapes', () => {
   assert.match(pair, /jsrt_string_from_utf8\("\\360\\237\\221\\215", 4\)/);
 });
 
-void test('identifier reference uses allocated slot', () => {
+test('identifier reference uses allocated slot', () => {
   const module = makeModule([
     decl('x', num(5), 'let', H_NUMBER, 1),
     decl('y', id('x', H_NUMBER, 2), 'let', H_NUMBER, 2),
@@ -315,7 +315,7 @@ void test('identifier reference uses allocated slot', () => {
   assert.ok(foundYDecl, 'y declaration should reference x via slot 0');
 });
 
-void test('binary operands are sequenced into rooted slots before the operation', () => {
+test('binary operands are sequenced into rooted slots before the operation', () => {
   const c = emitC(
     makeModule([
       fnDecl('f', ['n'], block([ret(id('n', H_NUMBER))])),
@@ -346,7 +346,7 @@ void test('binary operands are sequenced into rooted slots before the operation'
 
 /* --- Task 3.10: exception unwinding ------------------------------------------------------- */
 
-void test('an uncaught throw in main lands on an unwind pad that calls jsrt_uncaught', () => {
+test('an uncaught throw in main lands on an unwind pad that calls jsrt_uncaught', () => {
   const c = emitC(makeModule([throwStmt(str('boom'))]));
   assert.match(c, /jsrt_throw\(/);
   assert.match(c, /goto _jsrt_unwind;/);
@@ -357,7 +357,7 @@ void test('an uncaught throw in main lands on an unwind pad that calls jsrt_unca
   assert.match(c, /jsrt_uncaught\(\);/);
 });
 
-void test('a function unwind pad pops the frame before returning', () => {
+test('a function unwind pad pops the frame before returning', () => {
   const c = emitC(makeModule([fnDecl('f', [], block([throwStmt(num(1))]))]));
   // The pad is inside the function unit and must pop -- the rooting discipline requires a pop on
   // EVERY exit path, landing pads included.
@@ -371,7 +371,7 @@ void test('a function unwind pad pops the frame before returning', () => {
   assert.ok(!c.slice(mainStart).includes('_jsrt_unwind'), 'main has no unwind pad');
 });
 
-void test('every call is followed by a pending-exception check', () => {
+test('every call is followed by a pending-exception check', () => {
   const c = emitC(
     makeModule([fnDecl('f', [], block([])), exprStmt(call(id('f', H_NUMBER)), H_NUMBER)]),
   );
@@ -380,7 +380,7 @@ void test('every call is followed by a pending-exception check', () => {
   assert.ok(dispatch > -1 && check > dispatch, 'the check follows the dispatch');
 });
 
-void test('try/catch takes the exception into the binding slot and skips the catch normally', () => {
+test('try/catch takes the exception into the binding slot and skips the catch normally', () => {
   const c = emitC(
     makeModule([
       fnDecl('f', [], block([throwStmt(num(1))])),
@@ -399,7 +399,7 @@ void test('try/catch takes the exception into the binding slot and skips the cat
   assert.ok(skip > -1 && pad > skip && take > pad, 'skip, pad, take -- in that order');
 });
 
-void test('a catch whose try body cannot throw is not emitted at all', () => {
+test('a catch whose try body cannot throw is not emitted at all', () => {
   const c = emitC(
     makeModule([
       tryStmt(block([decl('x', num(1), 'let')]), {
@@ -412,7 +412,7 @@ void test('a catch whose try body cannot throw is not emitted at all', () => {
   assert.ok(!c.includes('jsrt_take_exception'), 'no handler body either');
 });
 
-void test('try/finally stashes the exception, runs the finally, then rethrows', () => {
+test('try/finally stashes the exception, runs the finally, then rethrows', () => {
   const c = emitC(
     makeModule([
       fnDecl('f', [], block([throwStmt(num(1))])),
@@ -431,7 +431,7 @@ void test('try/finally stashes the exception, runs the finally, then rethrows', 
   assert.ok(stash > -1 && body > stash && rethrow > body, 'stash, finally body, rethrow');
 });
 
-void test('a return through a finally routes via the completion dispatch', () => {
+test('a return through a finally routes via the completion dispatch', () => {
   const c = emitC(
     makeModule([
       fnDecl(
@@ -454,7 +454,7 @@ void test('a return through a finally routes via the completion dispatch', () =>
   assert.ok(dispatch > -1 && realReturn > dispatch, 'the dispatch re-performs the return');
 });
 
-void test('a break out of a try inside a loop routes through the finally first', () => {
+test('a break out of a try inside a loop routes through the finally first', () => {
   const brk = {
     kind: 'break-statement',
     type: H_NUMBER,
@@ -479,7 +479,7 @@ void test('a break out of a try inside a loop routes through the finally first',
   assert.ok(dispatch > -1 && jump > dispatch, 'the dispatch performs the break');
 });
 
-void test('a break inside try/finally that targets a loop inside the same try does not route', () => {
+test('a break inside try/finally that targets a loop inside the same try does not route', () => {
   const brk = {
     kind: 'break-statement',
     type: H_NUMBER,
@@ -500,7 +500,7 @@ void test('a break inside try/finally that targets a loop inside the same try do
 // Task 4.1: the dynamic residue. A dyn-object-literal allocates through jsrt_dynobj_new and fills
 // with NULL caches (construction transitions every time — the case the cache does not serve);
 // every ACCESS site gets its own static JSRTIC, zero-initialized at file scope.
-void test('dynamic objects emit shape-table calls with per-site inline caches', () => {
+test('dynamic objects emit shape-table calls with per-site inline caches', () => {
   const unknown = hUnknown(false);
   const s = span(1);
   const module = makeModule([
@@ -542,7 +542,7 @@ void test('dynamic objects emit shape-table calls with per-site inline caches', 
   assert.match(c, /static JSRTIC _jsrt_ic_1;/);
 });
 
-void test('an Unknown index site emits jsrt_dyn_index_* with a per-site cache', () => {
+test('an Unknown index site emits jsrt_dyn_index_* with a per-site cache', () => {
   const unknown = hUnknown(false);
   const s = span(1);
   const target = id('o', unknown);

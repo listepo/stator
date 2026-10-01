@@ -8,7 +8,7 @@ import * as assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { moduleOrder } from '../../compiler/src/frontend/graph.ts';
 import { createProgram } from '../../compiler/src/frontend/program.ts';
 

@@ -12,7 +12,7 @@
  * bypassed deliberately: these are labeling tests, not accepted input.
  */
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test } from 'vitest';
 
 import { lowerSourceFile } from '../../compiler/src/lower/index.ts';
 import { createProgram } from './helpers.ts';

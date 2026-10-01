@@ -15,6 +15,8 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | oxlint-tsgolint           | `7.0.2001` (exact) | `devDependencies`. The type-aware backend `oxlint --type-aware` runs through (plan-notes 224).                                                                                                                                   |
 | oxfmt                     | `0.67.0` (exact)   | `devDependencies`                                                                                                                                                                                                                |
 | cpd (copy/paste detector) | `5.0.16` (exact)   | `devDependencies`                                                                                                                                                                                                                |
+| vitest                    | `5.0.3` (exact)    | `devDependencies` (root + `packages/tests`). Unit-test runner; `--changed` runs only the tests a diff reaches (plan-notes 285).                                                                                                  |
+| c8                        | `12.0.0` (exact)   | `devDependencies`. `test:coverage`: V8 coverage across vitest workers and every CLI subprocess (plan-notes 285).                                                                                                                 |
 | pnpm                      | `12.3.4`           | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml`                                                                                                                                                               |
 | LLVM                      | `21.1.8`           | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
 | just                      | `1.58.0`           | `mise.toml`. The runtime build (`just -f packages/runtime/justfile -d packages/runtime runtime`, `runtime-asan`, `runtime-intl`).                                                                                                |
@@ -51,8 +53,9 @@ CI must run at least ubuntu-latest and macos-latest (plan.md §4 Task 1.0 step 1
 ```
 pnpm install --frozen-lockfile   # install exactly the pinned tree
 pnpm run ci                      # typecheck -> lint -> dupes -> unit -> runtime -> subset -> golden -> leak -> asan
-pnpm run test                    # unit tests (the default; coverage is on-demand, not per-run)
-pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info (only when the table is the question — ~3.4x wall time)
+pnpm run test                    # unit tests via vitest (the default; coverage is on-demand, not per-run)
+pnpm run test:affected           # only the unit tests your uncommitted changes reach (`pnpm run test:affected origin/main` for the whole branch)
+pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info (only when the table is the question — ~4x wall time)
 pnpm run test:subset             # feature × mode decision matrix
 pnpm run test:golden             # compile + run vs the pinned Node, byte-for-byte
 pnpm run test262                 # Test262 slice against the pin in tests/test262/pin.json

@@ -14,7 +14,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import {
   compareSdkNames,
   findFallbackSdk,
@@ -28,7 +28,7 @@ import {
 const OLD_TBD = 'archs: [ arm64, arm64e, x86_64 ]\n';
 const NEW_TBD = 'archs: [ arm64, arm64e.x1-macos, arm64e.x1-maccatalyst ]\n';
 
-void test('stale-linker signature matches only the .tbd format failure', () => {
+test('stale-linker signature matches only the .tbd format failure', () => {
   assert.equal(
     isStaleLdSystemLibFailure(
       'ld: warning: ignoring file /MacOSX.sdk/usr/lib/libm.tbd, malformed file\n' +
@@ -52,7 +52,7 @@ void test('stale-linker signature matches only the .tbd format failure', () => {
   assert.equal(isStaleLdSystemLibFailure('note: using sysroot .tbd stub overlay\n'), false);
 });
 
-void test('fallback pick is the newest versioned SDK the old parser can read', () => {
+test('fallback pick is the newest versioned SDK the old parser can read', () => {
   const candidates: readonly SdkCandidate[] = [
     { name: 'MacOSX.sdk', tbdText: OLD_TBD },
     { name: 'MacOSX26.5.sdk', tbdText: OLD_TBD },
@@ -63,7 +63,7 @@ void test('fallback pick is the newest versioned SDK the old parser can read', (
   assert.equal(pickFallbackSdk('/sdks', candidates), join('/sdks', 'MacOSX26.5.sdk'));
 });
 
-void test('no fallback when every SDK needs the new format', () => {
+test('no fallback when every SDK needs the new format', () => {
   assert.equal(
     pickFallbackSdk('/sdks', [
       { name: 'MacOSX27.0.sdk', tbdText: NEW_TBD },
@@ -74,14 +74,14 @@ void test('no fallback when every SDK needs the new format', () => {
   assert.equal(pickFallbackSdk('/sdks', []), undefined);
 });
 
-void test('plain arm64e does not disqualify an SDK', () => {
+test('plain arm64e does not disqualify an SDK', () => {
   assert.equal(
     pickFallbackSdk('/sdks', [{ name: 'MacOSX15.sdk', tbdText: OLD_TBD }]),
     join('/sdks', 'MacOSX15.sdk'),
   );
 });
 
-void test('SDK versions order numerically, not lexicographically', () => {
+test('SDK versions order numerically, not lexicographically', () => {
   // 'MacOSX26.sdk' sorts AFTER 'MacOSX26.5.sdk' lexicographically ('s' > '5') while
   // predating it — the pick must be newest-first by version, or a working fallback loses
   // to a broken older SDK.
@@ -97,7 +97,7 @@ void test('SDK versions order numerically, not lexicographically', () => {
   );
 });
 
-void test('retry gating never fires off-contract', () => {
+test('retry gating never fires off-contract', () => {
   const stale =
     'ld: warning: ignoring file /MacOSX.sdk/usr/lib/libm.tbd, malformed file\n' +
     'libm.tbd:4:20: error: unknown architecture\n';
@@ -128,7 +128,7 @@ void test('retry gating never fires off-contract', () => {
   );
 });
 
-void test('filesystem half resolves against a double root', () => {
+test('filesystem half resolves against a double root', () => {
   const root = mkdtempSync(join(tmpdir(), 'stator-sdks-'));
   try {
     mkdirSync(join(root, 'MacOSX26.5.sdk', 'usr', 'lib'), { recursive: true });

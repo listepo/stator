@@ -23,7 +23,7 @@
 import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { gateProgram } from '../../compiler/src/frontend/gate.ts';
@@ -125,7 +125,7 @@ function collectFrom(path: string, found: { line: number; phase: number; where: 
   walk(sourceFile);
 }
 
-void test('no not-yet under src/ names a completed phase', () => {
+test('no not-yet under src/ names a completed phase', () => {
   const offenders = phaseSites().filter((site) => COMPLETED_PHASES.includes(site.phase));
   assert.deepEqual(
     offenders,
@@ -137,7 +137,7 @@ void test('no not-yet under src/ names a completed phase', () => {
   );
 });
 
-void test('no not-yet MESSAGE under src/ names a completed phase', () => {
+test('no not-yet MESSAGE under src/ names a completed phase', () => {
   // The numeric field and the prose can disagree: `notYet` builds the message from its argument,
   // but a hand-written literal spells the phase out, and nothing makes the two agree.
   //
@@ -174,7 +174,7 @@ void test('no not-yet MESSAGE under src/ names a completed phase', () => {
   assert.deepEqual(offenders, [], offenders.join('\n'));
 });
 
-void test('the phase a user actually sees is not a completed one', () => {
+test('the phase a user actually sees is not a completed one', () => {
   // Source scans read intent. This reads the product: three constructs from three different
   // families, compiled the way `stator build` compiles them, rendered the way the CLI renders them.
   const sources = [
@@ -201,7 +201,7 @@ void test('the phase a user actually sees is not a completed one', () => {
   }
 });
 
-void test('COMPLETED_PHASES matches what done.md records', () => {
+test('COMPLETED_PHASES matches what done.md records', () => {
   // done.md is the authority; src/support/phases.ts is its machine-readable projection. Marking a
   // phase complete in one and not the other is the drift this pairing exists to prevent.
   const done = readFileSync(DONE_PATH, 'utf8');

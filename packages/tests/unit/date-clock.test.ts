@@ -14,7 +14,7 @@
  * check; one reading a monotonic clock instead of the wall clock fails the era check.
  */
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { compileAndRunLines, NATIVE_ONLY } from './helpers.ts';
 
 test(

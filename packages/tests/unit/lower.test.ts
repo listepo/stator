@@ -1,10 +1,10 @@
 import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import type { Declaration, FunctionExpr } from '../../compiler/src/hir/nodes.ts';
 import { verifyHir } from '../../compiler/src/hir/verify.ts';
 import { hirNodes, loweredModule, lowerSource, requireInit } from './helpers.ts';
 
-void test('console.log with arithmetic expression and correct precedence', () => {
+test('console.log with arithmetic expression and correct precedence', () => {
   const module = loweredModule('console.log(1 + 2 * 3);', 1, 'Should have one statement');
 
   const stmt = module.statements[0];
@@ -36,7 +36,7 @@ void test('console.log with arithmetic expression and correct precedence', () =>
   }
 });
 
-void test('let and while loop for counting', () => {
+test('let and while loop for counting', () => {
   const source = `
 let x: number = 0;
 while (x < 3) {
@@ -73,7 +73,7 @@ while (x < 3) {
   }
 });
 
-void test('span line numbers are 1-indexed and match source', () => {
+test('span line numbers are 1-indexed and match source', () => {
   const source = `console.log(42);\nlet x: number = 1;`;
   const result = lowerSource(source);
 
@@ -89,7 +89,7 @@ void test('span line numbers are 1-indexed and match source', () => {
   assert.equal(second.span.line, 2, 'Second statement should be on line 2');
 });
 
-void test('module with multiple statements lowers without errors', () => {
+test('module with multiple statements lowers without errors', () => {
   const source = `
 let a: number = 5;
 let b: number = 3;
@@ -98,7 +98,7 @@ console.log(a + b);
   loweredModule(source, 3, 'Should have three statements');
 });
 
-void test('if-else statement', () => {
+test('if-else statement', () => {
   const source = `
 let x: number = 5;
 if (x > 3) {
@@ -119,7 +119,7 @@ if (x > 3) {
   }
 });
 
-void test('nested if statements lower without errors', () => {
+test('nested if statements lower without errors', () => {
   const source = `
 let x: number = 5;
 if (x > 3) {
@@ -135,7 +135,7 @@ if (x > 3) {
   assert.equal(ifStmt.kind, 'if-statement', 'Should be an if statement');
 });
 
-void test('assignment to existing binding', () => {
+test('assignment to existing binding', () => {
   const source = `
 let x: number = 1;
 x = 2;
@@ -152,7 +152,7 @@ console.log(x);
   }
 });
 
-void test('multiple identifiers in expression', () => {
+test('multiple identifiers in expression', () => {
   const source = `
 let x: number = 1;
 let y: number = 2;
@@ -185,7 +185,7 @@ console.log(x + y);
   }
 });
 
-void test('comparison operators', () => {
+test('comparison operators', () => {
   const source = `
 let x: number = 5;
 if (x >= 3) {
@@ -209,7 +209,7 @@ if (x >= 3) {
   }
 });
 
-void test('string literals', () => {
+test('string literals', () => {
   const source = `console.log("hello");`;
   const result = lowerSource(source);
 
@@ -231,7 +231,7 @@ void test('string literals', () => {
   }
 });
 
-void test('boolean literals in if conditions lower without errors', () => {
+test('boolean literals in if conditions lower without errors', () => {
   const source = `
 let flag: boolean = true;
 if (flag) {
@@ -245,7 +245,7 @@ if (flag) {
   assert.equal(ifStmt.kind, 'if-statement', 'Should be an if statement');
 });
 
-void test('arithmetic with different operators lower without errors', () => {
+test('arithmetic with different operators lower without errors', () => {
   const source = `
 let a: number = 10;
 let b: number = 3;

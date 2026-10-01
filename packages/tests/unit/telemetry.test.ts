@@ -10,7 +10,7 @@ import type { Server } from 'node:http';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 
@@ -59,7 +59,7 @@ async function runCli(fixtureDir: { work: string; entry: string }, env?: NodeJS.
   return { status: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
 
-void test('STATOR_OTEL exports pipeline spans over OTLP without breaking machine output', async () => {
+test('STATOR_OTEL exports pipeline spans over OTLP without breaking machine output', async () => {
   const captured: Captured[] = [];
   const f = fixture();
   const { server, url } = await startReceiver(captured);
@@ -88,7 +88,7 @@ void test('STATOR_OTEL exports pipeline spans over OTLP without breaking machine
   }
 });
 
-void test('without STATOR_OTEL nothing is traced', async () => {
+test('without STATOR_OTEL nothing is traced', async () => {
   const captured: Captured[] = [];
   const f = fixture();
   const { server, url } = await startReceiver(captured);
@@ -102,7 +102,7 @@ void test('without STATOR_OTEL nothing is traced', async () => {
   }
 });
 
-void test('dotenv is loaded before the telemetry switch is read', async () => {
+test('dotenv is loaded before the telemetry switch is read', async () => {
   const captured: Captured[] = [];
   const f = fixture();
   const { server, url } = await startReceiver(captured);
