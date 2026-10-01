@@ -320,6 +320,36 @@ test('a fully JSDoc-annotated .js module has file verdict static', async () => {
   }
 });
 
+test('explain lists every diagnostic of the deciding stage, in source order', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-explain-all-'));
+  try {
+    const entry = join(work, 'many.ts');
+    // Written out of order on purpose: the report sorts by position, not by discovery.
+    writeFileSync(entry, 'let b: any = 2;\nlet a: any = 1;\nconsole.log(a, b);\n');
+    const [json, human] = await Promise.all([
+      stator('explain', entry, '--json'),
+      stator('explain', entry),
+    ]);
+    assert.equal(json.status, 0, json.stderr);
+    const report: unknown = JSON.parse(json.stdout);
+    assert.ok(typeof report === 'object' && report !== null);
+    assert.ok('diagnostics' in report && Array.isArray(report.diagnostics));
+    assert.deepEqual(
+      report.diagnostics.map((d: unknown) =>
+        typeof d === 'object' && d !== null && 'code' in d && 'line' in d ? [d.code, d.line] : d,
+      ),
+      [
+        ['STA1001', 1],
+        ['STA1001', 2],
+      ],
+    );
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /STA1001 x2/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not tsc's allowJs error", async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-js-under-ts-'));
   try {
@@ -333,7 +363,12 @@ test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not ts
       stator('build', entry, '-o', join(work, 'out')),
     ]);
     assert.equal(explained.status, 0, explained.stderr);
-    assert.deepEqual(JSON.parse(explained.stdout), { verdict: 'error', code: 'STA1002' });
+    const report: unknown = JSON.parse(explained.stdout);
+    assert.ok(typeof report === 'object' && report !== null && 'diagnostics' in report);
+    assert.deepEqual(
+      { ...report, diagnostics: undefined },
+      { verdict: 'error', code: 'STA1002', diagnostics: undefined },
+    );
 
     // The hint has to come from the CLI path, not the in-memory host: tsc used to DROP the .js
     // file and answer STA0012 "enable the allowJs option", which is the wrong code and the wrong

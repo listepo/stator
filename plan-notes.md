@@ -9044,3 +9044,205 @@ the 141 `node:test` calls.
 **Limit.** `--changed` follows static imports. A test that reaches compiler code only through a
 spawned CLI process is not selected, so `test:affected` is an iteration aid and plain `test`
 stays the gate (AGENTS.md, Testing rules).
+
+## 286. TypeScript 6.0.3's `tsc` bundle through `--mode=js`: what blocks it, and the `--node` card (2026-10-02)
+
+Creator's question: what must Stator gain to compile TypeScript 6.0? Creator's direction: put a
+`--node` mode on the roadmap, one that works with Node and `require`, research first (plan.md
+§11c, T11.0). The measurement below is the evidence §15.4 asks for before `STA1110` or §0's npm
+non-goal can reopen.
+
+**Input.** `node_modules/typescript/lib/_tsc.js` from `typescript@6.0.3`: 6,239,091 bytes, one
+`"use strict"` CommonJS script. It was copied out of `node_modules` and run through
+`stator build --mode=js` on `main` at `b36bdf1`, Node 26.7.0, macOS arm64.
+
+**1. The compiler crashes before it reaches a verdict.** `explain` at the default V8 stack fails
+with `STA4072 internal error: Maximum call stack size exceeded` (a compiler bug by definition).
+`--stack-size=7600` gets past it, and `explain` then takes 93 s.
+
+**2. The Node platform is missing.** The checker reports 47 errors (`STA0012`), and all but two
+of them are Node names:
+- `process`: 30.
+- `require`, through 11 call sites: `fs` (3), `path`, `os`, `crypto`, `perf_hooks`, `inspector`,
+  `source-map-support`, and one computed `require(modulePath)` that loads plugins.
+- `Buffer`: 2.
+- `setTimeout` and `clearTimeout`: 2 each.
+
+**3. js mode rejects valid JavaScript.** Two checker errors are JS that Node runs as is:
+- `Cannot assign to 'log' because it is a function`, at the namespace IIFE
+  `})(log = Debug2.log || (Debug2.log = {}))`.
+- `Spread types may only be created from object types`, at
+  `{ ...defaultLevels, ...customLevels }`.
+
+Surfacing `checkJs` semantic errors as hard errors contradicts §1.2: untyped code is never
+rejected.
+
+**4. The gate stops the rest.** Steps 2 and 3 were shimmed for the probe only: an ambient
+`.d.ts` declared `process`, `Buffer`, `require`, the timers and the six modules, and two
+`// @ts-ignore` lines covered the false rejections. The gate then reports 1,575 diagnostics, all
+`STA1214` except one `STA1210` (Date, ICU). The largest groups:
+- Method calls on an inferred receiver type whose method the shape table lacks, e.g.
+  `hasOwnProperty.call(map, key)`: 402.
+- Assignment or compound assignment to anything but a variable: 518, in three message variants.
+- Unsupported globals: 111 uses of 27 names. They are mostly `process`, `parseInt`, `Array`,
+  `String`, `Number`, `isFinite`, `encodeURI`, `require` and `Buffer`, plus TS's own top-level
+  functions referenced as globals (`createProgram`, `toPath`, …).
+- Spreads into calls, method calls, array methods and array literals: about 190.
+- A property that is not a field of the shape: 55.
+- `new Map(iterable)` / `new Set(iterable)`: 71.
+- `new` on a non-class value: 50.
+- Index access on a non-array: 33.
+- `Object.*`: 24.
+- Destructuring in `for-of` and in declarations: 31.
+- Class expressions: about 8.
+
+Lowering and codegen were never reached, so their behaviour at this size (6 MB of JS into C) is
+unmeasured.
+
+**Reading.** TypeScript 6.0 needs three separate things:
+- (a) Compiler robustness at scale: the stack overflow and the 93 s `explain`.
+- (b) js-mode completeness: items 3 and 4, which is Phase 5 residue plus the dynamic path taking
+  over where inference yields a shape Stator cannot model.
+- (c) The Node platform: item 2. Without (c), even a perfect (a) and (b) leave `tsc` unable to
+  read a file.
+
+(c) is what §11c's `--node` card researches. (a) and (b) are ordinary bugs and residue that
+need no reopened decision. Compiling TypeScript from its `.ts` sources in `ts` mode is not an
+alternative. Its public declarations alone (`lib/typescript.d.ts`) carry 73 `enum`s and 58 `any`s,
+and `ts` mode refuses both by design.
+
+## 288. T11.0 research lands: `--node` is a platform flag over a `std`-first layer; go for P0 + N1, defer N2, no-go N3 (2026-10-02)
+
+**Plan:** §11c T11.0 execution steps 1–3. `plan.md` edited (the card's status line); the Check
+stays open until the creator's decision is recorded here.
+
+**Evidence.** `docs/research/node-mode.md` (every fact with its primary source and the date
+checked) and the corpus scan in `docs/research/node-mode/` (`scan.ts` → `scan.json`,
+`scan.md`; 12 packages from this repo's install, measured on Node 26.7.0):
+
+- 36 built-in modules across the corpus. `path` is used by 10 of 12 packages, `fs` by 9, `url` 9,
+  `util` 8, `os` 7. `process` appears in all 12 (858 uses).
+- `tsc` 6.0.3 needs 15 sync `fs` functions plus watchers, `path.join/dirname/resolve`,
+  `os.platform/EOL`, `crypto.createHash`, `performance`, ~10 `process` members, `Buffer.from`,
+  `setTimeout`, and one computed `require`. A non-watch run needs no event loop.
+- Two prerequisites the plan does not have yet: typed arrays (`Buffer` is a `Uint8Array`
+  subclass; no `Uint8Array` exists in the tree), and a real `std/*` import edge (284 landed
+  `std/env` / `std/path` as `declare`-extern fixtures, not an importable package).
+
+**Recommendation (for the creator, not a decision).**
+
+- `--node` is orthogonal to `--mode`.
+- `node:*` modules are Stator TS over typed `std/*` modules, with no C of their own.
+- libuv (v1.53.0, MIT) backs a single `std/loop`, with microtasks drained after every callback.
+- CJS cycles are exempt from `STA3001` under `--node`, and `STA1110` narrows to "without
+  `--node`".
+- Order: **go** P0 (STA4072, js-mode coverage, typed arrays, `std` edge) → N1 (sync `tsc`).
+  **Defer** N2 (loop, child processes, streams). **No-go for now** N3 (net/http/tls/zlib,
+  `worker_threads`, `vm`).
+
+**Open conflict surfaced.** T10.2's planned worker pool plus MPSC completion queue, and libuv's
+own thread pool, would be two pools. One must own the other; settle it before either lands.
+
+**Decision:** recorded in 289.
+
+## 289. Creator's decision on T11.0, and four standing rules (2026-10-02)
+
+**Plan:** §0.5, §0.10 (new), §0 non-goals, §9 Tasks 6.15–6.16 (new), §11a, §11b A + T10.1,
+§11c (rewritten: T11.0 → done.md, cards T11.1–T11.6), §14 effort row, changelog v4.10.
+Docs: AGENTS.md golden rules 9–11 + commands, `docs/DIAGNOSTICS.md` (`STA1110` planned
+narrowing), `docs/STD.md` §6, `docs/TOOLCHAIN.md` (cpd row — it still said 5.0.16; the pin is
+5.3.0), `docs/README.md`, `docs/NODE.md` (new, generated).
+
+**The creator's answers to 288's five questions:**
+
+1. Order P0 → N1, N2 deferred, N3 not planned — **yes**.
+2. `--node` is a platform flag orthogonal to `--mode` — **yes**.
+3. The loop: **an own loop written in Zig**, not libuv. This goes beyond the question: every piece
+   of runtime code that manages memory or must be cross-platform is Zig from now on (§0.5). It
+   reopens 239's "do not grow Zig past the memory core" on the creator's direction — the same
+   kind of reopening 238 was. Existing C is ported only by a card.
+4. The T10.2 pool versus loop pool conflict — **deferred**; researched before N2's card.
+5. `node:*` modules are **written from scratch**, no vendored Node `lib/` JS.
+
+**Standing rules added the same day:**
+
+- **No JavaScript in our own source** (§0.10, AGENTS.md golden rule 9): strict TS, C and Zig
+  only. Today 27 tracked files violate it — oracle shims, the runtime print corpus's Node ground
+  truth, `scripts/check-node.mjs`, two vendor scripts, `site/astro.config.mjs` (vendored code and
+  `js`-mode inputs are exempt); Task 6.15 ports them.
+- **Reuse first; jscpd excludes tests** (golden rule 10). `.jscpd.json` now scans our source only
+  (tests, vendor, docs out; formats ts/tsx/js/c/zig), identifier-insensitive. Measured on this
+  tree: 1.1% exact duplication, 4.6% identifier-insensitive (224 clones) — over the old 1%
+  threshold once tests leave the denominator. So the gate became a ratchet: the 224 clones are
+  `.jscpd-baseline.json` and any NEW clone fails (`failOnNewClones: 0`; probed — copying
+  `src/cli/explain.ts` beside itself exits 1 with "1 new clones not in the baseline"). Task 6.16
+  works the baseline to zero.
+- **`docs/NODE.md`** (golden rule 11): Node API coverage, generated by
+  `packages/tests/golden/node-coverage.ts` from the pinned Node — 2 364 public members across 58
+  built-in modules, 37 of them in slice N1 — with the numerator proved exactly as
+  `test:builtins` proves builtins (the claim logic moved to `golden/coverage-claims.ts`, shared by
+  both; `test:builtins` output byte-identical before and after). `ci` runs `--check`.
+- **Decomposition by package** (§11c): `runtime` (typed arrays), new `packages/std` (TS surface +
+  Zig, `libjsrt_std.a`), new `packages/node` (strict TS over `std` only), `compiler` (flag,
+  resolution, CommonJS, js-mode coverage). Dependencies point `node` → `std` → `runtime`.
+
+## 290. `js` mode builds through a bundler; `packages/vite-stator` is the default (2026-10-02)
+
+**Plan:** new §11d Phase 12 (T12.0 design, T12.1 compiler API, T12.2 `vite-stator`), §11c T11.5
+(depends on T12.0's CommonJS answer), §14 effort row, changelog v4.11.
+
+**Creator's direction:** in `js` mode, bundle the graph into one file (tree-shaking, CommonJS,
+`node_modules` resolution) before Stator compiles it; expose an API so any bundler can be
+integrated; write the default integration as a `vite-stator` package.
+
+**What the card fixes in place, and why:**
+
+- **`ts` mode is out of scope.** Bundlers strip types, and typed code is where `ts` mode's speed
+  comes from (§1). In a mixed `js`-mode graph the same tension exists for project `.ts` files.
+  T12.0 measures "bundle everything" against "bundle only JS" and decides.
+- **The compiler never depends on a bundler.** Adapters load by name at run time and
+  `vite-stator` carries `vite` as a peer dependency, so §0.9's runtime budget is unchanged.
+- **The `node:*` / `std/*` boundary is external to the bundle.** Those are resolved by Stator,
+  so the bundler never sees platform code. This also keeps Phase 11's layering intact.
+- **Potential overlap with T11.5.** Vite 8 bundles through Rolldown, which converts CommonJS.
+  If that becomes the default path, Stator's own CommonJS lowering is needed only for
+  `--bundler=none`. T12.0 records the answer, and T11.5 is re-scoped in that change.
+
+**Decision:** the creator's (this entry). The design details are T12.0's.
+
+## 291. `explain` reports every diagnostic that decided the verdict; §1 and MODES.md §6 match the tree (2026-10-02)
+
+**Plan:** §1 (the `explain` bullet), §11c T11.4 Check and T11.5 steps, changelog v4.12;
+`docs/MODES.md` §6, `docs/DIAGNOSTICS.md` (JSON format note).
+
+**Contradiction.** §1 and `docs/MODES.md` §6 promised a per-construct `constructs` array with
+spans, `file` and `mode` fields and a rollup rule. The tree has never shipped it: `explainFile`
+returns `verdict`, the first deciding `code`, per-function rows (`functions`, plan §8 step 1) and
+`externCalls`. A reader of §6 would have written a consumer for fields that do not exist.
+
+**The gap that mattered.** T11.4's Check counts `STA1214` on `_tsc.js`, and `explain` could not:
+`classify` kept the first deciding diagnostic and dropped the rest, so a 1 589-diagnostic program
+and a one-diagnostic program printed the same line.
+
+**Change.** A verdict of `error`/`not-yet` now carries `diagnostics`: every diagnostic of the
+stage that decided it, `{ file, line, column, code, mode, message }`, sorted by file, line,
+column. The fields are `renderDiagnostic`'s (new `DiagnosticSite` type in
+`support/diagnostics.ts`), so the human output reuses the build's rendering instead of a second
+format. Present exactly when `code` is, so `static`/`dynamic` reports are byte-identical.
+Human output prints a count per code first when more than one diagnostic decided.
+
+**Measured** (TypeScript 6.0.3 `lib/_tsc.js`, `--mode=js`, `node --stack-size=7600`, 90.5 s
+wall): `not-yet (STA1214)`, 1 589 diagnostics — 1 541 `STA1214`, 47 `STA0012`, 1 `STA1210`. They
+come from the program + gate stage, so lowering's own count (plan-notes 286) is not reached yet.
+
+**Kept as is.** The `constructs` array is not built: per-function rows already answer "which
+function went dynamic", and a top-level-statement array would duplicate them. If it is wanted
+later it is a card, not a doc promise.
+
+**`--node`.** Not implemented here (T11.5). §6 and T11.5 now say how it surfaces: an unlanded
+`node:*` or Node-global member is a `not-yet` diagnostic naming T11.6, so this same list is the
+platform-gap report. Until then `--node` is `STA0005` (unknown flag).
+
+**Check:** `pnpm run test` (vitest, 599 tests incl. the new `explain lists every diagnostic`
+case) and `test:subset` (744 fixtures: 707 passed, 37 expected-fail, 0 failed) pass.
+
