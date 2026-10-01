@@ -64,8 +64,9 @@ Flags:
   explain: `Usage:
   stator explain <entry> [--mode=ts|js] [--json]
 
-Reports the verdict per construct: static | dynamic | error | not-yet,
-with the STA code. A rejected program still exits 0 — the verdict is
+Reports the file verdict: static | dynamic | error | not-yet, with the
+STA code and every diagnostic that decided it, then the static/dynamic
+split per function. A rejected program still exits 0 — the verdict is
 the answer, so a refusal is a result, not a crash.
 
 Flags:

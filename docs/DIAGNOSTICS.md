@@ -46,9 +46,9 @@ Fields:
 ### JSON format
 
 `--diagnostics=json` turns the *diagnostic stream* into an array of diagnostic objects. This is
-not the same thing as `stator explain --json`, which reports a per-construct verdict array plus
-a file-level rollup — that schema is specified in `docs/MODES.md` §6 and is what
-`tests/subset/run.ts` consumes. A diagnostic is "what went wrong"; an explain verdict is "how
+not the same thing as `stator explain --json`, which reports a file verdict, every diagnostic of
+the stage that decided it, and per-function rows — that schema is specified in `docs/MODES.md` §6,
+and its `verdict` + `code` are what `tests/subset/run.ts` consumes. A diagnostic is "what went wrong"; an explain verdict is "how
 this construct would compile", and most constructs produce a verdict without producing any
 diagnostic at all.
 
@@ -145,7 +145,7 @@ These are language features that Stator does not support, either by design (ESM-
 | STA1107 | ts | never | prototype mutation is not supported in ts mode — Object.setPrototypeOf, __proto__, and similar are incompatible with static shape analysis | `Object.setPrototypeOf()`, assignment to `__proto__`, or prototype rewrites |
 | STA1108 | ts | never | delete on class fields is not supported in ts mode — classes have fixed shape at compile time | Raised by `gateDelete` when the receiver of a `delete` lowers to a fixed-shape `HObject`. **The class-field wording is exhaustive, not an example:** TS2790 already requires the operand to be an OPTIONAL property, and an optional property is exactly what `isDynamicShape` uses to send an anonymous object type to the dynamic representation — so the only fixed shape a type-correct ts-mode `delete` can still name is a class instance, whose layout is the whole point of ts mode. js mode defers the same case instead (STA1205); an Unknown receiver that turns out fixed at run time aborts with STA2007 |
 | STA1109 | both | never | with statement is not supported — ESM is strict; with is not allowed in strict mode | `with` keyword |
-| STA1110 | both | never | CommonJS require() is not supported — Stator uses ES modules only | `require()` call or reference |
+| STA1110 | both | never | CommonJS require() is not supported — Stator uses ES modules only | `require()` call or reference. Planned narrowing (plan.md §11c T11.5): with `--node` in `js` mode `require` becomes legal; without `--node`, and in `ts` mode, it stays this code |
 | STA1111 | both | never | .tsx and .jsx files are not supported in v1 — JSX is a post-MVP goal | Attempt to load `.jsx` or `.tsx` file |
 | STA1112 | both | never | decorators are not supported in v1 | Any `@decorator` on a class, method, accessor, property, or parameter. A v1 non-goal (plan §0 "Non-goals"), so it is a `never` code rather than a `not-yet` one: no phase promises to deliver it |
 | STA1113 | both | never | a relative import must name the file's extension (./x.ts, ./x.js) — Node ESM does not resolve extensionless specifiers | Gate. The checker resolves Bundler-style (program.ts must, to be free of package.json metadata), which accepts `./x`; Node, the differential ground truth, never does. Permanent because it is Node's own permanent rule, not a scheduling decision |

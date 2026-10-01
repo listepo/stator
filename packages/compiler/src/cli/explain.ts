@@ -23,7 +23,7 @@ import type { ExternCall } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
 import { lowerProgram } from '../lower/index.ts';
 import { rewriteModule } from '../passes/rewrite.ts';
-import type { Diagnostic } from '../support/diagnostics.ts';
+import { type Diagnostic, type DiagnosticSite, renderDiagnostic } from '../support/diagnostics.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { BuildError } from './build.ts';
 import { diagnosticLines, INK_COLORS, type InkColor, type Line, print } from './render.ts';
@@ -35,6 +35,11 @@ export type Verdict = 'static' | 'dynamic' | 'error' | 'not-yet';
 export interface Explanation {
   readonly verdict: Verdict;
   readonly code?: string;
+  /** Every diagnostic of the stage that decided an `error` or `not-yet` verdict, in source order
+   * (plan-notes 291). `code` names one; this names all of them, which is what sizing a large
+   * input needs — one code says only that a file fails, not how far it is from compiling. Later
+   * stages never ran, so their diagnostics cannot be here. Present exactly when `code` is. */
+  readonly diagnostics?: readonly DiagnosticReport[];
   /** The static/dynamic split, one row per compiled function (plan.md §8 step 1). Absent when the
    * file earned a verdict before lowering ran -- a program that was rejected has no functions to
    * report, and an empty array would claim it had none. */
@@ -46,6 +51,10 @@ export interface Explanation {
    * which keeps every non-extern report byte-identical. */
   readonly externCalls?: readonly ExternCallReport[];
 }
+
+/** One diagnostic as `explain` reports it: the fields of its rendered line. `--json` consumers
+ * key on `code`, never on `message` (AGENTS.md, Diagnostics conventions). */
+export type DiagnosticReport = DiagnosticSite;
 
 /** One unchecked boundary: the C symbol called and the source line that calls it. The TS name
  * is the declaration's business; the audit question is which FOREIGN code runs, so the C
@@ -99,6 +108,16 @@ export async function explain(entry: string, mode: Mode, json: boolean): Promise
     // The file line first, then its functions indented under it: the file verdict is the stronger
     // claim (it counts bodies), so a `dynamic` file over all-`static` rows reads as the narrowing
     // it is rather than as a contradiction.
+    // A tally first, so a large input reads as how far it is from compiling, then every site.
+    const report = result.diagnostics ?? [];
+    if (report.length > 1) {
+      for (const [code, count] of tally(report)) {
+        lines.push({ text: `  ${code} x${count}` });
+      }
+    }
+    for (const d of report) {
+      lines.push({ text: `  ${renderDiagnostic(d)}` });
+    }
     for (const fn of result.functions ?? []) {
       lines.push({ text: `  ${fn.line}: ${fn.name}: ${fn.verdict} (${fn.provenance})` });
     }
@@ -160,7 +179,7 @@ export async function explainFile(entry: string, mode: Mode): Promise<Explanatio
     // Lowering gave up without saying why. That is a bug, and reporting `static` here would be a
     // false claim about a program that does not compile.
     await print(diagnosticLines(diagnostics), process.stderr);
-    return { verdict: 'error', code: 'STA4021' };
+    return { verdict: 'error', code: 'STA4021', diagnostics: diagnosticReports(diagnostics) };
   }
 
   return {
@@ -241,19 +260,51 @@ function functionReports(module: Module): readonly FunctionReport[] {
 
 /** null means "nothing here decides the verdict" — carry on to the typed answer. */
 function classify(diagnostics: readonly Diagnostic[]): Explanation | null {
+  const decided = (verdict: 'error' | 'not-yet', code: string): Explanation => ({
+    verdict,
+    code,
+    diagnostics: diagnosticReports(diagnostics),
+  });
   const never = diagnostics.find((d) => d.class === 'never');
   if (never !== undefined) {
-    return { verdict: 'error', code: never.code };
+    return decided('error', never.code);
   }
   const notYet = diagnostics.find((d) => d.class === 'not-yet');
   if (notYet !== undefined) {
-    return { verdict: 'not-yet', code: notYet.code };
+    return decided('not-yet', notYet.code);
   }
   const error = diagnostics.find((d) => d.class === 'error' || d.class === 'internal');
   if (error !== undefined) {
-    return { verdict: 'error', code: error.code };
+    return decided('error', error.code);
   }
   return null;
+}
+
+/** Source order: file, then line, then column — the order a reader walks the program in, and
+ * one that does not depend on which pass happened to find a site first. */
+function diagnosticReports(diagnostics: readonly Diagnostic[]): readonly DiagnosticReport[] {
+  return diagnostics
+    .map(({ file, line, column, code, mode, message }) => ({
+      file,
+      line,
+      column,
+      code,
+      mode,
+      message,
+    }))
+    .sort(
+      (a, b) =>
+        (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || a.column - b.column,
+    );
+}
+
+/** Count per code, most frequent first (ties by code, so the order is stable). */
+function tally(report: readonly DiagnosticReport[]): readonly (readonly [string, number])[] {
+  const counts = new Map<string, number>();
+  for (const d of report) {
+    counts.set(d.code, (counts.get(d.code) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
 }
 
 /** One Unknown anywhere -- in a signature or buried in a body -- makes the whole FILE dynamic.
