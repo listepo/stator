@@ -757,6 +757,56 @@ which 1.1% exact) as debt. Extract a shared helper per clone family at the respo
 `pnpm run dupes:baseline` in the same change. **Check:** the baseline is empty; `pnpm run dupes`
 then runs with no baseline at all.
 
+**Task 6.17 — Test impact: build and run only what a change reaches (plan-notes 293).** Creator's
+direction (2026-10-02). On a pull request and locally, run only the tests whose execution reaches
+a changed line — through the TypeScript compiler and on down into the C/Zig runtime the compiled
+binaries link. `main` and the nightly keep the full run: it records the map, and it is what
+catches a selection bug. Plain `pnpm run test` and `pnpm run ci` are unchanged.
+
+1. **The map** (`impact-map.json`, written by a full run with `STATOR_IMPACT_RECORD=<dir>`, never
+   committed) records, per test — a unit test file, a subset fixture, a golden fixture, or a whole
+   harness — with the commit, the Node version and the platform it was recorded on:
+   - **TypeScript:** every function the test executed, as line spans of its file. Unit files run
+     under `NODE_V8_COVERAGE`, which also covers the CLI processes the tests spawn. The in-process
+     runners (subset, golden) use `node:inspector`'s precise coverage: one take after loading,
+     then one take-and-reset per fixture, run serially. Verified on Node 26.7.0: after a reset, a
+     take reports only the functions the fixture ran, and loading reports what loading ran.
+   - **Native:** the runtime archive members the fixture's binary linked — its defined symbols
+     (`nm`) against each member's (`nm -A libjsrt.a`) — expanded to the sources and headers each
+     member depends on, read from the build's `-MMD` sidecars.
+2. **The diff** is `git diff <map commit>` (working tree included). TypeScript files are compared
+   after `module.stripTypeScriptTypes`, which keeps every offset, so a type-only edit selects
+   nothing. A change inside a function selects the tests that executed it. A change outside every
+   function (module scope), or in a function that ran while its module loaded, selects every test
+   that loaded the file. A change in a runtime source or header selects the tests whose binary
+   linked a member depending on it.
+3. **Whole-harness triggers:** the lockfile, `package.json`, `tsconfig*.json`, the vitest config,
+   `.node-version`, `mise.toml`, the runtime justfile, `packages/tests/support/**` and a runner's
+   own script select that whole harness, or everything if they are shared.
+4. **New tests always run:** a test file or fixture that is not in the map.
+5. **Fall back to the full run, out loud:** no map, a map commit that is not an ancestor of
+   `HEAD`, another Node or platform, or another schema version. The selector prints what it chose
+   and why. Selecting zero tests is a result it reports, never a silent pass.
+6. **Build only what is needed:** the runtime is built (already incremental through `-MMD`) only
+   when a selected test links it. CI caches `packages/runtime/build` keyed on the runtime's
+   sources.
+
+Steps: (1) `packages/tests/support/impact.ts` — map schema, diff and selection, pure, with unit
+tests. (2) Recorders in the unit, subset and golden runners, plus harness-level records for
+`test:runtime`, `test:leak`, `test:asan`, `test:ffi` and `test:builtins`. (3) `--only=<file>`
+selectors on the subset and golden runners, and `pnpm run test:impact [<base>]`, which drives
+every harness with its selection and replaces `test:affected`. (4) CI, after PR #45's staged
+pipeline: `main` and the nightly record and upload the map; pull requests download the newest
+`main` map and run `test:impact`. (5) Docs: AGENTS.md commands and Testing rules, `docs/TOOLCHAIN.md`.
+
+**Check:** (a) soundness by mutation: for 20 seeded mutations (a compiler function's body
+replaced by a `throw`, one runtime C function made to `abort()`), every test the full run fails is
+in the selection; (b) a type-only edit selects 0 tests; (c) an edit to one function in
+`jsrt_date.c` selects only fixtures whose binary links `jsrt_date.o`; (d) a missing map, or one
+from a commit that is not an ancestor, falls back to the full run with the reason printed; (e)
+on a one-function compiler change, `test:impact` runs well under the full suite's wall time
+(measured, numbers in plan-notes).
+
 ~~**Task 6.18 — `stator.config.json`: every CLI option in one validated file.**~~ ✅ **landed 2026-10-02** — evidence in [done.md](done.md) → Phase 6 Task 6.18 (plan-notes 303; `docs/CONFIG.md`).
 
 **Task 6.19 — Stator compiles itself and its own packages: a self-compilation test — [D3]**
@@ -2353,3 +2403,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.20** (2026-10-02): **T11.5a — per-module namespaces before T11.6** (plan-notes 302). Each module gets its own top-level namespace (module-qualified C names), and every aliasing shape lands: renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *`. This removes the one-namespace `STA1214` collisions that T11.2 found (plan-notes 294). T11.6 depends on it; T12.1 step 3 shares `export { a as b }` with it.
 - **v4.21** (2026-10-02): **Task 6.19 — self-compilation test** (plan-notes 304). Stator compiles itself and its own packages (`std`, later `node`, `webapi`, `renderer-clay`, `interpreter`) as a ratcheted test. Per-target diagnostic counts may only shrink. A target at zero builds and runs its smoke check, and for the compiler that check is a byte-identical stage-2 bootstrap. Baseline: compiler 2 522 `STA1214` in `ts` mode; `std` already compiles.
 - **v4.22** (2026-10-02): **Upstream test suites for `node` and `webapi`; Phase 11 outranks Phase 13** (plan-notes 305). New T11.7: Node's own `test/parallel` slice, pinned to `.node-version` and fetched rather than vendored, runs through vitest with a strict-TS `common` and `node:assert`, ratcheted, and adds a column to `docs/NODE.md`. New T13.6 does the same for web-platform-tests `dom/` and `css/cssom/`. Phase 11 is now `P1` and Phase 13 is `P3`.
+- **v4.23** (2026-10-02): **Task 6.17 — test impact selection** (plan-notes 293). Creator-directed: on pull requests and locally, build and run only the tests whose execution reaches a changed line, through TypeScript and on into the C/Zig runtime, using a per-test coverage map recorded by the full run on `main`. Falls back to the full run when the map cannot be trusted; `test:affected` is replaced.

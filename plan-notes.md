@@ -9888,3 +9888,36 @@ are fetched data, not our source.
 
 **Open for T13.0:** most WPT DOM tests are `.html`, so the document comes from markup. Either
 `webapi` gets an HTML parser, or a dev-only pre-pass converts the markup into DOM-building calls.
+
+## 293. Test impact selection: a per-test coverage map, down into the runtime (2026-10-02)
+
+**Plan:** §9 Task 6.17, changelog v4.23. Numbers 286–292 and 294–305 are taken on `main`.
+
+**Creator's direction:** build and run tests only for what was created, edited or used by the
+tests, following the code recursively down to the parts not written in TS/JS. Answers to the
+three questions: pull requests and local runs select, `main` and the nightly run in full; the
+selection comes from a per-test coverage map, not a static graph; card first, then code.
+
+**Why not a static graph.** Every golden and subset fixture runs through the whole compiler, so an
+import graph reaches them all from any `lower/` or `codegen/` edit, and it cannot see code reached
+only through a spawned CLI (plan-notes 285's limit on `test:affected`). Coverage records what
+actually ran.
+
+**Probes (Node 26.7.0, this host, 2026-10-02):**
+
+- `node:inspector/promises`: `Profiler.startPreciseCoverage({ callCount: true, detailed: false })`,
+  then `takePreciseCoverage` after each unit of work. After loading, the take listed the root,
+  the init function and the never-called functions (count 0). After `a()`, it listed only `a:1`;
+  after `b()`, only `b:1`. Take-and-reset gives per-fixture attribution in one process.
+- `module.stripTypeScriptTypes` replaces types with whitespace and keeps offsets
+  (`const x: number = 1;` → `const x         = 1;`). It is experimental and warns, so the
+  selector runs with `--disable-warning=ExperimentalWarning`.
+- `NODE_V8_COVERAGE` over `vitest run packages/tests/unit/cli.test.ts` wrote 20 coverage files:
+  vitest, its workers and every CLI the tests spawned, each with its own compiler functions.
+- The runtime archive is per-source members (`jsrt_*.o`, `vendor_*.o`, `jsrt_zig.o`), each with
+  a `-MMD` `.d` sidecar. Binaries link with `-dead_strip` / `--gc-sections`, so the binary's
+  symbols name exactly what can run.
+
+**Decision:** Task 6.17 as written. Its soundness Check is mutation-based. The question is never
+"did the selection run fewer tests" but "did it miss a test the full run fails".
+
