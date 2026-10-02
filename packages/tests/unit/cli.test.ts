@@ -233,6 +233,36 @@ test(
   },
 );
 
+/* The same edge when the checker has an opinion: `label` infers `string`, so `const n: number =
+ * label(10)` is TS2322. js mode suppresses it, and used to widen `n` to Unknown, which printed
+ * `10` out of a `number` binding (plan-notes 301). The annotation now stays and the declaration
+ * and assignment edges are checked. The passing half is golden `js/boundary_inferred`. */
+for (const [edge, body, line] of [
+  ['declaration', 'const n: number = label(10);\nconsole.log(n);\n', 2],
+  ['assignment', 'let n: number = 0;\nn = label(10);\nconsole.log(n);\n', 3],
+] as const) {
+  test(
+    `a .js value the checker types differently aborts the ${edge} edge with STA2001`,
+    NATIVE_ONLY,
+    async () => {
+      const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
+      try {
+        writeFileSync(join(work, 'lib.js'), 'export function label(x) {\n  return `${x}`;\n}\n');
+        const entry = join(work, 'main.ts');
+        writeFileSync(entry, `import { label } from "./lib.js";\n${body}`);
+        const run = await buildAndRun(entry, join(work, 'main'), '--mode=js');
+        assert.notEqual(run.status, 0, 'a string in a number slot must abort, never print');
+        assert.match(run.stderr, /STA2001/);
+        assert.match(run.stderr, new RegExp(`main\\.ts:${String(line)}:`));
+        assert.match(run.stderr, /expected number, got string/);
+        assert.equal(run.stdout, '', 'nothing may print before the abort');
+      } finally {
+        rmSync(work, { recursive: true, force: true });
+      }
+    },
+  );
+}
+
 /* Provenance has to survive the trip to stdout (plan.md §8 step 1). `lower.test.ts` proves the HIR
  * fact; this proves the report carries it, because a grade that is right in the HIR and lost on the
  * way out is still a wrong answer to the question the user asked.

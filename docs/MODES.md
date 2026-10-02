@@ -189,8 +189,32 @@ export const MAX_RETRIES = 3;
 import { MAX_RETRIES } from "./config.js";
 
 const retries: number = MAX_RETRIES;  // no check: the checker inferred `number`
-// `const retries: string = MAX_RETRIES` is a compile error (`STA0012`), not a trap.
+// `const retries: string = MAX_RETRIES` is checked: check(MAX_RETRIES, "string") → STA2001
 ```
+
+When the checker's inferred type and the `.ts` annotation disagree (`TS2322`), `ts` mode refuses
+the program (`STA0012`). `js` mode does not: it suppresses `TS2322` because in a `.js` file the
+disagreement is ordinary JavaScript (`let x = 1; x = 'a'` widens `x` to a dynamic binding). A
+`.ts` variable annotated `number`, `string` or `boolean` is not widened. Its annotation stays,
+and every declaration or assignment whose value has another type gets a check. A value that
+matches passes. One that does not fails with `STA2001` at the narrowing point (plan-notes 301):
+
+```javascript
+// lib.js
+export function pick(wantNumber) { return wantNumber ? 1 : "one"; }  // inferred 1 | "one"
+export function label(x) { return `${x}`; }                          // inferred string
+```
+
+```typescript
+// main.ts
+import { label, pick } from "./lib.js";
+
+const n: number = pick(true);  // check(pick(true), "number") passes
+const s: number = label(10);   // check(label(10), "number") → STA2001
+```
+
+An annotation no tag settles (an object type or a union) still widens the binding to the dynamic
+path, the way a `.js` binding does.
 
 A check appears only when the imported value is still Unknown:
 

@@ -1029,7 +1029,10 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // here, because both are ways the lowering could have inserted a check that does nothing: a
       // check on an already-concrete value is a runtime cost with no soundness gain, and a check
       // whose RESULT is Unknown has not narrowed anything and leaves the consumer no better off.
-      if (expr.value.type.kind !== 'unknown') {
+      // A concrete value of ANOTHER type is not a no-op: it is the js-mode edge where the checker's
+      // 2322 was suppressed against an annotated `.ts` binding, and the check is what fails it
+      // (plan-notes 301).
+      if (expr.value.type.kind !== 'unknown' && hTypeAssignable(expr.value.type, expr.type)) {
         problems.push({
           kind: 'boundary-check',
           span: expr.span,
