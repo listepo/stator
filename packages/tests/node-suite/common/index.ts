@@ -3,10 +3,12 @@
  * A port of the helpers the selection uses from Node v26.7.0 `test/common/index.js`
  * (https://github.com/nodejs/node/blob/v26.7.0/test/common/index.js), not a copy of the file:
  * it grows with the selection. Node's version also guards against leaked globals and wires
- * crash reporting; neither is here. host-hook.ts points the specifier at this file. */
+ * crash reporting; neither is here. It imports no `node:util` (N2): `inspect.ts` prints what
+ * the messages need. The Stator build reaches this file through the corpus's `test/common`
+ * link; the pinned Node, through host-hook.ts. */
 import assert from 'node:assert';
 import process from 'node:process';
-import { inspect } from 'node:util';
+import { inspectValue } from './inspect.ts';
 
 export const isWindows = process.platform === 'win32';
 export const isSunOS = process.platform === 'sunos';
@@ -90,7 +92,7 @@ export function mustNotCall(message?: string): (...args: unknown[]) => never {
   return (...args: unknown[]): never => {
     const called =
       args.length > 0
-        ? `\ncalled with arguments: ${args.map((arg) => inspect(arg)).join(', ')}`
+        ? `\ncalled with arguments: ${args.map((arg) => inspectValue(arg)).join(', ')}`
         : '';
     assert.fail(`${message ?? 'function should not have been called'}${called}`);
   };
@@ -102,7 +104,10 @@ export function expectsError(
   exact = 1,
 ): (...args: unknown[]) => boolean {
   return mustCall((...args: unknown[]): boolean => {
-    if (args.length !== 1) assert.fail(`Expected one argument, got ${inspect(args)}`);
+    if (args.length !== 1)
+      assert.fail(
+        `Expected one argument, got [ ${args.map((arg) => inspectValue(arg)).join(', ')} ]`,
+      );
     const error = args[0];
     assert.throws(() => {
       throw error;
@@ -128,9 +133,9 @@ export function invalidArgTypeHelper(input: unknown): string {
   if (typeof input === 'object') {
     const name: unknown = input.constructor?.name;
     if (typeof name === 'string' && name !== '') return ` Received an instance of ${name}`;
-    return ` Received ${inspect(input, { depth: -1 })}`;
+    return ` Received ${inspectValue(input)}`;
   }
-  let inspected = inspect(input, { colors: false });
+  let inspected = inspectValue(input);
   // Upstream writes `inspected.slice(inspected, 0, 25)`, whose start coerces to 0 and whose end
   // is 0: the kept prefix is empty. Ported as it behaves.
   if (inspected.length > 28) inspected = '...';

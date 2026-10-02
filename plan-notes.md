@@ -11433,6 +11433,66 @@ representation, not to this slice.
 - Self-compilation gains the target `packages/node/src/fs.ts` (`dynamic`, no codes), recorded
   with `--update`; the other counts do not move.
 
+## 318. T11.7, second slice: `require('../common')` in the Stator build (2026-10-02)
+
+**The problem** (plan-notes 321 item 10). The harness answered `require('../common')` only
+through Node's `--import` host hook. The corpus has no `test/common`, so the bundler could not
+resolve it, and all 15 `fail` files stopped at `STA0015`.
+
+**The fix: a link, not a copy.** `fetch.ts` now links `corpus/test/common` to
+`packages/tests/node-suite/common/`, with an absolute target. On Windows the link is a junction,
+which needs no privilege. A link to the wrong target (a moved checkout) is replaced. The bundler
+then resolves `../common` like any relative require: Vite's default `resolve.extensions`
+includes `.ts`, so the directory resolves to `index.ts`. The pinned Node's CommonJS `require`
+does not try `.ts`, so the host keeps `host-hook.ts`. Both sides read the same files.
+
+Other options, rejected:
+- An alias in the adapter's configuration. `compile` passes no resolve options to an adapter, and
+  the harness is test code, not a reason to grow `statorc/api`.
+- A generated `test/common/index.js` that re-exports the harness. That is a JavaScript file in
+  our flow (golden rule 9) when a link does the same job.
+
+**`node:util` leaves the harness.** `node:util` is N2 (plan.md §11c, deferred list), so a
+harness that imports it could never build in N1. `common/index.ts` used `inspect` in three
+places:
+- `mustNotCall`'s and `expectsError`'s failure reports. These are diagnostics.
+- `invalidArgTypeHelper`. Its output is compared: `test-path-parse-format.js` matches
+  `ERR_INVALID_ARG_TYPE` messages for `null`, `undefined`, `1`, `true`, `false` and `'string'`.
+
+`common/inspect.ts` ports what those need from Node v26.7.0 `lib/internal/util/inspect.js`
+(`formatPrimitive`, `strEscape`; https://github.com/nodejs/node/blob/v26.7.0/lib/internal/util/inspect.js,
+checked 2026-10-02):
+- Primitives, including the quote choice and the escapes.
+- `depth: -1` objects: plain objects, arrays, null-prototype objects, and any object with entries
+  as `[Name]`.
+
+It has two documented gaps: a string is never split across lines, and a lone surrogate is not
+escaped. `unit/node-suite-inspect.test.ts` holds it to the pinned Node's `util.inspect` for every
+value it claims.
+
+**`common/fixtures.ts` leaves `suite.ts`.** Upstream finds `test/fixtures` from `__dirname`. The
+port found it through `suite.ts`'s `CORPUS`, which pulls `node:url`, `node:fs` and
+`import.meta` into the Stator build. Both sides run in the corpus root (`node-suite.test.ts`
+passes `cwd: CORPUS`), so `join(process.cwd(), 'test', 'fixtures')` names the same directory,
+and the binary needs nothing but `node:process`.
+
+**Measured after the change** (`build --mode=js --node` on each selected file). Every file now
+reports `<package bundle>:2 STA1214 'node:process'`. Two report more:
+- `test-path-win32-exists.js` also reports `'path/win32'`.
+- `test-path-resolve.js`, a `skip`, also reports `'child_process'`. The harness reads
+`process.platform`, `exit`, `on` and `cwd`. Before this change, `node:util` also showed:
+- as `STA1214` in four files that bind `common`;
+- as a leftover side-effect import (`STA0012`) in two;
+- with `node:url` (from `suite.ts`) in `test-path-makelong.js`.
+
+Beyond `node:process`, a hand-written CommonJS file requiring `assert` and `path` stops at
+`STA4013` in Rolldown's `__commonJSMin` (T12.3, plan-notes 321 item 10; re-measured today). 13
+files also need `path.win32`. `expectations.json` names all three blockers per file.
+
+**Proof.** `pnpm run test:node-suite` → `node-suite: 17 selected at v26.7.0 — 0 passed, 15
+expected-fail, 2 skipped` and `Tests  15 passed | 2 skipped (17)`. The pinned Node still passes
+all 15 with the changed harness (the host half of every test). The pass count is unchanged at 0.
+
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 
 **What landed.** `js` mode sends package imports and CommonJS project files to one bundler

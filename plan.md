@@ -1511,9 +1511,14 @@ pin, `fetch.ts`, `expectations.json`, the strict-TS `common/` with its host reso
 vitest driver with the ratchet, `node:assert` in `packages/node`, and the "Node tests" column in
 `docs/NODE.md`. The selection is the 17 `test-path*` files: on the pinned Node all 17 pass with
 our `common`; under Stator 0 pass, 15 are `fail` and 2 are `skip` (a child process; a
-Windows-only file). Every `fail` is a CommonJS file, which goes to the T12 bundler, so STA0014
-until `vite-stator` lands (T12.2); after that, 13 of them also need `path.win32`. **Next:** flip
-the `path` files as T12.2 and `path.win32` land, then follow T11.6's module order.
+Windows-only file). Every `fail` is a CommonJS file, which goes to the T12 bundler.
+**Second slice landed** (plan-notes 318): the Stator build resolves `require('../common')`, since
+`fetch.ts` links the corpus's `test/common` to the strict-TS `common/`. The harness no longer
+imports `node:util` (N2); `common/inspect.ts` prints what its messages compare. Every `fail` now
+stops at `node:process` (the harness's `process.platform`, `exit`, `on` and `cwd`), then
+at Rolldown's `__commonJSMin` (STA4013, T12.3), and 13 of them at `path.win32`. **Next:** flip
+the `path` files as T11.6's `process` and `path.win32` slices and T12.3's interop helpers land,
+then follow T11.6's module order.
 
 **Deferred — N2 (not a card yet).** `std/loop` written in Zig (the creator chose an own loop
 over libuv: kqueue/epoll first, Windows when the runtime builds there), real timers and
@@ -2315,3 +2320,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.53** (2026-10-02): **T11.5: `--node` gates CommonJS routing of project files** (plan-notes 315). The creator's decisions on plan-notes 320: the narrowed CommonJS marker rule stays, and only under `--node` does a CommonJS project file go to the bundler; packages are bundled either way. Without the flag a free `require`, `module.exports` or `exports` is `STA1110`; `module.exports`/`exports` used to reach the lowering as `STA4035`, because TypeScript declares them by their own assignments and the free-binding test missed them. `statorc/api` gains `CompileRequest.node`. T11.4 gains item 10, the `STA2006` panic on a `RegExp` method called off a union narrowing.
 - **v4.54** (2026-10-02): **T11.5 closes: `require` over built-ins, `import.meta` and the injected `__filename`/`__dirname`** (plan-notes 316). `node:module` lands (`createRequire`, `isBuiltin`, `builtinModules`): its `require` answers every landed built-in and throws Node's `MODULE_NOT_FOUND` for anything else. Under `--node` the frontend rewrites `import.meta.url`/`.filename`/`.dirname` and the vendor module's free `__filename`/`__dirname` into run-time calls relative to the executable (`frontend/location.ts`). A free `require`, `__filename` or `__dirname` that reaches the gate is `STA1110` in every cell; `STA1218` is retired. Goldens `node_module` (ts, js).
 - **v4.55** (2026-10-02): **T11.6, second slice: the `node:fs` sync subset** (plan-notes 317). `packages/node/src/fs.ts` lands 12 of the 15 `fs` functions `tsc` calls, plus `rmdirSync`, over `std/fs`: Node's `SystemError` (`code`, `errno`, `syscall`, `path`, the `<CODE>: <description>, <syscall> '<path>'` message), the encodings `std/encoding` decodes, `{ recursive }`, `{ withFileTypes }` and `{ throwIfNoEntry }`. `require('fs')` answers it. The watch trio waits on N2. Goldens `node_fs` (ts, js); slice N1 at 15 / 37.
+- **v4.56** (2026-10-02): **T11.7, second slice: `require('../common')` resolves in the Stator build** (plan-notes 318). `fetch.ts` links the corpus's `test/common` to the strict-TS harness (a junction on Windows), so the bundler resolves it like any relative require. The harness drops `node:util`, an N2 module, for `common/inspect.ts`, and `common/fixtures.ts` drops `suite.ts`. Every `fail` now stops at `node:process` (T11.6), then at T12.3's `__commonJSMin` (STA4013). Pass count unchanged: 0 of 17.
