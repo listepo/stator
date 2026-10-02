@@ -18,59 +18,14 @@
  * same two-way check a fixture claim gets. The difference is only WHICH proof is accepted — a
  * range or distribution assertion in tests/unit/ instead of a byte-for-byte diff.
  */
-import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { type Claim, loadClaims, mentionsAccess, percent, verifyClaim } from './coverage-claims.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-/** A member is proved either by golden fixtures, or — if no golden test CAN prove it — by a named
- * non-golden proof. `undefined` proof means the member has not landed. */
-type Claim =
-  | { readonly kind: 'fixtures'; readonly fixtures: readonly string[] }
-  | {
-      readonly kind: 'nondeterministic';
-      readonly proof: string;
-    };
-type Coverage = Record<string, Record<string, Claim>>;
-
-function parseClaim(where: string, value: unknown): Claim {
-  if (Array.isArray(value)) {
-    if (value.some((f) => typeof f !== 'string')) {
-      throw new Error(`'${where}' must list fixture paths`);
-    }
-    return { kind: 'fixtures', fixtures: value as readonly string[] };
-  }
-  if (typeof value === 'object' && value !== null && 'nondeterministic' in value) {
-    const proof: unknown = (value as { nondeterministic: unknown }).nondeterministic;
-    if (typeof proof !== 'string' || proof === '') {
-      throw new Error(`'${where}' must name the proof that stands in for a golden test`);
-    }
-    return { kind: 'nondeterministic', proof };
-  }
-  throw new Error(`'${where}' must list fixture paths or be {"nondeterministic": "<proof>"}`);
-}
-
-function loadTable(): Coverage {
-  const raw: unknown = JSON.parse(readFileSync(join(HERE, 'builtins_coverage.json'), 'utf8'));
-  if (typeof raw !== 'object' || raw === null) {
-    throw new Error('builtins_coverage.json must be an object of namespaces');
-  }
-  const table: Coverage = {};
-  for (const [namespace, members] of Object.entries(raw)) {
-    if (namespace.startsWith('_')) {
-      continue; // the _comment key documents the format for humans
-    }
-    if (typeof members !== 'object' || members === null) {
-      throw new Error(`namespace '${namespace}' must map members to fixture lists`);
-    }
-    const checked: Record<string, Claim> = {};
-    for (const [member, value] of Object.entries(members)) {
-      checked[member] = parseClaim(`${namespace}.${member}`, value);
-    }
-    table[namespace] = checked;
-  }
-  return table;
+function loadTable(): Record<string, Record<string, Claim>> {
+  return loadClaims(join(HERE, 'builtins_coverage.json'), 'builtins_coverage.json');
 }
 
 function main(): void {
@@ -86,38 +41,21 @@ function main(): void {
     let carved = 0;
     const missing: string[] = [];
     for (const [member, claim] of Object.entries(members)) {
-      if (claim.kind === 'fixtures' && claim.fixtures.length === 0) {
-        missing.push(member);
-        continue;
-      }
       const spelled = namespace === 'globals' ? member : `${namespace}.${member}`;
       // What a proof must literally contain: a global by its name, a namespace member by its
       // qualified spelling (`Math.floor`), and a PROTOTYPE member by access syntax (`.trim`) —
-      // no source ever writes `String.prototype.trim`. The access form must not be followed by
-      // an identifier character, which is what keeps `.trim` from matching inside `.trimStart`;
-      // it deliberately does NOT require a paren, because `size` is a property, not a call.
+      // no source ever writes `String.prototype.trim`.
       const mentions =
         namespace === 'globals' || !namespace.endsWith('.prototype')
-          ? (source: string): boolean => source.includes(namespace === 'globals' ? member : spelled)
-          : (source: string): boolean => new RegExp(`\\.${member}(?![A-Za-z0-9_$])`).test(source);
-      // A nondeterministic member is verified exactly as hard as a golden one — the file it names
-      // must exist and must mention it. Only the KIND of proof differs, never whether one exists.
-      const proofs =
-        claim.kind === 'fixtures'
-          ? claim.fixtures.map((f) => join(HERE, f))
-          : [join(HERE, '..', claim.proof)];
-      if (claim.kind === 'fixtures') {
+          ? (source: string): boolean => source.includes(spelled)
+          : mentionsAccess(member);
+      const verdict = verifyClaim(spelled, claim, mentions, HERE, join(HERE, '..'), problems);
+      if (verdict === 'missing') {
+        missing.push(member);
+      } else if (verdict === 'landed') {
         landed += 1;
       } else {
         carved += 1;
-      }
-      for (const path of proofs) {
-        const shown = claim.kind === 'fixtures' ? path : claim.proof;
-        if (!existsSync(path)) {
-          problems.push(`${spelled}: proof '${shown}' does not exist`);
-        } else if (!mentions(readFileSync(path, 'utf8'))) {
-          problems.push(`${spelled}: proof '${shown}' never mentions it`);
-        }
       }
     }
     // Nondeterministic members leave the denominator: they are neither landed nor missing, and
@@ -126,7 +64,7 @@ function main(): void {
     landedTotal += landed;
     surfaceTotal += surface;
     carvedTotal += carved;
-    const pct = surface === 0 ? 0 : Math.round((landed / surface) * 100);
+    const pct = percent(landed, surface);
     const nd = carved === 0 ? '' : ` [+${String(carved)} nondeterministic]`;
     const tail = missing.length === 0 ? '' : ` — missing: ${missing.join(', ')}`;
     lines.push(
@@ -134,7 +72,7 @@ function main(): void {
     );
   }
 
-  const pct = surfaceTotal === 0 ? 0 : Math.round((landedTotal / surfaceTotal) * 100);
+  const pct = percent(landedTotal, surfaceTotal);
   const carvedNote =
     carvedTotal === 0 ? '' : `, +${String(carvedTotal)} nondeterministic (proved outside golden)`;
   console.log(

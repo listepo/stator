@@ -31,6 +31,9 @@ If `src/` does not exist yet, the project is pre-Phase-1: the only files may be 
 7. **The human is the only author.** No agent adds a `Co-Authored-By` trailer, a "Generated with …" line or itself as author to a commit, merge or PR — whatever its harness defaults to.
 
 8. **Docs stay in lockstep with the tree.** After any change that affects user-visible behavior, the public CLI, subset verdicts, diagnostics, toolchain, architecture diagrams, or examples: update the matching documentation in the **same** change (`README.md` and/or `docs/*`, plus example READMEs when those examples change). Do not leave docs describing a previous pipeline, flag set, or subset matrix. Spec authority for open work remains `plan.md`; operational docs in `docs/` must not contradict what the tree ships.
+9. **Zig for memory and cross-platform code; no JavaScript in our source** (creator's direction 2026-10-02, plan-notes 289; plan §0.5 and §0.10). New runtime code that manages memory or must be cross-platform — typed-array storage, the `std` backings, the event loop, OS abstraction — is Zig. C stays for the ABI headers generated code includes, generated code, vendored code, and existing C until a card ports it. The compiler, runtime, `std`, the `node:*` wrappers, harnesses, oracle shims and scripts are strict TypeScript, C or Zig — never `.js`/`.mjs`/`.cjs`. The only JS files are `js`-mode test inputs and examples, vendored upstream code, generated output, and browser-loaded assets under `site/public/`.
+10. **Reuse first.** Before writing a function, look for one that already does it and reuse or extend it; a second copy is a bug even when `dupes` misses it. `pnpm run dupes` (jscpd, AI reporter, identifier-insensitive) scans our source — tests, vendored code and docs excluded — against `.jscpd-baseline.json` and fails on **any** new clone. Removing a clone? Shrink the baseline in the same change with `pnpm run dupes:baseline`; never grow it to get a change through.
+11. **`docs/NODE.md` stays in sync.** It is generated (`pnpm run docs:node`) from the pinned Node and `packages/tests/golden/node_coverage.json`. Every change that adds, proves or removes a `node:*` member regenerates it in the same change; `pnpm run ci` fails when it is stale.
 
 ## Repo map
 
@@ -41,7 +44,7 @@ done.md            completion record for finished tasks (archive; not normative)
 AGENTS.md          this file
 plan-notes.md      evidence log for plan contradictions/decisions
 NICHE.md           Phase-0 niche justification (human-gated)
-docs/              README.md (index) HOW-IT-WORKS.md ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md FFI.md
+docs/              README.md (index) HOW-IT-WORKS.md ARCHITECTURE.md (D2 gallery) architecture/*.d2 MODES.md SUBSET.md DIAGNOSTICS.md VALUE.md NUMERIC.md HIR.md TOOLCHAIN.md FFI.md STD.md NODE.md (generated) research/
 .moon/             moon workspace: workspace.yml, toolchain.yml (orchestrator; plan-notes 204)
 packages/compiler/ the compiler package "statorc" — holds src/ + the locked tsconfig.json
   src/cli/         argument parsing, build/explain drivers
@@ -97,7 +100,10 @@ pnpm install --frozen-lockfile  # install (exact-pinned deps)
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lint + format (must be clean)
 pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)
-pnpm run dupes                  # cpd copy/paste detector (fails above 1% duplication)
+pnpm run dupes                  # jscpd over our source (no tests/vendor/docs): fails on any clone not in .jscpd-baseline.json
+pnpm run dupes:baseline         # rewrite .jscpd-baseline.json — only to SHRINK it after removing clones
+pnpm run docs:node              # regenerate docs/NODE.md (Node API coverage, % per module and member)
+pnpm run test:node-coverage     # fail when docs/NODE.md is stale (part of `ci`)
 pnpm run test                   # unit tests (vitest) — the default; use this for the gate
 pnpm run test:affected          # only the unit tests your uncommitted changes reach (append a commit, e.g. origin/main, for a whole branch) — iteration, never the gate
 pnpm run test:coverage          # same under c8 + packages/compiler/src coverage table; writes coverage/lcov.info — ONLY when the coverage table is the question (it costs ~4x wall time)
@@ -137,7 +143,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 ## Implementation standards — C runtime (`runtime/`)
 
 - C11, `clang -Wall -Wextra -Werror`; ASan/UBSan job in CI is mandatory and blocking. The full flag set is the rule for code we WRITE (`runtime/src/`); `runtime/vendor/` compiles with `-Wall` alone, because upstream source is not ours to fix and a warning flag is not a correctness flag (plan-notes 101). ASan/UBSan cover both.
-- T9.1 (plan-notes 238) landed the memory core in Zig 0.16.0 (`runtime/src/*.zig`): the GC glue, the growable buffers, the shape table and the allocation helpers. It `@cImport`s the C headers rather than mirroring any layout, exports only the C ABI declared in `jsrt.h`, `jsrt_value.h` and `src/jsrt_mem.h`, and passes `zig fmt --check`. Zig has no warnings, only errors; the ASan flavor builds it `ReleaseSafe`, so its safety checks stand in for the sanitizers it cannot take. Do not invent a second memory core or grow Zig past that card (plan-notes 239).
+- T9.1 (plan-notes 238) landed the memory core in Zig 0.16.0 (`runtime/src/*.zig`): the GC glue, the growable buffers, the shape table and the allocation helpers. It `@cImport`s the C headers rather than mirroring any layout, exports only the C ABI declared in `jsrt.h`, `jsrt_value.h` and `src/jsrt_mem.h`, and passes `zig fmt --check`. Zig has no warnings, only errors; the ASan flavor builds it `ReleaseSafe`, so its safety checks stand in for the sanitizers it cannot take. Do not invent a second memory core. Since plan-notes 289, new memory-managing or cross-platform runtime code is Zig too (golden rule 9); existing C is ported only by a card.
 - All value access goes through `jsrt_value.h` accessors; no hand-rolled bit twiddling outside it.
 - GC rooting discipline: every generated function opens `JSRT_FRAME(n)`; locals via `JSRT_LOCAL`; frames pop on **every** exit path including landing pads. The runtime may assume it; codegen must guarantee it.
 - Generated C is never hand-edited — fix the emitter and re-emit.
@@ -172,7 +178,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 - Don't quote competitor benchmark numbers as measurements — measure locally, record version/flags/hardware.
 - Don't "fix" a golden-test mismatch by changing the expected output without proving Node produces it.
 - Don't let mode logic leak below the frontend gate — if a pass or the emitter needs to know the mode, the design is wrong (plan §0.8).
-- Don't duplicate code or logic — find the existing helper and reuse it, or extract one shared helper at the responsible layer. `pnpm run dupes` fails above 1% copy/paste duplication; a clone you write today is a CI failure tomorrow.
+- Don't duplicate code or logic — find the existing helper and reuse it, or extract one shared helper at the responsible layer. `pnpm run dupes` fails on any clone not already in `.jscpd-baseline.json` (golden rule 10); a clone you write today is a CI failure today.
 - Don't draw the compiler pipeline in Mermaid or a new ASCII sketch — D2 in `docs/architecture/` is the diagram language.
 - Don't ship a behavior/CLI/subset/diagnostics/architecture change without updating the matching docs in the same change (golden rule 8).
 

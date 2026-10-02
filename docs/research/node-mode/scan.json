@@ -1,0 +1,2179 @@
+{
+  "node": "v26.7.0",
+  "corpus": [
+    {
+      "name": "typescript",
+      "version": "6.0.3",
+      "files": 1,
+      "bytes": 6239091,
+      "modules": {
+        "perf_hooks": {
+          "sites": 1,
+          "members": {
+            "performance": 1
+          }
+        },
+        "fs": {
+          "sites": 2,
+          "members": {
+            "existsSync": 1,
+            "mkdirSync": 3,
+            "openSync": 3,
+            "writeSync": 11,
+            "closeSync": 3,
+            "writeFileSync": 2,
+            "realpathSync": 5,
+            "statSync": 1,
+            "watchFile": 1,
+            "unwatchFile": 1,
+            "watch": 1,
+            "readFileSync": 1,
+            "readdirSync": 1,
+            "utimesSync": 1,
+            "unlinkSync": 1
+          }
+        },
+        "path": {
+          "sites": 1,
+          "members": {
+            "join": 2,
+            "dirname": 3,
+            "resolve": 1
+          }
+        },
+        "os": {
+          "sites": 1,
+          "members": {
+            "platform": 1,
+            "EOL": 1
+          }
+        },
+        "crypto": {
+          "sites": 1,
+          "members": {
+            "createHash": 1
+          }
+        },
+        "inspector": {
+          "sites": 1,
+          "members": {
+            "Session": 2
+          }
+        }
+      },
+      "globals": {
+        "process": {
+          "uses": 30,
+          "members": {
+            "nextTick": 1,
+            "browser": 1,
+            "pid": 3,
+            "platform": 4,
+            "cwd": 2,
+            "env": 6,
+            "argv": 1,
+            "stdout": 5,
+            "memoryUsage": 1,
+            "exit": 1,
+            "execArgv": 3,
+            "recordreplay": 1
+          }
+        },
+        "require": {
+          "uses": 10,
+          "members": {}
+        },
+        "performance": {
+          "uses": 2,
+          "members": {}
+        },
+        "__filename": {
+          "uses": 3,
+          "members": {
+            "endsWith": 1
+          }
+        },
+        "__dirname": {
+          "uses": 1,
+          "members": {}
+        },
+        "setTimeout": {
+          "uses": 2,
+          "members": {}
+        },
+        "clearTimeout": {
+          "uses": 2,
+          "members": {}
+        },
+        "Buffer": {
+          "uses": 2,
+          "members": {
+            "from": 2
+          }
+        }
+      },
+      "computedRequire": 1
+    },
+    {
+      "name": "vitest",
+      "version": "5.0.3",
+      "files": 62,
+      "bytes": 2312254,
+      "modules": {
+        "vm": {
+          "sites": 12,
+          "members": {
+            "runInThisContext": 2,
+            "runInContext": 6,
+            "context": 2,
+            "createContext": 1,
+            "isContext": 1,
+            "SyntheticModule": 1,
+            "SourceTextModule": 1,
+            "Script": 4,
+            "getVmContext": 2,
+            "teardown": 1
+          }
+        },
+        "perf_hooks": {
+          "sites": 9,
+          "members": {
+            "performance": 4
+          }
+        },
+        "module": {
+          "sites": 21,
+          "members": {
+            "createRequire": 9,
+            "isBuiltin": 7,
+            "builtinModules": 3,
+            "stripTypeScriptTypes": 5,
+            "flushCompileCache": 1,
+            "setSourceMapsSupport": 2,
+            "registerHooks": 2,
+            "register": 2,
+            "Module": 1
+          }
+        },
+        "timers": {
+          "sites": 5,
+          "members": {}
+        },
+        "timers/promises": {
+          "sites": 5,
+          "members": {}
+        },
+        "util": {
+          "sites": 14,
+          "members": {
+            "stripVTControlCharacters": 3,
+            "format": 1,
+            "inspect": 1
+          }
+        },
+        "events": {
+          "sites": 8,
+          "members": {
+            "EventEmitter": 2
+          }
+        },
+        "assert": {
+          "sites": 6,
+          "members": {
+            "ok": 8
+          }
+        },
+        "fs": {
+          "sites": 20,
+          "members": {
+            "mkdirSync": 3,
+            "writeFileSync": 4,
+            "existsSync": 9,
+            "readFileSync": 7,
+            "mkdtempSync": 1,
+            "rmSync": 1,
+            "promises": 7,
+            "chmodSync": 1,
+            "statfsSync": 1,
+            "realpathSync": 2,
+            "statSync": 5,
+            "readdirSync": 1
+          }
+        },
+        "readline": {
+          "sites": 5,
+          "members": {
+            "createInterface": 2,
+            "emitKeypressEvents": 2
+          }
+        },
+        "console": {
+          "sites": 12,
+          "members": {
+            "Console": 3
+          }
+        },
+        "path": {
+          "sites": 18,
+          "members": {
+            "relative": 2,
+            "resolve": 15,
+            "dirname": 7,
+            "join": 9,
+            "parse": 3,
+            "isAbsolute": 4,
+            "posix": 1,
+            "split": 1,
+            "replace": 3,
+            "endsWith": 3,
+            "extname": 1,
+            "length": 1,
+            "startsWith": 2,
+            "win32": 1,
+            "toNamespacedPath": 1,
+            "sep": 1,
+            "includes": 1
+          }
+        },
+        "stream": {
+          "sites": 9,
+          "members": {
+            "Writable": 2
+          }
+        },
+        "fs/promises": {
+          "sites": 5,
+          "members": {
+            "mkdir": 2,
+            "writeFile": 2,
+            "stat": 3,
+            "readFile": 2,
+            "rm": 1,
+            "rename": 1,
+            "unlink": 1,
+            "readdir": 1,
+            "copyFile": 1
+          }
+        },
+        "process": {
+          "sites": 5,
+          "members": {
+            "cwd": 8,
+            "env": 2,
+            "execArgv": 1,
+            "versions": 2,
+            "constrainedMemory": 1,
+            "noDeprecation": 3,
+            "emitWarning": 4,
+            "platform": 1
+          }
+        },
+        "os": {
+          "sites": 8,
+          "members": {
+            "availableParallelism": 15,
+            "cpus": 9,
+            "tmpdir": 3,
+            "homedir": 1,
+            "hostname": 1,
+            "totalmem": 1
+          }
+        },
+        "https": {
+          "sites": 3,
+          "members": {}
+        },
+        "http": {
+          "sites": 3,
+          "members": {}
+        },
+        "net": {
+          "sites": 3,
+          "members": {}
+        },
+        "tls": {
+          "sites": 3,
+          "members": {}
+        },
+        "crypto": {
+          "sites": 6,
+          "members": {
+            "createHash": 2,
+            "timingSafeEqual": 1,
+            "hash": 1,
+            "randomUUID": 3
+          }
+        },
+        "url": {
+          "sites": 23,
+          "members": {
+            "pathToFileURL": 9,
+            "fileURLToPath": 9,
+            "searchParams": 4,
+            "startsWith": 5,
+            "toString": 1,
+            "pathname": 1,
+            "search": 1,
+            "split": 1,
+            "URL": 1
+          }
+        },
+        "zlib": {
+          "sites": 3,
+          "members": {}
+        },
+        "buffer": {
+          "sites": 3,
+          "members": {}
+        },
+        "v8": {
+          "sites": 6,
+          "members": {
+            "startupSnapshot": 1,
+            "setFlagsFromString": 2
+          }
+        },
+        "tty": {
+          "sites": 3,
+          "members": {
+            "isatty": 1
+          }
+        },
+        "child_process": {
+          "sites": 4,
+          "members": {
+            "spawn": 1,
+            "fork": 1
+          }
+        },
+        "worker_threads": {
+          "sites": 7,
+          "members": {
+            "Worker": 1,
+            "isMainThread": 1,
+            "parentPort": 1,
+            "MessageChannel": 1
+          }
+        },
+        "async_hooks": {
+          "sites": 5,
+          "members": {
+            "createHook": 1
+          }
+        }
+      },
+      "globals": {
+        "exports": {
+          "uses": 81,
+          "members": {
+            "wrap": 1,
+            "printWarning": 2,
+            "defaultMsg": 1,
+            "mapFileCommentRegex": 3,
+            "fromObject": 1,
+            "fromJSON": 1,
+            "fromURI": 1,
+            "fromBase64": 1,
+            "fromComment": 2,
+            "commentRegex": 3,
+            "fromMapFileComment": 2,
+            "fromSource": 1,
+            "fromMapFileSource": 1,
+            "removeComments": 1,
+            "removeMapFileComments": 1,
+            "generateMapFileComment": 1,
+            "map": 2,
+            "configDefaults": 1,
+            "coverageConfigDefaults": 1,
+            "defaultBrowserPort": 1,
+            "defaultExclude": 1,
+            "defaultInclude": 1,
+            "defineConfig": 1,
+            "defineProject": 1
+          }
+        },
+        "process": {
+          "uses": 291,
+          "members": {
+            "env": 64,
+            "exit": 16,
+            "exitCode": 24,
+            "argv": 5,
+            "platform": 17,
+            "arch": 1,
+            "version": 2,
+            "execPath": 2,
+            "stdin": 8,
+            "kill": 3,
+            "ppid": 1,
+            "pid": 5,
+            "cwd": 30,
+            "stdout": 28,
+            "once": 6,
+            "versions": 10,
+            "emitWarning": 2,
+            "memoryUsage": 3,
+            "nextTick": 12,
+            "stderr": 8,
+            "off": 6,
+            "on": 3,
+            "execArgv": 4,
+            "emit": 1,
+            "send": 3,
+            "removeAllListeners": 1,
+            "listeners": 1,
+            "setSourceMapsEnabled": 2
+          }
+        },
+        "performance": {
+          "uses": 36,
+          "members": {
+            "now": 35
+          }
+        },
+        "module": {
+          "uses": 92,
+          "members": {
+            "exports": 6,
+            "transformResult": 1,
+            "id": 13,
+            "children": 3,
+            "state": 1,
+            "task": 4,
+            "project": 2,
+            "relativeModuleId": 1,
+            "moduleId": 1,
+            "default": 4,
+            "evaluated": 1,
+            "setExport": 2,
+            "hasAsyncGraph": 1,
+            "hasTopLevelAwait": 1,
+            "moduleRequests": 1,
+            "namespace": 1,
+            "file": 2,
+            "meta": 1,
+            "importers": 1
+          }
+        },
+        "queueMicrotask": {
+          "uses": 2,
+          "members": {}
+        },
+        "setTimeout": {
+          "uses": 34,
+          "members": {}
+        },
+        "clearTimeout": {
+          "uses": 32,
+          "members": {}
+        },
+        "AbortController": {
+          "uses": 3,
+          "members": {}
+        },
+        "URL": {
+          "uses": 49,
+          "members": {}
+        },
+        "MessageChannel": {
+          "uses": 2,
+          "members": {}
+        },
+        "setInterval": {
+          "uses": 6,
+          "members": {}
+        },
+        "clearInterval": {
+          "uses": 11,
+          "members": {}
+        },
+        "setImmediate": {
+          "uses": 8,
+          "members": {}
+        },
+        "clearImmediate": {
+          "uses": 4,
+          "members": {}
+        },
+        "crypto": {
+          "uses": 7,
+          "members": {
+            "timingSafeEqual": 1,
+            "hash": 1,
+            "createHash": 1,
+            "randomUUID": 3
+          }
+        },
+        "Blob": {
+          "uses": 2,
+          "members": {}
+        },
+        "Buffer": {
+          "uses": 47,
+          "members": {
+            "alloc": 4,
+            "allocUnsafe": 5,
+            "isBuffer": 1,
+            "from": 18,
+            "byteLength": 5
+          }
+        },
+        "require": {
+          "uses": 14,
+          "members": {
+            "resolve": 2,
+            "main": 1,
+            "cache": 1
+          }
+        },
+        "Event": {
+          "uses": 8,
+          "members": {
+            "prototype": 2
+          }
+        },
+        "EventTarget": {
+          "uses": 1,
+          "members": {}
+        },
+        "structuredClone": {
+          "uses": 3,
+          "members": {}
+        },
+        "atob": {
+          "uses": 1,
+          "members": {}
+        },
+        "btoa": {
+          "uses": 1,
+          "members": {}
+        },
+        "__dirname": {
+          "uses": 1,
+          "members": {}
+        },
+        "fetch": {
+          "uses": 1,
+          "members": {}
+        },
+        "WebAssembly": {
+          "uses": 4,
+          "members": {
+            "compile": 1,
+            "Module": 2,
+            "Instance": 1
+          }
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "vite",
+      "version": "8.3.1",
+      "files": 12,
+      "bytes": 2051459,
+      "modules": {
+        "module": {
+          "sites": 1,
+          "members": {
+            "Module": 1,
+            "builtinModules": 1,
+            "createRequire": 1
+          }
+        },
+        "crypto": {
+          "sites": 1,
+          "members": {
+            "randomBytes": 1,
+            "X509Certificate": 1,
+            "hash": 1,
+            "timingSafeEqual": 1,
+            "getRandomValues": 1
+          }
+        },
+        "fs": {
+          "sites": 4,
+          "members": {
+            "existsSync": 25,
+            "readFileSync": 18,
+            "readdirSync": 5,
+            "statSync": 6,
+            "accessSync": 1,
+            "constants": 1,
+            "rmSync": 2,
+            "mkdirSync": 2,
+            "copyFileSync": 1,
+            "realpathSync": 6,
+            "createReadStream": 1,
+            "strict": 1,
+            "allow": 1,
+            "writeFileSync": 3,
+            "renameSync": 2,
+            "rename": 2,
+            "stat": 1,
+            "promises": 1,
+            "realpath": 1,
+            "unlink": 1
+          }
+        },
+        "fs/promises": {
+          "sites": 3,
+          "members": {
+            "constants": 1,
+            "readdir": 3,
+            "appendFile": 1,
+            "copyFile": 1,
+            "mkdir": 2,
+            "mkdtemp": 1,
+            "readFile": 22,
+            "realpath": 2,
+            "rename": 1,
+            "rmdir": 1,
+            "stat": 4,
+            "lstat": 1,
+            "unlink": 1,
+            "writeFile": 2,
+            "access": 2,
+            "rm": 3
+          }
+        },
+        "path": {
+          "sites": 4,
+          "members": {
+            "basename": 20,
+            "dirname": 49,
+            "extname": 21,
+            "isAbsolute": 21,
+            "join": 40,
+            "normalize": 3,
+            "posix": 43,
+            "relative": 25,
+            "resolve": 71,
+            "sep": 1,
+            "win32": 1,
+            "slice": 12,
+            "at": 1,
+            "endsWith": 2,
+            "lastIndexOf": 2,
+            "replace": 4,
+            "startsWith": 6,
+            "length": 6,
+            "split": 3,
+            "includes": 6,
+            "indexOf": 1,
+            "toLowerCase": 1,
+            "substr": 1,
+            "push": 2,
+            "pop": 2,
+            "format": 1,
+            "parse": 1
+          }
+        },
+        "perf_hooks": {
+          "sites": 2,
+          "members": {
+            "performance": 2
+          }
+        },
+        "url": {
+          "sites": 1,
+          "members": {
+            "URL": 1,
+            "fileURLToPath": 1,
+            "pathToFileURL": 1
+          }
+        },
+        "util": {
+          "sites": 2,
+          "members": {
+            "format": 1,
+            "formatWithOptions": 1,
+            "inspect": 2,
+            "isDeepStrictEqual": 1,
+            "parseEnv": 1,
+            "promisify": 1,
+            "stripVTControlCharacters": 1
+          }
+        },
+        "worker_threads": {
+          "sites": 1,
+          "members": {
+            "MessageChannel": 1,
+            "Worker": 1
+          }
+        },
+        "child_process": {
+          "sites": 1,
+          "members": {
+            "exec": 1,
+            "execFile": 2,
+            "execSync": 1,
+            "spawn": 1
+          }
+        },
+        "dns": {
+          "sites": 1,
+          "members": {
+            "promises": 1
+          }
+        },
+        "net": {
+          "sites": 1,
+          "members": {
+            "isIPv4": 1,
+            "createServer": 1,
+            "isIP": 2
+          }
+        },
+        "os": {
+          "sites": 1,
+          "members": {
+            "networkInterfaces": 2,
+            "availableParallelism": 1,
+            "cpus": 1,
+            "release": 1
+          }
+        },
+        "tty": {
+          "sites": 1,
+          "members": {
+            "isatty": 1
+          }
+        },
+        "buffer": {
+          "sites": 1,
+          "members": {
+            "Buffer": 1
+          }
+        },
+        "assert": {
+          "sites": 1,
+          "members": {
+            "ok": 7
+          }
+        },
+        "process": {
+          "sites": 1,
+          "members": {
+            "platform": 6,
+            "env": 3,
+            "versions": 1
+          }
+        },
+        "v8": {
+          "sites": 1,
+          "members": {
+            "startupSnapshot": 1
+          }
+        },
+        "events": {
+          "sites": 1,
+          "members": {
+            "EventEmitter": 1
+          }
+        },
+        "http": {
+          "sites": 2,
+          "members": {
+            "STATUS_CODES": 1,
+            "createServer": 1,
+            "get": 1
+          }
+        },
+        "https": {
+          "sites": 1,
+          "members": {
+            "createServer": 1,
+            "get": 1
+          }
+        },
+        "readline": {
+          "sites": 1,
+          "members": {
+            "cursorTo": 1,
+            "clearScreenDown": 1,
+            "createInterface": 1
+          }
+        },
+        "querystring": {
+          "sites": 1,
+          "members": {
+            "parse": 1
+          }
+        },
+        "zlib": {
+          "sites": 1,
+          "members": {
+            "createBrotliCompress": 2,
+            "constants": 2,
+            "createGzip": 1
+          }
+        },
+        "timers/promises": {
+          "sites": 1,
+          "members": {
+            "setTimeout": 1
+          }
+        },
+        "http2": {
+          "sites": 1,
+          "members": {}
+        },
+        "inspector": {
+          "sites": 1,
+          "members": {
+            "then": 1
+          }
+        }
+      },
+      "globals": {
+        "exports": {
+          "uses": 469,
+          "members": {
+            "__esModule": 30,
+            "default": 22,
+            "unesc": 2,
+            "stripComments": 2,
+            "getProp": 2,
+            "ensureObject": 2,
+            "UNIVERSAL": 2,
+            "TAG": 2,
+            "STRING": 2,
+            "SELECTOR": 2,
+            "ROOT": 2,
+            "PSEUDO": 2,
+            "NESTING": 2,
+            "ID": 2,
+            "COMMENT": 2,
+            "COMBINATOR": 2,
+            "CLASS": 2,
+            "ATTRIBUTE": 2,
+            "unescapeValue": 1,
+            "word": 2,
+            "tilde": 2,
+            "tab": 2,
+            "str": 2,
+            "space": 2,
+            "slash": 2,
+            "singleQuote": 2,
+            "semicolon": 2,
+            "plus": 2,
+            "pipe": 2,
+            "openSquare": 2,
+            "openParenthesis": 2,
+            "newline": 2,
+            "greaterThan": 2,
+            "feed": 2,
+            "equals": 2,
+            "doubleQuote": 2,
+            "dollar": 2,
+            "cr": 2,
+            "comment": 4,
+            "comma": 2,
+            "combinator": 4,
+            "colon": 2,
+            "closeSquare": 2,
+            "closeParenthesis": 2,
+            "caret": 2,
+            "bang": 2,
+            "backslash": 2,
+            "at": 2,
+            "asterisk": 2,
+            "ampersand": 2,
+            "FIELDS": 2,
+            "universal": 2,
+            "tag": 2,
+            "string": 2,
+            "selector": 2,
+            "root": 2,
+            "pseudo": 2,
+            "nesting": 2,
+            "id": 2,
+            "className": 2,
+            "attribute": 2,
+            "isComment": 2,
+            "isCombinator": 2,
+            "isClassName": 2,
+            "isAttribute": 2,
+            "isContainer": 1,
+            "isIdentifier": 2,
+            "isNamespace": 1,
+            "isNesting": 2,
+            "isNode": 1,
+            "isPseudo": 2,
+            "isPseudoClass": 1,
+            "isPseudoElement": 1,
+            "isUniversal": 2,
+            "isTag": 2,
+            "isString": 2,
+            "isSelector": 2,
+            "isRoot": 2,
+            "isInteger": 3,
+            "find": 1,
+            "exceedsLimit": 1,
+            "escapeNode": 1,
+            "encloseBrace": 1,
+            "isInvalidBrace": 1,
+            "isOpenOrClose": 1,
+            "reduce": 1,
+            "flatten": 1,
+            "EV_ALL": 1,
+            "EV_READY": 1,
+            "EV_ADD": 1,
+            "EV_CHANGE": 1,
+            "EV_ADD_DIR": 1,
+            "EV_UNLINK": 1,
+            "EV_UNLINK_DIR": 1,
+            "EV_RAW": 1,
+            "EV_ERROR": 1,
+            "STR_DATA": 1,
+            "STR_END": 1,
+            "STR_CLOSE": 1,
+            "FSEVENT_CREATED": 1,
+            "FSEVENT_MODIFIED": 1,
+            "FSEVENT_DELETED": 1,
+            "FSEVENT_MOVED": 1,
+            "FSEVENT_CLONED": 1,
+            "FSEVENT_UNKNOWN": 1,
+            "FSEVENT_FLAG_MUST_SCAN_SUBDIRS": 1,
+            "FSEVENT_TYPE_FILE": 1,
+            "FSEVENT_TYPE_DIRECTORY": 1,
+            "FSEVENT_TYPE_SYMLINK": 1,
+            "KEY_LISTENERS": 2,
+            "KEY_ERR": 2,
+            "KEY_RAW": 2,
+            "HANDLER_KEYS": 1,
+            "DOT_SLASH": 1,
+            "BACK_SLASH_RE": 1,
+            "DOUBLE_SLASH_RE": 1,
+            "SLASH_OR_BACK_SLASH_RE": 1,
+            "DOT_RE": 1,
+            "REPLACER_RE": 1,
+            "SLASH": 1,
+            "SLASH_SLASH": 1,
+            "BRACE_START": 1,
+            "BANG": 1,
+            "ONE_DOT": 1,
+            "TWO_DOTS": 1,
+            "STAR": 1,
+            "GLOBSTAR": 1,
+            "ROOT_GLOBSTAR": 1,
+            "SLASH_GLOBSTAR": 1,
+            "DIR_SUFFIX": 1,
+            "ANYMATCH_OPTS": 1,
+            "STRING_TYPE": 1,
+            "FUNCTION_TYPE": 1,
+            "EMPTY_STR": 1,
+            "EMPTY_FN": 1,
+            "IDENTITY_FN": 1,
+            "isWindows": 1,
+            "isMacos": 1,
+            "isLinux": 1,
+            "isIBMi": 1,
+            "watch": 1,
+            "quote": 1,
+            "parse": 1,
+            "push": 2,
+            "mapFileCommentRegex": 3,
+            "fromObject": 1,
+            "fromJSON": 1,
+            "fromURI": 1,
+            "fromBase64": 1,
+            "fromComment": 2,
+            "commentRegex": 3,
+            "fromMapFileComment": 2,
+            "fromSource": 1,
+            "fromMapFileSource": 1,
+            "removeComments": 1,
+            "removeMapFileComments": 1,
+            "generateMapFileComment": 1,
+            "isSSL": 4,
+            "setupOutgoing": 1,
+            "setupSocket": 1,
+            "getPort": 1,
+            "hasEncryptedConnection": 1,
+            "urlJoin": 1,
+            "rewriteCookieProperty": 1,
+            "toURL": 1,
+            "__createBinding": 4,
+            "__setModuleDefault": 4,
+            "__importStar": 4,
+            "OUTGOING_PASSES": 2,
+            "removeChunked": 1,
+            "setConnection": 1,
+            "setRedirectHostRewrite": 1,
+            "writeHeaders": 1,
+            "writeStatusCode": 1,
+            "WEB_PASSES": 2,
+            "deleteLength": 1,
+            "timeout": 1,
+            "XHeaders": 2,
+            "stream": 2,
+            "__importDefault": 2,
+            "WS_PASSES": 2,
+            "numOpenSockets": 2,
+            "checkMethodAndHeader": 1,
+            "ProxyServer": 3,
+            "createProxyServer": 1,
+            "length": 2,
+            "every": 1,
+            "map": 2
+          }
+        },
+        "module": {
+          "uses": 239,
+          "members": {
+            "exportsHolder": 2,
+            "exports": 168,
+            "registerHooks": 4,
+            "register": 4,
+            "info": 3,
+            "meta": 2,
+            "lastInvalidationTimestamp": 1,
+            "id": 1,
+            "transformResult": 1,
+            "environment": 1,
+            "file": 4,
+            "_clientModule": 1,
+            "_ssrModule": 1,
+            "default": 1,
+            "_compile": 1,
+            "importers": 2,
+            "url": 1
+          }
+        },
+        "process": {
+          "uses": 232,
+          "members": {
+            "platform": 20,
+            "cwd": 24,
+            "env": 92,
+            "getBuiltinModule": 2,
+            "stderr": 5,
+            "once": 1,
+            "stdin": 4,
+            "off": 1,
+            "versions": 11,
+            "version": 2,
+            "nextTick": 16,
+            "stdout": 9,
+            "getuid": 2,
+            "getgid": 2,
+            "chdir": 4,
+            "argv": 4,
+            "execPath": 1,
+            "exit": 8,
+            "exitCode": 2,
+            "pid": 1,
+            "arch": 1,
+            "setSourceMapsEnabled": 3,
+            "sourceMapsEnabled": 1
+          }
+        },
+        "clearTimeout": {
+          "uses": 26,
+          "members": {}
+        },
+        "setTimeout": {
+          "uses": 26,
+          "members": {}
+        },
+        "setInterval": {
+          "uses": 3,
+          "members": {}
+        },
+        "clearInterval": {
+          "uses": 3,
+          "members": {}
+        },
+        "fetch": {
+          "uses": 4,
+          "members": {}
+        },
+        "URL": {
+          "uses": 45,
+          "members": {
+            "createObjectURL": 2
+          }
+        },
+        "Blob": {
+          "uses": 4,
+          "members": {}
+        },
+        "Buffer": {
+          "uses": 71,
+          "members": {
+            "from": 36,
+            "byteLength": 8,
+            "alloc": 5,
+            "isBuffer": 2,
+            "allocUnsafe": 5
+          }
+        },
+        "WebAssembly": {
+          "uses": 13,
+          "members": {
+            "Instance": 1,
+            "Module": 4,
+            "compile": 2,
+            "instantiate": 4,
+            "instantiateStreaming": 1
+          }
+        },
+        "crypto": {
+          "uses": 11,
+          "members": {
+            "createHash": 2,
+            "X509Certificate": 1,
+            "hash": 1,
+            "timingSafeEqual": 1,
+            "getRandomValues": 1
+          }
+        },
+        "atob": {
+          "uses": 6,
+          "members": {}
+        },
+        "MessageChannel": {
+          "uses": 3,
+          "members": {}
+        },
+        "setImmediate": {
+          "uses": 10,
+          "members": {}
+        },
+        "TextDecoder": {
+          "uses": 8,
+          "members": {}
+        },
+        "performance": {
+          "uses": 5,
+          "members": {
+            "now": 3,
+            "eventLoopUtilization": 2
+          }
+        },
+        "__dirname": {
+          "uses": 3,
+          "members": {}
+        },
+        "btoa": {
+          "uses": 1,
+          "members": {}
+        },
+        "AbortSignal": {
+          "uses": 1,
+          "members": {
+            "timeout": 1
+          }
+        },
+        "Event": {
+          "uses": 8,
+          "members": {
+            "prototype": 2
+          }
+        },
+        "queueMicrotask": {
+          "uses": 2,
+          "members": {}
+        },
+        "EventTarget": {
+          "uses": 1,
+          "members": {}
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "c8",
+      "version": "12.0.0",
+      "files": 7,
+      "bytes": 31249,
+      "modules": {
+        "fs/promises": {
+          "sites": 2,
+          "members": {
+            "rm": 1,
+            "mkdir": 1
+          }
+        },
+        "path": {
+          "sites": 3,
+          "members": {
+            "relative": 1,
+            "resolve": 2,
+            "isAbsolute": 1,
+            "extname": 1
+          }
+        },
+        "fs": {
+          "sites": 4,
+          "members": {
+            "readFileSync": 3,
+            "promises": 1,
+            "readdirSync": 1,
+            "statSync": 1
+          }
+        },
+        "url": {
+          "sites": 2,
+          "members": {
+            "pathToFileURL": 2,
+            "fileURLToPath": 2
+          }
+        },
+        "util": {
+          "sites": 2,
+          "members": {
+            "debuglog": 2
+          }
+        }
+      },
+      "globals": {
+        "require": {
+          "uses": 36,
+          "members": {}
+        },
+        "process": {
+          "uses": 16,
+          "members": {
+            "argv": 3,
+            "env": 3,
+            "exitCode": 3,
+            "cwd": 3,
+            "execPath": 1,
+            "stdout": 2,
+            "exit": 1
+          }
+        },
+        "exports": {
+          "uses": 12,
+          "members": {
+            "Report": 1,
+            "command": 2,
+            "describe": 2,
+            "builder": 1,
+            "handler": 2,
+            "checkCoverages": 2,
+            "outputReport": 2
+          }
+        },
+        "module": {
+          "uses": 3,
+          "members": {
+            "exports": 3
+          }
+        },
+        "URL": {
+          "uses": 2,
+          "members": {}
+        },
+        "Buffer": {
+          "uses": 1,
+          "members": {
+            "from": 1
+          }
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "execa",
+      "version": "10.0.1",
+      "files": 109,
+      "bytes": 252698,
+      "modules": {
+        "fs": {
+          "sites": 6,
+          "members": {
+            "openSync": 1,
+            "readSync": 1,
+            "closeSync": 1,
+            "statSync": 1,
+            "writeFileSync": 1,
+            "appendFileSync": 1,
+            "createReadStream": 1,
+            "createWriteStream": 1,
+            "readFileSync": 2
+          }
+        },
+        "buffer": {
+          "sites": 4,
+          "members": {
+            "Buffer": 4
+          }
+        },
+        "path": {
+          "sites": 4,
+          "members": {
+            "normalize": 1,
+            "extname": 1,
+            "delimiter": 2,
+            "resolve": 4,
+            "basename": 2
+          }
+        },
+        "process": {
+          "sites": 10,
+          "members": {
+            "platform": 4,
+            "env": 7,
+            "cwd": 2,
+            "channel": 1,
+            "execPath": 1,
+            "execArgv": 1,
+            "hrtime": 1,
+            "stdin": 2,
+            "stdout": 2,
+            "stderr": 2,
+            "kill": 1
+          }
+        },
+        "util": {
+          "sites": 10,
+          "members": {
+            "stripVTControlCharacters": 1,
+            "debuglog": 1,
+            "callbackify": 4,
+            "promisify": 1,
+            "aborted": 1,
+            "inspect": 2
+          }
+        },
+        "url": {
+          "sites": 1,
+          "members": {
+            "fileURLToPath": 1
+          }
+        },
+        "stream": {
+          "sites": 8,
+          "members": {
+            "Duplex": 4,
+            "Readable": 4,
+            "Writable": 4,
+            "getDefaultHighWaterMark": 2,
+            "PassThrough": 1,
+            "Transform": 1
+          }
+        },
+        "stream/promises": {
+          "sites": 4,
+          "members": {
+            "finished": 4
+          }
+        },
+        "timers/promises": {
+          "sites": 5,
+          "members": {
+            "setImmediate": 1,
+            "scheduler": 2,
+            "setTimeout": 2
+          }
+        },
+        "events": {
+          "sites": 12,
+          "members": {
+            "on": 3,
+            "EventEmitter": 1,
+            "once": 7,
+            "setMaxListeners": 1,
+            "addAbortListener": 2
+          }
+        },
+        "v8": {
+          "sites": 1,
+          "members": {
+            "serialize": 1
+          }
+        },
+        "child_process": {
+          "sites": 5,
+          "members": {
+            "spawn": 1,
+            "spawnSync": 1,
+            "ChildProcess": 2,
+            "execFile": 1
+          }
+        },
+        "tty": {
+          "sites": 1,
+          "members": {
+            "isatty": 1
+          }
+        },
+        "path/win32": {
+          "sites": 1,
+          "members": {
+            "join": 1,
+            "parse": 1
+          }
+        },
+        "os": {
+          "sites": 1,
+          "members": {
+            "constants": 1
+          }
+        },
+        "string_decoder": {
+          "sites": 2,
+          "members": {
+            "StringDecoder": 2
+          }
+        }
+      },
+      "globals": {
+        "process": {
+          "uses": 28,
+          "members": {
+            "platform": 3,
+            "env": 7,
+            "cwd": 2,
+            "channel": 1,
+            "stdin": 2,
+            "stdout": 2,
+            "stderr": 2,
+            "kill": 1
+          }
+        },
+        "Buffer": {
+          "uses": 4,
+          "members": {
+            "alloc": 1,
+            "from": 1,
+            "isBuffer": 2
+          }
+        },
+        "URL": {
+          "uses": 2,
+          "members": {}
+        },
+        "setImmediate": {
+          "uses": 1,
+          "members": {}
+        },
+        "AbortController": {
+          "uses": 12,
+          "members": {}
+        },
+        "setTimeout": {
+          "uses": 2,
+          "members": {}
+        },
+        "TextEncoder": {
+          "uses": 2,
+          "members": {}
+        },
+        "TextDecoder": {
+          "uses": 1,
+          "members": {}
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "ws",
+      "version": "8.21.3",
+      "files": 16,
+      "bytes": 132611,
+      "modules": {
+        "zlib": {
+          "sites": 1,
+          "members": {
+            "Z_DEFAULT_WINDOWBITS": 2,
+            "createInflateRaw": 1,
+            "createDeflateRaw": 1,
+            "Z_SYNC_FLUSH": 1
+          }
+        },
+        "stream": {
+          "sites": 5,
+          "members": {
+            "Writable": 1,
+            "Duplex": 4,
+            "Readable": 1
+          }
+        },
+        "crypto": {
+          "sites": 3,
+          "members": {
+            "randomFillSync": 1,
+            "createHash": 2,
+            "randomBytes": 1
+          }
+        },
+        "util": {
+          "sites": 1,
+          "members": {
+            "types": 1
+          }
+        },
+        "buffer": {
+          "sites": 1,
+          "members": {
+            "isUtf8": 1
+          }
+        },
+        "events": {
+          "sites": 2,
+          "members": {}
+        },
+        "http": {
+          "sites": 2,
+          "members": {
+            "createServer": 1,
+            "STATUS_CODES": 3,
+            "request": 1
+          }
+        },
+        "https": {
+          "sites": 1,
+          "members": {
+            "request": 1
+          }
+        },
+        "net": {
+          "sites": 1,
+          "members": {
+            "connect": 1,
+            "isIP": 1
+          }
+        },
+        "tls": {
+          "sites": 1,
+          "members": {
+            "connect": 1
+          }
+        },
+        "url": {
+          "sites": 1,
+          "members": {
+            "URL": 1
+          }
+        }
+      },
+      "globals": {
+        "module": {
+          "uses": 19,
+          "members": {
+            "exports": 19
+          }
+        },
+        "require": {
+          "uses": 59,
+          "members": {}
+        },
+        "Buffer": {
+          "uses": 22,
+          "members": {
+            "allocUnsafe": 5,
+            "isBuffer": 1,
+            "from": 4,
+            "alloc": 4,
+            "byteLength": 5
+          }
+        },
+        "process": {
+          "uses": 14,
+          "members": {
+            "env": 2,
+            "nextTick": 12
+          }
+        },
+        "Blob": {
+          "uses": 2,
+          "members": {}
+        },
+        "Event": {
+          "uses": 8,
+          "members": {
+            "prototype": 2
+          }
+        },
+        "EventTarget": {
+          "uses": 1,
+          "members": {}
+        },
+        "setImmediate": {
+          "uses": 3,
+          "members": {}
+        },
+        "URL": {
+          "uses": 3,
+          "members": {}
+        },
+        "setTimeout": {
+          "uses": 1,
+          "members": {}
+        },
+        "clearTimeout": {
+          "uses": 1,
+          "members": {}
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "dotenv",
+      "version": "18.0.1",
+      "files": 2,
+      "bytes": 10508,
+      "modules": {
+        "fs": {
+          "sites": 3,
+          "members": {
+            "readFileSync": 2,
+            "statSync": 1
+          }
+        },
+        "path": {
+          "sites": 3,
+          "members": {
+            "join": 2,
+            "resolve": 3,
+            "relative": 1,
+            "normalize": 1
+          }
+        },
+        "os": {
+          "sites": 2,
+          "members": {
+            "homedir": 2
+          }
+        },
+        "url": {
+          "sites": 1,
+          "members": {
+            "URL": 1,
+            "fileURLToPath": 1
+          }
+        },
+        "child_process": {
+          "sites": 2,
+          "members": {
+            "spawn": 3,
+            "spawnSync": 1
+          }
+        }
+      },
+      "globals": {
+        "require": {
+          "uses": 14,
+          "members": {
+            "main": 2
+          }
+        },
+        "process": {
+          "uses": 28,
+          "members": {
+            "env": 6,
+            "cwd": 4,
+            "platform": 4,
+            "exitCode": 5,
+            "stdin": 1,
+            "kill": 2,
+            "removeListener": 1,
+            "on": 1,
+            "exit": 1,
+            "pid": 1,
+            "argv": 2
+          }
+        },
+        "setInterval": {
+          "uses": 1,
+          "members": {}
+        },
+        "module": {
+          "uses": 6,
+          "members": {
+            "exports": 5
+          }
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "memfs",
+      "version": "4.78.1",
+      "files": 4,
+      "bytes": 4790,
+      "modules": {},
+      "globals": {
+        "exports": {
+          "uses": 18,
+          "members": {
+            "memfs": 2,
+            "fs": 3,
+            "vol": 3,
+            "Volume": 1,
+            "createFsFromVolume": 1
+          }
+        },
+        "require": {
+          "uses": 8,
+          "members": {}
+        },
+        "process": {
+          "uses": 1,
+          "members": {}
+        },
+        "module": {
+          "uses": 3,
+          "members": {
+            "exports": 3
+          }
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "tinypool",
+      "version": "2.1.2",
+      "files": 7,
+      "bytes": 33275,
+      "modules": {
+        "worker_threads": {
+          "sites": 2,
+          "members": {
+            "parentPort": 1,
+            "receiveMessageOnPort": 2,
+            "workerData": 1,
+            "MessageChannel": 1,
+            "MessagePort": 1,
+            "Worker": 1
+          }
+        },
+        "events": {
+          "sites": 1,
+          "members": {
+            "EventEmitterAsyncResource": 1,
+            "once": 1
+          }
+        },
+        "async_hooks": {
+          "sites": 1,
+          "members": {
+            "AsyncResource": 1
+          }
+        },
+        "url": {
+          "sites": 2,
+          "members": {
+            "URL": 1,
+            "fileURLToPath": 1,
+            "pathToFileURL": 1
+          }
+        },
+        "path": {
+          "sites": 1,
+          "members": {
+            "join": 1
+          }
+        },
+        "util": {
+          "sites": 1,
+          "members": {
+            "inspect": 1,
+            "types": 1
+          }
+        },
+        "assert": {
+          "sites": 1,
+          "members": {
+            "notStrictEqual": 1,
+            "strictEqual": 1
+          }
+        },
+        "perf_hooks": {
+          "sites": 1,
+          "members": {
+            "performance": 1
+          }
+        },
+        "fs": {
+          "sites": 1,
+          "members": {
+            "readFileSync": 1
+          }
+        },
+        "os": {
+          "sites": 1,
+          "members": {
+            "availableParallelism": 1
+          }
+        },
+        "child_process": {
+          "sites": 1,
+          "members": {
+            "fork": 1
+          }
+        }
+      },
+      "globals": {
+        "process": {
+          "uses": 30,
+          "members": {
+            "__tinypool_state__": 5,
+            "env": 3,
+            "memoryUsage": 2,
+            "send": 1,
+            "on": 1,
+            "stdout": 7,
+            "stderr": 7,
+            "nextTick": 1
+          }
+        },
+        "setTimeout": {
+          "uses": 3,
+          "members": {}
+        },
+        "clearTimeout": {
+          "uses": 3,
+          "members": {}
+        },
+        "URL": {
+          "uses": 1,
+          "members": {}
+        },
+        "performance": {
+          "uses": 5,
+          "members": {
+            "now": 5
+          }
+        },
+        "MessageChannel": {
+          "uses": 1,
+          "members": {}
+        },
+        "__dirname": {
+          "uses": 1,
+          "members": {}
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "yargs",
+      "version": "18.2.0",
+      "files": 25,
+      "bytes": 164231,
+      "modules": {
+        "assert": {
+          "sites": 1,
+          "members": {
+            "notStrictEqual": 1,
+            "strictEqual": 1
+          }
+        },
+        "util": {
+          "sites": 1,
+          "members": {
+            "inspect": 1
+          }
+        },
+        "url": {
+          "sites": 1,
+          "members": {
+            "fileURLToPath": 1
+          }
+        },
+        "path": {
+          "sites": 1,
+          "members": {
+            "basename": 1,
+            "dirname": 1,
+            "extname": 1,
+            "relative": 1,
+            "resolve": 1,
+            "join": 1
+          }
+        },
+        "module": {
+          "sites": 1,
+          "members": {
+            "createRequire": 1
+          }
+        },
+        "fs": {
+          "sites": 1,
+          "members": {
+            "readFileSync": 1,
+            "readdirSync": 1
+          }
+        }
+      },
+      "globals": {
+        "module": {
+          "uses": 1,
+          "members": {}
+        },
+        "process": {
+          "uses": 16,
+          "members": {
+            "defaultApp": 1,
+            "versions": 1,
+            "argv": 2,
+            "stdout": 3,
+            "stderr": 1,
+            "env": 1,
+            "cwd": 2,
+            "emitWarning": 1,
+            "execPath": 1,
+            "exit": 1,
+            "nextTick": 1
+          }
+        },
+        "require": {
+          "uses": 4,
+          "members": {
+            "cache": 2
+          }
+        },
+        "__dirname": {
+          "uses": 3,
+          "members": {
+            "substring": 1,
+            "lastIndexOf": 1
+          }
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "test-exclude",
+      "version": "8.0.0",
+      "files": 4,
+      "bytes": 5787,
+      "modules": {
+        "path": {
+          "sites": 3,
+          "members": {
+            "relative": 2,
+            "resolve": 3,
+            "join": 1
+          }
+        }
+      },
+      "globals": {
+        "require": {
+          "uses": 10,
+          "members": {}
+        },
+        "module": {
+          "uses": 5,
+          "members": {
+            "exports": 5
+          }
+        },
+        "process": {
+          "uses": 1,
+          "members": {
+            "platform": 1
+          }
+        }
+      },
+      "computedRequire": 0
+    },
+    {
+      "name": "rolldown",
+      "version": "1.2.12",
+      "files": 28,
+      "bytes": 555391,
+      "modules": {
+        "path": {
+          "sites": 4,
+          "members": {
+            "split": 1,
+            "length": 1,
+            "isAbsolute": 2,
+            "relative": 2,
+            "resolve": 5,
+            "dirname": 5,
+            "sep": 1,
+            "key": 2,
+            "extname": 2,
+            "join": 2
+          }
+        },
+        "process": {
+          "sites": 4,
+          "members": {
+            "versions": 2,
+            "env": 11,
+            "exit": 1,
+            "platform": 2,
+            "cwd": 1,
+            "stdin": 1,
+            "stdout": 1
+          }
+        },
+        "perf_hooks": {
+          "sites": 1,
+          "members": {
+            "performance": 1
+          }
+        },
+        "url": {
+          "sites": 3,
+          "members": {
+            "pathToFileURL": 2,
+            "fileURLToPath": 1
+          }
+        },
+        "worker_threads": {
+          "sites": 4,
+          "members": {
+            "isMainThread": 1,
+            "parentPort": 1,
+            "workerData": 1,
+            "Worker": 1,
+            "MessageChannel": 1
+          }
+        },
+        "module": {
+          "sites": 2,
+          "members": {
+            "createRequire": 1,
+            "Module": 1
+          }
+        },
+        "fs/promises": {
+          "sites": 2,
+          "members": {
+            "appendFile": 1,
+            "copyFile": 1,
+            "mkdir": 1,
+            "mkdtemp": 1,
+            "readdir": 2,
+            "readFile": 1,
+            "realpath": 1,
+            "rename": 1,
+            "rmdir": 1,
+            "stat": 1,
+            "lstat": 1,
+            "unlink": 1,
+            "writeFile": 1
+          }
+        },
+        "util": {
+          "sites": 1,
+          "members": {
+            "formatWithOptions": 1,
+            "styleText": 1
+          }
+        },
+        "tty": {
+          "sites": 2,
+          "members": {
+            "isatty": 2,
+            "WriteStream": 1
+          }
+        },
+        "os": {
+          "sites": 1,
+          "members": {
+            "availableParallelism": 1,
+            "cpus": 1
+          }
+        },
+        "fs": {
+          "sites": 1,
+          "members": {
+            "unlink": 1,
+            "readFileSync": 1,
+            "statSync": 1
+          }
+        },
+        "readline": {
+          "sites": 1,
+          "members": {
+            "createInterface": 1,
+            "emitKeypressEvents": 1
+          }
+        }
+      },
+      "globals": {
+        "process": {
+          "uses": 171,
+          "members": {
+            "platform": 11,
+            "arch": 27,
+            "version": 1,
+            "argv": 2,
+            "exit": 6,
+            "stdout": 7,
+            "env": 67,
+            "exitCode": 1,
+            "versions": 6,
+            "report": 4,
+            "config": 6,
+            "cwd": 2,
+            "stderr": 2,
+            "features": 1,
+            "removeListener": 1,
+            "emit": 2,
+            "reallyExit": 2,
+            "listeners": 1,
+            "kill": 2,
+            "pid": 2,
+            "on": 2,
+            "nextTick": 1
+          }
+        },
+        "EventTarget": {
+          "uses": 1,
+          "members": {}
+        },
+        "performance": {
+          "uses": 4,
+          "members": {
+            "now": 4
+          }
+        },
+        "Buffer": {
+          "uses": 3,
+          "members": {
+            "byteLength": 2,
+            "from": 1
+          }
+        },
+        "exports": {
+          "uses": 5,
+          "members": {}
+        },
+        "module": {
+          "uses": 80,
+          "members": {
+            "exportsHolder": 2,
+            "exports": 72
+          }
+        },
+        "URLSearchParams": {
+          "uses": 1,
+          "members": {}
+        },
+        "clearTimeout": {
+          "uses": 1,
+          "members": {}
+        },
+        "setTimeout": {
+          "uses": 1,
+          "members": {}
+        },
+        "URL": {
+          "uses": 1,
+          "members": {}
+        },
+        "MessageChannel": {
+          "uses": 1,
+          "members": {}
+        },
+        "setImmediate": {
+          "uses": 1,
+          "members": {}
+        }
+      },
+      "computedRequire": 0
+    }
+  ]
+}

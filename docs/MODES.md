@@ -262,238 +262,147 @@ Stator merges the program into one module in Task 3.11's topological order (depe
 
 Node's ESM loader may **interleave sibling subgraphs** — two modules that do not import each other can both run their prefix, hit `await`, and continue in registration order. Stator does not. A dependency's top-level await runs to completion before the next file in topological order begins. The difference is observable only in sibling interleavings; a linear import chain matches Node. Mirroring Node would need per-file init promises and a scheduler, which the whole-program merge does not have.
 
-## 6. `stator explain` — per-construct verdict reporter
+## 6. `stator explain` — what the compiler will do with a program
 
-The `explain` command analyzes a source file and reports the verdict for each top-level construct (function, class, const, etc.). It shows what would happen if that construct were compiled: static (compiles to unboxed machine code), dynamic (uses the dynamic representation), error (rejected), or not-yet (deferred to a later phase).
+`explain` runs the build's front half — program, gate, module graph, lowering — and stops before
+codegen. It reports one **file verdict** for the whole module graph, the diagnostics that decided
+it, and, when the program lowers, one row per compiled function. Source:
+`packages/compiler/src/cli/explain.ts`. A rejected program still exits 0: the verdict is the answer.
 
 ### Usage
 
 ```bash
 stator explain file.ts                   # human-readable
-stator explain file.ts --mode=js         # js mode
-stator explain file.ts --json            # JSON output
+stator explain file.js --mode=js         # js mode
+stator explain file.ts --json            # one JSON object on stdout (never through ink)
 ```
 
-### Output schema (human)
+### Verdicts
 
-```
-file.ts: construct verdict [code]
+| Verdict | Meaning |
+| --- | --- |
+| `error` | a `never`-class diagnostic (rejected by design), or an `error`/`internal` one |
+| `not-yet` | a `STA12xx` diagnostic: outside today's subset, scheduled |
+| `dynamic` | compiles; some value anywhere in the graph — signature or body — is Unknown |
+| `static` | compiles fully typed |
 
-const PI = 3.14159                        # static
-function add(a: number, b: number)        # static
-function unsafe(data)                     # STA1003 (implicit any in ts mode)
-const config = JSON.parse(...)            # dynamic (a boundary value stays tagged until narrowed)
-eval("x + 1")                             # STA1101 (eval in ts mode)
-```
+Precedence when one stage reports several classes: `never` > `not-yet` > `error`/`internal`. The
+first stage that reports a deciding diagnostic ends the run, so a later stage's diagnostics are
+never in the report — the program stage and the gate decide together, then the module graph, then
+lowering.
 
-### Output schema (JSON `--json` flag)
+### JSON schema (`--json`)
 
-The document carries **both** a per-construct array (what a human audits) and a file-level
-rollup (what a decision test asserts). One object, two readers:
+| Field | Present | Content |
+| --- | --- | --- |
+| `verdict` | always | one of the four verdicts |
+| `code` | exactly when `verdict` is `error` or `not-yet` | the deciding diagnostic's code — the first of the highest-precedence class |
+| `diagnostics` | exactly when `code` is | **every** diagnostic of the deciding stage, in source order (file, line, column): `{ file, line, column, code, mode, message }` (plan-notes 291) |
+| `functions` | when the program lowered | `{ name, line, provenance, verdict }` per compiled function, in source order; `provenance` is `typed`, `inferred` or `dynamic`, `verdict` is `static` or `dynamic` |
+| `externCalls` | when the program makes an extern call | `{ name, line }` per call — the unchecked boundaries (`docs/FFI.md` §5) |
 
-```json
-{
-  "file": "example.ts",
-  "mode": "ts",
-  "verdict": "error",
-  "code": "STA1003",
-  "constructs": [
-    {
-      "construct": "PI",
-      "kind": "const",
-      "span": { "line": 1, "column": 1, "endLine": 1, "endColumn": 23 },
-      "verdict": "static"
-    },
-    {
-      "construct": "add",
-      "kind": "function",
-      "span": { "line": 3, "column": 1, "endLine": 5, "endColumn": 2 },
-      "verdict": "static"
-    },
-    {
-      "construct": "unsafe",
-      "kind": "function",
-      "span": { "line": 7, "column": 1, "endLine": 9, "endColumn": 2 },
-      "verdict": "error",
-      "code": "STA1003"
-    }
-  ]
-}
-```
+Optional fields are **omitted**, never `null` or empty, so a report carries only what applies.
+Consumers key on `verdict` and `code`, never on `message` (`docs/DIAGNOSTICS.md`).
+`packages/tests/subset/run.ts` reads only `verdict` and `code`: a decision fixture isolates one
+construct, so the file verdict *is* that construct's verdict.
 
-**Rollup rule.** The top-level `verdict` is the most severe verdict in `constructs`, ordered:
+**Why `diagnostics` lists them all.** One code says a file fails; it does not say how far the file
+is from compiling. Sizing a large input — Phase 11's `_tsc.js` (§11c T11.4) — is a tally of codes,
+and the human output prints that tally first.
 
-```
-error  >  not-yet  >  dynamic  >  static
-```
+**Per-function rows describe signatures.** A row is `static` when the function's signature is
+typed; the file verdict still counts every Unknown in every body, so a `dynamic` file over
+all-`static` rows is a body-level dynamic site, not a contradiction.
 
-`code` is the code of the first construct (in source order) carrying that most-severe verdict,
-and is present exactly when the rollup verdict is `error` or `not-yet`. An empty `constructs`
-array rolls up to `static` with no `code`. `code` is **omitted**, never `null`, when absent —
-`static` and `dynamic` entries carry no `code` key at all.
+### Human output
 
-This is why the rule is a rollup and not "the first construct": a decision-test fixture isolates
-one construct, so its rollup *is* that construct's verdict, while a real source file still
-reports honestly at the top level that something in it failed.
+The file line, then — when more than one diagnostic decided — a count per code, most frequent
+first, then every diagnostic in the build's rendering (`file:line:col CODE [mode] message`), then
+the function rows and the unchecked boundaries.
 
-Consumers:
-
-- **`tests/subset/run.ts`** reads only the top-level `verdict` and optional `code`. Because
-  each fixture isolates one construct, the rollup is exactly that construct's verdict.
-- **Humans and tooling** read `constructs` to audit precisely what went dynamic, and where.
-
-**Top-level `externCalls` (optional).** A module that compiles extern calls carries one row
-per call — `{ "name": "<C symbol>", "line": <source line> }`, in source order — naming the
-unchecked boundaries (`docs/FFI.md` §5). Like `code`, it is **omitted**, never empty, when the
-module makes no extern call, so reports for programs without one are byte-identical to before.
-
-### Worked example: `ts` mode
-
-**Input file (`example.ts`):**
+### Worked example: `ts` mode, rejected
 
 ```typescript
-const PI = 3.14159;
+function unsafe(data: any) {
+  return data.x;
+}
+const other: any = 1;
+console.log(unsafe({ x: 1 }), other);
+```
 
+```
+unsafe.ts: error (STA1001)
+  STA1001 x2
+  unsafe.ts:1:17 STA1001 [ts] explicit 'any' is not allowed in ts mode; use 'unknown' instead
+  unsafe.ts:4:7 STA1001 [ts] explicit 'any' is not allowed in ts mode; use 'unknown' instead
+```
+
+```json
+{"verdict":"error","code":"STA1001","diagnostics":[
+  {"file":"unsafe.ts","line":1,"column":17,"code":"STA1001","mode":"ts","message":"explicit 'any' is not allowed in ts mode; use 'unknown' instead"},
+  {"file":"unsafe.ts","line":4,"column":7,"code":"STA1001","mode":"ts","message":"explicit 'any' is not allowed in ts mode; use 'unknown' instead"}]}
+```
+
+(`file` is the absolute path the program loaded; shortened here.)
+
+### Worked example: `ts` mode, compiles
+
+```typescript
 function add(a: number, b: number): number {
   return a + b;
 }
 
-function unsafe(data) {  // implicit any — error
-  return data.x;
-}
-
-const result = JSON.parse('{"x": 1}');  // unknown, must be narrowed
-type Result = typeof result;
-
-const narrowed: number = result?.x ?? 0;  // narrowing with optional chain
+const parsed: unknown = JSON.parse('2');
+const n = typeof parsed === 'number' ? parsed : 0;
+console.log(add(1, n));
 ```
 
-**Human output:**
-
 ```
-example.ts:1:1  static  const PI
-example.ts:3:1  static  function add
-example.ts:7:1  STA1003 [ts] function unsafe (implicit 'any' in parameter 'data')
-example.ts:11:1 dynamic const result (JSON.parse is boundary-checked, always)
-example.ts:12:1 static  type Result (erased)
-example.ts:14:1 dynamic const narrowed (narrowing a boundary value inserts a runtime check)
+example.ts: dynamic
+  1: add: static (typed)
 ```
-
-`result` and `narrowed` are **dynamic**, not static: `JSON.parse` is a boundary in both modes
-(plan §1.1, `docs/SUBSET.md`), so its value is tagged and every narrowing of it is a runtime
-check. Being annotated `: number` does not make it static — that annotation is the *claim* the
-check enforces.
-
-**JSON output:**
 
 ```json
-{
-  "file": "example.ts",
-  "mode": "ts",
-  "verdict": "error",
-  "code": "STA1003",
-  "constructs": [
-    { "construct": "PI", "kind": "const",
-      "span": { "line": 1, "column": 1, "endLine": 1, "endColumn": 20 },
-      "verdict": "static" },
-    { "construct": "add", "kind": "function",
-      "span": { "line": 3, "column": 1, "endLine": 5, "endColumn": 2 },
-      "verdict": "static" },
-    { "construct": "unsafe", "kind": "function",
-      "span": { "line": 7, "column": 1, "endLine": 9, "endColumn": 2 },
-      "verdict": "error", "code": "STA1003" },
-    { "construct": "result", "kind": "const",
-      "span": { "line": 11, "column": 1, "endLine": 11, "endColumn": 39 },
-      "verdict": "dynamic" },
-    { "construct": "Result", "kind": "type-alias",
-      "span": { "line": 12, "column": 1, "endLine": 12, "endColumn": 31 },
-      "verdict": "static" },
-    { "construct": "narrowed", "kind": "const",
-      "span": { "line": 14, "column": 1, "endLine": 14, "endColumn": 42 },
-      "verdict": "dynamic" }
-  ]
-}
+{"verdict":"dynamic","functions":[{"name":"add","line":1,"provenance":"typed","verdict":"static"}]}
 ```
 
-The rollup is `error` / `STA1003`: one construct failed, so the file failed, and the top-level
-code names the first (in source order) most-severe construct.
+`JSON.parse` is a boundary in both modes (plan §1.1), so `parsed` is tagged and the file is
+`dynamic`; `add`'s signature is typed, so its row is `static`.
 
 ### Worked example: `js` mode
 
-**Input file (`example.js`):**
-
 ```javascript
-const PI = 3.14159;
-
 /** @param {number} a @param {number} b @returns {number} */
 function add(a, b) {
   return a + b;
 }
 
 function pluck(record) {
-  return record.x;  // untyped in js mode: no error, just dynamic
+  return record.x;
 }
 
-export const config = JSON.parse('{"debug": true}');
+console.log(add(1, 2), pluck({ x: 3 }));
 ```
 
-**Human output:**
-
 ```
-example.js:1:1  static  const PI
-example.js:4:1  static  function add (JSDoc supplies both parameter types and the return type)
-example.js:8:1  dynamic function pluck (parameter 'record' is untyped, so it lowers to Unknown)
-example.js:12:1 dynamic const config (JSON.parse is a boundary in both modes)
+example.js: dynamic
+  2: add: static (typed)
+  6: pluck: dynamic (dynamic)
 ```
-
-**JSON output:**
 
 ```json
-{
-  "file": "example.js",
-  "mode": "js",
-  "verdict": "dynamic",
-  "constructs": [
-    { "construct": "PI", "kind": "const",
-      "span": { "line": 1, "column": 1, "endLine": 1, "endColumn": 20 },
-      "verdict": "static" },
-    { "construct": "add", "kind": "function",
-      "span": { "line": 4, "column": 1, "endLine": 6, "endColumn": 2 },
-      "verdict": "static" },
-    { "construct": "pluck", "kind": "function",
-      "span": { "line": 8, "column": 1, "endLine": 10, "endColumn": 2 },
-      "verdict": "dynamic" },
-    { "construct": "config", "kind": "const",
-      "span": { "line": 12, "column": 1, "endLine": 12, "endColumn": 51 },
-      "verdict": "dynamic" }
-  ]
-}
+{"verdict":"dynamic","functions":[{"name":"add","line":2,"provenance":"typed","verdict":"static"},{"name":"pluck","line":6,"provenance":"dynamic","verdict":"dynamic"}]}
 ```
 
-Two things this example is here to show. First, no `code` key anywhere: nothing failed, so the
-rollup is the most severe verdict present — `dynamic` — and codes only accompany `error` and
-`not-yet`. Second, `pluck` is the whole difference between the modes. The identical function in
-`ts` mode is `STA1003` (implicit `any`); here it simply compiles on the dynamic path, and
-`add` next to it stays static because JSDoc gave the checker enough to work with. That is what
-"untyped means dynamic, not rejected" means in practice.
+Untyped `pluck` is not an error in `js` mode — it compiles through the dynamic representation.
 
-### Resolved: per-construct array *and* a file-level rollup
+### Planned: `--node` (Phase 11)
 
-An earlier draft of this document flagged a contradiction: plan.md §1.3 and AGENTS.md promise
-*per-construct* verdicts, while `tests/subset/run.ts` reads a *single* top-level verdict.
-
-**Resolution (2026-08-29, recorded in `plan-notes.md`):** emit both, as specified above. The
-per-construct array is the primary artifact — dropping it would break the plan's stated purpose
-for `explain`, which is letting a user audit what went dynamic. The top-level rollup is derived
-from it by the severity rule, costs one pass over the array, and makes the decision-test runner
-correct without weakening anything.
-
-Rejected alternative: "single verdict per file only". It is simpler, but it contradicts plan
-§1.3 and AGENTS.md, and it would leave a user unable to locate *which* construct went dynamic
-in a file — the one question `explain` exists to answer.
-
-No runner change was required: `tests/subset/run.ts` already reads exactly the top-level
-`verdict` + optional `code` this schema guarantees.
+`--node` (plan §11c T11.5) is a platform flag, orthogonal to `--mode`, and `explain` accepts it
+like `build` does. Under it, a `node:*` or Node-global member that `packages/node` has not landed
+yet is a `not-yet` diagnostic naming T11.6, so `diagnostics` lists the platform gaps the same way
+it lists the language ones, and `docs/NODE.md` is the coverage the two must agree with. Until
+T11.5 lands, `--node` is an unknown flag (`STA0005`).
 
 ## 7. One pipeline, one gate
 

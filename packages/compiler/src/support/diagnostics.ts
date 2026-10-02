@@ -91,6 +91,12 @@ export function diagnosticFromFile(
 }
 
 /** Render a diagnostic in human format: file:line:col STAxxxx [mode] message */
-export function renderDiagnostic(d: Diagnostic): string {
+/** What a rendered diagnostic line shows; `stator explain` reports exactly these fields. */
+export type DiagnosticSite = Pick<
+  Diagnostic,
+  'file' | 'line' | 'column' | 'code' | 'mode' | 'message'
+>;
+
+export function renderDiagnostic(d: DiagnosticSite): string {
   return `${d.file}:${d.line}:${d.column} ${d.code} [${d.mode}] ${d.message}`;
 }
