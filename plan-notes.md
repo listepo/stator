@@ -9725,3 +9725,34 @@ shrink makes every subset card's progress visible, and blocks regressions today.
 for the same input is a miscompilation of the compiler. That is the strongest end-to-end
 correctness test the project can run on itself.
 
+## 305. `node` and `webapi` are tested by their upstream suites, synced; Phase 11 outranks Phase 13 (2026-10-02)
+
+**Plan:** new §11c T11.7 and §11e T13.6; Phase 11 tagged `P1` and Phase 13 `P3`; changelog v4.22.
+
+**Creator's direction:** add tests for `node` and `webapi`. Sync the existing upstream tests if
+that is not hard; otherwise copy them and rewrite them on vitest. Also: `node` has a higher
+priority than `webapi` and Clay.
+
+**Decision: sync, with vitest as the driver.** Copying and rewriting thousands of upstream files
+drifts the moment upstream changes and costs far more than a harness. Fetching a pinned slice, as
+Test262 already is (Task 6.1), keeps upstream's files unchanged, and a version bump shows up as a
+results diff. vitest runs each upstream file as one generated test, so the suites read like the
+rest of the unit tests without being rewritten. The only code we write is strict TS: the fetch
+scripts, `common`, the `testharness` subset and `node:assert` (§0.10). The upstream `.js` files
+are fetched data, not our source.
+
+**Facts (checked 2026-10-02):**
+- **Node.** The GitHub tree API on `nodejs/node` at tag `v26.7.0`
+  (<https://github.com/nodejs/node/tree/v26.7.0/test/parallel>) lists 4 641 `test/parallel/test-*`
+  files. 615 of them have a name matching `test-(fs|path|os|buffer|process|crypto-hash|timers|perf-hooks)`.
+  The license is MIT (`LICENSE` at the tag).
+- **web-platform-tests.** `master` is at `c5e80ef1dca9`, last pushed 2026-10-02
+  (<https://github.com/web-platform-tests/wpt>). Counted from the tree API:
+  - `dom/`: 937 files — 651 `.html`, 66 `.any.js`/`.window.js`;
+  - `css/cssom/`: 352 files — 295 `.html`, 1 `.any.js`.
+
+  The license is the 3-Clause BSD License (`LICENSE.md`).
+
+**Open for T13.0:** most WPT DOM tests are `.html`, so the document comes from markup. Either
+`webapi` gets an HTML parser, or a dev-only pre-pass converts the markup into DOM-building calls.
+
