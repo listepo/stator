@@ -1459,8 +1459,14 @@ smoke, `stator.config.json` with `"node": true`), and `node:path` plus `node:pat
 POSIX-complete: 14 of 16 members each, every one with a golden and a claim. A golden fixture
 named `node_*` builds with `--node`. Not landed: `path.win32` and `node:path/win32` (Windows
 semantics, outside N1) and `path.matchesGlob` (Node's glob matcher; nothing in the corpus uses
-it). **Next, in the order above:** the `node:fs` sync subset, `node:os`,
-`perf_hooks.performance`, `crypto.createHash`, `process`, `Buffer`, timers.
+it). **Second slice landed** (plan-notes 317): the `node:fs` sync subset, 12 of the 15
+functions `tsc` calls (`closeSync`, `existsSync`, `mkdirSync`, `openSync`, `readFileSync`,
+`readdirSync`, `realpathSync`, `statSync`, `unlinkSync`, `utimesSync`, `writeFileSync`,
+`writeSync`) plus `rmdirSync`, with Node's `SystemError` shape. `watch`, `watchFile` and
+`unwatchFile` wait on the event loop (N2) and stay `STA1214`. **Next**, in the order `tsc` needs
+them: `process`, `node:os`, `Buffer.from`/`toString` (then `readFileSync` without an encoding
+answers a `Buffer`), `crypto.createHash`, `perf_hooks.performance`, timers; `path.win32` is its
+own slice (13 of T11.7's `path` tests need it).
 
 **Check:** `tsc --version` and `tsc -p` on a small fixture project, compiled by Stator, print
 byte-for-byte what `node _tsc.js` prints on Node 26.7.0; `docs/NODE.md` slice N1 at 100%.
@@ -2289,3 +2295,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.
 - **v4.53** (2026-10-02): **T11.5: `--node` gates CommonJS routing of project files** (plan-notes 315). The creator's decisions on plan-notes 320: the narrowed CommonJS marker rule stays, and only under `--node` does a CommonJS project file go to the bundler; packages are bundled either way. Without the flag a free `require`, `module.exports` or `exports` is `STA1110`; `module.exports`/`exports` used to reach the lowering as `STA4035`, because TypeScript declares them by their own assignments and the free-binding test missed them. `statorc/api` gains `CompileRequest.node`. T11.4 gains item 10, the `STA2006` panic on a `RegExp` method called off a union narrowing.
 - **v4.54** (2026-10-02): **T11.5 closes: `require` over built-ins, `import.meta` and the injected `__filename`/`__dirname`** (plan-notes 316). `node:module` lands (`createRequire`, `isBuiltin`, `builtinModules`): its `require` answers every landed built-in and throws Node's `MODULE_NOT_FOUND` for anything else. Under `--node` the frontend rewrites `import.meta.url`/`.filename`/`.dirname` and the vendor module's free `__filename`/`__dirname` into run-time calls relative to the executable (`frontend/location.ts`). A free `require`, `__filename` or `__dirname` that reaches the gate is `STA1110` in every cell; `STA1218` is retired. Goldens `node_module` (ts, js).
+- **v4.55** (2026-10-02): **T11.6, second slice: the `node:fs` sync subset** (plan-notes 317). `packages/node/src/fs.ts` lands 12 of the 15 `fs` functions `tsc` calls, plus `rmdirSync`, over `std/fs`: Node's `SystemError` (`code`, `errno`, `syscall`, `path`, the `<CODE>: <description>, <syscall> '<path>'` message), the encodings `std/encoding` decodes, `{ recursive }`, `{ withFileTypes }` and `{ throwIfNoEntry }`. `require('fs')` answers it. The watch trio waits on N2. Goldens `node_fs` (ts, js); slice N1 at 15 / 37.

@@ -15,8 +15,8 @@ for the module and expected to pass under Stator, from
 `packages/tests/node-suite/expectations.json`, which `pnpm run test:node-suite` holds to the
 truth (plan.md §11c T11.7).
 
-**Total: 41 / 2364 members covered (2%) across 58 modules.**
-**Slice N1 (`tsc`): 3 / 37 (8%).**
+**Total: 57 / 2364 members covered (2%) across 58 modules.**
+**Slice N1 (`tsc`): 15 / 37 (41%).**
 **Node tests: 0 / 17 selected files pass.**
 
 | Module | Covered | Members | % | Corpus uses | tsc members | Node tests |
@@ -36,7 +36,7 @@ truth (plan.md §11c T11.7).
 | [`node:dns/promises`](#nodednspromises) | 0 | 61 | 0% | 0 | 0 |  |
 | [`node:domain`](#nodedomain) | 0 | 12 | 0% | 0 | 0 |  |
 | [`node:events`](#nodeevents) | 0 | 47 | 0% | 19 | 0 |  |
-| [`node:fs`](#nodefs) | 0 | 124 | 0% | 182 | 15 |  |
+| [`node:fs`](#nodefs) | 16 | 124 | 13% | 182 | 15 |  |
 | [`node:fs/promises`](#nodefspromises) | 0 | 33 | 0% | 78 | 0 |  |
 | [`node:http`](#nodehttp) | 0 | 87 | 0% | 8 | 0 |  |
 | [`node:http2`](#nodehttp2) | 0 | 64 | 0% | 0 | 0 |  |
@@ -1131,7 +1131,7 @@ truth (plan.md §11c T11.7).
 
 ### node:fs
 
-<details><summary><code>node:fs</code> — 0 / 124 (0%)</summary>
+<details><summary><code>node:fs</code> — 16 / 124 (13%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
@@ -1145,9 +1145,9 @@ truth (plan.md §11c T11.7).
 | `Dirent` | class | — |  |  |
 | `Dirent.prototype.isBlockDevice` | method | — |  |  |
 | `Dirent.prototype.isCharacterDevice` | method | — |  |  |
-| `Dirent.prototype.isDirectory` | method | — |  |  |
+| `Dirent.prototype.isDirectory` | method | ✅ |  |  |
 | `Dirent.prototype.isFIFO` | method | — |  |  |
-| `Dirent.prototype.isFile` | method | — |  |  |
+| `Dirent.prototype.isFile` | method | ✅ |  |  |
 | `Dirent.prototype.isSocket` | method | — |  |  |
 | `Dirent.prototype.isSymbolicLink` | method | — |  |  |
 | `FileReadStream` | getter | — |  |  |
@@ -1160,7 +1160,7 @@ truth (plan.md §11c T11.7).
 | `Stats.prototype.birthtimeInstant` | accessor | — |  |  |
 | `Stats.prototype.ctime` | accessor | — |  |  |
 | `Stats.prototype.ctimeInstant` | accessor | — |  |  |
-| `Stats.prototype.mtime` | accessor | — |  |  |
+| `Stats.prototype.mtime` | accessor | ✅ |  |  |
 | `Stats.prototype.mtimeInstant` | accessor | — |  |  |
 | `Utf8Stream` | getter | — |  |  |
 | `WriteStream` | getter | — |  |  |
@@ -1173,7 +1173,7 @@ truth (plan.md §11c T11.7).
 | `chown` | function | — |  |  |
 | `chownSync` | function | — |  |  |
 | `close` | function | — |  |  |
-| `closeSync` | function | — | 4 | ✓ |
+| `closeSync` | function | ✅ | 4 | ✓ |
 | `constants` | value | — | 1 |  |
 | `copyFile` | function | — |  |  |
 | `copyFileSync` | function | — | 1 |  |
@@ -1182,7 +1182,7 @@ truth (plan.md §11c T11.7).
 | `createReadStream` | function | — | 2 |  |
 | `createWriteStream` | function | — | 1 |  |
 | `exists` | function | — |  |  |
-| `existsSync` | function | — | 35 | ✓ |
+| `existsSync` | function | ✅ | 35 | ✓ |
 | `fchmod` | function | — |  |  |
 | `fchmodSync` | function | — |  |  |
 | `fchown` | function | — |  |  |
@@ -1210,36 +1210,36 @@ truth (plan.md §11c T11.7).
 | `lutimes` | function | — |  |  |
 | `lutimesSync` | function | — |  |  |
 | `mkdir` | function | — |  |  |
-| `mkdirSync` | function | — | 8 | ✓ |
+| `mkdirSync` | function | ✅ | 8 | ✓ |
 | `mkdtemp` | function | — |  |  |
 | `mkdtempDisposableSync` | function | — |  |  |
 | `mkdtempSync` | function | — | 1 |  |
 | `open` | function | — |  |  |
 | `openAsBlob` | function | — |  |  |
-| `openSync` | function | — | 4 | ✓ |
+| `openSync` | function | ✅ | 4 | ✓ |
 | `opendir` | function | — |  |  |
 | `opendirSync` | function | — |  |  |
 | `promises` | getter | — | 9 |  |
 | `read` | function | — |  |  |
 | `readFile` | function | — |  |  |
-| `readFileSync` | function | — | 36 | ✓ |
+| `readFileSync` | function | ✅ | 36 | ✓ |
 | `readSync` | function | — | 1 |  |
 | `readdir` | function | — |  |  |
-| `readdirSync` | function | — | 9 | ✓ |
+| `readdirSync` | function | ✅ | 9 | ✓ |
 | `readlink` | function | — |  |  |
 | `readlinkSync` | function | — |  |  |
 | `readv` | function | — |  |  |
 | `readvSync` | function | — |  |  |
 | `realpath` | function | — | 1 |  |
-| `realpathSync` | function | — | 13 | ✓ |
+| `realpathSync` | function | ✅ | 13 | ✓ |
 | `rename` | function | — | 2 |  |
 | `renameSync` | function | — | 2 |  |
 | `rm` | function | — |  |  |
 | `rmSync` | function | — | 3 |  |
 | `rmdir` | function | — |  |  |
-| `rmdirSync` | function | — |  |  |
+| `rmdirSync` | function | ✅ |  |  |
 | `stat` | function | — | 1 |  |
-| `statSync` | function | — | 16 | ✓ |
+| `statSync` | function | ✅ | 16 | ✓ |
 | `statfs` | function | — |  |  |
 | `statfsSync` | function | — | 1 |  |
 | `symlink` | function | — |  |  |
@@ -1247,16 +1247,16 @@ truth (plan.md §11c T11.7).
 | `truncate` | function | — |  |  |
 | `truncateSync` | function | — |  |  |
 | `unlink` | function | — | 2 |  |
-| `unlinkSync` | function | — | 1 | ✓ |
+| `unlinkSync` | function | ✅ | 1 | ✓ |
 | `unwatchFile` | function | — | 1 | ✓ |
 | `utimes` | function | — |  |  |
-| `utimesSync` | function | — | 1 | ✓ |
+| `utimesSync` | function | ✅ | 1 | ✓ |
 | `watch` | function | — | 1 | ✓ |
 | `watchFile` | function | — | 1 | ✓ |
 | `write` | function | — |  |  |
 | `writeFile` | function | — |  |  |
-| `writeFileSync` | function | — | 10 | ✓ |
-| `writeSync` | function | — | 11 | ✓ |
+| `writeFileSync` | function | ✅ | 10 | ✓ |
+| `writeSync` | function | ✅ | 11 | ✓ |
 | `writev` | function | — |  |  |
 | `writevSync` | function | — |  |  |
 

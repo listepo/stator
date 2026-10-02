@@ -17,6 +17,24 @@
     "strictEqual": ["ts/node_assert.ts", "js/node_assert.js"],
     "throws": ["ts/node_assert.ts", "js/node_assert.js"]
   },
+  "fs": {
+    "Dirent.prototype.isDirectory": ["ts/node_fs.ts"],
+    "Dirent.prototype.isFile": ["ts/node_fs.ts"],
+    "Stats.prototype.mtime": ["ts/node_fs.ts"],
+    "closeSync": ["ts/node_fs.ts"],
+    "existsSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "mkdirSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "openSync": ["ts/node_fs.ts"],
+    "readFileSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "readdirSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "realpathSync": ["ts/node_fs.ts"],
+    "rmdirSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "statSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "unlinkSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "utimesSync": ["ts/node_fs.ts"],
+    "writeFileSync": ["ts/node_fs.ts", "js/node_fs.js"],
+    "writeSync": ["ts/node_fs.ts"]
+  },
   "module": {
     "builtinModules": ["ts/node_module.ts"],
     "createRequire": ["ts/node_module.ts", "js/node_module.js"],
