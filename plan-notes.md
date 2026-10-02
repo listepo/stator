@@ -9111,6 +9111,76 @@ need no reopened decision. Compiling TypeScript from its `.ts` sources in `ts` m
 alternative. Its public declarations alone (`lib/typescript.d.ts`) carry 73 `enum`s and 58 `any`s,
 and `ts` mode refuses both by design.
 
+## 287. The `_tsc.js` stack overflow is TypeScript's checker, not a Stator pass; it becomes STA0013 (2026-10-02)
+
+Plan-notes 286 item 1: `explain --mode=js` on TypeScript 6.0.3's `lib/_tsc.js` (6,239,091 bytes)
+fails at the default V8 stack with `STA4072 internal error: Maximum call stack size exceeded`.
+STA4072 means a Stator bug, so the task was to find the Stator pass that recurses and make it
+iterative.
+
+**No Stator pass recurses.** The full stack, taken with `--stack-trace-limit=1000000`, has about
+10,900 frames. Twelve of them are Stator's (`createProgramUncached` → `explainFile` → `main`) and
+all the rest are in `typescript.js`, under the single call `ts.getPreEmitDiagnostics(program)` in
+`src/frontend/program.ts`. The gate, the lowering, the verifier and the module graph are never
+reached. Plain `tsc` 6.0.3 with the options Stator sets (`--allowJs --checkJs --strict
+--noImplicitAny false --noImplicitThis false --target es2025 --lib es2025 --module esnext
+--moduleResolution bundler --moduleDetection force`) dies on the same file with the same
+`RangeError`. This is the plan-notes 213 class: an upstream crash.
+
+**Mechanism.** TypeScript infers an unannotated return type on demand, from inside whatever asked
+for it. Each link nests one `getReturnTypeFromBody`, about thirty JS frames. The default stack
+holds about 350 links. An instrumented copy of `typescript.js` (scratch only) measured the
+natural pass on `_tsc.js` at 360 nested inferences, and the whole chain sits inside one
+1,285-function cycle of the checker's own code. TypeScript also re-enters functions whose
+inference is still in progress: `getTypeOfSymbol` appears 20 times on that one chain. With
+`--stack-size=7600` the type check itself takes about 1.8 s, so the 93 s plan-notes 286 measured
+for `explain` is spent after the checker, in the gate and lowering. That cost is not addressed
+here. A synthetic input reproduces the overflow: 600 functions `function fN(x) { return fN+1(x); }`
+overflow both `tsc` and Stator.
+
+**Rejected: pre-computing return types callee-first.** Before `getPreEmitDiagnostics`, a
+syntactic dependency graph (return expressions, concise arrow bodies, variable initializers →
+the declarations they name) was walked with explicit work stacks. It asked the checker for each
+return type in three orders: post-order DFS, Tarjan components callees-first, and acyclic
+closures only.
+- On the synthetic chain it works: depth 1 instead of 1,200.
+- On `_tsc.js` it makes things worse. Peak depth was 469, 407 and 407 against the natural 360.
+  Inside a cycle, any member asked first walks the rest of the cycle. Even the acyclic-only order
+  leaks into the cycle through dependencies a syntactic graph cannot see (contextual types,
+  property reads, flow narrowing).
+- It also changes which function in a cycle gets the circular `any`.
+
+So it could break inputs that pass today, and it does not fix the input that motivated it.
+Raising the stack (`--stack-size`, a Worker's `stackSizeMb`) was excluded by the creator.
+
+**Decision (creator, 2026-10-02): a dedicated code.** `STA0013` (`docs/DIAGNOSTICS.md`, the STA0
+toolchain band next to `STA0012`) is raised as a `BuildError` from a `RangeError` whose message
+matches V8's call-stack text, at the `getPreEmitDiagnostics` call site and nowhere else. A stack
+overflow in Stator's own code is still `STA4072`. Its message names the remedy that works:
+return-type annotations that cut the chain. The 3,000-link synthetic chain with a JSDoc
+`@returns` every 200 links passes `explain`. `BuildError` moved from `src/cli/build.ts` to
+`src/support/diagnostics.ts`, and `build.ts` re-exports it, so the frontend can raise it without
+importing the CLI. The plan-notes 213 input (`var yield` plus `*[yield]() {}`) is the same upstream
+crash and now reports `STA0013` too. The STA4072 row, the CLI and `compileToC` comments, and the
+Test262 runner's backstop comment now say so.
+
+**Evidence (Apple M3 Max, Node 26.7.0, `typescript@6.0.3`, `_tsc.js` sha256 prefix
+`1c59e77a54b186ec`).** `explain --mode=js --json` wall time, three runs each:
+- Before: 1.68 / 1.65 / 1.66 s, ending in `STA4072`.
+- After: 1.68 / 1.68 / 1.62 s, ending in `STA0013`.
+
+The time is unchanged because both stop at the same point, the checker's overflow. The fix
+reclassifies the failure; it does not get `_tsc.js` past the checker. That still needs either a
+deeper stack, which the creator's call excluded, or an upstream TypeScript change.
+
+`packages/tests/unit/cli.test.ts` pins three cases:
+- the `var yield` CLI spawn;
+- the in-process `build()`;
+- a new 3,000-link chain, through `explain`, which must give `STA0013` and must pass once
+  annotated.
+
+All three fail on the old call site, as `STA4072`.
+
 ## 288. T11.0 research lands: `--node` is a platform flag over a `std`-first layer; go for P0 + N1, defer N2, no-go N3 (2026-10-02)
 
 **Plan:** §11c T11.0 execution steps 1–3. `plan.md` edited (the card's status line); the Check

@@ -28,7 +28,7 @@ import { createProgram } from '../frontend/program.ts';
 import { verifyHir } from '../hir/verify.ts';
 import { lowerProgram } from '../lower/index.ts';
 import { optimize } from '../passes/index.ts';
-import type { Diagnostic } from '../support/diagnostics.ts';
+import { BuildError, type Diagnostic } from '../support/diagnostics.ts';
 import { runtimeFlavor } from '../support/features.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { isStaleLdSystemLibFailure, staleLdHint, staleLdRetryArgs } from '../support/toolchain.ts';
@@ -66,17 +66,7 @@ export interface BuildOptions {
   readonly unitName?: string;
 }
 
-/** Raised for conditions the USER can act on: a missing file, a missing toolchain. Anything the
- * user cannot act on is a Diagnostic with an STA4xxx code, not an exception. */
-export class BuildError extends Error {
-  readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-    this.name = 'BuildError';
-  }
-}
+export { BuildError };
 
 /** A thrown value is not necessarily an `Error` (`throw "boom"` is legal JavaScript, and a
  * rejection from a dependency can be anything). The diagnostic still has to say something. */
@@ -265,10 +255,8 @@ export async function compileToC(
   } catch (error) {
     // Diagnostics are the contract for everything the pipeline can name; an ESCAPING exception is
     // a compiler bug by AGENTS.md's definition, and its contract is STA4072, never a raw stack
-    // trace. `BuildError` passes through: it already carries a code the user can act on. This is
-    // reachable rather than theoretical — the TypeScript checker recurses without a depth guard,
-    // so `var yield` plus a generator method with `[yield]` as its computed key overflows the stack
-    // inside `getPreEmitDiagnostics` (plan-notes 213; plain `tsc` dies on the same file) — and the
+    // trace. `BuildError` passes through: it already carries a code the user can act on —
+    // including STA0013, the TypeScript checker's own stack overflow (plan-notes 213, 287). The
     // in-process callers (notably the Test262 runner) never pass through the CLI's catch-all, so
     // without this the whole process dies and the shard uploads no artifact.
     if (error instanceof BuildError) throw error;
