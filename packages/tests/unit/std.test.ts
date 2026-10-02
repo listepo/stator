@@ -78,17 +78,23 @@ test('the link line names libjsrt_std.a only when asked to', () => {
   );
 });
 
-async function compiledStd(source: string): Promise<boolean> {
+async function compiledStdC(
+  source: string,
+): Promise<{ readonly c: string; readonly std: boolean }> {
   const dir = mkdtempSync(join(tmpdir(), 'stator-std-'));
   try {
     const entry = join(dir, 'main.ts');
     writeFileSync(entry, source);
     const compiled = await compileToC(entry, 'ts');
     assert.ok(compiled !== null, 'the program compiles');
-    return compiled.std;
+    return compiled;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+async function compiledStd(source: string): Promise<boolean> {
+  return (await compiledStdC(source)).std;
 }
 
 test('a std importer is a std link; a program without std imports is not', async () => {
@@ -134,6 +140,39 @@ test('std/io read takes what stdin holds, then an empty answer at end of file', 
   assert.equal(run.status, 0);
   // The NUL survives: bytes never cross the C-string boundary.
   assert.equal(run.stdout, 'h\u00e9 \u0000x\n7 0\n');
+});
+
+// plan.md §11c T11.3a: a `Uint8Array` crosses as its storage, so std/io's bytes take ONE call
+// whatever their length — the byte channel this replaced made one call per byte.
+test('std/io passes a Uint8Array to its backing as one pointer + length call', async () => {
+  const { c } = await compiledStdC(
+    'import { read, stdin, stdout, writeBytes } from "std/io";\n' +
+      'writeBytes(stdout, read(stdin, 1048576));\n',
+  );
+  // A call site lands its raw result in an `_jsrt_exr_` local; the forward declaration does not.
+  const lines = c.split('\n');
+  for (const backing of ['jsrt_std_io_write_bytes', 'jsrt_std_io_read']) {
+    const calls = lines.filter((line) => line.includes(`= ${backing}(`));
+    assert.equal(calls.length, 1, `one call site for ${backing}`);
+    assert.match(calls[0] ?? '', /\(void \*\)jsrt_uint8array_bytes\(.*\), jsrt_uint8array_count\(/);
+  }
+  assert.ok(!c.includes('jsrt_std_bytes_'), 'no byte channel is left');
+});
+
+test('std/io moves a MiB through read and writeBytes byte for byte', NATIVE_ONLY, () => {
+  const input = Array.from({ length: 1 << 20 }, (_, i) => String.fromCharCode(32 + (i % 95))).join(
+    '',
+  );
+  const run = buildAndRun(
+    'import { read, stderr, stdin, stdout, write, writeBytes } from "std/io";\n' +
+      'let total = 0;\nlet chunk = read(stdin, 1048576);\n' +
+      'while (chunk.length > 0) {\n  writeBytes(stdout, chunk);\n  total += chunk.length;\n' +
+      '  chunk = read(stdin, 1048576);\n}\nwrite(stderr, `${total}\\n`);\n',
+    { input },
+  );
+  assert.equal(run.status, 0);
+  assert.equal(run.stderr, `${String(1 << 20)}\n`);
+  assert.ok(run.stdout === input, 'the MiB comes back unchanged');
 });
 
 test('std/io sees a terminal on a pseudo-terminal', NATIVE_ONLY, () => {

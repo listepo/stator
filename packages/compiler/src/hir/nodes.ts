@@ -1171,8 +1171,10 @@ export interface CallExpr extends Node {
  * for the call (the emitter frees it); `cstring-owned` transfers it (never freed). `pointer`
  * is a branded opaque handle (docs/FFI.md §2 `T*`, step 6): borrow-only, passed as `void *`
  * and never dereferenced — there is no transfer spelling in v0, so every pointer is a borrow.
- * `void` is a return position only — a `void` parameter is STA1119, and `cstring-owned` as a
- * return is STA1119, both refused where the signature is classified, never here. */
+ * `bytes` is a `Uint8Array` (plan.md §11c T11.3a): parameter-only, it crosses as TWO C arguments,
+ * `uint8_t *` and `size_t`, pointing into the view's own storage for the call — no copy.
+ * `void` is a return position only — a `void` parameter is STA1119, and `cstring-owned` or
+ * `bytes` as a return is STA1119, all refused where the signature is classified, never here. */
 export type ExternAbiKind =
   | 'number'
   | 'boolean'
@@ -1180,6 +1182,7 @@ export type ExternAbiKind =
   | 'cstring-owned'
   | 'pointer'
   | 'out-pointer'
+  | 'bytes'
   | 'void';
 
 /** The closed `@statorError` vocabulary (docs/FFI.md §4): the only conventions a declaration
@@ -1252,6 +1255,10 @@ export function externKindHType(kind: ExternAbiKind): HType {
       // dynamically-typed argument is STA1125): an out-param WRITES through the pointer, so
       // unlike a `T*` read it cannot trust bits.
       return hUnknown(false);
+    case 'bytes':
+      // A real HType, unlike a handle: the view is a value the program owns, and the runtime
+      // CAN test it (`jsrt_check_uint8array`), so a dynamic argument takes a boundary check.
+      return H_UINT8ARRAY;
     case 'void':
       return H_UNDEFINED;
   }

@@ -1134,6 +1134,20 @@ static inline bool jsrt_is_uint8array(jsrt_value v) {
   return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_uint8array;
 }
 
+/* A view's bytes and length, as an extern `Uint8Array` parameter passes them (docs/FFI.md §2):
+ * the pointer is the buffer's data block plus the view's offset, never a copy. Valid only while
+ * the view stays rooted -- the generated call holds it in its argument slot, the buffer edge keeps
+ * the block alive, and neither collector moves memory (docs/VALUE.md §4.19). The caller has
+ * already proven the value a view (statically, or through jsrt_check_uint8array). */
+static inline uint8_t *jsrt_uint8array_bytes(jsrt_value v) {
+  const JSRTTypedArray *view = (const JSRTTypedArray *)jsrt_ptr(v);
+  return view->buffer->data + view->byte_offset;
+}
+
+static inline size_t jsrt_uint8array_count(jsrt_value v) {
+  return ((const JSRTTypedArray *)jsrt_ptr(v))->length;
+}
+
 /* `new ArrayBuffer(n)`: n zeroed bytes. A length ToIndex refuses is Node's RangeError. */
 jsrt_value jsrt_arraybuffer_new(jsrt_value length);
 jsrt_value jsrt_arraybuffer_byte_length(jsrt_value buffer);
@@ -1674,6 +1688,9 @@ jsrt_value jsrt_typeof(jsrt_value v);
 jsrt_value jsrt_check_number(jsrt_value v, const char *where);
 jsrt_value jsrt_check_string(jsrt_value v, const char *where);
 jsrt_value jsrt_check_boolean(jsrt_value v, const char *where);
+/* A `Uint8Array` extern argument (docs/FFI.md §2): the one non-primitive check, because the
+ * emitter reads the view's layout straight after it. */
+jsrt_value jsrt_check_uint8array(jsrt_value v, const char *where);
 
 /* --------------------------------------------------------------- output */
 

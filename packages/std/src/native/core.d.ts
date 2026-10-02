@@ -13,19 +13,3 @@ export declare function jsrtStdResult(): CString;
 /** The error code (docs/STD.md §3) a backing recorded by its last failing call. */
 /** @statorExtern jsrt_std_last_error */
 export declare function jsrtStdLastError(): CString;
-
-// The byte channel (packages/std/zig/jsrt_std.zig): bytes cross one scalar call at a time,
-// because the extern table has no `Uint8Array` row (docs/FFI.md §2). src/internal/bytes.ts is
-// the only caller.
-
-/** @statorExtern jsrt_std_bytes_clear */
-export declare function jsrtStdBytesClear(): void;
-
-/** @statorExtern jsrt_std_bytes_push */
-export declare function jsrtStdBytesPush(byte: number): void;
-
-/** @statorExtern jsrt_std_bytes_length */
-export declare function jsrtStdBytesLength(): number;
-
-/** @statorExtern jsrt_std_bytes_at */
-export declare function jsrtStdBytesAt(index: number): number;

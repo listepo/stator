@@ -48,33 +48,27 @@ export fn jsrt_std_io_write(fd: f64, text: [*:0]const u8) f64 {
     return writeAll(f, std.mem.span(text));
 }
 
-/// The bytes pushed into the byte channel.
-export fn jsrt_std_io_write_bytes(fd: f64) f64 {
+/// The bytes of the caller's `Uint8Array`, in place (docs/FFI.md §2): the view's storage for the
+/// call, never copied. `data` is never NULL, even for an empty view (docs/VALUE.md §4.19).
+export fn jsrt_std_io_write_bytes(fd: f64, data: [*]const u8, len: usize) f64 {
     const f = fdArg(fd) orelse return root.fail("EBADF");
-    return writeAll(f, root.bytesIn());
+    return writeAll(f, data[0..len]);
 }
 
-/// The most one `read` asks for, whatever `max` says: the buffer is allocated before the call,
-/// and a pipe or terminal answers far less than this anyway.
-const read_cap: usize = 1 << 20;
+/// A failure for a backing whose success answer is a count: -1, with the code recorded.
+fn failCount(status: f64) f64 {
+    _ = status;
+    return -1;
+}
 
-/// One `read(2)` of at most `max` bytes (and at most `read_cap`), parked in the byte channel;
-/// zero bytes is end of file.
-export fn jsrt_std_io_read(fd: f64, max: f64) f64 {
-    const f = fdArg(fd) orelse return root.fail("EBADF");
-    const want = root.intIn(max, 0, std.math.maxInt(c_int)) orelse return root.fail("EINVAL");
-    const buf = root.allocator.alloc(u8, @min(@as(usize, @intCast(want)), read_cap)) catch return root.fail("ENOMEM");
-    const step = transfer(std.c.read, f, buf.ptr, buf.len);
-    if (step.err != .SUCCESS) {
-        root.allocator.free(buf);
-        return root.failErrno(step.err);
-    }
-    const got = root.allocator.realloc(buf, step.count) catch {
-        root.allocator.free(buf);
-        return root.fail("ENOMEM");
-    };
-    root.setBytes(got);
-    return 0;
+/// One `read(2)` of at most `max` bytes straight into the caller's `Uint8Array` (the surface
+/// sizes it, docs/STD.md §5): the byte count, zero at end of file, or -1 with the code recorded.
+export fn jsrt_std_io_read(fd: f64, max: f64, buf: [*]u8, len: usize) f64 {
+    const f = fdArg(fd) orelse return failCount(root.fail("EBADF"));
+    const want = root.intIn(max, 0, std.math.maxInt(c_int)) orelse return failCount(root.fail("EINVAL"));
+    const step = transfer(std.c.read, f, buf, @min(@as(usize, @intCast(want)), len));
+    if (step.err != .SUCCESS) return failCount(root.failErrno(step.err));
+    return @floatFromInt(step.count);
 }
 
 /// Node's `tty.isatty`: false for a descriptor outside `0..2^31-1` or one that is not a terminal,
