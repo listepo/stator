@@ -236,10 +236,32 @@ test(
 /* The same edge when the checker has an opinion: `label` infers `string`, so `const n: number =
  * label(10)` is TS2322. js mode suppresses it, and used to widen `n` to Unknown, which printed
  * `10` out of a `number` binding (plan-notes 301). The annotation now stays and the declaration
- * and assignment edges are checked. The passing half is golden `js/boundary_inferred`. */
+ * and assignment edges are checked. The passing half is golden `js/boundary_inferred`.
+ * The call edge (TS2345) and the return edge (TS2322 on a `return` or an arrow's concise body) had
+ * the same hole with no widening at all: `inc(label(1))` printed `11` and a `number` function
+ * returned `"2"` (plan-notes 306). Their passing half is golden `js/boundary_call_return`. */
 for (const [edge, body, line] of [
   ['declaration', 'const n: number = label(10);\nconsole.log(n);\n', 2],
   ['assignment', 'let n: number = 0;\nn = label(10);\nconsole.log(n);\n', 3],
+  [
+    'call',
+    'function inc(x: number): number {\n  return x + 1;\n}\nconsole.log(inc(label(1)));\n',
+    5,
+  ],
+  [
+    'method-call',
+    'class Box {\n  add(by: number): number {\n    return by + 1;\n  }\n}\n' +
+      'console.log(new Box().add(label(1)));\n',
+    7,
+  ],
+  [
+    'constructor-call',
+    'class Box {\n  n: number;\n  constructor(n: number) {\n    this.n = n;\n  }\n}\n' +
+      'console.log(new Box(label(1)).n);\n',
+    8,
+  ],
+  ['return', 'function g(): number {\n  return label(2);\n}\nconsole.log(g());\n', 3],
+  ['concise-return', 'const h = (): number => label(4);\nconsole.log(h());\n', 2],
 ] as const) {
   test(
     `a .js value the checker types differently aborts the ${edge} edge with STA2001`,
@@ -262,6 +284,27 @@ for (const [edge, body, line] of [
     },
   );
 }
+
+/* A concise arrow body's TS2322 starts at the body's first identifier -- here the CALLEE `lbl`.
+ * The suppression used to widen whatever identifier the diagnostic started at, so `lbl` itself
+ * turned dynamic and the file graded `dynamic` (plan-notes 306). The return edge is a check, not a
+ * widening: the file stays `static`. */
+test('a concise-body return mismatch widens nothing in js mode', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-concise-'));
+  try {
+    const entry = join(work, 'main.ts');
+    writeFileSync(
+      entry,
+      'const lbl = (x: number): string => `${x}`;\nconst h = (): number => lbl(4);\n' +
+        'console.log(lbl(3), h());\n',
+    );
+    const explained = await stator('explain', entry, '--mode=js', '--json');
+    assert.equal(explained.status, 0, explained.stderr);
+    assert.equal((JSON.parse(explained.stdout) as { verdict: unknown }).verdict, 'static');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
 
 /* Provenance has to survive the trip to stdout (plan.md §8 step 1). `lower.test.ts` proves the HIR
  * fact; this proves the report carries it, because a grade that is right in the HIR and lost on the
