@@ -1,4 +1,6 @@
 node_modules/
+# Golden fixtures that import packages ship them (plan.md §11d T12.2).
+!packages/tests/golden/js/*/node_modules/
 dist/
 coverage/
 packages/runtime/build/

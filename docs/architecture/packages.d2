@@ -3,6 +3,8 @@
 # All src modules live in packages/compiler/; jsrt is packages/runtime/ (monorepo, plan-notes 204).
 # std is packages/std/ (plan.md §11c T11.2): the compiler resolves and links it, never imports it.
 # nodepkg is packages/node/ (plan.md §11c T11.6): resolved under --node only, strict TS over std.
+# vitestator is packages/vite-stator/ (plan.md §11d T12.2): imports statorc/api; the compiler only
+# loads it by name at run time, never imports it (plan §0.9).
 
 ...@theme
 
@@ -55,3 +57,14 @@ frontend -> nodepkg: {
   label: "resolves node:* to\n(--node only)"
 }
 nodepkg -> std
+vitestator: {
+  label: "packages/vite-stator\ndefault bundler adapter\n+ stator() Vite plugin"
+  shape: parallelogram
+}
+vite: "vite pkg (peer)"
+vitestator -> cli: "statorc/api"
+vitestator -> vite
+cli -> vitestator: {
+  style.stroke-dash: 3
+  label: "loads by name\n(--bundler=vite, js mode)"
+}

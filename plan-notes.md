@@ -11272,3 +11272,50 @@ did not settle it.
 package code the user cannot fix; today it is reported at the mapped position like any other.
 Whether `checkJs` should skip the vendor module (and leave its errors to the lowering's
 verdicts) is not decided.
+
+## 321. T12.2 lands: `packages/vite-stator`, and the Vite pin (2026-10-02)
+
+**What landed.** `packages/vite-stator`: `src/adapter.ts` (the default `BundlerAdapter`, one Vite
+SSR build of the in-memory vendor entry, configured row by row per `docs/BUNDLER.md` §2),
+`src/plugin.ts` (`stator()`, so `vite build` writes the native binary), and `examples/vite`. The
+details the §2 table left open are written up under "As implemented (T12.2)" there.
+
+1. **`vite` is a peer dependency** (`^8.3.1`) and an exact dev dependency of `vite-stator`. What a
+   few lines could not do: the package *is* the Vite integration. The adapter is `vite.build()`
+   with a configuration, and the plugin is a Vite plugin. The compiler still imports no bundler
+   (plan §0.9): root `devDependencies` holds `vite-stator` (`workspace:*`) only so that
+   `--bundler=vite`, the default, resolves from the compiler. TOOLCHAIN.md has both rows.
+2. **The Vite version.** The coordinator asked for the latest stable, from the npm registry
+   (`https://registry.npmjs.org/vite`, checked 2026-10-02): `dist-tags.latest` is **8.3.2**,
+   published 2026-10-01T10:17:44.767Z. `pnpm add vite@8.3.2` fails on pnpm 12.3.4's
+   `minimumReleaseAge` (the release is under a day old); getting past it means adding a
+   `minimumReleaseAgeExclude` entry to `pnpm-workspace.yaml`, and the install then also moves
+   vitest's own transitive `vite` from 8.3.1 to 8.3.2, a version bump nobody approved. So the pin
+   is **8.3.1** (published 2026-09-24T12:26:19.940Z), the version the lockfile already held and
+   the one T12.0's spike measured. Moving to 8.3.2 once it is old enough is a one-line bump that
+   needs the creator's permission. **Open for the creator.**
+3. **Tree-shaking, measured** (plan.md T12.2 Check). A package `forty` with forty exported
+   functions `f1`…`f40`; `main.js` imports `f7` and prints `f7(12)`:
+   - the vendor bundle holds one function, `function f7(x)` (unit test
+     `the adapter tree-shakes`);
+   - the binary is **116 880 B** through the package and **116 880 B** with the same function in
+     a project module `./forty.js`, a 0% difference (macOS arm64, clang 21.1.8);
+   - both print `948363`, as Node does.
+4. **The namespace-import golden moves to T12.3.** The vendor entry's `export * as p$ns from 'p'`
+   makes Rolldown emit `__exportAll` (`Object.defineProperty`, `Symbol.toStringTag`), measured:
+   `<package bundle>:2:17 STA1214` and `<package bundle>:9:37 STA1212`. That is T12.3's
+   "dynamic-import namespace helpers" item, so T12.2's Check line "named, default and namespace
+   imports" is edited: named and default stay here (`pkg_imports`), the namespace import joins
+   T12.3's Check.
+5. **Goldens with a package.** `packages/tests/golden/js/pkg_imports` (named and default imports,
+   a package with an `exports` map) and `pkg_shared_dependency` (two packages sharing one
+   `counter`, one instance) commit their `node_modules` (`.gitignore` exception
+   `!packages/tests/golden/js/*/node_modules/`). `golden/run.ts --bundler=none` skips a fixture
+   that holds a `node_modules` and says how many it skipped, the way `intl_*` is reported.
+6. **The STA0014 unit test** named `vite-stator` as the adapter that is not installed. It is now,
+   so the test names `stator-adapter-not-installed`; the message under test is the same.
+7. **Self-compilation.** `packages/vite-stator` is listed in `selfhost/targets.json` as not a
+   target: it runs inside Vite on Node, and the compiler loads it by name, never compiles it. A
+   compiled compiler still cannot load an adapter (plan-notes 320 item 10, STA1207).
+8. **Windows.** The new unit tests are `NATIVE_ONLY`: one runs a binary, and the other two compare
+   POSIX paths.

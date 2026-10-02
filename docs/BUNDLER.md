@@ -1,6 +1,6 @@
 # BUNDLER.md — the bundler contract for `js` mode (Phase 12)
 
-> **Status: T12.1 implemented (plan-notes 320); T12.2 and T12.3 open.** This is T12.0's
+> **Status: T12.1 and T12.2 implemented (plan-notes 320, 321); T12.3 open.** This is T12.0's
 > docs-first output (§15.6). It fixes what T12.1 (`packages/compiler`: `statorc/api`) and T12.2
 > (`packages/vite-stator`) build, and it records the measured spike the decisions rest on. Where
 > T12.1 had to decide something this document left open, the section says so and names
@@ -131,6 +131,47 @@ Vite 8.3.1 (the `vite-stator` adapter's defaults):
 | `build.rolldownOptions.external` | `[/^std\//]` | §3 |
 | `build.target` | `'esnext'` | no down-levelling, so Stator sees the source's own syntax |
 | plugins | `esmExternalRequirePlugin` | §4 |
+
+**As implemented (T12.2, `packages/vite-stator`, plan-notes 321).** The adapter is
+`src/adapter.ts`: one `vite.build()` per compile, exactly the table above, with these details the
+table leaves open:
+
+- The vendor entry has no file. A `pre` plugin serves it under the id
+  `<resolveDir>/__stator_vendor_entry__.js`, so a CommonJS project file's relative specifier
+  resolves from the project's directory.
+- `configFile: false`, `envFile: false`, `publicDir: false`: the project's own
+  `vite.config.*` never shapes the vendor build.
+- `build.outDir` is `resolveDir` with `write: false`. Nothing is written, and the map's
+  `sources` come out relative to `resolveDir`, which is what §5 promises.
+- `external` is the compiler's list (§3), passed to both Rolldown and `esmExternalRequirePlugin`.
+- `inputs` are the chunk's absolute module ids, less the virtual entry. A build that answers
+  more than one chunk, or no map, is an error, so `STA0015`.
+
+The pin is Vite **8.3.1** (npm registry, published 2026-09-24T12:26:19.940Z, checked
+2026-10-02), the version the lockfile already held through vitest. The latest stable,
+**8.3.2** (published 2026-10-01T10:17:44.767Z), is younger than pnpm's `minimumReleaseAge`, and
+installing it would also move vitest's own `vite`, an unrequested bump (plan-notes 321).
+
+**The `stator()` plugin** (`src/plugin.ts`) makes `vite build` produce the binary:
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import { stator } from 'vite-stator';
+export default defineConfig({ plugins: [stator({ entry: 'src/main.js', out: 'dist/hello' })] });
+```
+
+It applies to `build` only. It points `build.ssr` at the entry with `write: false`, so Vite's own
+pass writes nothing, and keeps `node:*` and `std/*` external. In `closeBundle` it calls
+`statorc/api`'s `compile` with this adapter (`js` mode by default; `mode: 'ts'` builds with no
+bundler, as §0 requires) and fails the Vite build with Stator's diagnostics when the compile
+fails. `examples/vite` is the worked example.
+
+**A namespace import of a package does not compile yet.** The vendor entry's
+`export * as p$ns from 'p'` makes Rolldown emit its `__exportAll` helper
+(`Object.defineProperty` and `Symbol.toStringTag`: STA1214 and STA1212, measured through the
+adapter). That is T12.3's "dynamic-import namespace helpers" item, so the namespace golden moved
+to T12.3's Check (plan-notes 321).
 
 **What Rolldown output always contains.** Two things the contract cannot switch off, so
 Stator must lower them (T12.3):
@@ -365,14 +406,14 @@ list is what `vite-stator` hands Vite's watcher in dev, not moon.
   - the cache key (§7);
   - the `not-yet` diagnostic for `__filename`/`__dirname` without `--node` (§4, §9);
   - docs: `MODES.md` (packages and the order deviation), `HOW-IT-WORKS.md`, `pipeline.d2`.
-- **T12.2** (`packages/vite-stator`): §2's configuration, `esmExternalRequirePlugin`, and the
-  `stator()` Vite plugin.
+- **T12.2** (`packages/vite-stator`, implemented, plan-notes 321): §2's configuration,
+  `esmExternalRequirePlugin`, and the `stator()` Vite plugin.
 - **T12.3** (new): make Rolldown's output compile:
   - `var`/`let X = class {}`;
   - the interop helpers (§4 table);
   - the dynamic-import namespace helpers (`__esmMin`, `__exportAll`: `Object.defineProperty`,
     `Symbol.toStringTag`, zero-argument `Promise.resolve()`), measured in `dynamic_import`'s A
-    bundle;
+    bundle and in every namespace import of a package (T12.2, plan-notes 321);
   - `import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`);
   - a computed `export default` (`cjs_entry`).
 - **T11.5**: re-scoped per §4, plus the meaning of `__filename`/`__dirname` under `--node`.

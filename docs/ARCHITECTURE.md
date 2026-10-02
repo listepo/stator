@@ -59,6 +59,9 @@ Invariants:
 - **`node` is resolved, never imported** — under `--node` only, `frontend` maps `node:*` and the
   bare built-ins to `packages/node`'s sources (docs/MODES.md §6), strict TypeScript over `std/*`
   that compiles like any user module. Nothing in `packages/compiler` imports `packages/node`.
+- **`vite-stator` is loaded, never imported** — it imports `statorc/api` and `vite`; the compiler
+  loads it by module name (`--bundler=vite`, the `js`-mode default) only when a program imports a
+  package (docs/BUNDLER.md §5). Nothing in `packages/compiler` imports a bundler (plan §0.9).
 
 ## 4. Value flow at a type boundary (activity view)
 

@@ -6,3 +6,5 @@ packages:
   - packages/node
   - packages/std
   - packages/tests
+  - packages/vite-stator
+  - examples/vite
