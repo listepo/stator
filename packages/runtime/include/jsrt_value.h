@@ -216,6 +216,12 @@ jsrt_value jsrt_global_parse_float(jsrt_value string);
 jsrt_value jsrt_global_is_nan(jsrt_value v);
 jsrt_value jsrt_global_is_finite(jsrt_value v);
 
+/* `n.toString(radix)` and `n.toFixed(digits)` (§21.1.3): `number` is the receiver, a number; the
+ * argument is any value, JSRT_UNDEFINED when omitted. An out-of-range argument leaves Node's
+ * RangeError pending and answers undefined. */
+jsrt_value jsrt_number_to_string_radix(jsrt_value number, jsrt_value radix);
+jsrt_value jsrt_number_to_fixed(jsrt_value number, jsrt_value digits);
+
 /* ToBoolean: convert a jsrt_value to a boolean.
  * Falsy: false, +0, -0, NaN, undefined, null, empty string.
  * Truthy: everything else (including "0" and "false" as strings). */

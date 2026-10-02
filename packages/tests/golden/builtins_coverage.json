@@ -66,6 +66,30 @@
     "SQRT1_2": ["ts/math_builtins.ts"],
     "SQRT2": ["ts/math_builtins.ts"]
   },
+  "Number": {
+    "EPSILON": ["ts/number_methods.ts", "js/number_methods.js"],
+    "MAX_SAFE_INTEGER": ["ts/number_methods.ts", "js/number_methods.js"],
+    "MAX_VALUE": ["ts/number_methods.ts", "js/number_methods.js"],
+    "MIN_SAFE_INTEGER": ["js/number_methods.js"],
+    "MIN_VALUE": ["js/number_methods.js"],
+    "NaN": ["js/number_methods.js"],
+    "NEGATIVE_INFINITY": ["ts/number_methods.ts", "js/number_methods.js"],
+    "POSITIVE_INFINITY": ["js/number_methods.js"],
+    "isFinite": [],
+    "isInteger": [],
+    "isNaN": [],
+    "isSafeInteger": [],
+    "parseFloat": ["ts/number_methods.ts", "js/number_methods.js"],
+    "parseInt": ["ts/number_methods.ts", "js/number_methods.js"]
+  },
+  "Number.prototype": {
+    "toExponential": [],
+    "toFixed": ["ts/number_methods.ts", "js/number_methods.js"],
+    "toLocaleString": [],
+    "toPrecision": [],
+    "toString": ["ts/number_methods.ts", "js/number_methods.js"],
+    "valueOf": []
+  },
   "String.prototype": {
     "at": ["ts/string_at_concat.ts", "js/string_at_concat.js"],
     "charAt": ["ts/string_builtins.ts", "js/string_builtins.js"],

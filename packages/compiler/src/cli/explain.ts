@@ -631,7 +631,9 @@ function expressionHasUnknown(expr: Expression): boolean {
     // the top of this function has already answered.
     case 'match-read':
       return false;
+    // A field call loads its callee from a typed slot: only the operands can be dynamic.
     case 'method-call':
+    case 'field-call':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
     // Dynamic by construction: the receiver is Unknown, which the check at the top of this
     // function has already answered for the node itself; the arguments may add more.
@@ -682,6 +684,7 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expr.args.some(expressionHasUnknown);
     case 'array-op':
     case 'date-op':
+    case 'number-op':
     case 'string-op':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
     case 'iterator-next':

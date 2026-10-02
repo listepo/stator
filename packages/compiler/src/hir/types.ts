@@ -312,6 +312,21 @@ export function fieldSlot(t: HObject, name: string): number | undefined {
   return index === -1 ? undefined : index;
 }
 
+/** The slot of `name` on a layout whose field holds a callable value, or `undefined`. A
+ * module namespace is excluded: its fields are export slots, read by name rather than by
+ * offset, and an imported function is called directly before this point. Shared by the
+ * gate and the lowering, so the two admit exactly the same calls. */
+export function callableFieldSlot(type: HType, name: string): number | undefined {
+  if (type.kind !== 'object' || type.namespace === true) {
+    return undefined;
+  }
+  const field = type.fields.find((f) => f.name === name);
+  if (field === undefined || (field.type.kind !== 'fn' && field.type.kind !== 'unknown')) {
+    return undefined;
+  }
+  return fieldSlot(type, name);
+}
+
 export function methodOf(t: HObject, name: string): HField | undefined {
   return t.methods.find((m) => m.name === name);
 }

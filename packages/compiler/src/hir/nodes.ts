@@ -443,6 +443,24 @@ export interface DynMethodCall extends Node {
   readonly args: readonly Expression[];
 }
 
+/** `o.f(a)` where `o` has a layout and `f` is one of its FIELDS holding a closure -- an object
+ * literal's `{ f: () => …, g }` rather than a method (plan-notes 310).
+ *
+ * The callee loads from the field's slot (`slot`, as in a `FieldAccess`), and the call follows
+ * `DynMethodCall`'s receiver rule: the receiver becomes argument zero when -- and only when --
+ * the loaded closure declares one (docs/VALUE.md §4.16). That is what `o.f()` means: a plain
+ * `function` stored in a field sees `o` as `this`, an arrow ignores it, and a non-function
+ * field value aborts with `STA2006` exactly as an ordinary call does.
+ *
+ * `target` is the receiver and is NOT in `args`. */
+export interface FieldCall extends Node {
+  readonly kind: 'field-call';
+  readonly target: Expression;
+  readonly field: string;
+  readonly slot: number;
+  readonly args: readonly Expression[];
+}
+
 /** `o.m` — a method taken as a value, not called.
  *
  * The closure is the method's own, with `has_receiver` set so a later bare call shifts arguments
@@ -1816,6 +1834,23 @@ export interface TypedOp extends Node {
   readonly args: readonly Expression[];
 }
 
+/** `Number.prototype`'s landed methods (plan-notes 310): one runtime function each, the receiver
+ * first and the one argument padded with `undefined`, which both read as the spec's default
+ * (radix 10, zero digits). Both answer a string and may leave a RangeError pending. */
+export const NUMBER_OPS = {
+  toString: { fn: 'jsrt_number_to_string_radix' },
+  toFixed: { fn: 'jsrt_number_to_fixed' },
+} as const satisfies Record<string, { readonly fn: string }>;
+
+export type NumberOperation = keyof typeof NUMBER_OPS;
+
+export interface NumberOp extends Node {
+  readonly kind: 'number-op';
+  readonly op: NumberOperation;
+  readonly target: Expression;
+  readonly args: readonly Expression[];
+}
+
 export interface DateOp extends Node {
   readonly kind: 'date-op';
   readonly op: DateOperation;
@@ -2004,6 +2039,8 @@ export type Expression =
   | FieldAccess
   | MethodCall
   | DynMethodCall
+  | FieldCall
+  | NumberOp
   | MethodValue
   | ObjectLiteral
   | DynObjectLiteral

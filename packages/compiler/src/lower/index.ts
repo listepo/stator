@@ -34,6 +34,7 @@ import {
   PROMISE_STATICS,
 } from '../frontend/gate.ts';
 import { globalFunctionOf, globalTypeofOf, isGlobalArray } from '../frontend/gate.ts';
+import { numberConstant } from '../frontend/gate.ts';
 import type { GlobalFunction } from '../frontend/gate.ts';
 import {
   classReferenceTuple,
@@ -112,6 +113,7 @@ import type {
   ConsoleLogCall,
   ConsoleMethod,
   DateOperation,
+  NumberOperation,
   DateStatic,
   Declaration,
   DynEntry,
@@ -123,6 +125,7 @@ import type {
   OutGet,
   OutNew,
   FieldAccess,
+  FieldCall,
   FunctionDeclaration,
   FunctionExpr,
   FunctionLength,
@@ -167,6 +170,7 @@ import {
   ARRAY_OPS,
   CONSOLE_METHODS,
   DATE_OPS,
+  NUMBER_OPS,
   DATE_STATICS,
   errorHType,
   externKindHType,
@@ -188,6 +192,7 @@ import type { HField, HObject, HType } from '../hir/types.ts';
 import {
   accessorName,
   accessorProperty,
+  callableFieldSlot,
   fieldSlot,
   H_BOOLEAN,
   H_NUMBER,
@@ -4782,6 +4787,14 @@ function lowerExpression(
       value: constants[node.name.text] ?? Number.NaN,
     };
   }
+  // `Number.MAX_VALUE` and the other Number constants fold the same way (plan-notes 310).
+  const numberValue = ts.isPropertyAccessExpression(node)
+    ? numberConstant(node, checker)
+    : undefined;
+  if (numberValue !== undefined) {
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    return { kind: 'number-literal', type: H_NUMBER, span, value: numberValue };
+  }
 
   // `c?.m` on a nullable single-class receiver: the static twin of the dynamic read below.
   // Without it the union maps to Unknown and the shape-table read misses (methods live in no
@@ -6561,6 +6574,19 @@ function lowerExpression(
         };
       }
 
+      // `n.toString(radix)` and `n.toFixed(digits)` (plan-notes 310): the one argument padded
+      // with `undefined`, which the runtime reads as the spec's default.
+      if (receiverType.kind === 'number' && Object.hasOwn(NUMBER_OPS, propName)) {
+        const prologue = lowerReceiverCall(obj, node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
+          return null;
+        }
+        const { target, span } = prologue;
+        const op = propName as NumberOperation;
+        const args = padToArity(prologue.args, 1, span);
+        return { kind: 'number-op', type: H_STRING, span, op, target, args };
+      }
+
       // The landed `Date.prototype` surface, on the string ops' padding discipline and for the
       // same reason: every setter's spec text reads an omitted trailing component exactly as it
       // reads an explicitly-passed undefined. The result type comes from the table.
@@ -7046,9 +7072,56 @@ function lowerExpression(
   return null;
 }
 
+/** The two calls whose callee loads off the receiver at run time. */
+type ReceiverCall = DynMethodCall | FieldCall;
+
+/** `o.m(a)` where `o`'s HIR type is Unknown, or `o.f(a)` where `f` is a layout FIELD holding a
+ * closure (`FieldCall`, plan-notes 310).
+ *
+ * `undefined` means "not this shape" and the ordinary call path applies; `null` means a
+ * diagnostic was pushed. Every typed receiver took a specialized arm before this point, so a
+ * receiver that still has a layout here is a field holding a closure; the two calls differ only
+ * in where the callee loads from. `super` and match receivers are excluded the same way: neither
+ * is a shape-table read. */
+function lowerDynMethodCall(
+  node: ts.CallExpression,
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): ReceiverCall | null | undefined {
+  if (!ts.isPropertyAccessExpression(expr)) {
+    return undefined;
+  }
+  const obj = expr.expression;
+  if (obj.kind === ts.SyntaxKind.SuperKeyword || isMatchReceiver(obj, checker)) {
+    return undefined;
+  }
+  const receiver = typeAt(obj, checker, bindings);
+  const slot = callableFieldSlot(receiver, expr.name.text);
+  if (receiver.kind !== 'unknown' && slot === undefined) {
+    return undefined;
+  }
+  const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+  if (target === null) {
+    return null;
+  }
+  const args = lowerCallArguments(node, sourceFile, checker, bindings, diagnostics);
+  if (args === null) {
+    return null;
+  }
+  const type = typeAt(node, checker, bindings);
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const field = expr.name.text;
+  return slot === undefined
+    ? { kind: 'dyn-method-call', type, span, target, method: field, args }
+    : { kind: 'field-call', type, span, target, field, slot, args };
+}
+
 /** A call's arguments, lowered left to right: spread elements as expressions, generic arguments
- * as their specializations, everything else ordinarily. Shared by the ordinary call above and
- * the dynamic method call below, whose arguments are the same list. */
+ * as their specializations, everything else ordinarily. Shared by the ordinary call and
+ * the receiver calls above, whose arguments are the same list. */
 function lowerCallArguments(
   node: ts.CallExpression,
   sourceFile: ts.SourceFile,
@@ -7088,49 +7161,6 @@ function lowerCallArguments(
     args.push(lowered);
   }
   return args;
-}
-
-/** `o.m(a)` where `o`'s HIR type is Unknown.
- *
- * `undefined` means "not this shape" and the ordinary call path applies; `null` means a
- * diagnostic was pushed. Every typed receiver took a specialized arm before this point, so a
- * receiver that still has a layout here is a field holding a closure -- which the gate refuses
- * -- and only Unknown arrives. `super` and match receivers are excluded the same way: neither
- * is a shape-table read. */
-function lowerDynMethodCall(
-  node: ts.CallExpression,
-  expr: ts.Expression,
-  sourceFile: ts.SourceFile,
-  checker: ts.TypeChecker,
-  bindings: Scope,
-  diagnostics: Diagnostic[],
-): DynMethodCall | null | undefined {
-  if (!ts.isPropertyAccessExpression(expr)) {
-    return undefined;
-  }
-  const obj = expr.expression;
-  if (obj.kind === ts.SyntaxKind.SuperKeyword || isMatchReceiver(obj, checker)) {
-    return undefined;
-  }
-  if (typeAt(obj, checker, bindings).kind !== 'unknown') {
-    return undefined;
-  }
-  const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
-  if (target === null) {
-    return null;
-  }
-  const args = lowerCallArguments(node, sourceFile, checker, bindings, diagnostics);
-  if (args === null) {
-    return null;
-  }
-  return {
-    kind: 'dyn-method-call',
-    type: typeAt(node, checker, bindings),
-    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-    target,
-    method: expr.name.text,
-    args,
-  };
 }
 
 /** How V8 spells a non-function callee (verified against the pinned Node): a nameable

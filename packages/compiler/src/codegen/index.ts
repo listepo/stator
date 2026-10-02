@@ -18,6 +18,7 @@ import type {
   DateComponents,
   DateNew,
   DateOp,
+  NumberOp,
   DateStaticCall,
   GlobalCall,
   DeleteProp,
@@ -25,6 +26,7 @@ import type {
   DynFieldAccess,
   DynFieldAssignment,
   DynMethodCall,
+  FieldCall,
   DynObjectLiteral,
   EnvCapture,
   ErrorNew,
@@ -73,6 +75,7 @@ import {
   consoleEntryPoint,
   isConsoleVariadicWidth,
   DATE_OPS,
+  NUMBER_OPS,
   DATE_STATICS,
   GLOBAL_CALLS,
   errorDescriptor,
@@ -522,10 +525,12 @@ type CallSlotted =
   | DateComponents
   | DateNew
   | DateOp
+  | NumberOp
   | DateStaticCall
   | GlobalCall
   | DynMethodCall
   | DynObjectLiteral
+  | FieldCall
   | ErrorNew
   | ExternCall
   | MathCall
@@ -2103,9 +2108,11 @@ class Emitter {
       case 'new':
       case 'method-call':
       case 'dyn-method-call':
+      case 'field-call':
         this.callSlots.set(expr, this.slotCount);
-        this.slotCount += (expr.kind === 'dyn-method-call' ? 2 : 1) + expr.args.length;
-        if (expr.kind === 'method-call' || expr.kind === 'dyn-method-call') {
+        this.slotCount +=
+          (expr.kind === 'method-call' || expr.kind === 'new' ? 1 : 2) + expr.args.length;
+        if (expr.kind !== 'new') {
           this.countExpression(expr.target);
         }
         for (const arg of expr.args) {
@@ -2244,6 +2251,7 @@ class Emitter {
       case 'array-op':
       case 'collection-op':
       case 'date-op':
+      case 'number-op':
       case 'regexp-op':
       case 'string-op':
         this.countRooted(expr, expr.target, expr.args);
@@ -4281,19 +4289,26 @@ class Emitter {
       // when -- the loaded closure declares one (`has_receiver`, docs/VALUE.md §4.16). A
       // non-function callee panics exactly as an ordinary `call` does (`STA2006` with the site's
       // `file:line`).
-      case 'dyn-method-call': {
+      // A field call is the same call with the callee loaded from its slot rather than through
+      // the shape table: a slot load cannot throw, so no pending check follows it.
+      case 'dyn-method-call':
+      case 'field-call': {
         const base = this.callSlots.get(expr);
         if (base === undefined) {
-          throw new Error('dynamic method call was not registered during counting');
+          throw new Error(`${expr.kind} was not registered during counting`);
         }
         const method = this.slotAt(base + 1 + expr.args.length);
         const parts: string[] = [];
         this.beginCall(parts, expr.target, expr.args, expr.span, base);
         parts.push(
-          `${method} = jsrt_get_prop(${this.slotAt(base)}, ${cNameLiteral(expr.method)}, &${this.icSite()})`,
+          expr.kind === 'field-call'
+            ? `${method} = jsrt_object_get_field(${this.slotAt(base)}, ${expr.slot}, ${cNameLiteral(expr.field)})`
+            : `${method} = jsrt_get_prop(${this.slotAt(base)}, ${cNameLiteral(expr.method)}, &${this.icSite()})`,
         );
         this.flushParts(parts, expr.span);
-        this.emitPendingCheck(expr.span);
+        if (expr.kind === 'dyn-method-call') {
+          this.emitPendingCheck(expr.span);
+        }
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);
         const withReceiver = `jsrt_call_at(${method}, ${String(1 + expr.args.length)}, &${this.slotAt(base)}, ${loc})`;
@@ -4791,6 +4806,7 @@ class Emitter {
       case 'collection-op':
       case 'array-op':
       case 'date-op':
+      case 'number-op':
       case 'regexp-op':
       case 'string-op': {
         const base = this.callSlots.get(expr);
@@ -4834,16 +4850,18 @@ class Emitter {
               ? collectionCall(expr.op, expr.collection, operands)
               : expr.kind === 'date-op'
                 ? `${DATE_OPS[expr.op].fn}(${operands})`
-                : expr.kind === 'regexp-op'
-                  ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
-                    // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
-                    // `exec` already answers a value: the match array, or null.
-                    REGEXP_OPS[expr.op].result === 'boolean'
-                    ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
-                    : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
-                  : expr.kind === 'array-op'
-                    ? this.arrayOpCall(expr, base)
-                    : `jsrt_string_${snakeCase(expr.op)}(${operands})`;
+                : expr.kind === 'number-op'
+                  ? `${NUMBER_OPS[expr.op].fn}(${operands})`
+                  : expr.kind === 'regexp-op'
+                    ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
+                      // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
+                      // `exec` already answers a value: the match array, or null.
+                      REGEXP_OPS[expr.op].result === 'boolean'
+                      ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
+                      : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
+                    : expr.kind === 'array-op'
+                      ? this.arrayOpCall(expr, base)
+                      : `jsrt_string_${snakeCase(expr.op)}(${operands})`;
         // An op that calls back into compiled code can throw, so it gets its own STATEMENT and a
         // pending check -- the same discipline `call` follows, and for the same reason: the check
         // has to sit between the op and whatever consumes its result, which a comma expression
@@ -4855,6 +4873,7 @@ class Emitter {
           expr.kind === 'array-op' ||
           (expr.kind === 'collection-op' && expr.op === 'forEach') ||
           (expr.kind === 'date-op' && expr.op === 'toISOString') ||
+          expr.kind === 'number-op' ||
           (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
         return this.finishOp(parts, base, opCall, expr.span, flushed, canThrow);
       }

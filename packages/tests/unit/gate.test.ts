@@ -278,6 +278,34 @@ test('the global functions land as callees only, each refused by name otherwise'
   );
 });
 
+test('a function-valued field is callable through its object', () => {
+  // plan-notes 310: an arrow, a function expression and a shorthand function in a literal.
+  assert.deepEqual(
+    codesFor(
+      'function f(): number {\n  return 1;\n}\nconst o = { f, g: (x: number): number => x, h: function (): void {} };\nconsole.log(o.f(), o.g(2));\no.h();',
+    ),
+    [],
+  );
+  // A number-typed field is read, then its own method called: no field call involved.
+  assert.deepEqual(codesFor('const o = { n: 1 };\nconsole.log(o.n.toFixed(1));'), []);
+});
+
+test('Number methods, statics and constants land by name; the rest are refused by name', () => {
+  assert.deepEqual(
+    codesFor('const n: number = 255;\nconsole.log(n.toString(16), n.toFixed(2), n.toString());'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('console.log(Number.parseInt("8"), Number.parseFloat("1"), Number.MAX_VALUE);'),
+    [],
+  );
+  assert.deepEqual(codesFor('const n: number = 1;\nconsole.log(n.toPrecision(2));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(Number.isInteger(1));'), ['STA1214']);
+  assert.deepEqual(codesFor('const n: number = 1;\nconst f = n.toFixed;\nconsole.log(f);'), [
+    'STA1214',
+  ]);
+});
+
 test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is shared', () => {
   const chain = `class A {\n  n = 1;\n  m(): number {\n    return this.n;\n  }\n}\n`;
   assert.deepEqual(

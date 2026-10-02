@@ -10530,6 +10530,61 @@ The card is edited to say so and to carry the new baseline and the family order.
 - The Test262 harness went from 21 refusals to 17, with no globals left. The module-code pass
   count does not move until families 2–4 land.
 
+**Family 2 landed: method calls on inferred shapes** (same day). Most of the 403 refusals were not
+methods at all. In `_tsc.js` they are calls of a function-valued property of an object literal
+(`host.getCurrentDirectory()`, `state.reportDiagnostic(…)`), and in TypeScript's shape model that is
+a FIELD holding a closure, not a method. The gate only accepted a name in the shape's `methods`. What
+changed:
+- A call `o.f(…)` whose receiver is an object shape with a field `f` typed as a function (or
+  Unknown) lowers to a new HIR node, `field-call`. It is the dynamic method call with the callee
+  read from the field's slot (`jsrt_object_get_field`) instead of through the shape table, and it
+  passes the receiver as `this` exactly as `dyn-method-call` does (`has_receiver`, docs/VALUE.md
+  §4.16). One predicate, `callableFieldSlot` in `hir/types.ts`, answers for both the gate and the
+  lowering. A field of any other type (`o.n()` with `n: number`) stays not-yet: Node would throw a
+  TypeError the runtime does not raise yet.
+- `Number.prototype.toString(radix)` and `toFixed(digits)` are a new HIR node, `number-op`
+  (`NUMBER_OPS`, verifier `STA4103`), over two C entry points in a new
+  `runtime/src/jsrt_number_methods.c`. Radix 10 is ToString. Other radices port V8's
+  `DoubleToRadixCString`, because the spec leaves the digits implementation-defined and Node
+  prints V8's. `toFixed` rounds the exact decimal value half-up (§21.1.3.3), which printf's
+  half-even does not. Out-of-range arguments throw Node's RangeError with Node's message. They are
+  C, not Zig, for the reason family 1's entry points are: stack buffers and one result string, and
+  nothing platform-specific (golden rule 9). They sit in their own file because adding
+  `jsrt.h`/`stdio.h` to `jsrt_numeric.c`'s include block changed the text of two baseline clones.
+- `Number.parseInt`/`Number.parseFloat` are the global functions and lower to family 1's
+  `global-call`. The eight `Number.*` constants fold to literals, like `Math.PI`. Every other
+  `Number` static and number method is refused by name.
+- A shared gate helper, `calleeOnlyMember`, replaced twelve copies of the "using … as a value"
+  refusal. With the moves above, `jscpd` shrank by 6 fingerprints (207 → 201) and
+  `.jscpd-baseline.json` shrinks with it.
+
+**Evidence** (this branch, Node 26.7.0):
+- Goldens `ts/field_calls`, `js/field_calls` (argument order, `this` through a function field,
+  nested receivers, a reassigned field, closures over counters), `ts/number_methods` and
+  `js/number_methods` (edge values, every radix, every RangeError) match Node byte for byte.
+- A 20 000-line differential, 400 random doubles × radices 2..36 × 15 `toFixed` digit counts,
+  matched Node byte for byte.
+- Decision fixtures `subset_field_call_*` and `subset_number_*` in both modes; two gate unit tests.
+- `_tsc.js` (same command): 1 112 diagnostics — 1 066 `STA1214`, 45 `STA0012`, 1 `STA1210`
+  (−390). Method-call refusals fell from 403 to 19. The spread refusals rose from 92 to 95: three
+  calls that had been refused as method calls now reach their spread argument.
+- Self-compilation: `STA1214` 1648 → 1642, recorded with `--update`.
+- The Test262 harness is still at 17 refusals. Its 4 method calls (`assert._toString(…)`,
+  `assert.sameValue(…)`, `Object.prototype.toString.call(…)`) are calls on a function object whose
+  properties are assigned later, so they move with families 3 and 4.
+
+**Not covered.**
+- The 19 method calls left: `.call`/`.apply` on a function (13: `hasOwnProperty.call` 10,
+  `Function.prototype.toString.call`, `_a.call`, `String.fromCharCode.apply`), static calls on a
+  class expression (`VersionRange.tryParse` 3, family 9), and 3 calls whose receiver the checker
+  types as possibly `undefined`. They go to the singletons in step 9.
+- A pre-existing internal error, also on main: `this.name.toUpperCase()` inside an object-literal
+  `function` expression aborts the build with `STA4081` (a `string-op` lowered on an Unknown
+  receiver), whether or not the function is called. The golden avoids it.
+- A dynamic method call on an Unknown receiver that holds a string (`text.slice(1)` with `text`
+  untyped) panics with `STA2006` at run time, also on main: the shape-table read finds no function
+  on a string. The goldens type such receivers with JSDoc.
+
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
 
 **Trigger.** The creator's priority change: the T11.3 byte channel (plan-notes 309 step 1) cost
