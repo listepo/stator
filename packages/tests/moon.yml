@@ -57,6 +57,11 @@ tasks:
       runFromWorkspaceRoot: true
     deps:
       - 'runtime:build'
+  node-coverage:
+    script: 'node packages/tests/golden/node-coverage.ts --check'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
   runtime-corpus:
     script: 'just -f packages/runtime/justfile -d packages/runtime runtime-test'
     toolchain: 'system'
@@ -99,6 +104,7 @@ tasks:
       - 'tests:subset'
       - 'tests:golden'
       - 'tests:builtins'
+      - 'tests:node-coverage'
       - 'tests:leak'
       - 'tests:asan'
       - 'tests:ffi'

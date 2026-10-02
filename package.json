@@ -27,8 +27,11 @@
     "runtime": "just -f packages/runtime/justfile -d packages/runtime runtime",
     "vendor:update": "node packages/runtime/vendor/update.mjs",
     "dupes": "cpd .",
-    "ci": "node scripts/check-node.mjs && pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run runtime && pnpm run test && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:leak && pnpm run test:asan",
-    "test:builtins": "node packages/tests/golden/builtins.ts"
+    "dupes:baseline": "cpd . --update-baseline",
+    "ci": "node scripts/check-node.mjs && pnpm run typecheck && pnpm run lint && pnpm run dupes && pnpm run runtime && pnpm run test && pnpm run test:runtime && pnpm run test:subset && pnpm run test:golden && pnpm run test:builtins && pnpm run test:node-coverage && pnpm run test:leak && pnpm run test:asan",
+    "test:builtins": "node packages/tests/golden/builtins.ts",
+    "docs:node": "node packages/tests/golden/node-coverage.ts",
+    "test:node-coverage": "node packages/tests/golden/node-coverage.ts --check"
   },
   "devDependencies": {
     "@opentelemetry/api": "1.9.1",

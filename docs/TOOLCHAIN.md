@@ -14,7 +14,7 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | oxlint                    | `1.82.0` (exact)   | `devDependencies`                                                                                                                                                                                                                |
 | oxlint-tsgolint           | `7.0.2001` (exact) | `devDependencies`. The type-aware backend `oxlint --type-aware` runs through (plan-notes 224).                                                                                                                                   |
 | oxfmt                     | `0.67.0` (exact)   | `devDependencies`                                                                                                                                                                                                                |
-| cpd (copy/paste detector) | `5.0.16` (exact)   | `devDependencies`                                                                                                                                                                                                                |
+| cpd (copy/paste detector) | `5.3.0` (exact)    | `devDependencies`. `.jscpd.json`: our source only (tests, vendor, docs excluded), identifier-insensitive, AI reporter; fails on any clone not in `.jscpd-baseline.json` (AGENTS.md golden rule 10) |
 | vitest                    | `5.0.3` (exact)    | `devDependencies` (root + `packages/tests`). Unit-test runner; `--changed` runs only the tests a diff reaches (plan-notes 285).                                                                                                  |
 | c8                        | `12.0.0` (exact)   | `devDependencies`. `test:coverage`: V8 coverage across vitest workers and every CLI subprocess (plan-notes 285).                                                                                                                 |
 | pnpm                      | `12.3.4`           | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml`                                                                                                                                                               |
@@ -85,6 +85,20 @@ builtins inline across the archive boundary. ld64 and lld read bitcode archives;
 LLVMgold plugin, and without it the probe fails and the archive is plain objects, reported on the
 recipe's status line. Sanitized builds never use LTO. A probe result or Boehm status that differs
 from the last build rebuilds every object (`packages/runtime/build*/cflags.txt`).
+
+## CI stages (`.github/workflows/ci.yml`)
+
+CI runs in two stages (plan-notes 292):
+
+1. **Stage 1, Linux only:** `static analysis` (typecheck, `lint` = oxlint `--deny-warnings` + oxfmt
+   check, `dupes`) and `frontend (linux/x64)` (subset tests, runtime archive, unit tests **with
+   coverage**; uploads the `coverage-lcov` artifact). This is the only job that collects coverage.
+2. **Stage 2, Windows and macOS:** `frontend-desktop` (macOS and Windows, plain `pnpm run test`),
+   plus the `-macos` twins of `runtime`, `asan`, `intl` and `ffi`. Each has
+   `needs: [static, frontend-coverage]`, so none starts unless every stage-1 job passed.
+
+Other Linux jobs (`test262`, Linux arm64 `frontend`, Linux `runtime`/`asan`/`intl`/`ffi`) belong to
+neither stage and run ungated, in parallel with stage 1.
 
 ## Compile-time opt level (`STATOR_OPT` / `--opt`)
 

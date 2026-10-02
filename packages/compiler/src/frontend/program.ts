@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
-import { diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
+import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -477,6 +477,30 @@ export function createProgram(
   return createProgramUncached(entryFile, mode, host);
 }
 
+/** `ts.getPreEmitDiagnostics`, with the checker's stack overflow named as STA0013 instead of
+ * falling through to the CLI's STA4072 catch-all. TypeScript infers an unannotated return type on
+ * demand, nesting one inference (about thirty JS frames) per link, and re-enters functions whose
+ * inference is still in progress. A long enough chain exhausts the default V8 stack: TypeScript
+ * 6.0.3's own `_tsc.js` in js mode peaks at 360 nested inferences, and plain `tsc` dies on it too
+ * (plan-notes 287, which also measures why no order of pre-computing return types bounds it). The
+ * checker's state is unusable after the throw, so this ends the build rather than skipping files.
+ * Matched on the call-stack message so any other RangeError stays a compiler bug. */
+function preEmitDiagnostics(program: ts.Program): readonly ts.Diagnostic[] {
+  try {
+    return ts.getPreEmitDiagnostics(program);
+  } catch (error) {
+    if (error instanceof RangeError && /call stack/i.test(error.message)) {
+      throw new BuildError(
+        'STA0013',
+        'the TypeScript checker ran out of stack type-checking this program (plain `tsc` fails on ' +
+          'it too) — return-type annotations on long chains of functions that infer their return ' +
+          'types from each other shorten its inference',
+      );
+    }
+    throw error;
+  }
+}
+
 function createProgramUncached(
   entryFile: string,
   mode: Mode,
@@ -584,7 +608,7 @@ function createProgramUncached(
   const runtimeDynamicSymbols = new Set<ts.Symbol>();
 
   // Surface TypeScript's own diagnostics as Stator diagnostics
-  const tsDiagnostics = ts.getPreEmitDiagnostics(program);
+  const tsDiagnostics = preEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
     // Duplicate `__proto__` data properties are the one 1117 js mode keeps: an early
     // SyntaxError (spec B.3.1), not last-wins JavaScript — see isDuplicateProtoDataProperty.

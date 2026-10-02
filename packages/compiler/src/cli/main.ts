@@ -64,8 +64,9 @@ Flags:
   explain: `Usage:
   stator explain <entry> [--mode=ts|js] [--json]
 
-Reports the verdict per construct: static | dynamic | error | not-yet,
-with the STA code. A rejected program still exits 0 — the verdict is
+Reports the file verdict: static | dynamic | error | not-yet, with the
+STA code and every diagnostic that decided it, then the static/dynamic
+split per function. A rejected program still exits 0 — the verdict is
 the answer, so a refusal is a result, not a crash.
 
 Flags:
@@ -325,11 +326,9 @@ async function main(): Promise<void> {
       return;
     }
     // Everything else is a compiler bug, and the contract for one is a diagnostic -- never a raw
-    // Node stack trace (AGENTS.md: "A thrown exception reaching the CLI is a compiler bug"). It is
-    // reachable rather than theoretical: the TypeScript checker recurses without a depth guard, so
-    // `var yield` plus a generator method with `[yield]` as its computed key overflows the stack
-    // inside `getSemanticDiagnostics` -- plain `tsc` dies on the same file. Stator cannot fix
-    // upstream, and it must not pretend the input was fine either; naming the crash is the honest
+    // Node stack trace (AGENTS.md: "A thrown exception reaching the CLI is a compiler bug"). The
+    // TypeScript checker's own stack overflow does not land here: `createProgram` names it STA0013,
+    // because plain `tsc` dies on the same input (plan-notes 287). Naming the crash is the honest
     // answer, and the message asks for the input so the next step can be a real fix.
     await print(
       [

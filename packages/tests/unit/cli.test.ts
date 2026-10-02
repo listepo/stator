@@ -320,6 +320,36 @@ test('a fully JSDoc-annotated .js module has file verdict static', async () => {
   }
 });
 
+test('explain lists every diagnostic of the deciding stage, in source order', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-explain-all-'));
+  try {
+    const entry = join(work, 'many.ts');
+    // Written out of order on purpose: the report sorts by position, not by discovery.
+    writeFileSync(entry, 'let b: any = 2;\nlet a: any = 1;\nconsole.log(a, b);\n');
+    const [json, human] = await Promise.all([
+      stator('explain', entry, '--json'),
+      stator('explain', entry),
+    ]);
+    assert.equal(json.status, 0, json.stderr);
+    const report: unknown = JSON.parse(json.stdout);
+    assert.ok(typeof report === 'object' && report !== null);
+    assert.ok('diagnostics' in report && Array.isArray(report.diagnostics));
+    assert.deepEqual(
+      report.diagnostics.map((d: unknown) =>
+        typeof d === 'object' && d !== null && 'code' in d && 'line' in d ? [d.code, d.line] : d,
+      ),
+      [
+        ['STA1001', 1],
+        ['STA1001', 2],
+      ],
+    );
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /STA1001 x2/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not tsc's allowJs error", async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-js-under-ts-'));
   try {
@@ -333,7 +363,12 @@ test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not ts
       stator('build', entry, '-o', join(work, 'out')),
     ]);
     assert.equal(explained.status, 0, explained.stderr);
-    assert.deepEqual(JSON.parse(explained.stdout), { verdict: 'error', code: 'STA1002' });
+    const report: unknown = JSON.parse(explained.stdout);
+    assert.ok(typeof report === 'object' && report !== null && 'diagnostics' in report);
+    assert.deepEqual(
+      { ...report, diagnostics: undefined },
+      { verdict: 'error', code: 'STA1002', diagnostics: undefined },
+    );
 
     // The hint has to come from the CLI path, not the in-memory host: tsc used to DROP the .js
     // file and answer STA0012 "enable the allowJs option", which is the wrong code and the wrong
@@ -349,11 +384,12 @@ test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not ts
   }
 });
 
-test('an exception inside the checker is STA4072, not a Node stack trace', async () => {
+test('a stack overflow inside the checker is STA0013, not a Node stack trace', async () => {
   // `var yield` plus a generator method whose computed key is `[yield]` makes the TypeScript
   // checker recurse without a depth guard until the JS stack is gone (upstream: `tsc` 6.0.3 dies on
   // the same file, Test262's generator-prop-name-yield-expr.js). Stator cannot fix that, but
-  // AGENTS.md is unambiguous about what a user sees instead: a stable STA code, never a traceback.
+  // AGENTS.md is unambiguous about what a user sees instead: a stable STA code, never a traceback
+  // -- and not STA4072, which would call it a Stator bug (plan-notes 287).
   const work = mkdtempSync(join(tmpdir(), 'stator-checker-crash-'));
   try {
     const entry = join(work, 'entry.js');
@@ -370,8 +406,7 @@ test('an exception inside the checker is STA4072, not a Node stack trace', async
     );
     const { status, stderr } = await stator('build', entry, '-o', join(work, 'out'), '--mode=js');
     assert.equal(status, 1);
-    assert.match(stderr, /^stator: STA4072 internal error: /);
-    assert.match(stderr, /compiler bug/);
+    assert.match(stderr, /^stator: STA0013 the TypeScript checker ran out of stack/);
     assert.doesNotMatch(stderr, /typescript\.js/, 'the upstream frame must not leak');
     assert.doesNotMatch(stderr, /\n\s+at /, 'diagnostics must never leak a stack trace');
   } finally {
@@ -379,7 +414,38 @@ test('an exception inside the checker is STA4072, not a Node stack trace', async
   }
 });
 
-test('an in-process build whose checker overflows is BuildError STA4072, not a throw', async () => {
+test('a long chain of inferred return types is STA0013 from explain, not STA4072', async () => {
+  // The terminating shape behind TypeScript 6.0.3's `_tsc.js` (plan-notes 286, 287): the checker
+  // infers `f0`'s return type from `f1`'s, and so on, one nested inference per link. 600 links
+  // overflow the default stack (plain `tsc` too); 3000 keeps the margin wide. A JSDoc return type
+  // every few hundred links cuts the chain, which is what STA0013's message tells the user.
+  const work = mkdtempSync(join(tmpdir(), 'stator-checker-chain-'));
+  try {
+    const links = 3000;
+    const chain = (annotateEvery: number): string => {
+      let text = '';
+      for (let i = 0; i < links; i++) {
+        if (i % annotateEvery === 0) text += '/** @returns {number} */\n';
+        text += `function f${String(i)}(x) { return f${String(i + 1)}(x); }\n`;
+      }
+      return `${text}function f${String(links)}(x) { return x; }\nconsole.log(f0(1));\n`;
+    };
+    const entry = join(work, 'chain.js');
+    writeFileSync(entry, chain(links));
+    const overflowed = await stator('explain', entry, '--mode=js', '--json');
+    assert.equal(overflowed.status, 1);
+    assert.match(overflowed.stderr, /^stator: STA0013 /);
+    assert.doesNotMatch(overflowed.stderr, /STA4072/);
+
+    writeFileSync(entry, chain(200));
+    const annotated = await stator('explain', entry, '--mode=js', '--json');
+    assert.equal(annotated.status, 0, annotated.stderr);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('an in-process build whose checker overflows is BuildError STA0013, not a throw', async () => {
   // Same crashing construct as the CLI test above, through the path the Test262 runner uses:
   // `build()` in-process never passes through `main()`'s catch-all, so without `compileToC`'s own
   // guard the RangeError escapes, kills the shard, and no artifact is uploaded.
@@ -401,9 +467,8 @@ test('an in-process build whose checker overflows is BuildError STA4072, not a t
       build({ entry, out: join(work, 'out'), mode: 'js', emitCOnly: false, keepC: false }),
       (error: unknown) => {
         assert.ok(error instanceof BuildError);
-        assert.equal(error.code, 'STA4072');
-        assert.match(error.message, /^internal error: /);
-        assert.match(error.message, /compiler bug/);
+        assert.equal(error.code, 'STA0013');
+        assert.match(error.message, /^the TypeScript checker ran out of stack/);
         assert.doesNotMatch(error.message, /typescript\.js/, 'the upstream frame must not leak');
         return true;
       },

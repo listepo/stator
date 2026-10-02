@@ -31,6 +31,15 @@ concurrency:
 #   test:asan   -> asan (STATOR_ASAN_FORCE=1 in CI: always the full pass, never the hash skip)
 #   test:ffi    -> ffi
 #
+# Two stages (owner request): stage 1 is Linux-only and cheap to fail -- `static` (lint, format,
+# typecheck, dupes) plus `frontend (linux/x64)` (subset + unit tests WITH coverage, the lcov owner).
+# Stage 2 is every Windows and macOS job (`frontend-desktop`, `runtime-macos`, `asan-macos`,
+# `intl-macos`, `ffi-macos`); each has `needs: [static, frontend-coverage]`, so nothing starts on a
+# macOS/Windows runner until stage 1 is green, and none of them collects coverage. The remaining
+# Linux jobs (test262, linux/arm64 frontend, linux runtime/asan/intl/ffi) are not part of either
+# stage: they stay ungated and run alongside stage 1, so a slow conformance run never delays
+# the desktop platforms and a red desktop run never hides a Linux result.
+#
 # Plus `test:intl`, which is deliberately NOT part of `pnpm run ci` (the ICU feature build is off by
 # default, plan.md Task 4.4) and therefore had no coverage at all until this job existed.
 # Same for `test:ffi`: it needs clang and the built archive, so it lives in its own job and in
@@ -102,8 +111,8 @@ jobs:
         if: always()
         run: grep '^test262:' test262.log >> "$GITHUB_STEP_SUMMARY" || true
 
-  # Host-independent by construction: no native code, no filesystem semantics, no clang. Running
-  # these six times would prove the same thing six times.
+  # STAGE 1. Host-independent by construction: no native code, no filesystem semantics, no clang.
+  # Running these six times would prove the same thing six times.
   static:
     name: static analysis
     runs-on: ubuntu-24.04
@@ -115,30 +124,21 @@ jobs:
       - run: pnpm run lint
       - run: pnpm run dupes
 
-  # The compiler itself, which is portable TypeScript -- so this is the half of the suite Windows
-  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: a formatter check
-  # would be arguing with git's line-ending translation, not with the code.
-  frontend:
-    name: frontend (${{ matrix.platform }}/${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { platform: linux, arch: x64, os: ubuntu-24.04 }
-          - { platform: linux, arch: arm64, os: ubuntu-24.04-arm }
-          - { platform: macos, arch: x64, os: macos-15-intel }
-          - { platform: macos, arch: arm64, os: macos-14 }
-          - { platform: windows, arch: x64, os: windows-2025 }
-          - { platform: windows, arch: arm64, os: windows-11-arm }
-    runs-on: ${{ matrix.os }}
+  # STAGE 1. The compiler itself on linux/x64, which owns coverage: it builds the runtime archive,
+  # so native-only unit tests actually run, and one platform is enough for the lcov artifact.
+  # Keeps the check name `frontend (linux/x64)` it had as a matrix entry.
+  frontend-coverage:
+    name: frontend (linux/x64)
+    runs-on: ubuntu-24.04
     steps:
       - *checkout
-      - uses: extractions/setup-just@v4
-        if: runner.os != 'Windows'
+      - &setup-just
+        uses: extractions/setup-just@v4
         with:
           just-version: '1.58.0'
       - *setup
-      - name: Record toolchain
+      - &record-toolchain
+        name: Record toolchain
         shell: bash
         run: |
           node --version
@@ -147,48 +147,84 @@ jobs:
       - *pnpm-install
       - run: pnpm run typecheck
       - run: pnpm run test:subset
-      # A handful of unit tests compile and execute a native binary, so they need the archive the
-      # Unix justfile builds. Windows has no such toolchain, so those tests skip THEMSELVES there
-      # (`NATIVE_ONLY` in tests/unit/helpers.ts) and the rest of the file still runs -- which is
-      # why unit tests below are unconditional and only this build step is gated.
-      # linux/x64 is the coverage owner: it has the runtime archive, so native-only tests
-      # actually run, and one platform is enough for the lcov artifact.
       - name: Build runtime archive
-        if: runner.os != 'Windows'
         run: pnpm run runtime
       - name: Unit tests with coverage
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
         run: pnpm run test:coverage
       - name: Upload coverage
-        if: ${{ always() && matrix.platform == 'linux' && matrix.arch == 'x64' }}
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: coverage/lcov.info
           if-no-files-found: ignore
+
+  # The compiler itself, which is portable TypeScript -- so this is the half of the suite Windows
+  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: a formatter check
+  # would be arguing with git's line-ending translation, not with the code. No coverage on any of
+  # these (plain `pnpm run test`); linux/x64 (above) is the only coverage owner.
+  # This job is the ungated Linux arm64 leg; the same steps run for macOS/Windows in stage 2 below.
+  frontend:
+    name: frontend (${{ matrix.platform }}/${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps: &frontend-steps
+      - *checkout
+      - uses: extractions/setup-just@v4
+        if: runner.os != 'Windows'
+        with:
+          just-version: '1.58.0'
+      - *setup
+      - *record-toolchain
+      - *pnpm-install
+      - run: pnpm run typecheck
+      - run: pnpm run test:subset
+      # A handful of unit tests compile and execute a native binary, so they need the archive the
+      # Unix justfile builds. Windows has no such toolchain, so those tests skip THEMSELVES there
+      # (`NATIVE_ONLY` in tests/unit/helpers.ts) and the rest of the file still runs -- which is
+      # why unit tests below are unconditional and only this build step is gated.
+      - name: Build runtime archive
+        if: runner.os != 'Windows'
+        run: pnpm run runtime
       - name: Unit tests
-        if: ${{ !(matrix.platform == 'linux' && matrix.arch == 'x64') }}
         run: pnpm run test
+
+  # STAGE 2. macOS and Windows frontend legs: only after every stage-1 job passed.
+  frontend-desktop:
+    name: frontend (${{ matrix.platform }}/${{ matrix.arch }})
+    needs: [static, frontend-coverage]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: macos, arch: x64, os: macos-15-intel }
+          - { platform: macos, arch: arm64, os: macos-14 }
+          - { platform: windows, arch: x64, os: windows-2025 }
+          - { platform: windows, arch: arm64, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps: *frontend-steps
 
   # The C runtime and everything that links it. Unix only: the runtime's just/clang toolchain is
   # not ported to Windows, and pretending otherwise with a red job helps nobody.
+  # runtime / asan / intl / ffi each come as two jobs with the same steps: the Linux one (ungated)
+  # and a `-macos` twin that is stage 2 (`needs: [static, frontend-coverage]`). Job ids differ,
+  # check names do not.
   runtime:
     name: runtime (${{ matrix.platform }}/${{ matrix.arch }})
-    strategy: &unix-strategy
+    strategy: &linux-strategy
       fail-fast: false
       matrix:
         include:
           - { platform: linux, arch: x64, os: ubuntu-24.04 }
           - { platform: linux, arch: arm64, os: ubuntu-24.04-arm }
-          - { platform: macos, arch: x64, os: macos-15-intel }
-          - { platform: macos, arch: arm64, os: macos-14 }
     runs-on: ${{ matrix.os }}
-    steps:
+    steps: &runtime-steps
       - *checkout
-      - &setup-just
-        uses: extractions/setup-just@v4
-        with:
-          just-version: '1.58.0'
+      - *setup-just
       - *setup
       # Without bdw-gc the justfile silently falls back to malloc and `test:leak` SKIPS -- a green
       # run that proved nothing about GC hygiene (plan.md Task 4.5). Installing it is what makes
@@ -214,14 +250,26 @@ jobs:
       - run: pnpm run test:builtins
       - run: pnpm run test:leak
 
+  runtime-macos:
+    name: runtime (${{ matrix.platform }}/${{ matrix.arch }})
+    needs: [static, frontend-coverage]
+    strategy: &macos-strategy
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: macos, arch: x64, os: macos-15-intel }
+          - { platform: macos, arch: arm64, os: macos-14 }
+    runs-on: ${{ matrix.os }}
+    steps: *runtime-steps
+
   # Its own job rather than the tail of `runtime`: an ASan build is a second full compile of the
   # runtime AND of every golden fixture's generated C, so serializing it behind the ordinary
   # golden run doubles the platform's wall clock for no ordering reason.
   asan:
     name: asan (${{ matrix.platform }}/${{ matrix.arch }})
-    strategy: *unix-strategy
+    strategy: *linux-strategy
     runs-on: ${{ matrix.os }}
-    steps:
+    steps: &asan-steps
       - *checkout
       - *setup-just
       - *setup
@@ -231,13 +279,20 @@ jobs:
         env:
           STATOR_ASAN_FORCE: '1'
 
+  asan-macos:
+    name: asan (${{ matrix.platform }}/${{ matrix.arch }})
+    needs: [static, frontend-coverage]
+    strategy: *macos-strategy
+    runs-on: ${{ matrix.os }}
+    steps: *asan-steps
+
   # The ICU FEATURE build (plan.md Task 4.4), which the default archive must stay byte-identical
   # without -- so it is a separate build directory, a separate archive, and a separate job.
   intl:
     name: intl (${{ matrix.platform }}/${{ matrix.arch }})
-    strategy: *unix-strategy
+    strategy: *linux-strategy
     runs-on: ${{ matrix.os }}
-    steps:
+    steps: &intl-steps
       - *checkout
       - *setup-just
       - *setup
@@ -255,15 +310,22 @@ jobs:
       - *pnpm-install
       - run: pnpm run test:intl
 
+  intl-macos:
+    name: intl (${{ matrix.platform }}/${{ matrix.arch }})
+    needs: [static, frontend-coverage]
+    strategy: *macos-strategy
+    runs-on: ${{ matrix.os }}
+    steps: *intl-steps
+
   # Its own job rather than the tail of `runtime`: FFI failures (link plumbing, boundary
   # checks, header determinism) have different owners from runtime failures, and serializing
   # them behind the golden/leak runs would hide which half broke. Unix only, like `runtime`:
   # the harness links against the just/clang-built archive.
   ffi:
     name: ffi (${{ matrix.platform }}/${{ matrix.arch }})
-    strategy: *unix-strategy
+    strategy: *linux-strategy
     runs-on: ${{ matrix.os }}
-    steps:
+    steps: &ffi-steps
       - *checkout
       - *setup-just
       - *setup
@@ -288,9 +350,30 @@ jobs:
       # (row-count success + nonzero-convention error paths, header double-build cmp).
       - run: node examples/ffi/sqlite/sqlite-c-main.ts
 
+  ffi-macos:
+    name: ffi (${{ matrix.platform }}/${{ matrix.arch }})
+    needs: [static, frontend-coverage]
+    strategy: *macos-strategy
+    runs-on: ${{ matrix.os }}
+    steps: *ffi-steps
+
   revert-on-failure:
     name: revert-on-failure
-    needs: [test262, test262-report, static, frontend, runtime, asan, intl, ffi]
+    needs:
+      - test262
+      - test262-report
+      - static
+      - frontend-coverage
+      - frontend
+      - frontend-desktop
+      - runtime
+      - runtime-macos
+      - asan
+      - asan-macos
+      - intl
+      - intl-macos
+      - ffi
+      - ffi-macos
     if: >-
       always()
       && github.event_name == 'push'
