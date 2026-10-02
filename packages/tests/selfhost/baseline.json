@@ -13,6 +13,14 @@
     "verdict": "static",
     "codes": {}
   },
+  "packages/std/src/io.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/os.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
   "packages/std/src/path.ts": {
     "verdict": "static",
     "codes": {}

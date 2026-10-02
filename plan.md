@@ -1365,6 +1365,25 @@ Depends on T11.1, T11.2. Zig backings, POSIX first (STD.md §4). Errors throw wi
 | `std/hash` | `sha256`, `sha1`, `md5` over bytes or strings; `randomBytes` |
 | `std/encoding` | UTF-8 / latin1 / base64 / base64url / hex ↔ bytes |
 
+**In progress** — Claude Code / opus-5-5. Execution plan, three PRs in this order, each with its
+own Check evidence (a golden per module it lands). Step 1 lands with plan-notes 309:
+
+1. `std/os` + `std/io`, plus the byte channel every byte-level backing shares: bytes cross the
+   FFI edge one scalar call at a time (`jsrt_std_bytes_*` in `zig/jsrt_std.zig`, helpers in
+   `src/internal/bytes.ts`), because the extern table (docs/FFI.md §2) has no `Uint8Array` row
+   and widening it is the compiler's work, not this package's. `io` writes flush C stdio first so
+   `console.log` and `io.write` keep program order. New §3 codes `EBADF` and `ENOTTY`.
+2. `std/encoding` + `std/hash`: encoding is strict TypeScript over `Uint8Array` (no OS edge;
+   a string never crosses the C-string boundary, so a NUL survives); hash is Zig's
+   `std.crypto` (`Sha256`, `Sha1`, `Md5`) over the byte channel, `randomBytes` is `std.Io`'s
+   secure random.
+3. `std/process` + `std/fs` extensions: `argv` needs `int main(int argc, char **argv)` from the
+   emitter and a runtime slot (plan-notes 294); fd calls own a second lifetime (STD.md §9.3).
+
+Each step: `zig/<module>.zig`, `src/<module>.ts`, `src/native/<module>.d.ts`, a Node twin in
+`golden/std-oracle/`, a `std_<module>` golden, subset rows in both modes, unit-test ranges for
+nondeterministic values, docs/STD.md §3/§5 and docs/SUBSET.md rows.
+
 **Check:** a golden per module against Node's equivalent (nondeterministic results — `hostname`,
 `pid`, `randomBytes` — proved by unit-test ranges, as `test:builtins` carves them out).
 
@@ -2299,3 +2318,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.25** (2026-10-02): **Self-compilation counts may grow when recorded** (plan-notes 306). The creator answered 306's open question: a change that raises a `test:selfhost` count records it with `--update` in the same change, and review sees the diff.
 - **v4.26** (2026-10-02): **T11.5a lands: per-module namespaces** (plan-notes 302). Every module keeps its own top-level namespace, so a user `function get()` beside `import { has } from "std/env"` builds. Renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *` (with ES's ambiguity rule, new `STA3003`) and `export * as ns from` are static in both modes. The test262 runner now compiles module tests beside their fixtures. The self-compilation baseline shrinks (`STA1214` 2572 → 1771). The card moves to done.md. The creator moved its test262 "pass count rises" clause to T11.4, with a baseline of 152 passed, because the corpus harness needs `String` and `JSON` as values (plan-notes 302).
 - **v4.27** (2026-10-02): **T10.1 lands: the `std/fs` Promise twins are not-yet** (plan-notes 307). `readTextAsync`, `writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync` and `rmdirAsync` — each sync call's name plus `Async` — are `STA1214` naming Phase 10 (T10.2's thread pool) in both modes, instead of the checker's "no exported member" (`STA0012`, which every other missing name keeps). No new code. Subset rows `subset_std_fs_async_ts`/`_js`, `subset_std_fs_missing_ts`; docs/STD.md §2, SUBSET.md, DIAGNOSTICS.md (STA0012 row). T10.1 moves to `done.md`.
+- **v4.28** (2026-10-02): **T11.3 step 1: `std/os`, `std/io` and the byte channel** (plan-notes 309). `std/os` (`platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol`) answers what the pinned Node's `node:os` answers. `std/io` does raw descriptor I/O through libc; writes flush C stdio first. Bytes cross the FFI edge through a byte channel in `jsrt_std.zig`. STD.md §3 gains `EBADF`, `ENOTTY`, `EAGAIN` and `EPIPE`. The T11.3 card is claimed with its three-PR execution plan; it stays open until process + fs land.
