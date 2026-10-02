@@ -767,54 +767,25 @@ request's CI log shows a selection made from a `main` map.
 
 ~~**Task 6.18 — `stator.config.json`: every CLI option in one validated file.**~~ ✅ **landed 2026-10-02** — evidence in [done.md](done.md) → Phase 6 Task 6.18 (plan-notes 303; `docs/CONFIG.md`).
 
-**Task 6.19 — Stator compiles itself and its own packages: a self-compilation test — [D3]**
-(creator's direction 2026-10-02, plan-notes 304). The compiler must compile itself, and the
-packages written for programs to import (`std`, `node`, `webapi`, `interpreter`) must compile too.
-For now this is a **test**, not a shipped feature. It tracks progress and never lets it slip back.
+~~**Task 6.19 — Stator compiles itself and its own packages: a self-compilation test.**~~ ✅
+**landed 2026-10-02**: evidence in [done.md](done.md) → Phase 6 Task 6.19 (plan-notes 306).
+`pnpm run test:selfhost` is in `ci`. Three parts stay here, because they are still rules or not
+built yet:
 
-1. **Targets.** Every workspace package written for Stator to compile. Today those are
-   `packages/compiler` (entry `src/cli/main.ts`, `ts` mode) and `packages/std` (each `src/*.ts`).
-   `packages/node` (T11.6), `packages/webapi` (T13.1), `packages/renderer-clay` (T13.4) and
-   `packages/interpreter` (T14.1) join when they are created. The cards that create them add the
-   package to this test in the same change. The target list is checked in next to the baseline,
-   and a workspace package that is neither listed nor marked "not a target" fails the test.
-2. **What a run does.** `stator explain <entry> --json` per target, tallying the deciding
-   stage's diagnostics by code (plan-notes 291). A target whose verdict is `static` or `dynamic`
-   then goes through `stator build`, and the binary runs that package's own smoke check. For
-   `std`, that check is its goldens. For the compiler, the binary compiles a hello-world fixture
-   and its C output must be **byte-identical** to the C the Node-hosted compiler emits: the
-   stage-2 bootstrap check.
-3. **Ratchet.** `packages/tests/selfhost/baseline.json` holds, per target, the verdict and the
-   count per diagnostic code. The test fails when any count grows, a new code appears, or a
-   verdict gets worse. When a count shrinks, `--update` rewrites the baseline in the same change,
-   as `.jscpd-baseline.json` does (Task 6.16). Reaching zero for a target is that target's
-   milestone. From then on, its build and smoke check are part of the gate.
-4. **Cost.** One `explain` of the compiler takes about 35 s on the dev host (below). The test runs
-   in `ci` if the whole run stays under 60 s on that host; otherwise it runs nightly and on PRs
-   that Task 6.17's impact selection says reach `packages/compiler` or the target packages. The
-   choice and the timing go in plan-notes.
-5. **Config.** Each target's mode and entry come from its own `stator.config.json` (Task 6.18)
-   once that lands, so the test runs the same command a user would.
-
-**Baseline measured 2026-10-02** (main `f8db9eb`, darwin/arm64, `explain --json`):
-- **Compiler, `ts` mode:** `not-yet`, 2 522 × `STA1214`, 34.8 s. The top families are:
-  - 1 127 — an unsupported construct whose message prints the syntax kind as `FirstNode`. That is
-    an enum alias, so the message names the wrong kind: a diagnostics bug to fix with this task.
-  - 915 — method calls.
-  - 158 — unsupported globals.
-  - 52 — index access on a non-array.
-  - 52 — `for-of` over a user iterable.
-  - 47 — object spread without a fixed shape.
-  - 32 — package imports (`typescript`).
-- **Compiler, `js` mode:** `not-yet`, 2 586 × `STA1214`, 41.8 s.
-- **`packages/std`:** `env.ts` is `dynamic`; `fs.ts`, `path.ts`, `process.ts` and `time.ts` are
-  `static`.
-
-**Check:**
-- `pnpm run test:selfhost` passes against the committed baseline. It fails on a hand-raised count
-  and on an unlisted workspace package.
-- `std` builds and its smoke check runs.
-- The `FirstNode` message names the real syntax kind, and the baseline is re-recorded.
+- **Targets.** Every directory under `packages/` is a target in
+  `packages/tests/selfhost/targets.json`, or it is in that file's `notTargets` with a reason.
+  `packages/node` (T11.6), `packages/webapi` (T13.1), `packages/renderer-clay` (T13.4) and
+  `packages/interpreter` (T14.1) are added there by the card that creates them, in the same change.
+  Each one gets a `stator.config.json` for its mode and entry.
+- **Ratchet.** `packages/tests/selfhost/baseline.json` holds each target's verdict and its count per
+  diagnostic code. The test fails when a count grows, a new code appears or a verdict gets worse.
+  It also fails when a count shrinks, until `--update` records the shrink in the same change.
+  Whether growth may be recorded is open for the creator (plan-notes 306). When a target reaches
+  zero, that is its milestone, and from then on its build and smoke check are part of the gate.
+- **Stage-2 check (not built).** When the compiler's verdict becomes `static` or `dynamic`, its
+  binary compiles a hello-world fixture. That C output must be **byte-identical** to the C the
+  Node-hosted compiler emits. Until this check exists, the runner fails when a `stage2` target
+  reaches either verdict.
 
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
@@ -2362,3 +2333,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.21** (2026-10-02): **Task 6.19 — self-compilation test** (plan-notes 304). Stator compiles itself and its own packages (`std`, later `node`, `webapi`, `renderer-clay`, `interpreter`) as a ratcheted test. Per-target diagnostic counts may only shrink. A target at zero builds and runs its smoke check, and for the compiler that check is a byte-identical stage-2 bootstrap. Baseline: compiler 2 522 `STA1214` in `ts` mode; `std` already compiles.
 - **v4.22** (2026-10-02): **Upstream test suites for `node` and `webapi`; Phase 11 outranks Phase 13** (plan-notes 305). New T11.7: Node's own `test/parallel` slice, pinned to `.node-version` and fetched rather than vendored, runs through vitest with a strict-TS `common` and `node:assert`, ratcheted, and adds a column to `docs/NODE.md`. New T13.6 does the same for web-platform-tests `dom/` and `css/cssom/`. Phase 11 is now `P1` and Phase 13 is `P3`.
 - **v4.23** (2026-10-02): **Task 6.17 — test impact selection** (plan-notes 293). Creator-directed: on pull requests and locally, build and run only the tests whose execution reaches a changed line, through TypeScript and on into the C/Zig runtime, using a per-test coverage map recorded by the full run on `main`. Falls back to the full run when the map cannot be trusted; `test:affected` is replaced.
+- **v4.24** (2026-10-02): **Task 6.19 lands: the self-compilation ratchet** (plan-notes 306). `pnpm run test:selfhost` runs `explain --json` over `packages/compiler` and each `packages/std` module, compares verdicts and per-code counts with `packages/tests/selfhost/baseline.json`, builds the `std` modules and runs the `std_*` goldens. It runs in `ci` (38–47 s). The `FirstNode` message now names `QualifiedName`. The Task 6.19 card shrinks to its standing rules and the unbuilt stage-2 check.

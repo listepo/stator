@@ -31,6 +31,7 @@ export interface ProcessResult {
 export interface RunOptions {
   readonly timeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;
+  readonly cwd?: string;
 }
 
 /** Async `spawnSync`, so a pool can keep every core busy. */
@@ -45,6 +46,7 @@ export function runProcess(
     const spawnOptions = {
       ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
       ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     };
     const child = spawn(command, [...args], spawnOptions);
     let stdout = '';
