@@ -17,6 +17,7 @@ import {
   vendorEntry,
 } from '../../compiler/src/api.ts';
 import { createProgram } from '../../compiler/src/frontend/program.ts';
+import { NATIVE_ONLY } from './helpers.ts';
 import {
   isCommonJsFile,
   planVendor,
@@ -329,24 +330,28 @@ const ODD_LEFTPAD = [
   '',
 ].join('\n');
 
-test('a checker error in the vendor module does not fail the build; the binary prints what Node prints', async () => {
-  const main = "import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n";
-  const root = leftpadProject(main);
-  writeFileSync(join(root, 'node_modules/leftpad/index.js'), ODD_LEFTPAD);
-  const out = join(root, 'app');
-  const result = await compile({
-    entry: join(root, 'main.js'),
-    mode: 'js',
-    bundler: stubAdapter(),
-    out,
-  });
-  assert.equal(result.ok, true, result.stderr);
-  assert.deepEqual(result.diagnostics, []);
-  const node = spawnSync(process.execPath, [join(root, 'main.js')], { encoding: 'utf8' });
-  assert.equal(node.stdout, 'true\nNaN\nx!\n');
-  const binary = spawnSync(out, { encoding: 'utf8' });
-  assert.equal(binary.stdout, node.stdout, binary.stderr);
-});
+test(
+  'a checker error in the vendor module does not fail the build; the binary prints what Node prints',
+  NATIVE_ONLY,
+  async () => {
+    const main = "import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n";
+    const root = leftpadProject(main);
+    writeFileSync(join(root, 'node_modules/leftpad/index.js'), ODD_LEFTPAD);
+    const out = join(root, 'app');
+    const result = await compile({
+      entry: join(root, 'main.js'),
+      mode: 'js',
+      bundler: stubAdapter(),
+      out,
+    });
+    assert.equal(result.ok, true, result.stderr);
+    assert.deepEqual(result.diagnostics, []);
+    const node = spawnSync(process.execPath, [join(root, 'main.js')], { encoding: 'utf8' });
+    assert.equal(node.stdout, 'true\nNaN\nx!\n');
+    const binary = spawnSync(out, { encoding: 'utf8' });
+    assert.equal(binary.stdout, node.stdout, binary.stderr);
+  },
+);
 
 test('the same checker error in a project file is still STA0012', async () => {
   const root = leftpadProject(
