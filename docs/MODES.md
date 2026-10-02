@@ -493,7 +493,9 @@ without the flag (docs/BUNDLER.md §1).
 
 **Landed modules** (T11.6, one slice at a time; `docs/NODE.md` is the per-member list):
 `node:path` and `node:path/posix`, POSIX semantics — Stator builds for POSIX hosts, so `path` is
-`path.posix`, as on the pinned Node there. Each module's default export is the module object
+`path.posix`, as on the pinned Node there. `node:assert` (T11.7), the slice Node's own tests use:
+`ok`, `strictEqual`, `notStrictEqual`, `deepStrictEqual`, `match`, `fail`, `throws`, `rejects` and
+`AssertionError`; its default export is an object, not yet a callable function. Each module's default export is the module object
 (`import path from 'node:path'`), which the bundle's `import * as m` plus `m.default` also needs.
 `path.win32`, `node:path/win32` and `path.matchesGlob` have not landed.
 

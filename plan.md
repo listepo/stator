@@ -1503,7 +1503,8 @@ tests, synced at the pinned version, not by hand-written copies.
    `crypto-hash`, `timers`, `perf-hooks`). Start with `path`, then follow T11.6's order. Tests that
    need `// Flags: --expose-internals`, child processes or the network are `skip` until N2.
 3. **The harness, in strict TS.** `require('../common')` resolves to
-   `packages/tests/node-suite/common.ts`, a strict-TS implementation of the `common` helpers the
+   `packages/tests/node-suite/common/index.ts` (and `../common/fixtures` to
+   `common/fixtures.ts`), a strict-TS implementation of the `common` helpers the
    selected tests use (`mustCall`, `mustNotCall`, `expectsError`, `tmpdir`, platform flags). It
    grows with the selection. `node:assert` (`ok`, `strictEqual`, `deepStrictEqual`, `throws`,
    `rejects`) lands in `packages/node` as part of this card.
@@ -1520,6 +1521,15 @@ can land as soon as `node:path` exists.
 **Check:** `pnpm run test:node-suite` runs the selection through vitest against the pinned corpus,
 and its pass count is recorded in plan-notes; `docs/NODE.md` shows the column; a hand-flipped
 expectation fails the run.
+
+**Status:** in progress — Claude Code / opus-5-5. **First slice landed** (plan-notes 314): the
+pin, `fetch.ts`, `expectations.json`, the strict-TS `common/` with its host resolve hook, the
+vitest driver with the ratchet, `node:assert` in `packages/node`, and the "Node tests" column in
+`docs/NODE.md`. The selection is the 17 `test-path*` files: on the pinned Node all 17 pass with
+our `common`; under Stator 0 pass, 15 are `fail` and 2 are `skip` (a child process; a
+Windows-only file). Every `fail` is a CommonJS file, which goes to the T12 bundler, so STA0014
+until `vite-stator` lands (T12.2); after that, 13 of them also need `path.win32`. **Next:** flip
+the `path` files as T12.2 and `path.win32` land, then follow T11.6's module order.
 
 **Deferred — N2 (not a card yet).** `std/loop` written in Zig (the creator chose an own loop
 over libuv: kqueue/epoll first, Windows when the runtime builds there), real timers and
@@ -2305,3 +2315,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.40** (2026-10-02): **T12.1 lands: the bundler API** (plan-notes 320). In `js` mode, package imports and CommonJS project files go to one bundler call; the answer joins the program as the virtual `__stator_vendor__.js`, and project imports are rewritten to it, every line kept. `--bundler=vite|none|<module>` and the `bundler` config key choose the adapter (`STA0014` when it cannot load, `STA0015` when the bundle step fails); `statorc/api` exposes `compile` and `vendorEntry`. Diagnostics and `#line` inside the bundle map to the package's files, or `<package bundle>`. A free `__filename`/`__dirname` is the new not-yet `STA1218`. CommonJS routing is narrowed to files that read `require`, `module` or `exports`. `export *`, `import()` and attributed imports of packages stay `STA1214`. The card moves to done.md.
 - **v4.50** (2026-10-02): **T11.5, the steps that do not need the bundler** (plan-notes 312). `--node` on `build` and `explain`, and the config key `node`. Under it `node:*` and bare built-ins resolve to `packages/node` through `paths` entries, the mechanism `std/` uses. An unlanded module or member is `STA1214` naming Phase 11 (T11.6); without the flag a built-in is `STA1214` naming the flag. `STA1110` is implemented and narrowed: `ts` mode always, `js` mode without `--node`; with it, `STA1214` naming T11.5's `createRequire` step. `__filename`/`__dirname` are relative to the executable (docs/MODES.md §6); `STA1218` stays under the flag until the CommonJS wrapper injects them. One package-root rule for runtime, `std` and `node`. The card stays open for the CommonJS run-time steps, which T12.1 unblocked.
 - **v4.51** (2026-10-02): **T11.6, first slice: `packages/node` and `node:path`** (plan-notes 313). `packages/node` is created: strict TypeScript over `std`, a workspace package and moon project, a selfhost target (`node-goldens` smoke) and its own `stator.config.json` (`"node": true`). `node:path` and `node:path/posix` are POSIX-complete (14 of 16 members; `win32` and `matchesGlob` not-yet), proved by the `node_path*` goldens against Node 26.7.0, claimed in `node_coverage.json`, and `docs/NODE.md` is regenerated. Fixtures named `node_*` build with `--node`. A named import the module lacks is not-yet even when the checker answers TS2614 (the module has a default export).
+- **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.

@@ -20,6 +20,7 @@ packages/tests/differential/failures/
 .differential-*/
 packages/tests/bench/results/
 packages/tests/test262/corpus/
+packages/tests/node-suite/corpus/
 packages/tests/test262/results.json
 # `--shard=N/M` writes one of these per shard; `--aggregate` merges them into results.json.
 packages/tests/test262/results-*-of-*.json

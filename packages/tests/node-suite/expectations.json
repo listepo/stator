@@ -1,0 +1,73 @@
+{
+  "_comment": "plan.md §11c T11.7: each selected test/parallel file of the pinned Node, as pass, fail or skip with a reason. node-suite.test.ts enforces it both ways: a pass that fails, or a fail that passes, fails the run. A test that fails under the pinned Node itself is a skip, never a fail. fetch.ts downloads each file and the test/fixtures files it lists under \"fixtures\".",
+  "tests": {
+    "test-path-basename.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
+    },
+    "test-path-dirname.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
+    },
+    "test-path-extname.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
+    },
+    "test-path-glob.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), path.matchesGlob (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
+    },
+    "test-path-isabsolute.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+    },
+    "test-path-join.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+    },
+    "test-path-makelong.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+    },
+    "test-path-normalize.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+    },
+    "test-path-parse-format.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
+    },
+    "test-path-posix-exists.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2)"
+    },
+    "test-path-posix-relative-on-windows.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2)"
+    },
+    "test-path-relative.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+    },
+    "test-path-resolve.js": {
+      "expect": "skip",
+      "reason": "spawns a child process (child_process.spawnSync): N2"
+    },
+    "test-path-win32-exists.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+    },
+    "test-path-win32-normalize-device-names.js": {
+      "expect": "skip",
+      "reason": "Windows only: calls common.skip on POSIX, so it proves nothing here"
+    },
+    "test-path-zero-length-strings.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+    },
+    "test-path.js": {
+      "expect": "fail",
+      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
+    }
+  }
+}
