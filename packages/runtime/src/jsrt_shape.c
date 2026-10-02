@@ -119,6 +119,27 @@ static bool has_prop_table(jsrt_value v) {
   return jsrt_is(v, JSRT_TAG_ARRAY) || jsrt_is_dynobj(v);
 }
 
+bool jsrt_is_fixed_object(jsrt_value v) {
+  if (!jsrt_is(v, JSRT_TAG_OBJECT) || jsrt_is_dynobj(v)) {
+    return false;
+  }
+  const JSRTClass *cls = jsrt_as_object(v)->cls;
+  return cls != &jsrt_class_promise && cls != &jsrt_class_date && cls != &jsrt_class_map &&
+         cls != &jsrt_class_set && cls != &jsrt_class_weakmap && cls != &jsrt_class_weakset &&
+         cls != &jsrt_class_regexp && cls != &jsrt_class_iterator &&
+         cls != &jsrt_class_generator && cls != &jsrt_class_uint8array &&
+         cls != &jsrt_class_arraybuffer && cls != &jsrt_class_accessor;
+}
+
+JSRTDynObject *jsrt_fixed_extras(jsrt_value v) {
+  return jsrt_is_fixed_object(v) ? jsrt_as_object(v)->extras : NULL;
+}
+
+/* The overflow table as a value, for the property entries to recurse into. */
+static jsrt_value extras_value(const JSRTDynObject *extras) {
+  return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)extras);
+}
+
 static int32_t fixed_slot(jsrt_value obj, const char *key) {
   JSRTObject *o = jsrt_as_object(obj);
   const JSRTClass *cls = o->cls;
@@ -482,6 +503,11 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
       if (slot >= 0) {
         return jsrt_as_object(obj)->fields[slot];
       }
+      /* An undeclared OWN property shadows a method the prototype would answer. */
+      const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+      if (extras != NULL && jsrt_shape_find(extras->shape, key) != NULL) {
+        return jsrt_get_prop(extras_value(extras), key, NULL);
+      }
       bool found = false;
       jsrt_value method = fixed_method_get(obj, key, &found);
       if (found || jsrt_regexp_property(obj, key, &method)) {
@@ -556,7 +582,9 @@ bool jsrt_has_prop(jsrt_value obj, const char *key) {
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
-      return fixed_has(obj, key);
+      const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+      return fixed_has(obj, key) ||
+             (extras != NULL && jsrt_shape_find(extras->shape, key) != NULL);
     }
     return jsrt_is(obj, JSRT_TAG_STRING) && strcmp(key, "length") == 0;
   }
@@ -725,6 +753,23 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
       if (fixed_set(obj, key, value)) {
         return;
       }
+      /* Growth (docs/VALUE.md §4.24): a name the class never declared lands in the overflow
+       * table, created on the first such write. A frozen object is not extensible, and strict
+       * code -- every compiled module -- throws Node's TypeError for adding to it. */
+      if (jsrt_is_fixed_object(obj)) {
+        JSRTObject *o = jsrt_as_object(obj);
+        if (o->frozen && (o->extras == NULL || jsrt_shape_find(o->extras->shape, key) == NULL)) {
+          char msg[256];
+          snprintf(msg, sizeof msg, "Cannot add property %s, object is not extensible", key);
+          jsrt_throw_error(&jsrt_class_type_error, msg);
+          return;
+        }
+        if (o->extras == NULL) {
+          o->extras = (JSRTDynObject *)jsrt_ptr(jsrt_dynobj_new());
+        }
+        store_prop(extras_value(o->extras), key, value, NULL, honor_accessor);
+        return;
+      }
       jsrt_panic(
           "STA2004: a statically-shaped object cannot grow a new property; planned for Phase 8");
     }
@@ -806,6 +851,11 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
      * FROZEN is the one fixed-shape delete with a right answer, and it is the answer: a frozen
      * property is non-configurable, so the spec's `delete` raises in strict mode and never has to
      * reach a representation the layout does not have (plan.md §8 step 2a(c), bucket 2704). */
+    const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+    if (extras != NULL && jsrt_shape_find(extras->shape, k) != NULL) {
+      free((void *)k);
+      return jsrt_delete(extras_value(extras), key);
+    }
     if (jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_has(obj, k)) {
       if (jsrt_as_object(obj)->frozen) {
         char msg[256];

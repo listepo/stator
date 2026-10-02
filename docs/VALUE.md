@@ -484,9 +484,9 @@ anything else left-aligned (`padEnd`).
 
 A `JSRTObject` is a pointer to a `JSRTClass` descriptor followed by its slots, boxed under the
 `Object` tag. Unlike `JSRTArray`, the slots ARE a flexible array member — one allocation, not two —
-and that is safe here for the reason it is unsafe there: the slot count is fixed at construction
-and nothing in this subset adds a property, so the buffer never grows and the header's address
-never has to move.
+and that is safe here for the reason it is unsafe there: the slot count is fixed at construction,
+and a property added later goes to a separate overflow table (§4.24), so the buffer never grows and
+the header's address never has to move.
 
 The descriptor is `static const` and file-scope, one per class declaration, shared by every
 instance: the class name, the slot count, the field names in slot order, and the base class's
@@ -1483,6 +1483,51 @@ checks (`STA2001`, plan-notes 308) at a position a spread knows only at run time
 iterable`), adds `(cannot read property undefined)` for a nullish call-side operand, and words a
 non-nullish one as `Spread syntax requires ...iterable[Symbol.iterator] to be a function`. The
 class is the same, so a `catch` that tests it behaves the same.
+
+## 4.24 Growing a fixed layout — an overflow table beside the slots (plan.md §11c T11.4 step 7)
+
+A fixed object's slot count is its class's, and the allocation never grows (§4.10's header-address
+rule). A name the class does not declare -- `host.configFileName = x` on an object literal's type,
+`c.parent = p` on a class instance -- therefore lands in `JSRTObject::extras`, a dynamic object
+(§4.10) created on the first such write and NULL until then. It is the same precedent as a
+function's own properties in `JSRTClosure::props` (§4.20) and an array's named extras.
+
+**Which values have one.** Only a value laid out as a `JSRTObject` (`jsrt_is_fixed_object`): a
+`JSRT_TAG_OBJECT` that is neither a dynamic object nor one of the runtime's own layouts that share
+only the `cls` prefix (`Map`, `Set`, their weak twins, `Date`, `RegExp`, `Promise`, iterators,
+generators, the typed-array pair, accessor cells). `jsrt_fixed_extras(v)` answers the table or NULL
+for anything else, so no caller has to ask first. Those other layouts still abort `STA2004`.
+
+**The property entries.** `jsrt_get_prop` answers a declared slot first, then the table (an own
+property, so it shadows a prototype method), then the class's methods. `jsrt_set_prop` writes a
+declared slot, else the table; a frozen object is not extensible, so adding to it throws Node's
+`Cannot add property X, object is not extensible`, and `Object.freeze` freezes the table with its
+owner, so writing a grown name throws the read-only `TypeError` too. `jsrt_has_prop`, `hasOwn` and
+`in` see both halves. `jsrt_delete` removes a grown name from the table; a DECLARED slot still has
+no encoding for absence (`STA2007`).
+
+**Reflection.** `Object.keys`/`values`/`entries`, `for-in`, `JSON.stringify` (which walks the
+keys) and `console.log` list the declared names in their class order, then the table's in insertion
+order. That is Node's order whenever the grown names were added after construction, which is the
+only way to add one. Object spread copies them: into a dynamic result after the declared names
+(`jsrt_dynobj_spread`), into a fixed result through `jsrt_spread_order_src`, which grows the
+result's own table.
+
+**The compiler.** In `js` mode a name the receiver's fixed type does not declare
+(`isUndeclaredMember`: an object HType, not a module namespace, and no property of that name on the
+checker's type) reads, writes and calls through the shape-table nodes an Unknown receiver uses:
+`DynFieldAccess`, `DynFieldAssignment` (every compound, logical and update form, the receiver read
+once) and `DynMethodCall`, whose `notFunction` subject keeps Node's `c.missing is not a function`
+`TypeError` for a name nothing was stored under. A read's result is Unknown. A computed string or
+number key on a fixed shape (`table[node.kind]`, `levels[level] = v`) takes the degrading index
+entry points by name, which answer a declared slot or the table. In `ts` mode each of these is the
+checker's own TS2339 or TS7053 and stays an error.
+
+**Known divergences.** A fixed spread result lists the source's grown names after ALL its declared
+names, so `{ ...grown, extra: 1 }` prints `extra` before them where Node prints it last; and a
+grown name the result's type also declares keeps the declared writer's value, since the runtime
+cannot tell an earlier writer (which the spread overrides) from a later one. The element spelling
+with a static key naming no member (`o["extra"] = 1`) is still refused (`STA1214`).
 
 ## 5. What Phase 2 actually implements
 

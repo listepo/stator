@@ -4318,6 +4318,13 @@ class Emitter {
         this.flushParts(parts, expr.span);
         if (expr.kind === 'dyn-method-call') {
           this.emitPendingCheck(expr.span);
+          if (expr.notFunction !== undefined) {
+            this.appendLine(
+              `if (!jsrt_is(${method}, JSRT_TAG_CLOSURE)) { jsrt_throw_error(&jsrt_class_type_error, "${this.escapeCString(`${expr.notFunction} is not a function`)}"); }`,
+              expr.span,
+            );
+            this.emitPendingCheck(expr.span);
+          }
         }
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);

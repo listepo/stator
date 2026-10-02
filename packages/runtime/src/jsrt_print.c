@@ -830,8 +830,10 @@ static const char *dynobj_constructor_name(jsrt_value v) {
 /* One `key: value` entry per own property of a dynamic object, in OrdinaryOwnPropertyKeys order
  * (integer indices first, then insertion order). Shared by plain objects and by a function's own
  * properties, which Node lays out the same way. */
-static JSRTBuf *dyn_entries(const JSRTDynObject *dyn, size_t count, int recurse, size_t indent) {
-  JSRTBuf *entries = alloc_entries(count);
+/* A shape table's `count` properties, in insertion order, into `entries[0..count)`: a dynamic
+ * object's whole body, and a fixed object's overflow table after its declared fields. */
+static void fill_dyn_entries(JSRTBuf *entries, const JSRTDynObject *dyn, size_t count, int recurse,
+                             size_t indent) {
   const JSRTShape **links = jsrt_shape_property_order(dyn->shape, (uint32_t)count);
   for (size_t i = 0; i < count; i++) {
     JSRTBuf *entry = &entries[i];
@@ -841,6 +843,11 @@ static JSRTBuf *dyn_entries(const JSRTDynObject *dyn, size_t count, int recurse,
     inspect_value(entry, dyn->slots[links[i]->offset], recurse + 1, indent + 2);
   }
   free(links);
+}
+
+static JSRTBuf *dyn_entries(const JSRTDynObject *dyn, size_t count, int recurse, size_t indent) {
+  JSRTBuf *entries = alloc_entries(count);
+  fill_dyn_entries(entries, dyn, count, recurse, indent);
   return entries;
 }
 
@@ -886,12 +893,15 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
    * first, then insertion order -- plan.md §8 step 28), so console.log and the keys walk cannot
    * disagree. `#private` slots never enter either order. */
   uint32_t *fixed_order = NULL;
+  /* A fixed object's undeclared properties print after its declared ones (docs/VALUE.md §4.24). */
+  const JSRTDynObject *extras = dyn != NULL ? NULL : jsrt_fixed_extras(v);
+  const size_t extras_count = extras != NULL ? jsrt_shape_property_count(extras->shape) : 0;
   if (dyn != NULL) {
     count = jsrt_shape_property_count(dyn->shape);
   } else {
     uint32_t fixed_count = 0;
     fixed_order = jsrt_fixed_key_order(cls, &fixed_count);
-    count = fixed_count;
+    count = fixed_count + extras_count;
   }
 
   /* Emptiness first, like inspect_array: Node prints `{}` and `C {}` in full past the depth cap
@@ -922,9 +932,10 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
   } else {
     entries = alloc_entries(count);
     size_t next = 0;
-    /* fixed_order holds exactly the visible slots in enumeration order, so this loop runs `count`
-     * times with no skips -- `next` and `count` agree at emit_braced. */
-    for (size_t i = 0; i < count; i++) {
+    /* fixed_order holds exactly the visible slots in enumeration order, so this loop runs once per
+     * declared key with no skips, and the overflow table fills the rest -- `next` plus the
+     * table's count and `count` agree at emit_braced. */
+    for (size_t i = 0; i < count - extras_count; i++) {
       /* Enumeration order, not slot order: integer indices first, then the insertion sequence
        * the layout's key_order records (jsrt_value.h, JSRTClass::key_order). */
       const uint32_t slot = fixed_order[i];
@@ -937,6 +948,9 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
       append_key(entry, cls->fields[slot]);
       jsrt_buf_puts(entry, ": ");
       inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
+    }
+    if (extras != NULL) {
+      fill_dyn_entries(&entries[next], extras, extras_count, recurse, indent);
     }
     free(fixed_order);
   }

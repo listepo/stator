@@ -350,16 +350,31 @@ static inline uint32_t jsrt_class_key_slot(const JSRTClass *cls, uint32_t i) {
 
 struct JSRTClosure;
 
+struct JSRTDynObject;
+
 /* Unlike JSRTArray, the elements ARE a flexible member here, and that is safe for the reason it is
- * unsafe there: an object's slot count is fixed by its class at construction and the subset has no
- * way to add a property, so this allocation never grows and therefore never moves. If dynamic
- * property addition ever lands, it does NOT get to grow this -- it gets an overflow table, or the
- * header's address stops being stable and every boxed reference to it becomes wrong. */
+ * unsafe there: an object's slot count is fixed by its class at construction, so this allocation
+ * never grows and therefore never moves. A property the class never declared does NOT grow it: it
+ * lands in `extras`, a dynamic object created on the first such write (docs/VALUE.md §4.24), the
+ * way a function's own properties land in JSRTClosure::props. Growing `fields` instead would move
+ * the header and make every boxed reference to it wrong. */
 typedef struct JSRTObject {
   const JSRTClass *cls;
   bool frozen; /* Object.freeze: writes throw TypeError (Phase 5 step 11) */
+  /* The undeclared properties, in insertion order after every declared one; NULL until the first
+   * write of a name the class does not declare. */
+  struct JSRTDynObject *extras;
   jsrt_value fields[];
 } JSRTObject;
+
+/* True exactly for a value laid out as a JSRTObject: a JSRT_TAG_OBJECT that is neither a dynamic
+ * object nor one of the runtime's own layouts (Map, Date, RegExp, ...) that only share its `cls`
+ * prefix. Only such a value has `frozen`, `extras` and `fields`. */
+bool jsrt_is_fixed_object(jsrt_value v);
+
+/* A fixed object's undeclared properties as a dynamic object, or NULL when it has none -- and for
+ * any value that is not a fixed object, so a caller need not ask jsrt_is_fixed_object first. */
+struct JSRTDynObject *jsrt_fixed_extras(jsrt_value v);
 
 /* Every slot starts as `undefined`, which is what a declared-but-unassigned field reads as in
  * JavaScript. The constructor body then assigns the ones it assigns. */

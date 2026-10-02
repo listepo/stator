@@ -62,6 +62,7 @@ import {
   isDynamicShape,
   isFunctionValueCallee,
   isFunctionMemberRead,
+  isUndeclaredMemberRead,
   isFunctionValueMember,
   isGlobalSymbolIteratorName,
   isImplicitAny,
@@ -513,7 +514,7 @@ function gateConstruct(
       return gateArrayLiteral(node as ts.ArrayLiteralExpression, typeChecker);
 
     case ts.SyntaxKind.ElementAccessExpression:
-      return gateElementAccess(node as ts.ElementAccessExpression, typeChecker);
+      return gateElementAccess(node as ts.ElementAccessExpression, typeChecker, mode);
 
     case ts.SyntaxKind.ForOfStatement:
       return gateForOf(node as ts.ForOfStatement, mode, typeChecker);
@@ -1828,11 +1829,16 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       // A dynamic-shape or Unknown member is a fourth target, DynFieldAssignment, for every
       // assignment form: the key is static, so the read-once machinery need only hoist the
       // receiver, and the fold reads and writes the shape-table entry through it.
-      // A name the class never declared is refused first: growing a fixed layout is Phase 8's
-      // dictionary mode (the write twin of the dynamic read, plan.md §8 step 37). In `ts` mode
-      // the checker's own TS2339 owns the program, so refusing here too would report one mistake
-      // twice — and `explain` would answer not-yet where the build answers error.
-      if (mode === 'js' && isAbsentClassMemberWrite(bin.left, typeChecker)) {
+      // So is a name the receiver's fixed layout never declared, `o.extra = v`: the write grows
+      // the object's overflow table (docs/VALUE.md §4.24). Only the ELEMENT spelling over a class,
+      // `c["extra"] = v`, is still refused, first. In `ts` mode the checker's own TS2339 owns the
+      // program, so refusing here too would report one mistake twice — and `explain` would answer
+      // not-yet where the build answers error.
+      if (
+        mode === 'js' &&
+        ts.isElementAccessExpression(bin.left) &&
+        isAbsentClassMemberWrite(bin.left, typeChecker)
+      ) {
         return notYet('assigning a new property on a class instance is not yet supported', 8);
       }
       if (ts.isObjectLiteralExpression(bin.left) || ts.isArrayLiteralExpression(bin.left)) {
@@ -1874,21 +1880,16 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       ) {
         return functionMemberResult(mode);
       }
-      // The object-shape twin of the class refusal above: a fixed layout cannot grow a name its
-      // type never declared, which waits on Phase 8's dictionary mode (plan-notes 310). In `ts`
-      // mode the checker's TS2339 owns the program, for the same reason as there.
+      // A name an object's type never declared: in `js` mode isAssignableTarget accepted it above
+      // (the write grows the overflow table, docs/VALUE.md §4.24); in `ts` mode the checker's
+      // TS2339 owns the program, and refusing here too would report one mistake twice.
       if (
+        mode === 'ts' &&
         ts.isPropertyAccessExpression(bin.left) &&
         tsTypeToHType(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker).kind ===
           'object'
       ) {
-        if (mode === 'ts') {
-          return { kind: 'accept' };
-        }
-        return notYet(
-          "assigning a property the object's shape does not declare is not yet supported",
-          8,
-        );
+        return { kind: 'accept' };
       }
       return notYet('assignment to anything but a variable is not yet supported', 5);
 
@@ -1968,7 +1969,8 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker, mode: 
   if (
     mode === 'js' &&
     (isFunctionValueMember(node.expression, node.name.text, checker) ||
-      isFunctionMemberRead(node.expression, checker))
+      isFunctionMemberRead(node.expression, checker) ||
+      isUndeclaredMemberRead(node, checker))
   ) {
     return true;
   }
@@ -2020,17 +2022,23 @@ function isAbsentClassMemberWrite(target: ts.Expression, checker: ts.TypeChecker
 
 /** `++`/`--`/`+=`/`=` in any position: statement form folds to Assignment; value form is UpdateExpr. */
 function gateUpdate(node: ts.Node, checker: ts.TypeChecker, mode: Mode): GateResult {
-  // Every read-modify-write grows nothing, but an absent member's write would have to: `c.missing
-  // += 1` reads `undefined` fine and then has nowhere to store. One predicate covers the compound,
-  // logical and update spellings alike — plain `=` is decided in gateBinary, the one assignment
-  // form that does not route through here. In `ts` mode the checker's own TS2339 owns the program
-  // (see gateBinary's `=` arm for why the refusal is js-only).
+  // An absent member's read-modify-write grows the object: `c.missing += 1` reads `undefined` and
+  // stores into the overflow table (docs/VALUE.md §4.24). Only the element spelling over a class,
+  // `c["missing"] += 1`, is still refused. One predicate covers the compound, logical and update
+  // spellings alike — plain `=` is decided in gateBinary, the one assignment form that does not
+  // route through here. In `ts` mode the checker's own TS2339 owns the program (see gateBinary's
+  // `=` arm for why the refusal is js-only).
   const target = ts.isBinaryExpression(node)
     ? node.left
     : ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)
       ? node.operand
       : undefined;
-  if (mode === 'js' && target !== undefined && isAbsentClassMemberWrite(target, checker)) {
+  if (
+    mode === 'js' &&
+    target !== undefined &&
+    ts.isElementAccessExpression(target) &&
+    isAbsentClassMemberWrite(target, checker)
+  ) {
     return notYet('assigning a new property on a class instance is not yet supported', 8);
   }
   return { kind: 'accept' };
@@ -2058,6 +2066,11 @@ function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mo
     return notYet('delete of anything but a property access is not yet supported', 5);
   }
   const target = tsTypeToHType(checker.getTypeAtLocation(operand.expression), checker);
+  // A name the layout never declared lives in the overflow table, which can lose it
+  // (docs/VALUE.md §4.24); only a DECLARED slot has no encoding for absence.
+  if (mode === 'js' && isUndeclaredMemberRead(operand, checker)) {
+    return { kind: 'accept' };
+  }
   if (target.kind === 'object') {
     return mode === 'ts'
       ? {
@@ -3106,6 +3119,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       // its receiver through the closure's own properties (plan-notes 310).
       if (isFunctionValueMember(callee.expression, callee.name.text, typeChecker)) {
         return functionMemberResult(mode);
+      }
+      // `info.cb()` where `cb` was grown onto the object (docs/VALUE.md §4.24): get the name
+      // through the overflow table, then call it with the object as receiver.
+      if (mode === 'js' && isUndeclaredMemberRead(callee, typeChecker)) {
+        return { kind: 'accept' };
       }
       return notYet('method calls are not yet supported', 5);
     }
@@ -5954,6 +5972,12 @@ function gateMemberAccess(
       if (shape.methods.some((m) => m.name === access.name.text)) {
         return calleeOnlyMember(access, 'a method');
       }
+      // A name the layout never declared: `js` mode reads it from the overflow table, which
+      // answers `undefined` until a write grows it (docs/VALUE.md §4.24). Calling it is a
+      // get-then-call on the Unknown that read answers.
+      if (mode === 'js' && isUndeclaredMemberRead(access, checker)) {
+        return { kind: 'accept' };
+      }
       return notYet('a property that is not a field of the shape is not yet supported', 5);
     }
     if (isFunctionValueMember(access.expression, access.name.text, checker)) {
@@ -6031,6 +6055,7 @@ function isReadModifyWrite(place: ts.Expression): boolean {
 function gateElementAccess(
   access: ts.ElementAccessExpression,
   checker: ts.TypeChecker,
+  mode: Mode,
 ): GateResult {
   const chained = optionalChainElementReceiver(access, checker);
   if (chained !== undefined) {
@@ -6119,6 +6144,12 @@ function gateElementAccess(
         (ts.TypeFlags.Object | ts.TypeFlags.NonPrimitive)) !==
         0
     ) {
+      return { kind: 'accept' };
+    }
+    // `table[node.kind]` in `js` mode: a computed key on a fixed shape reads and writes by NAME,
+    // through the same coercing entry points -- a declared name answers its slot, any other the
+    // overflow table, or `undefined` (docs/VALUE.md §4.24). A module namespace is no object.
+    if (mode === 'js' && hir.kind === 'object' && hir.namespace !== true && key === null) {
       return { kind: 'accept' };
     }
     return hir.kind === 'unknown' || isDynamicShape(receiver, checker)

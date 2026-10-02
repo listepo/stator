@@ -448,6 +448,11 @@ export interface DynMethodCall extends Node {
    * (`jsrt_call_spread_at`). A spread call takes this node whatever the receiver's type: the
    * shape-table read answers a layout's methods and a builtin's bound ones as well. */
   readonly spread?: true;
+  /** Node's `TypeError` subject (`c.missing`) when the loaded value is not callable, instead of
+   * the STA2006 abort. Set for a name a fixed object's layout does not declare, whose call
+   * answered that `TypeError` statically before growth could store a function there
+   * (docs/VALUE.md §4.24, plan.md §8 step 37). */
+  readonly notFunction?: string;
 }
 
 /** `o.f(a)` where `o` has a layout and `f` is one of its FIELDS holding a closure -- an object
