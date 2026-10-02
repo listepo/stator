@@ -1,6 +1,7 @@
 import * as ts from 'typescript';
 import { ERROR_CLASSES, errorHType } from '../hir/nodes.ts';
 import type { HField, HType } from '../hir/types.ts';
+import { ambiguousStarExports, namespaceModule } from './modules.ts';
 import {
   accessorName,
   accessorProperty,
@@ -453,32 +454,33 @@ function moduleNamespaceToHType(
   if (depth >= MAX_SIGNATURE_DEPTH) {
     return null;
   }
-  const symbol = type.getSymbol();
   // TypeScript puts Module bits on a fresh `let o = {}` binding (ValueModule|NamespaceModule
-  // plus BlockScopedVariable). A namespace is a SourceFile / module declaration, never a value
-  // binding: matching those would mark `{ x: number }` as `namespace: true` and compile `o.x`
-  // to a global slot.
-  if (
-    symbol === undefined ||
-    (symbol.flags & ts.SymbolFlags.Module) === 0 ||
-    (symbol.flags & ts.SymbolFlags.Variable) !== 0
-  ) {
+  // plus BlockScopedVariable). A namespace is a SourceFile, never a value binding: matching
+  // those would mark `{ x: number }` as `namespace: true` (`namespaceModule` refuses them).
+  const file = namespaceModule(type);
+  if (file === undefined) {
     return null;
   }
-  const decl = symbol.valueDeclaration ?? symbol.declarations?.[0];
-  if (decl === undefined || !(ts.isSourceFile(decl) || ts.isModuleDeclaration(decl))) {
-    return null;
-  }
+  // A name two `export *` re-exports bind differently is no export at all (ES drops it from the
+  // namespace); the checker still lists it, under js mode's dropped TS2308 (plan-notes 302).
+  const ambiguous = ambiguousStarExports(file, checker);
   const fields: HField[] = [];
   for (const property of checker.getPropertiesOfType(type)) {
     const atDecl = property.valueDeclaration ?? property.declarations?.[0];
-    if (atDecl === undefined || (property.flags & ts.SymbolFlags.Method) !== 0) {
+    if (
+      atDecl === undefined ||
+      (property.flags & ts.SymbolFlags.Method) !== 0 ||
+      ambiguous.has(property.name)
+    ) {
       continue;
     }
-    fields.push({
-      name: property.name,
-      type: tsTypeToHType(checker.getTypeOfSymbolAtLocation(property, atDecl), checker, depth + 1),
-    });
+    const propertyType = checker.getTypeOfSymbolAtLocation(property, atDecl);
+    // A class has no value in this subset (a class object is rung 6b's), so an exported class is
+    // no namespace field: `ns.C` reads a class object and the gate holds it (plan.md §11c T11.5a).
+    if (propertyType.getConstructSignatures().length > 0) {
+      continue;
+    }
+    fields.push({ name: property.name, type: tsTypeToHType(propertyType, checker, depth + 1) });
   }
   if (fields.length === 0) {
     return null;

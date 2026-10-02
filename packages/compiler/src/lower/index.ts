@@ -53,6 +53,13 @@ import {
   outInnerTag,
   outSlotDeclarationOf,
 } from '../frontend/extern.ts';
+import {
+  DEFAULT_EXPORT_BINDING,
+  declaredBindingName,
+  exportTarget,
+  namespaceModule,
+  type ExportTarget,
+} from '../frontend/modules.ts';
 import { assertedBy, isCheckable, narrowedTo, sourceLocation } from '../frontend/narrowing.ts';
 import {
   accessorDeclaringClass,
@@ -200,7 +207,7 @@ import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, enclosingFunction, isFunctionLike, RECEIVER_NAME } from './captures.ts';
-import { Scope, resetShadowCounter, shadowSource } from './scope.ts';
+import { Scope, resetShadowCounter } from './scope.ts';
 
 /* What HIR name each source declaration ended up with (plan.md §8 step 14).
  *
@@ -361,6 +368,38 @@ let moduleAwaits = false;
  * that computes it, reset per `lowerProgram` with the module state above — lowering is
  * synchronous, so no nested lowering can observe another file's list. */
 let currentFileClassSpecs: readonly ClassSpecialization[] = [];
+/** Each module's own top-level scope (plan.md §11c T11.5a), recorded as `lowerProgram` reaches
+ * the file. An import resolves through the EXPORTER's scope, which topological order has always
+ * finished lowering by then. Reset per `lowerProgram` with the module state above. */
+const moduleScopes = new Map<ts.SourceFile, Scope>();
+/** The hidden global holding each module's namespace object (`import * as ns`, `export * as ns
+ * from`, a literal `import()`), created once, at the first importer that needs it. */
+const namespaceObjects = new Map<ts.SourceFile, string>();
+/** Each dependency module's position in the program order, which qualifies the specializations
+ * of its generic functions (`functionSpecializationName`). The entry has none. Reset per
+ * `lowerProgram` with the module state above. */
+const dependencyOrdinals = new Map<ts.SourceFile, number>();
+/** Every module of the program being lowered, in program order (the override question spans
+ * them all; see `isOverridden`). */
+let programModules: readonly ts.SourceFile[] = [];
+
+/** The name a generic FUNCTION's specialization binds under: `pick<number>` for the entry's own
+ * generics, `pick<number>@1` for a dependency's (plan.md §11c T11.5a).
+ *
+ * Two modules may each declare a generic `pick`, and the tuple alone would give both one
+ * specialization. The qualifier rides after the tuple, so the name stays unspellable and every
+ * reader that strips the tuple for printing still finds the source name; the printable name a
+ * closure carries is the declaration's own either way. Generic CLASSES do not need it: the
+ * gate keeps a module-level generic class name unique across the program. */
+function functionSpecializationName(
+  declaration: ts.Node,
+  key: string,
+  typeArguments: readonly HType[],
+): string {
+  const name = specializationName(key, typeArguments);
+  const ordinal = dependencyOrdinals.get(declaration.getSourceFile());
+  return ordinal === undefined ? name : `${name}@${String(ordinal)}`;
+}
 
 export function lowerProgram(
   files: readonly ts.SourceFile[],
@@ -411,11 +450,22 @@ export function lowerProgram(
   bindTempId = 0;
   resetShadowCounter();
   currentFileClassSpecs = [];
+  moduleScopes.clear();
+  namespaceObjects.clear();
+  dependencyOrdinals.clear();
   const entry = files.at(-1);
   if (entry === undefined) {
     throw new Error('lowerProgram requires at least one file');
   }
+  files.slice(0, -1).forEach((file, ordinal) => dependencyOrdinals.set(file, ordinal));
+  programModules = files;
   let current = entry;
+  // Every module is a scope of its own under the shared root (plan.md §11c T11.5a): a module sees
+  // its own top-level names and its imports, never another module's. All of them share the
+  // module unit's slot space, so a spelling two modules declare gets a fresh name in the second;
+  // the entry claims its spellings first, so it is a dependency's binding that is renamed.
+  const entryScope = bindings.child();
+  entryScope.claim(topLevelNames(entry));
 
   try {
     for (const sourceFile of files) {
@@ -436,7 +486,14 @@ export function lowerProgram(
       const classSpecializations = collected.classes.filter((spec) => !bindings.has(spec.name));
       // The nested-generic lookup below reads this file's list while its statements lower.
       currentFileClassSpecs = collected.classes;
-      hoistFunctionDeclarations(sourceFile.statements, checker, bindings);
+      const scope = sourceFile === entry ? entryScope : bindings.child();
+      moduleScopes.set(sourceFile, scope);
+      // Import bindings exist before the module body runs (ES module instantiation), so they are
+      // bound before anything hoists; a namespace object an import needs is built here too.
+      if (!bindImports(sourceFile, scope, bindings, statements, checker, diagnostics)) {
+        return { module: null, diagnostics };
+      }
+      hoistFunctionDeclarations(sourceFile.statements, checker, scope);
       for (const specialization of specializations) {
         bindings.set(specialization.name, specializationType(specialization, checker));
       }
@@ -447,23 +504,20 @@ export function lowerProgram(
       // does not reinitialize the slot to `undefined` (the spec instantiates the function, then
       // skips the var). Registering functions above and skipping already-bound names in the
       // hoist is that order.
-      const hoistedVars = hoistVarDeclarations(
-        sourceFile,
-        sourceFile,
-        checker,
-        bindings,
-        diagnostics,
-      );
+      const hoistedVars = hoistVarDeclarations(sourceFile, sourceFile, checker, scope, diagnostics);
       if (hoistedVars === null) {
         return { module: null, diagnostics };
       }
 
+      // A generic's body reads ITS module's names, wherever it was instantiated from.
+      const homeScope = (declaration: ts.Node): Scope =>
+        moduleScopes.get(declaration.getSourceFile()) ?? scope;
       for (const specialization of specializations) {
         const declaration = lowerSpecialization(
           specialization,
           sourceFile,
           checker,
-          bindings,
+          homeScope(specialization.declaration),
           diagnostics,
         );
         if (declaration === null) {
@@ -482,7 +536,7 @@ export function lowerProgram(
           specialization,
           sourceFile,
           checker,
-          bindings,
+          homeScope(specialization.declaration),
           diagnostics,
         );
         if (declaration === null) {
@@ -503,13 +557,12 @@ export function lowerProgram(
         // blocks, emitted for every declaration whether used or not, exactly as for an ordinary
         // class — comes first, so a tuple's method bodies read bound statics.
         if (ts.isClassDeclaration(node) && isGenericClass(node)) {
-          const mine = classSpecializations.filter((spec) => spec.declaration === node);
           const lowered = lowerGenericClassDeclaration(
             node,
-            mine,
+            classSpecializations.filter((spec) => spec.declaration === node),
             sourceFile,
             checker,
-            bindings,
+            scope,
             diagnostics,
           );
           if (lowered === null) {
@@ -518,15 +571,19 @@ export function lowerProgram(
           statements.push(...lowered);
           continue;
         }
-        // Module syntax lowers to nothing either: an import binds nothing in the merged namespace
-        // (the name resolves to the exporting file's own binding), `export { x }` is metadata
-        // about a binding that already exists, and a default export is gate-restricted to a
-        // literal, which has no effect to keep.
-        if (
-          ts.isImportDeclaration(node) ||
-          ts.isExportDeclaration(node) ||
-          ts.isExportAssignment(node)
-        ) {
+        // `export default <expression>` evaluates once, into the module's `*default*` binding.
+        if (ts.isExportAssignment(node)) {
+          const declared = lowerExportAssignment(node, sourceFile, checker, scope, diagnostics);
+          if (declared === null) {
+            return { module: null, diagnostics };
+          }
+          statements.push(declared);
+          continue;
+        }
+        // The rest of module syntax lowers to nothing: an import was bound above, to the
+        // exporter's own binding, and `export { x }` / `export … from` are metadata about
+        // bindings that already exist.
+        if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
           continue;
         }
         // Type-only declarations erase: `interface` and `type` bind no value and emit no code
@@ -536,7 +593,7 @@ export function lowerProgram(
         if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
           continue;
         }
-        const stmt = lowerStatement(node, sourceFile, checker, bindings, diagnostics);
+        const stmt = lowerStatement(node, sourceFile, checker, scope, diagnostics);
         if (stmt === null) {
           return { module: null, diagnostics };
         }
@@ -544,10 +601,10 @@ export function lowerProgram(
       }
     }
 
-    // Unioned across the graph, because the merged program has ONE module environment and each
-    // file contributes its own per-iteration top-level bindings to it. Concatenation is safe
-    // without a dedupe: cross-file name collisions are already refused before lowering, so two
-    // files cannot contribute the same name.
+    // Unioned across the graph, because the program has ONE module environment and each file
+    // contributes its own per-iteration top-level bindings to it. Concatenation is safe without a
+    // dedupe: the files share the module unit's slot space, so a spelling two files declare has
+    // two HIR names (plan.md §11c T11.5a).
     //
     // Each file's list is already in the analysis's slot order, and that order is what the
     // captures' `index` fields mean -- so this MUST NOT re-sort. It used to, back when every name
@@ -879,7 +936,8 @@ function lowerStatement(
   // before the first statement of this body was lowered, which is what makes a call that appears
   // above the declaration resolve.
   if (ts.isFunctionDeclaration(node)) {
-    const name = node.name?.text;
+    // `export default function () {}` binds the module's `*default*` and prints as `default`.
+    const name = declaredBindingName(node);
     if (name === undefined) {
       diagnostics.push(
         lowerDiagnostic(
@@ -903,10 +961,11 @@ function lowerStatement(
         statements: [],
       };
     }
-    const fn = lowerFunction(node, sourceFile, checker, bindings, diagnostics);
-    if (fn === null) {
+    const lowered = lowerFunction(node, sourceFile, checker, bindings, diagnostics);
+    if (lowered === null) {
       return null;
     }
+    const fn = node.name === undefined ? { ...lowered, name: lowered.name ?? 'default' } : lowered;
     const declaration: FunctionDeclaration = {
       kind: 'function-declaration',
       type: H_UNDEFINED,
@@ -1669,6 +1728,10 @@ function lowerPatternRead(
     const index: Expression = { kind: 'number-literal', type: H_NUMBER, span, value: field };
     return { kind: 'index-access', type, span, target, index };
   }
+  const member = namespaceObjectField(target, field, checker, bindings);
+  if (member !== undefined) {
+    return { kind: 'identifier', type: member.type, span, name: member.name };
+  }
   if (target.type.kind === 'unknown') {
     const access: DynFieldAccess = {
       kind: 'dyn-field-access',
@@ -2132,7 +2195,7 @@ function wrapUserIterator(
     slot,
     dispatch:
       iterable.type.kind === 'object' &&
-      isOverridden(iterable.type.name, ITERATOR_METHOD_NAME, sourceFile, checker)
+      isOverridden(iterable.type.name, ITERATOR_METHOD_NAME, checker)
         ? 'virtual'
         : 'direct',
     args: [],
@@ -4078,9 +4141,7 @@ function lowerClassMethodCall(
       // Skipping the override is what `super` MEANS, so this one call stays direct even where
       // every other call to the same method is virtual.
       dispatch:
-        !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
-          ? 'virtual'
-          : 'direct',
+        !viaSuper && isOverridden(target.type.name, propName, checker) ? 'virtual' : 'direct',
       args: checkCallArgs(target.type.methods[slot]?.type, args, node, sourceFile, checker),
     };
     return call;
@@ -4113,7 +4174,6 @@ function nullableMethodInfo(
   field: string,
   checker: ts.TypeChecker,
   bindings: Scope,
-  sourceFile: ts.SourceFile,
 ):
   | {
       readonly className: string;
@@ -4187,8 +4247,50 @@ function nullableMethodInfo(
   return {
     className,
     slot,
-    dispatch: isOverridden(objectType.name, field, sourceFile, checker) ? 'virtual' : 'direct',
+    dispatch: isOverridden(objectType.name, field, checker) ? 'virtual' : 'direct',
     objectType,
+  };
+}
+
+/** A method read as a value (`o.m`, `super.m`): the receiver's slot for `method` in `layout`,
+ * bound to `target`. A method with no slot is the gate and the lowering disagreeing (STA4067). */
+function methodValue(
+  node: ts.Node,
+  target: Expression,
+  layout: HObject,
+  method: string,
+  className: string,
+  context: {
+    readonly virtual: boolean;
+    readonly sourceFile: ts.SourceFile;
+    readonly checker: ts.TypeChecker;
+    readonly bindings: Scope;
+    readonly diagnostics: Diagnostic[];
+  },
+): MethodValue | null {
+  const { sourceFile, diagnostics } = context;
+  const slot = layout.methods.findIndex((m) => m.name === method);
+  if (slot < 0) {
+    diagnostics.push(
+      lowerDiagnostic(
+        node,
+        sourceFile,
+        'STA4067',
+        'internal',
+        `method '${method}' has no slot in the layout of ${hTypeName(layout)}`,
+      ),
+    );
+    return null;
+  }
+  return {
+    kind: 'method-value',
+    type: typeAt(node, context.checker, context.bindings),
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    target,
+    className,
+    method,
+    slot,
+    dispatch: context.virtual ? 'virtual' : 'direct',
   };
 }
 
@@ -4213,6 +4315,11 @@ function lowerClassMemberRead(
   bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null {
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const member = namespaceObjectField(target, field, checker, bindings);
+  if (member !== undefined) {
+    return { kind: 'identifier', type: member.type, span, name: member.name };
+  }
   // An accessor is not a slot: reading `o.x` RUNS the getter, which is what the property means.
   const methodOwner = declaringClassName(receiver, field, checker, bindings, sourceFile);
   if (methodOwner !== null) {
@@ -4222,30 +4329,13 @@ function lowerClassMemberRead(
       );
       return null;
     }
-    const slot = target.type.methods.findIndex((m) => m.name === field);
-    if (slot < 0) {
-      diagnostics.push(
-        lowerDiagnostic(
-          node,
-          sourceFile,
-          'STA4067',
-          'internal',
-          `method '${field}' has no slot in the layout of ${hTypeName(target.type)}`,
-        ),
-      );
-      return null;
-    }
-    const value: MethodValue = {
-      kind: 'method-value',
-      type: typeAt(node, checker, bindings),
-      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-      target,
-      className: methodOwner,
-      method: field,
-      slot,
-      dispatch: isOverridden(target.type.name, field, sourceFile, checker) ? 'virtual' : 'direct',
-    };
-    return value;
+    return methodValue(node, target, target.type, field, methodOwner, {
+      virtual: isOverridden(target.type.name, field, checker),
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    });
   }
   const owner = accessorOwner(receiver, field, checker, bindings, sourceFile);
   if (owner !== undefined) {
@@ -4533,6 +4623,12 @@ function lowerExpression(
     return template;
   }
 
+  // `ns.x` on a module namespace: the export's own binding, resolved here (plan.md §11c T11.5a).
+  const namespaceMember = namespaceMemberRead(node, sourceFile, checker, bindings);
+  if (namespaceMember !== undefined) {
+    return namespaceMember;
+  }
+
   // `C.count` on a class NAME. Tested before the instance case because the receiver's type answers
   // the same for both -- the type of the expression `C` is the class's static side, whose symbol is
   // still the class declaration. A static is one binding, so this is an ordinary identifier read --
@@ -4626,7 +4722,7 @@ function lowerExpression(
     !ts.isPrivateIdentifier(node.name) &&
     optionalChainCuts.has(node.expression)
   ) {
-    const info = nullableMethodInfo(node.expression, node.name.text, checker, bindings, sourceFile);
+    const info = nullableMethodInfo(node.expression, node.name.text, checker, bindings);
     if (info !== undefined) {
       const raw = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
       if (raw === null) {
@@ -4741,30 +4837,13 @@ function lowerExpression(
       );
       return null;
     }
-    const slot = target.type.methods.findIndex((m) => m.name === field);
-    if (slot < 0) {
-      diagnostics.push(
-        lowerDiagnostic(
-          node,
-          sourceFile,
-          'STA4067',
-          'internal',
-          `method '${field}' has no slot in the layout of ${hTypeName(target.type)}`,
-        ),
-      );
-      return null;
-    }
-    const value: MethodValue = {
-      kind: 'method-value',
-      type: typeAt(node, checker, bindings),
-      span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-      target,
-      className: owner,
-      method: field,
-      slot,
-      dispatch: 'direct',
-    };
-    return value;
+    return methodValue(node, target, target.type, field, owner, {
+      virtual: false,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    });
   }
 
   // `o.x` on a class instance. This is tested BEFORE `.length` because a class may declare a field
@@ -5147,9 +5226,7 @@ function lowerExpression(
                 className: sourceName,
                 method: method.name,
                 slot,
-                dispatch: isOverridden(sourceName, method.name, sourceFile, checker)
-                  ? 'virtual'
-                  : 'direct',
+                dispatch: isOverridden(sourceName, method.name, checker) ? 'virtual' : 'direct',
               };
               methodCopies.push({
                 at: fieldsBefore,
@@ -6673,7 +6750,7 @@ function lowerExpression(
         !ts.isPrivateIdentifier(expr.name) &&
         optionalChainCuts.has(obj)
       ) {
-        const info = nullableMethodInfo(obj, propName, checker, bindings, sourceFile);
+        const info = nullableMethodInfo(obj, propName, checker, bindings);
         if (info !== undefined) {
           const raw = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
           if (raw === null) {
@@ -7045,10 +7122,14 @@ function hoistFunctionDeclarations(
   bindings: Scope,
 ): void {
   for (const statement of statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
+    if (!ts.isFunctionDeclaration(statement)) {
+      continue;
+    }
+    const name = declaredBindingName(statement);
+    if (name !== undefined) {
       hirNameOfDeclaration.set(
         statement,
-        bindings.declare(statement.name.text, typeAt(statement, checker, bindings)),
+        bindings.declare(name, typeAt(statement, checker, bindings)),
       );
     }
   }
@@ -7095,13 +7176,21 @@ function hoistVarDeclarations(
         }
         seen.add(name);
         const type = typeAt(decl.name, checker, bindings);
-        bindings.set(name, type);
+        // A module's top-level `var` is a binding of the module unit like a `let` is: a spelling
+        // another module declared too takes a fresh name (plan.md §11c T11.5a). Inside a
+        // function the var keeps sharing what is visible, as before.
+        let hir = name;
+        if (root === sourceFile) {
+          hir = bindings.declare(name, type);
+        } else {
+          bindings.set(name, type);
+        }
         const span = makeSpan(decl.getStart(sourceFile), decl.getWidth(sourceFile), sourceFile);
         const stmt: Declaration = {
           kind: 'declaration',
           type,
           span,
-          name,
+          name: hir,
           declKind: 'let',
           value: { kind: 'undefined-literal', type: H_UNDEFINED, span },
         };
@@ -7156,7 +7245,7 @@ function lowerVarList(
       kind: 'assignment',
       type: value.type,
       span: makeSpan(decl.getStart(sourceFile), decl.getWidth(sourceFile), sourceFile),
-      target: name,
+      target: bindings.hirName(name),
       value,
     });
   }
@@ -7183,18 +7272,10 @@ function lowerImportCall(
 ): Expression | null {
   const spec = node.arguments[0];
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-  if (spec === undefined || !ts.isStringLiteral(spec)) {
-    diagnostics.push(
-      lowerDiagnostic(
-        node,
-        sourceFile,
-        'STA4031',
-        'internal',
-        'unexpected expression kind: ImportKeyword',
-      ),
-    );
-    return null;
-  }
+  const target =
+    spec !== undefined && ts.isStringLiteral(spec)
+      ? checker.getSymbolAtLocation(spec)?.valueDeclaration
+      : undefined;
   const resultType = typeAt(node, checker, bindings);
   const nsType =
     resultType.kind === 'promise' && resultType.value.kind === 'object'
@@ -7202,34 +7283,312 @@ function lowerImportCall(
       : resultType.kind === 'object'
         ? resultType
         : undefined;
-  if (nsType === undefined || nsType.namespace !== true) {
+  // `bindImports` built the namespace object of every literal `import()` target when this file
+  // began, so the promise resolves to the SAME object `import * as ns` binds, as in Node.
+  const object =
+    target !== undefined && ts.isSourceFile(target) ? namespaceObjects.get(target) : undefined;
+  const objectType = object === undefined ? undefined : bindings.get(object);
+  if (nsType?.namespace !== true || object === undefined || objectType === undefined) {
     diagnostics.push(
       lowerDiagnostic(
         node,
         sourceFile,
         'STA4031',
         'internal',
-        `import('${spec.text}') did not resolve to a module namespace`,
+        `import('${spec !== undefined && ts.isStringLiteral(spec) ? spec.text : ''}') did not resolve to a module namespace`,
       ),
     );
     return null;
   }
-  const entries = nsType.fields.map((field) => ({
-    name: field.name,
-    value: {
-      kind: 'identifier' as const,
-      name: field.name,
-      type: bindings.get(field.name) ?? field.type,
-      span,
-    },
-  }));
   return {
     kind: 'promise-static',
     type: resultType.kind === 'promise' ? resultType : hPromise(nsType),
     span,
     method: 'resolve',
-    arg: { kind: 'object-literal', type: nsType, span, entries, methods: [], methodCopies: [] },
+    arg: { kind: 'identifier', name: object, type: objectType, span },
   };
+}
+
+/** Every spelling `file` declares at its top level -- the names the entry claims (see
+ * `Scope.claim`) so that it is a dependency's same-spelled binding that is renamed. */
+function topLevelNames(file: ts.SourceFile): string[] {
+  const names: string[] = [];
+  for (const statement of file.statements) {
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) {
+          names.push(declaration.name.text);
+        }
+      }
+    } else if (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) {
+      const name = declaredBindingName(statement);
+      if (name !== undefined) {
+        names.push(name);
+      }
+    } else if (ts.isExportAssignment(statement)) {
+      names.push(DEFAULT_EXPORT_BINDING);
+    }
+  }
+  return names;
+}
+
+/** The binding an exported name resolves to (plan.md §11c T11.5a): its HIR name and type in the
+ * exporting module's own scope, or the namespace object of a whole module. `undefined` when the
+ * name has no runtime binding this program lowered -- a type, an ambient extern declaration. */
+function exportedBinding(
+  target: ExportTarget | undefined,
+  root: Scope,
+): { readonly name: string; readonly type: HType } | undefined {
+  if (target === undefined) {
+    return undefined;
+  }
+  if (target.kind === 'namespace') {
+    const name = namespaceObjects.get(target.file);
+    const type = name === undefined ? undefined : root.get(name);
+    return name === undefined || type === undefined ? undefined : { name, type };
+  }
+  const scope = moduleScopes.get(target.file);
+  const type = scope?.get(target.name);
+  return scope === undefined || type === undefined
+    ? undefined
+    : { name: scope.hirName(target.name), type };
+}
+
+/** Bind every import of `file` in its module scope, before its body hoists anything.
+ *
+ * A named, renamed or default import aliases the exporter's binding -- the same HIR name, so a
+ * read is the export's live binding and a renamed import costs nothing. A namespace import, an
+ * imported `export * as ns`, and a literal `import()` need the target's namespace OBJECT, which
+ * is built here, once per module, into a hidden global of the root scope: the target's body has
+ * already run (topological order), so every export it reads is initialized. Answers `false`
+ * after reporting an internal error. */
+function bindImports(
+  file: ts.SourceFile,
+  scope: Scope,
+  root: Scope,
+  statements: Statement[],
+  checker: ts.TypeChecker,
+  diagnostics: Diagnostic[],
+): boolean {
+  const fail = (node: ts.Node, message: string): false => {
+    diagnostics.push(lowerDiagnostic(node, file, 'STA4031', 'internal', message));
+    return false;
+  };
+  // Builds `module`'s namespace object (and, first, every nested one it holds) unless it exists.
+  const ensureNamespace = (module: ts.SourceFile, at: ts.Node): boolean => {
+    if (namespaceObjects.has(module)) {
+      return true;
+    }
+    const moduleSymbol = checker.getSymbolAtLocation(module);
+    const nsType =
+      moduleSymbol === undefined
+        ? undefined
+        : tsTypeToHType(checker.getTypeOfSymbolAtLocation(moduleSymbol, at), checker);
+    // A module with no value exports has no namespace HType (`moduleNamespaceToHType`): nothing
+    // can read a member of it, so it gets no object, and its importer's `ns` binds nothing.
+    if (moduleSymbol === undefined || nsType?.kind !== 'object' || nsType.namespace !== true) {
+      return true;
+    }
+    const entries: ObjectEntry[] = [];
+    const span = makeSpan(at.getStart(file), at.getWidth(file), file);
+    for (const field of nsType.fields) {
+      const target = moduleExportTarget(module, field.name, checker);
+      if (target?.kind === 'namespace' && !ensureNamespace(target.file, at)) {
+        return false;
+      }
+      const binding = exportedBinding(target, root);
+      if (binding === undefined) {
+        return fail(at, `export '${field.name}' of '${module.fileName}' has no binding`);
+      }
+      entries.push({
+        name: field.name,
+        value: { kind: 'identifier', name: binding.name, type: binding.type, span },
+      });
+    }
+    return declareNamespace(module, nsType, entries, at);
+  };
+  const declareNamespace = (
+    module: ts.SourceFile,
+    type: HObject,
+    entries: readonly ObjectEntry[],
+    at: ts.Node,
+  ): true => {
+    const name = `\u0000namespace:${module.fileName}`;
+    const span = makeSpan(at.getStart(file), at.getWidth(file), file);
+    root.set(name, type);
+    namespaceObjects.set(module, name);
+    statements.push({
+      kind: 'declaration',
+      type,
+      span,
+      name,
+      declKind: 'const',
+      value: { kind: 'object-literal', type, span, entries, methods: [], methodCopies: [] },
+    });
+    return true;
+  };
+  const bindName = (local: ts.Identifier): boolean => {
+    const target = exportTarget(checker.getSymbolAtLocation(local), checker);
+    if (target?.kind === 'namespace' && !ensureNamespace(target.file, local)) {
+      return false;
+    }
+    // An extern declaration or a type binds nothing here: the call site resolves an extern by
+    // its declaration (docs/FFI.md §1), and a type erases.
+    const binding = exportedBinding(target, root);
+    if (binding !== undefined) {
+      scope.alias(local.text, binding.name, binding.type);
+    }
+    return true;
+  };
+  for (const statement of file.statements) {
+    if (!ts.isImportDeclaration(statement)) {
+      continue;
+    }
+    const clause = statement.importClause;
+    if (clause === undefined || clause.isTypeOnly) {
+      continue;
+    }
+    if (clause.name !== undefined && !bindName(clause.name)) {
+      return false;
+    }
+    const named = clause.namedBindings;
+    if (named === undefined) {
+      continue;
+    }
+    if (ts.isNamespaceImport(named)) {
+      if (!bindName(named.name)) {
+        return false;
+      }
+      continue;
+    }
+    for (const element of named.elements) {
+      if (!element.isTypeOnly && !bindName(element.name)) {
+        return false;
+      }
+    }
+  }
+  return importCallTargets(file, checker).every((target) => ensureNamespace(target, file));
+}
+
+/** The modules a literal `import()` in `file` names, in source order. */
+function importCallTargets(file: ts.SourceFile, checker: ts.TypeChecker): ts.SourceFile[] {
+  const targets: ts.SourceFile[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments[0] !== undefined &&
+      ts.isStringLiteral(node.arguments[0])
+    ) {
+      const target = checker.getSymbolAtLocation(node.arguments[0])?.valueDeclaration;
+      if (target !== undefined && ts.isSourceFile(target) && !target.isDeclarationFile) {
+        targets.push(target);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return targets;
+}
+
+/** `export default <expression>`: the expression evaluated once into the module's hidden
+ * `*default*` binding (ES §16.2.3.7), which a default import aliases. An anonymous function or
+ * class takes the name `default`, as in Node. */
+function lowerExportAssignment(
+  node: ts.ExportAssignment,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Statement | null {
+  const value = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+  if (value === null) {
+    return null;
+  }
+  const name = bindings.declare(DEFAULT_EXPORT_BINDING, value.type);
+  return {
+    kind: 'declaration',
+    type: value.type,
+    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    name,
+    declKind: 'const',
+    value: withDisplayName(value, 'default'),
+  };
+}
+
+/** `ns.x` where `ns` statically names a module namespace -- an import, an `import()` result in a
+ * binding, a nested `ns.inner` -- resolved at compile time to the export's own binding: a live
+ * read with no object in between (plan.md §11c T11.5a). `undefined` for anything else, including
+ * a namespace computed by an expression with effects, which reads its object instead. */
+function namespaceMemberRead(
+  node: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+): Identifier | undefined {
+  if (!ts.isPropertyAccessExpression(node) || !isStaticNamespacePath(node.expression, checker)) {
+    return undefined;
+  }
+  const member = exportedBinding(
+    exportTarget(checker.getSymbolAtLocation(node.name), checker),
+    bindings,
+  );
+  return member === undefined
+    ? undefined
+    : {
+        kind: 'identifier',
+        type: member.type,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        name: member.name,
+      };
+}
+
+/** A read of `field` off a lowered expression that IS a module's namespace object (the hidden
+ * global `bindImports` built): the export's own binding, exactly as `namespaceMemberRead`
+ * resolves the dot spelling. The object is a snapshot taken when the importer started, so a
+ * destructuring (`const { x } = ns`) or a literal-keyed read (`ns[k]`, `k: "x"`) must not read it
+ * when the binding behind it can still change. `undefined` for any other target. */
+function namespaceObjectField(
+  target: Expression,
+  field: string,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+): { readonly name: string; readonly type: HType } | undefined {
+  if (target.kind !== 'identifier') {
+    return undefined;
+  }
+  for (const [module, name] of namespaceObjects) {
+    if (name === target.name) {
+      return exportedBinding(moduleExportTarget(module, field, checker), bindings);
+    }
+  }
+  return undefined;
+}
+
+/** What `module` exports under `name`, through the checker's alias chain. */
+function moduleExportTarget(
+  module: ts.SourceFile,
+  name: string,
+  checker: ts.TypeChecker,
+): ExportTarget | undefined {
+  const moduleSymbol = checker.getSymbolAtLocation(module);
+  if (moduleSymbol === undefined) {
+    return undefined;
+  }
+  return exportTarget(
+    checker.getExportsOfModule(moduleSymbol).find((symbol) => symbol.name === name),
+    checker,
+  );
+}
+
+function isStaticNamespacePath(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (namespaceModule(checker.getTypeAtLocation(node)) === undefined) {
+    return false;
+  }
+  return (
+    ts.isIdentifier(node) ||
+    (ts.isPropertyAccessExpression(node) && isStaticNamespacePath(node.expression, checker))
+  );
 }
 
 /** An explicit `this` parameter (`function f(this: Foo)`): the gate refuses it (STA1214), so
@@ -7674,14 +8033,26 @@ function declaringClassName(
  * ONE implementation for every receiver that can reach the call site. That stops being true the
  * moment two classes in one chain declare the same name, and it stops being true for the whole
  * FAMILY, not just for the pair: a call through a base-typed reference may land on any descendant.
- * So the question is asked of the file, not of the call: does any chain that contains this class
- * declare this method twice? A `yes` makes every call to that name on that family virtual, which
+ * So the question is asked of the program, not of the call: does any chain that contains this
+ * class declare this method twice? A `yes` makes every call to that name on that family virtual, which
  * is why a class that is never overridden keeps rung 6a's zero-cost direct call unchanged.
  *
- * Scanning per call site is quadratic in a file's classes and linear in its chains. It is also
- * exact, needs no plumbing through the lowering, and a program with enough classes for that to
- * matter has a much larger emitter cost -- memoize when a measurement says to. */
-function classesIn(sourceFile: ts.SourceFile): (ts.ClassDeclaration | ts.ClassExpression)[] {
+ * Scanning per call site is quadratic in the program's classes and linear in its chains (the class
+ * list itself is collected once per file). It is also exact, needs no plumbing through the
+ * lowering, and a program with enough classes for that to matter has a much larger emitter cost
+ * -- memoize the answers when a measurement says to. */
+const classesInCache = new WeakMap<
+  ts.SourceFile,
+  readonly (ts.ClassDeclaration | ts.ClassExpression)[]
+>();
+
+function classesIn(
+  sourceFile: ts.SourceFile,
+): readonly (ts.ClassDeclaration | ts.ClassExpression)[] {
+  const cached = classesInCache.get(sourceFile);
+  if (cached !== undefined) {
+    return cached;
+  }
   const found: (ts.ClassDeclaration | ts.ClassExpression)[] = [];
   const visit = (node: ts.Node): void => {
     // Declarations and bound expressions alike: an override family may span the spelling
@@ -7696,6 +8067,7 @@ function classesIn(sourceFile: ts.SourceFile): (ts.ClassDeclaration | ts.ClassEx
     ts.forEachChild(node, visit);
   };
   ts.forEachChild(sourceFile, visit);
+  classesInCache.set(sourceFile, found);
   return found;
 }
 
@@ -7732,36 +8104,29 @@ function declaresMethod(
   });
 }
 
-function className(declaration: ts.ClassDeclaration | ts.ClassExpression): string {
-  return declaration.name?.text ?? '';
-}
-
-/** Is `method` declared twice in some chain that contains the class `name`? */
-function isOverridden(
-  name: string,
-  method: string,
-  sourceFile: ts.SourceFile,
-  checker: ts.TypeChecker,
-): boolean {
-  // A shadow HIR name is never in an override family: the gate refuses overriding in any class
-  // that is not at module scope, and only a nested class can be renamed (plan.md §8 step 23).
-  // Asking the source-level scan about it would match the OUTER family of the same spelling and
-  // misclassify the call as virtual.
-  if (shadowSource(name) !== undefined) {
-    return false;
-  }
-  // A `#private` name never overrides either (see `declaresMethod`): re-declaring one adds a
-  // per-class slot, and every use resolves lexically, so no call is ever virtual on its account.
+/** Is `method` declared twice in some chain that contains the class `name`?
+ *
+ * Asked of the whole PROGRAM, not of the calling file: a family may span modules (a base here, its
+ * override in a dependent module), and a call through the base must dispatch virtually either way.
+ * A class is matched by its HIR name, so two modules' same-spelled classes (plan.md §11c T11.5a)
+ * and a nested class that shadows an outer one (plan.md §8 step 23) are separate families. A
+ * declaration not lowered yet answers its source name, the name every reference to it carries
+ * until then too. */
+function isOverridden(name: string, method: string, checker: ts.TypeChecker): boolean {
+  // A `#private` name never overrides (see `declaresMethod`): re-declaring one adds a per-class
+  // slot, and every use resolves lexically, so no call is ever virtual on its account.
   if (isPrivateMemberName(method)) {
     return false;
   }
-  for (const declaration of classesIn(sourceFile)) {
-    const chain = ancestry(declaration, checker);
-    if (!chain.some((c) => className(c) === name)) {
-      continue;
-    }
-    if (chain.filter((c) => declaresMethod(c, method, checker)).length > 1) {
-      return true;
+  for (const file of programModules) {
+    for (const declaration of classesIn(file)) {
+      const chain = ancestry(declaration, checker);
+      if (!chain.some((c) => hirClassName(c) === name)) {
+        continue;
+      }
+      if (chain.filter((c) => declaresMethod(c, method, checker)).length > 1) {
+        return true;
+      }
     }
   }
   return false;
@@ -7814,7 +8179,7 @@ function accessorCall(
     className: owner,
     method,
     slot,
-    dispatch: isOverridden(objectType.name, method, sourceFile, checker) ? 'virtual' : 'direct',
+    dispatch: isOverridden(objectType.name, method, checker) ? 'virtual' : 'direct',
     args,
   };
 }
@@ -9296,7 +9661,9 @@ function collectSpecializations(
       failed = true;
       return;
     }
-    const name = specializationName(key, typeArguments);
+    const name = ts.isClassDeclaration(declaration)
+      ? specializationName(key, typeArguments)
+      : functionSpecializationName(declaration, key, typeArguments);
     if (ts.isClassDeclaration(declaration) ? classesEmitted.has(name) : emitted.has(name)) {
       return;
     }
@@ -9553,6 +9920,48 @@ function collectSpecializations(
   return { functions: [...emitted.values()], classes: [...classesEmitted.values()] };
 }
 
+/** The function specialization `instantiation` names once the enclosing substitution in
+ * `bindings` is applied: its HIR name and the type collection registered for it. Recomputed from
+ * the inputs `collectSpecializations` used, so a miss means the two disagree about `at` (STA4070,
+ * naming the `what` it was looked up for), and the identifier reads it at `spanned`. */
+function collectedSpecialization(
+  instantiation: {
+    readonly declaration: ts.Node;
+    readonly key: string;
+    readonly typeArguments: readonly HType[];
+  },
+  at: ts.Node,
+  what: string,
+  sourceFile: ts.SourceFile,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+  spanned: ts.Node = at,
+): Identifier | null {
+  const typeArguments = instantiation.typeArguments.map((t) =>
+    substituteHType(t, (name) => bindings.get(typeParameterKey(name))),
+  );
+  const name = functionSpecializationName(
+    instantiation.declaration,
+    instantiation.key,
+    typeArguments,
+  );
+  const type = bindings.get(name);
+  if (type === undefined) {
+    diagnostics.push(
+      lowerDiagnostic(
+        at,
+        sourceFile,
+        'STA4070',
+        'internal',
+        `no specialization '${name}' was collected for this ${what}`,
+      ),
+    );
+    return null;
+  }
+  const span = makeSpan(spanned.getStart(sourceFile), spanned.getWidth(sourceFile), sourceFile);
+  return { kind: 'identifier', type, span, name };
+}
+
 /** The identifier naming the specialization this call resolves to.
  *
  * `undefined` means the call is not to a generic and the ordinary path applies; `null` means it is
@@ -9570,33 +9979,15 @@ function specializedCallee(
   if (instantiation.kind !== 'generic') {
     return undefined;
   }
-  const typeArguments = instantiation.typeArguments.map((t) =>
-    substituteHType(t, (name) => bindings.get(typeParameterKey(name))),
+  return collectedSpecialization(
+    instantiation,
+    node,
+    'call',
+    sourceFile,
+    bindings,
+    diagnostics,
+    node.expression,
   );
-  const name = specializationName(instantiation.key, typeArguments);
-  const type = bindings.get(name);
-  if (type === undefined) {
-    diagnostics.push(
-      lowerDiagnostic(
-        node,
-        sourceFile,
-        'STA4070',
-        'internal',
-        `no specialization '${name}' was collected for this call`,
-      ),
-    );
-    return null;
-  }
-  return {
-    kind: 'identifier',
-    type,
-    span: makeSpan(
-      node.expression.getStart(sourceFile),
-      node.expression.getWidth(sourceFile),
-      sourceFile,
-    ),
-    name,
-  };
 }
 
 /** The class name the construction resolves to: the specialization's mangled name.
@@ -9663,29 +10054,14 @@ function specializedArgument(
   if (instantiation === undefined) {
     return undefined;
   }
-  const typeArguments = instantiation.typeArguments.map((t) =>
-    substituteHType(t, (name) => bindings.get(typeParameterKey(name))),
+  return collectedSpecialization(
+    instantiation,
+    argument,
+    'argument',
+    sourceFile,
+    bindings,
+    diagnostics,
   );
-  const name = specializationName(instantiation.key, typeArguments);
-  const type = bindings.get(name);
-  if (type === undefined) {
-    diagnostics.push(
-      lowerDiagnostic(
-        argument,
-        sourceFile,
-        'STA4070',
-        'internal',
-        `no specialization '${name}' was collected for this argument`,
-      ),
-    );
-    return null;
-  }
-  return {
-    kind: 'identifier',
-    type,
-    span: makeSpan(argument.getStart(sourceFile), argument.getWidth(sourceFile), sourceFile),
-    name,
-  };
 }
 
 /** The identifier naming the specialization a generic read as a value resolves to.
@@ -9717,29 +10093,7 @@ function canonicalValueReference(
   if (value === undefined) {
     return undefined;
   }
-  const typeArguments = value.typeArguments.map((t) =>
-    substituteHType(t, (name) => bindings.get(typeParameterKey(name))),
-  );
-  const name = specializationName(value.key, typeArguments);
-  const type = bindings.get(name);
-  if (type === undefined) {
-    diagnostics.push(
-      lowerDiagnostic(
-        node,
-        sourceFile,
-        'STA4070',
-        'internal',
-        `no specialization '${name}' was collected for this value`,
-      ),
-    );
-    return null;
-  }
-  return {
-    kind: 'identifier',
-    type,
-    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-    name,
-  };
+  return collectedSpecialization(value, node, 'value', sourceFile, bindings, diagnostics);
 }
 
 /** The specialization's own function type: the generic's signature with the substitution applied. */
@@ -9805,6 +10159,21 @@ function typeParameterKey(name: string): string {
  * `ts.Type` becomes an HType, so no node is ever built carrying a `T` that a later pass would have
  * to find and rewrite. Outside a specialization the lookup finds nothing and this is `tsTypeToHType`
  * exactly. */
+/** The checker's type for `node`. One position needs a detour: the expression of `export default
+ * <expression>` is an alias position to the checker, which types a literal there `any`; the
+ * default export's own symbol carries the expression's type (plan.md §11c T11.5a). */
+function checkerTypeAt(node: ts.Node, checker: ts.TypeChecker): ts.Type {
+  const parent = node.parent as ts.Node | undefined;
+  if (parent !== undefined && ts.isExportAssignment(parent) && parent.expression === node) {
+    const moduleSymbol = checker.getSymbolAtLocation(parent.getSourceFile());
+    const exported = moduleSymbol?.exports?.get(ts.InternalSymbolName.Default);
+    if (exported !== undefined) {
+      return checker.getTypeOfSymbol(exported);
+    }
+  }
+  return checker.getTypeAtLocation(node);
+}
+
 function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType {
   // Parameters join identifiers here: step 44c widens a fixed-shape parameter that may receive
   // a dynamic value, and the widening must reach the declaration (which `lowerFunction` types
@@ -9848,7 +10217,7 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType 
       return hUnknown(false);
     }
   }
-  const type = substituteHType(tsTypeToHType(checker.getTypeAtLocation(node), checker), (name) =>
+  const type = substituteHType(tsTypeToHType(checkerTypeAt(node, checker), checker), (name) =>
     bindings.get(typeParameterKey(name)),
   );
   // A narrowing the compiler does not CHECK is not a fact about the value. `getTypeAtLocation`

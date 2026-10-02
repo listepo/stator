@@ -4091,11 +4091,6 @@ class Emitter {
       }
 
       case 'field-access': {
-        // A module namespace field is the export's own global slot (docs/VALUE.md §4.14).
-        if (expr.target.type.kind === 'object' && expr.target.type.namespace === true) {
-          this.emitExpression(expr.target);
-          return this.slotRef(expr.field);
-        }
         return `jsrt_object_get_field(${this.emitExpression(expr.target)}, ${expr.slot}, ${cNameLiteral(expr.field)})`;
       }
 

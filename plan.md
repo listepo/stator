@@ -460,8 +460,9 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    Task 3.11's topological order, **not** Node's sibling-subgraph interleaving (a documented
    divergence, docs/MODES.md). `STA1208` is no longer emitted.
 10. ~~Dynamic `import()` (`STA1207`).~~ ✅ **landed** (2026-09-02, plan-notes 156) — literal
-    specifiers only; **computed specifier stays `STA1207`, owned by Phase 8 step 7**, and
-    `import * as ns` stays `STA1214` (step 12).
+    specifiers only; **computed specifier stays `STA1207`, owned by Phase 8 step 7**.
+    `import * as ns` landed with §11c T11.5a (per-module namespaces), which shares this step's
+    namespace object.
 11. ~~`Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)` (`STA1216`).~~
     ✅ **landed** (2026-09-02, plan-notes 157) — combinator residue
     (`allSettled`/`any`/`race`/`withResolvers`/`try`) and a non-arity-1 constructor stay not-yet
@@ -524,7 +525,8 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     a `switch` stays `STA1214`), `super` in a static block (`gate.ts:3730`), `this` in a static
     member or block (`gate.ts:4711,4715`), bare `super` (`gate.ts:482,4984` — a JavaScript
     SyntaxError, stays refused), opaque class values (`gate.ts:904,919,940,5283` — need the
-    class object), and anonymous defaults (`gate.ts:3584` — blocked on default imports).
+    class object), and anonymous default classes (`export default class {}` — default imports
+    landed with §11c T11.5a; what is left is a descriptor for a declaration with no name).
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~,
     ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~,
     ~~calling a class field~~, and ~~named function expressions~~ **landed** (evidence in
@@ -1382,6 +1384,10 @@ with a verdict, not `STA0013`/`STA4072` (PR #44 names the checker's stack overfl
 Baseline 2026-10-02 at `--stack-size=7600`: 1 589 diagnostics — 1 541 `STA1214`, 47 `STA0012`,
 1 `STA1210` (plan-notes 291). Every landed
 construct has decision tests in both modes + a golden (Testing rules).
+Also, moved here from T11.5a (plan-notes 302): once the unsupported-globals family lets `String`
+and `JSON` be read as values, the Test262 harness (`assert.js`, `sta.js`) compiles, and the
+`test262` `language/module-code` pass count rises above T11.5a's baseline of 152 passed (426 skipped,
+21 failed; measured with T11.5a's runner fix, which compiles a module test beside its fixtures).
 
 ### T11.5. `packages/compiler`: the `--node` flag and CommonJS — **[D4]**
 
@@ -1419,43 +1425,10 @@ Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORK
 vs Node: `createRequire` of a built-in, a computed `require` hit (a built-in) and miss
 (`MODULE_NOT_FOUND`). The CJS cycle and `module.exports` replacement goldens moved to T12.3.
 
-### T11.5a. `packages/compiler`: per-module namespaces — **[D4]**
-
-Creator's direction (2026-10-02, plan-notes 302). This is a prerequisite of T11.6. Today one
-program has **one** namespace, so three things go wrong:
-- Importing a module reserves all of its top-level names, exported or not, for the whole program.
-  A user `function get()` next to `import { has } from "std/env"` is `STA1214`.
-- Every aliasing shape is `STA1214` (docs/SUBSET.md, "Renamed/default/namespace imports" and
-  "Re-exports" rows), so a library cannot hide its helpers or rename what it exports.
-- `packages/node` would hit both on every module (plan-notes 294).
-
-Steps:
-1. **Per-module symbols.** Every module's top-level bindings get a module-qualified C name. Two
-   modules may then declare the same name, and a module's unexported names are invisible to
-   others. Diagnostics and `#line` mapping keep the source name.
-2. **Aliasing imports.** `import { x as y }`, default imports, and `import * as ns` as a static
-   namespace object. A static `ns.x` resolves at compile time, like the `import()` namespace from
-   Phase 5 step 10. A namespace that escapes as a value uses that same `HObject`
-   (`namespace: true`).
-3. **Aliasing exports.** `export { x as y }`, `export default`, and re-exports:
-   `export { x } from`, `export * from` (with ES ambiguity rules: a name exported twice by `*` is
-   dropped, not an error) and `export * as ns from`. This takes over T12.1 step 3's
-   `export { a as b }`. Whichever card lands first owns it, and the other cites it.
-4. **Both modes, both kinds of graph.** The same rules apply to `ts`-mode modules, `js`-mode
-   modules and mixed graphs. `std/*` and the T12.1 vendor module are ordinary modules here,
-   with no special case.
-5. **Docs.** Flip the SUBSET.md rows. The Phase 5 step 12 line that still owns `import * as ns`
-   cites this card. Update MODES.md if init order or live bindings show a Node difference.
-
-**Check:**
-- A user `function get()` beside `import { has } from "std/env"` builds.
-- Two modules with a same-named private helper build and run as under Node.
-- Decision tests flip `not-yet` → `static` for every aliasing shape in both modes, removing the
-  `// @expected-fail` markers in the same commit.
-- Goldens cover renamed imports and exports, default, `import * as ns`, `export *` with an
-  ambiguous name, and a re-export chain. Each matches Node byte for byte.
-- `STA1214` is no longer emitted for those shapes, and the `test262` `language/module-code`
-  pass count rises, recorded in plan-notes.
+~~**T11.5a. `packages/compiler`: per-module namespaces.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 11 T11.5a (plan-notes 302). Still open from the card, each `STA1214`
+not-yet: a generic class whose name another module's class also uses (Phase 11), a class reached
+through a namespace (`new ns.C()`, Phase 5), an anonymous `export default class {}`, `export =`.
 
 ### T11.6. `packages/node`: the N1 wrappers — **[D4]**
 
@@ -1572,8 +1545,8 @@ Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
    - default and namespace imports get mangled names;
    - a name is mangled only on collision.
 3. **The vendor module.** Add the bundle as one virtual `js`-mode module and rebind the
-   imports to its exports. Lower `export { a as b }`, which is STA1214 today and is the form
-   Rolldown emits for renamed exports (T11.5a step 3 delivers it too; whichever lands first owns it).
+   imports to its exports. `export { a as b }`, the form Rolldown emits for renamed exports, is
+   lowered already: it landed with §11c T11.5a step 3 (`subset_export_renamed_*`).
 4. **The CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
    - the default in `js` mode is `vite`, loading `vite-stator`;
    - in `ts` mode the flag is `STA0004`;
@@ -2324,4 +2297,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.23** (2026-10-02): **Task 6.17 — test impact selection** (plan-notes 293). Creator-directed: on pull requests and locally, build and run only the tests whose execution reaches a changed line, through TypeScript and on into the C/Zig runtime, using a per-test coverage map recorded by the full run on `main`. Falls back to the full run when the map cannot be trusted; `test:affected` is replaced.
 - **v4.24** (2026-10-02): **Task 6.19 lands: the self-compilation ratchet** (plan-notes 306). `pnpm run test:selfhost` runs `explain --json` over `packages/compiler` and each `packages/std` module, compares verdicts and per-code counts with `packages/tests/selfhost/baseline.json`, builds the `std` modules and runs the `std_*` goldens. It runs in `ci` (38–47 s). The `FirstNode` message now names `QualifiedName`. The Task 6.19 card shrinks to its standing rules and the unbuilt stage-2 check.
 - **v4.25** (2026-10-02): **Self-compilation counts may grow when recorded** (plan-notes 306). The creator answered 306's open question: a change that raises a `test:selfhost` count records it with `--update` in the same change, and review sees the diff.
+- **v4.26** (2026-10-02): **T11.5a lands: per-module namespaces** (plan-notes 302). Every module keeps its own top-level namespace, so a user `function get()` beside `import { has } from "std/env"` builds. Renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *` (with ES's ambiguity rule, new `STA3003`) and `export * as ns from` are static in both modes. The test262 runner now compiles module tests beside their fixtures. The self-compilation baseline shrinks (`STA1214` 2572 → 1771). The card moves to done.md. The creator moved its test262 "pass count rises" clause to T11.4, with a baseline of 152 passed, because the corpus harness needs `String` and `JSON` as values (plan-notes 302).
 - **v4.27** (2026-10-02): **T10.1 lands: the `std/fs` Promise twins are not-yet** (plan-notes 307). `readTextAsync`, `writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync` and `rmdirAsync` — each sync call's name plus `Async` — are `STA1214` naming Phase 10 (T10.2's thread pool) in both modes, instead of the checker's "no exported member" (`STA0012`, which every other missing name keeps). No new code. Subset rows `subset_std_fs_async_ts`/`_js`, `subset_std_fs_missing_ts`; docs/STD.md §2, SUBSET.md, DIAGNOSTICS.md (STA0012 row). T10.1 moves to `done.md`.

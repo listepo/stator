@@ -181,12 +181,6 @@ test task depends on it.
 
 ## 8. v0 limitations
 
-- **One namespace.** Whole-program v0 merges every file's top level into one namespace, and
-  renamed imports and exports are not-yet (Phase 5). So a program that imports a std module
-  cannot declare a top-level name that module declares — its exports (`get`, `join`, `stat`,
-  …) and its `__std*`-prefixed helpers — whether or not it imports that name: the build says
-  `STA1214` naming both files. The `__std` prefix keeps the helpers out of the way; the public
-  names are the API, and they collide until module namespaces land.
 - **C-string boundary.** `std/fs` text stops at a NUL byte, and every string argument is
   passed as UTF-8 (§5).
 - **No `code` property** on thrown errors yet (§3).

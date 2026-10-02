@@ -980,16 +980,27 @@ NEW value, not the one it completed with) and `throw(e)` rethrows to the caller.
 method named `[Symbol.iterator]` is not that value: it is a compile-time-known method stored under
 TypeScript's `__@iterator`, which is why user-iterable `for-of` compiled without a Symbol tag.
 
-## 4.14 Module namespace objects (Phase 5 step 10)
+## 4.14 Module namespace objects (Phase 5 step 10, plan.md §11c T11.5a)
 
 A module namespace is not a new NaN-box tag. It is an `HObject` with `namespace: true` whose
-fields ARE the target file's export list, in source order. The merged program still has one global
-slot per name (Task 3.11); a namespace field read compiles to that slot, so `ns.x` and the
-export's own binding are the same cell — live bindings, not a snapshot taken at `import()` time.
+fields are the target module's value exports, in the checker's order. A class is no field (a
+class has no value in this subset), and neither is a name two `export *` re-exports bind
+differently (ES leaves it out of the namespace).
 
-The object VALUE exists so `import()` has something to put in a Promise. It is a sealed dummy
-(an object literal of the exported identifiers, evaluated once). Identity, printing, and
-`Object.keys` are not the spec's Module exotic object; those wait on a real per-module runtime.
+Every module keeps its own top-level scope, so the HIR name of an export is not its exported
+name: a renamed export, a default export (`*default*`), or a dependency's binding that shares a
+spelling with another module's each carry a different one. A member read therefore never goes
+through the field: the lowering resolves `ns.x` — the dot spelling, a destructuring, a
+literal-keyed element read, a nested `ns.inner.x` — to the export's own binding, through the
+checker's alias chain. `ns.x` and the export are the same cell: live bindings, not a snapshot.
+
+The object VALUE exists for what reaches it without a member name: `import()`'s Promise, `ns`
+passed or printed. It is one hidden global per module, an object literal of the exported
+bindings built once, when its first importer starts (the target's body has already run in
+topological order), and shared by every `import * as ns`, `export * as ns from` and literal
+`import()` of that module. Its fields are a snapshot: a `let` export written later is not seen
+through the object itself, only through a member read. Identity across importers holds;
+printing and `Object.keys` are not the spec's Module exotic object (`[Module: null prototype]`).
 A literal specifier is resolved into the whole-program graph as an init edge, so the target's
 top-level code has already run when the Promise is produced; `import()` is `Promise.resolve`
 of that namespace. A computed specifier stays `STA1207` (Phase 8): the graph cannot name a file

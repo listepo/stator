@@ -1,4 +1,5 @@
 import * as ts from 'typescript';
+import { ambiguousStarExports, namespaceModule } from './modules.ts';
 import type {
   ConsoleMethod,
   DateOperation,
@@ -130,14 +131,17 @@ export function gateProgram(program: ts.Program, mode: Mode): Diagnostic[] {
   return diagnostics;
 }
 
-/** How many named class declarations and expressions each spelling has across the program.
+/** The file of every named class declaration and expression, by spelling, across the program. */
+type ClassNameFiles = ReadonlyMap<string, readonly ts.SourceFile[]>;
+
+/** Where each named class spelling is declared across the program, one entry per declaration.
  *
- * A nested generic class specializes under its source name, so two declarations sharing one
- * would share one mangled tuple. The gate holds that boundary by program-wide name uniqueness
- * (`nestedGenericIsScoped`), counted once here over exactly the files the walk below gates, so
- * the two cannot disagree about which files count. */
-function countClassNames(program: ts.Program, mode: Mode): ReadonlyMap<string, number> {
-  const counts = new Map<string, number>();
+ * A generic class specializes under its source name, so two declarations sharing one would share
+ * one mangled tuple. The gate holds that boundary by name uniqueness (`nestedGenericIsScoped`
+ * program-wide, `genericNameIsModuleLocal` across modules), counted once here over exactly the
+ * files the walk below gates, so the two cannot disagree about which files count. */
+function countClassNames(program: ts.Program, mode: Mode): ClassNameFiles {
+  const counts = new Map<string, ts.SourceFile[]>();
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.isDeclarationFile || program.isSourceFileDefaultLibrary(sourceFile)) {
       continue;
@@ -147,7 +151,9 @@ function countClassNames(program: ts.Program, mode: Mode): ReadonlyMap<string, n
     }
     const visit = (node: ts.Node): void => {
       if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.name !== undefined) {
-        counts.set(node.name.text, (counts.get(node.name.text) ?? 0) + 1);
+        const files = counts.get(node.name.text) ?? [];
+        files.push(sourceFile);
+        counts.set(node.name.text, files);
       }
       ts.forEachChild(node, visit);
     };
@@ -163,7 +169,7 @@ function visitNode(
   typeChecker: ts.TypeChecker,
   mode: Mode,
   diagnostics: Diagnostic[],
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
 ): void {
   // Check for explicit `any` in ts mode (STA1001)
   if (mode === 'ts' && hasExplicitAny(node)) {
@@ -262,7 +268,7 @@ function gateConstruct(
   node: ts.Node,
   mode: Mode,
   typeChecker: ts.TypeChecker,
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
 ): GateResult {
   const kind = node.kind;
 
@@ -282,6 +288,11 @@ function gateConstruct(
     kind !== ts.SyntaxKind.SuperKeyword
   ) {
     return { kind: 'accept' };
+  }
+
+  const moduleSyntax = gateModuleSyntax(node, typeChecker);
+  if (moduleSyntax !== undefined) {
+    return moduleSyntax;
   }
 
   switch (kind) {
@@ -310,53 +321,6 @@ function gateConstruct(
     case ts.SyntaxKind.ThrowStatement:
     case ts.SyntaxKind.TryStatement:
       return { kind: 'accept' };
-
-    // Task 3.11: modules, whole-program v0. The merged program has ONE namespace and an import
-    // binds nothing -- the importer's identifier resolves to the exporting file's own top-level
-    // binding BY NAME (src/frontend/graph.ts). Everything accepted here must preserve that
-    // resolution, which is why every renaming shape (`x as y`) is refused: it would make a name
-    // resolve to a binding that does not carry it.
-    case ts.SyntaxKind.ImportDeclaration:
-      return gateImport(node as ts.ImportDeclaration, typeChecker);
-    case ts.SyntaxKind.ImportClause:
-    case ts.SyntaxKind.NamedImports:
-    case ts.SyntaxKind.NamedExports:
-      return { kind: 'accept' };
-    case ts.SyntaxKind.ImportSpecifier: {
-      const spec = node as ts.ImportSpecifier;
-      // A type-only alias is erased whole, so renaming one changes nothing at runtime.
-      return spec.propertyName === undefined || importIsTypeOnly(spec)
-        ? { kind: 'accept' }
-        : notYet("renaming an import ('x as y') is not yet supported", 5);
-    }
-    // `export { x }` (no specifier). The re-export form carries a specifier and is an ALIAS: the
-    // local file never binds the name, so name-resolution through the merge cannot find it.
-    case ts.SyntaxKind.ExportDeclaration: {
-      const decl = node as ts.ExportDeclaration;
-      return decl.moduleSpecifier === undefined
-        ? { kind: 'accept' }
-        : notYet("re-exports (export { x } from '...') are not yet supported", 5);
-    }
-    case ts.SyntaxKind.ExportSpecifier: {
-      const spec = node as ts.ExportSpecifier;
-      const parent = spec.parent.parent;
-      const typeOnly = spec.isTypeOnly || (ts.isExportDeclaration(parent) && parent.isTypeOnly);
-      return spec.propertyName === undefined || typeOnly
-        ? { kind: 'accept' }
-        : notYet("renaming an export ('x as y') is not yet supported", 5);
-    }
-    // `export default <literal>`. Nothing can import a default in v0 (default imports are
-    // refused below), so the only thing at stake is the expression's side effects -- which a
-    // literal has none of, letting the lowering skip the statement entirely.
-    case ts.SyntaxKind.ExportAssignment: {
-      const assignment = node as ts.ExportAssignment;
-      if (assignment.isExportEquals) {
-        return notYet('export = is not yet supported', 5);
-      }
-      return isLiteralValue(assignment.expression)
-        ? { kind: 'accept' }
-        : notYet('a default export with a computed value is not yet supported', 5);
-    }
 
     // `catch (e)` / `catch {`. The binding must be a plain name -- `catch ({ message })`
     // destructures, and the HIR has one name per binding, the same rule gateDeclaration applies.
@@ -647,10 +611,45 @@ function gateConstruct(
   }
 }
 
-/** A named or side-effect-only import. `import './x'` contributes an edge to the module graph
- * and nothing else; `import type` is erased whole. What is refused binds a NAME the exporting
- * file does not own under that spelling: a default import (the export is anonymous) and a
- * namespace import (`ns.x` would need an object no module is). */
+/** Task 3.11 + plan.md §11c T11.5a: the module syntax, or `undefined` for any other node. Every
+ * module has its own top-level namespace; an import binds its local name to the exporting
+ * module's binding, resolved through the checker's alias chain in the lowering, so every
+ * renaming shape (`x as y`, a default, a namespace, a re-export) names the binding it aliases
+ * rather than a spelling. */
+function gateModuleSyntax(node: ts.Node, typeChecker: ts.TypeChecker): GateResult | undefined {
+  if (MODULE_CLAUSE_KINDS.has(node.kind)) {
+    return { kind: 'accept' };
+  }
+  if (ts.isImportDeclaration(node)) {
+    return gateImport(node, typeChecker);
+  }
+  if (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) {
+    return gateSpecifier(node, typeChecker);
+  }
+  // `export { x }`, `export { x as y }`, and the re-exports `export … from`, `export * from`,
+  // `export * as ns from`: a re-export's specifier is held to the import rules.
+  if (ts.isExportDeclaration(node)) {
+    return node.moduleSpecifier === undefined || node.isTypeOnly
+      ? { kind: 'accept' }
+      : gateModuleSpecifier(node.moduleSpecifier, typeChecker);
+  }
+  // `export default <expression>` evaluates its expression once, into the module's hidden
+  // `*default*` binding (ES §16.2.3.7), which a default import then reads.
+  if (ts.isExportAssignment(node)) {
+    return node.isExportEquals ? notYet('export = is not yet supported', 5) : { kind: 'accept' };
+  }
+  return undefined;
+}
+
+/** The clauses that only hold an import's or an export's names; each name is gated on its own. */
+const MODULE_CLAUSE_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.ImportClause,
+  ts.SyntaxKind.NamedImports,
+  ts.SyntaxKind.NamedExports,
+  ts.SyntaxKind.NamespaceImport,
+  ts.SyntaxKind.NamespaceExport,
+]);
+
 /** `import(s)`. A string literal names a file already in the whole-program graph. Anything
  * else needs runtime resolution, which is Phase 8 (plan.md §8 step 10c). */
 function gateImportCall(call: ts.CallExpression): GateResult {
@@ -676,9 +675,70 @@ function gateImportCall(call: ts.CallExpression): GateResult {
   return { kind: 'accept' };
 }
 
+/** One name an import or a re-export takes from another module by name. A name two `export *`
+ * re-exports of that module bind differently is ambiguous, and naming it is the SyntaxError ES
+ * raises at link time (§16.2.1.6.3, plan-notes 302); js mode drops the checker's TS2308 so that
+ * this is where the program is refused, and the namespace merely leaves the name out. */
+function gateSpecifier(
+  spec: ts.ImportSpecifier | ts.ExportSpecifier,
+  typeChecker: ts.TypeChecker,
+): GateResult {
+  const declaration = ts.isImportSpecifier(spec) ? spec.parent.parent.parent : spec.parent.parent;
+  const moduleSpecifier = declaration.moduleSpecifier;
+  if (moduleSpecifier === undefined) {
+    return { kind: 'accept' };
+  }
+  const target = typeChecker.getSymbolAtLocation(moduleSpecifier)?.valueDeclaration;
+  const name = (spec.propertyName ?? spec.name).text;
+  return target !== undefined &&
+    ts.isSourceFile(target) &&
+    ambiguousStarExports(target, typeChecker).has(name)
+    ? {
+        kind: 'never',
+        code: 'STA3003',
+        message:
+          `'${name}' is ambiguous in ${target.fileName}: two \`export *\` re-exports bind it ` +
+          'differently, so it cannot be imported by name',
+      }
+    : { kind: 'accept' };
+}
+
+/** `ns.x` where `ns` is a module namespace: a member the lowering resolves to the export's own
+ * binding. */
+function isNamespaceMember(
+  node: ts.PropertyAccessExpression,
+  typeChecker: ts.TypeChecker,
+): boolean {
+  return namespaceModule(typeChecker.getTypeAtLocation(node.expression)) !== undefined;
+}
+
+/** An import declaration. `import './x'` contributes an edge to the module graph and nothing
+ * else; `import type` is erased whole; every binding shape -- named, renamed, default,
+ * namespace -- aliases the exporting module's binding (plan.md §11c T11.5a). */
 function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): GateResult {
-  const spec = node.moduleSpecifier;
-  if (ts.isStringLiteral(spec) && node.importClause?.isTypeOnly !== true) {
+  if (node.importClause?.isTypeOnly === true) {
+    return { kind: 'accept' };
+  }
+  const specifier = gateModuleSpecifier(node.moduleSpecifier, typeChecker);
+  if (specifier.kind !== 'accept') {
+    return specifier;
+  }
+  // A namespace of a declaration file has no module behind it: its bindings are extern C
+  // functions (docs/FFI.md §1), called by name, with no slot a namespace object could read.
+  const bindings = node.importClause?.namedBindings;
+  if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+    const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
+    if (target !== undefined && ts.isSourceFile(target) && target.isDeclarationFile) {
+      return notYet('a namespace import of a declaration file is not yet supported', 5);
+    }
+  }
+  return { kind: 'accept' };
+}
+
+/** The specifier rules every module edge obeys, an import's and a re-export's alike: a bare
+ * specifier is a package, a relative one names its extension, and `std/` is a reserved prefix. */
+function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): GateResult {
+  if (ts.isStringLiteral(spec)) {
     // `std/…` is a reserved prefix, not a package (docs/STD.md §1): a known module is an ordinary
     // edge into the std sources, judged by the clause rules below like any relative import. A
     // refused specifier that resolved to no file was already refused, with this same code, where
@@ -722,31 +782,7 @@ function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): Ga
       };
     }
   }
-  const clause = node.importClause;
-  if (clause === undefined || clause.isTypeOnly) {
-    return { kind: 'accept' };
-  }
-  if (clause.name !== undefined) {
-    return notYet('default imports are not yet supported', 5);
-  }
-  if (clause.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
-    return notYet('namespace imports (import * as ns) are not yet supported', 5);
-  }
   return { kind: 'accept' };
-}
-
-function importIsTypeOnly(spec: ts.ImportSpecifier): boolean {
-  return spec.isTypeOnly || spec.parent.parent.isTypeOnly;
-}
-
-function isLiteralValue(expr: ts.Expression): boolean {
-  return (
-    ts.isStringLiteral(expr) ||
-    ts.isNumericLiteral(expr) ||
-    expr.kind === ts.SyntaxKind.TrueKeyword ||
-    expr.kind === ts.SyntaxKind.FalseKeyword ||
-    expr.kind === ts.SyntaxKind.NullKeyword
-  );
 }
 
 /** One code for the whole Phase 2 boundary. These constructs are not deferred for six different
@@ -938,11 +974,27 @@ function classConstructorTypeOf(type: ts.Type): boolean {
   });
 }
 
+function isModuleClauseName(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  return (
+    ts.isImportSpecifier(parent) ||
+    ts.isExportSpecifier(parent) ||
+    ts.isImportClause(parent) ||
+    ts.isNamespaceImport(parent) ||
+    ts.isNamespaceExport(parent)
+  );
+}
+
 /** Cross-function references are what rung 4b implements, so an identifier is accepted on its own.
  * The one shape held back: a binding declared inside a loop is a FRESH binding per iteration, and
  * rung 4b gives a function one environment per call, so every iteration's closure would share the
  * one slot and read the last iteration's value. Reject the capture rather than emit that program. */
 function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
+  // A name in an import or export clause is a boundary spelling, never evaluated: it names the
+  // binding the lowering aliases (plan.md §11c T11.5a), whatever that binding is.
+  if (isModuleClauseName(node)) {
+    return { kind: 'accept' };
+  }
   const symbol = typeChecker.getSymbolAtLocation(node);
   const decl = symbol?.valueDeclaration;
   // A class NAME is not a value here. Five spellings are not uses of the value and must pass: the
@@ -2324,7 +2376,9 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   // Two property-access callees, each its own HIR node: `console.log`, and a method of a class
   // this subset lays out. Anything else -- a method on a built-in, on an object literal, on an
   // interface-typed value -- needs the shape lookup the dynamic path will bring.
-  if (ts.isPropertyAccessExpression(callee)) {
+  // `ns.f(…)` on a module namespace calls the export's own binding, exactly as `f(…)` would
+  // (plan.md §11c T11.5a): it is no method call, so it takes the ordinary-call rules below.
+  if (ts.isPropertyAccessExpression(callee) && !isNamespaceMember(callee, typeChecker)) {
     if (isConsoleLog(callee)) {
       const method = callee.name.text as ConsoleMethod;
       const shape = CONSOLE_METHODS[method];
@@ -3667,15 +3721,15 @@ function gateObjectLiteral(
 function gateClass(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
 ): GateResult {
   if (declaration.name === undefined) {
     // Only a bound expression has an identity (Node's `.name`: the variable it binds);
     // an unbound one — a heritage base, a call argument, a parenthesized expression — has
     // no layout key, and nominal equality has nothing to hold onto. An anonymous
-    // DECLARATION stays refused here too: its only identity would be `default`, whose
-    // uses arrive through default imports, which name Phase 5's module-namespace residue
-    // (plan-notes 278).
+    // DECLARATION stays refused here too: its only identity would be `default`, and the class
+    // pipeline keys every descriptor on a declared name (plan-notes 278; default imports
+    // themselves landed with plan.md §11c T11.5a).
     if (ts.isClassExpression(declaration) && expressionClassName(declaration) !== undefined) {
       // fall through to member vetting below
     } else {
@@ -3709,6 +3763,16 @@ function gateClass(
     if (!nestedGenericIsScoped(declaration, classNameCounts)) {
       return notYet('a nested generic class is not yet supported', 5);
     }
+  }
+  if (
+    declaration.typeParameters !== undefined &&
+    declaration.typeParameters.length > 0 &&
+    !genericNameIsModuleLocal(declaration, classNameCounts)
+  ) {
+    return notYet(
+      "a generic class sharing its name with another module's class is not yet supported",
+      11,
+    );
   }
   const heritage = gateHeritage(declaration, checker);
   if (heritage.kind !== 'accept') {
@@ -4139,7 +4203,7 @@ function genericBaseArgumentsAreConcrete(
  * across the program, so the one mangled tuple names one declaration. */
 function nestedGenericIsScoped(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
 ): boolean {
   const name = declaration.name?.text;
   if (name === undefined) {
@@ -4148,7 +4212,24 @@ function nestedGenericIsScoped(
   if (enclosingTypeParameterNames(declaration).size > 0) {
     return false;
   }
-  return (classNameCounts.get(name) ?? 0) === 1;
+  return (classNameCounts.get(name)?.length ?? 0) === 1;
+}
+
+/** Whether no OTHER module declares a class under a generic class's name. Every module keeps its
+ * own namespace (plan.md §11c T11.5a), and an ordinary class takes a fresh HIR name when another
+ * module's class shares its spelling, but a generic one specializes under the bare source name
+ * (`Box<number>`) -- which the frontend also spells for generic bases, before any module scope
+ * exists -- so a second module's `Box` would share its descriptors. */
+function genericNameIsModuleLocal(
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+  classNameCounts: ClassNameFiles,
+): boolean {
+  const name = declaration.name?.text;
+  const file = declaration.getSourceFile();
+  return (
+    name === undefined ||
+    (classNameCounts.get(name) ?? []).every((declaredIn) => declaredIn === file)
+  );
 }
 
 /** Every member name declared by any ANCESTOR -- fields and methods alike, because the two collide
