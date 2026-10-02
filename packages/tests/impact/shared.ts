@@ -45,6 +45,8 @@ export function git(args: readonly string[]): string {
     cwd: REPO,
     encoding: 'utf8',
     maxBuffer: 512 * 1024 * 1024,
+    // A failing probe (`merge-base --is-ancestor` on an unknown commit) is an answer, not noise.
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
