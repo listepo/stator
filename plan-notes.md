@@ -10618,3 +10618,76 @@ passed 413/413, including `extern_bytes` and the extended `std_io`. The ASan gat
 vitest passed 51 files and 683 tests, including `unit/extern-bytes.test.ts` and two new
 `unit/std.test.ts` tests. selfhost matched its baseline, so no `--update` was needed. The full
 record is in done.md, Phase 11 T11.3a.
+
+## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
+
+**What landed.** `js` mode sends package imports and CommonJS project files to one bundler
+call. The answer joins the program as the virtual `__stator_vendor__.js` beside the entry, and
+the project's import declarations are rewritten to name it. `--bundler=vite|none|<module>` and
+the `bundler` config key choose the adapter; `statorc/api` exposes `compile` and `vendorEntry`.
+Diagnostics and spans inside the bundle map back through its source map. A free `__filename` or
+`__dirname` is the new not-yet `STA1218`. The evidence is in done.md → Phase 12 T12.1.
+
+**Decisions this card had to make.** Each is recorded here because docs/BUNDLER.md or the card
+did not settle it.
+
+1. **CommonJS routing is narrower than Node's rule.** BUNDLER.md §4 quotes Node: a `.js` with no
+   `"type"` and no ES-module syntax is CommonJS. Routed literally, every plain script needs a
+   bundler — Test262's harness files, the `js` goldens staged in a tmpdir, any `console.log`
+   one-liner — and the default adapter (`vite-stator`, T12.2) is not installed, so all of them
+   would fail `STA0014`. A script that reads no `require`, `module` or `exports` means the same
+   thing as a module or as CommonJS, so T12.1 routes such a `.js` only when it reads a free
+   `require(…)`, `module.exports` or `exports`. "Free" is the checker's answer: no symbol, or
+   only ambient declarations (`@types/node`'s), so a local `const exports = …` does not count.
+   `.cjs` and `.js` under `"type": "commonjs"` route always. `src/frontend/vendor.ts`
+   `isCommonJsFile`; BUNDLER.md §4 says so.
+2. **CommonJS files route with or without `--node`.** The card's step 2 routes them in `js` mode;
+   BUNDLER.md §4's last paragraph and the T11.5 card tie routing to `--node`, which does not
+   exist yet. Waiting would have left the step unbuildable. Today a routed CommonJS file is
+   whatever its bundled code is (`STA1214` on the interop helpers, T12.3). **T11.5 must
+   reconcile:** either `--node` becomes the gate and `js` mode without it reports `STA1110` for a
+   CommonJS file, or BUNDLER.md §4 drops the `--node` clause. Open question for the creator.
+3. **The rewrite is textual and keeps every line.** Each project import or re-export of a package
+   is rewritten in place to `./__stator_vendor__.js` with the mangled names
+   (`<stem>$default`, `<stem>$ns`, `<stem>$<name>`, `$2`/`$3` on a collision). The new text keeps
+   the declaration's line count (`sameLines`), so line numbers in diagnostics, `#line` and
+   `STA2001` stay right. Columns on a rewritten line can shift; no diagnostic points inside an
+   import declaration today, so nothing reports a wrong column. Type-only names split onto the
+   original module, which `checkJs` and the `ts` checker still resolve.
+4. **Still refused, each `STA1214`:** `export * from 'p'` (only the bundler knows the names, and
+   the vendor entry is built before the bundle), `import('p')` (the vendor module is static) and
+   a package import with import attributes (the attribute changes what the import means). The
+   T12.1 stub in plan.md lists them; no card owns them yet.
+5. **The program cache keys on the overlay.** Two slots, keyed by (entry, mode, entry sha256,
+   overlay key). The overlay key is the sha256 of every overlay file, rewrites included, not only
+   the bundle's code the card named: the rewrites follow from the entry and the bundle, so the
+   wider key costs nothing and keys on every byte the program read. Two slots hold the base
+   program and the bundled one, so `explain` after `build` misses neither.
+6. **`sources` resolve against the vendor entry's `resolveDir`, after `sourceRoot`.** The
+   adapter contract (§5) gives `resolveDir`; an absolute or `file:` source is taken as is. A
+   source with a NUL prefix or a non-`file:` URL scheme (`\0rolldown/runtime.js`, `virtual:`)
+   is a bundler helper and maps to `<package bundle>`. `SourceMap.findEntry` answers the nearest
+   preceding mapping even on an earlier line, so only a mapping on the asked-for line counts;
+   otherwise a helper after mapped code would borrow that code's position.
+7. **Adapter loading.** `vite` names `vite-stator`; a specifier starting with `.` or absolute is
+   a path (from the current directory on the CLI, from the config file's directory for the
+   config key); anything else is a package resolved from the project (`createRequire` at the
+   entry's directory), then beside the compiler (`import.meta.resolve`). The adapter is the
+   module's default export or a named `adapter`. A module that cannot load or exports no
+   adapter is `STA0014`; a rejecting `bundle()` or an answer without `code`, a version-3 `map`
+   and an `inputs` list is `STA0015`. `--bundler` in `ts` mode is `STA0004`.
+8. **`statorc/api` exports the source.** `packages/compiler/package.json` `exports` maps
+   `./api` to `./src/api.ts`, the way every workspace consumer runs the compiler today (Node
+   strips types). The published package's `files` ships only `dist`, so a publish must map it to
+   the built file. No publish is planned; noted for the card that publishes.
+9. **The goldens stay adapter-free.** `golden/run.ts` takes `--bundler=none` and forwards it;
+   the default run loads no adapter because no golden imports a package or reads `require`. Both
+   runs pass 415 of 415.
+10. **Self-compilation grows** by 1 × `STA1207` (the adapter's `import()` of a computed
+    specifier, which a native binary cannot do — T12.2 or `--node` decides how a compiled
+    compiler loads one) and 63 × `STA1214` (1648 → 1711), recorded with `--update` per v4.25.
+
+**Open question for the creator.** A checker error (`STA0012`) inside the vendor module is
+package code the user cannot fix; today it is reported at the mapped position like any other.
+Whether `checkJs` should skip the vendor module (and leave its errors to the lowering's
+verdicts) is not decided.
