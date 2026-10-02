@@ -1406,9 +1406,47 @@ Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORK
 vs Node: `createRequire` of a built-in, a computed `require` hit (a built-in) and miss
 (`MODULE_NOT_FOUND`). The CJS cycle and `module.exports` replacement goldens moved to T12.3.
 
+### T11.5a. `packages/compiler`: per-module namespaces — **[D4]**
+
+Creator's direction (2026-10-02, plan-notes 302). This is a prerequisite of T11.6. Today one
+program has **one** namespace, so three things go wrong:
+- Importing a module reserves all of its top-level names, exported or not, for the whole program.
+  A user `function get()` next to `import { has } from "std/env"` is `STA1214`.
+- Every aliasing shape is `STA1214` (docs/SUBSET.md, "Renamed/default/namespace imports" and
+  "Re-exports" rows), so a library cannot hide its helpers or rename what it exports.
+- `packages/node` would hit both on every module (plan-notes 294).
+
+Steps:
+1. **Per-module symbols.** Every module's top-level bindings get a module-qualified C name. Two
+   modules may then declare the same name, and a module's unexported names are invisible to
+   others. Diagnostics and `#line` mapping keep the source name.
+2. **Aliasing imports.** `import { x as y }`, default imports, and `import * as ns` as a static
+   namespace object. A static `ns.x` resolves at compile time, like the `import()` namespace from
+   Phase 5 step 10. A namespace that escapes as a value uses that same `HObject`
+   (`namespace: true`).
+3. **Aliasing exports.** `export { x as y }`, `export default`, and re-exports:
+   `export { x } from`, `export * from` (with ES ambiguity rules: a name exported twice by `*` is
+   dropped, not an error) and `export * as ns from`. This takes over T12.1 step 3's
+   `export { a as b }`. Whichever card lands first owns it, and the other cites it.
+4. **Both modes, both kinds of graph.** The same rules apply to `ts`-mode modules, `js`-mode
+   modules and mixed graphs. `std/*` and the T12.1 vendor module are ordinary modules here,
+   with no special case.
+5. **Docs.** Flip the SUBSET.md rows. The Phase 5 step 12 line that still owns `import * as ns`
+   cites this card. Update MODES.md if init order or live bindings show a Node difference.
+
+**Check:**
+- A user `function get()` beside `import { has } from "std/env"` builds.
+- Two modules with a same-named private helper build and run as under Node.
+- Decision tests flip `not-yet` → `static` for every aliasing shape in both modes, removing the
+  `// @expected-fail` markers in the same commit.
+- Goldens cover renamed imports and exports, default, `import * as ns`, `export *` with an
+  ambiguous name, and a re-export chain. Each matches Node byte for byte.
+- `STA1214` is no longer emitted for those shapes, and the `test262` `language/module-code`
+  pass count rises, recorded in plan-notes.
+
 ### T11.6. `packages/node`: the N1 wrappers — **[D4]**
 
-Depends on T11.1, T11.3, T11.5. Create `packages/node` (strict TS over `std`, written from
+Depends on T11.1, T11.3, T11.5, T11.5a. Create `packages/node` (strict TS over `std`, written from
 scratch). Surface, from the corpus (`docs/NODE.md` **tsc** column): `node:fs` sync subset (the 15
 functions `tsc` calls), `node:path` (posix), `node:os`, `node:perf_hooks.performance`,
 `crypto.createHash`, `process` (`argv`/`env`/`cwd`/`exit`/`exitCode`/`platform`/`pid`/
@@ -1488,7 +1526,7 @@ Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
    - a name is mangled only on collision.
 3. **The vendor module.** Add the bundle as one virtual `js`-mode module and rebind the
    imports to its exports. Lower `export { a as b }`, which is STA1214 today and is the form
-   Rolldown emits for renamed exports.
+   Rolldown emits for renamed exports (T11.5a step 3 delivers it too; whichever lands first owns it).
 4. **The CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
    - the default in `js` mode is `vite`, loading `vite-stator`;
    - in `ts` mode the flag is `STA0004`;
@@ -2204,3 +2242,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
     - The order deviation is documented only.
 - **v4.17** (2026-10-02): **Phase 14: a JavaScript interpreter in strict TypeScript, `js` mode's second fallback** (plan-notes 300). New §11f: `packages/interpreter`, compiled by Stator, runs `eval`, `new Function` and the `not-yet` constructs it takes over, directly on `jsrt_value` (no marshaling layer). Order: compiled static, then compiled dynamic, then the interpreter. Phase 8's QuickJS-NG stays as an option behind its gate until T14.0 measures whether it is still needed. Cards T14.0 (design, `docs/INTERPRETER.md`, including §0.3's parser question), T14.1 parser front, T14.2 evaluator, T14.3 wiring, T14.4 async and the rest. `ts` mode is unchanged.
 - **v4.18** (2026-10-02): **T11.2 lands: `packages/std` is the real `std/*` package** (plan-notes 294). `std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` resolve through `paths` and link `libjsrt_std.a` only into programs that import them; unknown `std/foo` is the new `STA3002`. T10.1 steps 2–4 are struck (step 5 stays open); §11b's v0 table moves `std/env.args` to T11.3 as `std/process.argv`; T11.3's `std/fs` row drops `unlink`, `rmdir` and text reads. Record in `done.md`.
+- **v4.20** (2026-10-02): **T11.5a — per-module namespaces before T11.6** (plan-notes 302). Each module gets its own top-level namespace (module-qualified C names), and every aliasing shape lands: renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *`. This removes the one-namespace `STA1214` collisions that T11.2 found (plan-notes 294). T11.6 depends on it; T12.1 step 3 shares `export { a as b }` with it.

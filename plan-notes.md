@@ -9672,3 +9672,21 @@ member with no dependencies, and `--frozen-lockfile` then refuses the workspace
 No new package entered the tree.
 
 **Proof:** see done.md → Phase 11 T11.2.
+## 302. Per-module namespaces get a card, T11.5a, before `packages/node` (2026-10-02)
+
+**Plan:** new §11c T11.5a; T11.6 depends on it; T12.1 step 3 cross-reference; changelog v4.20.
+
+**Evidence (plan-notes 294, T11.2).** Importing a `std/*` module reserves its top-level names for
+the whole program. A user `function get()` next to `import { has } from "std/env"` is `STA1214`,
+and renamed imports and exports are `STA1214` too, so a library cannot hide its helpers.
+`packages/node` (T11.6) is a library of many modules over `std`, so it would hit this on every
+module.
+
+**Creator's decision:** add the card before T11.6.
+
+**Scope, and why:** one card covers per-module symbols plus every aliasing shape (renamed,
+default, namespace imports; renamed and default exports; re-exports), because they share one
+mechanism: resolving an imported name to its defining module's binding. Splitting them would
+build that resolution twice. `export { a as b }` is also T12.1 step 3. Whichever card lands first
+owns it, so it is written once.
+
