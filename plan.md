@@ -810,6 +810,22 @@ For now this is a **test**, not a shipped feature. It tracks progress and never 
 - **`packages/std`:** `env.ts` is `dynamic`; `fs.ts`, `path.ts`, `process.ts` and `time.ts` are
   `static`.
 
+**Status:** in progress — Claude Code / opus-5-5. **Execution plan:**
+1. `describeKind` in `src/frontend/gate.ts` names a kind through a shared `syntaxKindName` that
+   skips enum aliases (`FirstNode`, `FirstStatement`, …); the other `ts.SyntaxKind[kind]` sites
+   reuse it. Unit test on `QualifiedName`.
+2. `packages/compiler/stator.config.json` (entry + mode) and `packages/std/stator.config.json`
+   (mode), so the test runs the command a user would (step 5).
+3. `packages/tests/selfhost/`: `targets.json` (targets + "not a target" packages), `baseline.json`
+   (verdict + per-code counts), `ratchet.ts` (pure compare/tally/coverage logic), `run.ts`
+   (`explain --json` per target in parallel; `static`/`dynamic` targets `build` and run their
+   smoke check — std: build each module, then the `std_*` goldens; `--update` rewrites the
+   baseline). Script `test:selfhost`.
+4. `packages/tests/unit/selfhost.test.ts` (vitest): a raised count, a new code, a worse verdict and
+   an unlisted package each fail; a shrunk count passes and `--update` shrinks.
+5. Re-measure on current main, time the run, decide ci vs nightly (point 4), plan-notes 306,
+   changelog v4.24, docs (`docs/README.md`/AGENTS.md commands), `pnpm run ci`, move to done.md.
+
 **Check:**
 - `pnpm run test:selfhost` passes against the committed baseline. It fails on a hand-raised count
   and on an unlisted workspace package.
