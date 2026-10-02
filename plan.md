@@ -780,6 +780,9 @@ built yet:
 - **Ratchet.** `packages/tests/selfhost/baseline.json` holds each target's verdict and its count per
   diagnostic code. The test fails when a count grows, a new code appears or a verdict gets worse.
   It also fails when a count shrinks, until `--update` records the shrink in the same change.
+  **Growth may be recorded** (creator, 2026-10-02, plan-notes 306): a change that grows a count
+  runs `--update` in the same change, so the increase shows in `baseline.json`'s diff for review.
+  This differs from `dupes:baseline`, which only ever shrinks.
   Whether growth may be recorded is open for the creator (plan-notes 306). When a target reaches
   zero, that is its milestone, and from then on its build and smoke check are part of the gate.
 - **Stage-2 check (not built).** When the compiler's verdict becomes `static` or `dynamic`, its
@@ -2334,3 +2337,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.22** (2026-10-02): **Upstream test suites for `node` and `webapi`; Phase 11 outranks Phase 13** (plan-notes 305). New T11.7: Node's own `test/parallel` slice, pinned to `.node-version` and fetched rather than vendored, runs through vitest with a strict-TS `common` and `node:assert`, ratcheted, and adds a column to `docs/NODE.md`. New T13.6 does the same for web-platform-tests `dom/` and `css/cssom/`. Phase 11 is now `P1` and Phase 13 is `P3`.
 - **v4.23** (2026-10-02): **Task 6.17 — test impact selection** (plan-notes 293). Creator-directed: on pull requests and locally, build and run only the tests whose execution reaches a changed line, through TypeScript and on into the C/Zig runtime, using a per-test coverage map recorded by the full run on `main`. Falls back to the full run when the map cannot be trusted; `test:affected` is replaced.
 - **v4.24** (2026-10-02): **Task 6.19 lands: the self-compilation ratchet** (plan-notes 306). `pnpm run test:selfhost` runs `explain --json` over `packages/compiler` and each `packages/std` module, compares verdicts and per-code counts with `packages/tests/selfhost/baseline.json`, builds the `std` modules and runs the `std_*` goldens. It runs in `ci` (38–47 s). The `FirstNode` message now names `QualifiedName`. The Task 6.19 card shrinks to its standing rules and the unbuilt stage-2 check.
+- **v4.25** (2026-10-02): **Self-compilation counts may grow when recorded** (plan-notes 306). The creator answered 306's open question: a change that raises a `test:selfhost` count records it with `--update` in the same change, and review sees the diff.
