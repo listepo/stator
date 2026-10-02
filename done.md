@@ -2394,6 +2394,97 @@ reopen has the full picture.
 Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output names
 `differential/run.ts` among analyzed files.
 
+### Task 6.17 — Test impact: build and run only what a change reaches ✅ (landed 2026-10-02; step 4, CI, still open in plan.md)
+
+The card as written (plan-notes 293):
+
+Creator's
+direction (2026-10-02). On a pull request and locally, run only the tests whose execution reaches
+a changed line — through the TypeScript compiler and on down into the C/Zig runtime the compiled
+binaries link. `main` and the nightly keep the full run: it records the map, and it is what
+catches a selection bug. Plain `pnpm run test` and `pnpm run ci` are unchanged.
+
+1. **The map** (`impact-map.json`, written by a full run with `STATOR_IMPACT_RECORD=<dir>`, never
+   committed) records, per test — a unit test file, a subset fixture, a golden fixture, or a whole
+   harness — with the commit, the Node version and the platform it was recorded on:
+   - **TypeScript:** every function the test executed, as line spans of its file. Unit files run
+     under `NODE_V8_COVERAGE`, which also covers the CLI processes the tests spawn. The in-process
+     runners (subset, golden) use `node:inspector`'s precise coverage: one take after loading,
+     then one take-and-reset per fixture, run serially. Verified on Node 26.7.0: after a reset, a
+     take reports only the functions the fixture ran, and loading reports what loading ran.
+   - **Native:** the runtime archive members the fixture's binary linked — its defined symbols
+     (`nm`) against each member's (`nm -A libjsrt.a`) — expanded to the sources and headers each
+     member depends on, read from the build's `-MMD` sidecars.
+2. **The diff** is `git diff <map commit>` (working tree included). TypeScript files are compared
+   after `module.stripTypeScriptTypes`, which keeps every offset, so a type-only edit selects
+   nothing. A change inside a function selects the tests that executed it. A change outside every
+   function (module scope), or in a function that ran while its module loaded, selects every test
+   that loaded the file. A change in a runtime source or header selects the tests whose binary
+   linked a member depending on it.
+3. **Whole-harness triggers:** the lockfile, `package.json`, `tsconfig*.json`, the vitest config,
+   `.node-version`, `mise.toml`, the runtime justfile, `packages/tests/support/**` and a runner's
+   own script select that whole harness, or everything if they are shared.
+4. **New tests always run:** a test file or fixture that is not in the map.
+5. **Fall back to the full run, out loud:** no map, a map commit that is not an ancestor of
+   `HEAD`, another Node or platform, or another schema version. The selector prints what it chose
+   and why. Selecting zero tests is a result it reports, never a silent pass.
+6. **Build only what is needed:** the runtime is built (already incremental through `-MMD`) only
+   when a selected test links it. CI caches `packages/runtime/build` keyed on the runtime's
+   sources.
+
+Steps: (1) `packages/tests/support/impact.ts` — map schema, diff and selection, pure, with unit
+tests. (2) Recorders in the unit, subset and golden runners, plus harness-level records for
+`test:runtime`, `test:leak`, `test:asan`, `test:ffi` and `test:builtins`. (3) `--only=<file>`
+selectors on the subset and golden runners, and `pnpm run test:impact [<base>]`, which drives
+every harness with its selection and replaces `test:affected`. (4) CI, after PR #45's staged
+pipeline: `main` and the nightly record and upload the map; pull requests download the newest
+`main` map and run `test:impact`. (5) Docs: AGENTS.md commands and Testing rules, `docs/TOOLCHAIN.md`.
+
+**Check:** (a) soundness by mutation: for 20 seeded mutations (a compiler function's body
+replaced by a `throw`, one runtime C function made to `abort()`), every test the full run fails is
+in the selection; (b) a type-only edit selects 0 tests; (c) an edit to one function in
+`jsrt_date.c` selects only fixtures whose binary links `jsrt_date.o`; (d) a missing map, or one
+from a commit that is not an ancestor, falls back to the full run with the reason printed; (e)
+on a one-function compiler change, `test:impact` runs well under the full suite's wall time
+(measured, numbers in plan-notes).
+
+What landed: `packages/tests/support/impact.ts` (map schema 1, diff, selection — pure, 20 unit
+tests in `unit/impact.test.ts`); `packages/tests/impact/` — `preload.ts` + `recorder.ts` (V8
+precise coverage, `node:fs` read hooks, `nm` after every runtime link), `coverage.ts`,
+`native.ts`, `record.ts` (`pnpm run test:impact:record`), `run.ts` (`pnpm run test:impact`),
+`mutate.ts` (Check (a)); `--only=<file>` on the subset and golden runners; `test:affected` removed.
+Design deviations are in plan-notes 293 → "Landed".
+
+Check evidence (Node 26.7.0, darwin-arm64, 16 cores; map recorded at 7a992cc in 224 s, 3.1 MB):
+
+- **(a)** `node packages/tests/impact/mutate.ts` (seed 6017): 20 compiler functions (`throw new
+  Error('mut')`) + 3 runtime C functions (`__builtin_abort()` in `jsrt_date_new`,
+  `jsrt_string_length`, `jsrt_regexp_test`), each followed by the full unit, subset and golden
+  runs (and the runtime corpus for C): `23 mutations (seed 6017), 23 broke at least one test, 0
+  unsound, 1506 s`. Example rows (failed/selected): `lower/index.ts staticAccessorCall` unit 1/2,
+  subset 5/5, golden 5/5; `ffi-gen/abi.ts mapStructPointee` unit 1/2, nothing else;
+  `codegen/index.ts icSite` unit 3/17, subset 0/744, golden 79/397; `jsrt_regexp_test` golden
+  4/397, unit 0/8.
+- **(b)** `renderDiagnostic(d: DiagnosticSite)` → `(d: Readonly<DiagnosticSite>)`: every harness
+  `0 of N selected — nothing to run`.
+- **(c)** an edit inside `jsrt_date_to_json`: golden 397/397, asan 397/397, unit 8/45, leak, ffi,
+  runtime; subset, builtins, node-coverage 0. Every golden binary links `jsrt_date.o` (`jsrt_print`
+  references `jsrt_class_date` and `jsrt_date_to_json`; even `console.log(1)` links them), so the
+  selection is exactly "fixtures whose binary links `jsrt_date.o`" and that is all of them. The
+  same edit in `jsrt_json.c` selects golden 10/397, asan 10/397, unit 0.
+- **(d)** `--map=<missing>` → `impact: FULL RUN — no map at … (record one: pnpm run
+  test:impact:record)`; a foreign commit → `FULL RUN — map commit 0123456789ab is not an ancestor
+  of HEAD`; `node: v24.0.0` → `FULL RUN — map was recorded on Node v24.0.0, this is v26.7.0`;
+  `dirty: true` → `FULL RUN — map was recorded on a dirty tree`; a lockfile edit → every harness
+  `all selected (pnpm-lock.yaml → whole-run trigger)`.
+- **(e)** one-function change in `lower/index.ts` (`staticAccessorCall`): `pnpm run test:impact`
+  ran unit 2/45, subset 5/744, golden 5/397, asan 5/397 in **14.8 s** (`6 step(s), 0 failed`);
+  the full run through the same driver (`--map=/nonexistent.json`): **223.4 s** (unit 23.3,
+  runtime 9.7, subset 6.9, golden 37.5, ffi 4.3, leak 24.7, asan 116.0).
+
+Gate: `tsc` (compiler + tests), `oxlint --deny-warnings`, `oxfmt --check`, `cpd` clean; vitest 45
+files / 620 tests, subset 744 (707 passed, 37 expected-fail), golden 397 passed.
+
 ### Task 6.18 — `stator.config.json`: every CLI option in one validated file ✅ (landed 2026-10-02)
 
 (creator's direction 2026-10-02, plan-notes 303). Stator works both with a config file and without

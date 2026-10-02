@@ -9921,3 +9921,51 @@ actually ran.
 **Decision:** Task 6.17 as written. Its soundness Check is mutation-based. The question is never
 "did the selection run fewer tests" but "did it miss a test the full run fails".
 
+**Landed (2026-10-02).** Steps 1–3 and 5; step 4 (CI) stays open in plan.md. Measured on Node
+26.7.0, darwin-arm64, 16 cores:
+
+| What | Number |
+| --- | --- |
+| Recording (`test:impact:record`, every harness) | 224 s; map 3.1 MB |
+| (a) mutations, seed 6017 | 23 (20 compiler + 3 runtime C), 23 killed, 0 unsound, 1506 s |
+| (b) type-only edit | 0 tests selected in every harness |
+| (c) `jsrt_date.c` function edit | golden 397/397 (every binary links `jsrt_date.o` through `jsrt_print`); `jsrt_json.c`: 10/397 |
+| (e) one compiler function, `test:impact` | 14.8 s (unit 2, subset 5, golden 5, asan 5) |
+| (e) full suite through the same driver | 223.4 s |
+
+Deviations from the card, each one a soundness fix found while building it:
+
+- **Data reads are dependencies.** Coverage sees code, not the files a test reads: `done.md`,
+  `docs/DIAGNOSTICS.md`, fixture directories, `builtins_coverage.json`, `docs/NODE.md`. The preload
+  hooks `node:fs` reads and listings (and `module.syncBuiltinESMExports()` so ESM named imports see
+  the hooks); a change to a read file selects its readers, a read at harness level selects the
+  whole harness, an added or deleted file selects the readers of its directory listing. Module
+  files the loader read are dropped at merge, since coverage already covers them.
+- **Line rules are stricter than "inside a function".** A changed line that no recorded span
+  covers, an edit to a class member line in the new text (it can override), a removed top-level
+  or exported name, a changed import line (tests that load the importer but not the new target),
+  and any file that fails to type-strip all fall back to the module rule. A pure insertion
+  selects the spans that contain both neighbouring lines, so a new helper between two functions
+  selects nothing until something calls it.
+- **Native links are traced for every harness**, not only golden: the preload runs `nm` right
+  after any spawned link that names `-ljsrt`, so unit native proofs, leak and ffi are traced too.
+  A public header (`packages/runtime/include/**`) selects every test that links the runtime; a
+  runtime path no member's `.d` names selects them too. `jsrt_zig.o` stands for every `.zig` and
+  header (Zig's own cache tracks its inputs).
+- **`test:asan` is recorded as harness `asan`**: the golden runner against the sanitized archive,
+  keyed like golden. `test:impact` runs its three stages with the golden stage narrowed; the whole
+  gate when everything is selected. `test:node-coverage` (new on `main`) is a single-key harness.
+- **The recorder must not change what a test observes.** The first recording failed
+  `test:node-coverage`: loading `node:crypto` from the preload adds `defaultCipherList` to
+  `node:constants`, which that check counts. The preload now loads only `fs`, `child_process`,
+  `module`, `path`, `url` (and `inspector` in-process).
+- **Maps recorded on a dirty tree are refused**, and a red recording writes no map: coverage stops
+  where a test failed, so it would under-select exactly the broken code.
+- **Not a moon task.** Its result depends on the working-tree diff and a machine-local map, which
+  moon's cache cannot key on.
+
+Residual limits, none hit by (a): memoization shared across in-process fixtures (a cache a later
+fixture hits instead of recomputing attributes the work to the first one); a process spawned with
+an explicit environment that drops `NODE_OPTIONS` is not traced; a new top-level name that shadows
+a global changes behavior without an executed span (the module rule catches it only when the name
+replaces one). The selector trusts `tsc` for link-time import errors.

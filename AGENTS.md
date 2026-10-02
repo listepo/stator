@@ -66,6 +66,7 @@ packages/tests/    the test package "@stator/tests" — every harness + a tsconf
   differential/    fuzzer corpus       bench/  baselines + results
   test262/         runner + pin (corpus fetched, not vendored)
   leak/            GC hygiene: a 10M-object loop whose RSS must plateau
+  impact/          test impact: map recorder, selector driver (`test:impact`), mutation check
 ```
 
 Paths in prose below are written relative to their package (`src/frontend/` = `packages/compiler/src/frontend/`, `runtime/vendor/` = `packages/runtime/vendor/`, `tests/subset/` = `packages/tests/subset/`).
