@@ -9379,3 +9379,23 @@ TypeScript.
   is what T13.0 §2's damage tracking builds on.
 - Drawing backends in `renderers/` at `main`: GLES3, SDL2, SDL3, cairo, playdate, raylib, sokol,
   termbox2, terminal, web, win32_gdi.
+## 299. Web API coverage is generated into `docs/WEBAPI.md`, the way `docs/NODE.md` is (2026-10-02)
+
+**Plan:** new card §11e T13.5; T13.0 now writes its design to `docs/WEBAPI-DESIGN.md`; T13.1
+depends on T13.5; §14 row; changelog v4.15.
+
+**Creator's direction:** show `webapi` coverage through a Markdown file, the same way as for Node.
+
+**What the card fixes in place, and why:**
+
+- **The name follows `NODE.md`.** The platform-named file is the generated coverage table, so
+  `docs/WEBAPI.md` is coverage and the T13.0 design doc moves to `docs/WEBAPI-DESIGN.md`.
+- **The denominator is `lib.dom.d.ts` from the pinned `typescript`,** because it is already a
+  pinned dependency and is generated from the Web specs' IDL. The TypeScript 6.0.3 package ships
+  `lib/lib.dom.d.ts` with 1 520 top-level `interface` declarations (`grep -c '^interface '` on
+  `node_modules/typescript/lib/lib.dom.d.ts`, checked 2026-10-02). `@webref/idl` stays a fallback
+  that T13.0 may choose, with its own plan-notes entry, if per-spec grouping cannot be kept honest
+  by a checked-in map.
+- **The generator is shared with `node-coverage.ts`.** Two copies of a table renderer and a claim
+  validator would fail `dupes` (Task 6.16), and they would drift apart.
+
