@@ -105,7 +105,7 @@ Useful local gates (not a product feature list — just what the repo runs):
 
 ```sh
 pnpm run test            # unit (vitest)
-pnpm run test:affected   # unit tests your changes reach
+pnpm run test:impact     # tests your changes reach (per-test coverage map)
 pnpm run test:subset     # feature × mode decision matrix
 pnpm run test:golden     # compile + run vs pinned Node, byte-for-byte
 pnpm run ci              # full local gate before claiming work done

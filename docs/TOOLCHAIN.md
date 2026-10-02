@@ -17,7 +17,7 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | oxlint-tsgolint           | `7.0.2001` (exact) | `devDependencies`. The type-aware backend `oxlint --type-aware` runs through (plan-notes 224).                                                                                                                                   |
 | oxfmt                     | `0.67.0` (exact)   | `devDependencies`                                                                                                                                                                                                                |
 | cpd (copy/paste detector) | `5.3.0` (exact)    | `devDependencies`. `.jscpd.json`: our source only (tests, vendor, docs excluded), identifier-insensitive, AI reporter; fails on any clone not in `.jscpd-baseline.json` (AGENTS.md golden rule 10) |
-| vitest                    | `5.0.3` (exact)    | `devDependencies` (root + `packages/tests`). Unit-test runner; `--changed` runs only the tests a diff reaches (plan-notes 285).                                                                                                  |
+| vitest                    | `5.0.3` (exact)    | `devDependencies` (root + `packages/tests`). Unit-test runner (plan-notes 285); `test:impact` picks its files from the impact map (plan-notes 293).                                                                                                  |
 | c8                        | `12.0.0` (exact)   | `devDependencies`. `test:coverage`: V8 coverage across vitest workers and every CLI subprocess (plan-notes 285).                                                                                                                 |
 | pnpm                      | `12.3.4`           | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml`                                                                                                                                                               |
 | LLVM                      | `21.1.8`           | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
@@ -56,7 +56,8 @@ CI must run at least ubuntu-latest and macos-latest (plan.md §4 Task 1.0 step 1
 pnpm install --frozen-lockfile   # install exactly the pinned tree
 pnpm run ci                      # typecheck -> lint -> dupes -> unit -> runtime -> subset -> golden -> leak -> asan
 pnpm run test                    # unit tests via vitest (the default; coverage is on-demand, not per-run)
-pnpm run test:affected           # only the unit tests your uncommitted changes reach (`pnpm run test:affected origin/main` for the whole branch)
+pnpm run test:impact             # only the tests your diff reaches, every harness (plan.md §9 Task 6.17); prints its reasons, falls back to the full run
+pnpm run test:impact:record      # record that map: a full instrumented run at a clean HEAD → .cache/impact/impact-map.json
 pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info (only when the table is the question — ~4x wall time)
 pnpm run test:subset             # feature × mode decision matrix
 pnpm run test:golden             # compile + run vs the pinned Node, byte-for-byte
@@ -155,8 +156,10 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 | `zig`           | justfiles (T9.1, T11.2)                                              | memory-core objects into `libjsrt.a`, std backings into `libjsrt_std.a` (pinned `0.16.0` in `mise.toml`; required) |
 | `pkg-config`    | justfile                                                             | finding bdw-gc and ICU; absent means both are simply off |
 | `diff`          | `just -f packages/runtime/justfile -d packages/runtime runtime-test` | the print corpus against Node, byte-for-byte             |
+| `nm`            | `packages/tests/impact/` (`test:impact:record`)                      | which `libjsrt.a` members a test's binary linked (Task 6.17); a missing `nm` records "all of the runtime" |
+| `git`           | `packages/tests/impact/` (`test:impact`)                             | the diff against the impact map's commit                  |
 
-`clang` (and the rest of LLVM) and `zig` 0.16.0 are `mise install` on Unix. The other three still come from the Xcode
+`clang` (and the rest of LLVM) and `zig` 0.16.0 are `mise install` on Unix. The others still come from the Xcode
 command-line tools (`xcode-select --install`) on macOS and from `binutils`/`pkg-config`/
 `diffutils` on Debian/Ubuntu. A missing compiler is a diagnostic with the install hint (`STA0008`),
 not a crash.

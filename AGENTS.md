@@ -108,7 +108,8 @@ pnpm run schema:config          # regenerate packages/compiler/schema/stator.con
 pnpm run docs:node              # regenerate docs/NODE.md (Node API coverage, % per module and member)
 pnpm run test:node-coverage     # fail when docs/NODE.md is stale (part of `ci`)
 pnpm run test                   # unit tests (vitest) — the default; use this for the gate
-pnpm run test:affected          # only the unit tests your uncommitted changes reach (append a commit, e.g. origin/main, for a whole branch) — iteration, never the gate
+pnpm run test:impact            # only the tests (every harness) your diff reaches, from the impact map; falls back to everything, saying why — iteration, never the gate
+pnpm run test:impact:record     # full instrumented run at a clean HEAD → .cache/impact/impact-map.json (never committed)
 pnpm run test:coverage          # same under c8 + packages/compiler/src coverage table; writes coverage/lcov.info — ONLY when the coverage table is the question (it costs ~4x wall time)
 pnpm run test:subset            # decision tests → verdict matrix
 pnpm run test:golden            # compile + run vs Node, byte-for-byte
@@ -161,7 +162,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 - Every new language construct lands with: decision test(s) for both modes + at least one golden test + HIR-verifier-clean build. Non-trivial runtime code lands with a unit test.
 - Differential ground truth is the pinned Node LTS in `.node-version` — that Node, and only that Node.
 - **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (the stage-1 `frontend (linux/x64)` job, id `frontend-coverage`, owns the lcov artifact; Windows and macOS jobs never collect coverage), not on every local run.
-- **`test:affected` is for iteration only.** It follows the import graph from your diff, so it cannot see a test that reaches compiler code only through a spawned CLI process; plain `test` stays the gate.
+- **`test:impact` is for iteration only.** It selects from a per-test coverage map (`pnpm run test:impact:record`, plan.md §9 Task 6.17): the functions each test executed, the data files it read, and the runtime sources its binaries linked. It prints what it chose and why, and falls back to the full run when the map cannot be trusted (none, another Node or platform, a commit that is not an ancestor, a dirty recording). Plain `test` and `pnpm run ci` stay the gate.
 
 ## Diagnostics conventions
 
