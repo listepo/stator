@@ -221,6 +221,13 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
     return hUnknown(false);
   }
 
+  // An instance of a JavaScript constructor function: the checker gives `new P()` a class-like
+  // type listing what P's body assigns to `this`, but the value is a dynamic object
+  // `jsrt_construct` built (plan-notes 310) -- no layout exists, so no slot may be read.
+  if (isFunctionConstructorInstance(type)) {
+    return hUnknown(false);
+  }
+
   const object = classTypeToHType(type, checker, depth);
   if (object !== null) {
     return object;
@@ -1301,6 +1308,78 @@ export function classDisplayName(
   node: ts.ClassDeclaration | ts.ClassExpression,
 ): string | undefined {
   return ts.isClassExpression(node) ? expressionClassName(node) : node.name?.text;
+}
+
+/** The type of `new P()` for a JavaScript constructor function `P`: TypeScript gives the
+ * function's symbol the Class flag in a `.js` file whose body assigns to `this`, with no class
+ * declaration behind it. */
+function isFunctionConstructorInstance(type: ts.Type): boolean {
+  const symbol = type.getSymbol();
+  if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Class) === 0) {
+    return false;
+  }
+  const declarations = symbol.getDeclarations() ?? [];
+  return declarations.length > 0 && !declarations.some((d) => ts.isClassLike(d));
+}
+
+/** True for a symbol only declaration files declare: a builtin (`RegExp`, `Function.prototype.call`,
+ * `console.log`) rather than something the program wrote. */
+function declaredOnlyInDeclarationFiles(symbol: ts.Symbol | undefined): boolean {
+  const declarations = symbol?.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/** Whether `new callee(...)` and `x instanceof callee` dispatch through a function VALUE at run
+ * time (`jsrt_construct`, `jsrt_instanceof_ctor`; plan-notes 310): an ordinary function the
+ * program wrote, or a value of unknown type. A class keeps its descriptor path, and a builtin
+ * constructor (declared only in a declaration file) keeps its own rules. */
+export function isFunctionValueCallee(callee: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (declaredOnlyInDeclarationFiles(checker.getSymbolAtLocation(callee))) {
+    return false;
+  }
+  const type = checker.getTypeAtLocation(callee);
+  if (classLikeOf(type) !== undefined || declaredOnlyInDeclarationFiles(type.getSymbol())) {
+    return false;
+  }
+  const shape = tsTypeToHType(type, checker);
+  return shape.kind === 'fn' || shape.kind === 'unknown';
+}
+
+/** A member of an ordinary function value -- `f.count`, `F.prototype`, `assert.sameValue` -- which
+ * lives in the closure's own properties at run time (plan-notes 310), not in any layout. The
+ * receiver is a function the program wrote: a class object has its descriptor's statics, and a
+ * builtin function has no property table. `length` keeps its static arity read, and the other
+ * `Function.prototype` members (`call`, `apply`, `bind`, ...) are not own properties at all. */
+export function isFunctionValueMember(
+  receiver: ts.Expression,
+  name: string,
+  checker: ts.TypeChecker,
+): boolean {
+  if (name === 'length') {
+    return false;
+  }
+  const type = checker.getTypeAtLocation(receiver);
+  if (classLikeOf(type) !== undefined || tsTypeToHType(type, checker).kind !== 'fn') {
+    return false;
+  }
+  if (declaredOnlyInDeclarationFiles(checker.getSymbolAtLocation(receiver))) {
+    return false;
+  }
+  if (name === 'prototype' || name === 'name') {
+    return true;
+  }
+  return !declaredOnlyInDeclarationFiles(checker.getPropertyOfType(type, name));
+}
+
+/** Whether `expr` READS a member of an ordinary function value (`F.prototype`, `f.cache`). The
+ * value is whatever the program last stored there, so the checker's type for it -- inferred from
+ * one assignment such as `F.prototype = { … }` -- is no layout, and every use of it goes through
+ * the shape table like an Unknown receiver (plan-notes 310). */
+export function isFunctionMemberRead(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    isFunctionValueMember(expr.expression, expr.name.text, checker)
+  );
 }
 
 /** The class-like (declaration or expression) a type came from, or `undefined` for anything

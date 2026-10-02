@@ -467,6 +467,14 @@ export const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // `assign` that already copies an array spread (plan.md §8 step 12(c)). ts mode keeps the
   // refusal (STA0012).
   2698, // Spread types may only be created from object types.
+  // An ordinary function is a constructor (§10.2.4 MakeConstructor), and `new F()` where `F`
+  // returns an object answers that object (§10.2.2 [[Construct]] step 10), so a non-void return
+  // is how a factory-style constructor is written. Replacing `F.prototype` after reading it is
+  // the same idiom's other half: the read sees the auto-created prototype, the write replaces
+  // it for later `new F()` -- both have exact runtime answers (`construct_function`,
+  // docs/VALUE.md §4.20). ts mode keeps the refusal (STA0012; plan-notes 310, family 4).
+  2350, // Only a void function can be called with the 'new' keyword.
+  2565, // Property 'X' is used before being assigned.
   // Two `export *` re-exports binding one name differently: ES makes the name AMBIGUOUS, which
   // drops it from the namespace and makes importing it by name a SyntaxError -- not an error at
   // the `export *` itself (§16.2.1.6.3 ResolveExport). The namespace type drops the name

@@ -417,6 +417,15 @@ typedef struct JSRTDynObject {
   uint32_t capacity;    /* slots allocated; the shape says how many are live */
   jsrt_value *slots;
   bool frozen; /* Object.freeze: writes throw TypeError (Phase 5 step 11) */
+  /* [[Prototype]] of an object `new F()` built: `F.prototype` when that was an object, else 0 --
+   * the default %Object.prototype%, which has no representation here and holds nothing a lookup
+   * can find (plan-notes 310). A read that misses the own shape walks this chain; only
+   * `jsrt_construct` sets it. */
+  jsrt_value proto;
+  /* The hidden `constructor` of the object `F.prototype` creates on first observation: the
+   * function F, or 0. JavaScript makes that property non-enumerable, so it is a field rather than
+   * a shape key -- printing and key enumeration never see it, and a read of `constructor` does. */
+  jsrt_value ctor;
 } JSRTDynObject;
 
 /* One per property-access SITE, emitted `static` in generated C so it persists across executions
@@ -756,14 +765,14 @@ static inline bool jsrt_instanceof(jsrt_value v, const JSRTClass *cls) {
   return false;
 }
 
-/* `o instanceof v` where `v` is a VALUE (a class object reached at run time), not a name the
- * emitter resolved (docs/VALUE.md §4.17). A class object walks the same chain `jsrt_instanceof`
- * walks, against the descriptor the value carries. The right operand of `instanceof` must be
- * callable with a prototype in JavaScript; a non-callable answers Node's catchable TypeError
- * (`Right-hand side of 'instanceof' is not an object` -- or `not callable` for an object that is
- * not a function), and an ordinary function answers `false` here. That last answer is the one
- * case Node's prototype surface can make `true` (`new f() instanceof f`): `f.prototype` is
- * Phase 8's descriptor/prototype surface, recorded as residue. */
+/* `o instanceof v` where `v` is a VALUE (a class object or a function reached at run time), not a
+ * name the emitter resolved (docs/VALUE.md §4.20). A class object walks the same chain
+ * `jsrt_instanceof` walks, against the descriptor the value carries. An ordinary function answers
+ * through `v.prototype` (§7.3.22 OrdinaryHasInstance): true when it is on `o`'s prototype chain,
+ * which only an object `new` built through a function has (plan-notes 310), and Node's TypeError
+ * when the prototype is not an object (an arrow's). The right operand of `instanceof` must be
+ * callable in JavaScript; a non-callable answers Node's catchable TypeError (`Right-hand side of
+ * 'instanceof' is not an object` -- or `not callable` for an object that is not a function). */
 bool jsrt_instanceof_ctor(jsrt_value obj, jsrt_value ctor);
 
 /* ---------------------------------------------------------------- errors */
@@ -1409,6 +1418,18 @@ typedef struct JSRTClosure {
   JSRTEnv *env;     /* NULL when the function captures nothing */
   bool has_receiver; /* parameter zero is `this`; `jsrt_call` shifts when the caller omits it */
   const struct JSRTClass *klass;      /* NULL unless this is a class object */
+  /* A `function` declaration or expression -- not an arrow, a method, an async function or a
+   * generator, none of which JavaScript constructs. `new` builds through it (`jsrt_construct`),
+   * and it has a `prototype`. False for a class object, whose construction is `klass`'s. */
+  bool constructible;
+  /* `F.prototype` once something read or wrote it: an ordinary function's prototype is created on
+   * first observation (`jsrt_function_prototype`), so a function never constructed pays nothing. */
+  bool has_prototype;
+  jsrt_value prototype;
+  /* The function's own enumerable properties (`f.count = 0`, `assert.sameValue = ...`), as a
+   * dynamic object; NULL until the first write. A class object never has one: its statics are
+   * its descriptor's (plan-notes 310). */
+  struct JSRTDynObject *props;
 } JSRTClosure;
 
 static inline jsrt_value jsrt_closure(const JSRTClosure *c) {
@@ -1426,6 +1447,15 @@ static inline jsrt_value jsrt_method(jsrt_value obj, uint32_t slot) {
  * the closure is reachable only through it. */
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
                             uint32_t arity, const char *name, JSRTEnv *env, bool has_receiver);
+
+/* Marks a fresh heap closure as a `function` that captures -- one `new` can build through
+ * (`constructible`) -- and answers it. Nothing allocates between the two calls. */
+jsrt_value jsrt_closure_constructible(jsrt_value closure);
+
+/* `F.prototype` of an ordinary function: what was assigned, or -- for a constructible function
+ * never asked before -- a fresh object whose hidden `constructor` is F, created now and kept.
+ * `undefined` for a function that is not constructible and was never assigned one. */
+jsrt_value jsrt_function_prototype(jsrt_value fn);
 
 /* The closure every `jsrt_*_method` answers: environment slot 0 holds the receiver (kept alive by
  * the trace) and slot 1 the table row as a number, so `jsrt_call` needs no new protocol.
@@ -1470,9 +1500,11 @@ jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv
  *
  * A class object allocates its instance (`jsrt_object_new`), then runs `fn` with the instance as
  * receiver and the arguments after it; the constructor's return is ignored, because the gate
- * admits no explicit object return in a constructor. A value that is not a class object leaves
- * Node's catchable `X is not a constructor` TypeError pending -- including an ordinary function,
- * whose legacy-construct answer would need `f.prototype` to be right (Phase 8's surface). */
+ * admits no explicit object return in a constructor. A constructible function (`function F`)
+ * builds a dynamic object whose prototype is `F.prototype`, runs F with it as `this`, and answers
+ * F's return when that is an object, the new object otherwise (§10.2.2 [[Construct]], plan-notes
+ * 310). Anything else -- an arrow, a method, a non-function -- leaves Node's catchable
+ * `X is not a constructor` TypeError pending. */
 jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv);
 
 /* ------------------------------------------------------------ promises */

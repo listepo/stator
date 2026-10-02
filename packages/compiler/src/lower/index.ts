@@ -86,6 +86,9 @@ import {
   ITERATOR_METHOD_NAME,
   instanceMethodName,
   isDynamicShape,
+  isFunctionValueCallee,
+  isFunctionMemberRead,
+  isFunctionValueMember,
   isStaticMember,
   isSymbolIteratorKey,
   methodDeclaringClass,
@@ -133,6 +136,7 @@ import type {
   IfStatement,
   IndexAccess,
   InstanceOf,
+  InstanceOfValue,
   IteratorView,
   LogicalOp,
   MatchField,
@@ -142,6 +146,7 @@ import type {
   MethodValue,
   Module,
   NewExpr,
+  NewValue,
   ObjectEntry,
   ObjectLiteral,
   ObjectStaticMethod,
@@ -2879,7 +2884,8 @@ function receiverTypeAt(obj: ts.Expression, checker: ts.TypeChecker, bindings: S
       numberConstant(obj, checker) !== undefined);
   return ts.isPropertyAccessExpression(obj) &&
     !folds &&
-    targetIsDynamic(obj.expression, checker, bindings)
+    (targetIsDynamic(obj.expression, checker, bindings) ||
+      isFunctionValueMember(obj.expression, obj.name.text, checker))
     ? hUnknown(false)
     : typeAt(obj, checker, bindings);
 }
@@ -2889,6 +2895,7 @@ function targetIsDynamic(target: ts.Expression, checker: ts.TypeChecker, binding
     return bindings.get(RECEIVER)?.kind === 'unknown';
   }
   return (
+    isFunctionMemberRead(target, checker) ||
     isDynamicShape(checker.getTypeAtLocation(target), checker) ||
     typeAt(target, checker, bindings).kind === 'unknown'
   );
@@ -3518,13 +3525,15 @@ function memberAssignment(
     ({ current, write } = place);
   } else if (
     targetIsDynamic(targetNode.expression, checker, bindings) ||
+    isFunctionValueMember(targetNode.expression, targetNode.name.text, checker) ||
     (target.type.kind === 'array' && targetNode.name.text === 'length')
   ) {
     // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). The compound and
     // update forms read `current` through the same receiver, which `hoisted` evaluated once, so
     // `f().n += 1` calls `f` a single time (plan-notes 310). An array's `length` is written by the
     // same runtime entry, which resizes the array instead of touching a table (ECMA-262
-    // §10.4.2.4), and read as any `xs.length` is.
+    // §10.4.2.4), and read as any `xs.length` is. So is an ordinary function's own property
+    // (`f.count += 1`), which lives in the closure's property table.
     const field = targetNode.name.text;
     current =
       target.type.kind === 'array'
@@ -4996,7 +5005,8 @@ function lowerExpression(
   if (
     ts.isPropertyAccessExpression(node) &&
     !isMatchReceiver(node.expression, checker) &&
-    targetIsDynamic(node.expression, checker, bindings)
+    (targetIsDynamic(node.expression, checker, bindings) ||
+      isFunctionValueMember(node.expression, node.name.text, checker))
   ) {
     const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (target === null) {
@@ -5888,6 +5898,24 @@ function lowerExpression(
   // `new C(...)`. The class is named, not evaluated: the gate accepted only an identifier callee,
   // and what the emitter needs is the descriptor that identifier resolves to.
   if (ts.isNewExpression(node)) {
+    // `new F(...)` through a function value, or through an untyped one: the runtime constructs
+    // (`jsrt_construct`), and the result is a dynamic object whatever the checker infers from F's
+    // body (plan-notes 310).
+    if (isFunctionValueCallee(node.expression, checker)) {
+      const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+      if (target === null || args === null) {
+        return null;
+      }
+      const created: NewValue = {
+        kind: 'new-value',
+        type: hUnknown(false),
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        target,
+        args,
+      };
+      return created;
+    }
     const type = typeAt(node, checker, bindings);
     // A Map and a Set are allocated, not constructed: there is no descriptor to name and no
     // constructor to run, so the node carries which of the two it is and nothing else.
@@ -6303,6 +6331,22 @@ function lowerExpression(
         target,
         className: node.right.text,
         builtin: true,
+      };
+      return test;
+    }
+    // Against an ordinary function or an untyped value, the prototype question is the VALUE's,
+    // answered at run time (`jsrt_instanceof_ctor`, plan-notes 310).
+    if (isFunctionValueCallee(node.right, checker)) {
+      const ctor = lowerExpression(node.right, sourceFile, checker, bindings, diagnostics);
+      if (ctor === null) {
+        return null;
+      }
+      const test: InstanceOfValue = {
+        kind: 'instanceof-value',
+        type: H_BOOLEAN,
+        span,
+        target,
+        ctor,
       };
       return test;
     }
@@ -7234,7 +7278,11 @@ function lowerDynMethodCall(
   }
   const receiver = receiverTypeAt(obj, checker, bindings);
   const slot = callableFieldSlot(receiver, expr.name.text);
-  if (receiver.kind !== 'unknown' && slot === undefined) {
+  // `assert.sameValue(a, b)`: a function's own property, called with the function as receiver.
+  // Its result is Unknown: the checker types it from whatever was assigned, which no layout holds
+  // the program to (plan-notes 310).
+  const functionMember = isFunctionValueMember(obj, expr.name.text, checker);
+  if (receiver.kind !== 'unknown' && slot === undefined && !functionMember) {
     return undefined;
   }
   const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
@@ -7245,7 +7293,7 @@ function lowerDynMethodCall(
   if (args === null) {
     return null;
   }
-  const type = typeAt(node, checker, bindings);
+  const type = functionMember ? hUnknown(false) : typeAt(node, checker, bindings);
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
   const field = expr.name.text;
   return slot === undefined
@@ -8075,6 +8123,15 @@ function lowerFunction(
       : node.name !== undefined && ts.isIdentifier(node.name)
         ? node.name.text
         : undefined;
+    const isAsync = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+    const isGenerator =
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isMethodDeclaration(node)
+        ? node.asteriskToken !== undefined
+        : false;
+    const constructible =
+      (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) && !isAsync && !isGenerator;
     const fn: FunctionExpr = {
       kind: 'function',
       type,
@@ -8083,13 +8140,9 @@ function lowerFunction(
       ...(selfBinding !== undefined && { selfBinding }),
       params,
       body: bodyWithParams,
-      isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
-      isGenerator:
-        ts.isFunctionDeclaration(node) ||
-        ts.isFunctionExpression(node) ||
-        ts.isMethodDeclaration(node)
-          ? node.asteriskToken !== undefined
-          : false,
+      isAsync,
+      isGenerator,
+      ...(constructible && { constructible: true }),
       // The capture analysis resolved references by SYMBOL, so a name it reports is the one the
       // SOURCE wrote; the HIR may have renamed the declaration it points at. Both lists are
       // spelled in HIR names here, which is the only form the emitter's environment layout and

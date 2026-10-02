@@ -344,6 +344,94 @@ static bool class_static_other_half(const JSRTClosure *c, const char *key, bool 
   return false;
 }
 
+/* The mutable view of an ordinary function's closure. Only a closure with `klass == NULL` is
+ * written through it: those are heap closures or the emitter's non-const file statics, while a
+ * class object is a `const` file static and never reaches here (plan-notes 310). */
+static JSRTClosure *function_record(jsrt_value fn) { return (JSRTClosure *)jsrt_ptr(fn); }
+
+jsrt_value jsrt_function_prototype(jsrt_value fn) {
+  JSRTClosure *c = function_record(fn);
+  if (!c->has_prototype) {
+    if (!c->constructible) {
+      return JSRT_UNDEFINED;
+    }
+    /* Created on first observation and kept, so every later read -- and every `new` -- sees the
+     * same object. Its `constructor` is the hidden field, never a shape key: JavaScript makes it
+     * non-enumerable, so `console.log(F.prototype)` prints `{}`. */
+    const jsrt_value proto = jsrt_dynobj_new();
+    ((JSRTDynObject *)jsrt_ptr(proto))->ctor = fn;
+    c->prototype = proto;
+    c->has_prototype = true;
+  }
+  return c->prototype;
+}
+
+/* `key` read on an ordinary function: its `prototype`, then its own properties. False on a miss,
+ * which leaves `length`/`name` to the caller. */
+static bool function_own_get(jsrt_value fn, const char *key, jsrt_value *out) {
+  const JSRTClosure *c = jsrt_as_closure(fn);
+  if (strcmp(key, "prototype") == 0 && (c->constructible || c->has_prototype)) {
+    *out = jsrt_function_prototype(fn);
+    return true;
+  }
+  if (c->props == NULL) {
+    return false;
+  }
+  const JSRTShape *hit = jsrt_shape_find(c->props->shape, key);
+  if (hit == NULL) {
+    return false;
+  }
+  *out = accessor_read(c->props->slots[hit->offset], fn);
+  return true;
+}
+
+/* `key` on the hidden half and the prototype chain of a dynamic object, after its own shape
+ * missed: the hidden `constructor` of a function's prototype object, then each prototype in turn
+ * (§10.1.8.1 OrdinaryGet). A getter found on the chain runs with the ORIGINAL receiver. A prototype
+ * that is not a dynamic object -- `F.prototype = [1]` -- answers through its own lookup and ends
+ * the walk; one that has no representation (%Object.prototype%) is 0 and ends it with a miss. */
+static bool inherited_get(jsrt_value obj, const char *key, jsrt_value recv, jsrt_value *out) {
+  for (jsrt_value p = obj; p != 0;) {
+    if (!jsrt_is_dynobj(p)) {
+      if (!jsrt_has_prop(p, key)) {
+        return false;
+      }
+      *out = jsrt_get_prop(p, key, NULL);
+      return true;
+    }
+    const JSRTDynObject *o = (const JSRTDynObject *)jsrt_ptr(p);
+    if (p != obj) {
+      const JSRTShape *hit = jsrt_shape_find(o->shape, key);
+      if (hit != NULL) {
+        *out = accessor_read(o->slots[hit->offset], recv);
+        return true;
+      }
+    }
+    if (o->ctor != 0 && strcmp(key, "constructor") == 0) {
+      *out = o->ctor;
+      return true;
+    }
+    p = o->proto;
+  }
+  return false;
+}
+
+/* The accessor a write of `key` meets on `obj`'s prototype chain, or 0. A data property there is
+ * shadowed by the write (it lands on `obj`), so only an accessor cell changes what a write does:
+ * its setter runs, or its missing setter throws (§10.1.9.2 OrdinarySetWithOwnDescriptor). */
+static jsrt_value inherited_accessor(jsrt_value obj, const char *key) {
+  for (jsrt_value p = ((const JSRTDynObject *)jsrt_ptr(obj))->proto; p != 0 && jsrt_is_dynobj(p);) {
+    const JSRTDynObject *o = (const JSRTDynObject *)jsrt_ptr(p);
+    const JSRTShape *hit = jsrt_shape_find(o->shape, key);
+    if (hit != NULL) {
+      const jsrt_value slot = o->slots[hit->offset];
+      return jsrt_is_accessor_cell(slot) ? slot : 0;
+    }
+    p = o->proto;
+  }
+  return 0;
+}
+
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   if (jsrt_is_nullish(obj)) {
     char message[256];
@@ -374,6 +462,10 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
     }
     if (strcmp(key, "name") == 0) {
       return jsrt_string_from_utf8(c->name, strlen(c->name));
+    }
+    jsrt_value own = JSRT_UNDEFINED;
+    if (c->klass == NULL && function_own_get(obj, key, &own)) {
+      return own;
     }
     return JSRT_UNDEFINED;
   }
@@ -424,6 +516,11 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
     if (jsrt_is(obj, JSRT_TAG_ARRAY) && jsrt_array_method(obj, key, &method)) {
       return method;
     }
+    /* A prototype hit never fills the IC either: the site's cache says "this shape, this own
+     * slot", and an inherited member is neither. */
+    if (jsrt_is_dynobj(obj) && inherited_get(obj, key, obj, &method)) {
+      return method;
+    }
     return JSRT_UNDEFINED;
   }
   if (ic != NULL) {
@@ -453,7 +550,9 @@ bool jsrt_has_prop(jsrt_value obj, const char *key) {
         }
       }
     }
-    return strcmp(key, "length") == 0 || strcmp(key, "name") == 0;
+    jsrt_value own = JSRT_UNDEFINED;
+    return strcmp(key, "length") == 0 || strcmp(key, "name") == 0 ||
+           (c->klass == NULL && function_own_get(obj, key, &own));
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
@@ -499,6 +598,12 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   if (!answer) {
     answer = jsrt_has_prop(obj, k);
   }
+  /* `in` sees the prototype chain, where `Object.hasOwn` (the other `jsrt_has_prop` caller) must
+   * not: `'get' in new F()` is true when `F.prototype.get` is (§10.1.7.1 OrdinaryHasProperty). */
+  jsrt_value inherited = JSRT_UNDEFINED;
+  if (!answer && jsrt_is_dynobj(obj)) {
+    answer = inherited_get(obj, k, obj, &inherited);
+  }
   /* Compared only -- nothing here keeps the key, unlike a write that installs it in a shape -- so
    * this copy dies with the call instead of joining the immortal shape table. */
   free((void *)k);
@@ -530,6 +635,16 @@ static void array_set_length(jsrt_value array, jsrt_value value) {
     a->elements[i] = JSRT_UNDEFINED;
   }
   a->length = length;
+}
+
+/* An existing own slot takes `value` -- through its setter when it holds an accessor cell and the
+ * write honors accessors, which every write but a definition does. */
+static void write_own_slot(jsrt_value *slot, const char *key, jsrt_value obj, jsrt_value value,
+                           bool honor_accessor) {
+  if (honor_accessor && accessor_write(*slot, key, obj, value)) {
+    return;
+  }
+  *slot = value;
 }
 
 /* `honor_accessor` is false for exactly one caller: jsrt_define_accessor, which is INSTALLING the
@@ -577,6 +692,29 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
     }
     jsrt_panic("STA2004: a class object cannot grow a new static; planned for Phase 8");
   }
+  if (jsrt_is(obj, JSRT_TAG_CLOSURE)) {
+    /* An ordinary function's own properties (plan-notes 310): `prototype` is its own slot, `name`
+     * and `length` are read-only (compiled modules are strict, so the write throws), and anything
+     * else lands in the function's property object, created on the first write. */
+    JSRTClosure *c = function_record(obj);
+    if (strcmp(key, "prototype") == 0 && (c->constructible || c->has_prototype)) {
+      c->prototype = value;
+      c->has_prototype = true;
+      return;
+    }
+    if (strcmp(key, "name") == 0 || strcmp(key, "length") == 0) {
+      char msg[256];
+      snprintf(msg, sizeof msg, "Cannot assign to read only property '%s' of function '%s'", key,
+               c->name);
+      jsrt_throw_error(&jsrt_class_type_error, msg);
+      return;
+    }
+    if (c->props == NULL) {
+      c->props = (JSRTDynObject *)jsrt_ptr(jsrt_dynobj_new());
+    }
+    store_prop(JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)c->props), key, value, NULL, honor_accessor);
+    return;
+  }
   if (jsrt_is(obj, JSRT_TAG_ARRAY) && strcmp(key, "length") == 0) {
     array_set_length(obj, value);
     return;
@@ -594,10 +732,7 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
   }
   const PropTable o = as_prop_table(obj, "set");
   if (ic != NULL && ic->shape == (*o.shape)) {
-    if (honor_accessor && accessor_write((*o.slots)[ic->offset], key, obj, value)) {
-      return;
-    }
-    (*o.slots)[ic->offset] = value;
+    write_own_slot(&(*o.slots)[ic->offset], key, obj, value, honor_accessor);
     return;
   }
   const JSRTShape *hit = jsrt_shape_find((*o.shape), key);
@@ -606,11 +741,15 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
       ic->shape = (*o.shape);
       ic->offset = hit->offset;
     }
-    if (honor_accessor && accessor_write((*o.slots)[hit->offset], key, obj, value)) {
+    write_own_slot(&(*o.slots)[hit->offset], key, obj, value, honor_accessor);
+    return;
+  }
+
+  if (jsrt_is_dynobj(obj) && honor_accessor) {
+    const jsrt_value inherited = inherited_accessor(obj, key);
+    if (inherited != 0 && accessor_write(inherited, key, obj, value)) {
       return;
     }
-    (*o.slots)[hit->offset] = value;
-    return;
   }
 
   /* New property: take (or build) the transition, and make its slot writable. */

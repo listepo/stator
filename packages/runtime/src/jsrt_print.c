@@ -740,6 +740,73 @@ static void append_key(JSRTBuf *out, const char *key) {
   jsrt_buf_putc(out, quote);
 }
 
+/* Whether `v` is an instance of the function `ctor` for the printer: `jsrt_instanceof_ctor`'s
+ * answer without its TypeError, which Node's own printer swallows the same way (an arrow found as
+ * a `constructor` simply does not name the object). */
+static bool printer_instanceof(jsrt_value v, jsrt_value ctor) {
+  const JSRTClosure *c = jsrt_as_closure(ctor);
+  if (c->klass != NULL) {
+    return jsrt_instanceof(v, c->klass);
+  }
+  const jsrt_value proto = jsrt_function_prototype(ctor);
+  if (!jsrt_is_object(proto)) {
+    return false;
+  }
+  for (jsrt_value p = v; jsrt_is_dynobj(p);) {
+    p = ((const JSRTDynObject *)jsrt_ptr(p))->proto;
+    if (p == proto) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* The constructor name Node prints in front of a dynamic object (util.inspect's
+ * getConstructorName, plan-notes 310): the first object on the chain -- the value itself first --
+ * whose own `constructor` is a named function the value is an instance of. `new F()` prints
+ * `F { x: 1 }`; a literal, and `F.prototype` itself (which is not an instance of F), reach
+ * %Object.prototype% and print bare, which NULL means. A class instance on the chain names its
+ * class, exactly as its own `constructor` would. */
+static const char *dynobj_constructor_name(jsrt_value v) {
+  for (jsrt_value p = v; p != 0;) {
+    if (!jsrt_is_dynobj(p)) {
+      if (jsrt_is(p, JSRT_TAG_OBJECT) && jsrt_as_object(p)->cls->name[0] != '\0') {
+        return jsrt_as_object(p)->cls->name;
+      }
+      return NULL;
+    }
+    const JSRTDynObject *o = (const JSRTDynObject *)jsrt_ptr(p);
+    jsrt_value ctor = o->ctor;
+    if (ctor == 0) {
+      const JSRTShape *hit = jsrt_shape_find(o->shape, "constructor");
+      ctor = hit == NULL ? 0 : o->slots[hit->offset];
+    }
+    if (jsrt_is(ctor, JSRT_TAG_CLOSURE) && jsrt_as_closure(ctor)->name[0] != '\0' &&
+        printer_instanceof(v, ctor)) {
+      return jsrt_as_closure(ctor)->name;
+    }
+    p = o->proto;
+  }
+  return NULL;
+}
+
+/* One `key: value` entry per own property of a dynamic object, in OrdinaryOwnPropertyKeys order
+ * (integer indices first, then insertion order). Shared by plain objects and by a function's own
+ * properties, which Node lays out the same way. */
+static JSRTBuf *dyn_entries(const JSRTDynObject *dyn, size_t count, int recurse, size_t indent) {
+  JSRTBuf *entries = alloc_entries(count);
+  const JSRTShape **links = jsrt_shape_property_order(dyn->shape, (uint32_t)count);
+  for (size_t i = 0; i < count; i++) {
+    JSRTBuf *entry = &entries[i];
+    jsrt_buf_init(entry);
+    append_key(entry, links[i]->key);
+    jsrt_buf_puts(entry, ": ");
+    inspect_value(entry, dyn->slots[links[i]->offset], recurse + 1, indent + 2);
+  }
+  free(links);
+  return entries;
+}
+
 static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTObject *o = jsrt_as_object(v);
   const JSRTClass *cls = o->cls;
@@ -769,6 +836,7 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
    * same way. Every other nameless object (a literal, a plain dynamic object) still prints bare. */
   const char *const name = cls == &jsrt_class_null_proto  ? "[Object: null prototype]"
                            : cls->name[0] != '\0'         ? cls->name
+                           : dyn != NULL                  ? dynobj_constructor_name(v)
                                                           : NULL;
   const bool named = name != NULL;
 
@@ -811,20 +879,12 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
     return;
   }
 
-  JSRTBuf *entries = alloc_entries(count);
-  size_t next = 0;
+  JSRTBuf *entries = NULL;
   if (dyn != NULL) {
-    /* Dynamic keys follow OrdinaryOwnPropertyKeys: integer indices first, then insertion order. */
-    const JSRTShape **links = jsrt_shape_property_order(dyn->shape, (uint32_t)count);
-    for (size_t i = 0; i < count; i++) {
-      JSRTBuf *entry = &entries[next++];
-      jsrt_buf_init(entry);
-      append_key(entry, links[i]->key);
-      jsrt_buf_puts(entry, ": ");
-      inspect_value(entry, dyn->slots[links[i]->offset], recurse + 1, indent + 2);
-    }
-    free(links);
+    entries = dyn_entries(dyn, count, recurse, indent);
   } else {
+    entries = alloc_entries(count);
+    size_t next = 0;
     /* fixed_order holds exactly the visible slots in enumeration order, so this loop runs `count`
      * times with no skips -- `next` and `count` agree at emit_braced. */
     for (size_t i = 0; i < count; i++) {
@@ -959,6 +1019,16 @@ static void inspect_date(JSRTBuf *out, jsrt_value v) {
   append_string(out, (const JSString *)jsrt_ptr(text));
 }
 
+/* `label { entries }` for a class object's statics and a function's own properties. The label and
+ * the space after it are part of the prefix Node measures, along with the `{` -- the same
+ * accounting a named instance's class name gets. */
+static void emit_labeled(JSRTBuf *out, const char *label, JSRTBuf *entries, size_t count,
+                         size_t indent) {
+  jsrt_buf_puts(out, label);
+  jsrt_buf_putc(out, ' ');
+  emit_braced(out, entries, count, indent, strlen(label) + 1 /* the space */ + 1 /* "{" */);
+}
+
 /* `[class Point] { count: 0 }` -- a class object (docs/VALUE.md §4.17).
  *
  * The label names the class and, past a base, what it extends; Node then shows the class's OWN
@@ -1006,11 +1076,33 @@ static void inspect_class(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
     jsrt_buf_puts(entry, ": ");
     inspect_value(entry, *e->slot, recurse + 1, indent + 2);
   }
-  /* The label and the space after it are part of the prefix Node measures, along with the `{` --
-   * the same accounting a named instance's class name gets. */
-  jsrt_buf_puts(out, label);
-  jsrt_buf_putc(out, ' ');
-  emit_braced(out, entries, count, indent, strlen(label) + 1 /* the space */ + 1 /* "{" */);
+  emit_labeled(out, label, entries, count, indent);
+}
+
+/* Whether `v` is an ordinary function carrying own properties, which print after its label. */
+static bool has_own_props(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_CLOSURE) && jsrt_as_closure(v)->props != NULL &&
+         jsrt_shape_property_count(jsrt_as_closure(v)->props->shape) > 0;
+}
+
+/* A function with own properties (plan-notes 310): `[Function: f] { count: 1 }`, laid out like a
+ * class object's statics -- the label and its space count toward the line budget with the `{`.
+ * Past the depth cap Node names only what it is, `[Function]`. A function with none prints its
+ * label alone through inspect_scalar. */
+static void inspect_function(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
+  const JSRTClosure *c = jsrt_as_closure(v);
+  const size_t count = jsrt_shape_property_count(c->props->shape);
+  if (recurse > INSPECT_MAX_DEPTH) {
+    jsrt_buf_puts(out, "[Function]");
+    return;
+  }
+  char label[256];
+  if (c->name[0] == '\0') {
+    snprintf(label, sizeof label, "[Function (anonymous)]");
+  } else {
+    snprintf(label, sizeof label, "[Function: %s]", c->name);
+  }
+  emit_labeled(out, label, dyn_entries(c->props, count, recurse, indent), count, indent);
 }
 
 /* Every heap value with a printer of its own, in the order the tests must run (a builtin object
@@ -1055,6 +1147,10 @@ static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
   /* A class object prints `[class …]`, not the `[Function: …]` every other closure gets. */
   if (jsrt_is(v, JSRT_TAG_CLOSURE) && jsrt_as_closure(v)->klass != NULL) {
     inspect_class(out, v, recurse, indent);
+    return;
+  }
+  if (has_own_props(v)) {
+    inspect_function(out, v, recurse, indent);
     return;
   }
   if (!inspect_heap(out, v, recurse, indent)) {
@@ -1103,7 +1199,9 @@ static void write_grouped(const char *text, size_t len, FILE *stream) {
  * no such exception -- it inspects whatever it is given, which is the whole difference between
  * the two entry points. */
 static void print_one(JSRTBuf *out, jsrt_value v, bool bare) {
-  if (!inspect_heap(out, v, 0, 0)) {
+  if (has_own_props(v)) {
+    inspect_function(out, v, 0, 0);
+  } else if (!inspect_heap(out, v, 0, 0)) {
     inspect_scalar(out, v, !bare);
   }
 }

@@ -1322,6 +1322,66 @@ buffer as `ArrayBuffer { [Uint8Contents]: <01 02>, [byteLength]: 2 }`, the hex c
 bytes. `String(u)` is the comma join; `JSON.stringify` writes a view as its index-keyed object
 and a buffer as `{}`, which is what Node does because neither has a `toJSON`.
 
+## 4.20 Ordinary functions as constructors — a prototype on the closure, a chain on the object (plan.md §11c T11.4 family 4)
+
+JavaScript before classes builds objects with `function P(x) { this.x = x; }`, `P.prototype.m =
+function () { … }` and `new P(1)`, and stores data on functions themselves (`assert.sameValue =
+function …`, `P.count += 1`). TypeScript's own `_tsc.js` builds every `Symbol`, `Type`, `Signature`
+and `Node` that way, and the Test262 harness is written in it. In `js` mode all of it is the
+dynamic tier: no layout is invented, every access goes through the shape table (§4.10).
+
+**The closure carries the function's own state.** `JSRTClosure` gains four fields:
+
+| Field | Meaning |
+|---|---|
+| `constructible` | A `function` declaration or expression — not an arrow, a method, an accessor, an async function or a generator. Only these reach construction. |
+| `has_prototype`, `prototype` | `F.prototype`, created on first observation by `jsrt_function_prototype`: a fresh `JSRTDynObject` whose hidden `ctor` is F. A function nobody constructs or inspects pays nothing. An assignment (`F.prototype = { … }`) stores whatever value it is given. |
+| `props` | The function's own enumerable properties as a `JSRTDynObject`, NULL until the first write. `name` and `length` stay the closure's read-only fields; writing them throws a `TypeError` worded like Node's `Cannot assign to read only property 'name' of function '…'`, except that Node quotes the function's source text and Stator, with no `Function.prototype.toString`, quotes its name. |
+
+A class object never uses `prototype` or `props`: its statics and methods are its descriptor's
+(§4.5). A non-capturing function is a file-static `JSRTClosure` in generated C; it is emitted
+**non-`const`**, because the first `P.count = 0` writes it. A capturing one is built by
+`jsrt_closure_new` and marked by `jsrt_closure_constructible`, which sets `constructible`. The collector scans
+both: file statics are data-segment roots, like the inline caches.
+
+**The object carries its chain.** `JSRTDynObject` gains `proto` (the `[[Prototype]]` an object
+`new F()` built was given, 0 for the default `%Object.prototype%`, which holds nothing a lookup can
+find) and `ctor` (the hidden, non-enumerable `constructor` of an auto-created `F.prototype`). A
+read that misses the own shape walks `ctor` and then `proto`, link by link; a getter found on the
+chain runs with the ORIGINAL receiver, and a write of a new own name first looks for a setter on
+the chain (§10.1.9.2 OrdinarySetWithOwnDescriptor). Chain hits fill no inline cache: the cache
+keys on the receiver's own shape, and a chain hit is not in it. `in` sees the chain;
+printing and own-key enumeration do not.
+
+**Construction** (`jsrt_construct` on a closure without `klass`, §10.2.2 [[Construct]]): a
+non-constructible callee leaves Node's `X is not a constructor` TypeError pending; otherwise a
+fresh dynamic object is rooted, its `proto` set to `F.prototype` when that is an object, F runs
+with it as `this` (when F declares a receiver), and the answer is F's return value when that is
+an object, the new object otherwise. `new v(…)` in generated C lays the callee and its arguments
+out in one contiguous run of rooted slots, the call layout, and lands as a statement followed by
+its pending check.
+
+**`instanceof`** (`jsrt_instanceof_ctor`, §7.3.22 OrdinaryHasInstance): a primitive left side is
+`false`; a right side whose `prototype` is not an object (an arrow's) is Node's `Function has
+non-object prototype 'undefined' in instanceof check`; otherwise the left side's `proto` chain is
+compared with `F.prototype`. Replacing `F.prototype` after construction therefore makes older
+instances answer `false`, as in Node.
+
+**Printing** follows `util.inspect`: an instance prints under the name of the first `constructor`
+on its chain (`P { x: 3 }`), an object whose chain names none prints as a plain object, and a
+function with own properties prints them after its label (`[Function: assert] { same: [Function
+(anonymous)] }`, `[Function]` past the depth cap).
+
+**Gate and lowering.** The member predicates live in `frontend/types.ts`: `isFunctionValueCallee`
+(the callee of `new`/`instanceof` is a function the program wrote, or Unknown — never a class or a
+lib builtin), `isFunctionValueMember` (`f.x` on such a function, except `length` and the lib's
+`call`/`apply`/`bind`), and `isFunctionMemberRead` (`F.prototype` used as a receiver, whose
+checker type — inferred from one `F.prototype = { … }` — is no layout). They lower to the
+existing `new-value`, `instanceof-value`, `dyn-field-access`, `dyn-field-assignment` and
+`dyn-method-call` nodes; `FunctionExpr.constructible` tells the emitter which closures `new` may
+build through. `ts` mode refuses a function's properties as not-yet (`STA1214`) and `new` on a
+function through the checker (TS7009, an implicit `any`).
+
 ## 5. What Phase 2 actually implements
 
 The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap

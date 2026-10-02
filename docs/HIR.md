@@ -60,7 +60,9 @@ Expressions produce values; statements do not. An expression-statement wraps an 
 - `ConsoleLogCall` — builtin console call. `method` names one of the eleven members of `CONSOLE_METHODS` (`src/hir/nodes.ts`), the single table the gate, the lowering, the verifier and the emitter all read: it gives each member its arity, how many trailing arguments are optional, and the C entry point the emitter calls. `args` is therefore either exactly `arity` long or, for the two members whose omitted tail is its own C entry point (`group`, `assert`), that minus its optional tail: the lowering pads an omitted optional with an `undefined` literal only where explicit `undefined` means what absence means. `consoleEntryPoint(method, width)` maps a width to the C call, and `STA4019` holds every node to a width it answers
 - `FunctionExpr` — a function expression or arrow function; `params`, a `body` Block, an
   optional `name` (a declaration's name, or the binding a function expression is assigned to, so
-  `[Function: name]` survives to the runtime), and a `provenance` grade (plan.md §8 step 1). The
+  `[Function: name]` survives to the runtime), `constructible: true` on a `function` declaration
+  or expression that is neither async nor a generator (the closures `new` may build through,
+  docs/VALUE.md §4.20; absent on an arrow, a method, an accessor and a constructor), and a `provenance` grade (plan.md §8 step 1). The
   grade is about the SIGNATURE and answers where its types came from: `typed` if the author
   annotated it whole — `x: number` and `@param {number} x` are the same claim in two spellings —
   `inferred` if the checker finished it, and `dynamic` if an `Unknown` is anywhere in it, which
@@ -203,7 +205,11 @@ the property is a NAME resolved through the shape table at run time, with a per-
   consumer narrows the value back the way it narrows a `Map.get`. One typed target is admitted:
   an array's `length`, which `DynFieldAssignment` writes (and, in value position, `DynFieldAccess`
   reads) through the same runtime entries, because writing it resizes the array rather than
-  touching a slot (ECMA-262 §10.4.2.4, plan-notes 310).
+  touching a slot (ECMA-262 §10.4.2.4, plan-notes 310). The other is a FUNCTION target
+  (`kind: 'fn'`): an ordinary function's own properties and its `prototype` live in a table on
+  its closure (`f.count`, `F.prototype`, `assert.same(…)`), so `DynFieldAccess`,
+  `DynFieldAssignment` and `DynMethodCall` reach them by name exactly as on an Unknown receiver
+  (docs/VALUE.md §4.20).
 - **No pending check follows a dynamic access.** `jsrt_get_prop` allocates nothing and runs no
   user code; `jsrt_set_prop` can grow slot storage — which is why its operands sit in rooted
   frame slots. A nullish receiver is a TypeError; a primitive read answers `undefined`; a

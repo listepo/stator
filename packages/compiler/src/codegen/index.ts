@@ -49,6 +49,8 @@ import type {
   MethodValue,
   Module,
   NewExpr,
+  NewValue,
+  InstanceOfValue,
   ObjectLiteral,
   ObjectStaticCall,
   OptionalChain,
@@ -517,6 +519,8 @@ function escapeBytes(bytes: readonly number[]): string {
 /** Every node that claims a contiguous run of rooted call slots (see `callSlots`). */
 type CallSlotted =
   | ArrayOp
+  | InstanceOfValue
+  | NewValue
   | CallExpr
   | ConsoleLogCall
   | JsonParse
@@ -831,9 +835,11 @@ class Emitter {
       out.push(
         `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env);`,
       );
+      // Not `const`: an ordinary function's `prototype` and own properties are written into its
+      // closure on first use (plan-notes 310), and writing a `const` object is undefined behavior.
       out.push(
-        `static const JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
-          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}, NULL};`,
+        `static JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
+          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}, NULL, ${unit.fn.constructible === true ? 'true' : 'false'}};`,
       );
     }
     if (this.functions.length > 0) {
@@ -2289,18 +2295,15 @@ class Emitter {
       case 'instanceof':
         this.countExpression(expr.target);
         break;
-      // The lowering never constructs these (class-object construction lands here only once
-      // the gate admits it): each counts its operands exactly like the named spelling it
-      // generalizes — one rooted slot per evaluated child, no call slots of its own.
+      // `new v(...)` takes the call layout: the constructor value, then each argument, rooted in
+      // one contiguous run that is also the `argv` the runtime reads (plan-notes 310).
       case 'new-value':
-        this.countExpression(expr.target);
-        for (const arg of expr.args) {
-          this.countExpression(arg);
-        }
+        this.countRooted(expr, expr.target, expr.args);
         break;
+      // The walk can throw (a right side with no object `prototype`), so it lands as a statement
+      // with its pending check, and both operands wait in rooted slots like a call's.
       case 'instanceof-value':
-        this.countExpression(expr.target);
-        this.countExpression(expr.ctor);
+        this.countRooted(expr, expr.target, [expr.ctor]);
         break;
       case 'class-value':
         break;
@@ -5021,19 +5024,42 @@ class Emitter {
         return `jsrt_bool(jsrt_instanceof(${this.emitExpression(expr.target)}, &_jsrt_class_${id}))`;
       }
 
-      // `new v(...)` where `v` is a class-object value: allocation and the constructor both
-      // dispatch through the value (one runtime entry) because the instance's class is a
-      // run-time fact. Operands are counted above; slots follow the named-`new` counting rule
-      // (receiver slot holds the result, arguments after it) rather than inline C temporaries,
-      // so nothing the constructor's arguments allocate can collect the half-built object.
+      // `new v(...)` where `v` is a class object or a constructible function: allocation and the
+      // constructor both dispatch through the value (one runtime entry) because what it builds is
+      // a run-time fact. The constructor's slot receives the result, the arguments after it are
+      // the `argv`, and the call lands as a statement so a throwing constructor (or a
+      // non-constructor's TypeError) meets its pending check before anything consumes it.
       case 'new-value': {
-        return `jsrt_construct(${this.emitExpression(expr.target)}, ${expr.args.length}${expr.args.length === 0 ? '' : `, ${expr.args.map((arg) => this.emitExpression(arg)).join(', ')}`})`;
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('new-value was not registered during counting');
+        }
+        const parts: string[] = [];
+        this.beginCall(parts, expr.target, expr.args, expr.span, base);
+        const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
+        return this.finishStatement(
+          parts,
+          `${this.slotAt(base)} = jsrt_construct(${this.slotAt(base)}, ${expr.args.length}, ${argv})`,
+          this.slotAt(base),
+          expr.span,
+        );
       }
 
       // `o instanceof v` where `v` is a class-object value: the chain walk against the
       // descriptor the value carries, or Node's TypeError when it carries no constructor.
       case 'instanceof-value': {
-        return `jsrt_bool(jsrt_instanceof_ctor(${this.emitExpression(expr.target)}, ${this.emitExpression(expr.ctor)}))`;
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('instanceof-value was not registered during counting');
+        }
+        const parts: string[] = [];
+        this.beginCall(parts, expr.target, [expr.ctor], expr.span, base);
+        return this.finishStatement(
+          parts,
+          `${this.slotAt(base)} = jsrt_bool(jsrt_instanceof_ctor(${this.slotAt(base)}, ${this.slotAt(base + 1)}))`,
+          this.slotAt(base),
+          expr.span,
+        );
       }
 
       // One file-scope constant per class (docs/VALUE.md §4.17): the closure-shaped class
@@ -5914,7 +5940,8 @@ class Emitter {
     }
     const name = cNameLiteral(fn.name ?? '');
     const meta = closureMeta(fn);
-    return `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? 'true' : 'false'})`;
+    const closure = `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? 'true' : 'false'})`;
+    return fn.constructible === true ? `jsrt_closure_constructible(${closure})` : closure;
   }
 
   private appendLine(line: string, span?: Span): void {

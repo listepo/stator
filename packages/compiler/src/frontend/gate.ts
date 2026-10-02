@@ -59,6 +59,9 @@ import {
   hirPropertyName,
   instanceMethodName,
   isDynamicShape,
+  isFunctionValueCallee,
+  isFunctionMemberRead,
+  isFunctionValueMember,
   isGlobalSymbolIteratorName,
   isImplicitAny,
   isSingleConstDeclarator,
@@ -500,7 +503,7 @@ function gateConstruct(
       ) {
         return { kind: 'accept' };
       }
-      return gateMemberAccess(access, typeChecker);
+      return gateMemberAccess(access, typeChecker, mode);
     }
 
     case ts.SyntaxKind.ArrayLiteralExpression:
@@ -1729,6 +1732,18 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       }
     }
   }
+  // Every compound assignment, `+=` through `??=`, which TypeScript numbers as one contiguous range.
+  // `x += e` on an identifier folds to `x = x + e`, sound because a bare identifier cannot have
+  // side effects. An element target cannot use that fold -- `a[i()] += 1` must call `i` ONCE --
+  // so the lowering hoists the target and the index into temporaries and reads the element from
+  // those (the promise rung 3 made in plan-notes 43, kept here).
+  const op = bin.operatorToken.kind;
+  if (op >= ts.SyntaxKind.FirstCompoundAssignment && op <= ts.SyntaxKind.LastCompoundAssignment) {
+    if (!isAssignableTarget(bin.left, typeChecker, mode)) {
+      return notYet('compound assignment to anything but a variable is not yet supported', 5);
+    }
+    return gateUpdate(bin, typeChecker, mode);
+  }
   switch (bin.operatorToken.kind) {
     // Every operator BinaryOp and LogicalOp model, plus plain assignment. Loose equality is here
     // rather than deferred because docs/NUMERIC.md §6.3 defines it for primitives without any
@@ -1767,6 +1782,11 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
     // compare against. (There is no `instanceof Box<number>` spelling — the right operand is an
     // expression, and type arguments are not expressions.)
     case ts.SyntaxKind.InstanceOfKeyword: {
+      // `x instanceof F` against an ordinary function or an untyped value answers through the
+      // value's `prototype` at run time (`jsrt_instanceof_ctor`, plan-notes 310).
+      if (mode === 'js' && isFunctionValueCallee(bin.right, typeChecker)) {
+        return { kind: 'accept' };
+      }
       if (!ts.isIdentifier(bin.right)) {
         return notYet('instanceof against anything but a class name is not yet supported', 5);
       }
@@ -1851,8 +1871,15 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
           }
         }
       }
-      if (isAssignableTarget(bin.left, typeChecker)) {
+      if (isAssignableTarget(bin.left, typeChecker, mode)) {
         return { kind: 'accept' };
+      }
+      // `f.count = 0` in ts mode: the same property-table write js mode accepts above.
+      if (
+        ts.isPropertyAccessExpression(bin.left) &&
+        isFunctionValueMember(bin.left.expression, bin.left.name.text, typeChecker)
+      ) {
+        return functionMemberResult(mode);
       }
       // The object-shape twin of the class refusal above: a fixed layout cannot grow a name its
       // type never declared, which waits on Phase 8's dictionary mode (plan-notes 310). In `ts`
@@ -1871,35 +1898,6 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
         );
       }
       return notYet('assignment to anything but a variable is not yet supported', 5);
-
-    // `x += e` on an identifier folds to `x = x + e`, sound because a bare identifier cannot have
-    // side effects. An element target cannot use that fold -- `a[i()] += 1` must call `i` ONCE --
-    // so the lowering hoists the target and the index into temporaries and reads the element from
-    // those (the promise rung 3 made in plan-notes 43, kept here).
-    case ts.SyntaxKind.PlusEqualsToken:
-    case ts.SyntaxKind.MinusEqualsToken:
-    case ts.SyntaxKind.AsteriskEqualsToken:
-    case ts.SyntaxKind.SlashEqualsToken:
-    case ts.SyntaxKind.PercentEqualsToken:
-    case ts.SyntaxKind.AsteriskAsteriskEqualsToken:
-    case ts.SyntaxKind.AmpersandEqualsToken:
-    case ts.SyntaxKind.BarEqualsToken:
-    case ts.SyntaxKind.CaretEqualsToken:
-    case ts.SyntaxKind.LessThanLessThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken:
-      if (!isAssignableTarget(bin.left, typeChecker)) {
-        return notYet('compound assignment to anything but a variable is not yet supported', 5);
-      }
-      return gateUpdate(bin, typeChecker, mode);
-
-    case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
-    case ts.SyntaxKind.BarBarEqualsToken:
-    case ts.SyntaxKind.QuestionQuestionEqualsToken:
-      if (!isAssignableTarget(bin.left, typeChecker)) {
-        return notYet('compound assignment to anything but a variable is not yet supported', 5);
-      }
-      return gateUpdate(bin, typeChecker, mode);
 
     default:
       return notYet('this operator is not yet supported', 5);
@@ -1925,7 +1923,7 @@ function gatePrefixUnary(
     // to the same positional rule as compound assignment.
     case ts.SyntaxKind.PlusPlusToken:
     case ts.SyntaxKind.MinusMinusToken:
-      if (!isAssignableTarget(unary.operand, typeChecker)) {
+      if (!isAssignableTarget(unary.operand, typeChecker, mode)) {
         return notYet('++ and -- on anything but a variable are not yet supported', 5);
       }
       return gateUpdate(unary, typeChecker, mode);
@@ -1936,14 +1934,15 @@ function gatePrefixUnary(
 }
 
 /** What a read-modify-write may be applied to: a variable, an array element, a layout field, an
- * array's `length`, or a member of a dynamic-shape or Unknown receiver.
+ * array's `length`, a member of a dynamic-shape or Unknown receiver, or -- in `js` mode -- an own
+ * property of an ordinary function (`f.count = 0`, `F.prototype.m = …`; plan-notes 310).
  *
  * Each is the HIR's vocabulary -- `Assignment`, `IndexAssignment`, `FieldAssignment` and
  * `DynFieldAssignment` -- and the gate's accept set
  * must equal that vocabulary exactly, which is why this is one predicate rather than a check
  * duplicated at each operator. The element case is admitted here and vetted for real by
  * gateElementAccess when the child node is reached. */
-function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boolean {
+function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker, mode: Mode): boolean {
   if (ts.isIdentifier(node) || ts.isElementAccessExpression(node)) {
     return true;
   }
@@ -1971,6 +1970,13 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   // A dynamic-shape or Unknown receiver: the shape table is the place, read and written by name
   // through the receiver the lowering evaluates once (plan-notes 310).
   if (isDynamicShape(receiver, checker)) {
+    return true;
+  }
+  if (
+    mode === 'js' &&
+    (isFunctionValueMember(node.expression, node.name.text, checker) ||
+      isFunctionMemberRead(node.expression, checker))
+  ) {
     return true;
   }
   const shape = tsTypeToHType(receiver, checker);
@@ -3094,7 +3100,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       }
       // `o.m()` on an Unknown receiver: get the name through the shape table, then call.
       const shape = tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
-      if (shape.kind === 'unknown') {
+      if (readsAsUnknown(callee.expression, shape, typeChecker, mode)) {
         return { kind: 'accept' };
       }
       if (shape.kind === 'object' && shape.methods.some((m) => m.name === callee.name.text)) {
@@ -3105,6 +3111,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       // along exactly as a dynamic method call passes it.
       if (callableFieldSlot(shape, callee.name.text) !== undefined) {
         return { kind: 'accept' };
+      }
+      // `assert.sameValue(a, b)`: a function stored on a function, called with the function as
+      // its receiver through the closure's own properties (plan-notes 310).
+      if (isFunctionValueMember(callee.expression, callee.name.text, typeChecker)) {
+        return functionMemberResult(mode);
       }
       return notYet('method calls are not yet supported', 5);
     }
@@ -5184,6 +5195,27 @@ function gateCollectionCall(
   return { kind: 'accept' };
 }
 
+/** Whether a member's receiver goes through the shape table the way an Unknown one does: its
+ * HType is Unknown, or -- in `js` mode -- it reads a function's own property (`F.prototype`),
+ * whose checker type is no layout (plan-notes 310). */
+function readsAsUnknown(
+  receiver: ts.Expression,
+  shape: HType,
+  checker: ts.TypeChecker,
+  mode: Mode,
+): boolean {
+  return shape.kind === 'unknown' || (mode === 'js' && isFunctionMemberRead(receiver, checker));
+}
+
+/** An own property of an ordinary function (`f.count`, `F.prototype`): the closure's property
+ * table in `js` mode (plan-notes 310). `ts` mode would need the member typed, and the property
+ * table is untyped, so it waits on Phase 8's descriptor surface. */
+function functionMemberResult(mode: Mode): GateResult {
+  return mode === 'js'
+    ? { kind: 'accept' }
+    : notYet('a property of a function value is not yet supported in ts mode', 8);
+}
+
 function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): GateResult {
   if (dynamicCodeGeneration(node.expression, checker) === 'function') {
     return functionCtorResult(mode);
@@ -5266,6 +5298,15 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
     return args.length <= 1
       ? { kind: 'accept' }
       : notYet('the Error constructor options argument is not yet supported', 5);
+  }
+  // `new F(...)` on an ordinary function, or on a value of unknown type -- tsc's
+  // `new (NodeConstructor || (NodeConstructor = getNodeConstructor()))(kind)` -- constructs
+  // through the value at run time (`jsrt_construct`, plan-notes 310). In `ts` mode the checker
+  // refuses `new` on a function (TS7009), and an untyped callee is `any`.
+  if (mode === 'js' && isFunctionValueCallee(node.expression, checker)) {
+    return node.arguments?.some((argument) => ts.isSpreadElement(argument)) === true
+      ? notYet('a spread argument to a constructor is not yet supported', 5)
+      : { kind: 'accept' };
   }
   if (node.typeArguments !== undefined) {
     // Explicit type arguments on a generic class are the tuple spelled out: the checker applies
@@ -5546,6 +5587,7 @@ function superValueHasReceiver(access: ts.PropertyAccessExpression): boolean {
 function gateMemberAccess(
   access: ts.PropertyAccessExpression,
   checker: ts.TypeChecker,
+  mode: Mode,
 ): GateResult {
   // `Symbol.iterator` as a computed class-method name is the well-known iterator, not a stored
   // symbol value. Any other property of `Symbol` (and `Symbol.iterator` as a value) is STA1212 —
@@ -5900,7 +5942,7 @@ function gateMemberAccess(
         : notYet(`${access.name.text} on a RegExp match is not yet supported`, 5);
     }
     const shape = tsTypeToHType(checker.getTypeAtLocation(access.expression), checker);
-    if (shape.kind === 'unknown') {
+    if (readsAsUnknown(access.expression, shape, checker, mode)) {
       return { kind: 'accept' };
     }
     // Dynamic shapes (optional fields, index signatures, empty `{}`) must be asked BEFORE the
@@ -5922,6 +5964,9 @@ function gateMemberAccess(
         return calleeOnlyMember(access, 'a method');
       }
       return notYet('a property that is not a field of the shape is not yet supported', 5);
+    }
+    if (isFunctionValueMember(access.expression, access.name.text, checker)) {
+      return functionMemberResult(mode);
     }
     return notYet('property access is not yet supported', 5);
   }

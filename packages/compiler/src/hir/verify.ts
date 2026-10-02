@@ -660,10 +660,11 @@ function verifyStatement(
     case 'dyn-field-assignment': {
       verifyExpression(stmt.target, problems, bindings);
       verifyExpression(stmt.value, problems, bindings);
-      // The one typed target is an array's `length`, which the runtime entry resizes (plan-notes
-      // 310): the array has no other property this node may write.
+      // The typed targets are an array's `length`, which the runtime entry resizes, and a
+      // function, whose own properties live in its closure (plan-notes 310): the array has no
+      // other property this node may write.
       const arrayLength = stmt.target.type.kind === 'array' && stmt.field === 'length';
-      if (stmt.target.type.kind !== 'unknown' && !arrayLength) {
+      if (stmt.target.type.kind !== 'unknown' && stmt.target.type.kind !== 'fn' && !arrayLength) {
         problems.push({
           kind: 'dyn-field-assignment',
           span: stmt.span,
@@ -1360,9 +1361,10 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       for (const arg of expr.args) {
         verifyExpression(arg, problems, bindings);
       }
-      // The lowering routes only Unknown receivers here; anything else is a call the typed
-      // arms own, and building this node for one would aim a shape-table read at a layout.
-      if (expr.target.type.kind !== 'unknown') {
+      // The lowering routes only Unknown receivers here, and functions, whose own properties the
+      // closure holds (plan-notes 310); anything else is a call the typed arms own, and building
+      // this node for one would aim a shape-table read at a layout.
+      if (expr.target.type.kind !== 'unknown' && expr.target.type.kind !== 'fn') {
         problems.push({
           kind: 'dyn-method-call',
           span: expr.span,
@@ -1572,11 +1574,12 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // still resolves), a miss answers `undefined` — and the per-site cache is untouched on that
       // path. What is still rejected is a concrete NON-object target, which has no descriptor for
       // any name -- except an array's `length`, the place an assignment in value position resizes
-      // through (plan-notes 310).
+      // through, and a function's own properties, which its closure holds (plan-notes 310).
       const arrayLength = expr.target.type.kind === 'array' && expr.field === 'length';
       if (
         (expr.target.type.kind !== 'unknown' &&
           expr.target.type.kind !== 'object' &&
+          expr.target.type.kind !== 'fn' &&
           !arrayLength) ||
         expr.type.kind !== 'unknown'
       ) {
