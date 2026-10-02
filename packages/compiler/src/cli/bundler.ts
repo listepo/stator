@@ -257,7 +257,7 @@ async function bundledFrontend(
   if (plan === undefined) return plain;
   const bundle = await obtainBundle(bundler, plan.entry);
   if (bundle === undefined) return plain;
-  const files = new Map(plan.rewrites);
+  const files = new Map(plan.rewrites(bundle.code));
   files.set(plan.modulePath, bundle.code);
   // The bundle's code is what the card keys on (T12.1 step 6); the rewrites follow from the
   // entry's bytes and the bundle, but hashing them too costs nothing and keys on every byte read.

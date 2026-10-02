@@ -19,6 +19,7 @@ import {
 import { createProgram } from '../../compiler/src/frontend/program.ts';
 import { NATIVE_ONLY } from './helpers.ts';
 import {
+  bundleExportNames,
   isCommonJsFile,
   planVendor,
   sameLines,
@@ -170,7 +171,7 @@ test('the rewrite keeps every line and splits type-only names onto the original 
   const plan = planVendor(program, entry, false);
   assert.ok(plan !== undefined);
   assert.equal(plan.modulePath, `${root}/${VENDOR_MODULE_NAME}`);
-  const rewritten = plan.rewrites.get(entry.fileName) ?? '';
+  const rewritten = plan.rewrites(undefined).get(entry.fileName) ?? '';
   assert.equal(rewritten.split('\n').length, source.split('\n').length);
   const lines = rewritten.split('\n').map((line) => line.trimEnd());
   assert.equal(
@@ -181,6 +182,82 @@ test('the rewrite keeps every line and splits type-only names onto the original 
   assert.match(lines[4] ?? '', /fmt\$default as def/);
   assert.match(lines[4] ?? '', /fmt\$ns as ns/);
   assert.equal(lines[5], 'console.log(pad, def, ns);');
+});
+
+/** The plan for `main.js` in a fresh project of `files`. */
+function planFor(files: Record<string, string>): {
+  plan: NonNullable<ReturnType<typeof planVendor>>;
+  root: string;
+} {
+  const root = project(files);
+  const { program } = createProgram(join(root, 'main.js'), 'js');
+  const entry = program.getSourceFile(join(root, 'main.js'));
+  assert.ok(entry !== undefined);
+  const plan = planVendor(program, entry, false);
+  assert.ok(plan !== undefined);
+  return { plan, root };
+}
+
+test('export * from a package: the entry re-exports it whole; every named request is mangled', () => {
+  const { plan, root } = planFor({
+    'main.js':
+      "import { pad } from 'leftpad';\nimport { a } from './more.js';\nconsole.log(pad, a);\n",
+    'more.js': "export * from 'star';\nexport const own = 1;\n",
+  });
+  assert.equal(
+    plan.entry.code,
+    ['export * from "star";', 'export { pad as leftpad$pad } from "leftpad";', ''].join('\n'),
+  );
+  // The star re-exports the bundle's plain names: not the mangled ones, not the file's own `own`.
+  const bundle = 'const a = 1, own = 2, pad = 3;\nexport { a, own, pad as leftpad$pad };\n';
+  const more = plan.rewrites(bundle).get(join(root, 'more.js')) ?? '';
+  assert.equal(more.split('\n')[0]?.trimEnd(), `export { a } from "./${VENDOR_MODULE_NAME}";`);
+  // Without the bundle, the declaration stays as written and the gate refuses it.
+  assert.equal(plan.rewrites(undefined).get(join(root, 'more.js')), undefined);
+});
+
+test('export * from two packages: the bundle cannot say which star a name came from', () => {
+  const { plan, root } = planFor({
+    'main.js': "export * from 'one';\nexport * from 'two';\n",
+  });
+  assert.equal(plan.entry.code, 'export * from "one";\nexport * from "two";\n');
+  assert.equal(plan.rewrites('export const a = 1;\n').get(join(root, 'main.js')), undefined);
+});
+
+test('a bundle that re-exports an external whole has no name list', () => {
+  assert.deepEqual(bundleExportNames('export const a = 1;\nexport { a as b };\n'), ['a', 'b']);
+  assert.deepEqual(bundleExportNames('export default 1;\nexport function f() {}\n'), [
+    'default',
+    'f',
+  ]);
+  assert.equal(bundleExportNames('export * from "node:fs";\n'), undefined);
+});
+
+test('import attributes travel to the entry; the rewritten import drops them', () => {
+  const { plan, root } = planFor({
+    'main.js': [
+      "import data from 'conf/data.json' with { type: 'json' };",
+      "import same from 'conf/data.json';",
+      "import old from 'conf/old.json' assert { type: 'json' };",
+      'console.log(data, same, old);',
+      '',
+    ].join('\n'),
+  });
+  assert.equal(
+    plan.entry.code,
+    [
+      'export { default as conf_data_json$default } from "conf/data.json" with { type: "json" };',
+      'export { default as conf_data_json$default$2 } from "conf/data.json";',
+      '',
+    ].join('\n'),
+  );
+  const lines = (plan.rewrites(undefined).get(join(root, 'main.js')) ?? '').split('\n');
+  assert.equal(
+    lines[0]?.trimEnd(),
+    `import { conf_data_json$default as data } from "./${VENDOR_MODULE_NAME}";`,
+  );
+  // The deprecated `assert` form is not rewritten: the gate answers it.
+  assert.equal(lines[2], "import old from 'conf/old.json' assert { type: 'json' };");
 });
 
 test('sameLines pads a shorter replacement and keeps the original line breaks', () => {

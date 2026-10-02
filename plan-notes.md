@@ -11678,3 +11678,69 @@ STA1214 (`this construct (QualifiedName)`) like its 464 siblings in that file. M
 `d30600a` by diffing `explain --json` diagnostics per file and message, line numbers stripped, with
 and without the change: that one row is the only difference. Every other target keeps its baseline
 entry (`std/env.ts` and the `node` targets were and stay `dynamic`).
+
+## 323. T12.3, first slice: what Rolldown's output needs, measured (2026-10-02)
+
+**Measured.** On 0afd141, 12 probe projects built through the default adapter (`--mode=js`, plus
+`--node` for `node_*`) and compared with Node 26.7.0: `exports.x` imported by name and by
+default, `module.exports` replacement, a nested `require`, a CJS cycle, a `.cjs` entry, the
+`__filename` package adf9419 found (`node_pkg_location`), a package with an inlined `import()`, a
+top-level class, `export * from 'p'`, `import('p')`, an attributed JSON import and a namespace
+import. Four of them failed only on `__commonJSMin`'s `STA4013`; the rest split as below.
+
+1. **The comma operator types as its right operand.** `lowerExpression` asked the checker for the
+   type of the whole `a, b`, and the verifier requires it to equal `b`'s lowered type. They differ
+   when `a` assigns a binding `b` reads: `(mod = { exports: {} }, mod.exports)` in js mode (the
+   checker answers from `mod`'s declared Unknown) and `(m = { e: 1 }, m.e)` on a union in ts mode
+   (`got number`). Both were an internal `STA4013`. The comma's value is its right operand by
+   definition, so the node now takes `right.type`. Goldens `comma_narrowing` (ts, js).
+2. **`var`/`let X = class {}`.** The `const` formation (plan-notes 278) binds no value and erases
+   every use to the expression; `let` was refused because it can be repointed. A `let` or `var`
+   that nothing in its file writes cannot be, so `isClassFormationDeclarator` accepts it: no
+   assignment, compound, logical, update, destructuring or `for-in`/`of` target names the binding.
+   A module binding is read-only to importers, so the file is the whole scan. A `var` formation is
+   not hoisted. One hazard is the declaration semantics of `var`: a read that runs before the
+   declaration is `undefined` in Node and a TypeError at `new`, while here it names the class.
+   Rolldown never emits that. `subset_class_expression_let_{js,ts}` move from not-yet to static,
+   and `subset_class_expression_reassigned_*` pin the refusal. Goldens `class_expression_var.js`,
+   `class_expression_let.ts`, `pkg_class`.
+3. **`export * from 'p'`.** The entry spells `export * from "p";`, and the rewrite of that
+   declaration waits for the bundle (`VendorPlan.rewrites(bundle)`). It parses the bundle's own
+   `export` declarations (`bundleExportNames`) and re-exports every plain name. With a star in
+   the entry every named request is mangled, so the plain names are exactly the star's. Names
+   the file exports itself, or that another `export *` of the file also offers (the checker's
+   `getExportsOfModule` for a project module), are left out. **Limit:** two different packages
+   under `export *` in one build cannot be attributed, because one bundle does not say which star
+   a name came from. Those declarations stay as written: `STA1214` at the star, and the checker's
+   `STA0012` at whoever imports a name through it. A bundle whose exports include
+   `export * from` an external is the same. Golden `pkg_export_star` (with a shadowing own
+   export); unit tests in `bundler.test.ts`.
+4. **Import attributes** are part of a request's identity (the same specifier under other
+   attributes is another module) and travel to the entry line. The rewritten import of the
+   vendor module drops them. The deprecated `assert` form is not rewritten. Golden
+   `pkg_import_json`.
+5. **`import('p')` was an internal `STA4031`.** `gateImportCall` accepted any literal specifier,
+   and the lowering found no module behind a package. It is `STA1214` naming Phase 12 now, both
+   modes (`subset_import_call_package_*`).
+6. **A computed `export default`** already lowers since T11.5a
+   (`subset_export_default_expression_*`), so the card's item is struck.
+7. **The golden runner** takes `main.cjs` as a js-mode entry, and such a fixture needs the
+   bundler (skipped under `--bundler=none`, like one with `node_modules`). The cycle fixture reads
+   `'late' in a` rather than `a.late`: Node prints a circular-dependency warning on stderr for a
+   missing-property read, and the runner compares stderr.
+
+**Blocked, a decision for the creator.**
+
+- `__toESM`/`__copyProps` (a default import of a CommonJS package, `module.exports` replacement):
+  `Object.create`, `Object.defineProperty` with getters, `getOwnPropertyDescriptor`,
+  `getOwnPropertyNames`, `getPrototypeOf`, `hasOwnProperty.call` and `bind`. That is T11.4
+  step 8 (`Object.*`) and step 9 (`.call`), and T11.4 is in progress under another agent at
+  step 5. The T12.3 card says to do those first.
+- `__exportAll` (a namespace import, `import('p')`, a package's inlined `import()`) needs
+  `Object.defineProperty` with a getter under a computed key and also
+  `__defProp(target, Symbol.toStringTag, { value: "Module" })`. The runtime has no symbol values
+  (`STA1212`, Phase 5), so this needs more than T11.4. One way around it for the project-side
+  uses only: a facade module per namespace source (`export { a, b } from vendor`, names read
+  back from the bundle like item 3), which Stator's own namespace objects (T11.5a) then serve.
+  It shares item 3's one-source limit. A package's own inlined `import()` would still need
+  `__exportAll`.

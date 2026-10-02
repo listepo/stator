@@ -1165,6 +1165,97 @@ export function isSingleConstDeclarator(declaration: ts.VariableDeclaration): bo
   );
 }
 
+/** The identifiers an assignment target writes: a name, or every name a destructuring pattern
+ * spreads into (`[a, { b, c: d = 1 }, ...e] = …`). */
+function writtenIdentifiers(target: ts.Expression, out: ts.Identifier[]): void {
+  let inner = target;
+  while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+  if (ts.isIdentifier(inner)) {
+    out.push(inner);
+  } else if (ts.isArrayLiteralExpression(inner)) {
+    for (const element of inner.elements) writtenIdentifiers(element, out);
+  } else if (ts.isObjectLiteralExpression(inner)) {
+    for (const property of inner.properties) {
+      if (ts.isShorthandPropertyAssignment(property)) out.push(property.name);
+      else if (ts.isPropertyAssignment(property)) writtenIdentifiers(property.initializer, out);
+      else if (ts.isSpreadAssignment(property)) writtenIdentifiers(property.expression, out);
+    }
+  } else if (ts.isSpreadElement(inner)) {
+    writtenIdentifiers(inner.expression, out);
+  } else if (
+    ts.isBinaryExpression(inner) &&
+    inner.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  ) {
+    // A pattern element's default: `[a = 1] = xs` writes `a`.
+    writtenIdentifiers(inner.left, out);
+  }
+}
+
+const neverWritten = new WeakMap<ts.VariableDeclaration, boolean>();
+
+/** Whether nothing in the declaring file writes the binding after its initializer: no
+ * assignment, compound or logical assignment, `++`/`--`, destructuring target or `for-in`/`for-of`
+ * head names it. A module's bindings are read-only to every importer, so the file is the whole
+ * program as far as writes go. */
+function isNeverWritten(declaration: ts.VariableDeclaration, checker: ts.TypeChecker): boolean {
+  const cached = neverWritten.get(declaration);
+  if (cached !== undefined) return cached;
+  const symbol = checker.getSymbolAtLocation(declaration.name);
+  let written = symbol === undefined;
+  const visit = (node: ts.Node): void => {
+    if (written) return;
+    const targets: ts.Identifier[] = [];
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      writtenIdentifiers(node.left, targets);
+    } else if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken ||
+        node.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      writtenIdentifiers(node.operand, targets);
+    } else if (
+      (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
+      !ts.isVariableDeclarationList(node.initializer)
+    ) {
+      writtenIdentifiers(node.initializer, targets);
+    }
+    if (targets.some((id) => checker.getSymbolAtLocation(id) === symbol)) {
+      written = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(declaration.getSourceFile());
+  neverWritten.set(declaration, !written);
+  return !written;
+}
+
+/** Whether a declarator binds a class expression the way a single `const` does: the only
+ * declarator in its list, an identifier, and a binding that never changes — `const`, or a `let`
+ * or `var` nothing writes. Rolldown spells every top-level class `var X = class { … }` (plan.md
+ * §11d T12.3), and a binding nothing repoints erases exactly as a `const` one. One hazard stays,
+ * as with a class declaration under `var` semantics: a `var` read that RUNS before the
+ * declaration is `undefined` in Node, and a TypeError at `new`; here it names the class. */
+export function isClassFormationDeclarator(
+  declaration: ts.VariableDeclaration,
+  checker: ts.TypeChecker,
+): boolean {
+  const list = declaration.parent;
+  if (
+    list === undefined ||
+    !ts.isVariableDeclarationList(list) ||
+    list.declarations.length !== 1 ||
+    !ts.isIdentifier(declaration.name)
+  ) {
+    return false;
+  }
+  return (list.flags & ts.NodeFlags.Const) !== 0 || isNeverWritten(declaration, checker);
+}
+
 /** The class declaration an identifier names, directly or through `const K = C` aliases.
  *
  * A class used as a value is erased, not built (plan.md §8 step 12e): `const K = C` binds no
@@ -1244,7 +1335,7 @@ export function classExpressionTarget(
     declaration.name === node ||
     declaration.initializer === undefined ||
     !ts.isClassExpression(declaration.initializer) ||
-    !isSingleConstDeclarator(declaration)
+    !isClassFormationDeclarator(declaration, checker)
   ) {
     return undefined;
   }

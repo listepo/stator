@@ -75,6 +75,7 @@ import {
   tsTypeToHType,
   userIteratorMethod,
 } from './types.ts';
+import { isClassFormationDeclarator } from './types.ts';
 import {
   classifyExternDeclaration,
   classifyOutSlotCall,
@@ -87,7 +88,7 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
-import { isFreeCommonJsName } from './vendor.ts';
+import { isFreeCommonJsName, isPackageSpecifier } from './vendor.ts';
 import { type CommonJsBinding, commonJsVerdict, isNodeSourceFile, nodeBuiltinId } from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
@@ -683,6 +684,18 @@ function gateImportCall(call: ts.CallExpression): GateResult {
       phase: 8,
     };
   }
+  // A package's namespace object lives in the vendor bundle, where Rolldown builds it with
+  // `__exportAll` (`Object.defineProperty` getters and `Symbol.toStringTag`); until that helper
+  // compiles, the call has no module to load (plan.md §11d T12.3).
+  if (isPackageSpecifier(spec.text)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1214',
+      message:
+        "import() of a package is not yet supported; planned for Phase 12 (Rolldown's __exportAll)",
+      phase: 12,
+    };
+  }
   return { kind: 'accept' };
 }
 
@@ -777,9 +790,10 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
       }
     }
     // Bare specifier: a package. In js mode the bundler takes it (plan.md §11d T12.1), and the
-    // vendor rewrite turns every import declaration and named re-export of one into an import of
-    // the vendor module, so a package specifier left here is ts mode, `--bundler=none`, or a
-    // form the rewrite does not take (`export * from`, `import()`, an import attribute).
+    // vendor rewrite turns every import declaration and re-export of one into an import of the
+    // vendor module, so a package specifier left here is ts mode, `--bundler=none`, or a form
+    // the rewrite does not take: `import()`, `export * from` a second package (the bundle cannot
+    // say which star a name came from), or the deprecated `assert` attributes (plan.md T12.3).
     if (std === undefined && !spec.text.startsWith('./') && !spec.text.startsWith('../')) {
       // No `phase`: ts mode never bundles (a bundler strips the types it compiles), and no open
       // phase owns the remaining forms — a phase number here would tell the user to wait for a
@@ -789,7 +803,8 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
         code: 'STA1214',
         message:
           'importing a package is not yet supported here (a package reaches a program only ' +
-          'through the js-mode bundler, which takes import declarations and named re-exports; ' +
+          'through the js-mode bundler, which takes import declarations, re-exports and ' +
+          "one package's `export *`; " +
           'docs/BUNDLER.md)',
       };
     }
@@ -4308,8 +4323,7 @@ function gateClass(
       parent !== undefined &&
       ts.isVariableDeclaration(parent) &&
       parent.initializer === declaration &&
-      ts.isIdentifier(parent.name) &&
-      isSingleConstDeclarator(parent);
+      isClassFormationDeclarator(parent, checker);
     if (!bound) {
       const name = declaration.name?.text;
       return name === undefined

@@ -182,9 +182,9 @@ to T12.3's Check (plan-notes 321).
 Stator must lower them (T12.3):
 
 - Every top-level class comes out as `var X = class {}`. The rolldown 1.2.12 typings say this
-  is "always", independent of `topLevelVar`. Stator lowers `const X = class {}` but reports
-  `var`/`let X = class {}` as STA1214 "anonymous class expression" (spike `exitcheck`, and
-  hand-checked).
+  is "always", independent of `topLevelVar`. Since T12.3, a `var`/`let` formation that nothing in
+  its file writes lowers like `const X = class {}` (golden `js/pkg_class`); before, it was
+  STA1214 "anonymous class expression" (spike `exitcheck`, and hand-checked).
 - Constants are inlined across modules (`inlineConst`, default `smart`). In `modules`, the
   bundle has `doubled + 10`. This is harmless.
 
@@ -218,6 +218,7 @@ What the bundle leaves for Stator:
 
 | Leftover | Measured | Who handles it |
 | --- | --- | --- |
+| `__commonJSMin` itself | `(mod \|\| (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports)`: an internal STA4013, because the checker typed the comma from `mod`'s declaration while its right operand read `mod` narrowed by the assignment | T12.3, landed: a comma types as its right operand (goldens `pkg_cjs_*`, `node_cjs_entry`, `node_pkg_location`, `comma_narrowing`) |
 | interop helpers `__toESM`, `__copyProps` | `Object.create`, `Object.defineProperty` (getter descriptors), `getOwnPropertyDescriptor`, `getOwnPropertyNames`, `getPrototypeOf`, `Object.prototype.hasOwnProperty.call`, `Function.prototype.bind`: 9 STA1214 in `cjs` | T12.3 (overlaps T11.4's `Object.*` and method-call families) |
 | `require('path')` of a built-in | `__require("path")` through `createRequire(import.meta.url)`. With `esmExternalRequirePlugin({ external: [/^node:/, …builtinModules] })` (re-exported by Vite 8.3.1) it becomes `import * as m from "path"` and `module.exports = m.default` | the plugin in `vite-stator` (T12.2). Built-ins need a default export (T11.6) |
 | computed `require('./' + n)` | stays `__require(...)`, and Node itself fails on the bundle with `Cannot find module './five.js'` | T11.5: a `require` over built-ins only. Anything else throws `MODULE_NOT_FOUND` |
@@ -327,8 +328,19 @@ stem is the source spelled as an identifier (`@scope/util` → `_scope_util`), t
 `resolveDir`. Each project declaration is rewritten in place to name the vendor module, every
 line kept (`import { pad } from "./__stator_vendor__.js";`); a mixed clause keeps its type-only
 names on an `import type` of the original specifier. Named re-exports and `export * as ns from
-'p'` are rewritten the same way. `export * from 'p'` (only the bundler knows the names),
-`import('p')` and a declaration with import attributes are not, and stay STA1214.
+'p'` are rewritten the same way. Import attributes (`with { type: 'json' }`) travel to the
+entry line, which is the bundler's to read; the rewritten import of the vendor module drops them,
+because that module is JavaScript (T12.3). The deprecated `assert` form is not rewritten.
+
+**`export * from 'p'` (T12.3).** Only the bundle knows `p`'s names, so the entry spells
+`export * from "p";` and the rewrite waits for the bundle: it parses the bundle's own `export`
+declarations and re-exports every plain name. With a star in the entry every named request is
+mangled, so the plain names are exactly the star's. The file's own exports, and names another
+`export *` of the same file also offers, are left out (an own export shadows a star; two stars
+make a name ambiguous, ECMA-262 §16.2.1.6.3). Two different packages under `export *` cannot be
+told apart in one bundle, so those declarations stay as written and STA1214, as does a bundle
+whose exports include an `export * from` an external. `import('p')` is STA1214 too: its namespace
+is Rolldown's `__exportAll` (§8).
 
 **Loading the adapter.** `vite` loads the `vite-stator` package; any other value is a module: a
 path (starting with `.` or absolute; relative to the current directory, or to the config file
@@ -435,15 +447,22 @@ list is what `vite-stator` hands Vite's watcher in dev, not moon.
   - docs: `MODES.md` (packages and the order deviation), `HOW-IT-WORKS.md`, `pipeline.d2`.
 - **T12.2** (`packages/vite-stator`, implemented, plan-notes 321): §2's configuration,
   `esmExternalRequirePlugin`, and the `stator()` Vite plugin.
-- **T12.3** (new): make Rolldown's output compile:
-  - `var`/`let X = class {}`;
-  - the interop helpers (§4 table);
+- **T12.3** (in progress): make Rolldown's output compile. Landed in its first slice:
+  `__commonJSMin`, whose comma expression was an internal STA4013 (the comma now types as its
+  right operand), so `exports.x` packages imported by name, nested `require`, CJS cycles and a
+  `.cjs` entry compile; `var`/`let X = class {}`; `export * from` one package; attributed package
+  imports. Open:
+  - the interop helpers (§4 table): `__toESM`/`__copyProps`, reached by a default import of a
+    CommonJS package or `module.exports` replacement, need T11.4 step 8's `Object.*`;
   - the dynamic-import namespace helpers (`__esmMin`, `__exportAll`: `Object.defineProperty`,
     `Symbol.toStringTag`, zero-argument `Promise.resolve()`), measured in `dynamic_import`'s A
-    bundle and in every namespace import of a package (T12.2, plan-notes 321);
+    bundle and in every namespace import of a package (T12.2, plan-notes 321). The runtime has no
+    symbol values, so `Symbol.toStringTag` is Phase 5's STA1212, not only T11.4's `Object.*`
+    (plan-notes 323);
   - ~~`import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`)~~: landed under `--node` by T11.5
     (plan-notes 316); without the flag it stays STA1214;
-  - a computed `export default` (`cjs_entry`).
+  - ~~a computed `export default` (`cjs_entry`)~~: lowers since T11.5a
+    (`subset_export_default_expression_*`).
 - **T11.5**: re-scoped per §4, plus the meaning of `__filename`/`__dirname` under `--node`.
 
 ## 9. Decided by the creator (2026-10-02)

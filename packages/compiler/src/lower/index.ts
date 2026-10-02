@@ -101,6 +101,7 @@ import {
   outSlotInner,
   isWeakCollection,
 } from '../frontend/types.ts';
+import { isClassFormationDeclarator } from '../frontend/types.ts';
 import type {
   ArrayLength,
   ArrayLiteral,
@@ -1994,6 +1995,22 @@ function withDisplayName(value: Expression, name: string): Expression {
   return value.kind === 'function' && value.name === undefined ? { ...value, name } : value;
 }
 
+/** The class expression a declarator forms (`const|let|var X = class { … }`, the binding never
+ * repointed), or `undefined`. The formation emits the class's descriptor under the variable's
+ * name and binds no value; the gate accepts exactly these (`isClassFormationDeclarator`). */
+function classFormation(
+  decl: ts.VariableDeclaration,
+  checker: ts.TypeChecker,
+): ts.ClassExpression | undefined {
+  const init = decl.initializer;
+  return init !== undefined &&
+    ts.isClassExpression(init) &&
+    isClassFormationDeclarator(decl, checker) &&
+    expressionClassName(init) !== undefined
+    ? init
+    : undefined;
+}
+
 function lowerDeclarationList(
   list: ts.VariableDeclarationList,
   at: ts.Node,
@@ -2009,6 +2026,12 @@ function lowerDeclarationList(
 
   if (!list.declarations || list.declarations.length === 0) {
     return fail(at, 'empty variable declaration list');
+  }
+  // A `var X = class {}` formation (Rolldown's spelling of a top-level class) binds no value,
+  // exactly like the `const` one, so it takes the declarator path and is never hoisted.
+  const single = list.declarations.length === 1 ? list.declarations[0] : undefined;
+  if (single !== undefined && classFormation(single, checker) !== undefined) {
+    return lowerDeclarator(single, 'let', at, sourceFile, checker, bindings, diagnostics, fail);
   }
   if (isVarDeclarationList(list)) {
     return lowerVarList(list, at, sourceFile, checker, bindings, diagnostics, fail);
@@ -2113,13 +2136,9 @@ function lowerDeclarator(
   // to the expression, so the name needs no slot; every other read is refused at the gate.
   // Only the formation spelling qualifies, mirroring the gate exactly: anything else lowers
   // as written and fails where it always did.
-  if (
-    decl.initializer !== undefined &&
-    ts.isClassExpression(decl.initializer) &&
-    isSingleConstDeclarator(decl) &&
-    expressionClassName(decl.initializer) !== undefined
-  ) {
-    return lowerClass(decl.initializer, sourceFile, checker, bindings, diagnostics);
+  const formation = classFormation(decl, checker);
+  if (formation !== undefined) {
+    return lowerClass(formation, sourceFile, checker, bindings, diagnostics);
   }
   // A generic arrow or function expression assigned to a `const` lowers to nothing: its
   // specializations are already above (collected by tuple), and the name itself binds no value
@@ -6445,6 +6464,13 @@ function lowerExpression(
       };
       return logicalOp;
     }
+    if (operator === ',') {
+      // The comma operator's value IS its right operand, so its type is the lowered right's type.
+      // Asking the checker again can disagree: an Unknown binding narrowed by an assignment on
+      // the left (`(mod = { exports: {} }, mod.exports)`, Rolldown's `__commonJSMin`) types the
+      // whole expression from the declared Unknown while the right lowers through the narrowing.
+      return { kind: 'binary-op', type: right.type, span, operator, left, right };
+    }
     if (operator !== undefined) {
       return arithmeticBinOp(operator, left, right, span, type);
     }
@@ -7592,6 +7618,7 @@ function hoistVarDeclarations(
     }
     if (ts.isVariableDeclarationList(node) && isVarDeclarationList(node)) {
       for (const decl of node.declarations) {
+        if (classFormation(decl, checker) !== undefined) continue;
         if (!ts.isIdentifier(decl.name)) {
           diagnostics.push(
             lowerDiagnostic(

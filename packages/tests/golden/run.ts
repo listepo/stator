@@ -69,10 +69,12 @@ process.env['TZ'] = 'UTC';
  * `pnpm run ci` stays green without ICU and `pnpm run test:intl` is what turns them on. */
 const INTL = process.env['STATOR_RUNTIME'] === 'intl';
 
-/** A directory's entry is `main.<mode>`, except a js-mode mixed graph may enter at `main.ts`.
+/** A directory's entry is `main.<mode>`, except a js-mode graph may enter at `main.cjs` or
+ * `main.ts`.
  *
  * js mode compiles TypeScript (plan.md §8 step 5): the point of that fixture is a `.ts` file
- * importing an untyped `.js` module, and looking only for `main.js` would skip it. */
+ * importing an untyped `.js` module, and looking only for `main.js` would skip it. A `.cjs`
+ * entry is CommonJS the bundler takes whole under `--node` (plan.md §11d T12.3). */
 function fixtureEntry(dir: string, name: string, mode: 'ts' | 'js'): string {
   if (name.endsWith(`.${mode}`)) {
     return join(dir, name);
@@ -80,9 +82,11 @@ function fixtureEntry(dir: string, name: string, mode: 'ts' | 'js'): string {
   const folder = join(dir, name);
   const preferred = join(folder, `main.${mode}`);
   if (mode === 'js' && !existsSync(preferred)) {
-    const tsEntry = join(folder, 'main.ts');
-    if (existsSync(tsEntry)) {
-      return tsEntry;
+    for (const other of ['main.cjs', 'main.ts']) {
+      const entry = join(folder, other);
+      if (existsSync(entry)) {
+        return entry;
+      }
     }
   }
   return preferred;
@@ -110,14 +114,14 @@ function skippedIntlCount(): number {
 }
 
 /** `--bundler=none` (plan.md §11d T12.1 Check): every fixture builds with the bundle step off,
- * except the ones that import a package from their own `node_modules` (T12.2's `pkg_*`), which
- * need the bundler and are skipped. The default leaves the compiler's own default, `vite`, which
+ * except the ones that import a package from their own `node_modules` (T12.2's `pkg_*`) or enter
+ * at a `.cjs` file, which need the bundler and are skipped. The default leaves the compiler's own default, `vite`, which
  * loads `vite-stator` only for those. */
 const BUNDLER_NONE = process.argv.includes('--bundler=none');
 
-/** A fixture that ships packages: only the bundler can build it. */
+/** A fixture that ships packages, or enters at a CommonJS file: only the bundler can build it. */
 function needsBundler(dir: string, name: string): boolean {
-  return existsSync(join(dir, name, 'node_modules'));
+  return existsSync(join(dir, name, 'node_modules')) || existsSync(join(dir, name, 'main.cjs'));
 }
 
 interface Fixture {
@@ -134,7 +138,7 @@ function fixtures(mode: 'ts' | 'js'): Fixture[] {
   } catch {
     return [];
   }
-  // A DIRECTORY is a multi-file fixture: its entry point is `main.<mode>` (or `main.ts` in js mode) and the other
+  // A DIRECTORY is a multi-file fixture: its entry point is `main.<mode>` (`fixtureEntry`) and the other
   // files in it are modules the entry imports. Stator compiles the whole graph from the
   // entry; Node likewise runs just the entry — both resolve the imports themselves.
   return names

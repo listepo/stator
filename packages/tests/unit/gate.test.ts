@@ -510,8 +510,9 @@ test('a bound class expression is vetted like a declaration and compiles', () =>
     [],
   );
   // Still refused, each with the message that names it: an unbound expression has no identity,
-  // a `let` formation can be repointed, a generic one has nowhere to specialize, and an
-  // opaque use reads the class object (plan.md §8 step 12e).
+  // a `let` formation the file repoints names two classes (one nothing writes is a formation,
+  // plan.md §11d T12.3), a generic one has nowhere to specialize, and an opaque use reads the
+  // class object (plan.md §8 step 12e).
   assert.deepEqual(
     codesFor(
       'function take(x: unknown): void {}\ntake(class { m() { return 1; } });\nexport const x = 1;\n',
@@ -528,13 +529,14 @@ test('a bound class expression is vetted like a declaration and compiles', () =>
     unbound[0]?.message ?? '',
     /an anonymous class expression is not yet supported; planned for Phase 5/,
   );
-  assert.deepEqual(codesFor('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n'), [
-    'STA1214',
-  ]);
-  const letBound = gateProgram(
-    createProgram('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n').program,
-    'ts',
+  assert.deepEqual(
+    codesFor('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n'),
+    [],
   );
+  const repointed =
+    'let C = class D { m() { return 7; } }\nC = class D {};\nconsole.log(new C());\n';
+  assert.deepEqual(codesFor(repointed), ['STA1214', 'STA1214']);
+  const letBound = gateProgram(createProgram(repointed).program, 'ts');
   assert.match(letBound[0]?.message ?? '', /a class expression 'D' is not yet supported/);
   assert.deepEqual(codesFor('const C = class<T> { m(): T | undefined { return undefined; } }\n'), [
     'STA1214',
