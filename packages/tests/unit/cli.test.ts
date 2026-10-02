@@ -239,7 +239,7 @@ test(
  * and assignment edges are checked. The passing half is golden `js/boundary_inferred`.
  * The call edge (TS2345) and the return edge (TS2322 on a `return` or an arrow's concise body) had
  * the same hole with no widening at all: `inc(label(1))` printed `11` and a `number` function
- * returned `"2"` (plan-notes 306). Their passing half is golden `js/boundary_call_return`. */
+ * returned `"2"` (plan-notes 307). Their passing half is golden `js/boundary_call_return`. */
 for (const [edge, body, line] of [
   ['declaration', 'const n: number = label(10);\nconsole.log(n);\n', 2],
   ['assignment', 'let n: number = 0;\nn = label(10);\nconsole.log(n);\n', 3],
@@ -287,7 +287,7 @@ for (const [edge, body, line] of [
 
 /* A concise arrow body's TS2322 starts at the body's first identifier -- here the CALLEE `lbl`.
  * The suppression used to widen whatever identifier the diagnostic started at, so `lbl` itself
- * turned dynamic and the file graded `dynamic` (plan-notes 306). The return edge is a check, not a
+ * turned dynamic and the file graded `dynamic` (plan-notes 307). The return edge is a check, not a
  * widening: the file stays `static`. */
 test('a concise-body return mismatch widens nothing in js mode', async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-concise-'));

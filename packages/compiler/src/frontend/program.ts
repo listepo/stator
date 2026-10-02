@@ -222,7 +222,7 @@ function keepsCheckedAnnotation(symbol: ts.Symbol, checker: ts.TypeChecker): boo
  * operand, not an assignment target, so it must not widen: `jsLabel` itself would turn dynamic.
  * The span must be the whole body, because an assignment body (`() => x = v`) starts at the same
  * identifier and its own 2322 spans only `x`. A `return` statement's 2322 starts at the keyword,
- * where `identifierAt` finds nothing (plan-notes 306). */
+ * where `identifierAt` finds nothing (plan-notes 307). */
 function isConciseReturnAt(token: ts.Identifier, source: ts.SourceFile, length: number): boolean {
   const start = token.getStart(source);
   let node: ts.Node = token;

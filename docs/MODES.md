@@ -216,7 +216,7 @@ const s: number = label(10);   // check(label(10), "number") → STA2001
 An annotation no tag settles (an object type or a union) still widens the binding to the dynamic
 path, the way a `.js` binding does.
 
-The call and return edges follow the same rule (plan-notes 306). An argument the checker refuses
+The call and return edges follow the same rule (plan-notes 307). An argument the checker refuses
 for a parameter (`TS2345`), or a returned value it refuses for the function's return type (`TS2322`
 on a `return` or an arrow's concise body), is suppressed in `js` mode and checked when a TypeScript
 file annotated that parameter or return. Function, method and constructor parameters all count;

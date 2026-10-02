@@ -197,7 +197,7 @@ import {
   objectFieldsPrefix,
 } from '../hir/types.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
-import { diagnosticFromNode } from '../support/diagnostics.ts';
+import { diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, enclosingFunction, isFunctionLike, RECEIVER_NAME } from './captures.ts';
 import { Scope, resetShadowCounter, shadowSource } from './scope.ts';
@@ -972,7 +972,7 @@ function lowerStatement(
       sourceFile,
       'STA4031',
       'internal',
-      `unexpected statement kind: ${ts.SyntaxKind[node.kind]}`,
+      `unexpected statement kind: ${syntaxKindName(node.kind)}`,
     ),
   );
   return null;
@@ -982,7 +982,7 @@ function lowerStatement(
  * annotated parameter is the call-shaped form of the same edge `maybeBoundary` wraps. A parameter
  * a TypeScript file annotated also checks a CONCRETE argument of another type (`edgeBoundary`):
  * js mode suppresses the checker's TS2345, and `inc(jsLabel(1))` passed a string into a `number`
- * parameter (plan-notes 306). A `.js` callee's JSDoc keeps Node's coercion. `signature` is the
+ * parameter (plan-notes 307). A `.js` callee's JSDoc keeps Node's coercion. `signature` is the
  * callee's (or method's) type when the HIR has one; a constructor has none, so its parameters
  * answer from their annotations. A spread argument shifts every later slot, so a call with one
  * keeps the dynamic-value check alone, and so does a callee resolved to a declaration with no body:
@@ -1028,7 +1028,7 @@ function checkCallArgs(
  * meets `maybeBoundary`; a concrete value of ANOTHER type is checked too (`edgeBoundary`) when a
  * TypeScript file annotated the enclosing function's return -- js mode suppresses the checker's
  * TS2322, and `function g(): number { return jsLabel(2) }` returned a string as a `number`
- * (plan-notes 306). Async functions and generators are left out: their annotation is a `Promise`
+ * (plan-notes 307). Async functions and generators are left out: their annotation is a `Promise`
  * or a generator, not the type a returned value must have. */
 function returnBoundary(
   value: Expression,
@@ -6055,7 +6055,7 @@ function lowerExpression(
           sourceFile,
           'STA4036',
           'internal',
-          `unsupported binary operator: ${ts.SyntaxKind[opKind]}`,
+          `unsupported binary operator: ${syntaxKindName(opKind)}`,
         ),
       );
       return null;
@@ -6102,7 +6102,7 @@ function lowerExpression(
           sourceFile,
           'STA4036',
           'internal',
-          `unsupported unary operator: ${ts.SyntaxKind[node.operator]}`,
+          `unsupported unary operator: ${syntaxKindName(node.operator)}`,
         ),
       );
       return null;
@@ -6856,7 +6856,7 @@ function lowerExpression(
       sourceFile,
       'STA4031',
       'internal',
-      `unexpected expression kind: ${ts.SyntaxKind[node.kind]}`,
+      `unexpected expression kind: ${syntaxKindName(node.kind)}`,
     ),
   );
   return null;

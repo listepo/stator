@@ -15,7 +15,7 @@
 
 import * as ts from 'typescript';
 import type { ExternAbiKind } from '../hir/nodes.ts';
-import { diagnosticFromNode, type Diagnostic } from '../support/diagnostics.ts';
+import { diagnosticFromNode, syntaxKindName, type Diagnostic } from '../support/diagnostics.ts';
 import { exportAbiKindOf } from './extern.ts';
 import { outSlotInner } from './types.ts';
 import { tsTypeToHType } from './types.ts';
@@ -537,7 +537,7 @@ export function collectUnitExports(
       collector.never(
         statement,
         'STA1122',
-        `exported ${ts.SyntaxKind[statement.kind]} cannot be exposed to C in v0 — only ` +
+        `exported ${syntaxKindName(statement.kind)} cannot be exposed to C in v0 — only ` +
           'non-generic function declarations and const primitives are exportable (docs/FFI.md)',
       );
     }

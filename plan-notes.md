@@ -9731,7 +9731,7 @@ check cannot fail.
 is suppressed, and the `number` parameter holds a string). `function g(): number { return
 label(2); }` prints `2` (TS2322 on a return). Both should be `STA2001`. Neither is in the spike's
 repro, and the call edge must leave a `.js` callee alone: `golden/js/argument_mismatch.js` needs
-`increment("2")` to coerce the way Node does. Follow-up work, not this change. Closed by plan-notes 306.
+`increment("2")` to coerce the way Node does. Follow-up work, not this change. Closed by plan-notes 307.
 
 ## 302. Per-module namespaces get a card, T11.5a, before `packages/node` (2026-10-02)
 
@@ -9981,7 +9981,89 @@ an explicit environment that drops `NODE_OPTIONS` is not traced; a new top-level
 a global changes behavior without an executed span (the module rule catches it only when the name
 replaces one). The selector trusts `tsc` for link-time import errors.
 
-## 306. js mode checks the call and return edges a `.ts` annotation claims (2026-10-02)
+## 306. Task 6.19 lands: the self-compilation ratchet runs in `ci` (2026-10-02)
+
+**Plan:** §9 Task 6.19 moves to done.md; changelog v4.24 (v4.23 went to Task 6.17, #64).
+
+**Re-measured** on main `31e7b52` plus this change (darwin/arm64, Node per `.node-version`), by
+`pnpm run test:selfhost`, which runs `stator explain --json` from each target package's directory:
+
+| Target | Verdict | Diagnostics |
+| --- | --- | --- |
+| `packages/compiler` (`ts` mode, entry from its `stator.config.json`) | not-yet | 2 549 × STA1214 |
+| `packages/std/src/env.ts` | dynamic | none |
+| `packages/std/src/{fs,path,process,time}.ts` | static | none |
+
+Plan-notes 304 measured 2 522 on `f8db9eb`; the 27 more are the code #58 and #60 added. Top
+`ts`-mode families now:
+- 1 134 `QualifiedName`: a qualified type name such as `ts.Node` or `NodeJS.WriteStream`;
+- 920 method calls;
+- 166 globals;
+- 52 index access on a non-array;
+- 52 `for-of` over a user iterable;
+- 48 object spread without a fixed shape;
+- 38 package imports.
+
+**Two fixes found by the first run:**
+- **`FirstNode`.** `ts.SyntaxKind[kind]` returns the last name assigned to a value, and the enum
+  ends in range markers that alias real kinds (`FirstNode = QualifiedName`, `FirstStatement =
+  VariableStatement`, …). `syntaxKindName` in `src/support/diagnostics.ts` keeps the first name
+  declared for each value. The gate's catch-all message and the four `ts.SyntaxKind[...]` sites in
+  `lower/index.ts` and `frontend/export.ts` use it. It lives in `support/`, not in `gate.ts`,
+  because a new name in `lower/index.ts`'s long import list from `gate.ts` changes two baselined
+  jscpd fingerprints.
+- **The compiler's verdict was `error`, not `not-yet`.** `src/cli/config.ts` (Task 6.18) had two
+  callbacks over `Array.isArray(x) ? x : []`. `Array.isArray` narrows `unknown` to `any[]`, so
+  Stator's `ts` mode reported 2 × STA1003, a never-class code. Both arrays are now
+  `readonly unknown[]`. tsc and oxlint accept `any[]` there, so only this test can catch it.
+
+**Cost: in `ci`.** Card point 4 sets the bar at 60 s on the dev host for the whole run. Measured,
+with the host at a load average of about 70 from parallel agents:
+- 38.0 s: explain 30.0 s, smoke 8.1 s;
+- 47.1 s: explain 36.7 s, smoke 10.3 s.
+- 53.1 s inside the full `pnpm run ci`: explain 39.0 s, smoke 14.0 s.
+
+The explains run in parallel, so the compiler's explain sets the pace. The smoke step builds and
+runs the five `std` modules, then runs the six `std_*` goldens. So `test:selfhost` is in `pnpm run
+ci` after `test:golden`, in the GitHub `runtime` jobs (Linux and macOS, after the runtime build)
+and in `moon run tests:ci`. Task 6.17's impact selection is not needed for it, and
+`test:impact` does not select it: it is not one of that runner's harnesses. It runs in full
+wherever it runs.
+
+**Shape:**
+- `packages/tests/selfhost/targets.json` lists the targets. Every directory under `packages/` is
+  either a target or in `notTargets` with a reason. This is wider than the pnpm workspace, so
+  `packages/runtime` must be declared too. A missing package or a stale entry fails.
+- `packages/compiler/stator.config.json` (entry + mode) and `packages/std/stator.config.json`
+  (mode) supply each target's mode and entry (card point 5).
+- `baseline.json` holds the verdict and per-code counts. `--update` writes it sorted.
+- `ratchet.ts` holds the logic, which `packages/tests/unit/selfhost.test.ts` tests: a raised count,
+  a new code, a worse verdict, a target missing from the baseline and an unlisted package each fail.
+- A shrink also fails until `--update` records it. Unrecorded slack would let a later regression
+  pass unseen, as `.jscpd-baseline.json` would.
+
+**Not landed: the stage-2 check** (card point 2, byte-identical C from the self-compiled compiler).
+It cannot run before the compiler's verdict is `static` or `dynamic`. Until then the runner fails
+when a `stage2` target reaches either verdict, and the message names the card point. So the
+milestone cannot pass without its check.
+
+**Open for the creator: may growth be recorded?** Every compiler change that adds a construct
+Stator does not compile yet grows `STA1214` for `packages/compiler`, and `ci` fails. Today that
+covers most code: method calls and qualified type names alone are 2 054 of 2 549. The card says
+the test fails when any count grows, and it does. It does not say whether the author may then
+record the growth with `--update`.
+- **If yes:** the increase lands in `baseline.json`'s diff, and review sees it.
+- **If no:** the rule is `dupes:baseline`'s, which `.jscpd-baseline.json` follows, and compiler
+  work is limited to the subset Stator already compiles.
+
+The tool does not decide this. `--update` rewrites the baseline either way.
+
+**Answered by the creator (2026-10-02): yes.** A change that grows a count runs `--update` in
+the same change, and the growth is reviewed in `baseline.json`'s diff. A shrink must still be
+recorded too. `.jscpd-baseline.json` keeps its shrink-only rule; the two baselines answer
+different questions. The rule is in plan.md's Task 6.19 stub.
+
+## 307. js mode checks the call and return edges a `.ts` annotation claims (2026-10-02)
 
 **Trigger.** Plan-notes 301's "Not covered" paragraph. With `lib.js` exporting
 ``label(x) { return `${x}`; }`` (checker: `string`), two more `.js`→`.ts` edges ran a string as a

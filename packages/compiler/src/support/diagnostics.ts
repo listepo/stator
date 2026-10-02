@@ -1,4 +1,4 @@
-import type * as ts from 'typescript';
+import * as ts from 'typescript';
 
 type Mode = 'ts' | 'js';
 
@@ -112,4 +112,21 @@ export type DiagnosticSite = Pick<
 
 export function renderDiagnostic(d: DiagnosticSite): string {
   return `${d.file}:${d.line}:${d.column} ${d.code} [${d.mode}] ${d.message}`;
+}
+
+/* `ts.SyntaxKind[kind]` returns the LAST name assigned to a value, and the enum ends in range
+ * markers that alias real kinds (`FirstNode = QualifiedName`, `FirstStatement =
+ * VariableStatement`, ...), so the reverse lookup prints the marker. The first name declared for a
+ * value is the kind itself; enum keys iterate in declaration order. */
+const SYNTAX_KIND_NAMES: ReadonlyMap<number, string> = (() => {
+  const names = new Map<number, string>();
+  for (const [name, value] of Object.entries(ts.SyntaxKind)) {
+    if (typeof value === 'number' && !names.has(value)) names.set(value, name);
+  }
+  return names;
+})();
+
+/** The name of a syntax kind as TypeScript declares it ("QualifiedName", never "FirstNode"). */
+export function syntaxKindName(kind: ts.SyntaxKind): string {
+  return SYNTAX_KIND_NAMES.get(kind) ?? String(kind);
 }

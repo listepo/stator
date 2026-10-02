@@ -55,6 +55,15 @@ tasks:
     deps:
       - 'runtime:build'
       - 'std:build'
+  selfhost:
+    script: 'node packages/tests/selfhost/run.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    # The std smoke check builds and runs binaries (plan.md §9 Task 6.19).
+    deps:
+      - 'runtime:build'
+      - 'std:build'
   builtins:
     script: 'node packages/tests/golden/builtins.ts'
     toolchain: 'system'
@@ -113,6 +122,7 @@ tasks:
       - 'tests:runtime-corpus'
       - 'tests:subset'
       - 'tests:golden'
+      - 'tests:selfhost'
       - 'tests:builtins'
       - 'tests:node-coverage'
       - 'tests:leak'

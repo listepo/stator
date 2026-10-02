@@ -4,7 +4,7 @@
 // The checker's TS2345 (a `string` argument for a `number` parameter) and TS2322 (a `string`
 // returned from a `number` function) are suppressed in js mode, but each `.ts` annotation is
 // kept: the call and return edges get boundary checks, and the emitted program raises STA2001 at
-// the argument instead of running `inc` on a string (golden rule 4, plan-notes 306). ts mode keeps
+// the argument instead of running `inc` on a string (golden rule 4, plan-notes 307). ts mode keeps
 // the refusal (subset_call_return_boundary_ts).
 
 import { label } from "./annotated_binding_helper_js.js";
