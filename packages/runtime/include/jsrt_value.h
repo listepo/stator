@@ -1852,4 +1852,15 @@ static inline JSRTEnv *jsrt_env_up(JSRTEnv *env, uint32_t levels) {
  * Fails loudly at startup rather than corrupting values on a platform where it does not hold. */
 void jsrt_init(void);
 
+/* The process slots (src/jsrt_process.c): the generated `main` hands its argument vector to
+ * `jsrt_process_args` right after `jsrt_init` and returns `jsrt_process_exit_code()`.
+ * `std/process` binds the other four as `@statorExtern` functions, so their spellings are the
+ * emitter's extern ones (`double` for a number, `char *` for a returned string) — a generated unit
+ * that declares one again must match this declaration exactly. */
+void jsrt_process_args(int argc, char **argv);
+double jsrt_process_argc(void);
+char *jsrt_process_argv(double index);
+double jsrt_process_exit_code(void);
+void jsrt_process_set_exit_code(double code);
+
 #endif /* JSRT_VALUE_H */

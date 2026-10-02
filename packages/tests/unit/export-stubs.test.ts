@@ -100,7 +100,7 @@ test('the library object has init instead of main, with the guard set before jsr
   const { c } = emitLibrary(
     'export function add(a: number, b: number): number { return a + b; }\n',
   );
-  assert.ok(!c.includes('int main(void)'), 'a unit exposed to C has no main');
+  assert.ok(!c.includes('int main('), 'a unit exposed to C has no main');
   assert.ok(c.includes('void stator_u_init(void) {'));
   assert.ok(c.includes('static bool _stator_u_initialized = false;'));
   const guardSet = c.indexOf('_stator_u_initialized = true;');

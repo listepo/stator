@@ -103,6 +103,13 @@ pub fn failErrno(err: std.c.E) f64 {
     return fail(switch (err) {
         .NOENT => "ENOENT",
         .ACCES, .PERM => "EACCES",
+        .EXIST => "EEXIST",
+        .NOTDIR => "ENOTDIR",
+        .NOTEMPTY => "ENOTEMPTY",
+        .NAMETOOLONG => "ENAMETOOLONG",
+        .LOOP => "ELOOP",
+        .ROFS => "EROFS",
+        .BUSY, .TXTBSY => "EBUSY",
         .BADF => "EBADF",
         .NOTTY => "ENOTTY",
         .AGAIN => "EAGAIN",

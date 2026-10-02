@@ -975,15 +975,12 @@ class Emitter {
       return produced;
     }
 
-    this.appendLine('int main(void) {');
-    this.indent++;
-    this.appendLine('jsrt_init();', module.span);
-    this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
+    this.emitMainEntry(module, globalSlots);
     this.emitModuleEnv(module);
     this.emitSyncTopLevelStatements(module);
     this.emitMicrotaskDrain(module);
     // No pop: the globals frame is pushed once and lives as long as the program does.
-    this.appendLine('return 0;', module.span);
+    this.appendLine('return (int)jsrt_process_exit_code();', module.span);
     if (this.unwindUsed) {
       // An exception no try caught: report on stderr and exit(1), which is what Node does.
       this.appendLine('_jsrt_unwind: ;', module.span);
@@ -995,6 +992,17 @@ class Emitter {
     return produced;
   }
 
+  /* The program entry both module shapes share. `main` keeps its argument vector for
+   * `std/process.argv` before any module code runs, and returns the status `std/process`'s
+   * `setExitCode` left (0 unless a program set one; docs/STD.md §5). */
+  private emitMainEntry(module: Module, globalSlots: number): void {
+    this.appendLine('int main(int argc, char **argv) {');
+    this.indent++;
+    this.appendLine('jsrt_init();', module.span);
+    this.appendLine('jsrt_process_args(argc, argv);', module.span);
+    this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
+  }
+
   /* A module with a top-level await is an async unit (Phase 5 step 9). Named bindings stay in
    * the globals array so the rest of the program still reads JSRT_GLOBAL; temps and await state
    * live in a heap environment because a suspension pops main's C frame. Init runs in Task 3.11's
@@ -1004,22 +1012,9 @@ class Emitter {
     this.emitModuleDoneMain();
     this.emitAsyncModuleForward();
 
-    this.appendLine('int main(void) {');
-    this.indent++;
-    this.appendLine('jsrt_init();', module.span);
-    this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
-    this.emitHoistedFunctions(module.statements);
-    this.appendLine('JSRT_FRAME(1);', module.span);
-    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
-    this.appendLine(
-      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
-      module.span,
-    );
-    this.appendLine('jsrt_promise_subscribe(JSRT_LOCAL(0), _jsrt_module_done, NULL);', module.span);
-    this.appendLine('jsrt_run_microtasks();', module.span);
-    this.appendLine('JSRT_FRAME_POP();', module.span);
-    this.appendLine('return 0;', module.span);
+    this.emitMainEntry(module, globalSlots);
+    this.emitAsyncModuleRun(module, envSlots, '_jsrt_module_done');
+    this.appendLine('return (int)jsrt_process_exit_code();', module.span);
     this.indent--;
     this.appendLine('}');
     this.appendLine('');
@@ -1297,6 +1292,23 @@ class Emitter {
     this.appendLine('');
   }
 
+  /* The body of an async unit's entry, `main` or `stator_init_<unit>`: start the module's async
+   * function in a fresh heap environment, subscribe `onDone` to its promise, and drain the
+   * microtasks. The frame pushed here pops before the caller's own exit code. */
+  private emitAsyncModuleRun(module: Module, envSlots: number, onDone: string): void {
+    this.emitHoistedFunctions(module.statements);
+    this.appendLine('JSRT_FRAME(1);', module.span);
+    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
+    this.appendLine(
+      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
+      module.span,
+    );
+    this.appendLine(`jsrt_promise_subscribe(JSRT_LOCAL(0), ${onDone}, NULL);`, module.span);
+    this.appendLine('jsrt_run_microtasks();', module.span);
+    this.appendLine('JSRT_FRAME_POP();', module.span);
+  }
+
   /* `stator_init_<unit>` for a top-level-await module: `main`'s async startup with the exit
    * replaced by init semantics. A rejected module body captures into the error cell instead
    * of `jsrt_uncaught`'s exit(1): libraries must not exit their host. An unhandled rejection
@@ -1310,17 +1322,7 @@ class Emitter {
     scratch: number,
   ): void {
     this.emitInitOpen(library.unit, module.span, globalSlots);
-    this.emitHoistedFunctions(module.statements);
-    this.appendLine('JSRT_FRAME(1);', module.span);
-    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
-    this.appendLine(
-      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
-      module.span,
-    );
-    this.appendLine('jsrt_promise_subscribe(JSRT_LOCAL(0), _jsrt_init_done, NULL);', module.span);
-    this.appendLine('jsrt_run_microtasks();', module.span);
-    this.appendLine('JSRT_FRAME_POP();', module.span);
+    this.emitAsyncModuleRun(module, envSlots, '_jsrt_init_done');
     this.appendLine('if (_jsrt_init_rejected) {', module.span);
     this.indent++;
     this.appendLine(

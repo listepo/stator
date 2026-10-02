@@ -10380,6 +10380,72 @@ both with no codes, recorded with `--update` (plan-notes 306).
 - `unit/std.test.ts`: 11 passed. `randomBytes` draws are fresh and 65 536 bytes cover all 256
   values, and `std/hash` and `std/encoding` emit one call site per backing.
 
+### Step 3: `std/process` and `std/fs`, and the card closes
+
+This is the third of T11.3's three PRs. It was written on step 1's byte channel and moved to
+T11.3a's `Uint8Array` row (plan-notes 311) before it opened.
+
+**Decisions.**
+
+- **`argv` and the exit status live in the runtime, not the std archive.** Both belong to
+  `main`. The emitter now writes `int main(int argc, char **argv)`, hands the vector to
+  `jsrt_process_args` right after `jsrt_init`, and returns `(int)jsrt_process_exit_code()`
+  instead of `0`, in both module shapes (sync and top-level-await). The slots are
+  `packages/runtime/src/jsrt_process.c`. `std/process` binds them as `@statorExtern`
+  functions, so the archive still calls only libc (docs/STD.md §6). Their prototypes in
+  `jsrt_value.h` are spelled the way the emitter forward-declares an extern (`double`,
+  `char *`): a generated unit sees both, and C refuses two spellings of one function.
+- **`exitCode` is two functions,** `exitCode()` and `setExitCode(code)`, not Node's writable
+  property: an ES import binding is read-only, so a module cannot export an assignable status.
+  `setExitCode` takes `0..255` (else `EINVAL`, nothing changes), and `exit(code)` or an uncaught
+  exception (status 1) still win.
+- **`argv()[0]` is the program as invoked.** Node's `process.argv` starts with `node` and the
+  script; the oracle twin drops the `node` entry so the shapes agree.
+- **`hrtimeNs` is a number,** exact below 2^53 ns (about 104 days of uptime). `memoryUsage()`
+  answers `rss` only (libuv's `uv_resident_set_memory`); `heapTotal` and friends are V8's.
+  `platform` and `arch` are `std/os`'s, re-exported.
+- **Descriptors are plain integers with no finalizer** (STD.md §9.3). A GC-driven close would tie
+  a descriptor's lifetime to the collector, and a reused number would close someone else's
+  file. `open` takes libuv's flag table (`stringToFlags`) and opens close-on-exec, as libuv does.
+  `read`/`write` take a `position`: `-1` uses the descriptor's offset, anything else is
+  `pread`/`pwrite`.
+- **Bytes take the row.** `std/fs.read` and `write` pass their view in one call, like
+  `std/io`; the read sizing moved to `src/internal/read.ts`, which both modules share.
+  `readBytes` cannot size its answer before it reads, so it is two calls: the backing reads the
+  file, parks it and answers the count, and `jsrt_std_fs_read_bytes_take` copies it into a view
+  of that size and frees it.
+- **`utimes` calls libc `utimensat`, not `std.Io`.** Zig 0.16's `Dir.setTimestamps` reports a
+  missing path as `Unexpected`, which read as `EIO` where Node says `ENOENT`; the `std_fs` golden
+  caught it. It takes milliseconds, where Node's `utimesSync` takes seconds.
+- **A count-returning backing fails with -1.** The golden also caught `open(path, "rw")`
+  answering descriptor 1: the backing returned the status `1` from `root.fail`, not `-1`. Every
+  backing whose success is a count now fails through `io.failCount`.
+- **`readdir` sorts in byte order,** which is libuv's `strcmp` sort and so Node's answer. The
+  golden's names must not collide on a case-insensitive file system (macOS's default APFS):
+  `b.txt` beside `B.txt` was one file there, so the second name is `C.txt`. The golden also masks
+  the descriptor number in messages, since the two sides open different numbers.
+- **`failErrno` maps more errnos** (`EEXIST`, `ENOTDIR`, `ENOTEMPTY`, `ENAMETOOLONG`, `ELOOP`,
+  `EROFS`, `EBUSY`). Each code was already in STD.md §3's closed table.
+
+**Self-compilation.** The changed `fs.ts`, `io.ts` and `process.ts` stay `static` with no codes;
+selfhost matched its baseline, so no `--update` was needed.
+
+**Duplication.** Retargeting `main`'s return made jscpd re-fingerprint a known clone between the
+two async entries (`main` and `stator_init_<unit>`), so it counted as new. The shared run is now
+one helper, `emitAsyncModuleRun`, and `.jscpd-baseline.json` shrank by one fingerprint
+(207 → 206 clones).
+
+**Check evidence (step 3, and the card).** `pnpm run ci` exit 0.
+
+- Goldens: 415 passed. `std_process` and `std_fs` match their `golden/std-oracle/` twins, and
+  with `std_os`, `std_io`, `std_encoding` and `std_hash` every N1 module has its golden.
+- Subset: 821 fixtures, 786 passed, 35 expected-fail. New: `subset_std_process_n1_ts`/`_js` and
+  `subset_std_fs_fd_ts`/`_js` (static).
+- vitest: 51 files, 688 tests. `unit/std.test.ts` (14) adds real arguments, the
+  `setExitCode`/`exit`/throw statuses, and ranges for `pid`, `ppid`, `execPath`, `hrtimeNs`,
+  `memoryUsage().rss` and `hostname`.
+- ASan: `golden-asan green` (415). Leak plateau, `builtins` 242/304, `docs/NODE.md` current.
+
 ## 310. T11.4 re-measured, and the Test262 harness needs more than `String` and `JSON` (2026-10-02)
 
 **Baseline.** `node --stack-size=7600 packages/compiler/src/cli/main.ts explain _tsc.js --mode=js
