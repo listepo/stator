@@ -11,7 +11,10 @@
  * executed — they are counted, so the corpus can land before the compiler can pass it.
  *
  * Usage: node packages/tests/subset/run.ts [--filter <substring> | --filter=<substring>]
- *          [--shard=N/M] [--shards=N]
+ *          [--only=<file>] [--shard=N/M] [--shards=N]
+ *
+ * `--only=<file>` runs just the fixtures named in the file, one per line — the selection
+ * `pnpm run test:impact` hands over (plan.md §9 Task 6.17). It composes with `--filter`.
  *
  * `--shard=N/M` runs one round-robin slice of the (filtered) fixtures; `--shards=N` fans out to
  * N worker processes of this same runner and merges their per-item records back by index, so the
@@ -24,12 +27,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { explainFile } from '../../compiler/src/cli/explain.ts';
+import type { InProcessRecorder } from '../impact/recorder.ts';
+import { impactRecorder } from '../support/impact-hook.ts';
 import {
   fanOutWorkers,
   mergeShardFiles,
   parseShardArgs,
   pool,
+  readOnlyList,
   shardSlice,
+  workerBaseArgs,
   writeShardFile,
   type Shard,
 } from '../support/parallel.ts';
@@ -137,46 +144,55 @@ function decodeOutcome(value: unknown): Outcome {
   throw new Error(`shard record has unknown kind ${String(kind)}`);
 }
 
+/* With an impact recorder the pool is one wide (the recorder insists), so the take after each
+ * fixture holds exactly what that fixture ran. */
 async function evaluate(
   names: readonly string[],
   allocated: ReadonlySet<string>,
+  impact: InProcessRecorder | undefined,
 ): Promise<Outcome[]> {
   return pool(names, async (name): Promise<Outcome> => {
-    const path = join(HERE, name);
-    const want = parseDirectives(name, readFileSync(path, 'utf8'));
-    if (want.code !== undefined && !allocated.has(want.code)) {
-      return {
-        kind: 'failed',
-        message: `${name}: @code ${want.code} is not allocated in docs/DIAGNOSTICS.md`,
-      };
-    }
-    // Expected-fail fixtures are still evaluated. A marker that outlives the work it was waiting
-    // for is worse than no marker: it silently exempts a fixture that would now hold the line.
-    try {
-      const got = await explain(path, want.mode);
-      const matches =
-        got.verdict === want.verdict && (want.code === undefined || got.code === want.code);
-      if (want.expectedFail) {
-        return matches
-          ? { kind: 'failed', message: `${name}: now passes — remove the @expected-fail marker` }
-          : { kind: 'expected-fail' };
-      }
-      if (matches) return { kind: 'passed' };
-      return {
-        kind: 'failed',
-        message:
-          got.verdict === want.verdict
-            ? `${name}: code ${got.code ?? '(none)'}, want ${want.code ?? '(none)'}`
-            : `${name}: verdict ${got.verdict}, want ${want.verdict}`,
-      };
-    } catch (error) {
-      if (want.expectedFail) return { kind: 'expected-fail' };
-      return {
-        kind: 'failed',
-        message: `${name}: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
+    const outcome = await evaluateOne(name, allocated);
+    await impact?.take(name);
+    return outcome;
   });
+}
+
+async function evaluateOne(name: string, allocated: ReadonlySet<string>): Promise<Outcome> {
+  const path = join(HERE, name);
+  const want = parseDirectives(name, readFileSync(path, 'utf8'));
+  if (want.code !== undefined && !allocated.has(want.code)) {
+    return {
+      kind: 'failed',
+      message: `${name}: @code ${want.code} is not allocated in docs/DIAGNOSTICS.md`,
+    };
+  }
+  // Expected-fail fixtures are still evaluated. A marker that outlives the work it was waiting
+  // for is worse than no marker: it silently exempts a fixture that would now hold the line.
+  try {
+    const got = await explain(path, want.mode);
+    const matches =
+      got.verdict === want.verdict && (want.code === undefined || got.code === want.code);
+    if (want.expectedFail) {
+      return matches
+        ? { kind: 'failed', message: `${name}: now passes — remove the @expected-fail marker` }
+        : { kind: 'expected-fail' };
+    }
+    if (matches) return { kind: 'passed' };
+    return {
+      kind: 'failed',
+      message:
+        got.verdict === want.verdict
+          ? `${name}: code ${got.code ?? '(none)'}, want ${want.code ?? '(none)'}`
+          : `${name}: verdict ${got.verdict}, want ${want.verdict}`,
+    };
+  } catch (error) {
+    if (want.expectedFail) return { kind: 'expected-fail' };
+    return {
+      kind: 'failed',
+      message: `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 /* The one report, shared verbatim by the serial run, a direct `--shard` slice, and the merged
@@ -234,8 +250,11 @@ async function main(): Promise<void> {
     .filter((name) => name.startsWith('subset_'))
     .sort();
   const filter = args.filter;
-  const fixtures =
-    filter === undefined ? allFixtures : allFixtures.filter((name) => name.includes(filter));
+  const only = args.only === undefined ? undefined : readOnlyList(args.only);
+  const fixtures = allFixtures.filter(
+    (name) =>
+      (filter === undefined || name.includes(filter)) && (only === undefined || only.has(name)),
+  );
 
   const allocated = allocatedCodes();
 
@@ -250,7 +269,7 @@ async function main(): Promise<void> {
     try {
       await fanOutWorkers({
         script,
-        baseArgs: args.filter === undefined ? [] : [`--filter=${args.filter}`],
+        baseArgs: workerBaseArgs(args),
         shards: args.shards,
         dir,
       });
@@ -272,10 +291,14 @@ async function main(): Promise<void> {
     args.shard === undefined
       ? fixtures.map((name, index) => ({ name, index }))
       : shardSlice(fixtures, args.shard).map((entry) => ({ name: entry.item, index: entry.index }));
+  const impact = await impactRecorder('subset', ['packages/tests/subset/']);
+  await impact?.loaded();
   const outcomes = await evaluate(
     slice.map((entry) => entry.name),
     allocated,
+    impact,
   );
+  impact?.finish();
   if (args.jsonOut !== undefined) {
     // Per-item failures are DATA for the driver: exit 0 on a completed slice, nonzero only when
     // the worker itself broke (which `fanOutWorkers` reports as the fatal error).

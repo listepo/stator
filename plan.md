@@ -757,6 +757,14 @@ which 1.1% exact) as debt. Extract a shared helper per clone family at the respo
 `pnpm run dupes:baseline` in the same change. **Check:** the baseline is empty; `pnpm run dupes`
 then runs with no baseline at all.
 
+~~**Task 6.17 — Test impact: build and run only what a change reaches.**~~ ✅ **landed 2026-10-02**
+(steps 1–3 and 5; Check (a)–(e) passed) — evidence in [done.md](done.md) → Phase 6 Task 6.17
+(plan-notes 293). **Still open — step 4, CI:** after PR #45's staged pipeline, `main` and the
+nightly run `pnpm run test:impact:record` and upload `.cache/impact/impact-map.json` as an
+artifact; pull requests download the newest `main` map and run `pnpm run test:impact` (it falls
+back to the full run, saying why, when that map is missing or not an ancestor). Done when a pull
+request's CI log shows a selection made from a `main` map.
+
 ~~**Task 6.18 — `stator.config.json`: every CLI option in one validated file.**~~ ✅ **landed 2026-10-02** — evidence in [done.md](done.md) → Phase 6 Task 6.18 (plan-notes 303; `docs/CONFIG.md`).
 
 **Task 6.19 — Stator compiles itself and its own packages: a self-compilation test — [D3]**
@@ -2353,3 +2361,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.20** (2026-10-02): **T11.5a — per-module namespaces before T11.6** (plan-notes 302). Each module gets its own top-level namespace (module-qualified C names), and every aliasing shape lands: renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *`. This removes the one-namespace `STA1214` collisions that T11.2 found (plan-notes 294). T11.6 depends on it; T12.1 step 3 shares `export { a as b }` with it.
 - **v4.21** (2026-10-02): **Task 6.19 — self-compilation test** (plan-notes 304). Stator compiles itself and its own packages (`std`, later `node`, `webapi`, `renderer-clay`, `interpreter`) as a ratcheted test. Per-target diagnostic counts may only shrink. A target at zero builds and runs its smoke check, and for the compiler that check is a byte-identical stage-2 bootstrap. Baseline: compiler 2 522 `STA1214` in `ts` mode; `std` already compiles.
 - **v4.22** (2026-10-02): **Upstream test suites for `node` and `webapi`; Phase 11 outranks Phase 13** (plan-notes 305). New T11.7: Node's own `test/parallel` slice, pinned to `.node-version` and fetched rather than vendored, runs through vitest with a strict-TS `common` and `node:assert`, ratcheted, and adds a column to `docs/NODE.md`. New T13.6 does the same for web-platform-tests `dom/` and `css/cssom/`. Phase 11 is now `P1` and Phase 13 is `P3`.
+- **v4.23** (2026-10-02): **Task 6.17 — test impact selection** (plan-notes 293). Creator-directed: on pull requests and locally, build and run only the tests whose execution reaches a changed line, through TypeScript and on into the C/Zig runtime, using a per-test coverage map recorded by the full run on `main`. Falls back to the full run when the map cannot be trusted; `test:affected` is replaced.

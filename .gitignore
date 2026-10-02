@@ -12,6 +12,8 @@ packages/std/build/
 reasonix.toml
 # moon's local task cache and run artifacts.
 .moon/cache/
+# Test impact map (plan.md §9 Task 6.17): machine-local, keyed to a commit, never committed.
+.cache/
 packages/tests/differential/failures/
 # Live fuzzer scratch: repo-local (the CLI resolves relative to the input), so lint and git both
 # have to know it is transient -- otherwise `pnpm run ci` fails whenever a fuzzer run overlaps it.
