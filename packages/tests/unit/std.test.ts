@@ -8,8 +8,8 @@
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'vitest';
@@ -41,7 +41,11 @@ function underTerminal(binary: string): [string, string[]] {
  * pseudo-terminal when `terminal` is set. */
 function buildAndRun(
   source: string,
-  options: { readonly input?: string; readonly terminal?: boolean } = {},
+  options: {
+    readonly input?: string;
+    readonly terminal?: boolean;
+    readonly args?: readonly string[];
+  } = {},
 ): ReturnType<typeof spawnSync> & { stdout: string } {
   return withProgram(source, (entry, dir) => {
     const out = join(dir, 'main');
@@ -58,7 +62,11 @@ function buildAndRun(
         timeout: 30_000,
       });
     }
-    return spawnSync(out, [], { encoding: 'utf8', input: options.input ?? '', timeout: 30_000 });
+    return spawnSync(out, options.args ?? [], {
+      encoding: 'utf8',
+      input: options.input ?? '',
+      timeout: 30_000,
+    });
   });
 }
 
@@ -229,3 +237,68 @@ test('std/hash randomBytes draws fresh bytes that cover the whole byte range', N
   assert.equal(run.status, 0, String(run.stderr));
   assert.equal(run.stdout, 'true\n256\n');
 });
+
+// plan.md §11c T11.3 step 3: what the `std_process` golden cannot run — the golden runner passes
+// no arguments and demands status 0, and a pid, a clock or a memory size differs every run.
+test("std/process argv is main's argument vector, byte for byte", NATIVE_ONLY, () => {
+  const args = ['plain', 'two words', '', 'h\u00e9 \u{1f600}', '--flag=x'];
+  const run = buildAndRun(
+    'import { argv } from "std/process";\nconst all = argv();\n' +
+      'console.log(all.length);\nfor (const arg of all.slice(1)) {\n  console.log(`[${arg}]`);\n}\n' +
+      'console.log((all[0] ?? "").endsWith("/main"));\n',
+    { args },
+  );
+  assert.equal(run.status, 0, String(run.stderr));
+  assert.equal(
+    run.stdout,
+    `${String(args.length + 1)}\n${args.map((arg) => `[${arg}]\n`).join('')}true\n`,
+  );
+});
+
+test(
+  'std/process setExitCode is the status of a normal end; exit and a throw still win',
+  NATIVE_ONLY,
+  () => {
+    const set = 'import { exit, exitCode, setExitCode } from "std/process";\nsetExitCode(7);\n';
+    const normal = buildAndRun(`${set}console.log(exitCode());\n`);
+    assert.equal(normal.status, 7);
+    assert.equal(normal.stdout, '7\n');
+    assert.equal(buildAndRun(`${set}exit(3);\n`).status, 3);
+    assert.equal(buildAndRun(`${set}throw new Error("boom");\n`).status, 1);
+    assert.equal(buildAndRun(`${set}setExitCode(0);\n`).status, 0);
+  },
+);
+
+test(
+  'std/process and std/os identity, clock and memory answer plausible values',
+  NATIVE_ONLY,
+  () => {
+    const run = withProgram(
+      'import { hostname } from "std/os";\n' +
+        'import { execPath, hrtimeNs, memoryUsage, pid, ppid } from "std/process";\n' +
+        'import { sleepMs } from "std/time";\n' +
+        'const t0 = hrtimeNs();\nsleepMs(20);\nconst t1 = hrtimeNs();\n' +
+        'console.log(pid());\nconsole.log(ppid());\nconsole.log(execPath());\n' +
+        'console.log(t1 - t0);\nconsole.log(memoryUsage().rss);\nconsole.log(hostname());\n',
+      (entry, dir) => {
+        const out = join(dir, 'main');
+        const build = spawnSync(process.execPath, [CLI, 'build', entry, '-o', out], {
+          encoding: 'utf8',
+        });
+        assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
+        const ran = spawnSync(out, [], { encoding: 'utf8', timeout: 30_000 });
+        return { ran, exe: realpathSync(out) };
+      },
+    );
+    assert.equal(run.ran.status, 0, run.ran.stderr);
+    const [pid, ppid, exe, elapsed, rss, host] = run.ran.stdout.trimEnd().split('\n');
+    // spawnSync starts the binary directly, so its parent is this test process.
+    assert.equal(Number(ppid), process.pid);
+    assert.ok(Number(pid) > 0 && Number(pid) !== process.pid);
+    assert.equal(exe, run.exe);
+    assert.equal(host, hostname());
+    // A 20 ms sleep on the monotonic clock: at least 20 ms, and well under the run's timeout.
+    assert.ok(Number(elapsed) >= 20e6 && Number(elapsed) < 30e9, `elapsed ${String(elapsed)} ns`);
+    assert.ok(Number(rss) >= 1 << 20 && Number(rss) < 2 ** 34, `rss ${String(rss)}`);
+  },
+);
