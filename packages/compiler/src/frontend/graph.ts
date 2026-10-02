@@ -1,15 +1,15 @@
 /* The module graph (plan.md §5 Task 3.11): which files the program is, and in what order their
  * top-level code runs.
  *
- * Whole-program v0. The compiled artifact is ONE merged module: each file's statements, in
- * topological order (dependencies first), sharing one binding namespace. An import therefore
- * binds nothing -- `import { x } from './b.ts'` makes the importer's `x` resolve to b's own
- * top-level binding, BY NAME, which is why the gate refuses every module shape that renames
- * (`x as y`) and why this walk refuses two files declaring the same top-level name.
+ * Whole-program. The compiled artifact is ONE module: each file's statements, in topological
+ * order (dependencies first). Every module keeps its own top-level namespace (plan.md §11c
+ * T11.5a): the lowering gives each file a scope of its own, and an import binds its local name to
+ * the exporting file's binding, so two files may declare the same name and a file's unexported
+ * names are invisible to the others.
  *
  * Cycles are STA3001 with the cycle spelled out, never a silently-picked order (plan.md Task
  * 3.11): ESM gives a cyclic graph well-defined semantics only via live bindings and TDZ checks,
- * neither of which a merged namespace can express honestly.
+ * and an order picked here would run some importer before the module it reads.
  */
 
 import * as ts from 'typescript';
@@ -62,13 +62,12 @@ export function moduleOrder(program: ts.Program, entry: ts.SourceFile, mode: Mod
     order.push(file);
   };
   visit(entry);
-
-  checkCollisions(order, mode, diagnostics);
   return { order, diagnostics };
 }
 
-/** The files whose top-level code must run before this one's: every non-type-only import edge.
- * `import type` is erased and constrains nothing at runtime. A specifier that does not resolve is
+/** The files whose top-level code must run before this one's: every non-type-only import edge,
+ * and every re-export (`export … from`), which links the target module exactly as an import does.
+ * `import type` and `export type … from` are erased and constrain nothing at runtime. A specifier that does not resolve is
  * not reported here -- TypeScript already errored on it during program construction, and this walk
  * only runs on a program that survived that. */
 function valueImports(
@@ -85,6 +84,16 @@ function valueImports(
         continue;
       }
       pushResolved(program, file, stmt.moduleSpecifier.text, stmt, edges);
+      continue;
+    }
+    if (ts.isExportDeclaration(stmt)) {
+      if (
+        !stmt.isTypeOnly &&
+        stmt.moduleSpecifier !== undefined &&
+        ts.isStringLiteral(stmt.moduleSpecifier)
+      ) {
+        pushResolved(program, file, stmt.moduleSpecifier.text, stmt, edges);
+      }
       continue;
     }
     collectImportCallEdges(program, file, stmt, edges);
@@ -131,62 +140,4 @@ function pushResolved(
   if (target !== undefined && !target.isDeclarationFile) {
     edges.push({ target, at });
   }
-}
-
-/** One namespace for the whole program means one owner per name. Two files declaring the same
- * top-level name -- exported or not; module scopes that TypeScript keeps apart -- collide in the
- * merge, so the collision is refused rather than silently letting the later file's initializer
- * overwrite the earlier one's binding. */
-function checkCollisions(
-  order: readonly ts.SourceFile[],
-  mode: Mode,
-  diagnostics: Diagnostic[],
-): void {
-  const owners = new Map<string, string>();
-  for (const file of order) {
-    for (const { name, at } of topLevelNames(file)) {
-      const owner = owners.get(name);
-      if (owner === undefined) {
-        owners.set(name, file.fileName);
-      } else if (owner !== file.fileName) {
-        diagnostics.push(
-          diagnosticFromNode(
-            at,
-            file,
-            'STA1214',
-            'not-yet',
-            mode,
-            `'${name}' is declared at the top level of both ${owner} and ${file.fileName}; ` +
-              'modules share one namespace in whole-program v0 -- rename one; ' +
-              'planned for Phase 5',
-            // Per-module namespaces, which is the module surface Phase 5 owns -- not builtins.
-            // This site named Phase 4 until 2026-09-01 and was missed by Task 4.7's first sweep,
-            // which read `gate.ts` alone: the gate is where MOST not-yets live, not where all of
-            // them do. `tests/unit/phases.test.ts` now scans every file under `src/` for exactly
-            // that reason (plan-notes 136).
-            5,
-          ),
-        );
-      }
-    }
-  }
-}
-
-function topLevelNames(file: ts.SourceFile): { readonly name: string; readonly at: ts.Node }[] {
-  const names: { name: string; at: ts.Node }[] = [];
-  for (const stmt of file.statements) {
-    if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (ts.isIdentifier(decl.name)) {
-          names.push({ name: decl.name.text, at: decl.name });
-        }
-      }
-    } else if (
-      (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) &&
-      stmt.name !== undefined
-    ) {
-      names.push({ name: stmt.name.text, at: stmt.name });
-    }
-  }
-  return names;
 }

@@ -94,7 +94,9 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
   widened binding, a dynamic read, a runtime throw. Examples: a possibly-`undefined` read
   (TS2532), `"" == 0` (TS2367), a namespace IIFE reassigning a function declaration's binding
   (TS2630; a named function expression's own name is immutable and stays fatal), a spread the
-  checker narrowed to `never` (TS2698).
+  checker narrowed to `never` (TS2698), and two `export *` re-exports binding one name differently
+  (TS2308: ES drops the name from the namespace, and importing it by name is `STA3003`, plan.md
+  §11c T11.5a; `ts` mode keeps TS2308 fatal).
 - **Fatal until listed:** every other type-level refusal. The lowering trusts JSDoc types and
   the checker's control flow, so dropping a refusal it has no answer for compiles to an internal
   error at best and to a silent miscompile at worst (`const c = 1; c = 2` printed `2` where Node
@@ -327,9 +329,11 @@ Structure: `path:line:col STA#### [mode] message`
 
 ### Module init and top-level await
 
-Stator merges the program into one module in Task 3.11's topological order (dependencies first, entry last) and evaluates that body as a single unit. When the body contains a top-level `await`, that unit is async: `main` starts it and drains the microtask queue until it settles.
+Stator evaluates the program's modules in Task 3.11's topological order (dependencies first, entry last) as a single unit; each module keeps its own top-level namespace (plan.md §11c T11.5a), so only the order is shared. When the body contains a top-level `await`, that unit is async: `main` starts it and drains the microtask queue until it settles.
 
-Node's ESM loader may **interleave sibling subgraphs** — two modules that do not import each other can both run their prefix, hit `await`, and continue in registration order. Stator does not. A dependency's top-level await runs to completion before the next file in topological order begins. The difference is observable only in sibling interleavings; a linear import chain matches Node. Mirroring Node would need per-file init promises and a scheduler, which the whole-program merge does not have.
+Node's ESM loader may **interleave sibling subgraphs** — two modules that do not import each other can both run their prefix, hit `await`, and continue in registration order. Stator does not. A dependency's top-level await runs to completion before the next file in topological order begins. The difference is observable only in sibling interleavings; a linear import chain matches Node. Mirroring Node would need per-file init promises and a scheduler, which the whole-program unit does not have.
+
+Imports are **live bindings**, as in Node, however they are spelled: a named, renamed or default import and every member read through a namespace (`ns.x`, `const { x } = ns`, `ns["x"]`) read the exporter's own binding. The namespace OBJECT is where Stator differs: it is built once, when its first importer starts, so a value that reaches it without a member name (`console.log(ns)`, `Object.keys(ns)`, `ns` passed to a function taking a plain object type) sees each export as it was then, and prints as a plain object rather than Node's `[Module: null prototype]`. docs/VALUE.md §4.14.
 
 ## 6. `stator explain` — what the compiler will do with a program
 

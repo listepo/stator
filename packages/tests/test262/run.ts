@@ -9,7 +9,15 @@
  * writes no result files (a slice must never pose as `results.json` or as a shard `--aggregate`
  * would merge), and always exits 0 — inspect the counts. Combining `--filter` with `--aggregate`
  * is a loud error for the same reason: aggregating a slice would publish it as the corpus. */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build, BuildError, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
@@ -56,6 +64,8 @@ const DIAGNOSTIC_ERROR_CLASSES: Readonly<Record<string, readonly string[]>> = {
   STA2004: ['TypeError'],
   STA2005: ['RangeError', 'SyntaxError', 'TypeError'],
   STA2006: ['TypeError'],
+  // An ambiguous `export *` name imported by name: ES's link-time SyntaxError (plan-notes 302).
+  STA3003: ['SyntaxError'],
 };
 
 function listValue(raw: string): string[] {
@@ -215,8 +225,13 @@ function testFiles(root: string): string[] {
   return result.sort((left, right) => left.localeCompare(right));
 }
 
+/** The code that answers for a refused build: the first one the runner can map to an ES error
+ * class, else the first one. A gate reports every construct at once, so a test's own refusal
+ * (an ambiguous `export *` import, STA3003) can follow a not-yet code the harness raised first --
+ * and the refusal, not the schedule, is what the negative test asks about (plan-notes 302). */
 function diagnosticCode(stderr: string): string | undefined {
-  return /\b(STA\d{4})\b/.exec(stderr)?.[1];
+  const codes = [...stderr.matchAll(/\b(STA\d{4})\b/g)].map((match) => match[1] ?? '');
+  return codes.find((code) => DIAGNOSTIC_ERROR_CLASSES[code] !== undefined) ?? codes[0];
 }
 
 /** The lowest not-yet code in a build that raised NOTHING but not-yet codes.
@@ -317,6 +332,32 @@ async function buildInProcess(input: string, output: string): Promise<ProcessRes
   ]);
 }
 
+/** Relative module specifiers in `source`: static imports, re-exports and literal `import()`. */
+const RELATIVE_SPECIFIER = /(?:\bfrom|\bimport)\s*\(?\s*['"](\.{1,2}\/[^'"]+)['"]/g;
+
+/** Copy every module `entry` reaches by relative specifier into `dir`, under the same relative
+ * path. A module test imports `_FIXTURE` siblings -- and sometimes itself -- by name, so it must
+ * compile beside them, not from a renamed temp file (plan-notes 302). The entry itself is never
+ * copied: `dir` already holds it, harness included, under its own name. */
+function copyModuleSiblings(entry: string, dir: string): void {
+  const origin = dirname(entry);
+  const pending = [entry];
+  const seen = new Set<string>([entry]);
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (file === undefined) break;
+    for (const match of readFileSync(file, 'utf8').matchAll(RELATIVE_SPECIFIER)) {
+      const target = join(dirname(file), match[1] ?? '');
+      if (seen.has(target) || !existsSync(target)) continue;
+      seen.add(target);
+      const copy = join(dir, relative(origin, target));
+      mkdirSync(dirname(copy), { recursive: true });
+      copyFileSync(target, copy);
+      pending.push(target);
+    }
+  }
+}
+
 async function execute(
   path: string,
   root: string,
@@ -328,7 +369,18 @@ async function execute(
   mkdirSync(work, { recursive: true });
   // Keyed by the pool slot as well as the pid: two workers sharing one filename would compile each
   // other's source and report the answer to the wrong test.
-  const input = join(work, `test-${process.pid}-${String(slot)}.js`);
+  // A module test compiles from a directory of its own, under its own name, beside the modules
+  // it imports (`copyModuleSiblings`); a script needs no neighbours.
+  const isModule = metadata.flags.includes('module');
+  const moduleDir = join(work, `module-${process.pid}-${String(slot)}`);
+  if (isModule) {
+    rmSync(moduleDir, { recursive: true, force: true });
+    mkdirSync(moduleDir, { recursive: true });
+    copyModuleSiblings(path, moduleDir);
+  }
+  const input = isModule
+    ? join(moduleDir, basename(path))
+    : join(work, `test-${process.pid}-${String(slot)}.js`);
   const output = join(work, `test-${process.pid}-${String(slot)}.out`);
   writeFileSync(input, harnessSource(root, path, metadata), 'utf8');
   const compiled = await buildInProcess(input, output);
@@ -389,9 +441,9 @@ async function execute(
       features: metadata.features,
     };
   } finally {
-    for (const file of [input, output]) {
+    for (const file of [input, output, ...(isModule ? [moduleDir] : [])]) {
       try {
-        rmSync(file, { force: true });
+        rmSync(file, { recursive: true, force: true });
       } catch {
         /* best-effort temp cleanup */
       }

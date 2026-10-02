@@ -3326,3 +3326,89 @@ naming Phase 10.
 
 **Check:** goldens for env/path/process/fs sync; subset rows match; no Node polyfill dependency.
 
+## Phase 11 — T11.5a per-module namespaces ✅ (2026-10-02)
+
+### T11.5a. `packages/compiler`: per-module namespaces — **[D4]**
+
+Creator's direction (2026-10-02, plan-notes 302). This is a prerequisite of T11.6. Today one
+program has **one** namespace, so three things go wrong:
+- Importing a module reserves all of its top-level names, exported or not, for the whole program.
+  A user `function get()` next to `import { has } from "std/env"` is `STA1214`.
+- Every aliasing shape is `STA1214` (docs/SUBSET.md, "Renamed/default/namespace imports" and
+  "Re-exports" rows), so a library cannot hide its helpers or rename what it exports.
+- `packages/node` would hit both on every module (plan-notes 294).
+
+Steps:
+1. **Per-module symbols.** Every module's top-level bindings get a module-qualified C name. Two
+   modules may then declare the same name, and a module's unexported names are invisible to
+   others. Diagnostics and `#line` mapping keep the source name.
+2. **Aliasing imports.** `import { x as y }`, default imports, and `import * as ns` as a static
+   namespace object. A static `ns.x` resolves at compile time, like the `import()` namespace from
+   Phase 5 step 10. A namespace that escapes as a value uses that same `HObject`
+   (`namespace: true`).
+3. **Aliasing exports.** `export { x as y }`, `export default`, and re-exports:
+   `export { x } from`, `export * from` (with ES ambiguity rules: a name exported twice by `*` is
+   dropped, not an error) and `export * as ns from`. This takes over T12.1 step 3's
+   `export { a as b }`. Whichever card lands first owns it, and the other cites it.
+4. **Both modes, both kinds of graph.** The same rules apply to `ts`-mode modules, `js`-mode
+   modules and mixed graphs. `std/*` and the T12.1 vendor module are ordinary modules here,
+   with no special case.
+5. **Docs.** Flip the SUBSET.md rows. The Phase 5 step 12 line that still owns `import * as ns`
+   cites this card. Update MODES.md if init order or live bindings show a Node difference.
+
+**Check:**
+- A user `function get()` beside `import { has } from "std/env"` builds.
+- Two modules with a same-named private helper build and run as under Node.
+- Decision tests flip `not-yet` → `static` for every aliasing shape in both modes, removing the
+  `// @expected-fail` markers in the same commit.
+- Goldens cover renamed imports and exports, default, `import * as ns`, `export *` with an
+  ambiguous name, and a re-export chain. Each matches Node byte for byte.
+- `STA1214` is no longer emitted for those shapes, and the `test262` `language/module-code`
+  pass count rises, recorded in plan-notes.
+
+**Check — PASSED as amended** (the creator moved the test262 clause to T11.4 on 2026-10-02, plan-notes
+302; run 2026-10-02, darwin/arm64, Node per `.node-version`,
+on main `ede4537`):
+
+- **`std/env` beside a user `get`.** `import { has } from "std/env"; function get(): number {
+  return 41; }` builds and prints `42 true`.
+- **Same-named private helpers.** Two modules declaring the same private helper build and run as
+  under Node: the fixtures `subset_cross_module_collision_{ts,js}`, and the
+  `golden/{ts,js}/module_aliasing` goldens.
+- **Decision tests.** `node packages/tests/subset/run.ts` →
+  `subset: 793 fixtures — 758 passed, 35 expected-fail, 0 failed`.
+  - Every aliasing shape is static in both modes: renamed, default and namespace imports; renamed
+    exports; `export default <expression>`; `export *`; `export * as`; cross-module collisions.
+  - `subset_re_exports_{ts,js}` lost `@expected-fail` in this change.
+  - The ambiguous `export *` is `STA3003` in js mode and `STA0012` (TS2308) in ts mode.
+- **Goldens.** `node packages/tests/golden/run.ts` → `golden: 408 fixtures — 408 passed, 0 failed`.
+  - `golden/ts/module_aliasing` covers renamed imports and exports, default exports,
+    `import * as ns`, `export * as` and a re-export chain.
+  - `golden/js/module_aliasing` is a mixed js + ts graph. It adds `export *` with an ambiguous
+    name and an expression default.
+- **`STA1214` is gone for those shapes**, and the self-compilation baseline shrinks with it.
+  `node packages/tests/selfhost/run.ts` reported `packages/compiler: STA1214 2572 -> 1771`, and
+  `--update` recorded the new count in `packages/tests/selfhost/baseline.json`.
+- **test262 `language/module-code` (599 tests): moved to T11.4 by the amendment.** The pass count
+  does not rise yet; these numbers are T11.4's baseline.
+
+  | Run | Passed | Skipped | Failed |
+  | --- | --- | --- | --- |
+  | before | 152 | 351 | 96 |
+  | after | 152 | 426 | 21 |
+
+  - The "before" runner compiled module tests away from their fixtures. Its SyntaxError
+    passes, the four ambiguous-export tests among them, matched "Cannot find module".
+  - The runner now compiles each module test beside its fixtures. The four ambiguous-export tests
+    pass on `STA3003`, and no positive module test can pass yet, because the corpus harness itself
+    is `STA1214`.
+  - Full evidence is in plan-notes 302, "Implementation" and "Check amended". The clause needs the
+    harness to compile, which is T11.4's unsupported-globals work.
+- **Rest of the gate** (`pnpm run ci`, exit 0).
+  - `tsc` (compiler, tests, std), `oxlint --deny-warnings` and `oxfmt --check`: clean.
+  - `cpd`: 207 clones, none new against the baseline.
+  - vitest: 50 files, 672 tests.
+  - `just runtime-test`: the print corpus matches Node.
+  - `builtins`: 234/294. `node-coverage --check`: current.
+  - leak: plateau.
+  - ASan: `node packages/tests/golden/asan-gate.ts` → 408 passed, `golden-asan green`.

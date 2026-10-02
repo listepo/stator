@@ -83,6 +83,12 @@ export class Scope {
    * that reason (plan-notes 216). */
   private readonly unitDeclared: Set<string>;
 
+  /** Spellings this scope owns at the top of the unit even though another scope of the same unit
+   * may declare them first (plan.md §11c T11.5a). Only the program entry's module scope has any:
+   * every module shares the module unit's slot space, and the entry keeps its source names so a
+   * dependency's same-spelled top-level binding is the one that takes a fresh name. */
+  private readonly claimed = new Set<string>();
+
   /** The enclosing scope, or null at the module root. `child()` and `functionScope()` link here
    * instead of duplicating the visible maps, which is what keeps per-block scope creation O(1)
    * in the size of the program rather than O(visible bindings). */
@@ -114,6 +120,23 @@ export class Scope {
    * inherited. */
   functionScope(): Scope {
     return new Scope(this, new Set());
+  }
+
+  /** Reserve `names` for this scope before any module of the unit declares them: a sibling
+   * module scope that declares one of them later gets a fresh name, and this scope keeps the
+   * source spelling. */
+  claim(names: Iterable<string>): void {
+    for (const name of names) {
+      this.claimed.add(name);
+      this.unitDeclared.add(name);
+    }
+  }
+
+  /** Bind `name` in this scope to a binding another scope owns (an import, plan.md §11c T11.5a):
+   * a reference here resolves to `hir` with `type`, and nothing new is allocated. */
+  alias(name: string, hir: string, type: HType): void {
+    this.ownTypes.set(name, type);
+    this.ownHirNames.set(name, hir);
   }
 
   has(name: string): boolean {
@@ -155,7 +178,8 @@ export class Scope {
     // with a visible binding -- or a second declaration anywhere else in this unit -- needs a
     // name of its own or the two share a slot.
     const sameScope = this.declaredHere.has(name);
-    const secondHome = !sameScope && (this.has(name) || this.unitDeclared.has(name));
+    const secondHome =
+      !sameScope && !this.claimed.has(name) && (this.has(name) || this.unitDeclared.has(name));
     const hir = secondHome ? shadowName(name) : this.hirName(name);
     this.declaredHere.add(name);
     this.unitDeclared.add(name);

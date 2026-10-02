@@ -445,6 +445,13 @@ export const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // `assign` that already copies an array spread (plan.md §8 step 12(c)). ts mode keeps the
   // refusal (STA0012).
   2698, // Spread types may only be created from object types.
+  // Two `export *` re-exports binding one name differently: ES makes the name AMBIGUOUS, which
+  // drops it from the namespace and makes importing it by name a SyntaxError -- not an error at
+  // the `export *` itself (§16.2.1.6.3 ResolveExport). The namespace type drops the name
+  // (`ambiguousStarExports`) and the gate refuses a by-name import of it (STA3003), so nothing
+  // the checker would have caught gets through. ts mode keeps the refusal (STA0012;
+  // plan-notes 302).
+  2308, // Module 'X' has already exported a member named 'Y'. Consider explicitly re-exporting...
 ]);
 
 /** Checker refusals Stator answers with exact runtime semantics in BOTH modes, unlike the

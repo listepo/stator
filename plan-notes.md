@@ -9751,6 +9751,98 @@ mechanism: resolving an imported name to its defining module's binding. Splittin
 build that resolution twice. `export { a as b }` is also T12.1 step 3. Whichever card lands first
 owns it, so it is written once.
 
+**Implementation (T11.5a lands).**
+
+- **Per-module symbols.** Every module gets its own scope under the module unit
+  (`lower/index.ts` `moduleScopes`). HIR names stay keys, so a top-level name that two files
+  declare is alpha-renamed through the existing shadow mechanism (`lower/scope.ts`), not
+  prefixed. The entry `claim`s its own top-level names first, so the entry keeps its source
+  spellings and a dependency's same-spelled binding is the one renamed. An import binds its local
+  name with `Scope.alias` to the exporting module's binding, which keeps live bindings. Card step 1
+  says "module-qualified C names". C globals are slot indices keyed by HIR name, so distinct HIR
+  names are the qualification, and the emitter did not change. The graph's cross-file collision
+  refusal is gone (`frontend/graph.ts`). `std/*` has no special case: a user `function get()`
+  beside `import { has } from "std/env"` builds and prints `42 true`.
+- **Resolving an exported name** is one helper, `frontend/modules.ts` `exportTarget`. It walks
+  the checker's alias chain one hop at a time and stops at `export default <expression>`, because
+  ES evaluates that expression once into the module's `*default*` binding. Renamed imports,
+  default imports, renamed exports, `export { x } from`, `export *` and `export * as ns from` all
+  resolve through it.
+- **Namespace objects.** `import * as ns`, `export * as ns from` and a literal `import()` share
+  one hidden root global per module (`\0namespace:<file>`), built at the first importer. That is
+  the Phase 5 step 10 HObject. A member read through it is resolved statically to the export
+  binding, which keeps it live; this covers dot access, a literal key, destructuring and nested
+  namespaces. The object itself is a snapshot (docs/VALUE.md §4.14, docs/MODES.md).
+  Classes are not namespace fields: a class value is not a first-class HIR value yet.
+  `new ns.C()`, `ns.C.s` and `instanceof ns.C` therefore stay `STA1214` (Phase 5).
+- **`export *` ambiguity.** `ambiguousStarExports` follows ES ResolveExport. An ambiguous name is
+  left out of the namespace, and a by-name import or re-export of it is the new `STA3003`
+  (docs/DIAGNOSTICS.md). js mode drops TS2308 so that the ES answer stands. ts mode keeps TS2308
+  as `STA0012`, since a strict program must not export an ambiguity.
+- **`export default <expression>`.** TypeScript types the expression `any` at the
+  ExportAssignment, so `export default 42` lowered as `unknown` (`STA4007`). `checkerTypeAt`
+  reads the module's default export symbol type instead.
+- **Two latent bugs the renaming exposed, fixed:**
+  - Generic function specializations of a dependency module now carry `@<ordinal>`, so two
+    modules' same-named generics no longer share one specialization.
+  - The override question (`isOverridden`) was asked of source-level class families in the
+    asking file only. It is now asked across the whole program by HIR class name. On origin/main,
+    a subclass in another file overriding a method was dispatched statically to the base method,
+    so it printed the wrong answer.
+- **Holdouts, `STA1214` not-yet:**
+  - A generic class whose name another module's class also uses (Phase 11). Class
+    specializations are keyed by source name; qualifying them like functions needs the
+    descriptor and printing paths to agree.
+  - A class reached through a namespace (Phase 5).
+  - An anonymous `export default class {}`.
+  - `export =` is unchanged.
+- **Tests.** Decision tests for renamed, default and namespace imports, renamed and default
+  exports, `export *`, `export * as` and a cross-module collision, in both modes, plus the
+  ambiguous shape (`STA3003` in js mode, `STA0012` in ts mode). `subset_re_exports_*` lost their
+  `@expected-fail`. Goldens: `golden/ts/module_aliasing` and `golden/js/module_aliasing`, a mixed
+  graph.
+
+**test262 `language/module-code`, 599 tests.**
+
+| Run | Passed | Skipped | Failed |
+| --- | --- | --- | --- |
+| origin/main runner and compiler (before) | 152 | 351 | 96 |
+| fixed runner, origin/main compiler | 152 | 425 | 22 |
+| fixed runner, this change (after) | 152 | 426 | 21 |
+
+The passed count does not rise, and the old count overstated conformance.
+
+- **The old runner was broken for module tests.** It compiled each test from a renamed temp
+  file, so every `import "./x_FIXTURE.js"` was "Cannot find module" (`STA0012`). Every negative
+  test expecting a SyntaxError then passed on that error, whatever it was about.
+- **What the runner does now.** It compiles a `module`-flagged test beside copies of its
+  fixtures, copying them transitively. It maps `STA3003` to SyntaxError. When stderr carries
+  several codes, it reports the first code that has an error-class mapping.
+- **What passes.** The 152 passes are 148 genuine early-error `STA0012` negatives plus the four
+  `ambiguous-export-bindings/error-*` tests. On origin/main those four passed falsely, on "Cannot
+  find module"; they now pass on `STA3003`.
+- **Why no positive module test can pass yet.** The corpus harness (`assert.js`, `sta.js`) uses
+  `String` and `JSON` as values, which is `STA1214` in js mode. Every positive test skips on
+  the harness before reaching module semantics, and `language/expressions/addition` shows the
+  same: 0 passed.
+- **The 21 failures** are `STA0012` checker errors. Most are assignments to imported bindings in
+  the `instn-*` tests, which TypeScript rejects at compile time and ES rejects at run time. The
+  rest are top-level-await syntax tests.
+- **Moved to SUPPORTED** in `test262/features.ts`: `export-star-as-namespace-from-module`.
+
+**Self-compilation (Task 6.19).** `packages/compiler` falls from 2572 to 1771 `STA1214`
+diagnostics: its own source uses the import and export shapes this card makes static.
+`packages/tests/selfhost/baseline.json` records the shrink.
+
+**Check amended (creator, 2026-10-02).** T11.5a's clause "the `test262` `language/module-code`
+pass count rises" moves to T11.4. The count could not rise here because the corpus harness
+(`assert.js`, `sta.js`) uses `String` and `JSON` as values, which is `STA1214` ("the global
+'String' is not yet supported"). Every positive module test skips on the harness before it
+reaches module semantics. T11.4's unsupported-globals family lifts that. The baseline is
+152 passed, 426 skipped and 21 failed of 599, measured with T11.5a's runner fix, which compiles a
+module test beside copies of its fixtures. Before the fix the count was 152 passed, 351 skipped
+and 96 failed, and those passes included false matches on "Cannot find module".
+
 ## 303. A config file for the CLI: `stator.config.json` with a generated JSON Schema (2026-10-02)
 
 **Plan:** new §9 Task 6.18; changelog v4.19 (v4.18 went to T11.2).
