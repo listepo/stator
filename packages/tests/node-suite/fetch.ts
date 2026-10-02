@@ -5,14 +5,37 @@
  * Downloads each `test/parallel/<test>` that expectations.json selects, and the `test/fixtures`
  * files it lists, at the tag pin.json names. A file already present is kept unless the corpus
  * was fetched at another tag, which re-fetches everything: a Node bump re-pins, and the diff of
- * results is the review. Nothing from Node's `test/common` is fetched: `require('../common')`
- * answers with this directory's strict-TS `common/` instead (host-hook.ts). */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+ * results is the review. Nothing from Node's `test/common` is fetched: the corpus's `test/common`
+ * is a link to this directory's strict-TS `common/`. The Stator build resolves `../common`
+ * through it, as the bundler resolves any relative require (`index.ts` by extension); the pinned
+ * Node, whose `require` does not try `.ts`, gets the same files from host-hook.ts. */
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { CORPUS, loadExpectations, loadPin } from './suite.ts';
 
 const STAMP = join(CORPUS, 'PIN');
+const COMMON = fileURLToPath(new URL('common', import.meta.url));
+
+/** `test/common` → `common/`. A junction on Windows, which needs no privilege and an absolute
+ * target; a link that points elsewhere (a moved checkout) is replaced. */
+function linkCommon(): void {
+  const link = join(CORPUS, 'test', 'common');
+  mkdirSync(dirname(link), { recursive: true });
+  const present = lstatSync(link, { throwIfNoEntry: false });
+  if (present?.isSymbolicLink() === true && readlinkSync(link) === COMMON) return;
+  if (present !== undefined) rmSync(link, { recursive: true, force: true });
+  symlinkSync(COMMON, link, 'junction');
+}
 
 function rawUrl(repository: string, tag: string, path: string): string {
   const slug = repository.replace(/^https:\/\/github\.com\//, '');
@@ -45,6 +68,7 @@ async function main(): Promise<void> {
   // Node's tree has no `"type"` above `test/`, so its tests are CommonJS; without this file the
   // corpus would inherit `@stator/tests`'s `"type": "module"`.
   writeFileSync(join(CORPUS, 'package.json'), '{ "type": "commonjs" }\n');
+  linkCommon();
   writeFileSync(STAMP, `${tag}\n`);
   process.stdout.write(
     `node-suite: ${String(missing.length)} fetched, ${String(unique.length - missing.length)} present at ${tag} in ${CORPUS}\n`,
