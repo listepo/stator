@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
+import { hasTypeScriptAnnotation } from './annotation.ts';
 import { isCheckable } from './narrowing.ts';
 import {
   classifyStdMember,
@@ -216,9 +217,38 @@ function keepsCheckedAnnotation(symbol: ts.Symbol, checker: ts.TypeChecker): boo
     declaration !== undefined &&
     ts.isVariableDeclaration(declaration) &&
     declaration.type !== undefined &&
-    !declaration.getSourceFile().fileName.endsWith('.js') &&
+    hasTypeScriptAnnotation(declaration) &&
     isCheckable(tsTypeToHType(checker.getTypeFromTypeNode(declaration.type), checker))
   );
+}
+
+/** Whether a 2322 whose leading identifier is `token` spans an arrow's concise body -- the return
+ * edge spelled without `return` (`(): number => jsLabel(4)`). That identifier is a callee or an
+ * operand, not an assignment target, so it must not widen: `jsLabel` itself would turn dynamic.
+ * The span must be the whole body, because an assignment body (`() => x = v`) starts at the same
+ * identifier and its own 2322 spans only `x`. A `return` statement's 2322 starts at the keyword,
+ * where `identifierAt` finds nothing (plan-notes 308). */
+function isConciseReturnAt(token: ts.Identifier, source: ts.SourceFile, length: number): boolean {
+  const start = token.getStart(source);
+  let node: ts.Node = token;
+  while (
+    !ts.isSourceFile(node.parent) &&
+    !ts.isArrowFunction(node.parent) &&
+    node.parent.getStart(source) === start
+  ) {
+    node = node.parent;
+  }
+  while (ts.isParenthesizedExpression(node.parent)) {
+    node = node.parent;
+  }
+  if (!ts.isArrowFunction(node.parent) || node.parent.body !== node) {
+    return false;
+  }
+  let body: ts.Node = node;
+  while (ts.isParenthesizedExpression(body)) {
+    body = body.expression;
+  }
+  return body.getEnd() === start + length;
 }
 
 /** The identifier a suppressed 2362/2363 assigns through, or `undefined` when the diagnostic is
@@ -725,7 +755,11 @@ function createProgramUncached(
               ? undefined
               : compoundAssignTarget(token);
         const checker = program.getTypeChecker();
-        const symbol = target === undefined ? undefined : checker.getSymbolAtLocation(target);
+        const symbol =
+          target === undefined ||
+          (diag.code === 2322 && isConciseReturnAt(target, diag.file, diag.length ?? 0))
+            ? undefined
+            : checker.getSymbolAtLocation(target);
         if (
           symbol !== undefined &&
           !(diag.code === 2322 && keepsCheckedAnnotation(symbol, checker))

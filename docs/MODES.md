@@ -216,6 +216,29 @@ const s: number = label(10);   // check(label(10), "number") → STA2001
 An annotation no tag settles (an object type or a union) still widens the binding to the dynamic
 path, the way a `.js` binding does.
 
+The call and return edges follow the same rule (plan-notes 308). An argument the checker refuses
+for a parameter (`TS2345`), or a returned value it refuses for the function's return type (`TS2322`
+on a `return` or an arrow's concise body), is suppressed in `js` mode and checked when a TypeScript
+file annotated that parameter or return. Function, method and constructor parameters all count;
+async functions and generators do not, since their annotation is a `Promise` or a generator, not
+the returned value's type:
+
+```typescript
+// main.ts
+import { label, pick } from "./lib.js";
+
+function inc(x: number): number { return x + 1; }
+function first(): number { return pick(true); }  // check(pick(true), "number") passes
+const h = (): number => label(4);                // check(label(4), "number") → STA2001
+
+inc(pick(true));  // check(pick(true), "number") passes
+inc(label(1));    // check(label(1), "number") → STA2001, `inc` never runs
+```
+
+A callee declared in a `.js` file (or described by a `.d.ts`) keeps Node's coercion: its JSDoc is
+not a TypeScript annotation, so `increment("2")` against `/** @param {number} value */` still
+prints `21`, as Node does (golden `js/argument_mismatch`).
+
 A check appears only when the imported value is still Unknown:
 
 ```javascript

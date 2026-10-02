@@ -2,7 +2,7 @@
   "packages/compiler": {
     "verdict": "not-yet",
     "codes": {
-      "STA1214": 2553
+      "STA1214": 2572
     }
   },
   "packages/std/src/env.ts": {

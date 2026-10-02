@@ -44,6 +44,7 @@ import {
   specializationName,
   substituteHType,
 } from '../frontend/generics.ts';
+import { hasTypeScriptAnnotation } from '../frontend/annotation.ts';
 import {
   classifyExternDeclaration,
   classifyOutSlotCall,
@@ -198,7 +199,7 @@ import {
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
-import { analyzeCaptures, isFunctionLike, RECEIVER_NAME } from './captures.ts';
+import { analyzeCaptures, enclosingFunction, isFunctionLike, RECEIVER_NAME } from './captures.ts';
 import { Scope, resetShadowCounter, shadowSource } from './scope.ts';
 
 /* What HIR name each source declaration ended up with (plan.md §8 step 14).
@@ -927,11 +928,7 @@ function lowerStatement(
       if (lowered === null) {
         return null;
       }
-      const contextual = checker.getContextualType(node.expression);
-      value =
-        contextual === undefined
-          ? lowered
-          : maybeBoundary(lowered, tsTypeToHType(contextual, checker), node.expression, sourceFile);
+      value = returnBoundary(lowered, node.expression, sourceFile, checker);
     }
     const statement: ReturnStatement = {
       kind: 'return-statement',
@@ -982,25 +979,75 @@ function lowerStatement(
 }
 
 /** Check each argument against the callee's parameter types — a dynamic value reaching an
- * annotated parameter is the call-shaped form of the same edge `maybeBoundary` wraps. */
+ * annotated parameter is the call-shaped form of the same edge `maybeBoundary` wraps. A parameter
+ * a TypeScript file annotated also checks a CONCRETE argument of another type (`edgeBoundary`):
+ * js mode suppresses the checker's TS2345, and `inc(jsLabel(1))` passed a string into a `number`
+ * parameter (plan-notes 308). A `.js` callee's JSDoc keeps Node's coercion. `signature` is the
+ * callee's (or method's) type when the HIR has one; a constructor has none, so its parameters
+ * answer from their annotations. A spread argument shifts every later slot, so a call with one
+ * keeps the dynamic-value check alone, and so does a callee resolved to a declaration with no body:
+ * an overload signature need not be the one the call selected (`calleeParameters` answers the
+ * first), and a `.d.ts` has nothing to protect. */
 function checkCallArgs(
-  callee: Expression,
+  signature: HType | undefined,
   args: Expression[],
-  node: ts.CallExpression,
+  node: ts.CallExpression | ts.NewExpression,
   sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
 ): Expression[] {
-  const signature = callee.type;
-  if (signature.kind !== 'fn') {
-    return args;
-  }
+  const sites = node.arguments ?? [];
+  const callee = sites.some(ts.isSpreadElement) ? undefined : calleeParameters(node, checker);
+  const declared =
+    callee !== undefined &&
+    isFunctionLike(callee.declaration) &&
+    callee.declaration.body !== undefined
+      ? callee.parameters
+      : undefined;
   return args.map((arg, i) => {
-    const expected = signature.params[i];
-    const site = node.arguments[i];
+    const site = sites[i];
+    const param = declared?.[i];
+    const annotation = param?.type;
+    const expected =
+      signature?.kind === 'fn'
+        ? signature.params[i]
+        : annotation === undefined
+          ? undefined
+          : tsTypeToHType(checker.getTypeFromTypeNode(annotation), checker);
     if (expected === undefined || site === undefined) {
       return arg;
     }
-    return maybeBoundary(arg, expected, site, sourceFile);
+    return param !== undefined &&
+      param.dotDotDotToken === undefined &&
+      hasTypeScriptAnnotation(param)
+      ? edgeBoundary(arg, expected, site, sourceFile)
+      : maybeBoundary(arg, expected, site, sourceFile);
   });
+}
+
+/** The return edge: a returned value checked against the type its context expects. A dynamic value
+ * meets `maybeBoundary`; a concrete value of ANOTHER type is checked too (`edgeBoundary`) when a
+ * TypeScript file annotated the enclosing function's return -- js mode suppresses the checker's
+ * TS2322, and `function g(): number { return jsLabel(2) }` returned a string as a `number`
+ * (plan-notes 308). Async functions and generators are left out: their annotation is a `Promise`
+ * or a generator, not the type a returned value must have. */
+function returnBoundary(
+  value: Expression,
+  expression: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+): Expression {
+  const contextual = checker.getContextualType(expression);
+  if (contextual === undefined) {
+    return value;
+  }
+  const expected = tsTypeToHType(contextual, checker);
+  const fn = enclosingFunction(expression);
+  return fn !== undefined &&
+    fn.asteriskToken === undefined &&
+    fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true &&
+    hasTypeScriptAnnotation(fn)
+    ? edgeBoundary(value, expected, expression, sourceFile)
+    : maybeBoundary(value, expected, expression, sourceFile);
 }
 
 /** Wrap `value` in a BoundaryCheck when it is Unknown and `expected` is a tag the runtime
@@ -3998,7 +4045,7 @@ function lowerClassMethodCall(
       method: callPriv.property,
       slot: privateSlot,
       dispatch: 'direct',
-      args,
+      args: checkCallArgs(target.type.methods[privateSlot]?.type, args, node, sourceFile, checker),
     };
     return call;
   }
@@ -4034,7 +4081,7 @@ function lowerClassMethodCall(
         !viaSuper && isOverridden(target.type.name, propName, sourceFile, checker)
           ? 'virtual'
           : 'direct',
-      args,
+      args: checkCallArgs(target.type.methods[slot]?.type, args, node, sourceFile, checker),
     };
     return call;
   }
@@ -5694,7 +5741,7 @@ function lowerExpression(
       type: instanceType,
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       className: specialized ?? type.name,
-      args,
+      args: checkCallArgs(undefined, args, node, sourceFile, checker),
     };
     return created;
   }
@@ -6797,7 +6844,7 @@ function lowerExpression(
       type: typeAt(node, checker, bindings),
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       callee,
-      args: checkCallArgs(callee, args, node, sourceFile),
+      args: checkCallArgs(callee.type, args, node, sourceFile, checker),
     };
     return call;
   }
@@ -9116,10 +9163,15 @@ function lowerFunctionBody(
     }
     return { ...lowered, statements: [...hoistedVars, ...lowered.statements] };
   }
-  const value = lowerExpression(body, sourceFile, checker, bindings, diagnostics);
-  if (value === null) {
+  const lowered = lowerExpression(body, sourceFile, checker, bindings, diagnostics);
+  if (lowered === null) {
     return null;
   }
+  // The return edge, for an arrow whose return a TypeScript file annotated (`returnBoundary`).
+  const value =
+    ts.isArrowFunction(body.parent) && hasTypeScriptAnnotation(body.parent)
+      ? returnBoundary(lowered, body, sourceFile, checker)
+      : lowered;
   const span = makeSpan(body.getStart(sourceFile), body.getWidth(sourceFile), sourceFile);
   return {
     kind: 'block',
