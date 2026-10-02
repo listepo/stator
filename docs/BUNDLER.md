@@ -1,0 +1,351 @@
+# BUNDLER.md — the bundler contract for `js` mode (Phase 12)
+
+> **Status: design, nothing implemented.** This is T12.0's docs-first output (§15.6). It fixes
+> what T12.1 (`packages/compiler`: `statorc/api`) and T12.2 (`packages/vite-stator`) build, and
+> it records the measured spike the decisions rest on. The choice is plan-notes 296. On any
+> disagreement with `plan.md` §11d, the plan wins.
+
+Checked 2026-10-02. Facts carry a primary source (URL + version or date checked) or a spike
+number. Lines marked *synthesis* are this document's reasoning, not a source's or a measurement.
+
+## 0. The decision in one paragraph
+
+In `js` mode the bundler bundles the **dependencies, not the project**. Stator keeps compiling
+the project's own `.ts` and `.js` files as its own module graph, exactly as today. Two kinds of input go to the bundler instead:
+
+- every import of a **package**, meaning a bare specifier that is not `node:*`, a Node
+  built-in or `std/*`;
+- every **CommonJS** project file, with its `require` closure. "CommonJS" uses Node's own
+  rule (§4).
+
+They are collected into one generated *vendor entry*. The adapter bundles that entry into **one ESM file** with a
+source map: `node_modules` resolved, CommonJS converted, tree-shaken. Stator adds the file to
+the graph as one more `js`-mode module. A project that imports no package never calls the
+bundler, so it builds without Vite installed. This is option B of question 1, narrowed by the
+spike from "bundle all JS" to "bundle packages". The reasons are §1's numbers.
+
+## The spike
+
+`docs/research/bundler/spike.ts` (strict TS, not part of `ci`) reproduces every number below:
+
+```bash
+mkdir /some/dir && cd /some/dir && pnpm add vite@8.3.1      # outside the workspace
+node docs/research/bundler/spike.ts --vite /some/dir --runs 11 > report.json
+```
+
+For each case it builds and runs the original graph (`none`), and it builds three bundles:
+
+- **A**, the whole graph, with §2's contract.
+- **A′**, the whole graph, with Vite's own output defaults.
+- **B**, the vendor bundle only, which is the decision.
+
+Each binary's stdout is compared byte-for-byte with `node <original entry>`. Setup: Vite 8.3.1
+on Rolldown 1.2.12, Node 26.7.0, clang 21.1.8, Apple M3 Max, macOS 27.0. Run times are the
+median of 11 runs, and they move about ±10% between runs on this machine.
+
+| Case | Origin | `none` (today) | A: whole graph bundled | B: packages bundled |
+| --- | --- | --- | --- | --- |
+| `modules` | golden `js/modules` (3 files) | dynamic · 74 408 B · = Node | dynamic · 74 088 B · = Node | no packages → nothing bundled, = `none` |
+| `mixed_graph` | golden `js/mixed_graph` (.ts + .js) | dynamic · 74 232 B · = Node | dynamic · 74 088 B · = Node | = `none` |
+| `dynamic_import` | golden `js/dynamic_import` | **static** · 75 304 B · = Node | **not-yet** STA1214 ×3 (Rolldown helpers) | = `none` |
+| `exitcheck` | golden `ts/exitcheck` (5 typed files) in `js` mode | dynamic, 34/34 functions typed·static · 146 968 B · = Node | **not-yet** STA1214 ×3 (`var X = class {}`) | = `none` |
+| `fib` | bench `fib.ts` | **static** · 425.9 ms | **dynamic** · 426.8 ms | = `none` |
+| `nbody` | bench `nbody.ts` | static · 21.6 ms | static · 21.6 ms | = `none` |
+| `boundary` | generated: `.ts` annotation over a lying `JSON.parse` | **aborts STA2001** (Stator's check) | prints `s` = Node (check gone) | = `none` |
+| `typed_app` | generated: typed `.ts` + ESM package | not-yet STA1214 (package import) | dynamic, `fib` dynamic · 94 008 B · = Node | dynamic, **`fib` typed·static** · 94 008 B · = Node |
+| `order` | generated: `pkg-a`, `./a.js`, `pkg-b` | not-yet STA1214 | static · = Node | static · **≠ Node** (`pkg-a pkg-b a main`) |
+| `treeshake` | generated: 1 of 40 functions used | dynamic · 93 976 B | dynamic · 93 976 B | = `none` |
+| `cjs` | generated: `exports.x`, `module.exports =`, nested `require` | not-yet STA1214 | not-yet STA1214 ×9 (interop helpers) | not-yet STA1214 ×10 |
+| `diag` | generated: `new Proxy` in a dependency | not-yet STA1214 at `dep.js:4:10` | same, mapped back from `bundle.js:3:9` | = `none` |
+
+A′ (Vite's default output) gives the same verdicts as A, with binaries 8 bytes larger. Every
+bundle that compiled matched Node byte-for-byte. The one mismatch is B's `order` case, a known
+cost (§1).
+
+## 1. Typed code in a mixed graph
+
+**Question.** A bundler strips TS types. Bundle everything, or keep project `.ts` typed?
+
+**Measured.** Bundling the whole graph (A) takes the types away from Stator:
+
+- `fib` goes from `static` to `dynamic`.
+- `exitcheck` goes from 34 typed·static functions to 3 typed + 6 inferred·static + 24 dynamic.
+  That was measured after hand-rewriting Rolldown's `var X = class {}` to `const`, because
+  Stator does not lower the `var` form yet. Its output then matches Node, and the binary is
+  2 184 B larger.
+- The `boundary` case loses its check. Unbundled, Stator aborts with `STA2001` (golden rule 4).
+  Bundled, the annotation is gone, and the program prints `s`, as Node does.
+
+`docs/MODES.md` §3 says a `.ts` file in `js` mode gets the full static treatment, and bundling
+everything would quietly drop that promise.
+
+**Runtime cost today: none.** `fib` runs 425.9 ms static and 426.8 ms dynamic. The emitted C is
+identical except for the `#line` paths. Today's emitter routes even `--mode=ts` code through
+`jsrt_value`: `fib.ts --mode=ts --emit=c` calls `jsrt_op_lt` and `jsrt_op_add`. So the loss is
+deferred, not avoided. It arrives the day typed values compile unboxed (§1's promise, the §12
+ladder). *Synthesis.*
+
+**Why not bundle project `.js` too** (the card's option B as first written)? It gains nothing
+the spike could find, and it costs three things:
+
+- **Tree-shaking.** Stator's own DCE already removes unused project code. `treeshake` is
+  93 976 B with and without the bundler.
+- **Goldens.** Bundling project JS breaks `dynamic_import`: Rolldown's namespace helpers need
+  `Object.defineProperty`, `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
+- **Cycles.** A project `.js` that imports a `.ts` would make the bundle and the typed modules
+  import each other. *Synthesis, not measured.*
+
+**Decision: B, packages only.** All existing `js` goldens keep their behavior trivially, since
+none of them imports a package. Project `.ts` stays typed, and the boundary checks stay.
+
+**Known cost: evaluation order.** All package bodies run where the project first imports
+*any* package, so a project module imported between two packages moves. In `order`, Node prints
+`pkg-a a pkg-b main` and B prints `pkg-a pkg-b a main`. Linear cases match, as `typed_app`
+does. This is the same kind of documented deviation as top-level-await interleaving
+(`docs/MODES.md` §5). T12.1 documents it there. A per-package init split would close it, and
+it waits for a program that needs it. *Synthesis.*
+
+**Found by the spike, out of this card's scope.** In `boundary_inferred` (`.js` returns
+`` `${x}` ``; the `.ts` declares `number`), `tsc --strict` reports `TS2322` on `main.ts`. Stator
+`--mode=js` neither reports it nor checks the boundary, and it prints `10`. Under golden
+rule 4 this is a soundness bug. It is reported separately, not fixed here.
+
+## 2. Output contract
+
+One ESM file, no code splitting, no minification, a source map. Measured configuration for
+Vite 8.3.1 (the `vite-stator` adapter's defaults):
+
+| Setting | Value | Why (source) |
+| --- | --- | --- |
+| build kind | `build.ssr: <vendor entry>`, `ssr.noExternal: true`, `ssr.target: 'node'` | `noExternal: true` bundles every dependency, and with `target: 'node'` built-ins stay external (https://vite.dev/config/ssr-options, v8.3.1). **Library mode is wrong:** the spike's `externals` case in `build.lib` replaced `node:path` with an empty `__vite-browser-external` stub (`module.exports = {}`), with no error |
+| `build.rolldownOptions.output.format` | `'es'` | one ESM module |
+| `…output.codeSplitting` | `false` | inlines dynamic `import()`. `inlineDynamicImports` is deprecated in favor of it (rolldown 1.2.12 `define-config` typings) |
+| `build.minify` | `false` | names stay readable in diagnostics and traces. Vite then runs Rolldown with `minify: 'dce-only'` (vite 8.3.1 `dist/node/chunks/node.js`) |
+| `build.sourcemap` | `true` | §6 |
+| `…output.topLevelVar` | `false` | Vite's build sets Rolldown's `topLevelVar: true` (vite 8.3.1 `dist/node/chunks/node.js`; Rolldown's own default is `false`). That rewrites top-level `let`/`const` to `var`, and `js` mode lowers `var` with function-scope tracking. Measured: `fib`'s `const n` came out as `var n` |
+| `build.rolldownOptions.external` | `[/^std\//]` | §3 |
+| `build.target` | `'esnext'` | no down-levelling, so Stator sees the source's own syntax |
+| plugins | `esmExternalRequirePlugin` and the `__filename` transform | §4 |
+
+**What Rolldown output always contains.** Two things the contract cannot switch off, so
+Stator must lower them (T12.3):
+
+- Every top-level class comes out as `var X = class {}`. The rolldown 1.2.12 typings say this
+  is "always", independent of `topLevelVar`. Stator lowers `const X = class {}` but reports
+  `var`/`let X = class {}` as STA1214 "anonymous class expression" (spike `exitcheck`, and
+  hand-checked).
+- Constants are inlined across modules (`inlineConst`, default `smart`). In `modules`, the
+  bundle has `doubled + 10`. This is harmless.
+
+## 3. Externals
+
+**Measured.** In the SSR build, `import … from 'node:path'` and from bare `'path'` stay as ESM
+imports at the top of the bundle. `std/env` stays external through `external: [/^std\//]`.
+Both are what plan-notes 290 asks for: the bundler never sees platform code.
+
+The vendor entry never includes a `node:*`, built-in or `std/*` specifier, so the project's
+own imports of them go straight to Stator, as today. Today Stator rejects all three kinds the
+same way, as STA1214 "importing a package" (spike `externals`, `std`). They become legal with
+T11.5 (`node:*`, built-ins) and T10.x (`std/*`).
+
+## 4. CommonJS
+
+**Primary sources.** Rolldown converts CommonJS without a plugin. It wraps each module in a
+lazy `__commonJS` function, converts exports for ESM importers with `__toESM`, and for external
+requires on the Node platform generates a `require` from `module.createRequire`
+(https://rolldown.rs/in-depth/bundling-cjs, checked 2026-10-02). In Vite 8 `build.commonjsOptions`
+is a no-op, and the CJS default-import rule (`.mjs`/`.mts` importer, `"type": "module"`,
+`__esModule`) is the same in dev and build (https://vite.dev/guide/migration, checked 2026-10-02).
+
+**Measured** (`cjs`, `cjs_edges`). Each CJS module becomes
+`var require_x = __commonJSMin((exports, module) => { … })`. That is the "one function over a
+module record" that T11.5 planned to write. The helper sets `mod` before the body runs, so a
+re-entrant `require` returns the partial `exports`, which is Node's cycle behavior. *Read from
+the helper source; T12.3's golden proves it.*
+
+What the bundle leaves for Stator:
+
+| Leftover | Measured | Who handles it |
+| --- | --- | --- |
+| interop helpers `__toESM`, `__copyProps` | `Object.create`, `Object.defineProperty` (getter descriptors), `getOwnPropertyDescriptor`, `getOwnPropertyNames`, `getPrototypeOf`, `Object.prototype.hasOwnProperty.call`, `Function.prototype.bind`: 9 STA1214 in `cjs` | T12.3 (overlaps T11.4's `Object.*` and method-call families) |
+| `require('path')` of a built-in | `__require("path")` through `createRequire(import.meta.url)`. With `esmExternalRequirePlugin({ external: [/^node:/, …builtinModules] })` (re-exported by Vite 8.3.1) it becomes `import * as m from "path"` and `module.exports = m.default` | the plugin in `vite-stator` (T12.2). Built-ins need a default export (T11.6) |
+| computed `require('./' + n)` | stays `__require(...)`, and Node itself fails on the bundle with `Cannot find module './five.js'` | T11.5: a `require` over built-ins only. Anything else throws `MODULE_NOT_FOUND` |
+| `__filename`, `__dirname` | left free, so **Node itself crashes on the bundle** (`ReferenceError: __filename is not defined in ES module scope`) | a `vite-stator` transform defines both inside each CJS module. The spike's 6-line version works. Their value is open question 2 |
+
+**CommonJS project files** (`cjs_entry`, the shape of `_tsc.js`) go to the bundler whole. A
+file is CommonJS by Node's rule (https://nodejs.org/api/packages.html, docs v26.10.0, checked
+2026-10-02):
+
+- `.cjs` always;
+- `.js` under `"type": "commonjs"`;
+- `.js` with no `"type"` and no ES-module syntax. Syntax detection is unflagged since v22.7.0.
+
+The bundle runs on Node unchanged (= Node). With `esmExternalRequirePlugin`, Stator then
+reports four things:
+
+- the two built-in imports, `node:module` and `path`, which wait on T11.5;
+- a leftover side-effect `import "node:module"`;
+- `export default require_main()`, which Stator reports as STA1214 "a default export with a
+  computed value" (T12.3).
+
+The same file unbundled is STA1214 "the global 'require'". The vendor module then holds that
+file's code, so it is dynamic like any `.js`. *Measured; the routing itself is T12.1's.*
+
+**Consequence for T11.5.** Stator no longer writes CommonJS lowering. Module records, compile-time
+`require` edges, the `"type"` decision and the CJS-cycle exemption from `STA3001` all move to
+the bundler. T11.5 shrinks to the `--node` flag, the Node globals, external resolution of
+`node:*` and built-ins, and a `createRequire`/`require` over built-ins. `STA1110` narrows as
+T11.5 already planned. With `--node` in `js` mode a CommonJS project file goes to the bundler.
+Without `--node`, under `--bundler=none`, or in `ts` mode, `require` stays `STA1110`.
+
+## 5. The API
+
+`statorc/api` (T12.1). The compiler imports no bundler (§0.9). It loads an adapter by module
+name only when the graph imports a package.
+
+```ts
+export type VendorEntry = {
+  code: string; // generated ESM: `export { pad } from 'leftpad-esm';` …
+  resolveDir: string; // where package resolution starts (the entry's directory)
+};
+export type BundleOptions = {
+  external: readonly (string | RegExp)[]; // node:*, built-ins, std/* (§3)
+};
+export type BundleResult = {
+  code: string; // one ESM module (§2)
+  map: SourceMapV3; // always present (§6)
+  inputs: readonly string[]; // absolute paths of every file read (§7)
+};
+export type BundlerAdapter = {
+  name: string;
+  bundle(entry: VendorEntry, options: BundleOptions): Promise<BundleResult>;
+};
+export function compile(request: CompileRequest): Promise<CompileResult>; // vendor bundle optional
+```
+
+**The vendor entry** comes from the project's import declarations. The spike's `depsOnly`
+generates it in about 60 lines:
+
+- a named import becomes `export { a } from 'p'`;
+- a default import becomes `export { default as p$default } from 'p'`;
+- a namespace import becomes `export * as p$ns from 'p'`;
+- a bare `import 'p'` stays `import 'p'`.
+
+A name is mangled only when two packages export it, because Rolldown then emits
+`export { a as b }`, which Stator does not lower yet (STA1214 "renaming an export", measured).
+T12.1 lowers that form. Only the named imports enter the vendor entry, so a package's unused
+exports never reach Stator.
+
+**CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
+
+- The default in `js` mode is `vite`, which loads `vite-stator`.
+- `none` is today's behavior: a package import is STA1214.
+- In `ts` mode `--bundler` is `STA0004` ("`--bundler` requires `--mode=js`").
+
+**Diagnostics allocated** (`docs/DIAGNOSTICS.md`, planned, emitted from T12.1):
+
+- `STA0014`: the adapter's module cannot be loaded. The message names the package and how to
+  install it (`pnpm add -D vite-stator vite`).
+- `STA0015`: the adapter's bundle step failed, with the bundler's message passed through, the
+  same model as `STA0012`.
+
+## 6. Diagnostics through the source map
+
+**Measured.** Node's built-in `module.SourceMap` maps a bundle position back:
+`findOrigin(line, column)` is 1-indexed both ways (https://nodejs.org/api/module.html, docs
+v26.10.0, checked 2026-10-02; run on 26.7.0). In `diag`, `STA1214` at `bundle.js:3:9` maps to
+`dep.js:4:10`, the `new` of `new Proxy` in the original file.
+
+**Decision.** T12.1 uses `node:module`'s `SourceMap`. It has zero dependencies, so the §0.9
+budget holds. Its stability index is **1.1, active development** (same page), so T12.1
+wraps it behind one function in `src/support/`.
+
+**Rules for T12.1:**
+
+- `sources` are relative to the map file (`../src/dep.js` measured). Resolve them against the
+  map's location and `sourceRoot`.
+- A position with no mapping must say so. All 9 `cjs` diagnostics sit in Rolldown's
+  `\0rolldown/runtime.js` region and map to nothing (measured). Report them as
+  `<package bundle>:line:col (bundler runtime helper, no source mapping)`, never as a
+  position in a user file. Such a diagnostic is a Stator gap, not a user error.
+- The emitter's `#line` and the runtime's call-site strings (`jsrt_call_at(…, "file:line")`)
+  for vendor statements use the mapped file and line.
+- Under B only the vendor module needs mapping. Project diagnostics point at real files, as
+  today.
+
+## 7. Caching
+
+**Measured cost.** Importing Vite takes 68–256 ms, cold to warm process. One vendor or graph
+bundle takes 6–30 ms. A Stator build takes 660–1 450 ms, almost all of it the frontend and
+clang. The bundle step is about 1–3% of a build.
+
+**Bundler side.** Rolldown has no persistent cache. `experimental.incrementalBuild` exists
+only for watch mode (rolldown 1.2.12 typings). So T12.1 does not cache the bundle step. It
+reruns, cheaply, and only for graphs with package imports.
+
+**Program cache (Task 6.9).** Today's key is (absolute entry, mode, sha256 of the entry bytes),
+held in-process for one entry, and skipped for custom hosts. T12.1 adds the sha256 of the
+vendor bundle's `code` to the key. A changed dependency then misses the cache even when the
+entry did not change. `compile` over an in-memory bundle keys on content, not on a path.
+
+**moon.** A task that builds a binary declares as `inputs`:
+
+- the project sources;
+- `package.json` and the lockfile, which cover every package version;
+- the Vite config, if any.
+
+moon's input hash then skips the bundle step and the build together. The adapter's `inputs`
+list is what `vite-stator` hands Vite's watcher in dev, not moon.
+
+## 8. What each card gets from this
+
+- **T12.1** (`packages/compiler`):
+  - package-import collection, CommonJS-file routing, and the vendor entry;
+  - `statorc/api` and the adapter interface (§5);
+  - `--bundler`, `STA0014`, `STA0015`;
+  - the vendor bundle as one virtual `js` module, and `export { a as b }` lowering;
+  - source-map mapping of diagnostics, `#line` and call-site strings (§6);
+  - the cache key (§7);
+  - docs: `MODES.md` (packages and the order deviation), `HOW-IT-WORKS.md`, `pipeline.d2`.
+- **T12.2** (`packages/vite-stator`): §2's configuration, `esmExternalRequirePlugin`, the
+  `__filename`/`__dirname` transform, and the `stator()` Vite plugin.
+- **T12.3** (new): make Rolldown's output compile:
+  - `var`/`let X = class {}`;
+  - the interop helpers (§4 table);
+  - the dynamic-import namespace helpers (`__esmMin`, `__exportAll`: `Object.defineProperty`,
+    `Symbol.toStringTag`, zero-argument `Promise.resolve()`), measured in `dynamic_import`'s A
+    bundle;
+  - `import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`);
+  - a computed `export default` (`cjs_entry`).
+- **T11.5**: re-scoped per §4.
+
+## 9. Open questions for the creator
+
+1. **"One file" means the dependencies.** plan-notes 290 says the module graph is bundled
+   into one file. This design bundles only the packages into one file and keeps the project
+   in Stator's graph. The reasons are §1's numbers: types, boundary checks and goldens are
+   kept, and tree-shaking is not lost. If you want the literal whole-graph bundle, T12.1 and
+   T12.3 grow: classes, namespace helpers, `export` renames hit every project, and project
+   `.ts` turns dynamic.
+2. **`__filename`/`__dirname` in a native binary.** CJS packages read them, and a binary has no
+   source files at run time. There are three options:
+   - bake the build machine's absolute path, which is what the spike did. It works, but the
+     path ends up in the binary;
+   - make it relative to the executable;
+   - make it `not-yet`.
+   This is a product choice, not a measurement.
+3. **The evaluation-order deviation** (§1, `order`). Is documenting it enough, as with
+   top-level await, or must package bodies run in exact Node order before T12.2 ships?
+
+## Sources
+
+- Vite SSR options, v8.3.1: https://vite.dev/config/ssr-options (checked 2026-10-02)
+- Vite 8 migration guide: https://vite.dev/guide/migration (checked 2026-10-02)
+- Rolldown, bundling CommonJS: https://rolldown.rs/in-depth/bundling-cjs (checked 2026-10-02)
+- npm `rolldown@1.2.12`: `dist/shared/define-config-*.d.mts` (`topLevelVar`, `codeSplitting`,
+  `inlineConst`, `experimental.incrementalBuild`); `dist/plugins-index.d.mts`
+  (`esmExternalRequirePlugin`)
+- npm `vite@8.3.1`: `dist/node/chunks/node.js` (build output defaults: `topLevelVar: true`,
+  `minify: false` → `'dce-only'`); `dist/node/index.d.ts` (re-exports `esmExternalRequirePlugin`)
+- Node.js Module API, `module.SourceMap`, docs v26.10.0: https://nodejs.org/api/module.html
+  (checked 2026-10-02)

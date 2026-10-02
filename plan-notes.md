@@ -9399,3 +9399,82 @@ depends on T13.5; §14 row; changelog v4.15.
 - **The generator is shared with `node-coverage.ts`.** Two copies of a table renderer and a claim
   validator would fail `dupes` (Task 6.16), and they would drift apart.
 
+
+## 296. T12.0 lands: `js` mode bundles the dependencies, not the project; the bundler converts CommonJS (2026-10-02)
+
+**Plan sections touched:**
+
+- §11d: the intro, the T12.0 stub, T12.1 and T12.2 rewritten, and a new T12.3.
+- §11c T11.5, re-scoped.
+- §14 (effort row) and the v4.16 changelog.
+- Docs: `docs/BUNDLER.md` (new), `docs/README.md`, `docs/DIAGNOSTICS.md` (STA0014/STA0015 planned, the STA1110 note).
+
+**Spike.** The spike is `docs/research/bundler/spike.ts`, in strict TS and not part of `ci`. It
+ran on Vite 8.3.1 / Rolldown 1.2.12, installed outside the workspace, so `vite` is not a repo
+dependency yet. The rest of the setup: Node 26.7.0, clang 21.1.8, Apple M3 Max, medians of 11
+runs. It covers six real fixtures plus generated cases:
+
+- the goldens `js/modules`, `js/mixed_graph`, `js/dynamic_import` and `ts/exitcheck`;
+- the benches `fib` and `nbody`;
+- generated CJS, order, externals, boundary and tree-shaking cases.
+
+Every bundle that compiled matched Node byte-for-byte.
+
+**Measured against bundling the whole graph.**
+
+- **Types are lost.** `fib` goes from `static` to `dynamic`. `exitcheck` goes from 34/34
+  typed·static functions to 3 typed + 6 inferred + 24 dynamic.
+- **Boundary checks are lost.** A `.ts` annotation over a lying `JSON.parse` aborts with
+  `STA2001` unbundled. Bundled, it prints the value.
+- **Existing goldens break.** `dynamic_import` and `exitcheck` go not-yet, because of
+  Rolldown's `var X = class {}` and its namespace helpers.
+- **Nothing is gained.** Stator's DCE already gives 93 976 B with and without the bundler. The
+  runtime cost of dynamic code is zero today (`fib` runs 425.9 vs 426.8 ms), because the emitter
+  still boxes typed values. That cost arrives with the §12 ladder.
+
+**Decision.**
+
+- Package imports and CommonJS project files, routed by Node's rule, go into one generated
+  vendor entry. The adapter bundles it into one ESM module with a source map. Stator adds that
+  module to its graph.
+- Project `.ts` and ESM `.js` stay Stator's.
+- A graph with neither kind never loads the adapter.
+
+**What the bundler takes.** The bundler converts CommonJS: Rolldown's `__commonJSMin`
+(https://rolldown.rs/in-depth/bundling-cjs, checked 2026-10-02). T11.5 therefore drops its
+CommonJS lowering.
+
+**Rolldown output needs compiler work, now T12.3:**
+
+- the `var`/`let` class form;
+- the interop and namespace helpers;
+- `import.meta.url`;
+- a computed `export default`.
+
+**Vite gotchas.**
+
+- Library mode silently stubs `node:*` (`__vite-browser-external`), so the adapter uses an SSR
+  build with `noExternal: true`.
+- Vite forces `topLevelVar: true`.
+- `__filename`/`__dirname` crash even Node on an ESM bundle, so a transform defines them.
+
+**Diagnostics and cache.** Diagnostics map back through `node:module` `SourceMap`
+(https://nodejs.org/api/module.html, docs v26.10.0, stability 1.1). The bundle step costs 1–3%
+of a build. Rolldown has no persistent cache, so the program-cache key gains the vendor
+module's sha256.
+
+**Known cost.** Package bodies all run at the first package import. In the `order` case, Node
+prints `pkg-a a pkg-b main` and the vendor bundle prints `pkg-a pkg-b a main`. This is
+documented, the same way as top-level await.
+
+**Open for the creator** (`docs/BUNDLER.md` §9):
+
+1. Does "one file" (plan-notes 290) mean the dependencies?
+2. What value do `__filename`/`__dirname` get in a binary: the absolute build path,
+   exe-relative, or not-yet?
+3. Is documenting the order deviation enough before T12.2 ships?
+
+**Found, out of scope.** A `.js` that returns a string imported into a `.ts` that declares
+`number`: `tsc --strict` reports `TS2322`, but Stator `--mode=js` reports nothing, inserts no
+`STA2001` check, and prints the string. Under golden rule 4 this is a soundness bug. It is
+reported, not fixed here.
