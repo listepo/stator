@@ -149,6 +149,30 @@ export function isFreeGlobal(node: ts.Expression, name: string, checker: ts.Type
   );
 }
 
+/** A read of one of Node's CommonJS bindings that no program declaration binds: unresolved (a
+ * `.ts` file), or bound by the checker itself (a `.js` file, where TypeScript models CommonJS and
+ * declares `require` nowhere, and `module`/`exports` by the assignments that use them). A user's
+ * own `function require` is a binding like any other, and a NAME — a property's (`o.require`,
+ * `{ exports: 1 }`, `{ exports: e } = o`), a member's or a label's — reads no binding at all. */
+export function isFreeCommonJsName(
+  node: ts.Identifier,
+  name: string,
+  checker: ts.TypeChecker,
+): boolean {
+  // Every `name` slot is a NAME site — a property's, a member's, a declaration's — except a
+  // shorthand `{ exports }`, which reads the binding it spells.
+  const parent = node.parent;
+  if (
+    ('name' in parent && parent.name === node && !ts.isShorthandPropertyAssignment(parent)) ||
+    ('label' in parent && parent.label === node) ||
+    (ts.isQualifiedName(parent) && parent.right === node) ||
+    (ts.isBindingElement(parent) && parent.propertyName === node)
+  ) {
+    return false;
+  }
+  return isFreeGlobal(node, name, checker);
+}
+
 /** Whether the file reads Node's CommonJS bindings: `require(…)`, `module.exports`, `exports.x`. */
 function usesCommonJsBindings(file: ts.SourceFile, checker: ts.TypeChecker): boolean {
   const free = (node: ts.Expression, name: string): boolean => isFreeGlobal(node, name, checker);
@@ -187,7 +211,7 @@ export function isCommonJsFile(file: ts.SourceFile, checker: ts.TypeChecker): bo
 }
 
 /** A file the project wrote: not a declaration, not a lib, not a std source, not a dependency. */
-function isProjectFile(program: ts.Program, file: ts.SourceFile): boolean {
+export function isProjectFile(program: ts.Program, file: ts.SourceFile): boolean {
   return (
     !file.isDeclarationFile &&
     !program.isSourceFileDefaultLibrary(file) &&
@@ -267,7 +291,7 @@ function vendorSource(
   return undefined;
 }
 
-function relativeSpecifier(fromDir: string, to: string): string {
+export function relativeSpecifier(fromDir: string, to: string): string {
   const rel = relative(fromDir, to).replace(/\\/g, '/');
   return rel.startsWith('../') ? rel : `./${rel}`;
 }

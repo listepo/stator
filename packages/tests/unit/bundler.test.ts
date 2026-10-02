@@ -399,6 +399,50 @@ test('compile: a ready bundle needs no adapter', async () => {
   assert.equal(result.ok, true, result.stderr);
 });
 
+/** Rolldown 1.2.12's shape for a CommonJS package that requires a built-in and reads its own
+ * location, minus the interop helpers T12.3 compiles: `__require` is `createRequire(import.meta.url)`
+ * and `__filename`/`__dirname` are left free (docs/BUNDLER.md §4). */
+const EDGE_BUNDLE = [
+  'import { createRequire } from "node:module";',
+  'const __require = createRequire(import.meta.url);',
+  'const path = __require("path");',
+  'export const base = path.basename(__filename);',
+  'export const dir = path.basename(__dirname);',
+  'export function load(n) { try { return __require("./" + n); } catch (e) { return e.code; } }',
+  'export const helper = path.basename(__filename);',
+  '',
+].join('\n');
+
+test('--node: the vendor module requires a built-in and reads its location at run time', async () => {
+  const main =
+    "import { base, dir, load, helper } from 'edge';\nconsole.log(base, dir, load('five.js'), helper);\n";
+  const root = project({
+    'package.json': '{"type":"module"}',
+    'node_modules/edge/package.json': '{"name":"edge","main":"index.js"}',
+    'node_modules/edge/index.js': 'module.exports = {};\n',
+    'main.js': main,
+  });
+  const out = join(root, 'app');
+  const bundle: BundleResult = {
+    code: EDGE_BUNDLE,
+    // Lines 1-6 come from the package; line 7 stands for a bundler helper, which has no mapping.
+    map: lineMap('node_modules/edge/index.js', [1, 1, 1, 2, 3, 4]),
+    inputs: [],
+  };
+  const result = await compile({
+    entry: join(root, 'main.js'),
+    mode: 'js',
+    bundle,
+    node: true,
+    out,
+  });
+  assert.equal(result.ok, true, result.stderr);
+  const run = spawnSync(out, [], { encoding: 'utf8' });
+  // `__filename` is the binary's directory joined with the file the read was written in; a read
+  // with no mapping is the vendor module's own, beside the entry.
+  assert.equal(run.stdout, 'index.js edge MODULE_NOT_FOUND __stator_vendor__.js\n', run.stderr);
+});
+
 test('STA0014: an adapter package that is not installed; a module path that does not exist', async () => {
   const root = leftpadProject("import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n");
   // The default, `vite-stator`, is a workspace package since T12.2 (unit/vite-stator.test.ts).

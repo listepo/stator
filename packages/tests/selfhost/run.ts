@@ -60,8 +60,9 @@ function jobs(): Job[] {
       continue;
     }
     const dir = target.entries;
+    // A declaration file (`packages/node/src/globals.d.ts`) declares; it is no module to compile.
     for (const file of readdirSync(join(cwd, dir))
-      .filter((name) => name.endsWith('.ts'))
+      .filter((name) => name.endsWith('.ts') && !name.endsWith('.d.ts'))
       .sort()) {
       const entry = `${dir}/${file}`;
       out.push({ name: `${target.package}/${entry}`, cwd, entry: [entry], smoke: target.smoke });

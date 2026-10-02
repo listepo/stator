@@ -3,10 +3,14 @@
     "verdict": "not-yet",
     "codes": {
       "STA1207": 1,
-      "STA1214": 1763
+      "STA1214": 1777
     }
   },
   "packages/node/src/assert.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/node/src/module.ts": {
     "verdict": "dynamic",
     "codes": {}
   },
