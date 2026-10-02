@@ -400,6 +400,13 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
     if (jsrt_is(obj, JSRT_TAG_STRING) && strcmp(key, "length") == 0) {
       return jsrt_number((double)jsrt_string_length(obj));
     }
+    /* A primitive's prototype methods, bound to it (plan-notes 310): `text.slice(1)` on an
+     * Unknown receiver read `undefined` here and the call aborted STA2006. */
+    jsrt_value primitive_method = JSRT_UNDEFINED;
+    if (jsrt_string_method(obj, key, &primitive_method) ||
+        jsrt_number_method(obj, key, &primitive_method)) {
+      return primitive_method;
+    }
     return JSRT_UNDEFINED;
   }
   const PropTable o = as_prop_table(obj, "get");

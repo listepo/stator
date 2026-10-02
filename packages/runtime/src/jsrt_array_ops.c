@@ -1042,17 +1042,23 @@ static jsrt_value array_method_call(uint32_t argc, const jsrt_value *argv, JSRTE
   jsrt_panic("array method dispatch fell through its own table");
 }
 
+jsrt_value jsrt_bound_method(jsrt_value receiver, uint32_t row,
+                             jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
+                             uint32_t length, const char *name) {
+  JSRTEnv *env = jsrt_env_new(NULL, 2);
+  env->slots[0] = receiver;
+  env->slots[1] = jsrt_number((double)row);
+  return jsrt_closure_new(fn, length, name, env, false);
+}
+
 bool jsrt_array_method(jsrt_value array, const char *key, jsrt_value *out) {
   if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
     return false;
   }
   for (size_t i = 0; i < sizeof ARRAY_METHOD_TABLE / sizeof ARRAY_METHOD_TABLE[0]; i++) {
     if (strcmp(ARRAY_METHOD_TABLE[i].name, key) == 0) {
-      JSRTEnv *env = jsrt_env_new(NULL, 2);
-      env->slots[0] = array;
-      env->slots[1] = jsrt_number((double)ARRAY_METHOD_TABLE[i].op);
-      *out = jsrt_closure_new(array_method_call, ARRAY_METHOD_TABLE[i].arity,
-                              ARRAY_METHOD_TABLE[i].name, env, false);
+      *out = jsrt_bound_method(array, (uint32_t)ARRAY_METHOD_TABLE[i].op, array_method_call,
+                               ARRAY_METHOD_TABLE[i].arity, ARRAY_METHOD_TABLE[i].name);
       return true;
     }
   }

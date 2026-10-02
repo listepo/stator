@@ -148,3 +148,25 @@ jsrt_value jsrt_number_to_fixed(jsrt_value number, jsrt_value digits) {
   }
   return jsrt_string_from_utf8(out, n);
 }
+
+/* Number.prototype read as a value from a number the compiler only knows as Unknown: the
+ * `jsrt_string_method` contract (jsrt_string_methods.c). Slot 1 of the environment says which
+ * of the two landed methods the closure is. */
+static jsrt_value number_method_call(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {
+  const jsrt_value argument = jsrt_arg(argc, argv, 0);
+  return jsrt_to_number(env->slots[1]) == 0.0 ? jsrt_number_to_string_radix(env->slots[0], argument)
+                                              : jsrt_number_to_fixed(env->slots[0], argument);
+}
+
+bool jsrt_number_method(jsrt_value number, const char *key, jsrt_value *out) {
+  if (!jsrt_is_number(number)) {
+    return false;
+  }
+  const bool to_string = strcmp(key, "toString") == 0;
+  if (!to_string && strcmp(key, "toFixed") != 0) {
+    return false;
+  }
+  *out = jsrt_bound_method(number, to_string ? 0U : 1U, number_method_call, 1,
+                           to_string ? "toString" : "toFixed");
+  return true;
+}

@@ -10555,8 +10555,8 @@ changed:
   `global-call`. The eight `Number.*` constants fold to literals, like `Math.PI`. Every other
   `Number` static and number method is refused by name.
 - A shared gate helper, `calleeOnlyMember`, replaced twelve copies of the "using … as a value"
-  refusal. With the moves above, `jscpd` shrank by 6 fingerprints (207 → 201) and
-  `.jscpd-baseline.json` shrinks with it.
+  refusal. With the moves above, `jscpd` shrank by 7 fingerprints against main 3b3be09
+  (206 → 199), and `.jscpd-baseline.json` shrinks with it.
 
 **Evidence** (this branch, Node 26.7.0):
 - Goldens `ts/field_calls`, `js/field_calls` (argument order, `this` through a function field,
@@ -10568,7 +10568,9 @@ changed:
 - `_tsc.js` (same command): 1 112 diagnostics — 1 066 `STA1214`, 45 `STA0012`, 1 `STA1210`
   (−390). Method-call refusals fell from 403 to 19. The spread refusals rose from 92 to 95: three
   calls that had been refused as method calls now reach their spread argument.
-- Self-compilation: `STA1214` 1648 → 1642, recorded with `--update`.
+- Self-compilation, on main c2a033b: `STA1214` 1722 → 1718, recorded with `--update`. The new
+  constructs remove 6. `receiverTypeAt` (below) adds two references into the bare `typescript`
+  import, which count as they did in plan-notes 308.
 - The Test262 harness is still at 17 refusals. Its 4 method calls (`assert._toString(…)`,
   `assert.sameValue(…)`, `Object.prototype.toString.call(…)`) are calls on a function object whose
   properties are assigned later, so they move with families 3 and 4.
@@ -10578,12 +10580,26 @@ changed:
   `Function.prototype.toString.call`, `_a.call`, `String.fromCharCode.apply`), static calls on a
   class expression (`VersionRange.tryParse` 3, family 9), and 3 calls whose receiver the checker
   types as possibly `undefined`. They go to the singletons in step 9.
-- A pre-existing internal error, also on main: `this.name.toUpperCase()` inside an object-literal
-  `function` expression aborts the build with `STA4081` (a `string-op` lowered on an Unknown
-  receiver), whether or not the function is called. The golden avoids it.
-- A dynamic method call on an Unknown receiver that holds a string (`text.slice(1)` with `text`
-  untyped) panics with `STA2006` at run time, also on main: the shape-table read finds no function
-  on a string. The goldens type such receivers with JSDoc.
+- A method read as a value from a primitive and called detached (`const m = text.trim; m()`)
+  keeps its receiver, where Node throws a TypeError. This follows the `Array.prototype`
+  precedent, `jsrt_array_method`.
+
+**Two defects on main, fixed in this family.** Both are method-call defects, not coverage gaps:
+- `this.name.toUpperCase()` inside an object literal's `function` aborted the build with the
+  internal `STA4081`, in both modes, whether or not the function was called. The function's
+  `this` is dynamic, so `this.name` lowers to an Unknown `dyn-field-access`. The method-call
+  lowering asked the CHECKER for the receiver's type, got `string`, and built a `string-op` on an
+  Unknown target. A new `receiverTypeAt` answers Unknown for a property read through a dynamic
+  target, so the call takes the dynamic method call. The specialized arms (string, Date, RegExp,
+  typed-array, number, collection) and `lowerDynMethodCall` all ask it.
+- A dynamic method call on a primitive (`text.slice(1)` with `text` untyped) aborted `STA2006`
+  at run time. A string has no shape table, so `jsrt_get_prop` read `undefined`. It now answers
+  the primitive's method: the new `runtime/src/jsrt_string_methods.c` binds every landed
+  `STRING_OPS` member, and `jsrt_number_method` binds `toString`/`toFixed`. Both follow the
+  `jsrt_array_method` contract: a closure over the receiver, with the spec's `name` and `length`.
+  Goldens `js/primitive_methods` (every op, untyped string and number receivers, method values,
+  RangeErrors) and `ts/primitive_methods` match Node. The fixtures are
+  `subset_primitive_method_dynamic_js` and `subset_this_field_string_op_*`.
 
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
 

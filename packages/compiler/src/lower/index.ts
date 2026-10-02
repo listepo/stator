@@ -2816,6 +2816,26 @@ function privateOwnerMember(
  * layout — but the object is a `JSRTDynObject` (docs/VALUE.md §4.15), and the binding is the only
  * place that is recorded. Inside a class member the binding is the layout, so this answers false
  * and the fixed-slot path takes over, unchanged. */
+/** A method receiver's type as its lowering will carry it. A property read through a dynamic
+ * target lowers to a `dyn-field-access`, which is Unknown whatever the checker says: `this.name`
+ * in an object literal's `function` reads through an Unknown receiver, while the checker types it
+ * from the literal. Asking the checker instead sent `this.name.toUpperCase()` to the string-op
+ * arm with an Unknown target, an internal STA4081 (plan-notes 310); the dynamic method call is
+ * what runs it, `jsrt_get_prop` answering the bound String.prototype method. */
+function receiverTypeAt(obj: ts.Expression, checker: ts.TypeChecker, bindings: Scope): HType {
+  // `Math.PI` and `Number.EPSILON` read through a global with no HType, but they fold to number
+  // literals before any dynamic read is considered, so they keep the checker's `number`.
+  const folds =
+    ts.isPropertyAccessExpression(obj) &&
+    ((isGlobalMath(obj.expression, checker) && MATH_CONSTANTS.has(obj.name.text)) ||
+      numberConstant(obj, checker) !== undefined);
+  return ts.isPropertyAccessExpression(obj) &&
+    !folds &&
+    targetIsDynamic(obj.expression, checker, bindings)
+    ? hUnknown(false)
+    : typeAt(obj, checker, bindings);
+}
+
 function targetIsDynamic(target: ts.Expression, checker: ts.TypeChecker, bindings: Scope): boolean {
   if (target.kind === ts.SyntaxKind.ThisKeyword) {
     return bindings.get(RECEIVER)?.kind === 'unknown';
@@ -6484,7 +6504,7 @@ function lowerExpression(
         return test;
       }
 
-      const receiverType = typeAt(obj, checker, bindings);
+      const receiverType = receiverTypeAt(obj, checker, bindings);
       if (
         receiverType.kind === 'promise' &&
         (propName === 'then' || propName === 'catch' || propName === 'finally')
@@ -6801,7 +6821,7 @@ function lowerExpression(
       // `m.get(k)`, `s.add(v)` and the rest. Decided before the class case because a Map has no
       // class declaration at all: the receiver's TYPE is the whole test, and each operation is one
       // runtime function shared by every collection in the program.
-      const receiver = typeAt(obj, checker, bindings);
+      const receiver = receiverTypeAt(obj, checker, bindings);
       if (receiver.kind === 'map' || receiver.kind === 'set') {
         // Asked of the TYPE before anything is lowered: `super.m()` reaches this same branch, and
         // `super` names no value, so lowering the receiver to find out what it is would report an
@@ -7098,7 +7118,7 @@ function lowerDynMethodCall(
   if (obj.kind === ts.SyntaxKind.SuperKeyword || isMatchReceiver(obj, checker)) {
     return undefined;
   }
-  const receiver = typeAt(obj, checker, bindings);
+  const receiver = receiverTypeAt(obj, checker, bindings);
   const slot = callableFieldSlot(receiver, expr.name.text);
   if (receiver.kind !== 'unknown' && slot === undefined) {
     return undefined;
