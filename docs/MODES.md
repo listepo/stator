@@ -78,6 +78,28 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
 - **`any` in `.js` files:** Allowed. The type `any` is a no-op in `js` mode; it downgrades to the dynamic representation (same as `Unknown`). No error.
 - **Unresolved identifiers in `.js` files:** Not an error; the identifier is assumed to be a runtime global or dynamic property and lowers to `Unknown`.
 
+### Which checker diagnostics are fatal
+
+`checkJs` runs the full checker over `.js` files, and its diagnostics surface as `STA0012`. In
+`js` mode they split three ways (plan-notes 297):
+
+- **Always fatal:** every syntactic diagnostic, and every JavaScript **early error** — the
+  binder and grammar groups of TypeScript's own `plainJSErrors` list, the codes `tsc` reports
+  for a `.js` file even without `checkJs` (`let x; let x;`, `with`, `break` outside a loop, …).
+  A program carrying one is not JavaScript; Node refuses it before running a line. No code may
+  name one of these in the js-mode list below, and `tests/unit/js-early-errors.test.ts` reads
+  the list out of the pinned `typescript` to hold that.
+- **Degraded to the dynamic path:** a type-level refusal of JavaScript Node runs, listed in
+  `JS_MODE_RUNTIME_CODES` (`src/frontend/program.ts`) together with its run-time answer — a
+  widened binding, a dynamic read, a runtime throw. Examples: a possibly-`undefined` read
+  (TS2532), `"" == 0` (TS2367), a namespace IIFE reassigning a function declaration's binding
+  (TS2630; a named function expression's own name is immutable and stays fatal), a spread the
+  checker narrowed to `never` (TS2698).
+- **Fatal until listed:** every other type-level refusal. The lowering trusts JSDoc types and
+  the checker's control flow, so dropping a refusal it has no answer for compiles to an internal
+  error at best and to a silent miscompile at worst (`const c = 1; c = 2` printed `2` where Node
+  throws a `TypeError`). A code moves to the degraded list with its answer and a test.
+
 ### JS-only constructs that compile
 
 - **`var` declarations:** Function scoping, hoisting, and `undefined` initialization are honored by lowering to a dynamic representation with explicit scope tracking. Hoisting is visible (assignment without declaration before use initializes to `undefined`).

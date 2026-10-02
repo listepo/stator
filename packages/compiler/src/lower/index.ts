@@ -4900,12 +4900,14 @@ function lowerExpression(
     // method of a literal-shaped source, stored at the fragment's own `at` like the field
     // reads are, so evaluation order is source order however the emitter walks them.
     const methodCopies: { at: number; order: number; name: string; value: MethodValue }[] = [];
-    // `{ ...a }` over an array, in property order: the entry count before the fragment (runs of
-    // own entries split here), the fragment's own property index (runs bucket the methods they
-    // enclose by it), the lowered source, and the spread's span (the fold's `assign` sites).
-    // The gate accepted exactly the array kind on this arm, so every record here folds through
-    // `assign` below; any other non-object source still reports STA4068 on its own arm.
-    const arraySpreads: { at: number; order: number; source: Expression; span: Span }[] = [];
+    // `{ ...a }` over an array or an untyped value, in property order: the entry count before the
+    // fragment (runs of own entries split here), the fragment's own property index (runs bucket
+    // the methods they enclose by it), the lowered source, and the spread's span (the fold's
+    // `assign` sites).
+    // The gate accepted the array kind, and an Unknown operand of a dynamic literal, on this arm,
+    // so every record here folds through `assign` below; any other non-object source still
+    // reports on its own arm.
+    const foldedSpreads: { at: number; order: number; source: Expression; span: Span }[] = [];
     for (const [propIndex, property] of node.properties.entries()) {
       // `{ x }` is `{ x: x }`. The desugaring lives here and not in HIR: the value is the ordinary
       // identifier expression, so every later pass sees a name/value pair like any other.
@@ -4957,7 +4959,7 @@ function lowerExpression(
         // entries around it stay in `entries` (and enclosing methods in `methodNodes`); the
         // fold splits both at each fragment's `at` and combines the runs left to right.
         if (source.type.kind === 'array') {
-          arraySpreads.push({ at: entries.length, order: propIndex, source, span: spreadSpan });
+          foldedSpreads.push({ at: entries.length, order: propIndex, source, span: spreadSpan });
           continue;
         }
         // A value the checker promised a shape for but the lowering typed dynamic — a call to
@@ -4965,6 +4967,15 @@ function lowerExpression(
         // Expanding slots off it would be silent garbage; the shape-table enumeration a
         // dynamic spread needs is the unknown-spread owner's, so this names it exactly as the
         // gate names the checker-unknown twin (an honest not-yet, never an internal error).
+        // A non-object operand of a dynamic literal folds like an array: the gate accepted an
+        // operand the CHECKER types Unknown there (plan-notes 297), and `assign` copies whatever
+        // keys the run-time value holds. The lowered type may be narrower than Unknown -- a
+        // `never`-narrowed operand lowers at its binding's static type -- and says nothing about
+        // that value, so any non-object kind takes the fold.
+        if (source.type.kind !== 'object' && objectLiteralIsDynamic(node, checker)) {
+          foldedSpreads.push({ at: entries.length, order: propIndex, source, span: spreadSpan });
+          continue;
+        }
         if (source.type.kind === 'unknown') {
           diagnostics.push(
             lowerDiagnostic(
@@ -5250,19 +5261,19 @@ function lowerExpression(
     // `objectLiteralIsDynamic` holds, which is what binds Unknown alongside the Unknown value.
     // A fixed path here would promise slots the value never builds, so reaching one is the
     // gate and the lowering disagreeing about the layout -- a compiler bug, not a program error.
-    if (arraySpreads.length > 0 && !objectLiteralIsDynamic(node, checker)) {
+    if (foldedSpreads.length > 0 && !objectLiteralIsDynamic(node, checker)) {
       diagnostics.push(
         lowerDiagnostic(
           node,
           sourceFile,
           'STA4068',
           'internal',
-          'object literal with an array spread took the fixed-shape path',
+          'object literal with a folded spread took the fixed-shape path',
         ),
       );
       return null;
     }
-    if (arraySpreads.length > 0) {
+    if (foldedSpreads.length > 0) {
       const assignNode = (target: Expression, source: Expression, at: Span): Expression => ({
         kind: 'object-static',
         type: hUnknown(false),
@@ -5282,7 +5293,7 @@ function lowerExpression(
       };
       let runStart = 0;
       let runStartOrder = -1;
-      for (const fragment of arraySpreads) {
+      for (const fragment of foldedSpreads) {
         const runEntries = entries.slice(runStart, fragment.at);
         const runMethods = methodNodes
           .filter((method) => method.order > runStartOrder && method.order < fragment.order)
@@ -5316,7 +5327,7 @@ function lowerExpression(
             sourceFile,
             'STA4068',
             'internal',
-            'object literal with an array spread folded to nothing',
+            'object literal with a folded spread folded to nothing',
           ),
         );
         return null;
@@ -9657,7 +9668,7 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType 
   // through here), not only later uses. A parameter declaration carries no symbol of its own —
   // only its name does — so it probes through that; a binding pattern has neither and falls
   // through.
-  if (ts.isIdentifier(node) || ts.isParameter(node)) {
+  if (ts.isIdentifier(node) || ts.isParameter(node) || ts.isFunctionDeclaration(node)) {
     // An expando namespace has a checker shape, but its runtime read throws instead of producing
     // an object with that layout. Property consumers must agree with the reference-error's type.
     // Parameters skip this: the test names an identifier position, and a parameter has none.
@@ -9672,7 +9683,9 @@ function typeAt(node: ts.Node, checker: ts.TypeChecker, bindings: Scope): HType 
       const symbol =
         ts.isParameter(node) && ts.isIdentifier(node.name)
           ? checker.getSymbolAtLocation(node.name)
-          : checker.getSymbolAtLocation(node);
+          : ts.isFunctionDeclaration(node) && node.name !== undefined
+            ? checker.getSymbolAtLocation(node.name)
+            : checker.getSymbolAtLocation(node);
       if (
         symbol !== undefined &&
         bindings.has(`\u0000dynamic:${checker.getFullyQualifiedName(symbol)}`)
