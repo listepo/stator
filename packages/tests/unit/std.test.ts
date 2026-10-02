@@ -159,6 +159,32 @@ test('std/io passes a Uint8Array to its backing as one pointer + length call', a
   assert.ok(!c.includes('jsrt_std_bytes_'), 'no byte channel is left');
 });
 
+// The same row carries std/hash and std/encoding: a digest, a random fill and a bytes-to-text
+// conversion are each one call, the answer's view passed in for the backing to fill.
+test('std/hash and std/encoding pass their bytes as one pointer + length call', async () => {
+  const { c } = await compiledStdC(
+    'import { bytesToHex } from "std/encoding";\n' +
+      'import { randomBytes, sha256 } from "std/hash";\n' +
+      'console.log(bytesToHex(sha256(randomBytes(1048576))));\n',
+  );
+  const lines = c.split('\n');
+  const want: ReadonlyArray<readonly [string, number]> = [
+    ['jsrt_std_hash_digest', 2],
+    ['jsrt_std_hash_random_bytes', 1],
+    ['jsrt_std_encoding_to_text', 1],
+  ];
+  for (const [backing, views] of want) {
+    const calls = lines.filter((line) => line.includes(`= ${backing}(`));
+    assert.equal(calls.length, 1, `one call site for ${backing}`);
+    assert.equal(
+      (calls[0] ?? '').split('jsrt_uint8array_count(').length - 1,
+      views,
+      `${backing} takes ${String(views)} view(s)`,
+    );
+  }
+  assert.ok(!c.includes('jsrt_std_bytes_'), 'no byte channel is left');
+});
+
 test('std/io moves a MiB through read and writeBytes byte for byte', NATIVE_ONLY, () => {
   const input = Array.from({ length: 1 << 20 }, (_, i) => String.fromCharCode(32 + (i % 95))).join(
     '',
@@ -186,4 +212,20 @@ test('std/io sees a terminal on a pseudo-terminal', NATIVE_ONLY, () => {
   assert.equal(run.status, 0, String(run.stderr));
   // The terminal turns `\n` into `\r\n`, and BSD `script` echoes the EOF it reads (`^D`) first.
   assert.match(run.stdout.replace(/\r\n/g, '\n'), /(^|\n|\b)true true true\n$/);
+});
+
+test('std/hash randomBytes draws fresh bytes that cover the whole byte range', NATIVE_ONLY, () => {
+  // Two 32-byte draws collide with probability 2^-256, and 65536 bytes miss one of the 256
+  // values with probability about 256 * (255/256)^65536, below 10^-100.
+  const run = buildAndRun(
+    'import { bytesToHex } from "std/encoding";\n' +
+      'import { randomBytes } from "std/hash";\n' +
+      'console.log(bytesToHex(randomBytes(32)) !== bytesToHex(randomBytes(32)));\n' +
+      'const seen = new Uint8Array(256);\n' +
+      'for (const byte of randomBytes(65536)) {\n  seen[byte] = 1;\n}\n' +
+      'let distinct = 0;\nfor (const flag of seen) {\n  distinct += flag;\n}\n' +
+      'console.log(distinct);\n',
+  );
+  assert.equal(run.status, 0, String(run.stderr));
+  assert.equal(run.stdout, 'true\n256\n');
 });

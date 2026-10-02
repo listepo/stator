@@ -5,12 +5,20 @@
       "STA1214": 1648
     }
   },
+  "packages/std/src/encoding.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
   "packages/std/src/env.ts": {
     "verdict": "dynamic",
     "codes": {}
   },
   "packages/std/src/fs.ts": {
     "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/hash.ts": {
+    "verdict": "dynamic",
     "codes": {}
   },
   "packages/std/src/io.ts": {

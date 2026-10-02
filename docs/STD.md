@@ -108,6 +108,8 @@ differ, `std` answers one way and says so (§5).
 | `std/time` | `nowMs(): number`, `sleepMs(ms)` | `nowMs` is whole milliseconds since the Unix epoch (`Date.now()`); `sleepMs` blocks the only thread on the monotonic clock, fractions truncated |
 | `std/os` | `platform()`, `arch()`, `release()`, `hostname()`, `homedir()`, `tmpdir()`, `cpuCount()`, `totalMemory()`, `eol` | the pinned Node's `node:os` answers (see below) |
 | `std/io` | `stdin`/`stdout`/`stderr` (`0`/`1`/`2`), `write(fd, text)`, `writeBytes(fd, bytes)`, `read(fd, max): Uint8Array`, `isatty(fd)`, `terminalSize(fd): TerminalSize` | raw descriptors through libc (see below) |
+| `std/encoding` | `utf8ToBytes`/`bytesToUtf8`, `latin1ToBytes`/`bytesToLatin1`, `base64ToBytes`/`bytesToBase64`, `base64urlToBytes`/`bytesToBase64url`, `hexToBytes`/`bytesToHex` | Node's `Buffer` conversions (see below) |
+| `std/hash` | `sha256(data)`, `sha1(data)`, `md5(data)` over `Uint8Array \| string`, `randomBytes(size)` | digests as `Uint8Array`; text hashes as its UTF-8 |
 | `std/sync` | — | not-yet, T10.2 |
 | `std/thread` | — | not-yet, T10.2 |
 
@@ -150,10 +152,32 @@ call; an empty answer is end of file, and `max` outside `0..2^31-1` is `EINVAL`.
 `terminalSize` answers a `TerminalSize` (`columns`, `rows`), a class like `Stat`; a descriptor
 that is not a terminal is `ENOTTY`, and one that names no open file is `EBADF`.
 
+**`std/encoding` semantics** are Node's `Buffer`, because `packages/node` builds `Buffer` on
+them, and nothing throws. `utf8ToBytes` encodes a lone surrogate as U+FFFD (`EF BF BD`).
+`bytesToUtf8` turns each maximal invalid subsequence into one U+FFFD. `latin1ToBytes` keeps
+each UTF-16 code unit's low byte. `bytesToBase64` pads with `=`, while `bytesToBase64url` uses
+`-`/`_` and no padding. The two base64 decoders are one decoder:
+- it reads either alphabet and skips any other character;
+- the first `=` ends the input;
+- a final group of two or three digits gives one or two bytes, and a single digit gives none.
+
+`hexToBytes` reads digit pairs in either case up to the first pair that is not one, and drops
+an odd last digit. Text-to-bytes is plain TypeScript (`charCodeAt`). Bytes-to-text goes
+through the backing, because `String.fromCharCode` is not in the subset, so a string can only
+be made at the C-string edge. UTF-8 and Latin-1 text therefore crosses in NUL-free runs, with
+each `0x00` put back as U+0000.
+
+**`std/hash` semantics.** `sha256`, `sha1` and `md5` return the digest as a fresh `Uint8Array`
+(32, 20 and 16 bytes). A string argument is hashed as its UTF-8, as Node's `update(text)`
+hashes it. The digests are Zig's `std.crypto`, which ships with the pinned toolchain, so no C
+is vendored. SHA-1 and MD5 are there for interop, not security. `randomBytes(size)` reads the
+OS's secure source through `std.Io`, and a `size` outside `0..2^31-1` is `EINVAL`.
+
 **Verdicts.** A std module is ordinary strict TypeScript, and `explain` reports its functions
 like any other file in the graph: everything is `static` except `std/env.get`, whose
-`string | undefined` answer is a union the HIR boxes, so an importer of `std/env` explains as
-`dynamic` (docs/SUBSET.md).
+`string | undefined` answer is a union the HIR boxes, and `std/hash`'s digests, whose
+`Uint8Array | string` parameter is one. An importer of `std/env` or `std/hash` therefore
+explains as `dynamic` (docs/SUBSET.md).
 
 ## 6. Implementation layers
 

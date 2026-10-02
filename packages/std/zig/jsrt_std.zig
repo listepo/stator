@@ -130,4 +130,6 @@ comptime {
     _ = @import("time.zig");
     _ = @import("os.zig");
     _ = @import("io.zig");
+    _ = @import("encoding.zig");
+    _ = @import("hash.zig");
 }

@@ -10324,6 +10324,62 @@ no codes, recorded with `--update` (plan-notes 306).
   `subset_std_os_ts`/`_js` and `subset_std_io_ts`/`_js` (static).
 - `unit/std.test.ts`: 7 passed, including console ordering, stdin and pseudo-terminal.
 
+### Step 2: `std/encoding` and `std/hash`
+
+This is the second of T11.3's three PRs. It was written on step 1's byte channel and rebased
+onto T11.3a (plan-notes 311) before it merged, so its bytes take the extern table's `Uint8Array`
+row instead.
+
+**Decisions.**
+
+- **Bytes-to-text goes through the backing.** `String.fromCharCode` is not in the subset
+  (docs/SUBSET.md, "every other global"), so TypeScript cannot build a string from code
+  units, and the C-string edge is the only place a string is made from bytes.
+  `jsrt_std_encoding_to_text` turns the view's bytes into UTF-8, Latin-1, base64,
+  base64url or hex text, and the emitter's copy decodes it. That copy turns each maximal
+  invalid subsequence into one U+FFFD, which is Node's rule (docs/FFI.md §3).
+- **NULs.** A C string ends at a NUL, so UTF-8 and Latin-1 text crosses in NUL-free runs and
+  each `0x00` is put back as U+0000. No multi-byte UTF-8 sequence holds a `0x00`, so the cut
+  changes nothing. The golden covers `00` and `e2820061`.
+- **Text-to-bytes is TypeScript** (`charCodeAt`): nothing crosses the edge, so a NUL or a
+  lone surrogate is exact.
+- **Decoder leniency follows Node's `Buffer`.** It was probed on the pinned Node 26.7.0 with
+  `Buffer.from(x, 'base64' | 'base64url' | 'hex')`:
+  - base64 reads both alphabets under either name and skips other characters; the first `=`
+    ends the input; a final group of two or three digits yields one or two bytes;
+  - hex reads pairs up to the first bad pair and drops an odd last digit.
+
+  `packages/node` can build `Buffer` on these without re-deriving them. The `std_encoding`
+  golden replays every probe against the oracle's `Buffer`.
+- **Hash: Zig's `std.crypto`, nothing vendored.** `Sha256`, `Sha1` and `Md5` ship with the
+  pinned Zig 0.16.0 (`lib/std/crypto/{sha2,Sha1,md5}.zig`) and are tested upstream against the
+  standard vectors. A vendored C implementation would add a second toolchain path and a
+  patch-tracking duty for code `std.crypto` already provides. `randomBytes` is
+  `std.Io.randomSecure`, the OS's secure source.
+- **The digests take `Uint8Array | string`**, mirroring Node's `update(data)`. That union
+  makes `std/hash` and its importers `dynamic`. This is the `std/env.get` trade-off again,
+  recorded in STD.md §5 and SUBSET.md.
+
+**Bytes take the row, one call each way.** A digest passes the input view and an output view of
+the digest's exact size (32, 20 or 16 bytes), and the backing hashes one into the other.
+`randomBytes(size)` allocates the view and the backing fills it from `std.Io.randomSecure`; an
+invalid `size` gets an empty view, and the backing still answers `EINVAL` from `size` itself.
+A bytes-to-text conversion passes the view, or each NUL-free run of it as a `subarray`. Nothing
+is parked and nothing is copied on the way in. `unit/std.test.ts` asserts one call site per
+backing, each with its views as pointer + length pairs.
+
+**Self-compilation.** `encoding.ts` joins the baseline as `static` and `hash.ts` as `dynamic`,
+both with no codes, recorded with `--update` (plan-notes 306).
+
+**Check evidence (step 2).**
+
+- `node packages/tests/golden/run.ts --filter std_`: 10 passed (`std_encoding`, `std_hash`
+  new). `std_hash` hashes a 1 MB buffer in one call.
+- `node packages/tests/subset/run.ts --filter subset_std`: 25 passed (`subset_std_encoding_*`
+  static, `subset_std_hash_*` dynamic).
+- `unit/std.test.ts`: 11 passed. `randomBytes` draws are fresh and 65 536 bytes cover all 256
+  values, and `std/hash` and `std/encoding` emit one call site per backing.
+
 ## 310. T11.4 re-measured, and the Test262 harness needs more than `String` and `JSON` (2026-10-02)
 
 **Baseline.** `node --stack-size=7600 packages/compiler/src/cli/main.ts explain _tsc.js --mode=js
