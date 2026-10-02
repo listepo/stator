@@ -3737,6 +3737,8 @@ not the latest 8.3.2, because 8.3.2 is inside pnpm's `minimumReleaseAge` and wou
   `src/plugin.ts` (`stator({ entry, out?, mode? })`: `build.ssr` at the entry with nothing
   written, `compile` in `closeBundle`, the Vite build fails on a failed compile), `src/index.ts`,
   tsconfig, `moon.yml`; root `typecheck` and moon's `tests:ci` include it.
+- The adapter passes the external list to `esmExternalRequirePlugin` only, so `require` of a
+  built-in becomes an `import` (Rolldown's own `external` pre-empted the plugin; plan-notes 321).
 - `examples/vite`: `src/main.js` imports `greeting` (`link:./greeting`); `vite build` writes
   `dist/hello`.
 - Goldens `pkg_imports` and `pkg_shared_dependency` with committed `node_modules`;
@@ -3749,15 +3751,18 @@ not the latest 8.3.2, because 8.3.2 is inside pnpm's `minimumReleaseAge` and wou
 
 - Goldens through the default adapter, byte-for-byte vs Node: `pkg_imports` (named and default
   imports, a package `exports` map) and `pkg_shared_dependency` (`a1 b2 a3` / `4 4`: one
-  `counter` instance). `pnpm run test:golden` → `golden: 426 fixtures — 426 passed, 0 failed`;
+  `counter` instance). `pnpm run test:golden` → `golden: 433 fixtures — 433 passed, 0 failed`;
   `node packages/tests/golden/run.ts --bundler=none --filter pkg_` →
   `golden: SKIPPED 2 fixtures that import packages (--bundler=none)`.
 - `examples/vite` builds a binary with `vite build`: unit test `examples/vite: vite build writes
-  a binary that prints what Node prints` (`packages/tests/unit/vite-stator.test.ts`, 3 tests).
+  a binary that prints what Node prints` (`packages/tests/unit/vite-stator.test.ts`, 4 tests).
 - Tree-shaking: 1 of 40 functions imported; the vendor module holds only `function f7` (unit
   test `the adapter tree-shakes`); the binary is 116 880 B through the package and 116 880 B with
   the function in the project, 0% apart (plan-notes 321).
-- `pnpm run ci` on the branch rebased onto 549d73f: exit 0 (typecheck, lint, dupes at 198
-  clones, runtime, unit `Test Files  54 passed (54)` / `Tests  715 passed (715)`, runtime
-  corpus, subset `845 fixtures — 812 passed, 33 expected-fail, 0 failed`, golden 426/426,
-  selfhost `11 targets match the baseline`, builtins, node-coverage, leak, ASan golden 426/426).
+- The Node suite (T11.7): `pnpm run test:node-suite` → `Tests  15 passed | 2 skipped (17)`; the
+  15 CommonJS `test-path*` files now stop at `STA0015` (`../common` resolves only through the
+  harness's host hook), not `STA0014` (plan-notes 321).
+- `pnpm run ci` on the branch rebased onto 9a26b03: exit 0 (typecheck, lint, dupes at 188
+  clones, runtime, unit `Test Files  55 passed (55)` / `Tests  721 passed (721)`, runtime
+  corpus, subset `879 fixtures — 846 passed, 33 expected-fail, 0 failed`, golden 433/433,
+  selfhost `12 targets match the baseline`, builtins, node-coverage, leak, ASan golden 433/433).

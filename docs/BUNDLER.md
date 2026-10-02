@@ -143,7 +143,12 @@ table leaves open:
   `vite.config.*` never shapes the vendor build.
 - `build.outDir` is `resolveDir` with `write: false`. Nothing is written, and the map's
   `sources` come out relative to `resolveDir`, which is what §5 promises.
-- `external` is the compiler's list (§3), passed to both Rolldown and `esmExternalRequirePlugin`.
+- `external` is the compiler's list (§3), passed to `esmExternalRequirePlugin` only.
+  Rolldown's own `external` answers before any plugin, so with the list there `require('path')`
+  stayed `__require("path")` through `createRequire` (measured). The plugin leaves every match
+  external for `import` too.
+- `treeshake.moduleSideEffects` is `false` for an external built-in, so the `import "node:module"`
+  Rolldown's runtime keeps after the last `__require` is gone is dropped.
 - `inputs` are the chunk's absolute module ids, less the virtual entry. A build that answers
   more than one chunk, or no map, is an error, so `STA0015`.
 

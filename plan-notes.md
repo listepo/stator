@@ -11319,3 +11319,23 @@ details the §2 table left open are written up under "As implemented (T12.2)" th
    compiled compiler still cannot load an adapter (plan-notes 320 item 10, STA1207).
 8. **Windows.** The new unit tests are `NATIVE_ONLY`: one runs a binary, and the other two compare
    POSIX paths.
+9. **`require` of a built-in, fixed in the adapter.** With the compiler's external list passed to
+   Rolldown's `external` as well as to `esmExternalRequirePlugin`, `require('path')` stayed
+   `__require("path")` through `createRequire(import.meta.url)`: Rolldown's `external` answers
+   before any plugin's `resolveId`, so the plugin never saw the specifier. BUNDLER.md §4's
+   measurement had the plugin alone. The adapter now passes the list to the plugin only (which
+   keeps every match external for `import` too), and marks external built-ins side-effect free,
+   which drops the `import "node:module"` Rolldown's runtime otherwise leaves behind. Unit test
+   `require of a built-in becomes an import`, which fails on the previous adapter.
+10. **The Node suite (T11.7), re-run on this branch** (rebased onto 8f6b38c and again onto 9a26b03, which have T11.7 and
+    T11.5's `--node` gate for CommonJS routing): `pnpm run test:node-suite` →
+    `Tests  15 passed | 2 skipped (17)`. The 15 `fail` expectations still fail, so the run is
+    green, but no longer on `STA0014`. Every one now stops at `STA0015`: the bundler cannot
+    resolve `require('../common')` (and `../common/fixtures`), because the harness answers those
+    specifiers only through Node's `--import` host hook, and the corpus has no `test/common`.
+    `expectations.json` reasons say so. Measured past that by copying the harness's `common/`
+    beside a copy of the corpus: every file then stops at `node:process` (`STA1214`, T11.6) plus
+    a checker error, and a hand-written CommonJS file that only requires `path` and `assert`
+    stops at `STA4013` "comma operator result must match" in Rolldown's `__commonJSMin`, which is
+    T12.3's interop-helper item (noted on its card). How the Stator build should see `../common`
+    is the node-suite harness's question; this card does not change it.

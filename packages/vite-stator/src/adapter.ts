@@ -3,6 +3,7 @@
  * no code splitting, no minification, a source map. `stator build --mode=js` loads it by name
  * (`--bundler=vite`, the default) only when the program imports a package. */
 
+import { isBuiltin } from 'node:module';
 import { isAbsolute } from 'node:path';
 import { build, esmExternalRequirePlugin, type Plugin, type Rolldown } from 'vite';
 import type { BundleOptions, BundleResult, BundlerAdapter, VendorEntry } from 'statorc/api';
@@ -40,6 +41,11 @@ function onlyChunk(result: Awaited<ReturnType<typeof build>>): Rolldown.OutputCh
   return chunk;
 }
 
+/** `false` for an external built-in; `undefined` leaves every other module to Rolldown. */
+function builtinSideEffects(moduleId: string, isExternal: boolean): boolean | undefined {
+  return isExternal && isBuiltin(moduleId) ? false : undefined;
+}
+
 /** One Vite build of `entry`, docs/BUNDLER.md §2's table row by row. */
 export async function bundle(entry: VendorEntry, options: BundleOptions): Promise<BundleResult> {
   const root = entry.resolveDir.replace(/\\/g, '/');
@@ -68,7 +74,13 @@ export async function bundle(entry: VendorEntry, options: BundleOptions): Promis
         sourcemap: true,
         target: 'esnext',
         rolldownOptions: {
-          external,
+          // Empty on purpose: Rolldown's `external` answers before any plugin, so `require` of a
+          // built-in would stay `__require` through `createRequire`. The require plugin above takes
+          // the whole list instead, and leaves every match external for `import` as well.
+          external: [],
+          // Rolldown's runtime keeps `import "node:module"` once no `__require` is left. A built-in
+          // has no import side effect, so an unused one is dropped.
+          treeshake: { moduleSideEffects: builtinSideEffects },
           // Vite's build turns `topLevelVar` on, which rewrites every top-level `let`/`const`.
           output: { format: 'es', codeSplitting: false, topLevelVar: false },
         },

@@ -4,6 +4,7 @@
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
+import { builtinModules } from 'node:module';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -62,6 +63,31 @@ test(
     // Sources come out relative to `resolveDir`, the contract (docs/BUNDLER.md §5).
     assert.deepEqual(bundle.map.sources, ['node_modules/forty/index.js']);
     assert.deepEqual(bundle.inputs, [join(root, 'node_modules/forty/index.js')]);
+  },
+);
+
+test(
+  'require of a built-in becomes an import; std/* and node:* imports stay external',
+  NATIVE_ONLY,
+  async () => {
+    const root = project({
+      'main.cjs':
+        "'use strict';\nconst path = require('path');\nconst { f } = require('esm');\nconsole.log(path.basename('/a/b.js'), f('/x/y'));\n",
+      'node_modules/esm/package.json': PACKAGE_JSON('esm'),
+      'node_modules/esm/index.js':
+        "import { basename } from 'path';\nimport { sep } from 'node:path';\nimport env from 'std/env';\n" +
+        'export const f = (p) => basename(p) + sep + typeof env;\n',
+    });
+    const entry = vendorEntry(join(root, 'main.cjs'), 'js', true);
+    assert.ok(entry !== undefined);
+    const bundle = await adapter.bundle(entry, {
+      external: [/^node:/, ...builtinModules, /^std\//],
+    });
+    assert.match(bundle.code, /^import \* as \w+ from "path";$/m);
+    assert.match(bundle.code, /^import \{ sep \} from "node:path";$/m);
+    assert.match(bundle.code, /^import env from "std\/env";$/m);
+    // No `__require` through `createRequire`, and no leftover `import "node:module"`.
+    assert.doesNotMatch(bundle.code, /createRequire|node:module|__require\(/);
   },
 );
 
