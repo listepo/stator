@@ -105,7 +105,7 @@ async function explain(
   // exits 0 with the verdict as the answer — a refusal is a result, not a throw — and
   // `explainFile` preserves that: rejections come back as a verdict, and only a missing
   // entry throws (which the caller reports per fixture, as the spawn failure was).
-  const result = await explainFile(file, mode, node);
+  const result = await explainFile(file, mode, undefined, node);
   return result.code === undefined
     ? { verdict: result.verdict }
     : { verdict: result.verdict, code: result.code };

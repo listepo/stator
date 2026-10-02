@@ -30,6 +30,7 @@ const NO_FLAGS: CliOptions = {
   keepC: undefined,
   emitHeader: undefined,
   unitName: undefined,
+  bundler: undefined,
   diagnostics: undefined,
   node: undefined,
 };
@@ -46,6 +47,7 @@ const FULL = {
   keepC: true,
   emitHeader: 'build/app.h',
   unitName: 'app',
+  bundler: './adapter.ts',
   diagnostics: 'json',
   node: true,
 };
@@ -82,6 +84,7 @@ test('every key from the file alone; paths resolve against the file directory', 
     keepC: true,
     emitHeader: join(dir, 'build/app.h'),
     unitName: 'app',
+    bundler: join(dir, 'adapter.ts'),
     diagnostics: 'json',
     node: true,
   });
@@ -108,6 +111,7 @@ test('every key overridden from the command line; link concatenates, file first'
     keepC: true,
     emitHeader: 'other.h',
     unitName: 'other',
+    bundler: 'none',
     diagnostics: 'text',
     node: true,
   };
@@ -121,6 +125,7 @@ test('every key overridden from the command line; link concatenates, file first'
     keepC: true,
     emitHeader: 'other.h',
     unitName: 'other',
+    bundler: 'none',
     diagnostics: 'text',
     node: true,
   });
@@ -145,6 +150,7 @@ test('no file and no flags give the built-in defaults', () => {
     keepC: false,
     emitHeader: undefined,
     unitName: undefined,
+    bundler: undefined,
     diagnostics: 'text',
     node: false,
   });

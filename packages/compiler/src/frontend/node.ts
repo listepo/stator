@@ -135,22 +135,23 @@ export function classifyNodeMember(
 
 /** The verdict on a free `require` (plan.md §11c T11.5, docs/BUNDLER.md §4). ESM is the module
  * system in `ts` mode, and without `--node`, so `require` is refused by design (`STA1110`). With
- * `--node` in `js` mode a CommonJS file is the bundler's to convert (T12.1), and `require` over
- * built-ins comes from `createRequire`; until those land it is not-yet naming Phase 12. */
+ * `--node` in `js` mode a CommonJS project file goes to the bundler whole (T12.1) and never reaches
+ * the gate; a `require` that does — the bundle's own call on a built-in, or one beside ES-module
+ * syntax — is T11.5's open `createRequire` step, so it is not-yet naming Phase 11. */
 export function requireVerdict(
   mode: Mode,
   node: boolean,
 ):
   | { kind: 'never'; code: 'STA1110'; message: string }
-  | { kind: 'not-yet'; code: 'STA1214'; message: string; phase: 12 } {
+  | { kind: 'not-yet'; code: 'STA1214'; message: string; phase: 11 } {
   if (mode === 'js' && node) {
     return {
       kind: 'not-yet',
       code: 'STA1214',
       message:
-        'CommonJS require() under --node is not yet supported; planned for Phase 12 ' +
-        '(T12.1: the bundler converts CommonJS)',
-      phase: 12,
+        'CommonJS require() under --node is not yet supported; planned for Phase 11 ' +
+        '(T11.5: require over built-ins through createRequire)',
+      phase: 11,
     };
   }
   return {

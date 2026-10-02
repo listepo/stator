@@ -37,6 +37,22 @@ function identifierAt(source: ts.SourceFile, position: number): ts.Identifier | 
   return found;
 }
 
+/** The checker codes for an undeclared name — plain, with the `@types/node` hint (two spellings),
+ * and as a shorthand property — when the name is one of Node's two CommonJS path globals. */
+const UNDECLARED_NAME_CODES: ReadonlySet<number> = new Set([2304, 2580, 2591, 18004]);
+
+function isNodePathGlobalRead(diag: ts.Diagnostic): boolean {
+  if (
+    !UNDECLARED_NAME_CODES.has(diag.code) ||
+    diag.file === undefined ||
+    diag.start === undefined
+  ) {
+    return false;
+  }
+  const name = identifierAt(diag.file, diag.start)?.text;
+  return name === '__filename' || name === '__dirname';
+}
+
 /** A TS1117 duplicate-key diagnostic that must NOT be swallowed by the js-mode carve-out:
  * two or more `__proto__` DATA properties (`PropertyName : AssignmentExpression`) in one
  * object literal — an early SyntaxError per spec B.3.1 that Node rejects, so js mode refuses it
@@ -472,31 +488,53 @@ export const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2407, // The right-hand side of a 'for...in' statement must be of type 'any', an object type...
 ]);
 
-/** Last in-process `createProgram` result for an unchanged entry.
+/** Source text the program reads instead of the disk (plan.md §11d T12.1 step 3): the vendor
+ * bundle as one virtual module, and the project files whose package imports were rewritten to
+ * name it. `key` is the sha256 of the bundle's code, so the program cache (Task 6.9, T12.1 step 6)
+ * misses when a dependency changed even though the entry did not. */
+export interface ProgramOverlay {
+  readonly files: ReadonlyMap<string, string>;
+  readonly key: string;
+}
+
+/** The sha256 the cache keys on: entry bytes, and a vendor bundle's code. */
+export function sha256(data: string | Buffer): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+/** Last in-process `createProgram` results for an unchanged entry.
  *
- * Keyed by absolute entry path + mode + platform + entry CONTENT hash. v0 invalidates on bytes, not mtime:
+ * Keyed by absolute entry path + mode + platform + entry CONTENT hash + the overlay's key (the
+ * vendor bundle's sha256, empty without one). v0 invalidates on bytes, not mtime:
  * test262 stages thousands of tests through a handful of slot-reused temp paths, so (path, mtime)
  * can repeat for different contents on a coarse-tick filesystem and serve a stale program under
  * the wrong test's name (plan-notes 245). A dep edit without an entry touch still does not bust
  * the cache — no runner does that mid-run; a watch daemon with a full dependency set is the
- * follow-up. Custom `host` (memfs tests) always bypasses the cache. */
+ * follow-up. Custom `host` (memfs tests) always bypasses the cache.
+ *
+ * Two slots: a graph that imports a package loads twice per build — once to find the imports,
+ * once over the bundle — and one slot would evict each with the other. */
 interface ProgramCacheEntry {
   readonly absEntry: string;
   readonly mode: Mode;
   readonly node: boolean;
   readonly contentHash: string;
-  readonly result: {
-    program: ts.Program;
-    diagnostics: Diagnostic[];
-    runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
-  };
+  readonly overlayKey: string;
+  readonly result: LoadedProgram;
 }
 
-let programCache: ProgramCacheEntry | null = null;
+export interface LoadedProgram {
+  readonly program: ts.Program;
+  readonly diagnostics: Diagnostic[];
+  readonly runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
+}
+
+const PROGRAM_CACHE_SLOTS = 2;
+let programCache: ProgramCacheEntry[] = [];
 
 /** Drop the cached `ts.Program` (tests that mutate files under a reused entry need this). */
 export function clearProgramCache(): void {
-  programCache = null;
+  programCache = [];
 }
 
 /** Build a ts.Program from an entry file, using Stator-owned compilerOptions.
@@ -505,51 +543,70 @@ export function clearProgramCache(): void {
  *
  * `host` is the seam for tests (plan-notes 187): unit suites back programs with a memfs volume
  * through it. Omitted means ts.sys against the real disk — the ONLY mode the shipped compiler
- * runs in, since every production call passes no host.
+ * runs in, since every production call passes no host. `overlay` lays virtual text over either.
  *
  * `node` is the `--node` platform (plan.md §11c T11.5): Node built-ins resolve to `packages/node`
  * (`./node.ts`). Like the mode, it is a frontend policy nothing below the gate reads.
  *
- * Unchanged re-builds of the same absolute entry+mode+platform reuse the previous `ts.Program`
+ * Unchanged re-builds of the same absolute entry+mode+platform+overlay reuse the previous `ts.Program`
  * when the entry's bytes are unchanged (see `clearProgramCache`). */
 export function createProgram(
   entryFile: string,
   mode: Mode,
   host?: ts.CompilerHost,
+  overlay?: ProgramOverlay,
   node = false,
-): {
-  program: ts.Program;
-  diagnostics: Diagnostic[];
-  runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
-} {
+): LoadedProgram {
   // Custom hosts (memfs) have no meaningful disk mtime; never cache those.
   if (host === undefined) {
     const absEntry = resolve(entryFile).replace(/\\/g, '/');
+    const overlayKey = overlay?.key ?? '';
     // Hash, not mtime: one small-file read is noise against a ~380 ms frontend, and it closes
     // the stale-hit hole for slot-reused temp paths airtightly instead of by timestamp luck.
     let contentHash: string | undefined;
     try {
-      contentHash = createHash('sha256').update(readFileSync(absEntry)).digest('hex');
+      contentHash = sha256(readFileSync(absEntry));
     } catch {
       contentHash = undefined;
     }
-    if (
-      contentHash !== undefined &&
-      programCache !== null &&
-      programCache.absEntry === absEntry &&
-      programCache.mode === mode &&
-      programCache.node === node &&
-      programCache.contentHash === contentHash
-    ) {
-      return programCache.result;
+    const hit = programCache.find(
+      (entry) =>
+        entry.absEntry === absEntry &&
+        entry.mode === mode &&
+        entry.node === node &&
+        entry.contentHash === contentHash &&
+        entry.overlayKey === overlayKey,
+    );
+    if (contentHash !== undefined && hit !== undefined) {
+      return hit.result;
     }
-    const result = createProgramUncached(entryFile, mode, host, node);
+    const result = createProgramUncached(entryFile, mode, host, overlay, node);
     if (contentHash !== undefined) {
-      programCache = { absEntry, mode, node, contentHash, result };
+      programCache = [
+        { absEntry, mode, node, contentHash, overlayKey, result },
+        ...programCache,
+      ].slice(0, PROGRAM_CACHE_SLOTS);
     }
     return result;
   }
-  return createProgramUncached(entryFile, mode, host, node);
+  return createProgramUncached(entryFile, mode, host, overlay, node);
+}
+
+/** `base`, with `files` served from memory: the vendor module exists nowhere on disk, and a
+ * rewritten project file must be read as rewritten. Everything else passes through. */
+function overlayHost(base: ts.CompilerHost, files: ReadonlyMap<string, string>): ts.CompilerHost {
+  const normal = (name: string): string => resolve(name).replace(/\\/g, '/');
+  return {
+    ...base,
+    fileExists: (name) => files.has(normal(name)) || base.fileExists(name),
+    readFile: (name) => files.get(normal(name)) ?? base.readFile(name),
+    getSourceFile: (name, languageVersion, onError, shouldCreate) => {
+      const text = files.get(normal(name));
+      return text === undefined
+        ? base.getSourceFile(name, languageVersion, onError, shouldCreate)
+        : ts.createSourceFile(name, text, languageVersion, true);
+    },
+  };
 }
 
 /** `ts.getPreEmitDiagnostics`, with the checker's stack overflow named as STA0013 instead of
@@ -580,12 +637,9 @@ function createProgramUncached(
   entryFile: string,
   mode: Mode,
   host: ts.CompilerHost | undefined,
+  overlay: ProgramOverlay | undefined,
   node: boolean,
-): {
-  program: ts.Program;
-  diagnostics: Diagnostic[];
-  runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
-} {
+): LoadedProgram {
   // Stator owns these options — strict family on, noEmit true
   const compilerOptions: ts.CompilerOptions = {
     // Strict mode (Stator's policy)
@@ -640,8 +694,8 @@ function createProgramUncached(
     moduleResolution: ts.ModuleResolutionKind.Bundler,
     moduleDetection: ts.ModuleDetectionKind.Force,
     // `std/<name>` resolves to the std package's own source (plan.md §11c T11.2). On the options
-    // rather than in a custom host so the module graph's `ts.resolveModuleName` reads the same
-    // mapping the checker did; an unknown name is refused by `classifyStdSpecifier`, never here.
+    // rather than in a custom host so every resolution reads one mapping (the module graph asks
+    // the checker, T12.1); an unknown name is refused by `classifyStdSpecifier`, never here.
     // `--node` adds the Node built-ins the same way (`./node.ts`).
     paths: node ? { ...stdPathMapping(), ...nodePathMapping() } : stdPathMapping(),
 
@@ -683,7 +737,9 @@ function createProgramUncached(
   const program = ts.createProgram(
     [globals, resolve(entryFile).replace(/\\/g, '/')],
     compilerOptions,
-    host,
+    overlay === undefined
+      ? host
+      : overlayHost(host ?? ts.createCompilerHost(compilerOptions), overlay.files),
   );
   const diagnostics: Diagnostic[] = [];
   const runtimeDynamicSymbols = new Set<ts.Symbol>();
@@ -691,6 +747,12 @@ function createProgramUncached(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = preEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
+    // A free `__filename` or `__dirname` is the gate's STA1218 (plan.md §11d T12.1 step 7), in
+    // both modes: the checker's "cannot find name" would make it an STA0012 type error in ts mode
+    // and silent in js mode, where Node either defines it (CommonJS) or throws.
+    if (isNodePathGlobalRead(diag)) {
+      continue;
+    }
     // Duplicate `__proto__` data properties are the one 1117 js mode keeps: an early
     // SyntaxError (spec B.3.1), not last-wins JavaScript — see isDuplicateProtoDataProperty.
     const keepProtoRefusal =

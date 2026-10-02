@@ -10657,7 +10657,9 @@ bundler does not touch, and the card stays open for the rest.
   declares it nowhere. A user's own `function require` and a property name `o.require` are not
   it. The checker's 2580 on that name is dropped so the gate's answer stands alone. Cells: `ts`
   mode `STA1110` with or without `--node`; `js` mode `STA1110` without, and `STA1214` naming
-  Phase 12 (T12.1) with, until the bundler converts CommonJS.
+  Phase 11 (T11.5's `createRequire` step) with it. Since T12.1 a CommonJS project file goes to the
+  bundler whole and never reaches the gate, so the `require` this cell sees is the bundle's own
+  call on a built-in, or one beside ES-module syntax.
 - **`__filename`/`__dirname`.** Decided, recorded in docs/MODES.md §6: relative to the
   executable, resolved at run time. `__dirname` is the binary's directory joined with the
   module's directory relative to the entry's; `__filename` adds the file name; the vendor module
@@ -10665,8 +10667,9 @@ bundler does not touch, and the card stays open for the rest.
   needs the same rule, and the subset does not compile `import.meta` yet; when it does, it is
   the `file:` URL of `__filename`. In an ES module the names stay undefined, as in Node 26.7.0
   (`ReferenceError: __dirname is not defined in ES module scope`, measured with
-  `node --input-type=module -e 'console.log(__dirname)'`). Injection belongs to T12.1's CommonJS
-  wrapper.
+  `node --input-type=module -e 'console.log(__dirname)'`). Injection belongs to the CommonJS
+  wrapper; until then T12.1's `STA1218` stands under the flag too, with a message that names the
+  wrapper instead of the flag.
 - **One root rule.** `std.ts`'s package-root lookup was a copy of `build.ts`'s runtime-root
   lookup, and `node` would have been a third. They are one function now,
   `support/package-root.ts`; `STATOR_NODE_ROOT` joins `STATOR_STD_ROOT` and
@@ -10680,14 +10683,94 @@ passing, and `subset_commonjs_require_node_ts`/`_js`), built-ins without the fla
 `unit/node-platform.test.ts` points `STATOR_NODE_ROOT` at a stub package and checks the landed
 path: both spellings resolve and compile `static`, the config key equals the flag, an unlanded
 member names T11.6, an unknown member stays `STA0012`, and a built-in builds and runs through
-the stub. The self-compilation count rises 1648 → 1658 `STA1214`, re-recorded with `--update`
+the stub. The self-compilation count rises 1711 → 1722 `STA1214` (1648 → 1658 before the merge with T12.1), re-recorded with `--update`
 (plan-notes 306): the new `node.ts` and `package-root.ts` import `node:*` modules and read
 `process`, which the compiler's own `ts`-mode explain counts.
 
-`pnpm run ci` on the branch: vitest 52 files, 694 tests passed; subset 827 fixtures, 794 passed,
-33 expected-fail (two fewer: the `require` pair), 0 failed; golden 415/415; selfhost matches the
-re-recorded baseline; ASan gate green.
+`pnpm run ci` on the branch, merged with T12.1: vitest 53 files, 710 tests passed; subset 831
+fixtures, 798 passed, 33 expected-fail (two fewer: the `require` pair), 0 failed; golden 415/415;
+selfhost matches the re-recorded baseline; builtins 242/304; NODE.md current; leak plateaus; ASan
+gate green.
 
-**Still open in T11.5 (waits for T12.1).** Routing a CommonJS project file to the bundler; the
-vendor bundle's `import * as m from "path"` plus `m.default`; `require`/`createRequire` at run
-time and its three goldens; and the `__filename`/`__dirname` values in the CommonJS wrapper.
+**Merged after T12.1 (plan-notes 320).** T12.1 landed while this branch was open. Both drive
+the frontend through `cli/bundler.ts` `loadFrontend` now, so `node` threads through it into
+`createProgram` (whose cache keys on it beside the overlay key) and `entryProgram` is gone: the
+clone it removed is `loadFrontend`'s job. T12.1 routes CommonJS project files with or without
+`--node`; whether `--node` should gate that routing is 320's open question 2, left to the creator.
+
+**Still open in T11.5.** The vendor bundle's `import * as m from "path"` plus `m.default`;
+`require`/`createRequire` at run time and its three goldens; and the `__filename`/`__dirname`
+values in the CommonJS wrapper.
+
+## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
+
+**What landed.** `js` mode sends package imports and CommonJS project files to one bundler
+call. The answer joins the program as the virtual `__stator_vendor__.js` beside the entry, and
+the project's import declarations are rewritten to name it. `--bundler=vite|none|<module>` and
+the `bundler` config key choose the adapter; `statorc/api` exposes `compile` and `vendorEntry`.
+Diagnostics and spans inside the bundle map back through its source map. A free `__filename` or
+`__dirname` is the new not-yet `STA1218`. The evidence is in done.md → Phase 12 T12.1.
+
+**Decisions this card had to make.** Each is recorded here because docs/BUNDLER.md or the card
+did not settle it.
+
+1. **CommonJS routing is narrower than Node's rule.** BUNDLER.md §4 quotes Node: a `.js` with no
+   `"type"` and no ES-module syntax is CommonJS. Routed literally, every plain script needs a
+   bundler — Test262's harness files, the `js` goldens staged in a tmpdir, any `console.log`
+   one-liner — and the default adapter (`vite-stator`, T12.2) is not installed, so all of them
+   would fail `STA0014`. A script that reads no `require`, `module` or `exports` means the same
+   thing as a module or as CommonJS, so T12.1 routes such a `.js` only when it reads a free
+   `require(…)`, `module.exports` or `exports`. "Free" is the checker's answer: no symbol, or
+   only ambient declarations (`@types/node`'s), so a local `const exports = …` does not count.
+   `.cjs` and `.js` under `"type": "commonjs"` route always. `src/frontend/vendor.ts`
+   `isCommonJsFile`; BUNDLER.md §4 says so.
+2. **CommonJS files route with or without `--node`.** The card's step 2 routes them in `js` mode;
+   BUNDLER.md §4's last paragraph and the T11.5 card tie routing to `--node`, which does not
+   exist yet. Waiting would have left the step unbuildable. Today a routed CommonJS file is
+   whatever its bundled code is (`STA1214` on the interop helpers, T12.3). **T11.5 must
+   reconcile:** either `--node` becomes the gate and `js` mode without it reports `STA1110` for a
+   CommonJS file, or BUNDLER.md §4 drops the `--node` clause. Open question for the creator.
+3. **The rewrite is textual and keeps every line.** Each project import or re-export of a package
+   is rewritten in place to `./__stator_vendor__.js` with the mangled names
+   (`<stem>$default`, `<stem>$ns`, `<stem>$<name>`, `$2`/`$3` on a collision). The new text keeps
+   the declaration's line count (`sameLines`), so line numbers in diagnostics, `#line` and
+   `STA2001` stay right. Columns on a rewritten line can shift; no diagnostic points inside an
+   import declaration today, so nothing reports a wrong column. Type-only names split onto the
+   original module, which `checkJs` and the `ts` checker still resolve.
+4. **Still refused, each `STA1214`:** `export * from 'p'` (only the bundler knows the names, and
+   the vendor entry is built before the bundle), `import('p')` (the vendor module is static) and
+   a package import with import attributes (the attribute changes what the import means). The
+   T12.1 stub in plan.md lists them; no card owns them yet.
+5. **The program cache keys on the overlay.** Two slots, keyed by (entry, mode, entry sha256,
+   overlay key). The overlay key is the sha256 of every overlay file, rewrites included, not only
+   the bundle's code the card named: the rewrites follow from the entry and the bundle, so the
+   wider key costs nothing and keys on every byte the program read. Two slots hold the base
+   program and the bundled one, so `explain` after `build` misses neither.
+6. **`sources` resolve against the vendor entry's `resolveDir`, after `sourceRoot`.** The
+   adapter contract (§5) gives `resolveDir`; an absolute or `file:` source is taken as is. A
+   source with a NUL prefix or a non-`file:` URL scheme (`\0rolldown/runtime.js`, `virtual:`)
+   is a bundler helper and maps to `<package bundle>`. `SourceMap.findEntry` answers the nearest
+   preceding mapping even on an earlier line, so only a mapping on the asked-for line counts;
+   otherwise a helper after mapped code would borrow that code's position.
+7. **Adapter loading.** `vite` names `vite-stator`; a specifier starting with `.` or absolute is
+   a path (from the current directory on the CLI, from the config file's directory for the
+   config key); anything else is a package resolved from the project (`createRequire` at the
+   entry's directory), then beside the compiler (`import.meta.resolve`). The adapter is the
+   module's default export or a named `adapter`. A module that cannot load or exports no
+   adapter is `STA0014`; a rejecting `bundle()` or an answer without `code`, a version-3 `map`
+   and an `inputs` list is `STA0015`. `--bundler` in `ts` mode is `STA0004`.
+8. **`statorc/api` exports the source.** `packages/compiler/package.json` `exports` maps
+   `./api` to `./src/api.ts`, the way every workspace consumer runs the compiler today (Node
+   strips types). The published package's `files` ships only `dist`, so a publish must map it to
+   the built file. No publish is planned; noted for the card that publishes.
+9. **The goldens stay adapter-free.** `golden/run.ts` takes `--bundler=none` and forwards it;
+   the default run loads no adapter because no golden imports a package or reads `require`. Both
+   runs pass 415 of 415.
+10. **Self-compilation grows** by 1 × `STA1207` (the adapter's `import()` of a computed
+    specifier, which a native binary cannot do — T12.2 or `--node` decides how a compiled
+    compiler loads one) and 63 × `STA1214` (1648 → 1711), recorded with `--update` per v4.25.
+
+**Open question for the creator.** A checker error (`STA0012`) inside the vendor module is
+package code the user cannot fix; today it is reported at the mapped position like any other.
+Whether `checkJs` should skip the vendor module (and leave its errors to the lowering's
+verdicts) is not decided.

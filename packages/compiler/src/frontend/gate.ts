@@ -770,18 +770,21 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
         return { kind: 'accept' };
       }
     }
-    // Bare specifier: a package. Compiling one means compiling someone else's whole module graph.
+    // Bare specifier: a package. In js mode the bundler takes it (plan.md §11d T12.1), and the
+    // vendor rewrite turns every import declaration and named re-export of one into an import of
+    // the vendor module, so a package specifier left here is ts mode, `--bundler=none`, or a
+    // form the rewrite does not take (`export * from`, `import()`, an import attribute).
     if (std === undefined && !spec.text.startsWith('./') && !spec.text.startsWith('../')) {
-      // No `phase`: compiling a package means compiling someone else's whole module graph
-      // (npm-ecosystem compatibility, a v1 non-goal in plan.md §0), and no open phase owns
-      // it — a phase number here would tell the user to wait for a release that has no card
-      // for the work (src/support/phases.ts).
+      // No `phase`: ts mode never bundles (a bundler strips the types it compiles), and no open
+      // phase owns the remaining forms — a phase number here would tell the user to wait for a
+      // release that has no card for the work (src/support/phases.ts).
       return {
         kind: 'not-yet',
         code: 'STA1214',
         message:
-          'importing a package is not yet supported (npm-ecosystem compatibility is a ' +
-          'v1 non-goal; no phase owns it)',
+          'importing a package is not yet supported here (a package reaches a program only ' +
+          'through the js-mode bundler, which takes import declarations and named re-exports; ' +
+          'docs/BUNDLER.md)',
       };
     }
     // Node ESM never resolves an extensionless relative specifier, and Node is the ground truth
@@ -816,6 +819,43 @@ function isFreeRequire(node: ts.Identifier, symbol: ts.Symbol | undefined): bool
     return false;
   }
   return (symbol?.declarations ?? []).every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/** A read of Node's `__filename` or `__dirname` that nothing in the program declares (plan.md
+ * §11d T12.1 step 7, docs/BUNDLER.md §4, §9). A shorthand `{ __dirname }` reads it too; a
+ * property name (`o.__dirname`) or a declaration is not the global. */
+function isFreeNodePathGlobal(
+  node: ts.Identifier,
+  symbol: ts.Symbol | undefined,
+  typeChecker: ts.TypeChecker,
+): boolean {
+  if (node.text !== '__filename' && node.text !== '__dirname') return false;
+  const parent = node.parent;
+  if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
+    return typeChecker.getShorthandAssignmentValueSymbol(parent) === undefined;
+  }
+  if (
+    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+    (ts.isPropertyAssignment(parent) && parent.name === node) ||
+    ts.isTypeNode(parent)
+  ) {
+    return false;
+  }
+  return symbol === undefined;
+}
+
+/** STA1218: the value is a path on the build machine, which no binary may carry. `--node`
+ * (T11.5) defines what it means in a native binary (creator's decision, plan-notes 296; the rule
+ * is docs/MODES.md §6); until the CommonJS wrapper injects it, it stays not-yet under the flag too. */
+function nodePathGlobalNotYet(name: string, onNode: boolean): GateResult {
+  return {
+    kind: 'not-yet',
+    code: 'STA1218',
+    message: onNode
+      ? `'${name}' is not yet supported; planned for Phase 11 (T11.5: the CommonJS wrapper injects it)`
+      : `'${name}' is not yet supported without --node; planned for Phase 11 (T11.5)`,
+    phase: 11,
+  };
 }
 
 /** One code for the whole Phase 2 boundary. These constructs are not deferred for six different
@@ -1036,6 +1076,9 @@ function gateIdentifier(
   const symbol = typeChecker.getSymbolAtLocation(node);
   if (isFreeRequire(node, symbol)) {
     return requireVerdict(mode, onNode);
+  }
+  if (isFreeNodePathGlobal(node, symbol, typeChecker)) {
+    return nodePathGlobalNotYet(node.text, onNode);
   }
   const decl = symbol?.valueDeclaration;
   // A class NAME is not a value here. Five spellings are not uses of the value and must pass: the

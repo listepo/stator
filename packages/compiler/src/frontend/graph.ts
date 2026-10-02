@@ -83,7 +83,7 @@ function valueImports(
       if (!ts.isStringLiteral(stmt.moduleSpecifier)) {
         continue;
       }
-      pushResolved(program, file, stmt.moduleSpecifier.text, stmt, edges);
+      pushResolved(program, stmt.moduleSpecifier, stmt, edges);
       continue;
     }
     if (ts.isExportDeclaration(stmt)) {
@@ -92,18 +92,17 @@ function valueImports(
         stmt.moduleSpecifier !== undefined &&
         ts.isStringLiteral(stmt.moduleSpecifier)
       ) {
-        pushResolved(program, file, stmt.moduleSpecifier.text, stmt, edges);
+        pushResolved(program, stmt.moduleSpecifier, stmt, edges);
       }
       continue;
     }
-    collectImportCallEdges(program, file, stmt, edges);
+    collectImportCallEdges(program, stmt, edges);
   }
   return edges;
 }
 
 function collectImportCallEdges(
   program: ts.Program,
-  file: ts.SourceFile,
   node: ts.Node,
   edges: { target: ts.SourceFile; at: ts.Node }[],
 ): void {
@@ -113,31 +112,24 @@ function collectImportCallEdges(
     node.arguments[0] !== undefined &&
     ts.isStringLiteral(node.arguments[0])
   ) {
-    pushResolved(program, file, node.arguments[0].text, node, edges);
+    pushResolved(program, node.arguments[0], node, edges);
   }
   ts.forEachChild(node, (child) => {
-    collectImportCallEdges(program, file, child, edges);
+    collectImportCallEdges(program, child, edges);
   });
 }
 
+/** The edge a specifier names, resolved by the checker rather than by a fresh `ts.sys` lookup: the
+ * checker resolved it through the program's own host, which also serves files that exist nowhere
+ * on disk (the vendor module, plan.md §11d T12.1 step 3). */
 function pushResolved(
   program: ts.Program,
-  file: ts.SourceFile,
-  specifier: string,
+  specifier: ts.StringLiteral,
   at: ts.Node,
   edges: { target: ts.SourceFile; at: ts.Node }[],
 ): void {
-  const resolved = ts.resolveModuleName(
-    specifier,
-    file.fileName,
-    program.getCompilerOptions(),
-    ts.sys,
-  ).resolvedModule;
-  if (resolved === undefined) {
-    return;
-  }
-  const target = program.getSourceFile(resolved.resolvedFileName);
-  if (target !== undefined && !target.isDeclarationFile) {
+  const target = program.getTypeChecker().getSymbolAtLocation(specifier)?.valueDeclaration;
+  if (target !== undefined && ts.isSourceFile(target) && !target.isDeclarationFile) {
     edges.push({ target, at });
   }
 }

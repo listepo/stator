@@ -22,6 +22,10 @@ d2 docs/architecture/values.d2 docs/architecture/values.svg
 One pipeline, two modes. Mode is a policy layer at the frontend gate; nothing below it knows the
 mode existed (plan §0.8).
 
+In `js` mode a graph that imports a package or holds a CommonJS file takes one detour first
+(T12.1, `docs/BUNDLER.md`): the dependencies are bundled into one virtual module and the program
+is reloaded over it. Below the gate the vendor module is one more `js` file.
+
 ![Compile pipeline](architecture/pipeline.svg)
 
 Source: [`architecture/pipeline.d2`](architecture/pipeline.d2)

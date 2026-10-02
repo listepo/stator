@@ -167,12 +167,23 @@ function decodeFailure(value: unknown): string | undefined {
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
  * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
  * compile into each other's `app`. */
+/** `--bundler=none` (plan.md §11d T12.1 Check): every fixture builds with the bundle step off.
+ * The default leaves the compiler's own default, `vite`, which must never load here: no fixture
+ * imports a package or holds a CommonJS file. */
+const BUNDLER_NONE = process.argv.includes('--bundler=none');
+
 async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStreams> {
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
     const objects = await compileFixtureC(path, dirname(out));
-    await buildFixture({ entry: path, out, mode, linkFlags: objects });
+    await buildFixture({
+      entry: path,
+      out,
+      mode,
+      linkFlags: objects,
+      ...(BUNDLER_NONE ? { bundler: { kind: 'none' } } : {}),
+    });
     const exec = await runProcess(out, [], { env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
@@ -269,7 +280,7 @@ async function main(): Promise<void> {
     try {
       await fanOutWorkers({
         script,
-        baseArgs: workerBaseArgs(args),
+        baseArgs: [...workerBaseArgs(args), ...(BUNDLER_NONE ? ['--bundler=none'] : [])],
         shards: args.shards,
         dir,
       });

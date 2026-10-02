@@ -23,16 +23,21 @@ import {
 } from '../frontend/export.ts';
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
-import { createProgram } from '../frontend/program.ts';
 import { isStdSourceFile, STD_ROOT } from '../frontend/std.ts';
 import { verifyHir } from '../hir/verify.ts';
-import { lowerProgram } from '../lower/index.ts';
 import { optimize } from '../passes/index.ts';
 import { BuildError, type Diagnostic } from '../support/diagnostics.ts';
 import { runtimeFlavor } from '../support/features.ts';
 import { packageRoot } from '../support/package-root.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { isStaleLdSystemLibFailure, staleLdHint, staleLdRetryArgs } from '../support/toolchain.ts';
+import {
+  type BundlerChoice,
+  DEFAULT_BUNDLER,
+  loadFrontend,
+  lowerFrontend,
+  mapVendorDiagnostics,
+} from './bundler.ts';
 import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
 
 type Mode = 'ts' | 'js';
@@ -65,6 +70,9 @@ export interface BuildOptions {
   /** `--unit-name` override for the `stator_<unit>_<name>` mangling; defaults to the entry's
    * file basename. Sanitized to a C identifier wherever it came from. */
   readonly unitName?: string;
+  /** `js` mode: the bundler for package imports and CommonJS project files (docs/BUNDLER.md
+   * §5). Default `vite`; it loads only when the graph needs it. */
+  readonly bundler?: BundlerChoice;
   /** `--node`: the Node platform (plan.md §11c T11.5, docs/MODES.md §6). Node built-ins resolve
    * to `packages/node`; a frontend policy, like the mode. */
   readonly node?: boolean;
@@ -96,6 +104,8 @@ export function internalErrorMessage(error: unknown): string {
  */
 interface DiagnosticCapture {
   readonly lines: string[];
+  /** The same diagnostics, structured, for `statorc/api`. */
+  readonly diagnostics: Diagnostic[];
 }
 
 const diagnosticCapture = new AsyncLocalStorage<DiagnosticCapture>();
@@ -103,10 +113,10 @@ const diagnosticCapture = new AsyncLocalStorage<DiagnosticCapture>();
 /** Run `fn` with diagnostics captured as plain text (no ink). */
 export async function withDiagnosticCapture<T>(
   fn: () => Promise<T>,
-): Promise<{ result: T; stderr: string }> {
-  const store: DiagnosticCapture = { lines: [] };
+): Promise<{ result: T; stderr: string; diagnostics: readonly Diagnostic[] }> {
+  const store: DiagnosticCapture = { lines: [], diagnostics: [] };
   const result = await diagnosticCapture.run(store, fn);
-  return { result, stderr: store.lines.join('') };
+  return { result, stderr: store.lines.join(''), diagnostics: store.diagnostics };
 }
 
 /** Route diagnostic lines to the capture store when set, else ink → stderr. */
@@ -176,7 +186,13 @@ export async function build(options: BuildOptions): Promise<number> {
     options.emitHeader === undefined
       ? undefined
       : sanitizeUnitName(options.unitName ?? defaultUnitName(options.entry));
-  const compiled = await compileToC(options.entry, options.mode, unit, options.node ?? false);
+  const compiled = await compileToC(
+    options.entry,
+    options.mode,
+    unit,
+    options.bundler,
+    options.node ?? false,
+  );
   if (compiled === null) {
     return 1;
   }
@@ -249,10 +265,11 @@ export async function compileToC(
   entry: string,
   mode: Mode,
   unit?: string,
+  bundler: BundlerChoice = DEFAULT_BUNDLER,
   node = false,
 ): Promise<CompiledC | null> {
   try {
-    return await compileToCInner(entry, mode, unit, node);
+    return await compileToCInner(entry, mode, unit, bundler, node);
   } catch (error) {
     // Diagnostics are the contract for everything the pipeline can name; an ESCAPING exception is
     // a compiler bug by AGENTS.md's definition, and its contract is STA4072, never a raw stack
@@ -265,31 +282,19 @@ export async function compileToC(
   }
 }
 
-/** The entry's `ts.Program`, the front door `build` and `explain` share: a missing entry is
- * STA0007, and `node` is the `--node` platform. */
-export function entryProgram(
-  entry: string,
-  mode: Mode,
-  node: boolean,
-): ReturnType<typeof createProgram> {
-  if (!existsSync(entry)) {
-    throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
-  }
-  return withSpan('frontend/program', {}, () => createProgram(entry, mode, undefined, node));
-}
-
 async function compileToCInner(
   entry: string,
   mode: Mode,
   unit: string | undefined,
+  bundler: BundlerChoice,
   node: boolean,
 ): Promise<CompiledC | null> {
-  const {
-    program,
-    diagnostics: programDiagnostics,
-    runtimeDynamicSymbols,
-  } = entryProgram(entry, mode, node);
-  if (await report(programDiagnostics)) {
+  const frontend = await loadFrontend(entry, mode, bundler, node);
+  const { program } = frontend;
+  // Every stage's diagnostics in the vendor module are mapped before they print (T12.1 step 5).
+  const report = (diagnostics: readonly Diagnostic[]): Promise<boolean> =>
+    reportDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
+  if (await report(frontend.diagnostics)) {
     return null;
   }
 
@@ -329,7 +334,7 @@ async function compileToCInner(
   }
 
   const { module, diagnostics: lowerDiagnostics } = withSpan('lower', {}, () =>
-    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols, mode),
+    lowerFrontend(frontend, order, mode),
   );
   if ((await report(lowerDiagnostics)) || module === null) {
     return null;
@@ -372,7 +377,8 @@ async function compileToCInner(
 
 /** Prints diagnostics and reports whether any of them stops the build. `not-yet` and `never` are
  * both rejections — the difference is what the user should do about it, not whether it compiles. */
-async function report(diagnostics: readonly Diagnostic[]): Promise<boolean> {
+async function reportDiagnostics(diagnostics: readonly Diagnostic[]): Promise<boolean> {
+  diagnosticCapture.getStore()?.diagnostics.push(...diagnostics);
   await emitDiagnosticLines(diagnosticLines(diagnostics));
   return diagnostics.length > 0;
 }

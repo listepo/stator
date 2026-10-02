@@ -19,11 +19,17 @@ import { moduleOrder } from '../frontend/graph.ts';
 import type { Expression, FunctionExpr, Module, Provenance, Statement } from '../hir/nodes.ts';
 import type { ExternCall } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
-import { lowerProgram } from '../lower/index.ts';
 import { rewriteModule } from '../passes/rewrite.ts';
 import { type Diagnostic, type DiagnosticSite, renderDiagnostic } from '../support/diagnostics.ts';
 import { withSpan } from '../support/telemetry.ts';
-import { BuildError, entryProgram } from './build.ts';
+import { BuildError } from './build.ts';
+import {
+  type BundlerChoice,
+  DEFAULT_BUNDLER,
+  loadFrontend,
+  lowerFrontend,
+  mapVendorDiagnostics,
+} from './bundler.ts';
 import { diagnosticLines, INK_COLORS, type InkColor, type Line, print } from './render.ts';
 
 type Mode = 'ts' | 'js';
@@ -91,9 +97,10 @@ export async function explain(
   entry: string,
   mode: Mode,
   json: boolean,
+  bundler: BundlerChoice = DEFAULT_BUNDLER,
   node = false,
 ): Promise<number> {
-  const result = await explainFile(entry, mode, node);
+  const result = await explainFile(entry, mode, bundler, node);
 
   if (json) {
     // The machine path NEVER goes through ink (decision tests parse this verbatim).
@@ -137,14 +144,19 @@ export async function explain(
 /** `node` is the `--node` platform (docs/MODES.md §6): under it a Node built-in `packages/node`
  * has not landed is a `not-yet` naming T11.6, so `diagnostics` lists the platform gaps the same
  * way it lists the language ones. */
-export async function explainFile(entry: string, mode: Mode, node = false): Promise<Explanation> {
-  const {
-    program,
-    diagnostics: programDiagnostics,
-    runtimeDynamicSymbols,
-  } = entryProgram(entry, mode, node);
+export async function explainFile(
+  entry: string,
+  mode: Mode,
+  bundler: BundlerChoice = DEFAULT_BUNDLER,
+  node = false,
+): Promise<Explanation> {
+  const frontend = await loadFrontend(entry, mode, bundler, node);
+  const { program } = frontend;
+  // The same mapping `build` applies (T12.1 step 5): a vendor diagnostic names the package file.
+  const classify = (diagnostics: readonly Diagnostic[]): Explanation | null =>
+    classifyDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
   const verdictFromDiagnostics = classify([
-    ...programDiagnostics,
+    ...frontend.diagnostics,
     ...withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)),
   ]);
   if (verdictFromDiagnostics !== null) {
@@ -170,9 +182,7 @@ export async function explainFile(entry: string, mode: Mode, node = false): Prom
     return graphVerdict;
   }
 
-  const { module, diagnostics } = withSpan('lower', {}, () =>
-    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols, mode),
-  );
+  const { module, diagnostics } = withSpan('lower', {}, () => lowerFrontend(frontend, order, mode));
   const verdictFromLowering = classify(diagnostics);
   if (verdictFromLowering !== null) {
     return verdictFromLowering;
@@ -261,7 +271,7 @@ function functionReports(module: Module): readonly FunctionReport[] {
 }
 
 /** null means "nothing here decides the verdict" — carry on to the typed answer. */
-function classify(diagnostics: readonly Diagnostic[]): Explanation | null {
+function classifyDiagnostics(diagnostics: readonly Diagnostic[]): Explanation | null {
   const decided = (verdict: 'error' | 'not-yet', code: string): Explanation => ({
     verdict,
     code,

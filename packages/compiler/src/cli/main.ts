@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { config as dotenvConfig } from 'dotenv';
 import { telemetryInit, telemetryShutdown, withSpanAsync } from '../support/telemetry.ts';
 import { BuildError, build, internalErrorMessage, type OptLevel } from './build.ts';
+import { type BundlerChoice, bundlerChoice, DEFAULT_BUNDLER } from './bundler.ts';
 import {
   type CliOptions,
   type ConfigChoice,
@@ -30,16 +31,25 @@ type Command =
       linkFlags: readonly string[];
       emitHeader: string | undefined;
       unitName: string | undefined;
+      bundler: BundlerChoice;
       node: boolean;
     }
-  | { kind: 'explain'; entry: string; mode: Mode; json: boolean; node: boolean };
+  | {
+      kind: 'explain';
+      entry: string;
+      mode: Mode;
+      json: boolean;
+      bundler: BundlerChoice;
+      node: boolean;
+    };
 
 const USAGE = `stator — ahead-of-time compiler for TypeScript/JavaScript
 
 Usage:
   stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
-  stator explain <entry> [--mode=ts|js] [--node] [--json]
+    [--bundler=vite|none|<module>]
+  stator explain <entry> [--mode=ts|js] [--node] [--json] [--bundler=vite|none|<module>]
   stator <command> --help
   stator --version
   stator --help
@@ -64,6 +74,7 @@ const COMMAND_USAGE = {
   build: `Usage:
   stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
+    [--bundler=vite|none|<module>]
 
 Flags:
   -o, --out <out>  output path: native binary, or C with --emit=c
@@ -78,13 +89,15 @@ Flags:
   --emit-header <h> write a C header for the unit's exports (docs/FFI.md);
                    -o names a relocatable object, not an executable
   --unit-name <unit> prefix for stator_<unit>_<name> (default: entry basename)
+  --bundler <b>    js mode: bundles package imports and CommonJS files;
+                   vite (default), none, or an adapter module (BUNDLER.md)
   --emit=binary    build a binary (default; overrides "emit": "c")
   --config <path>  read options from this JSON file (default:
                    ./stator.config.json when it exists; docs/CONFIG.md)
   --no-config      ignore stator.config.json
 `,
   explain: `Usage:
-  stator explain <entry> [--mode=ts|js] [--node] [--json]
+  stator explain <entry> [--mode=ts|js] [--node] [--json] [--bundler=<b>]
 
 Reports the file verdict: static | dynamic | error | not-yet, with the
 STA code and every diagnostic that decided it, then the static/dynamic
@@ -97,6 +110,7 @@ Flags:
                    landed is not-yet, naming T11.6
   --json           machine-readable report (used by the decision tests);
                    --diagnostics=text|json spells the same choice
+  --bundler <b>    js mode: vite (default), none, or an adapter module
   --config <path>  read options from this JSON file (default:
                    ./stator.config.json when it exists; docs/CONFIG.md)
   --no-config      ignore stator.config.json
@@ -184,6 +198,7 @@ function parse(argv: readonly string[]): Command {
     keepC: undefined,
     emitHeader: undefined,
     unitName: undefined,
+    bundler: undefined,
     diagnostics: undefined,
     node: undefined,
   };
@@ -285,6 +300,19 @@ function parse(argv: readonly string[]): Command {
       }
       cli.unitName = next;
       i += 1;
+    } else if (arg.startsWith('--bundler=')) {
+      const value = arg.slice('--bundler='.length);
+      if (value === '') {
+        throw new StatorError('STA0004', '--bundler requires a value (vite, none or a module)');
+      }
+      cli.bundler = value;
+    } else if (arg === '--bundler') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--bundler requires a value (vite, none or a module)');
+      }
+      cli.bundler = next;
+      i += 1;
     } else if (arg.startsWith('-')) {
       throw new StatorError('STA0005', `unknown flag "${arg}"`);
     } else if (cli.entry === undefined) {
@@ -304,6 +332,12 @@ function parse(argv: readonly string[]): Command {
   if (entry === undefined) {
     throw new StatorError('STA0004', `"${head}" requires an entry file`);
   }
+  // A ts-mode graph never bundles (docs/BUNDLER.md §5): a package import there is refused at the
+  // gate, so a bundler choice is a mistake worth naming, not an inert flag.
+  if (mode === 'ts' && options.bundler !== undefined) {
+    throw new StatorError('STA0004', '--bundler requires --mode=js');
+  }
+  const bundler = options.bundler === undefined ? DEFAULT_BUNDLER : bundlerChoice(options.bundler);
   if (head === 'build') {
     if (out === undefined) {
       throw new StatorError('STA0004', 'build requires -o <out>');
@@ -319,10 +353,18 @@ function parse(argv: readonly string[]): Command {
       linkFlags: options.link,
       emitHeader: options.emitHeader,
       unitName: options.unitName,
+      bundler,
       node: options.node,
     };
   }
-  return { kind: 'explain', entry, mode, json: options.diagnostics === 'json', node: options.node };
+  return {
+    kind: 'explain',
+    entry,
+    mode,
+    json: options.diagnostics === 'json',
+    bundler,
+    node: options.node,
+  };
 }
 
 async function run(command: Command): Promise<void> {
@@ -362,13 +404,20 @@ async function runCommand(command: Command): Promise<void> {
         keepC: command.keepC,
         opt: command.opt,
         linkFlags: command.linkFlags,
+        bundler: command.bundler,
         ...(command.emitHeader !== undefined && { emitHeader: command.emitHeader }),
         ...(command.unitName !== undefined && { unitName: command.unitName }),
         node: command.node,
       });
       return;
     case 'explain':
-      process.exitCode = await explain(command.entry, command.mode, command.json, command.node);
+      process.exitCode = await explain(
+        command.entry,
+        command.mode,
+        command.json,
+        command.bundler,
+        command.node,
+      );
       return;
   }
 }

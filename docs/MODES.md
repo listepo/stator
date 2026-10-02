@@ -63,6 +63,7 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
 
 - **Files:** Any mix of `.ts` and `.js` (and `.jsx`, `.tsx` in Phase 2+). ESM only; always strict (ESM enforces strict mode).
 - **Module format:** ESM enforced by the pipeline (not configurable).
+- **Packages and CommonJS (plan.md §11d T12.1, `docs/BUNDLER.md`):** a package import (a bare specifier that is not `node:*`, a built-in or `std/*`) and a CommonJS project file go to a bundler first. `--bundler=vite|none|<module>` picks it (default `vite`, the `vite-stator` package; `--bundler` in `ts` mode is `STA0004`), and it loads only when the graph has something to bundle. The bundle joins the program as one virtual ESM module, `__stator_vendor__.js` in the entry's directory, compiled under the same `js`-mode rules as every other `.js` file; each project import declaration of a package is rewritten in place to import from it, keeping every line, so project diagnostics and `#line` still point at the user's lines (only code after a rewritten import on the same line can shift columns). A CommonJS file is `.cjs`, a `.js` under `"type": "commonjs"`, or a `.js` with no `"type"`, no ES-module syntax and a read of `require`, `module.exports` or `exports` (plan-notes 320). Diagnostics inside the bundle are reported at the package's own file and line through the bundle's source map, or as `<package bundle>` with "(bundler runtime helper, no source mapping)". `STA0014` means the adapter cannot be loaded, `STA0015` that the bundle step failed. `--bundler=none` keeps a package import `STA1214`.
 
 ### Typing rules
 
@@ -333,6 +334,8 @@ Stator evaluates the program's modules in Task 3.11's topological order (depende
 
 Node's ESM loader may **interleave sibling subgraphs** — two modules that do not import each other can both run their prefix, hit `await`, and continue in registration order. Stator does not. A dependency's top-level await runs to completion before the next file in topological order begins. The difference is observable only in sibling interleavings; a linear import chain matches Node. Mirroring Node would need per-file init promises and a scheduler, which the whole-program unit does not have.
 
+**Package evaluation order** (`docs/BUNDLER.md` §1, documented only): every package body runs together, where the project first imports *any* package, because the packages are one vendor module. A project module imported between two packages therefore moves: where Node prints `pkg-a a pkg-b main`, Stator prints `pkg-a pkg-b a main`. A linear import chain matches Node.
+
 Imports are **live bindings**, as in Node, however they are spelled: a named, renamed or default import and every member read through a namespace (`ns.x`, `const { x } = ns`, `ns["x"]`) read the exporter's own binding. The namespace OBJECT is where Stator differs: it is built once, when its first importer starts, so a value that reaches it without a member name (`console.log(ns)`, `Object.keys(ns)`, `ns` passed to a function taking a plain object type) sees each export as it was then, and prints as a plain object rather than Node's `[Module: null prototype]`. docs/VALUE.md §4.14.
 
 ## 6. `stator explain` — what the compiler will do with a program
@@ -495,17 +498,18 @@ lists the language ones, and `docs/NODE.md` is the coverage the two must agree w
 Node itself does not have stays the checker's error (`STA0012`). Without `--node`, a built-in is
 `STA1214` with no phase, and its message names the flag.
 
-**`require`.** `STA1110` narrows to "without `--node`". In `ts` mode it stays, flag or not. With
-`--node` in `js` mode, a CommonJS project file goes to the bundler (T12.1, docs/BUNDLER.md §4),
-and a computed `require` over built-ins comes from `createRequire(import.meta.url)`; until T12.1
-lands, `require` there is `STA1214` naming Phase 12.
+**`require`.** `STA1110` narrows to "without `--node`". In `ts` mode it stays, flag or not. A
+CommonJS project file goes to the bundler whole (T12.1, docs/BUNDLER.md §4) and never reaches the
+gate. With `--node` in `js` mode, a computed `require` over built-ins comes from
+`createRequire(import.meta.url)`; until that step of T11.5 lands, a free `require` there is
+`STA1214` naming it.
 
 **`__filename` and `__dirname`** (decided 2026-10-02, plan-notes 312; docs/BUNDLER.md §9). They
 exist where Node defines them: in a CommonJS project file and in the vendor module, both of which
 reach the build through T12.1's bundler. An ES module has neither, under `--node` or not, exactly
-as in Node (`ReferenceError: __dirname is not defined in ES module scope`); `js` mode compiles the
-free name as a dynamic read that throws a `ReferenceError`, and `ts` mode refuses the undeclared
-name (`STA0012`). The
+as in Node (`ReferenceError: __dirname is not defined in ES module scope`). Until the CommonJS
+wrapper injects the values, every free read is T12.1's `STA1218`, in any file and under the flag
+too. The
 values are **relative to the executable, resolved at run time**:
 
 - `__dirname` is the directory of the running binary (the path `process.execPath` answers),
