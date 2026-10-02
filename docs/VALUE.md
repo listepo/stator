@@ -390,6 +390,37 @@ member, because the buffer grows and a flexible member cannot move without inval
 `jsrt_value` that boxes the header. The header's address is therefore stable for the array's whole
 life, which is what lets the emitter hold an array in a frame slot across a push.
 
+### Holes (plan.md §11c T11.4 step 4b)
+
+An index below `length` can be ABSENT: `new Array(3)`, `a[5] = 1` on a shorter array, and
+`delete a[i]` all leave one. An absent element is stored as `JSRT_HOLE`, `JSRT_BOX(TAG_UNDEFINED,
+1)` — a box no program can produce, because `undefined` has exactly one value and it is
+`JSRT_BOX(TAG_UNDEFINED, 0)`. Every reader that hands an element to a program goes through
+`jsrt_unhole`, which turns the hole into `undefined`: the indexed read, `at`/`pop`/`shift`, the
+iterators and the inlined for-of, `join`, `JSON.stringify` (where it is `null`), an array-literal
+spread (`[...a]` is the iteration, so `jsrt_array_fill_holes` runs over the copied `concat`), and
+the ES2023 copies (`toReversed`, `toSorted`, `toSpliced`, `with`). What the spec makes skip a hole
+skips it: `in` and `Object.keys`, the callback methods (`forEach`, `map`, `filter`, `some`,
+`every`, `reduce`, `reduceRight`, `flatMap`; `map` keeps the hole in its answer), `flat`, and
+`sort`, which moves holes after every `undefined`. `indexOf` never finds one, because a hole's bits
+are not `undefined`'s; `includes(undefined)` does. `concat` and `slice` copy holes as holes.
+
+Only an array whose element type is Unknown may hold one. A typed element (`number[]`) has no value
+that stands for "absent", so the compiler keeps holes out of it: `Array(n)` with a typed element
+and `delete` on one are `STA1214`, an indexed write to an Unknown-element array emits
+`jsrt_array_set_sparse` (which fills the gap with holes), and the typed write `jsrt_array_set` still
+aborts `STA2002` past the end. `a.length = n` growing the array is `STA2002` on both paths, because
+the property write cannot tell which element type it serves. A literal hole (`[1, , 3]`) is still
+refused by `gateArrayLiteral`.
+
+`Array(n)` / `new Array(n)` is `jsrt_array_construct`: a number argument must be a uint32
+(`RangeError: Invalid array length` otherwise) and answers that many holes; any other single
+argument is a one-element array, and zero or two or more arguments are an array literal, lowered as
+one. `console.log` prints a run of holes as Node's `formatSpecialArray` does — `<1 empty item>`,
+`<3 empty items>` — counting each run as one entry against the 100-entry cap, and a hole makes the
+grouped layout left-aligned, since Node right-aligns only when every `value[i]` it looks at is a
+number.
+
 ### An array with properties
 
 An array can also carry NAMED properties, in the same `shape` + out-of-line `slots` layout §4.10
@@ -1381,6 +1412,39 @@ existing `new-value`, `instanceof-value`, `dyn-field-access`, `dyn-field-assignm
 `dyn-method-call` nodes; `FunctionExpr.constructible` tells the emitter which closures `new` may
 build through. `ts` mode refuses a function's properties as not-yet (`STA1214`) and `new` on a
 function through the checker (TS7009, an implicit `any`).
+
+## 4.21 `new RegExp(pattern, flags)` — a pattern the source does not spell (plan.md §11c T11.4 step 4b)
+
+`new RegExp(p, f)` and `RegExp(p, f)` are one `global-call` row (`jsrt_regexp_construct`). A RegExp
+`p` lends its source, and its flags when `f` is `undefined` (§22.2.4.1 steps 4-5); otherwise both
+go through ToString, with `undefined` meaning the empty string. The source is escaped the way V8's
+`EscapeRegExpPattern` does it — `/` outside a class becomes `\/`, a line terminator becomes
+`\n`/`\r`/`\u2028`/`\u2029` — so `source`, `toString` and `console.log` match Node. An invalid flag
+string throws `SyntaxError: Invalid flags supplied to RegExp constructor '<f>'`, and an invalid
+pattern throws `SyntaxError: Invalid regular expression: /<source>/<flags>: <reason>`. The reason
+comes from the vendored libregexp, translated to V8's words where one libregexp reason has exactly
+one V8 counterpart (`Unterminated group`, `Unmatched ')'`, `Nothing to repeat`, `numbers out of
+order in {} quantifier`, `Duplicate capture group name`, `Invalid capture group name`, `Invalid
+group`, `Invalid property name`). **Known divergence:** the other reasons keep libregexp's wording
+(`unexpected end` where Node says `Unterminated character class` or `\ at end of pattern`, `invalid
+class range`, `invalid escape sequence in regular expression`). A regexp literal is unchanged: its
+pattern is compiled by `jsrt_regexp_new`, which still aborts `STA2005` on a bad one.
+
+## 4.22 WeakMap and WeakSet — a Map and a Set that refuse primitives (plan.md §11c T11.4 step 4b)
+
+A WeakMap and a WeakSet are `JSRTMap`s (§4.6) under two more descriptors, `jsrt_class_weakmap` and
+`jsrt_class_weakset`. The type model folds them into `Map`/`Set` HTypes — the checker already keeps
+`size`, `forEach`, `clear` and the iterators off them — so `CollectionNew.weak` is the one place the
+difference is recorded: it picks `jsrt_weak_collection_new`. `set`/`add` throw Node's
+`TypeError` (`Invalid value used as weak map key` / `Invalid value used in weak set`) on a key that
+is not an object, function or array; the emitter adds the pending check only where the key type is
+open (Unknown or a type parameter), since a primitive key type means an ordinary Map and an object
+key type always passes. `get`, `has` and `delete` of a primitive answer `undefined`/`false` with no
+check. `console.log` prints `WeakMap { <items unknown> }` (`[WeakMap]` past the depth cap), `String`
+answers `[object WeakMap]`, `JSON.stringify` answers `{}`, and `instanceof` tells all four apart.
+**Known divergence:** the keys are held STRONGLY. Nothing is collected while the collection lives,
+which no program can observe except through memory use; true weakness needs ephemeron support in
+the collector.
 
 ## 5. What Phase 2 actually implements
 

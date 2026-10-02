@@ -1421,7 +1421,9 @@ export const INSTANCEOF_BUILTINS: ReadonlySet<string> = new Set([
   'Function',
   'Date',
   'Map',
+  'WeakMap',
   'Set',
+  'WeakSet',
   'RegExp',
   'Promise',
   'Uint8Array',
@@ -2116,8 +2118,10 @@ function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mo
           phase: 8,
         };
   }
-  if (target.kind === 'array') {
-    return notYet('delete of an array element is not yet supported', 5);
+  // An array of an Unknown element may hold holes (docs/VALUE.md §4.4), so deleting one of its
+  // elements leaves a hole; a typed element has no value that could stand for one.
+  if (target.kind === 'array' && target.element.kind !== 'unknown') {
+    return notYet('delete of an element of an array with a typed element is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -2584,16 +2588,7 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   // type is accepted -- every one of these coerces.
   const globalFunction = globalFunctionOf(callee, typeChecker);
   if (globalFunction !== undefined) {
-    if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-      return notYet(`a spread argument to ${globalFunction} is not yet supported`, 5);
-    }
-    const arity = globalFunctionArity(globalFunction);
-    return call.arguments.length > arity
-      ? notYet(
-          `${globalFunction} with ${String(call.arguments.length)} arguments is not yet supported`,
-          5,
-        )
-      : { kind: 'accept' };
+    return gateGlobalArguments(globalFunction, call, typeChecker);
   }
 
   // Two property-access callees, each its own HIR node: `console.log`, and a method of a class
@@ -5334,6 +5329,13 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
       ? { kind: 'accept' }
       : notYet('the Error constructor options argument is not yet supported', 5);
   }
+  // `new RegExp(p, f)` and `new Array(n)` answer what the call without `new` answers (§22.2.4.1,
+  // §23.1.1.1), so they are the same node. `new String(x)` and its siblings are wrapper OBJECTS,
+  // not the conversions, and keep their refusal below.
+  const global = globalFunctionOf(node.expression, checker);
+  if (global === 'RegExp' || global === 'Array') {
+    return gateGlobalArguments(global, node, checker);
+  }
   // `new F(...)` on an ordinary function, or on a value of unknown type -- tsc's
   // `new (NodeConstructor || (NodeConstructor = getNodeConstructor()))(kind)` -- constructs
   // through the value at run time (`jsrt_construct`, plan-notes 310). In `ts` mode the checker
@@ -6559,6 +6561,59 @@ export function globalFunctionOf(
     return undefined;
   }
   return isGlobalNamed(node, checker, name) ? (name as GlobalFunction) : undefined;
+}
+
+/** The argument list of a global function called by name or, for `RegExp` and `Array`, `new`ed
+ * (plan.md §11c T11.4). Each lowers to one fixed-arity node, so a spread (whose count is not its
+ * arity) and an argument past the last parameter (evaluated, then ignored) are refused rather than
+ * lowered wrong. Any argument type is accepted -- every one of these coerces. `Array` is the
+ * exception both ways: any count but one is an array literal, and one argument may be a LENGTH,
+ * whose array is all holes (docs/VALUE.md §4.4). A hole reads as `undefined`, which only an
+ * Unknown element type admits: `new Array<string>(n)` would hand typed code an `undefined` its
+ * element type says cannot be there. */
+function gateGlobalArguments(
+  name: GlobalFunction,
+  node: ts.CallExpression | ts.NewExpression,
+  checker: ts.TypeChecker,
+): GateResult {
+  const args = node.arguments ?? [];
+  if (args.some((a) => ts.isSpreadElement(a))) {
+    return notYet(`a spread argument to ${name} is not yet supported`, 5);
+  }
+  if (name === 'Array') {
+    // Only a lone argument that may be a number is a LENGTH, and only a length leaves holes;
+    // `Array('a')` is `['a']`.
+    const [only] = args;
+    if (
+      args.length !== 1 ||
+      only === undefined ||
+      !mayBeArrayLength(checker.getTypeAtLocation(only))
+    ) {
+      return { kind: 'accept' };
+    }
+    const created = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+    return created.kind === 'array' && created.element.kind === 'unknown'
+      ? { kind: 'accept' }
+      : notYet(
+          'Array(n) with a typed element is not yet supported: its holes read as undefined',
+          5,
+        );
+  }
+  const arity = globalFunctionArity(name);
+  return args.length > arity
+    ? notYet(`${name} with ${String(args.length)} arguments is not yet supported`, 5)
+    : { kind: 'accept' };
+}
+
+/** Whether `Array(x)` may read `x` as a length (§23.1.1.1 step 4): a number, or a type that
+ * does not rule one out. */
+function mayBeArrayLength(type: ts.Type): boolean {
+  if (type.isUnion()) {
+    return type.types.some(mayBeArrayLength);
+  }
+  const open =
+    ts.TypeFlags.NumberLike | ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter;
+  return (type.flags & open) !== 0;
 }
 
 /** The most arguments a global function's node holds: a conversion reads one. */

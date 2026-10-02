@@ -379,10 +379,12 @@ jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {
   if (!index_of(index, &i) || i >= a->length) {
     return JSRT_UNDEFINED;
   }
-  return a->elements[i];
+  return jsrt_unhole(a->elements[i]);
 }
 
-void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
+/* The write both entry points share; `sparse` is whether the skipped indices of a write past the
+ * end may become holes (docs/VALUE.md §4.4). */
+static void array_store(jsrt_value array, jsrt_value index, jsrt_value element, bool sparse) {
   if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
     /* Same degradation as the read: nullish throws Node's setting-message, a primitive throws
      * the dynamic write's TypeError, a fixed shape takes its existing-or-STA2004 path. */
@@ -397,25 +399,41 @@ void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
     return;
   }
 
-  if (i > a->length) {
-    /* A write more than one past the end leaves the skipped indices genuinely ABSENT in ECMA-262 --
-     * `console.log` prints `<2 empty items>`, not `undefined` -- and a dense array has no way to be
-     * absent. Filling with `undefined` would print a different program's output, so this refuses
-     * loudly instead (STA2002). In-range writes and the append idiom `a[a.length] = v` are the
-     * cases that matter and are unaffected; the refusal lifts when sparse arrays land. */
-    jsrt_panic("STA2002: sparse arrays are not yet supported: write past the end of an array");
+  if (i > a->length && !sparse) {
+    /* A write more than one past the end leaves the skipped indices ABSENT in ECMA-262, and a hole
+     * reads as `undefined` -- which an array of a typed element must never hand out, so only the
+     * sparse entry (an Unknown element type) may leave one (docs/VALUE.md §4.4). In-range writes
+     * and the append idiom `a[a.length] = v` are unaffected. */
+    jsrt_panic("STA2002: a write past the end of an array of a typed element would leave holes");
   }
 
   if (i >= a->capacity) {
     jsrt_array_grow(a, i);
   }
 
-  /* At this point `i <= a->length`, so the write either replaces an element or appends exactly
-   * one -- no gap is possible, which is what the refusal above buys. */
+  for (uint32_t k = a->length; k < i; k++) {
+    a->elements[k] = JSRT_HOLE;
+  }
   a->elements[i] = element;
   if (i >= a->length) {
     a->length = i + 1;
   }
+}
+
+void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
+  array_store(array, index, element, false);
+}
+
+void jsrt_array_set_sparse(jsrt_value array, jsrt_value index, jsrt_value element) {
+  array_store(array, index, element, true);
+}
+
+bool jsrt_array_delete(jsrt_value array, uint32_t index) {
+  JSRTArray *a = jsrt_as_array(array);
+  if (index < a->length) {
+    a->elements[index] = JSRT_HOLE;
+  }
+  return true;
 }
 
 /* -------------------------------------------------------------- objects */

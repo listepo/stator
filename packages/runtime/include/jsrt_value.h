@@ -634,6 +634,9 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator);
 jsrt_value jsrt_array_slice(jsrt_value array, jsrt_value start, jsrt_value end);
 jsrt_value jsrt_array_concat(jsrt_value array, jsrt_value other);
 jsrt_value jsrt_array_concat_many(jsrt_value array, uint32_t n, ...);
+/* Replace every hole of `array` with `undefined`, in place, and answer it: an array-literal
+ * spread iterates its operand, so `[...xs]` has no holes where `xs.concat()` keeps them. */
+jsrt_value jsrt_array_fill_holes(jsrt_value array);
 jsrt_value jsrt_array_reverse(jsrt_value array);
 jsrt_value jsrt_array_fill(jsrt_value array, jsrt_value value, jsrt_value start, jsrt_value end);
 
@@ -866,20 +869,26 @@ typedef struct JSRTMap {
 
 extern const JSRTClass jsrt_class_map;
 extern const JSRTClass jsrt_class_set;
+extern const JSRTClass jsrt_class_weakmap;
+extern const JSRTClass jsrt_class_weakset;
 
 jsrt_value jsrt_map_new(void);
 jsrt_value jsrt_set_new(void);
+/* `new WeakMap()` (map) or `new WeakSet()`: a JSRTMap whose `set`/`add` throws a TypeError on a
+ * non-object key (docs/VALUE.md §4.22). */
+jsrt_value jsrt_weak_collection_new(bool map);
 
 static inline JSRTMap *jsrt_as_map(jsrt_value v) { return (JSRTMap *)jsrt_ptr(v); }
 
-/* True for a Map or a Set -- the test the printer runs before treating an object as a class
- * instance, since both carry the object tag. */
+/* True for a Map or a Set, weak or not -- the test the printer runs before treating an object as
+ * a class instance, since all four carry the object tag and the JSRTMap layout. */
 static inline bool jsrt_is_map_or_set(jsrt_value v) {
   if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
     return false;
   }
   const JSRTClass *cls = jsrt_as_object(v)->cls;
-  return cls == &jsrt_class_map || cls == &jsrt_class_set;
+  return cls == &jsrt_class_map || cls == &jsrt_class_set || cls == &jsrt_class_weakmap ||
+         cls == &jsrt_class_weakset;
 }
 
 /* `m.get(k)` -- `undefined` for an absent key, which is what JavaScript returns and why the static
@@ -1221,6 +1230,13 @@ static inline bool jsrt_is_regexp(jsrt_value v) {
  * answering with something that is not a regexp. */
 jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags);
 
+/* `new RegExp(pattern, flags)` and `RegExp(pattern, flags)` (§22.2.4.1), whose operands are data:
+ * a RegExp pattern lends its source (and its flags when `flags` is undefined), anything else is
+ * ToString'd, and undefined is the empty string. The source is escaped as Node prints it
+ * (§22.2.6.13.1). A flag string or a pattern the engine refuses is a catchable SyntaxError with
+ * V8's head; the reason after it is libregexp's wording (docs/VALUE.md §4.21). */
+jsrt_value jsrt_regexp_construct(jsrt_value pattern, jsrt_value flags);
+
 /* `re.test(s)` -- and the one operation that also WRITES `lastIndex`, for a /g or /y pattern. */
 bool jsrt_regexp_test(jsrt_value re, jsrt_value str);
 
@@ -1262,26 +1278,32 @@ bool jsrt_regexp_flag(jsrt_value re, int letter);
  * is always a spelling that parses back to an equal pattern. */
 jsrt_value jsrt_regexp_to_string(jsrt_value re);
 
+/* A regexp's data property or bound method by name, for a receiver the compiler only knows as
+ * Unknown (`jsrt_get_prop`); false for a non-regexp or a name RegExp.prototype does not have here. */
+bool jsrt_regexp_property(jsrt_value re, const char *key, jsrt_value *out);
+
 jsrt_value jsrt_regexp_search(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_split(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_replace(jsrt_value re, jsrt_value str, jsrt_value replacement, bool all);
 
 /* ---------------------------------------------------------------- arrays */
 
-/* A dense array: `length` contiguous elements and no holes, plus the named-property table below
- * (empty for every array but a RegExp match).
+/* An array: `length` contiguous element slots, plus the named-property table below (empty for
+ * every array but a RegExp match).
  *
  * `elements` is a separate allocation rather than a flexible array member, because `length` grows
  * (a write past the end extends the array) and a flexible member cannot move without invalidating
  * every `jsrt_value` that boxes this header. The header's address is therefore stable for the
  * array's whole life, which is what lets the emitter hold an array in a frame slot across a push.
  *
- * KNOWN CEILING: no holes. ECMA-262 leaves the indices skipped by `a[5] = v` on a shorter array
- * genuinely ABSENT -- `console.log` prints `<4 empty items>`, not `undefined` -- and a dense buffer
- * has no way to be absent. Rather than fill the gap and print a different program's output,
- * `jsrt_array_set` refuses a write more than one past the end (STA2002). Replacing an element and
- * appending at `length` -- the cases real programs use -- are unaffected. Sparse storage arrives
- * with the object model, and the refusal lifts with it. */
+ * HOLES. ECMA-262 leaves an index below `length` genuinely ABSENT after `new Array(3)`, `a[5] = v`
+ * on a shorter array, or `delete a[1]` -- `console.log` prints `<3 empty items>`, `1 in a` is false,
+ * `forEach` skips it -- and a slot holding JSRT_HOLE is that absence (docs/VALUE.md §4.4). Storage
+ * stays dense: a hole costs its slot. Only an array whose static element type is Unknown may gain
+ * one, because a hole READS as `undefined` and a typed element would hand typed code a value its
+ * type excludes: the emitter writes such an array through `jsrt_array_set_sparse` and every other
+ * one through `jsrt_array_set`, which keeps refusing a write more than one past the end
+ * (STA2002). */
 typedef struct JSRTArray {
   uint32_t length;
   uint32_t capacity;
@@ -1303,6 +1325,22 @@ typedef struct JSRTArray {
 /* Build an array from `count` initial elements; `items` may be NULL when `count` is 0. Returns an
  * already-boxed value because the header is reachable only through it. */
 jsrt_value jsrt_array_new(uint32_t count, const jsrt_value *items);
+
+/* The element-slot state of an absent index: undefined's tag with a payload no `undefined` VALUE
+ * ever carries, so a collector scans it as an immediate and bit equality never mistakes it for
+ * `undefined` (`indexOf(undefined)` skips a hole, as §23.1.3.17 requires). It is never a value:
+ * every path that hands an element out answers `undefined` for it (`jsrt_unhole`) or skips it as
+ * its spec step's HasProperty does. */
+#define JSRT_HOLE JSRT_BOX(JSRT_TAG_UNDEFINED, 1)
+
+static inline jsrt_value jsrt_unhole(jsrt_value element) {
+  return element == JSRT_HOLE ? JSRT_UNDEFINED : element;
+}
+
+/* `Array(n)` / `new Array(n)` with its one argument (§23.1.1.1): a Number is a LENGTH -- that many
+ * holes, or a catchable `RangeError: Invalid array length` when it is not a uint32 -- and anything
+ * else is the sole element. */
+jsrt_value jsrt_array_construct(jsrt_value arg);
 
 static inline JSRTArray *jsrt_as_array(jsrt_value v) {
   return (JSRTArray *)jsrt_ptr(v);
@@ -1340,6 +1378,12 @@ jsrt_value jsrt_array_length(jsrt_value array);
  * the array is `undefined` (ECMA-262, not an error); a write outside it extends the array. */
 jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index);
 void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element);
+/* The write an Unknown-element array takes (and every dynamic index write): past the end, the
+ * skipped indices become holes instead of STA2002. */
+void jsrt_array_set_sparse(jsrt_value array, jsrt_value index, jsrt_value element);
+/* `delete a[i]` on an array: an index below `length` becomes a hole. Answers true, as the
+ * operator does for an element (they are configurable). */
+bool jsrt_array_delete(jsrt_value array, uint32_t index);
 
 /* ------------------------------------------------------------- closures */
 
@@ -1597,12 +1641,10 @@ static inline bool jsrt_instanceof_builtin(jsrt_value v, const char *name) {
   if (strcmp(name, "ArrayBuffer") == 0) {
     return jsrt_is_arraybuffer(v);
   }
-  if (strcmp(name, "Map") == 0 || strcmp(name, "Set") == 0) {
-    if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
-      return false;
-    }
-    const JSRTClass *cls = jsrt_as_object(v)->cls;
-    return strcmp(name, "Map") == 0 ? cls == &jsrt_class_map : cls == &jsrt_class_set;
+  if (strcmp(name, "Map") == 0 || strcmp(name, "Set") == 0 || strcmp(name, "WeakMap") == 0 ||
+      strcmp(name, "WeakSet") == 0) {
+    /* The class descriptor's name IS the constructor's: a WeakMap is not `instanceof Map`. */
+    return jsrt_is_map_or_set(v) && strcmp(jsrt_as_object(v)->cls->name, name) == 0;
   }
   return false;
 }

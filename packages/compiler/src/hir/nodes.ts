@@ -599,14 +599,17 @@ export function isComputedEntry(entry: DynEntry): entry is ComputedEntry {
   return 'key' in entry;
 }
 
-/** `new Map()` and `new Set()`.
+/** `new Map()` and `new Set()`, and their weak twins.
  *
- * Not a `NewExpr`: that names a class the emitter emitted a descriptor for, and these two are
+ * Not a `NewExpr`: that names a class the emitter emitted a descriptor for, and these are
  * runtime structures with no declaration in the program. The `collection` field is the whole
- * difference between them below this point -- one allocator call each. */
+ * difference between them below this point -- one allocator call each. A WeakMap is typed as a
+ * Map (the checker keeps every walk off it), so `weak` is the one place its weakness is recorded:
+ * it picks the allocator whose `set`/`add` refuses a non-object key (docs/VALUE.md §4.22). */
 export interface CollectionNew extends Node {
   readonly kind: 'collection-new';
   readonly collection: 'map' | 'set';
+  readonly weak: boolean;
 }
 
 /** Every operation the subset performs on a Map or a Set.
@@ -767,19 +770,30 @@ export interface StringStaticCall extends Node {
 }
 
 /** The global functions that are calls rather than conversions (§19.2, plan.md §11c T11.4):
- * `parseInt`, `parseFloat`, `isNaN`, `isFinite`. On the `DateStaticCall` precedent -- no function
- * value exists, each name is one runtime function over boxed operands, and the lowering pads an
- * omitted argument with `undefined`, so `arity` is exact below the gate. `String(x)`, `Number(x)`
- * and `Boolean(x)` are not here: each IS an existing operation (a template hole, unary `+`, `!!`)
- * and lowers to that node instead of to a second spelling of it. */
+ * `parseInt`, `parseFloat`, `isNaN`, `isFinite`, and the two constructors that answer the same
+ * object called or `new`ed -- `RegExp(p, f)` (§22.2.4.1) and the one-argument `Array(n)`
+ * (§23.1.1.1). On the `DateStaticCall` precedent -- no function value exists, each name is one
+ * runtime function over boxed operands, and the lowering pads an omitted argument with
+ * `undefined`, so `arity` is exact below the gate. `throws` marks the rows whose entry can leave an
+ * exception pending (a SyntaxError for a bad pattern, a RangeError for a bad length), which the
+ * emitter checks as a statement. `String(x)`, `Number(x)` and `Boolean(x)` are not here: each IS
+ * an existing operation (a template hole, unary `+`, `!!`) and lowers to that node instead of to a
+ * second spelling of it. `Array()` and `Array(a, b)` are array literals for the same reason. */
 export const GLOBAL_CALLS = {
-  parseInt: { arity: 2, fn: 'jsrt_global_parse_int', result: 'number' },
-  parseFloat: { arity: 1, fn: 'jsrt_global_parse_float', result: 'number' },
-  isNaN: { arity: 1, fn: 'jsrt_global_is_nan', result: 'boolean' },
-  isFinite: { arity: 1, fn: 'jsrt_global_is_finite', result: 'boolean' },
+  parseInt: { arity: 2, fn: 'jsrt_global_parse_int', result: 'number', throws: false },
+  parseFloat: { arity: 1, fn: 'jsrt_global_parse_float', result: 'number', throws: false },
+  isNaN: { arity: 1, fn: 'jsrt_global_is_nan', result: 'boolean', throws: false },
+  isFinite: { arity: 1, fn: 'jsrt_global_is_finite', result: 'boolean', throws: false },
+  RegExp: { arity: 2, fn: 'jsrt_regexp_construct', result: 'regexp', throws: true },
+  Array: { arity: 1, fn: 'jsrt_array_construct', result: 'array', throws: true },
 } as const satisfies Record<
   string,
-  { readonly arity: number; readonly fn: string; readonly result: 'number' | 'boolean' }
+  {
+    readonly arity: number;
+    readonly fn: string;
+    readonly result: 'number' | 'boolean' | 'regexp' | 'array';
+    readonly throws: boolean;
+  }
 >;
 
 export type GlobalCallName = keyof typeof GLOBAL_CALLS;
@@ -911,6 +925,9 @@ export interface ArrayOp extends Node {
   readonly op: ArrayOpName;
   readonly target: Expression;
   readonly args: readonly Expression[];
+  /** Set on the `concat` an array-literal spread lowers to: a spread ITERATES its operand, so a
+   * hole becomes `undefined` where a source-level `concat` keeps it (docs/VALUE.md §4.4). */
+  readonly spread?: true;
 }
 
 /** The `Object` namespace calls the HIR can spell — `Object.keys(o)` and its two siblings, each

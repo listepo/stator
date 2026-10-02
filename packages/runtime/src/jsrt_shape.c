@@ -483,8 +483,8 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
         return jsrt_as_object(obj)->fields[slot];
       }
       bool found = false;
-      const jsrt_value method = fixed_method_get(obj, key, &found);
-      if (found) {
+      jsrt_value method = fixed_method_get(obj, key, &found);
+      if (found || jsrt_regexp_property(obj, key, &method)) {
         return method;
       }
       return JSRT_UNDEFINED;
@@ -592,8 +592,9 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
      * a`, `'+1' in a` and `'-0' in a` all answered `true` where Node answers `false`. The canonical
      * spelling `jsrt_key_is_array_index` is the one test the rest of this file uses. */
     uint32_t index = 0;
-    answer = strcmp(k, "length") == 0 ||
-             (jsrt_key_is_array_index(k, &index) && index < jsrt_as_array(obj)->length);
+    const JSRTArray *a = jsrt_as_array(obj);
+    answer = strcmp(k, "length") == 0 || (jsrt_key_is_array_index(k, &index) &&
+                                          index < a->length && a->elements[index] != JSRT_HOLE);
   }
   if (!answer) {
     answer = jsrt_has_prop(obj, k);
@@ -788,13 +789,14 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
   bool answer = true;
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
     uint32_t index = 0;
-    /* A dense array has no representation for an absent element: `delete a[1]` must leave a HOLE
-     * that `1 in a` denies and iteration skips, and `undefined` is not that (plan.md §8 step 2a(c);
-     * the same gap gateArrayLiteral names for `[1, , 3]`). `length` is non-configurable, which is
-     * a different refusal the same absence blocks from being spelled honestly. */
-    if (strcmp(k, "length") == 0 ||
-        (jsrt_key_is_array_index(k, &index) && index < jsrt_as_array(obj)->length)) {
-      jsrt_panic("STA2007: an array element cannot be deleted; planned for Phase 5 (array holes)");
+    /* `delete a[1]` leaves a HOLE that `1 in a` denies and iteration skips (docs/VALUE.md §4.4).
+     * `length` is non-configurable: strict code throws Node's TypeError for it. */
+    if (strcmp(k, "length") == 0) {
+      jsrt_throw_error(&jsrt_class_type_error,
+                       "Cannot delete property 'length' of [object Array]");
+      answer = false;
+    } else if (jsrt_key_is_array_index(k, &index)) {
+      answer = jsrt_array_delete(obj, index);
     }
   } else if (!has_prop_table(obj)) {
     /* A fixed layout is slots at compile-time offsets; a missing one has no encoding. Deleting a
@@ -850,7 +852,9 @@ jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic) {
 
 void jsrt_dyn_index_set(jsrt_value obj, jsrt_value index, jsrt_value value, JSRTIC *ic) {
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
-    jsrt_array_set(obj, index, value);
+    /* An Unknown receiver is an Unknown-element view, so a write past the end may leave holes
+     * (docs/VALUE.md §4.4). */
+    jsrt_array_set_sparse(obj, index, value);
     return;
   }
   if (jsrt_is_uint8array(obj)) {

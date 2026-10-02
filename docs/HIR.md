@@ -227,7 +227,17 @@ closed set is the point: an operation is not a general method call that happens 
 it is one HIR node the emitter turns into one runtime function with a fixed C signature. `.size` is
 an `op` with no arguments rather than a `FieldAccess`, so nothing below reads the struct field. The
 verifier checks the receiver's type kind and the argument count for both, because every `jsrt_value`
-argument has the same C type and the C compiler cannot catch either mistake.
+argument has the same C type and the C compiler cannot catch either mistake. A `WeakMap`/`WeakSet` is
+a Map/Set HType (the checker keeps every walk off it), and `CollectionNew.weak` is the one bit that
+records it: it picks the allocator whose `set`/`add` refuses a non-object key (docs/VALUE.md §4.22).
+
+`GlobalCall` (plan.md §11c T11.4) is one row of `GLOBAL_CALLS` called with boxed operands padded to
+the row's arity: `parseInt`, `parseFloat`, `isNaN`, `isFinite`, and since step 4b `RegExp`
+(`new RegExp(p, f)` and `RegExp(p, f)`, result `regexp`) and `Array` (`Array(n)` / `new Array(n)`
+with one argument, result an array of an Unknown element). A row with `throws` gets a pending check
+after the call. `Array()` and `Array(a, b, …)` are not calls at all: they lower to the array literal
+they equal. An `ArrayOp` with `spread` set is the `concat` an array-literal spread lowers to; its
+answer has its holes filled with `undefined`, because a spread iterates (docs/VALUE.md §4.4).
 
 The seven ES2025 set operations are `op`s too, and they are the only ones whose ARGUMENT is a
 collection: the emitter passes it to a runtime function that reads it as a `JSRTMap`, so the

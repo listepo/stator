@@ -99,6 +99,7 @@ import {
   tsTypeToHType,
   userIteratorMethod,
   outSlotInner,
+  isWeakCollection,
 } from '../frontend/types.ts';
 import type {
   ArrayLength,
@@ -128,6 +129,7 @@ import type {
   OutGet,
   OutNew,
   FieldAccess,
+  GlobalCallName,
   FieldCall,
   FunctionDeclaration,
   FunctionExpr,
@@ -201,6 +203,7 @@ import {
   fieldSlot,
   H_BOOLEAN,
   H_NUMBER,
+  H_REGEXP,
   H_STRING,
   H_UNDEFINED,
   hArray,
@@ -3976,11 +3979,12 @@ function lowerBlock(
   return block;
 }
 
-/** `receiver.concat(other)` as an HIR node — the lowering for array-literal spread. */
+/** `receiver.concat(other)` as an HIR node — the lowering for array-literal spread, marked so
+ * the holes it copies read as `undefined`. */
 function arrayConcatExpr(target: Expression, other: Expression, span: Span): Expression {
   const shape = ARRAY_OPS.concat;
   const type: HType = shape.result === 'self' ? target.type : hUnknown(false);
-  return { kind: 'array-op', type, span, op: 'concat', target, args: [other] };
+  return { kind: 'array-op', type, span, op: 'concat', target, args: [other], spread: true };
 }
 
 function emptyArrayLiteral(type: HType, span: Span): ArrayLiteral {
@@ -5917,6 +5921,13 @@ function lowerExpression(
       return created;
     }
     const type = typeAt(node, checker, bindings);
+    // `new RegExp(p, f)` and `new Array(n)` are the calls without `new` (§22.2.4.1, §23.1.1.1);
+    // the gate admitted no other global function here.
+    const globalFunction = globalFunctionOf(node.expression, checker);
+    if (globalFunction === 'RegExp' || globalFunction === 'Array') {
+      const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+      return prologue === null ? null : globalFunctionNode(globalFunction, prologue, type);
+    }
     // A Map and a Set are allocated, not constructed: there is no descriptor to name and no
     // constructor to run, so the node carries which of the two it is and nothing else.
     if (type.kind === 'map' || type.kind === 'set') {
@@ -5925,6 +5936,7 @@ function lowerExpression(
         type,
         span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
         collection: type.kind,
+        weak: isWeakCollection(node, checker),
       };
       return created;
     }
@@ -6482,7 +6494,9 @@ function lowerExpression(
     const globalFunction = globalFunctionOf(expr, checker);
     if (globalFunction !== undefined) {
       const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
-      return prologue === null ? null : globalFunctionNode(globalFunction, prologue);
+      return prologue === null
+        ? null
+        : globalFunctionNode(globalFunction, prologue, typeAt(node, checker, bindings));
     }
 
     // Check if this is a property access (console.log)
@@ -10751,13 +10765,20 @@ function lowerArguments(
  * arguments lowered left to right plus the span the node hangs off. `null` when lowering
  * failed. The namespace object itself is never lowered -- it names the table, not a value. */
 function lowerGlobalCall(
-  node: ts.CallExpression,
+  node: ts.CallExpression | ts.NewExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   bindings: Scope,
   diagnostics: Diagnostic[],
 ): { args: Expression[]; span: Span } | null {
-  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics, node);
+  const args = lowerArguments(
+    node.arguments,
+    sourceFile,
+    checker,
+    bindings,
+    diagnostics,
+    ts.isCallExpression(node) ? node : undefined,
+  );
   if (args === null) {
     return null;
   }
@@ -10832,11 +10853,15 @@ function typedOpNode(
 /** A global function call's node (plan.md §11c T11.4). The three conversions ARE existing
  * operations -- `String(x)` is a template hole (ToString, never the `valueOf`-first ToPrimitive
  * `"" + x` runs), `Number(x)` is unary `+`, `Boolean(x)` is `!!x` -- and with no argument each is
- * its constant. The four number functions are one `global-call` each, padded to their row's
- * arity because an omitted argument is `undefined` to the runtime. */
+ * its constant. `Array()` and `Array(a, b, ...)` are the array literal of their arguments
+ * (§23.1.1.1 steps 4 and 6); the one-argument form may be a length and stays a call. The rest are
+ * one `global-call` each, padded to their row's arity because an omitted argument is `undefined`
+ * to the runtime. `created` is the checker's type of the whole call: the array an `Array` call
+ * builds. */
 function globalFunctionNode(
   name: GlobalFunction,
   prologue: { readonly args: readonly Expression[]; readonly span: Span },
+  created: HType,
 ): Expression {
   const { args, span } = prologue;
   const [arg] = args;
@@ -10862,20 +10887,35 @@ function globalFunctionNode(
       };
       return { kind: 'unary-op', type: H_BOOLEAN, span, operator: '!', operand: not };
     }
+    case 'Array':
+      if (args.length !== 1) {
+        return { kind: 'array-literal', type: created, span, elements: args };
+      }
+      return globalCallNode(name, args, created, span);
+    case 'RegExp':
+      return globalCallNode(name, args, H_REGEXP, span);
     case 'parseInt':
     case 'parseFloat':
+      return globalCallNode(name, args, H_NUMBER, span);
     case 'isNaN':
-    case 'isFinite': {
-      const row = GLOBAL_CALLS[name];
-      return {
-        kind: 'global-call',
-        type: row.result === 'number' ? H_NUMBER : H_BOOLEAN,
-        span,
-        name,
-        args: padToArity(args, row.arity, span),
-      };
-    }
+    case 'isFinite':
+      return globalCallNode(name, args, H_BOOLEAN, span);
   }
+}
+
+function globalCallNode(
+  name: GlobalCallName,
+  args: readonly Expression[],
+  type: HType,
+  span: Span,
+): Expression {
+  return {
+    kind: 'global-call',
+    type,
+    span,
+    name,
+    args: padToArity(args, GLOBAL_CALLS[name].arity, span),
+  };
 }
 
 function padToArity(args: readonly Expression[], arity: number, span: Span): Expression[] {

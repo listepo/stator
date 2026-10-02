@@ -279,7 +279,7 @@ export fn jsrt_arraybuffer_slice(buffer: Value, start: Value, end: Value) Value 
 fn elementOf(source: Value, i: usize) Value {
     if (c.jsrt_is(source, c.JSRT_TAG_ARRAY)) {
         const a = c.jsrt_as_array(source);
-        return if (i < a.*.length) a.*.elements[i] else undefined_value;
+        return if (i < a.*.length) c.jsrt_unhole(a.*.elements[i]) else undefined_value;
     }
     if (c.jsrt_is(source, c.JSRT_TAG_STRING)) {
         const unit = c.jsrt_string_char(source, @intCast(i));
