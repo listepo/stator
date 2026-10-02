@@ -3,5 +3,6 @@
 # C project (no package.json) driven by its justfile as a moon project.
 packages:
   - packages/compiler
+  - packages/node
   - packages/std
   - packages/tests

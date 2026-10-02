@@ -12,8 +12,8 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 (`docs/research/node-mode/scan.json`); **tsc** marks members TypeScript 6.0.3's `tsc` needs
 (plan.md §11c, slice N1).
 
-**Total: 0 / 2364 members covered (0%) across 58 modules.**
-**Slice N1 (`tsc`): 0 / 37 (0%).**
+**Total: 28 / 2364 members covered (1%) across 58 modules.**
+**Slice N1 (`tsc`): 3 / 37 (8%).**
 
 | Module | Covered | Members | % | Corpus uses | tsc members |
 | --- | --- | --- | --- | --- | --- |
@@ -42,8 +42,8 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | [`node:module`](#nodemodule) | 0 | 48 | 0% | 38 | 0 |
 | [`node:net`](#nodenet) | 0 | 79 | 0% | 6 | 0 |
 | [`node:os`](#nodeos) | 0 | 23 | 0% | 43 | 2 |
-| [`node:path`](#nodepath) | 0 | 16 | 0% | 402 | 3 |
-| [`node:path/posix`](#nodepathposix) | 0 | 16 | 0% | 0 | 0 |
+| [`node:path`](#nodepath) | 14 | 16 | 88% | 402 | 3 |
+| [`node:path/posix`](#nodepathposix) | 14 | 16 | 88% | 0 | 0 |
 | [`node:path/win32`](#nodepathwin32) | 0 | 16 | 0% | 2 | 0 |
 | [`node:perf_hooks`](#nodeperf_hooks) | 0 | 69 | 0% | 61 | 1 |
 | [`node:process`](#nodeprocess) | 0 | 68 | 0% | 822 | 10 |
@@ -1711,50 +1711,50 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 
 ### node:path
 
-<details><summary><code>node:path</code> — 0 / 16 (0%)</summary>
+<details><summary><code>node:path</code> — 14 / 16 (88%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
-| `basename` | function | — | 23 |  |
-| `delimiter` | value | — | 2 |  |
-| `dirname` | function | — | 65 | ✓ |
-| `extname` | function | — | 27 |  |
-| `format` | function | — | 1 |  |
-| `isAbsolute` | function | — | 28 |  |
-| `join` | function | — | 58 | ✓ |
+| `basename` | function | ✅ | 23 |  |
+| `delimiter` | value | ✅ | 2 |  |
+| `dirname` | function | ✅ | 65 | ✓ |
+| `extname` | function | ✅ | 27 |  |
+| `format` | function | ✅ | 1 |  |
+| `isAbsolute` | function | ✅ | 28 |  |
+| `join` | function | ✅ | 58 | ✓ |
 | `matchesGlob` | function | — |  |  |
-| `normalize` | function | — | 5 |  |
-| `parse` | function | — | 4 |  |
-| `posix` | value | — | 44 |  |
-| `relative` | function | — | 34 |  |
-| `resolve` | function | — | 105 | ✓ |
-| `sep` | value | — | 3 |  |
-| `toNamespacedPath` | function | — | 1 |  |
+| `normalize` | function | ✅ | 5 |  |
+| `parse` | function | ✅ | 4 |  |
+| `posix` | value | ✅ | 44 |  |
+| `relative` | function | ✅ | 34 |  |
+| `resolve` | function | ✅ | 105 | ✓ |
+| `sep` | value | ✅ | 3 |  |
+| `toNamespacedPath` | function | ✅ | 1 |  |
 | `win32` | value | — | 2 |  |
 
 </details>
 
 ### node:path/posix
 
-<details><summary><code>node:path/posix</code> — 0 / 16 (0%)</summary>
+<details><summary><code>node:path/posix</code> — 14 / 16 (88%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
-| `basename` | function | — |  |  |
-| `delimiter` | value | — |  |  |
-| `dirname` | function | — |  |  |
-| `extname` | function | — |  |  |
-| `format` | function | — |  |  |
-| `isAbsolute` | function | — |  |  |
-| `join` | function | — |  |  |
+| `basename` | function | ✅ |  |  |
+| `delimiter` | value | ✅ |  |  |
+| `dirname` | function | ✅ |  |  |
+| `extname` | function | ✅ |  |  |
+| `format` | function | ✅ |  |  |
+| `isAbsolute` | function | ✅ |  |  |
+| `join` | function | ✅ |  |  |
 | `matchesGlob` | function | — |  |  |
-| `normalize` | function | — |  |  |
-| `parse` | function | — |  |  |
-| `posix` | value | — |  |  |
-| `relative` | function | — |  |  |
-| `resolve` | function | — |  |  |
-| `sep` | value | — |  |  |
-| `toNamespacedPath` | function | — |  |  |
+| `normalize` | function | ✅ |  |  |
+| `parse` | function | ✅ |  |  |
+| `posix` | value | ✅ |  |  |
+| `relative` | function | ✅ |  |  |
+| `resolve` | function | ✅ |  |  |
+| `sep` | value | ✅ |  |  |
+| `toNamespacedPath` | function | ✅ |  |  |
 | `win32` | value | — |  |  |
 
 </details>

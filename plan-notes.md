@@ -10773,6 +10773,53 @@ clone it removed is `loadFrontend`'s job. T12.1 routes CommonJS project files wi
 `require`/`createRequire` at run time and its three goldens; and the `__filename`/`__dirname`
 values in the CommonJS wrapper.
 
+## 313. T11.6, first slice: `packages/node` and `node:path` (2026-10-02)
+
+**Trigger.** The creator's Node-track order, step 2: create `packages/node`, strict TypeScript over
+`std`, with `node:path` (posix) complete, goldens, claims, the regenerated `docs/NODE.md`, a
+selfhost target and the package's `stator.config.json`. Built on T11.5's resolution (plan-notes
+312), so the branch starts from that one.
+
+**What landed.**
+
+- **The package.** `packages/node` is a pnpm workspace package (`@stator/node`, private) and a
+  moon project (`typecheck`, `lint`). Its `tsconfig.json` mirrors `packages/std`'s, the options
+  the compiler gives every program, plus a `paths` entry for `std/*`. Its `stator.config.json` is
+  `{ "mode": "ts", "node": true }`, the first config to use T11.5's key. `src/<id>.ts` is
+  `node:<id>`, so `src/path/posix.ts` is `node:path/posix`.
+- **`node:path`.** Written from scratch against Node's documented behavior and checked against
+  the pinned Node's `lib/path.js` `posix` object
+  (https://github.com/nodejs/node/blob/v26.7.0/lib/path.js, read 2026-10-02), whose algorithms it
+  follows: `resolve`, `normalize`, `isAbsolute`, `join`, `relative`, `toNamespacedPath`,
+  `dirname`, `basename` (with the suffix rule), `extname`, `parse`, `format`, `sep`, `delimiter`,
+  `posix`. The working directory comes from `std/env.cwd`. Stator builds for POSIX hosts, so the
+  module is `path.posix`, as on Node there. The module object is a class instance whose fields
+  hold the functions, so `path.join` and a destructured `const { join } = path` both compile
+  without a receiver; `posix` is a getter answering the instance. It is also the default export,
+  which `import path from 'node:path'` and the bundle's `m.default` (T11.5's open step) need.
+  `node:path/posix` re-exports it all.
+- **Not landed.** `win32` (the Windows rules; outside N1, 2 corpus uses) and `matchesGlob` (Node's
+  glob matcher; 0 corpus uses). Both are members Node has, so importing one is `STA1214` naming
+  T11.6. TypeScript answers a missing named import from a module with a default export with
+  TS2614 ("did you mean the default import"), not TS2305, so the edge mapping in `program.ts` now
+  reads TS2614 too; without it `import { win32 } from 'node:path'` was a plain `STA0012`.
+- **Goldens.** A fixture named `node_*` builds with `--node` (`golden/run.ts`, the way `intl_*`
+  selects the ICU build); Node runs it unchanged. `ts/node_path` covers every landed member with
+  the edge cases from Node's own docs and tests (empty strings, `..` above the root, `//`, dot
+  files, the suffix overlap), `ts/node_path_posix` the subpath module, `js/node_path` the bare
+  specifier and the default export from `js` mode. Nothing printed depends on the working
+  directory: `resolve()` is checked against itself. All three match Node 26.7.0 byte for byte.
+- **Coverage.** `node_coverage.json` claims the 14 members of both modules; `docs/NODE.md` reads
+  `node:path` 14 / 16 (88%), `node:path/posix` 14 / 16, slice N1 3 / 37.
+- **Selfhost.** `packages/node` is a target (`entries: src`) with a new smoke kind,
+  `node-goldens`: build and run each module, then the `node_` goldens. `smokeStd` became
+  `smokeLibrary(built, prefix)`, shared by both kinds. `packages/node/src/path.ts` explains
+  `dynamic` with no diagnostics. The compiler's own count rises 1722 → 1723 `STA1214` (the new
+  missing-member set), recorded with `--update` (plan-notes 306).
+- **Decision tests.** `subset_node_path_node_ts` / `_js` (dynamic: the graph holds `std/env`,
+  whose `get` answers a union, and `basename`'s optional suffix is one) and
+  `subset_node_path_win32_node_ts` (not-yet).
+
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 
 **What landed.** `js` mode sends package imports and CommonJS project files to one bundler

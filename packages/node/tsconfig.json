@@ -1,0 +1,19 @@
+{
+  "extends": "../compiler/tsconfig.json",
+  "compilerOptions": {
+    // The options the compiler gives every program it builds under --node (frontend/program.ts),
+    // not the compiler's own Node-hosted ones: these modules are compiled INTO user programs, so
+    // they see ES2025 and no Node or DOM types, and `std/*` resolves to the sibling package.
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "target": "es2025",
+    "lib": ["es2025"],
+    "types": [],
+    "noEmit": true,
+    // `std/*` is the sibling package, so the root is `packages/`.
+    "rootDir": "..",
+    "paths": { "std/*": ["../std/src/*.ts"] }
+  },
+  "include": ["src"]
+}
