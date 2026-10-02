@@ -154,7 +154,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 - **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug.
 - Every new language construct lands with: decision test(s) for both modes + at least one golden test + HIR-verifier-clean build. Non-trivial runtime code lands with a unit test.
 - Differential ground truth is the pinned Node LTS in `.node-version` — that Node, and only that Node.
-- **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (linux/x64 `frontend` job owns the lcov artifact), not on every local run.
+- **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (the stage-1 `frontend (linux/x64)` job, id `frontend-coverage`, owns the lcov artifact; Windows and macOS jobs never collect coverage), not on every local run.
 - **`test:affected` is for iteration only.** It follows the import graph from your diff, so it cannot see a test that reaches compiler code only through a spawned CLI process; plain `test` stays the gate.
 
 ## Diagnostics conventions
