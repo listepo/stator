@@ -172,7 +172,14 @@ function decodeFailure(value: unknown): string | undefined {
  * imports a package or holds a CommonJS file. */
 const BUNDLER_NONE = process.argv.includes('--bundler=none');
 
-async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStreams> {
+/** Fixtures named `node_*` build on the `--node` platform (plan.md §11c T11.6, docs/MODES.md
+ * §6): their `node:*` imports resolve to `packages/node`, and Node runs them like any fixture. */
+function onNodePlatform(fixture: Fixture): boolean {
+  return fixture.name.startsWith('node_');
+}
+
+async function runCompiled(fixture: Fixture): Promise<FixtureStreams> {
+  const { path, mode } = fixture;
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
@@ -182,6 +189,7 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStre
       out,
       mode,
       linkFlags: objects,
+      node: onNodePlatform(fixture),
       ...(BUNDLER_NONE ? { bundler: { kind: 'none' } } : {}),
     });
     const exec = await runProcess(out, [], { env: PINNED_ENV });
@@ -212,7 +220,7 @@ async function collect(
 async function check(fixture: Fixture): Promise<string | undefined> {
   try {
     const [actual, expected] = await Promise.all([
-      runCompiled(fixture.path, fixture.mode),
+      runCompiled(fixture),
       runNodeOracle(fixture.path, PINNED_ENV),
     ]);
     if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {

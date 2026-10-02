@@ -1,0 +1,11 @@
+{
+  "name": "@stator/node",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stator's --node platform: the node:* built-ins as strict TypeScript over std/*",
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

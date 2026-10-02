@@ -59,6 +59,8 @@ packages/runtime/  C11 + Zig memory core (plan-notes 238 / T9.1; NOT an npm pack
   vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
 packages/std/      "@stator/std" — the std/* modules (docs/STD.md): src/<module>.ts surface (strict TS,
                    Stator's own subset) + zig/<module>.zig backings → packages/std/build/libjsrt_std.a (justfile)
+packages/node/     "@stator/node" — the --node platform (docs/MODES.md §6): src/<id>.ts is node:<id>, strict TS
+                   over std/*; resolved by the compiler only under --node, compiled into the importer
 packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
   unit/            vitest unit tests (*.test.ts; config: packages/tests/vitest.config.ts)
   subset/          decision tests (feature × mode matrix)
@@ -161,7 +163,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 ## Testing rules
 
 - **Decision tests** (`tests/subset/`): first-line directives `// @mode: ts|js`, `// @verdict: static|dynamic|error|not-yet`, `// @code: STAxxxx` (required for error/not-yet). Pre-implementation tests carry `// @expected-fail: true`; the runner reports (never hides) that count; removing the marker happens in the same commit that makes the test pass.
-- **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug.
+- **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug. A fixture named `node_*` builds with `--node`, so its `node:*` imports resolve to `packages/node`.
 - Every new language construct lands with: decision test(s) for both modes + at least one golden test + HIR-verifier-clean build. Non-trivial runtime code lands with a unit test.
 - Differential ground truth is the pinned Node LTS in `.node-version` — that Node, and only that Node.
 - **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (the stage-1 `frontend (linux/x64)` job, id `frontend-coverage`, owns the lcov artifact; Windows and macOS jobs never collect coverage), not on every local run.

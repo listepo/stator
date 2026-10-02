@@ -56,6 +56,9 @@ Invariants:
 - **`std` is resolved and linked, never imported** — `frontend` maps `std/*` to `packages/std`'s
   sources and `cli` adds `libjsrt_std.a` only for a program that imports one (docs/STD.md §6).
   Nothing in `packages/compiler` imports `packages/std`.
+- **`node` is resolved, never imported** — under `--node` only, `frontend` maps `node:*` and the
+  bare built-ins to `packages/node`'s sources (docs/MODES.md §6), strict TypeScript over `std/*`
+  that compiles like any user module. Nothing in `packages/compiler` imports `packages/node`.
 
 ## 4. Value flow at a type boundary (activity view)
 
