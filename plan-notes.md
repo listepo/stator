@@ -9246,6 +9246,21 @@ platform-gap report. Until then `--node` is `STA0005` (unknown flag).
 **Check:** `pnpm run test` (vitest, 599 tests incl. the new `explain lists every diagnostic`
 case) and `test:subset` (744 fixtures: 707 passed, 37 expected-fail, 0 failed) pass.
 
+## 292. CI runs in two stages: Linux lint and coverage first, Windows and macOS after (2026-10-02)
+
+Owner-directed (2026-10-02). `ci.yml` was one flat set of jobs, so Windows and macOS runners
+started on every commit even when `lint` or the Linux unit tests would fail in a minute.
+
+**Decision.** Stage 1 is `static` plus `frontend (linux/x64)` (job id `frontend-coverage`, still
+the lcov owner; the check name is unchanged). Stage 2 is every Windows and macOS job
+(`frontend-desktop`, `runtime-macos`, `asan-macos`, `intl-macos`, `ffi-macos`), each with
+`needs: [static, frontend-coverage]`, running the same steps as before and no coverage (macOS and
+Windows never collected any). Matrix jobs cannot gate single entries, so each Unix job is split
+into a Linux job and a `-macos` twin sharing its steps through a YAML anchor; check names are
+unchanged. The Linux-only extras (`test262`, Linux arm64 `frontend`, Linux `runtime`/`asan`/`intl`/
+`ffi`) are in neither stage and stay ungated, so a long conformance run never delays stage 2.
+`revert-on-failure` now lists every job id. No action or tool version changed.
+
 ## 298. Phase 13: a Web API package with a pluggable render API; Clay is the default renderer (2026-10-02)
 
 **Plan:** new §11e Phase 13 (T13.0 design, T13.1 DOM, T13.2 CSS, T13.3 render API + recording
@@ -9294,4 +9309,3 @@ TypeScript.
   is what T13.0 §2's damage tracking builds on.
 - Drawing backends in `renderers/` at `main`: GLES3, SDL2, SDL3, cairo, playdate, raylib, sokol,
   termbox2, terminal, web, win32_gdi.
-

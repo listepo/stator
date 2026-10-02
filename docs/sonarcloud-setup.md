@@ -70,7 +70,7 @@ once the dashboard looks sane:
 Coverage **is wired**: the workflow runs the existing
 `pnpm run test:coverage` script (vitest under c8, which collects V8 coverage from the test
 workers and every CLI subprocess the tests spawn; plan-notes 285), the same one the ci.yml
-`frontend` job runs on linux/x64. It writes `coverage/lcov.info`, which Sonar reads via
+`frontend (linux/x64)` job (`frontend-coverage`, stage 1) runs. It writes `coverage/lcov.info`, which Sonar reads via
 **`sonar.javascript.lcov.reportPaths`**. Before that the workflow builds the runtime
 archive (`pnpm run runtime`), because a few unit tests compile and run native binaries.
 Both steps are best effort: if they fail, the scan still runs.
