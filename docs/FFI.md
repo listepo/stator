@@ -248,6 +248,13 @@ asymmetric on purpose:
   explicit free function in the same binding, declared as its own extern; the
   binding's documentation says so.
 
+Away from the call, a `CString` value is a string: the brand is a phantom only
+the extern signature reads, so `const v = cEcho(s as CString)` and an arrow
+whose return is inferred from an extern call are statically typed `string`
+(plan-notes 322). Its string surface (`.length`, methods) still wants a
+`string`-typed binding first: the gate reads string-ness from the checker,
+which does not see through the brand.
+
 Two stated answers, not accidents:
 
 - **Embedded NULs (in).** A JS string containing U+0000 is truncated at the

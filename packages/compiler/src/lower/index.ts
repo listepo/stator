@@ -1282,6 +1282,12 @@ function effectiveValueType(
       current = current.expression;
       continue;
     }
+    if (ts.isArrayLiteralExpression(current)) {
+      const contextual = emptyArrayContextType(current, checker);
+      if (contextual !== undefined) {
+        return contextual;
+      }
+    }
     if (ts.isCallExpression(current)) {
       if (knownReturn.size > 0) {
         const fqn = calledFunctionFQN(current, checker);
@@ -4053,7 +4059,7 @@ function lowerArrayLiteralExpression(
   diagnostics: Diagnostic[],
 ): Expression | null {
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-  const literalType = typeAt(node, checker, bindings);
+  const literalType = arrayLiteralType(node, checker, bindings);
   const hasSpread = node.elements.some((element) => ts.isSpreadElement(element));
   if (!hasSpread) {
     const elements: Expression[] = [];
@@ -4096,6 +4102,40 @@ function lowerSpreadSegments(
     }
   }
   return segments;
+}
+
+/** The checker's type for an array literal -- except `[]`, which has no element to type it, so
+ * the checker answers `never[]`, whose element is Unknown, and one Unknown makes the module and
+ * every importer dynamic. The CONTEXT is the type the empty array will be read as
+ * (`const out: string[] = []`, `[] as string[]`, `return []` under a `string[]` return), so an
+ * array context is the literal's type. A context still naming a type parameter is a generic
+ * callee's, not this scope's, and keeps the checker's answer (plan-notes 322). */
+function arrayLiteralType(
+  node: ts.ArrayLiteralExpression,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+): HType {
+  return (
+    emptyArrayContextType(node, checker, (type) =>
+      substituteHType(type, (name) => bindings.get(typeParameterKey(name))),
+    ) ?? typeAt(node, checker, bindings)
+  );
+}
+
+/** The array type an empty `[]` takes from its context, or undefined when the context is not an
+ * array this scope can name. The lowering (`arrayLiteralType`) and the step-45 return marks
+ * (`effectiveValueType`) both ask, so a `return []` under `number[]` is the same array to both. */
+function emptyArrayContextType(
+  node: ts.ArrayLiteralExpression,
+  checker: ts.TypeChecker,
+  ground: (type: HType) => HType = (type) => type,
+): HType | undefined {
+  const contextual = node.elements.length === 0 ? checker.getContextualType(node) : undefined;
+  if (contextual === undefined) {
+    return undefined;
+  }
+  const type = ground(tsTypeToHType(contextual, checker));
+  return type.kind === 'array' && !hasTypeParam(type) ? type : undefined;
 }
 
 /** Whether `name` is the prototype-setter spelling: a non-computed `__proto__` written as an
