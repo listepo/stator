@@ -1496,7 +1496,7 @@ modes: the packages are typed code, and nothing below the frontend gate learns a
 
 ### T13.0. Design: the render API and the DOM/CSS subset — **[D4]**
 
-Docs first (§15.6): `docs/WEBAPI.md`, settled with a measured spike. The spike renders one fixture
+Docs first (§15.6): `docs/WEBAPI-DESIGN.md`, settled with a measured spike. The spike renders one fixture
 (a flex row, text, a border, a scroll container) through `renderer-clay` and dumps Clay's render
 commands. Questions it must answer:
 
@@ -1539,14 +1539,15 @@ commands. Questions it must answer:
    there is no strict-TS one that Stator compiles; otherwise write one per CSS Syntax Level 3 and
    say why in plan-notes.
 
-**Check:** `docs/WEBAPI.md` answers 1–9 with the spike's numbers; plan-notes records the choices;
-T13.1–T13.4 are edited to match; `docs/README.md` lists the new doc.
+**Check:** `docs/WEBAPI-DESIGN.md` answers 1–9 with the spike's numbers; plan-notes records the choices;
+T13.1–T13.5 are edited to match; `docs/README.md` lists the new doc.
 
 ### T13.1. `packages/webapi`: the DOM — **[D4]**
 
-Depends on T13.0. New workspace package, strict TS (§0.9, §0.10), compiled by Stator. The DOM
-subset from T13.0 §3, against a recording renderer (T13.3's test double) so no pixels are needed.
-Docs: `docs/WEBAPI.md` coverage table, generated and checked in `ci` like `docs/NODE.md`.
+Depends on T13.0 and T13.5. New workspace package, strict TS (§0.9, §0.10), compiled by Stator.
+The DOM subset from T13.0 §3, against a recording renderer (T13.3's test double) so no pixels are
+needed. Every member it proves is claimed in `webapi_coverage.json` and `docs/WEBAPI.md` is
+regenerated in the same change (T13.5) — the rule for every later Phase 13 card too.
 
 **Check:** the T13.0 DOM oracle slice passes in both modes, byte-for-byte against the oracle;
 every unsupported member surfaces in `explain` as `not-yet`, not as `STA0012`.
@@ -1566,7 +1567,7 @@ recording renderer in `packages/tests` that prints what it is handed, one line p
 is the test double for T13.1–T13.2 and the contract test every renderer must pass.
 
 **Check:** golden fixtures dump the recorded stream for each T13.0 §4 property; a second renderer
-can be written against the interface alone (`docs/WEBAPI.md` has the worked example).
+can be written against the interface alone (`docs/WEBAPI-DESIGN.md` has the worked example).
 
 ### T13.4. `packages/renderer-clay`: the default renderer — **[D5]**
 
@@ -1584,6 +1585,38 @@ Depends on T13.3. New workspace package:
 **Check:** the T13.3 contract test passes; T13.0's layout oracle agrees within the documented
 tolerance on every fixture; `examples/webapi` builds a native binary on macOS, Linux and Windows
 that renders and reacts to a click; ASan/UBSan clean.
+
+### T13.5. `docs/WEBAPI.md`: generated Web API coverage — **[D2]**
+
+Depends on T13.0; lands before T13.1 claims its first member. The Web-platform counterpart of
+`docs/NODE.md` (AGENTS.md rule 11): coverage in % per area, interface and member, generated, and
+checked in `ci`.
+
+- **The denominator comes from a pinned source, not a hand list.** Every interface in
+  `lib.dom.d.ts` from the pinned `typescript` (6.0.3 ships it: 1 520 top-level `interface`
+  declarations), with its constructor, static and instance members, read through the TypeScript
+  API. No new dependency, and a `typescript` bump moves the denominator visibly. As with
+  `NODE.md`, forgetting a member cannot raise the percentage.
+- **Grouped by area.** DOM and CSSOM (CSSOM View included) come first, because those are the rows
+  this phase delivers; everything else sits under one "other Web APIs" heading. The interface →
+  area map is checked in next to the claims, and an interface missing from it is a generator
+  error, not a silent "other". If that map cannot be kept honest by hand, T13.0 may pick
+  `@webref/idl` (W3C Webref's per-spec IDL) as the source instead: a new dev dependency with its
+  own plan-notes entry.
+- **The numerator comes from claims.** `packages/tests/golden/webapi_coverage.json` maps interface
+  → member → the fixtures that prove it against T13.0 §8's oracle, or to `{ "not-yet": "T13.x" }`.
+  A claim whose fixture is missing or never mentions the member fails the generator, as
+  `coverage-claims.ts` already does for Node.
+- **One generator, not two.** Table rendering, the staleness check and claim validation are shared
+  with `node-coverage.ts` through one extracted helper (`pnpm run dupes`); only the denominator
+  readers differ.
+- `pnpm run docs:webapi` writes the file; `pnpm run test:webapi-coverage` (in `ci`, and a moon
+  task beside `node-coverage`) fails when it is stale. AGENTS.md gains rule 12 mirroring rule 11;
+  `docs/README.md` lists the file as generated.
+
+**Check:** `pnpm run test:webapi-coverage` passes on a fresh tree and fails after a hand edit of
+`docs/WEBAPI.md`; before T13.1 the doc shows 0% over the full denominator; a claim naming a
+missing fixture fails with the claim's path.
 
 **Low priority — the other Web APIs (not cards yet).** `URL`, `TextEncoder`/`TextDecoder`, timers,
 `fetch`, `WebSocket`, storage, `Canvas`, `structuredClone` and the rest. They land in
@@ -1767,7 +1800,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
 | `--node` (Phase 11) | typed arrays, `packages/std` + `packages/node`, CommonJS, sync `tsc` (N1) | T11.1–T11.6; the largest item is T11.4 (js-mode coverage, not Node). N2 deferred, N3 not planned (plan-notes 289) |
 | Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`, one-file `js` builds | T12.0 design first; T12.1–T12.2 (plan-notes 290) |
-| Web API (Phase 13) | `packages/webapi` (DOM + CSS, strict TS, render API) + `packages/renderer-clay` (default renderer) | T13.0 design first; T13.1–T13.4; other Web APIs low priority (plan-notes 298) |
+| Web API (Phase 13) | `packages/webapi` (DOM + CSS, strict TS, render API) + `packages/renderer-clay` (default renderer) | T13.0 design first; T13.1–T13.5 (coverage in generated `docs/WEBAPI.md`); other Web APIs low priority (plan-notes 298, 299) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
 
@@ -1935,3 +1968,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.11** (2026-10-02): **Phase 12 card — `js` mode builds through a bundler** (plan-notes 290). Creator-directed: one tree-shaken file per build, any bundler through `statorc/api` + `BundlerAdapter`, `packages/vite-stator` as the default. `ts` mode is untouched. T12.0 (design, docs-first) gates T12.1–T12.2 and may re-scope T11.5's CommonJS work.
 - **v4.12** (2026-10-02): **`explain` reports every deciding diagnostic** (plan-notes 291). §1's "per top-level construct" promise was never what shipped; the tree reports a file verdict plus per-function rows. `explain` now also lists every diagnostic of the deciding stage, which is what T11.4's Check needs to count `STA1214`; §1, `docs/MODES.md` §6 and T11.4/T11.5 rewritten to match, including how `--node` will surface platform gaps.
 - **v4.14** (2026-10-02): **Phase 13 — Web API with a pluggable render API** (plan-notes 298). New §11e: `packages/webapi` holds DOM + CSS in strict TS and owns the `Renderer` interface; `packages/renderer-clay` is the default renderer (vendored `clay.h` v0.14, Zig glue, TS adapter over FFI). Cards T13.0 (design, `docs/WEBAPI.md`), T13.1 DOM, T13.2 CSS, T13.3 render API + recording renderer, T13.4 Clay renderer; other Web APIs low priority, no cards yet.
+- **v4.15** (2026-10-02): **Web API coverage is a generated doc, like `docs/NODE.md`** (plan-notes 299). New card T13.5: `docs/WEBAPI.md` is the coverage table (denominator from the pinned `typescript`'s `lib.dom.d.ts`, claims in `webapi_coverage.json`, stale check in `ci`); T13.0's design doc moves to `docs/WEBAPI-DESIGN.md`; T13.1 depends on T13.5.
