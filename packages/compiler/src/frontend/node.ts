@@ -27,6 +27,20 @@ const NODE_SOURCE_DIR = checkerDir(join(NODE_ROOT, 'src'));
 
 const PREFIX = 'node:';
 
+/** The Node platform's global declarations (`import.meta.url`, `NodeRequire`, and T11.6's
+ * globals), a root file of every `--node` program; `undefined` for a package without one (a test
+ * stub under `STATOR_NODE_ROOT`). */
+export function nodeGlobalsFile(): string | undefined {
+  const file = `${NODE_SOURCE_DIR}/globals.d.ts`;
+  return existsSync(file) ? file : undefined;
+}
+
+/** The run-time location helpers (`packages/node/src/internal/location.ts`) that `location.ts`
+ * rewrites every module-location read into. */
+export function nodeLocationFile(): string {
+  return `${NODE_SOURCE_DIR}/internal/location.ts`;
+}
+
 /** The pinned Node's public built-in ids, without the prefix. `_`-prefixed ids (`_http_agent`)
  * are Node's own internals, the same exclusion `docs/NODE.md` makes. The list is read from the
  * Node running the compiler, which `pnpm run ci` pins to `.node-version`, so it is the same list
@@ -133,44 +147,23 @@ export function classifyNodeMember(
   };
 }
 
-/** The verdict on a free `require` (plan.md §11c T11.5, docs/BUNDLER.md §4). ESM is the module
- * system in `ts` mode, and without `--node`, so `require` is refused by design (`STA1110`). With
- * `--node` in `js` mode a CommonJS project file goes to the bundler whole (T12.1) and never reaches
- * the gate; a `require` that does — the bundle's own call on a built-in, or one beside ES-module
- * syntax — is T11.5's open `createRequire` step, so it is not-yet naming Phase 11. */
-export function requireVerdict(
-  mode: Mode,
-  node: boolean,
-):
-  | { kind: 'never'; code: 'STA1110'; message: string }
-  | { kind: 'not-yet'; code: 'STA1214'; message: string; phase: 11 } {
-  if (mode === 'js' && node) {
-    return {
-      kind: 'not-yet',
-      code: 'STA1214',
-      message:
-        'CommonJS require() under --node is not yet supported; planned for Phase 11 ' +
-        '(T11.5: require over built-ins through createRequire)',
-      phase: 11,
-    };
-  }
-  return {
-    kind: 'never',
-    code: 'STA1110',
-    message:
-      mode === 'ts'
-        ? 'CommonJS require() is not supported — ts mode uses ES modules only'
-        : 'CommonJS require() is not supported — without --node, Stator uses ES modules only',
-  };
-}
+/** A binding Node gives a CommonJS module and an ES module does not have. */
+export type CommonJsBinding =
+  | 'require()'
+  | 'module.exports'
+  | 'exports'
+  | '__filename'
+  | '__dirname';
 
-/** The verdict on a free `module.exports` or `exports` (plan-notes 315). Never, in every cell: in
- * `ts` mode and without `--node` ESM is the only module system, and with `--node` in `js` mode a
- * CommonJS project file goes to the bundler whole. One that reaches the gate there is an ES module
- * by Node's rule (ES-module syntax, or `"type": "module"`), where Node has no `module` or `exports`
- * either, or a build under `--bundler=none`, which has nothing to convert CommonJS with. */
-export function commonJsExportVerdict(
-  binding: 'module.exports' | 'exports',
+/** The verdict on a free CommonJS binding that reaches the gate (plan.md §11c T11.5,
+ * plan-notes 315, 316). Never, in every cell: in `ts` mode and without `--node` ESM is the only
+ * module system, and with `--node` in `js` mode a CommonJS project file goes to the bundler whole,
+ * whose `require` is `createRequire(import.meta.url)` and whose `__filename`/`__dirname` the
+ * frontend injects (`location.ts`). One that reaches the gate there is in an ES module by Node's
+ * rule (ES-module syntax, or `"type": "module"`), where Node has none of them either, or in a build
+ * under `--bundler=none`, which has nothing to convert CommonJS with. */
+export function commonJsVerdict(
+  binding: CommonJsBinding,
   mode: Mode,
   node: boolean,
 ): { kind: 'never'; code: 'STA1110'; message: string } {

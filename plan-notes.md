@@ -10882,7 +10882,7 @@ iterables here. It is not a spread defect; step 9 owns it (plan.md §11c T11.4).
   and 1 spread into `String.fromCharCode` (step 9). One `index access on a non-array` appeared
   that a spread refusal used to mask (step 7). Map/Set from an iterable (73) is step 6, which can
   drain through `drain` too.
-- Self-compilation: `STA1214` 1763 → 1742 on f752d15, recorded with `--update`.
+- Self-compilation: `STA1214` 1763 → 1742 on f752d15, and 1777 → 1755 rebased onto 0afd141 (T11.5), recorded with `--update`.
 - jscpd: 188 → 187.
 
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
@@ -11266,6 +11266,89 @@ construct the compiler's own source already holds hundreds of.
 **Left alone.** Decision 4 of the same review (skip checker diagnostics in vendor code) belongs to
 the T12.1 follow-up. A `typeof module` in a `.js` file that is not CommonJS is still the
 checker's `STA0012` "Cannot find name", as before this change.
+
+## 316. T11.5 closes: `require` over built-ins, `import.meta`, injected `__filename`/`__dirname` (2026-10-02)
+
+**What landed.**
+
+- **`node:module`** (`packages/node/src/module.ts`): `createRequire`, `isBuiltin` and
+  `builtinModules`, after Node v26.7.0 `lib/internal/modules`. The `require` it makes answers
+  every built-in `packages/node` has landed (a `landed` table: `assert`, `module`, `path`,
+  `path/posix`), with or without the `node:` prefix. Anything else throws, because a native binary
+  has nothing left to load at run time: the project's files and packages were bundled at build
+  time (docs/BUNDLER.md §4). The errors are Node's (measured on the pinned Node 26.7.0,
+  2026-10-02):
+  - an id that is not a built-in → `MODULE_NOT_FOUND`, "Cannot find module 'x'\nRequire
+    stack:\n- <requirer>";
+  - `node:` plus an unknown id → `ERR_UNKNOWN_BUILTIN_MODULE`, "No such built-in module: node:x";
+  - a built-in Stator has not landed → `ERR_UNKNOWN_BUILTIN_MODULE` with the T11.6 note appended;
+  - `createRequire` of a relative path → `TypeError` `ERR_INVALID_ARG_VALUE`, Node's message.
+  `createRequire` takes a `file:` URL or an absolute path (`internal/url.ts` converts as
+  `url.fileURLToPath` and `url.pathToFileURL` do on POSIX). `unit/node-module.test.ts` holds the
+  `landed` table to the files under `packages/node/src`, and `builtinModules` to the pinned Node's.
+- **`import.meta` under `--node`.** `packages/node/src/globals.d.ts` (a root file of every
+  `--node` program) declares `ImportMeta.url`/`filename`/`dirname` and `NodeRequire`. The
+  `require` result type is `ReturnType<typeof JSON.parse>`, the `any` js mode needs to read
+  members off it; a `.d.ts` is not lowered, so ts mode never sees it as an `any` it compiles.
+- **The location rewrite** (`frontend/location.ts`, run by `cli/bundler.ts` after the vendor
+  step, under `--node` only). Every `import.meta.url`/`.filename`/`.dirname` in a project file,
+  and every free `__filename`/`__dirname` in the vendor module, becomes a call into
+  `packages/node/src/internal/location.ts` carrying the file's path relative to the entry's
+  directory. At run time the call joins it to the directory of `std/process.execPath()`. One
+  import joins line 1 (after a shebang), so no line moves; the program reloads over the merged
+  overlay. Inside the vendor module the path is the file the read was written in, found through the
+  bundle's source map, so `node_modules/edge/index.js` reads `<bin dir>/node_modules/edge`. A read
+  with no mapping (a bundler helper) takes the vendor module's own path, beside the entry.
+  - **Refinement of 312, recorded here.** 312 said "the vendor module is one module at the
+    entry's level, so its `__dirname` is the binary's directory". With the source map at hand,
+    each read takes its original file's location instead, which is 312's own rule ("the module's
+    directory relative to the entry file's directory") applied per original module. The old
+    sentence survives as the case with no mapping. docs/MODES.md §6 is rewritten to match.
+- **One verdict for the CommonJS bindings.** `requireVerdict` and `commonJsExportVerdict` merge
+  into `commonJsVerdict` (node.ts). A free `require`, `module.exports`, `exports`, `__filename` or
+  `__dirname` that reaches the gate is `STA1110` in all four mode × platform cells. Under `--node`
+  in `js` mode it can reach the gate only from an ES module, where Node has none of them
+  (`ReferenceError: require is not defined in ES module scope`), or from a build under
+  `--bundler=none`. The `js` + `--node` `require` cell was `STA1214` naming this card; it is now
+  `STA1110`, and an ES module calls `createRequire(import.meta.url)`.
+- **`STA1218` retired.** It was T12.1's placeholder until this card gave the two names a value.
+  The vendor module's reads are injected, and every other read is an ES module's or an unrouted
+  CommonJS file's: `STA1110`, the CommonJS family's `never` code. `isFreeCommonJsName` moves from
+  the gate to `vendor.ts`, so the gate and the rewrite agree on what "free" means.
+- **Without `--node`, `import.meta` stays `STA1214`** ("MetaProperty"), as before. Nothing gives it
+  a meaning without `packages/node`.
+
+**Proof.**
+
+- Goldens `ts/node_module.ts` and `js/node_module.js`, byte-for-byte vs Node:
+  `createRequire(import.meta.url)` of a built-in, `require('node:path') === require('path')`, a
+  computed `require` hit, misses `MODULE_NOT_FOUND` and `ERR_UNKNOWN_BUILTIN_MODULE`, `isBuiltin`,
+  `builtinModules.length`, and `import.meta.url`/`filename`/`dirname` checked by shape. The binary
+  does not sit where the source does, so no line prints a path.
+- `unit/bundler.test.ts`: a ready bundle in Rolldown 1.2.12's shape for a CommonJS package
+  (`__require = createRequire(import.meta.url)`, free `__filename`/`__dirname`), built with
+  `node: true` and run. It prints `index.js edge MODULE_NOT_FOUND __stator_vendor__.js`: the mapped
+  file, its directory, a computed miss, and an unmapped read taking the vendor module's name.
+  Rolldown's shape was measured by bundling `lib/a.cjs` with `platform: 'node'` (Rolldown 1.2.12,
+  installed under Vite 8.3.1). The interop helpers (`__toESM`, `__commonJSMin`) are T12.3's, so the
+  test leaves them out.
+- Decision tests: `subset_commonjs_require_node_js` → `STA1110`; `subset_node_filename_*` and
+  `subset_node_dirname_*` → `STA1110`, with new `_node_ts`/`_node_js` cells;
+  `subset_node_import_meta_node_*` dynamic (the helpers reach `node:path`, whose graph holds
+  `std/env`), and `subset_node_import_meta_*` `STA1214` without the flag.
+- `node_coverage.json` claims `module.builtinModules`, `createRequire` and `isBuiltin`;
+  `docs/NODE.md` regenerated (38 → 41 of 2364 members).
+
+**What a golden cannot prove yet.** A CommonJS file's `__filename` read through the default
+adapter needs `vite-stator` (T12.2) and the interop helpers (T12.3). The unit test above proves
+the injection with a ready bundle in the meantime.
+
+**Self-compilation grows** by 14 × `STA1214` in `packages/compiler` (1763 → 1777 on main
+f752d15), recorded with `--update` per v4.25. The new `frontend/location.ts` holds 15 (its
+`node:path` and `typescript` imports, `QualifiedName` annotations, a `for-of` over an `as const`
+tuple, a spread of a `Set`, a generic function as a value); the rest of the change nets −1.
+`packages/node/src/module.ts` joins as a target (`dynamic`). The runner now skips declaration
+files in an `entries` directory: `globals.d.ts` declares and is no module to compile.
 
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 

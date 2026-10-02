@@ -1336,7 +1336,7 @@ built-in modules. The first target is TypeScript 6.0.3's own `tsc` bundle.
 | `packages/runtime` | C11 + Zig | values, GC, builtins, **typed arrays** (T11.1) | know `std` or Node |
 | `packages/std` (new, T11.2) | strict TS surface + Zig backings → `libjsrt_std.a` | `std/env`, `path`, `process`, `fs`, `time`, `os`, `io`, `hash`, `encoding` | know Node; mimic Node option bags or error strings |
 | `packages/node` (new, T11.6) | strict TS only | `node:*` modules, Node globals (`process`, `Buffer`, timers), the CJS runtime helpers | contain C, Zig or JS; reach `runtime` except through `std` |
-| `packages/compiler` | strict TS | `--node` flag, `std/*` + `node:*` resolution, CommonJS lowering (T11.5), js-mode coverage (T11.4) | contain platform semantics (those live in `node`) |
+| `packages/compiler` | strict TS | `--node` flag, `std/*` + `node:*` resolution, CommonJS routing and `require` over built-ins (T11.5), js-mode coverage (T11.4) | contain platform semantics (those live in `node`) |
 | `packages/tests` | strict TS | goldens, `node_coverage.json` claims, the `docs/NODE.md` generator | — |
 
 Each new package is a pnpm workspace member and a moon project with its own `typecheck`,
@@ -1437,58 +1437,10 @@ constructor and `instanceof` against one, and `.call` on a builtin method
 clause is met by families 1–4 and step 9 together. After family 4 those two `.call` sites are the
 harness's only refusals (plan-notes 310).
 
-### T11.5. `packages/compiler`: the `--node` flag and CommonJS — **[D4]**
-
-Depends on T11.2. **Re-scoped by T12.0** (question 4, plan-notes 296; `docs/BUNDLER.md` §4):
-the bundler converts CommonJS. Rolldown wraps each module as a function over
-`(exports, module)`, and it already turns static `require` into graph edges, decides `"type"`
-and gives CJS cycles Node's partial `exports`. Stator writes none of that. A CommonJS project
-file (Node's rule: `.cjs`, `"type": "commonjs"`, or `.js` without ES-module syntax) is routed
-to the bundler by T12.1, under `--node` only (decided 2026-10-02, plan-notes 315).
-
-**Status:** in progress — Claude Code / opus-5-5. The steps that do not need the bundler landed
-(plan-notes 312): the flag and its config key, platform-gap diagnostics, ESM resolution of
-`node:*` and bare built-ins, the `STA1110` narrowing, and the `__filename`/`__dirname` decision
-(`docs/MODES.md` §6). T12.1 has landed since (plan-notes 320), and `--node` now gates its
-CommonJS routing (plan-notes 315): only under the flag does a CommonJS project file go to the
-bundler, and without it the file's free `require`, `module.exports` and `exports` are `STA1110`.
-Packages under `node_modules` are bundled either way. **What is left, now unblocked:** the vendor
-bundle's built-in imports, `require`/`createRequire` at run time, and the `__filename`/`__dirname`
-values in the CommonJS wrapper (`STA1218` until then, under the flag too). Until then a free
-`require` under `--node` in `js` mode is `STA1214` naming this card. The card stays open.
-
-Steps:
-
-- ~~**The flag.**~~ Landed (plan-notes 312): `--node` on `build` and `explain`, the config key
-  `node`. An unlanded `node:*` module or member is `STA1214` naming Phase 11 (T11.6). A Node
-  global member under `--node` joins this when `packages/node` declares its globals (T11.6).
-- ~~**The Node globals' location.**~~ Decided (plan-notes 312, `docs/MODES.md` §6): relative to
-  the executable, resolved at run time, never `import.meta.url`. **Open:** injecting the values
-  in CommonJS project files and the vendor module (lifts `STA1218`).
-- **Resolution.** ~~ESM imports in project files~~ landed (plan-notes 312): `node:*` and bare
-  built-ins resolve to `packages/node` through `paths` entries. **Open:** the
-  vendor bundle reaches them as `import * as m from "path"` plus `m.default`
-  (`esmExternalRequirePlugin`), so built-ins need a default export (T11.6 provides it).
-- **`require` at run time.** `import.meta.url` + `node:module.createRequire`
-  give a `require` over built-ins only. It serves Rolldown's `__require` for computed
-  `require(expr)`, and anything that is not a built-in throws Node's `MODULE_NOT_FOUND`. A
-  computed require of a bundled file cannot resolve: Node itself fails on the bundle, as
-  measured in T12.0.
-- ~~**`STA1110`** narrows to "without `--node`".~~ Landed (plan-notes 312): it stays in `ts` mode
-  with or without the flag, and in `js` mode without it. No new code.
-- ~~**`--node` gates CommonJS routing.**~~ Landed (plan-notes 315): `planVendor` routes a CommonJS
-  project file only under the flag, and the gate answers a free `module.exports` or `exports`
-  with `STA1110` (it used to reach the lowering as `STA4035`).
-
-Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORKS.md`,
-`CONFIG.md` — updated for the landed steps.
-
-**Check:** decision tests for `require` in all four mode × platform cells — **passing**
-(`subset_commonjs_require_*`); for a CommonJS project file in all four — **passing**
-(`subset_commonjs_file_ts` / `_node_ts` / `_js`, and the `js` + `--node` cell, which needs an
-adapter, in `unit/bundler.test.ts`). Goldens, byte-for-byte vs Node: `createRequire` of a built-in, a
-computed `require` hit (a built-in) and miss (`MODULE_NOT_FOUND`) — open. The CJS
-cycle and `module.exports` replacement goldens moved to T12.3.
+~~**T11.5. `packages/compiler`: the `--node` flag and CommonJS.**~~ ✅ **landed 2026-10-02** —
+evidence in [done.md](done.md) → Phase 11 T11.5 (plan-notes 312, 315, 316). The `vite-stator`
+side of a bundled built-in (`esmExternalRequirePlugin`, which turns the bundle's `__require` of a
+built-in into an import) is T12.2's; the CommonJS goldens through the default adapter are T12.3's.
 
 ### T11.6. `packages/node`: the N1 wrappers — **[D4]**
 
@@ -1596,7 +1548,7 @@ Decided by the creator (2026-10-02, BUNDLER.md §9, plan-notes 296):
 
 - "one file" means the dependencies only, so this design stands;
 - `__filename`/`__dirname` are a `not-yet` diagnostic until `--node` (T11.5), and no path is
-  baked into a binary;
+  baked into a binary (T11.5 landed the values, plan-notes 316; the diagnostic is `STA1110`);
 - the package evaluation-order deviation is documented only, with no card to close it.
 
 The phase is not sequenced after Phase 8 (§15.1 exception, as Phases 9–11). It touches only
@@ -1636,15 +1588,16 @@ where they are the same constructs. Each item below is measured in T12.0 (`docs/
   internal error today: `STA4013` "comma operator result must match" (plan-notes 321).
 - **The dynamic-import namespace helpers.** `__esmMin` and `__exportAll` need
   `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
-- **`import.meta.url`.**
+- ~~**`import.meta.url`.**~~ Landed under `--node` by T11.5 (plan-notes 316).
 - **A computed `export default`.**
 - **The package imports T12.1 leaves refused** (plan-notes 320 Q3), each `STA1214` today:
   `export * from 'p'`, whose names come from the bundle's own exports once it is built;
   `import('p')`, which lands on the dynamic-import namespace helpers above; and a package import
   with import attributes.
 
-Out of scope: `__filename`/`__dirname`. They stay `not-yet` until T11.5 (BUNDLER.md §9), so no
-golden here reads them.
+`__filename`/`__dirname`: T11.5 injects them in the vendor module under `--node` (plan-notes
+316, proved with a ready bundle in `unit/bundler.test.ts`); a golden here may read them, printing
+no path.
 
 **Check:** CommonJS goldens through the default adapter, byte-for-byte vs Node:
 
@@ -2335,3 +2288,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.51** (2026-10-02): **T11.6, first slice: `packages/node` and `node:path`** (plan-notes 313). `packages/node` is created: strict TypeScript over `std`, a workspace package and moon project, a selfhost target (`node-goldens` smoke) and its own `stator.config.json` (`"node": true`). `node:path` and `node:path/posix` are POSIX-complete (14 of 16 members; `win32` and `matchesGlob` not-yet), proved by the `node_path*` goldens against Node 26.7.0, claimed in `node_coverage.json`, and `docs/NODE.md` is regenerated. Fixtures named `node_*` build with `--node`. A named import the module lacks is not-yet even when the checker answers TS2614 (the module has a default export).
 - **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.
 - **v4.53** (2026-10-02): **T11.5: `--node` gates CommonJS routing of project files** (plan-notes 315). The creator's decisions on plan-notes 320: the narrowed CommonJS marker rule stays, and only under `--node` does a CommonJS project file go to the bundler; packages are bundled either way. Without the flag a free `require`, `module.exports` or `exports` is `STA1110`; `module.exports`/`exports` used to reach the lowering as `STA4035`, because TypeScript declares them by their own assignments and the free-binding test missed them. `statorc/api` gains `CompileRequest.node`. T11.4 gains item 10, the `STA2006` panic on a `RegExp` method called off a union narrowing.
+- **v4.54** (2026-10-02): **T11.5 closes: `require` over built-ins, `import.meta` and the injected `__filename`/`__dirname`** (plan-notes 316). `node:module` lands (`createRequire`, `isBuiltin`, `builtinModules`): its `require` answers every landed built-in and throws Node's `MODULE_NOT_FOUND` for anything else. Under `--node` the frontend rewrites `import.meta.url`/`.filename`/`.dirname` and the vendor module's free `__filename`/`__dirname` into run-time calls relative to the executable (`frontend/location.ts`). A free `require`, `__filename` or `__dirname` that reaches the gate is `STA1110` in every cell; `STA1218` is retired. Goldens `node_module` (ts, js).

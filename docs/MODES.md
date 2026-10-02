@@ -504,7 +504,8 @@ without the flag (docs/BUNDLER.md §1).
 `node:path` and `node:path/posix`, POSIX semantics — Stator builds for POSIX hosts, so `path` is
 `path.posix`, as on the pinned Node there. `node:assert` (T11.7), the slice Node's own tests use:
 `ok`, `strictEqual`, `notStrictEqual`, `deepStrictEqual`, `match`, `fail`, `throws`, `rejects` and
-`AssertionError`; its default export is an object, not yet a callable function. Each module's default export is the module object
+`AssertionError`; its default export is an object, not yet a callable function. `node:module`
+(T11.5): `createRequire`, `isBuiltin` and `builtinModules`. Each module's default export is the module object
 (`import path from 'node:path'`), which the bundle's `import * as m` plus `m.default` also needs.
 `path.win32`, `node:path/win32` and `path.matchesGlob` have not landed.
 
@@ -520,32 +521,42 @@ it stays, flag or not. `--node` is also what routes a CommonJS project file to t
 (T12.1, docs/BUNDLER.md §4; decided 2026-10-02, plan-notes 315), so under it such a file never
 reaches the gate. Without the flag the file stays in the graph and its free `require`,
 `module.exports` and `exports` are `STA1110`; a CommonJS file that reads none of them compiles as
-written. Packages are bundled either way. With `--node` in `js` mode, a computed `require` over
-built-ins comes from `createRequire(import.meta.url)`; until that step of T11.5 lands, a free
-`require` there is `STA1214` naming it. A `module.exports` or `exports` that still reaches the
-gate under `--node` (beside ES-module syntax, or under `--bundler=none`) is `STA1110`.
+written. Packages are bundled either way. With `--node` in `js` mode the bundle's `require` is
+`createRequire(import.meta.url)` (Rolldown's `__require`), a `require` over built-ins only:
+`node:module` (T11.5) answers every built-in `packages/node` has landed, throws
+`ERR_UNKNOWN_BUILTIN_MODULE` naming T11.6 for one it has not, and throws Node's
+`MODULE_NOT_FOUND` for anything else, because the project's files and packages were bundled at
+build time and nothing is left to load. An ES module gets the same `require` from
+`createRequire(import.meta.url)`. A free `require`, `module.exports` or `exports` that still
+reaches the gate under `--node` (beside ES-module syntax, or under `--bundler=none`) is `STA1110`,
+as in Node, where an ES module has none of them. `require` is a plain function: `require.resolve`,
+`require.cache` and `require.main` are absent (a function with properties is not-yet).
 
-**`__filename` and `__dirname`** (decided 2026-10-02, plan-notes 312; docs/BUNDLER.md §9). They
-exist where Node defines them: in a CommonJS project file and in the vendor module, both of which
-reach the build through T12.1's bundler. An ES module has neither, under `--node` or not, exactly
-as in Node (`ReferenceError: __dirname is not defined in ES module scope`). Until the CommonJS
-wrapper injects the values, every free read is T12.1's `STA1218`, in any file and under the flag
-too. The
-values are **relative to the executable, resolved at run time**:
+**`__filename`, `__dirname` and `import.meta`** (decided 2026-10-02, plan-notes 312; landed in
+plan-notes 316; docs/BUNDLER.md §9). `__filename` and `__dirname` exist where Node defines them:
+in a CommonJS file, which under `--node` reaches the build through the bundler, so in the vendor
+module. An ES module has neither, exactly as in Node (`ReferenceError: __dirname is not defined in
+ES module scope`), so a free read that reaches the gate is `STA1110`, under the flag or not.
+`import.meta.url`, `import.meta.filename` and `import.meta.dirname` exist in every module under
+`--node`; without the flag `import.meta` is `STA1214`. The values are **relative to the
+executable, resolved at run time**:
 
 - `__dirname` is the directory of the running binary (the path `process.execPath` answers),
   joined with the module's directory relative to the entry file's directory. For a module beside
   the entry it is the binary's directory itself.
 - `__filename` is `__dirname` joined with the module's file name.
-- The vendor module is one module at the entry's level, so its `__dirname` is the binary's
-  directory.
+- Inside the vendor module a read takes the location of the file it was written in, which the
+  bundle's source map names (`node_modules/edge/index.js` reads `<bin dir>/node_modules/edge`). A
+  read with no mapping, in a bundler helper, takes the vendor module's own: it sits at the entry's
+  level, so its `__dirname` is the binary's directory.
+- `import.meta.filename` is `__filename`, `import.meta.dirname` is `__dirname`, and
+  `import.meta.url` is the `file:` URL of `__filename` (`url.pathToFileURL`'s encoding).
 
-No build-machine path is ever baked into the binary. `import.meta.url` was the alternative and is
-not taken: in a native binary it has no meaning of its own, so it would need this same rule, and
-the subset does not compile `import.meta` yet. When it does, `import.meta.url` is the `file:` URL
-of the same `__filename`. The rule keeps the common idiom working: `join(__dirname, "data.json")`
-finds assets laid out beside the binary the way they sat beside the source. The values are
-injected by T12.1's CommonJS wrapper; T11.5 only fixes what they are.
+No build-machine path is ever baked into the binary. The frontend rewrites every read into a call
+to `packages/node/src/internal/location.ts` that carries the file's path relative to the entry
+(`frontend/location.ts`); the call joins it to the binary's directory when the program runs. The
+rule keeps the common idiom working: `join(__dirname, "data.json")` finds assets laid out beside
+the binary the way they sat beside the source.
 
 ## 7. One pipeline, one gate
 

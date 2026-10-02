@@ -15,7 +15,7 @@ for the module and expected to pass under Stator, from
 `packages/tests/node-suite/expectations.json`, which `pnpm run test:node-suite` holds to the
 truth (plan.md §11c T11.7).
 
-**Total: 38 / 2364 members covered (2%) across 58 modules.**
+**Total: 41 / 2364 members covered (2%) across 58 modules.**
 **Slice N1 (`tsc`): 3 / 37 (8%).**
 **Node tests: 0 / 17 selected files pass.**
 
@@ -43,7 +43,7 @@ truth (plan.md §11c T11.7).
 | [`node:https`](#nodehttps) | 0 | 13 | 0% | 3 | 0 |  |
 | [`node:inspector`](#nodeinspector) | 0 | 13 | 0% | 2 | 1 |  |
 | [`node:inspector/promises`](#nodeinspectorpromises) | 0 | 10 | 0% | 0 | 0 |  |
-| [`node:module`](#nodemodule) | 0 | 48 | 0% | 38 | 0 |  |
+| [`node:module`](#nodemodule) | 3 | 48 | 6% | 38 | 0 |  |
 | [`node:net`](#nodenet) | 0 | 79 | 0% | 6 | 0 |  |
 | [`node:os`](#nodeos) | 0 | 23 | 0% | 43 | 2 |  |
 | [`node:path`](#nodepath) | 14 | 16 | 88% | 402 | 3 | 0 / 13 |
@@ -1538,7 +1538,7 @@ truth (plan.md §11c T11.7).
 
 ### node:module
 
-<details><summary><code>node:module</code> — 0 / 48 (0%)</summary>
+<details><summary><code>node:module</code> — 3 / 48 (6%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
@@ -1573,9 +1573,9 @@ truth (plan.md §11c T11.7).
 | `SourceMap.prototype.findOrigin` | method | — |  |  |
 | `SourceMap.prototype.lineLengths` | accessor | — |  |  |
 | `SourceMap.prototype.payload` | accessor | — |  |  |
-| `builtinModules` | value | — | 4 |  |
+| `builtinModules` | value | ✅ | 4 |  |
 | `constants` | value | — |  |  |
-| `createRequire` | function | — | 12 |  |
+| `createRequire` | function | ✅ | 12 |  |
 | `enableCompileCache` | function | — |  |  |
 | `findPackageJSON` | function | — |  |  |
 | `findSourceMap` | function | — |  |  |
@@ -1583,7 +1583,7 @@ truth (plan.md §11c T11.7).
 | `getCompileCacheDir` | function | — |  |  |
 | `getSourceMapsSupport` | function | — |  |  |
 | `globalPaths` | value | — |  |  |
-| `isBuiltin` | function | — | 7 |  |
+| `isBuiltin` | function | ✅ | 7 |  |
 | `register` | function | — | 2 |  |
 | `registerHooks` | function | — | 2 |  |
 | `runMain` | function | — |  |  |

@@ -11,6 +11,7 @@ import {
   classifyNodeMember,
   classifyNodeSpecifier,
   type NodeNotYet,
+  nodeGlobalsFile,
   nodePathMapping,
 } from './node.ts';
 import {
@@ -751,8 +752,13 @@ function createProgramUncached(
   // import edge silently fails the `getSourceFile` lookup and the module graph loses its
   // dependencies -- legal multi-file source then dies as STA4035 in the lowering. Forward slashes
   // because that is the separator TypeScript normalizes every fileName to.
+  const nodeGlobals = node ? nodeGlobalsFile() : undefined;
   const program = ts.createProgram(
-    [globals, resolve(entryFile).replace(/\\/g, '/')],
+    [
+      globals,
+      ...(nodeGlobals === undefined ? [] : [nodeGlobals]),
+      resolve(entryFile).replace(/\\/g, '/'),
+    ],
     compilerOptions,
     overlay === undefined
       ? host
@@ -764,9 +770,10 @@ function createProgramUncached(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = preEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
-    // A free `__filename` or `__dirname` is the gate's STA1218 (plan.md §11d T12.1 step 7), in
-    // both modes: the checker's "cannot find name" would make it an STA0012 type error in ts mode
-    // and silent in js mode, where Node either defines it (CommonJS) or throws.
+    // A free `__filename` or `__dirname` is the gate's STA1110 (plan-notes 316), in both modes:
+    // the checker's "cannot find name" would make it an STA0012 type error in ts mode and silent
+    // in js mode, where Node either defines it (CommonJS) or throws. The vendor module's reads
+    // never get here: under `--node` the frontend rewrites them (`location.ts`).
     if (isNodePathGlobalRead(diag)) {
       continue;
     }

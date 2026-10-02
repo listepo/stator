@@ -87,8 +87,8 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
-import { isFreeGlobal } from './vendor.ts';
-import { commonJsExportVerdict, isNodeSourceFile, nodeBuiltinId, requireVerdict } from './node.ts';
+import { isFreeCommonJsName } from './vendor.ts';
+import { type CommonJsBinding, commonJsVerdict, isNodeSourceFile, nodeBuiltinId } from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
@@ -809,37 +809,20 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
   return { kind: 'accept' };
 }
 
-/** A read of one of Node's CommonJS bindings that no program declaration binds: unresolved (a
- * `.ts` file), or bound by the checker itself (a `.js` file, where TypeScript models CommonJS and
- * declares `require` nowhere, and `module`/`exports` by the assignments that use them). A user's
- * own `function require` is a binding like any other, and a NAME — a property's (`o.require`,
- * `{ exports: 1 }`, `{ exports: e } = o`), a member's or a label's — reads no binding at all. */
-function isFreeCommonJsName(
+/** Which CommonJS binding a free identifier reads or writes (plan-notes 315, 316): `require`,
+ * `__filename`, `__dirname`, `module` as the base of `module.exports`, or `exports` itself.
+ * `typeof module` / `typeof exports` is a probe, not a use: a UMD wrapper asks it in every
+ * environment, and it answers `'undefined'`. */
+function commonJsBinding(
   node: ts.Identifier,
-  name: string,
   typeChecker: ts.TypeChecker,
-): boolean {
-  // Every `name` slot is a NAME site — a property's, a member's, a declaration's — except a
-  // shorthand `{ exports }`, which reads the binding it spells.
-  const parent = node.parent;
-  if (
-    ('name' in parent && parent.name === node && !ts.isShorthandPropertyAssignment(parent)) ||
-    ('label' in parent && parent.label === node) ||
-    (ts.isQualifiedName(parent) && parent.right === node) ||
-    (ts.isBindingElement(parent) && parent.propertyName === node)
-  ) {
-    return false;
+): CommonJsBinding | undefined {
+  for (const name of ['__filename', '__dirname'] as const) {
+    if (isFreeCommonJsName(node, name, typeChecker)) return name;
   }
-  return isFreeGlobal(node, name, typeChecker);
-}
-
-/** Which CommonJS export binding a free identifier writes or reads (plan-notes 315): `module` as
- * the base of `module.exports`, or `exports` itself. `typeof module` / `typeof exports` is a
- * probe, not a use: a UMD wrapper asks it in every environment, and it answers `'undefined'`. */
-function commonJsExportBinding(
-  node: ts.Identifier,
-  typeChecker: ts.TypeChecker,
-): 'module.exports' | 'exports' | undefined {
+  if (isFreeCommonJsName(node, 'require', typeChecker)) {
+    return 'require()';
+  }
   if (ts.isTypeOfExpression(node.parent)) {
     return undefined;
   }
@@ -855,43 +838,6 @@ function commonJsExportBinding(
   return exportsOf && parent.expression === node && isFreeCommonJsName(node, 'module', typeChecker)
     ? 'module.exports'
     : undefined;
-}
-
-/** A read of Node's `__filename` or `__dirname` that nothing in the program declares (plan.md
- * §11d T12.1 step 7, docs/BUNDLER.md §4, §9). A shorthand `{ __dirname }` reads it too; a
- * property name (`o.__dirname`) or a declaration is not the global. */
-function isFreeNodePathGlobal(
-  node: ts.Identifier,
-  symbol: ts.Symbol | undefined,
-  typeChecker: ts.TypeChecker,
-): boolean {
-  if (node.text !== '__filename' && node.text !== '__dirname') return false;
-  const parent = node.parent;
-  if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
-    return typeChecker.getShorthandAssignmentValueSymbol(parent) === undefined;
-  }
-  if (
-    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
-    (ts.isPropertyAssignment(parent) && parent.name === node) ||
-    ts.isTypeNode(parent)
-  ) {
-    return false;
-  }
-  return symbol === undefined;
-}
-
-/** STA1218: the value is a path on the build machine, which no binary may carry. `--node`
- * (T11.5) defines what it means in a native binary (creator's decision, plan-notes 296; the rule
- * is docs/MODES.md §6); until the CommonJS wrapper injects it, it stays not-yet under the flag too. */
-function nodePathGlobalNotYet(name: string, onNode: boolean): GateResult {
-  return {
-    kind: 'not-yet',
-    code: 'STA1218',
-    message: onNode
-      ? `'${name}' is not yet supported; planned for Phase 11 (T11.5: the CommonJS wrapper injects it)`
-      : `'${name}' is not yet supported without --node; planned for Phase 11 (T11.5)`,
-    phase: 11,
-  };
 }
 
 /** One code for the whole Phase 2 boundary. These constructs are not deferred for six different
@@ -1109,17 +1055,11 @@ function gateIdentifier(
   if (isModuleClauseName(node)) {
     return { kind: 'accept' };
   }
-  if (isFreeCommonJsName(node, 'require', typeChecker)) {
-    return requireVerdict(mode, onNode);
-  }
-  const exportBinding = commonJsExportBinding(node, typeChecker);
-  if (exportBinding !== undefined) {
-    return commonJsExportVerdict(exportBinding, mode, onNode);
+  const binding = commonJsBinding(node, typeChecker);
+  if (binding !== undefined) {
+    return commonJsVerdict(binding, mode, onNode);
   }
   const symbol = typeChecker.getSymbolAtLocation(node);
-  if (isFreeNodePathGlobal(node, symbol, typeChecker)) {
-    return nodePathGlobalNotYet(node.text, onNode);
-  }
   const decl = symbol?.valueDeclaration;
   // A class NAME is not a value here. Five spellings are not uses of the value and must pass: the
   // declaration's own name, the callee of `new`, the right operand of `instanceof`, the base of an
