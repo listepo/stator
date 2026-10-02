@@ -55,6 +55,10 @@
     "diagnostics": {
       "enum": ["text", "json"],
       "description": "explain: report format; \"json\" is --json (default \"text\")."
+    },
+    "node": {
+      "type": "boolean",
+      "description": "build and explain: the Node platform (--node). node:* and bare built-ins resolve to packages/node (docs/MODES.md §6). Default false."
     }
   },
   "additionalProperties": false

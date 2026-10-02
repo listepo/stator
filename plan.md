@@ -1416,37 +1416,41 @@ and gives CJS cycles Node's partial `exports`. Stator writes none of that. A Com
 file (Node's rule: `.cjs`, `"type": "commonjs"`, or `.js` without ES-module syntax) is routed
 to the bundler by T12.1.
 
+**Status:** in progress — Claude Code / opus-5-5. The steps that do not need the bundler landed
+(plan-notes 312): the flag and its config key, platform-gap diagnostics, ESM resolution of
+`node:*` and bare built-ins, the `STA1110` narrowing, and the `__filename`/`__dirname` decision
+(`docs/MODES.md` §6). **What is left waits for T12.1:** routing a CommonJS project file to the
+bundler, the vendor bundle's built-in imports, `require`/`createRequire` at run time, and the
+`__filename`/`__dirname` values in T12.1's CommonJS wrapper. Until then `require` under `--node`
+in `js` mode is `STA1214` naming Phase 12. The card stays open.
+
 Steps:
 
-- **The flag.** `--node` on the CLI and `explain`. Under `--node` an unlanded `node:*` or
-  global member is a `not-yet` diagnostic naming T11.6, so `explain`'s `diagnostics` lists
-  platform gaps (`docs/MODES.md` §6).
-- **The Node globals.** These include `__filename` and `__dirname`, which lift T12.1's
-  `not-yet` under `--node`. They apply both in CommonJS project files and in the vendor
-  module. Their value must not bake a build-machine path into the binary (creator, 2026-10-02,
-  BUNDLER.md §9). Decide whether the value is relative to the executable or comes from
-  `import.meta.url`, then record it in `MODES.md`.
-- **Resolution.** `node:*` and bare built-ins resolve to `packages/node`, both as ESM imports
-  in project files and in the vendor bundle. The bundle reaches them as
-  `import * as m from "path"` plus `m.default` (`esmExternalRequirePlugin`), so built-ins need
-  a default export.
-- **`require` at run time.** `import.meta.url` + `node:module.createRequire` give a `require`
-  over built-ins only. It serves Rolldown's `__require` for computed `require(expr)`, and
-  anything that is not a built-in throws Node's `MODULE_NOT_FOUND`. A computed require of a
-  bundled file cannot resolve: Node itself fails on the bundle, as measured in T12.0.
-- **`STA1110`** narrows to "without `--node`". In `ts` mode, and under `--bundler=none`, it
-  stays. New not-yet codes are allocated in `docs/DIAGNOSTICS.md`.
+- ~~**The flag.**~~ Landed (plan-notes 312): `--node` on `build` and `explain`, the config key
+  `node`. An unlanded `node:*` module or member is `STA1214` naming Phase 11 (T11.6). A Node
+  global member under `--node` joins this when `packages/node` declares its globals (T11.6).
+- ~~**The Node globals' location.**~~ Decided (plan-notes 312, `docs/MODES.md` §6): relative to
+  the executable, resolved at run time, never `import.meta.url`. **Open, waits for T12.1:**
+  injecting the values in CommonJS project files and the vendor module.
+- **Resolution.** ~~ESM imports in project files~~ landed (plan-notes 312): `node:*` and bare
+  built-ins resolve to `packages/node` through `paths` entries. **Open, waits for T12.1:** the
+  vendor bundle reaches them as `import * as m from "path"` plus `m.default`
+  (`esmExternalRequirePlugin`), so built-ins need a default export (T11.6 provides it).
+- **`require` at run time** (waits for T12.1). `import.meta.url` + `node:module.createRequire`
+  give a `require` over built-ins only. It serves Rolldown's `__require` for computed
+  `require(expr)`, and anything that is not a built-in throws Node's `MODULE_NOT_FOUND`. A
+  computed require of a bundled file cannot resolve: Node itself fails on the bundle, as
+  measured in T12.0.
+- ~~**`STA1110`** narrows to "without `--node`".~~ Landed (plan-notes 312): it stays in `ts` mode
+  with or without the flag; `--bundler=none` keeps it when T12.1 adds that flag. No new code.
 
-Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORKS.md`.
+Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORKS.md`,
+`CONFIG.md` — updated for the landed steps.
 
-**Check:** decision tests for `require` in all four mode × platform cells. Goldens, byte-for-byte
-vs Node: `createRequire` of a built-in, a computed `require` hit (a built-in) and miss
-(`MODULE_NOT_FOUND`). The CJS cycle and `module.exports` replacement goldens moved to T12.3.
-
-~~**T11.5a. `packages/compiler`: per-module namespaces.**~~ ✅ **landed 2026-10-02** — evidence in
-[done.md](done.md) → Phase 11 T11.5a (plan-notes 302). Still open from the card, each `STA1214`
-not-yet: a generic class whose name another module's class also uses (Phase 11), a class reached
-through a namespace (`new ns.C()`, Phase 5), an anonymous `export default class {}`, `export =`.
+**Check:** decision tests for `require` in all four mode × platform cells — **passing**
+(`subset_commonjs_require_*`). Goldens, byte-for-byte vs Node: `createRequire` of a built-in, a
+computed `require` hit (a built-in) and miss (`MODULE_NOT_FOUND`) — open, with T12.1. The CJS
+cycle and `module.exports` replacement goldens moved to T12.3.
 
 ### T11.6. `packages/node`: the N1 wrappers — **[D4]**
 
@@ -2322,3 +2326,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.30** (2026-10-02): **T11.3 step 3 lands and the card closes: `std/process` + `std/fs`** (plan-notes 309). `std/process` gains `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode`/`setExitCode`; the emitter's `main` becomes `int main(int argc, char **argv)` and returns the runtime's exit-code slot (`jsrt_process.c`). `std/fs` gains descriptors (`open`/`read`/`write`/`close`, positional or sequential), `readBytes`, `readdir`, `realpath`, `utimes` and `exists`; bytes take T11.3a's `Uint8Array` row, and `readBytes` parks the file and copies it into a view of its size. `utimes` is libc `utimensat`, because Zig 0.16 reports a missing path as `Unexpected`. T11.3 moves to done.md.
 - **v4.31** (2026-10-02): **T11.4 claimed; family 1, the global functions, lands** (plan-notes 310). The card now carries the family order, a re-measured baseline (1 560 diagnostics on 68c8d57), and a corrected test262 clause: the Test262 harness needs families 1–4, not just `String` and `JSON` as values. Landed: `String`/`Number`/`Boolean` lower to the operations they are. `parseInt`/`parseFloat`/`isNaN`/`isFinite` lower to a new `global-call` node (verifier `STA4102`, C entry points `jsrt_global_*`). `Array.isArray` lowers to the builtin `instanceof Array`, and `typeof` of a language global folds. An object binding pattern's property name is no longer refused as a global. `_tsc.js`: 1 514 → 1 456 `STA1214`. Self-compilation: 1771 → 1648.
 - **v4.39** (2026-10-02): **T11.3a lands: `Uint8Array` across the extern boundary** (plan-notes 311). A new card, placed after T11.3 and done in the same change. A `Uint8Array` is a parameter row of the FFI table (docs/FFI.md §2): one TS parameter, two C arguments (`uint8_t *`, `size_t`), the view's own storage for the call and no copy. The pointer is stable because the view sits in a rooted argument slot, neither collector moves memory, a buffer never resizes, and the C call runs no Stator code. Every call guards the layout read with `jsrt_check_uint8array` (STA2001). A return stays STA1119, because a returned buffer has no owner and no length. `std/io.writeBytes`/`read` move to the row, and the byte channel (`internal/bytes.ts`, `jsrt_std_bytes_*`) is deleted. 10 MiB write: 87.1 → 3.9 ms; 10 MiB read: 247.5 → 5.3 ms. A new fixture shim may be `node_shim.ts`.
+- **v4.50** (2026-10-02): **T11.5, the steps that do not need the bundler** (plan-notes 312). `--node` on `build` and `explain`, and the config key `node`. Under it `node:*` and bare built-ins resolve to `packages/node` through `paths` entries, the mechanism `std/` uses. An unlanded module or member is `STA1214` naming Phase 11 (T11.6); without the flag a built-in is `STA1214` naming the flag. `STA1110` is implemented and narrowed: `ts` mode always, `js` mode without `--node`; with it, `STA1214` naming Phase 12 until T12.1. `__filename`/`__dirname` are relative to the executable (docs/MODES.md §6). One package-root rule for runtime, `std` and `node`. The card stays open for the CommonJS steps, which wait for T12.1.

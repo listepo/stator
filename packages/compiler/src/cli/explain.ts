@@ -13,11 +13,9 @@
  * not-yet is a fact about the compiler's current progress.
  */
 
-import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
-import { createProgram } from '../frontend/program.ts';
 import type { Expression, FunctionExpr, Module, Provenance, Statement } from '../hir/nodes.ts';
 import type { ExternCall } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
@@ -25,7 +23,7 @@ import { lowerProgram } from '../lower/index.ts';
 import { rewriteModule } from '../passes/rewrite.ts';
 import { type Diagnostic, type DiagnosticSite, renderDiagnostic } from '../support/diagnostics.ts';
 import { withSpan } from '../support/telemetry.ts';
-import { BuildError } from './build.ts';
+import { BuildError, entryProgram } from './build.ts';
 import { diagnosticLines, INK_COLORS, type InkColor, type Line, print } from './render.ts';
 
 type Mode = 'ts' | 'js';
@@ -89,8 +87,13 @@ const VERDICT_COLOR: Record<Verdict, InkColor> = {
   'not-yet': INK_COLORS.notYet,
 };
 
-export async function explain(entry: string, mode: Mode, json: boolean): Promise<number> {
-  const result = await explainFile(entry, mode);
+export async function explain(
+  entry: string,
+  mode: Mode,
+  json: boolean,
+  node = false,
+): Promise<number> {
+  const result = await explainFile(entry, mode, node);
 
   if (json) {
     // The machine path NEVER goes through ink (decision tests parse this verbatim).
@@ -131,19 +134,18 @@ export async function explain(entry: string, mode: Mode, json: boolean): Promise
   return 0;
 }
 
-export async function explainFile(entry: string, mode: Mode): Promise<Explanation> {
-  if (!existsSync(entry)) {
-    throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
-  }
-
+/** `node` is the `--node` platform (docs/MODES.md §6): under it a Node built-in `packages/node`
+ * has not landed is a `not-yet` naming T11.6, so `diagnostics` lists the platform gaps the same
+ * way it lists the language ones. */
+export async function explainFile(entry: string, mode: Mode, node = false): Promise<Explanation> {
   const {
     program,
     diagnostics: programDiagnostics,
     runtimeDynamicSymbols,
-  } = withSpan('frontend/program', {}, () => createProgram(entry, mode));
+  } = entryProgram(entry, mode, node);
   const verdictFromDiagnostics = classify([
     ...programDiagnostics,
-    ...withSpan('frontend/gate', {}, () => gateProgram(program, mode)),
+    ...withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)),
   ]);
   if (verdictFromDiagnostics !== null) {
     return verdictFromDiagnostics;

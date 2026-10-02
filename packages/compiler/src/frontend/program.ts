@@ -8,6 +8,12 @@ import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/dia
 import { hasTypeScriptAnnotation } from './annotation.ts';
 import { isCheckable } from './narrowing.ts';
 import {
+  classifyNodeMember,
+  classifyNodeSpecifier,
+  type NodeNotYet,
+  nodePathMapping,
+} from './node.ts';
+import {
   classifyStdMember,
   classifyStdSpecifier,
   type StdSpecifier,
@@ -468,7 +474,7 @@ export const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
 
 /** Last in-process `createProgram` result for an unchanged entry.
  *
- * Keyed by absolute entry path + mode + entry CONTENT hash. v0 invalidates on bytes, not mtime:
+ * Keyed by absolute entry path + mode + platform + entry CONTENT hash. v0 invalidates on bytes, not mtime:
  * test262 stages thousands of tests through a handful of slot-reused temp paths, so (path, mtime)
  * can repeat for different contents on a coarse-tick filesystem and serve a stale program under
  * the wrong test's name (plan-notes 245). A dep edit without an entry touch still does not bust
@@ -477,6 +483,7 @@ export const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
 interface ProgramCacheEntry {
   readonly absEntry: string;
   readonly mode: Mode;
+  readonly node: boolean;
   readonly contentHash: string;
   readonly result: {
     program: ts.Program;
@@ -500,12 +507,16 @@ export function clearProgramCache(): void {
  * through it. Omitted means ts.sys against the real disk — the ONLY mode the shipped compiler
  * runs in, since every production call passes no host.
  *
- * Unchanged re-builds of the same absolute entry+mode reuse the previous `ts.Program` when the
- * entry's bytes are unchanged (see `clearProgramCache`). */
+ * `node` is the `--node` platform (plan.md §11c T11.5): Node built-ins resolve to `packages/node`
+ * (`./node.ts`). Like the mode, it is a frontend policy nothing below the gate reads.
+ *
+ * Unchanged re-builds of the same absolute entry+mode+platform reuse the previous `ts.Program`
+ * when the entry's bytes are unchanged (see `clearProgramCache`). */
 export function createProgram(
   entryFile: string,
   mode: Mode,
   host?: ts.CompilerHost,
+  node = false,
 ): {
   program: ts.Program;
   diagnostics: Diagnostic[];
@@ -527,17 +538,18 @@ export function createProgram(
       programCache !== null &&
       programCache.absEntry === absEntry &&
       programCache.mode === mode &&
+      programCache.node === node &&
       programCache.contentHash === contentHash
     ) {
       return programCache.result;
     }
-    const result = createProgramUncached(entryFile, mode, host);
+    const result = createProgramUncached(entryFile, mode, host, node);
     if (contentHash !== undefined) {
-      programCache = { absEntry, mode, contentHash, result };
+      programCache = { absEntry, mode, node, contentHash, result };
     }
     return result;
   }
-  return createProgramUncached(entryFile, mode, host);
+  return createProgramUncached(entryFile, mode, host, node);
 }
 
 /** `ts.getPreEmitDiagnostics`, with the checker's stack overflow named as STA0013 instead of
@@ -567,7 +579,8 @@ function preEmitDiagnostics(program: ts.Program): readonly ts.Diagnostic[] {
 function createProgramUncached(
   entryFile: string,
   mode: Mode,
-  host?: ts.CompilerHost,
+  host: ts.CompilerHost | undefined,
+  node: boolean,
 ): {
   program: ts.Program;
   diagnostics: Diagnostic[];
@@ -629,7 +642,8 @@ function createProgramUncached(
     // `std/<name>` resolves to the std package's own source (plan.md §11c T11.2). On the options
     // rather than in a custom host so the module graph's `ts.resolveModuleName` reads the same
     // mapping the checker did; an unknown name is refused by `classifyStdSpecifier`, never here.
-    paths: stdPathMapping(),
+    // `--node` adds the Node built-ins the same way (`./node.ts`).
+    paths: node ? { ...stdPathMapping(), ...nodePathMapping() } : stdPathMapping(),
 
     // Target and libs. `lib` takes FILE names, not the tsconfig shorthand: "es2025" resolves to
     // nothing and silently leaves the program without Array, Object, or any other global type.
@@ -776,9 +790,12 @@ function createProgramUncached(
       }
       continue;
     }
-    const stdRefusal = stdImportRefusal(diag, mode);
-    if (stdRefusal !== undefined) {
-      diagnostics.push(stdRefusal);
+    const edge = edgeRefusal(diag, mode, node);
+    if (edge === 'gate') {
+      continue;
+    }
+    if (edge !== undefined) {
+      diagnostics.push(edge);
       continue;
     }
     const file = diag.file;
@@ -819,20 +836,43 @@ function createProgramUncached(
   return { program, diagnostics, runtimeDynamicSymbols };
 }
 
-/** TS2307 ("cannot find module") on a `std/…` specifier is the std edge's refusal, not a checker
+/** Checker codes for a name or module nothing declares. TypeScript answers a Node built-in
+ * specifier and the name `require` with the two "install type definitions for node" spellings
+ * (2580, 2591) rather than 2307/2304. */
+const UNRESOLVED_MODULE_CODES: ReadonlySet<number> = new Set([2307, 2580, 2591]);
+const UNRESOLVED_NAME_CODES: ReadonlySet<number> = new Set([2304, 2580, 2591]);
+
+/** The module-edge refusals a checker diagnostic stands for, or `'gate'` when the gate owns the
+ * answer and the checker's must not be reported beside it.
+ *
+ * TS2307 ("cannot find module") on a `std/…` specifier is the std edge's refusal, not a checker
  * error: `std/foo` resolves to no file because no such module exists (STA3002), or because it is
  * a threads module that has not landed (STA1214, Phase 10) — the same answer the gate gives a
  * specifier that did resolve (gate.ts `gateImport`), so the code never depends on whether a
  * stray file happens to sit where the mapping looked. TS2305/TS2724 ("has no exported member")
  * on a std module's Promise twin (`readTextAsync` from `std/fs`) is the same kind of refusal:
- * the member waits for T10.2 (T10.1 step 5). */
-function stdImportRefusal(diag: ts.Diagnostic, mode: Mode): Diagnostic | undefined {
+ * the member waits for T10.2 (T10.1 step 5). A Node built-in is the platform edge's (`./node.ts`):
+ * without `--node` it names the flag, and under it an unlanded module or member names T11.6.
+ *
+ * An unresolved `require` is the gate's: it rules on `require` in every file, including the `.js`
+ * ones where the checker binds the name itself and reports nothing. */
+function edgeRefusal(
+  diag: ts.Diagnostic,
+  mode: Mode,
+  node: boolean,
+): Diagnostic | 'gate' | undefined {
   const file = diag.file;
   if (file === undefined || diag.start === undefined) {
     return undefined;
   }
   const start = diag.start;
-  const std = stdRefusalFor(diag.code, file, start, diag.length ?? 0);
+  if (
+    UNRESOLVED_NAME_CODES.has(diag.code) &&
+    file.text.slice(start, start + (diag.length ?? 0)) === 'require'
+  ) {
+    return 'gate';
+  }
+  const std = edgeRefusalFor(diag.code, file, start, diag.length ?? 0, node);
   if (std === undefined || std.kind === 'module') {
     return undefined;
   }
@@ -852,21 +892,25 @@ function stdImportRefusal(diag: ts.Diagnostic, mode: Mode): Diagnostic | undefin
   );
 }
 
-/** What the std edge says about a checker diagnostic at `start`: TS2307 names a specifier,
- * TS2305/TS2724 a member of one. */
-function stdRefusalFor(
+/** What the std and Node edges say about a checker diagnostic at `start`: an unresolved-module
+ * code names a specifier, TS2305/TS2724 a member of one. */
+function edgeRefusalFor(
   code: number,
   file: ts.SourceFile,
   start: number,
   length: number,
-): StdSpecifier | undefined {
+  node: boolean,
+): StdSpecifier | NodeNotYet | undefined {
   const literal = file.text.slice(start, start + length);
-  if (code === 2307) {
-    return classifyStdSpecifier(literal.slice(1, -1));
+  if (UNRESOLVED_MODULE_CODES.has(code) && /^["']/.test(literal)) {
+    const specifier = literal.slice(1, -1);
+    return classifyStdSpecifier(specifier) ?? classifyNodeSpecifier(specifier, node);
   }
   if (code === 2305 || code === 2724) {
     const specifier = moduleSpecifierAt(file, start);
-    return specifier === undefined ? undefined : classifyStdMember(specifier, literal);
+    return specifier === undefined
+      ? undefined
+      : (classifyStdMember(specifier, literal) ?? classifyNodeMember(specifier, literal, node));
   }
   return undefined;
 }

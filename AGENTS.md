@@ -130,7 +130,7 @@ just -f packages/std/justfile -d packages/std std                  # the std/* b
 pnpm run test:intl              # the intl_* golden fixtures against that build (not part of `ci`)
 pnpm run ci                     # all of the above, in order — run before claiming any task done
 moon run tests:ci               # same gate through moon (dependency graph + caching); wraps the above
-node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]
+node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--node] [--emit=c] [--keep-c]
 node packages/compiler/src/cli/main.ts explain file.ts --json   # per-construct verdicts (decision tests use this)
 node packages/compiler/src/cli/main.ts build                   # entry, -o, mode, … from ./stator.config.json (docs/CONFIG.md); flags override it
 ```

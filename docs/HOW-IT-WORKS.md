@@ -22,6 +22,11 @@ below the gate is allowed to branch on mode ([`MODES.md`](MODES.md), plan §0.8)
 | `any`, `eval`, `var`, `Proxy`, … | compile errors (`eval` permanently) | untyped code goes dynamic; `eval` is `not-yet` until Phase 8 |
 | Speed | unboxed values in checked code | same wherever the checker can infer a type |
 
+`--node` is a second frontend policy, orthogonal to the mode: the Node
+platform. Under it `node:*` and bare built-ins (`path`) resolve to
+`packages/node`, strict TypeScript over `std`, and a built-in that has not
+landed is a `not-yet` naming T11.6 ([`MODES.md`](MODES.md) §6).
+
 Per-construct verdicts (`static` / `dynamic` / `error` / `not-yet`) are the
 language of the subset matrix ([`SUBSET.md`](SUBSET.md)) and of
 `stator explain`.
@@ -94,6 +99,7 @@ node packages/compiler/src/cli/main.ts explain app.ts --json
 # Useful flags (see CLI help / AGENTS.md Commands)
 #   --emit=c --keep-c     keep generated C for inspection
 #   --mode=ts|js          frontend policy
+#   --node                the Node platform: node:* resolves to packages/node
 #   --config=<path>       options from a JSON file (default ./stator.config.json)
 #   --no-config           ignore stator.config.json
 ```

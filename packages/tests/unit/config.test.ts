@@ -31,6 +31,7 @@ const NO_FLAGS: CliOptions = {
   emitHeader: undefined,
   unitName: undefined,
   diagnostics: undefined,
+  node: undefined,
 };
 
 /** Every key, each with a non-default value. */
@@ -46,6 +47,7 @@ const FULL = {
   emitHeader: 'build/app.h',
   unitName: 'app',
   diagnostics: 'json',
+  node: true,
 };
 
 /** A fresh directory holding `files` (name → text). */
@@ -81,12 +83,19 @@ test('every key from the file alone; paths resolve against the file directory', 
     emitHeader: join(dir, 'build/app.h'),
     unitName: 'app',
     diagnostics: 'json',
+    node: true,
   });
 });
 
 test('every key overridden from the command line; link concatenates, file first', () => {
   const dir = project({
-    'stator.config.json': JSON.stringify({ ...FULL, emit: 'c', keepC: false, diagnostics: 'json' }),
+    'stator.config.json': JSON.stringify({
+      ...FULL,
+      emit: 'c',
+      keepC: false,
+      diagnostics: 'json',
+      node: false,
+    }),
   });
   const file = loadConfig({ kind: 'discover' }, dir);
   const cli: CliOptions = {
@@ -100,6 +109,7 @@ test('every key overridden from the command line; link concatenates, file first'
     emitHeader: 'other.h',
     unitName: 'other',
     diagnostics: 'text',
+    node: true,
   };
   assert.deepEqual(resolveOptions(cli, { opt: 1 }, file), {
     entry: 'other.ts',
@@ -112,6 +122,7 @@ test('every key overridden from the command line; link concatenates, file first'
     emitHeader: 'other.h',
     unitName: 'other',
     diagnostics: 'text',
+    node: true,
   });
 });
 
@@ -135,6 +146,7 @@ test('no file and no flags give the built-in defaults', () => {
     emitHeader: undefined,
     unitName: undefined,
     diagnostics: 'text',
+    node: false,
   });
 });
 

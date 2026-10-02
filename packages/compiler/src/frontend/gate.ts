@@ -82,6 +82,7 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
+import { isNodeSourceFile, nodeBuiltinId, requireVerdict } from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
@@ -91,7 +92,7 @@ type Mode = 'ts' | 'js';
  * In js mode: accepts both .ts and .js files; untyped becomes Unknown/dynamic.
  * Gating decisions produce diagnostics; nothing below the gate knows the mode exists.
  */
-export function gateProgram(program: ts.Program, mode: Mode): Diagnostic[] {
+export function gateProgram(program: ts.Program, mode: Mode, onNode = false): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const typeChecker = program.getTypeChecker();
   const classNameCounts = countClassNames(program, mode);
@@ -127,7 +128,7 @@ export function gateProgram(program: ts.Program, mode: Mode): Diagnostic[] {
     }
 
     // Walk the AST and gate each node
-    visitNode(sourceFile, sourceFile, typeChecker, mode, diagnostics, classNameCounts);
+    visitNode(sourceFile, sourceFile, typeChecker, mode, diagnostics, classNameCounts, onNode);
   }
 
   return diagnostics;
@@ -172,6 +173,7 @@ function visitNode(
   mode: Mode,
   diagnostics: Diagnostic[],
   classNameCounts: ClassNameFiles,
+  onNode: boolean,
 ): void {
   // Check for explicit `any` in ts mode (STA1001)
   if (mode === 'ts' && hasExplicitAny(node)) {
@@ -207,13 +209,13 @@ function visitNode(
   // apply, and we still recurse so a nested `any` (e.g. `Array<any>`) is found.
   if (ts.isTypeNode(node)) {
     ts.forEachChild(node, (child) =>
-      visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts),
+      visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts, onNode),
     );
     return;
   }
 
   // Gate specific constructs: accept the micro-subset, reject the rest
-  const gateResult = gateConstruct(node, mode, typeChecker, classNameCounts);
+  const gateResult = gateConstruct(node, mode, typeChecker, classNameCounts, onNode);
   if (gateResult.kind === 'not-yet') {
     diagnostics.push(
       diagnosticFromNode(
@@ -239,7 +241,7 @@ function visitNode(
 
   // Recurse
   ts.forEachChild(node, (child) =>
-    visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts),
+    visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts, onNode),
   );
 }
 
@@ -271,6 +273,7 @@ function gateConstruct(
   mode: Mode,
   typeChecker: ts.TypeChecker,
   classNameCounts: ClassNameFiles,
+  onNode: boolean,
 ): GateResult {
   const kind = node.kind;
 
@@ -418,7 +421,7 @@ function gateConstruct(
       return { kind: 'accept' };
 
     case ts.SyntaxKind.Identifier:
-      return gateIdentifier(node as ts.Identifier, typeChecker, mode);
+      return gateIdentifier(node as ts.Identifier, typeChecker, mode, onNode);
 
     case ts.SyntaxKind.VariableDeclarationList:
       return gateDeclarationList(node as ts.VariableDeclarationList, mode);
@@ -757,6 +760,16 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
         ? { kind: 'never', code: std.code, message: std.message }
         : { kind: 'not-yet', code: std.code, message: std.message, phase: std.phase };
     }
+    // A Node built-in is never a package (docs/BUNDLER.md §1). Under `--node` a landed one
+    // resolved into `packages/node` and is an ordinary edge; every other one resolved to nothing
+    // and was refused where the checker's "cannot find module" is mapped (program.ts
+    // `edgeRefusal`), with the platform's answer.
+    if (nodeBuiltinId(spec.text) !== undefined) {
+      const target = typeChecker.getSymbolAtLocation(spec)?.valueDeclaration;
+      if (target === undefined || (ts.isSourceFile(target) && isNodeSourceFile(target.fileName))) {
+        return { kind: 'accept' };
+      }
+    }
     // Bare specifier: a package. Compiling one means compiling someone else's whole module graph.
     if (std === undefined && !spec.text.startsWith('./') && !spec.text.startsWith('../')) {
       // No `phase`: compiling a package means compiling someone else's whole module graph
@@ -785,6 +798,24 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
     }
   }
   return { kind: 'accept' };
+}
+
+/** A `require` no program declaration binds: unresolved (a `.ts` file), or bound by the checker
+ * itself (a `.js` file, where TypeScript models CommonJS and declares the name nowhere). A user's
+ * own `function require` is a binding like any other, and a property NAME (`o.require`) is
+ * answered by the object, never by scope. */
+function isFreeRequire(node: ts.Identifier, symbol: ts.Symbol | undefined): boolean {
+  if (node.text !== 'require') {
+    return false;
+  }
+  const parent = node.parent;
+  if (
+    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+    (ts.isQualifiedName(parent) && parent.right === node)
+  ) {
+    return false;
+  }
+  return (symbol?.declarations ?? []).every((d) => d.getSourceFile().isDeclarationFile);
 }
 
 /** One code for the whole Phase 2 boundary. These constructs are not deferred for six different
@@ -991,13 +1022,21 @@ function isModuleClauseName(node: ts.Identifier): boolean {
  * The one shape held back: a binding declared inside a loop is a FRESH binding per iteration, and
  * rung 4b gives a function one environment per call, so every iteration's closure would share the
  * one slot and read the last iteration's value. Reject the capture rather than emit that program. */
-function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
+function gateIdentifier(
+  node: ts.Identifier,
+  typeChecker: ts.TypeChecker,
+  mode: Mode,
+  onNode: boolean,
+): GateResult {
   // A name in an import or export clause is a boundary spelling, never evaluated: it names the
   // binding the lowering aliases (plan.md §11c T11.5a), whatever that binding is.
   if (isModuleClauseName(node)) {
     return { kind: 'accept' };
   }
   const symbol = typeChecker.getSymbolAtLocation(node);
+  if (isFreeRequire(node, symbol)) {
+    return requireVerdict(mode, onNode);
+  }
   const decl = symbol?.valueDeclaration;
   // A class NAME is not a value here. Five spellings are not uses of the value and must pass: the
   // declaration's own name, the callee of `new`, the right operand of `instanceof`, the base of an

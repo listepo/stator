@@ -30,15 +30,16 @@ type Command =
       linkFlags: readonly string[];
       emitHeader: string | undefined;
       unitName: string | undefined;
+      node: boolean;
     }
-  | { kind: 'explain'; entry: string; mode: Mode; json: boolean };
+  | { kind: 'explain'; entry: string; mode: Mode; json: boolean; node: boolean };
 
 const USAGE = `stator — ahead-of-time compiler for TypeScript/JavaScript
 
 Usage:
-  stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
+  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
-  stator explain <entry> [--mode=ts|js] [--json]
+  stator explain <entry> [--mode=ts|js] [--node] [--json]
   stator <command> --help
   stator --version
   stator --help
@@ -46,6 +47,9 @@ Usage:
 Modes:
   ts  (default)  strict static TypeScript; .ts only; explicit any is an error
   js             JavaScript, or JS + TS mixed; untyped code goes dynamic
+
+Platform:
+  --node         node:* and bare built-ins resolve to packages/node
 
 Config:
   Every option can also come from ./stator.config.json (docs/CONFIG.md);
@@ -58,12 +62,14 @@ Config:
  * that fits the fallback width reads the same on a TTY and on a pipe (plan-notes 187). */
 const COMMAND_USAGE = {
   build: `Usage:
-  stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
+  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
 
 Flags:
   -o, --out <out>  output path: native binary, or C with --emit=c
   --mode ts|js     strict ts (default) or dynamic js; diagnostics only
+  --node           the Node platform: node:* and bare built-ins resolve
+                   to packages/node (docs/MODES.md §6)
   --emit=c         stop after writing C to <out>; skip the C compiler
   --keep-c         keep the intermediate .c next to the binary
   --opt 0|1|2|3    clang -O level (default 2; or STATOR_OPT)
@@ -78,7 +84,7 @@ Flags:
   --no-config      ignore stator.config.json
 `,
   explain: `Usage:
-  stator explain <entry> [--mode=ts|js] [--json]
+  stator explain <entry> [--mode=ts|js] [--node] [--json]
 
 Reports the file verdict: static | dynamic | error | not-yet, with the
 STA code and every diagnostic that decided it, then the static/dynamic
@@ -87,6 +93,8 @@ the answer, so a refusal is a result, not a crash.
 
 Flags:
   --mode ts|js     strict ts (default) or dynamic js
+  --node           the Node platform; a built-in packages/node has not
+                   landed is not-yet, naming T11.6
   --json           machine-readable report (used by the decision tests);
                    --diagnostics=text|json spells the same choice
   --config <path>  read options from this JSON file (default:
@@ -177,6 +185,7 @@ function parse(argv: readonly string[]): Command {
     emitHeader: undefined,
     unitName: undefined,
     diagnostics: undefined,
+    node: undefined,
   };
   const linkFlags: string[] = [];
   let configChoice: ConfigChoice = { kind: 'discover' };
@@ -215,6 +224,8 @@ function parse(argv: readonly string[]): Command {
       cli.emit = 'binary';
     } else if (arg === '--keep-c') {
       cli.keepC = true;
+    } else if (arg === '--node') {
+      cli.node = true;
     } else if (arg.startsWith('--config=')) {
       const value = arg.slice('--config='.length);
       if (value === '') {
@@ -308,9 +319,10 @@ function parse(argv: readonly string[]): Command {
       linkFlags: options.link,
       emitHeader: options.emitHeader,
       unitName: options.unitName,
+      node: options.node,
     };
   }
-  return { kind: 'explain', entry, mode, json: options.diagnostics === 'json' };
+  return { kind: 'explain', entry, mode, json: options.diagnostics === 'json', node: options.node };
 }
 
 async function run(command: Command): Promise<void> {
@@ -320,7 +332,11 @@ async function run(command: Command): Promise<void> {
       : `stator ${command.kind}`;
   const attrs =
     command.kind === 'build' || command.kind === 'explain'
-      ? { 'stator.mode': command.mode, 'stator.entry': command.entry }
+      ? {
+          'stator.mode': command.mode,
+          'stator.entry': command.entry,
+          'stator.node': String(command.node),
+        }
       : {};
   await withSpanAsync(spanName, attrs, () => runCommand(command));
 }
@@ -348,10 +364,11 @@ async function runCommand(command: Command): Promise<void> {
         linkFlags: command.linkFlags,
         ...(command.emitHeader !== undefined && { emitHeader: command.emitHeader }),
         ...(command.unitName !== undefined && { unitName: command.unitName }),
+        node: command.node,
       });
       return;
     case 'explain':
-      process.exitCode = await explain(command.entry, command.mode, command.json);
+      process.exitCode = await explain(command.entry, command.mode, command.json, command.node);
       return;
   }
 }

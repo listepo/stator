@@ -15,7 +15,7 @@ Stator compiles TypeScript/JavaScript to native binaries in one of two modes tha
 
 - **Files:** `.ts` only. A `.js`, `.jsx`, or `.tsx` file anywhere in the module graph (including transitive dependencies) is `STA1002` (error) with message "expected .ts, got [ext]; use `--mode=js` for untyped code."
 - **Module format:** ESM only (enforced by `tsconfig.json` `module: NodeNext`).
-- **Semantic:** ECMAScript semantics, not Node.js; no global `__dirname`, `require`, `process` (these are runtime-provided via standard library or rejected as undefined).
+- **Semantic:** ECMAScript semantics, not Node.js; no global `__dirname`, `require`, `process` (these are runtime-provided via standard library or rejected as undefined). Node's modules are a platform, not a mode: `--node` (§6) resolves `node:*` and bare built-ins to `packages/node` in either mode.
 
 ### Typing contract
 
@@ -41,7 +41,7 @@ is rejected for using `var`.
 - `delete` on a class field: `STA1108` — class instances are C structs with a fixed layout.
 - `var` declarations: `STA1104` — function scoping, hoisting, and `undefined` initialization; use `let`/`const`.
 - `arguments` object: `STA1105` — use rest parameters.
-- `with`: `STA1109`, CommonJS `require()`: `STA1110`, `.jsx`/`.tsx`: `STA1111` — these apply in **both** modes, not just `ts`.
+- `with`: `STA1109`, CommonJS `require()`: `STA1110`, `.jsx`/`.tsx`: `STA1111` — these apply in **both** modes, not just `ts`. `STA1110` is the one narrowed by a platform: `js` mode under `--node` hands CommonJS to the bundler (§6).
 - Untyped catch bindings: `STA1003` — the implicit-`any` rule; annotate the parameter `unknown` (or `Error`) and narrow.
 
 **Not on this list:** `Symbol` and `BigInt`. They are *deferred*, not rejected — `STA1212` and
@@ -469,13 +469,58 @@ example.js: dynamic
 
 Untyped `pluck` is not an error in `js` mode — it compiles through the dynamic representation.
 
-### Planned: `--node` (Phase 11)
+### `--node`: the Node platform (Phase 11)
 
 `--node` (plan §11c T11.5) is a platform flag, orthogonal to `--mode`, and `explain` accepts it
-like `build` does. Under it, a `node:*` or Node-global member that `packages/node` has not landed
-yet is a `not-yet` diagnostic naming T11.6, so `diagnostics` lists the platform gaps the same way
-it lists the language ones, and `docs/NODE.md` is the coverage the two must agree with. Until
-T11.5 lands, `--node` is an unknown flag (`STA0005`).
+like `build` does; `stator.config.json` spells it `"node": true` (docs/CONFIG.md). Like the mode,
+it is a frontend policy: nothing below the gate reads it. It changes four things, and only these.
+
+```bash
+stator build app.ts -o app --node            # ts mode on the Node platform
+stator explain app.js --mode=js --node --json
+```
+
+**Resolution.** A Node built-in is `node:<id>` for any public id of the pinned Node's
+`builtinModules`, or the bare `<id>` where Node accepts one (`path`, `fs/promises`; `test` and
+`sqlite` only with the prefix, as in Node). Under `--node` both spellings resolve to
+`packages/node/src/<id>.ts`, strict TypeScript over `std`, through `paths` entries on the
+program's own options, the same mechanism `std/` uses (`packages/compiler/src/frontend/node.ts`).
+A landed module is ordinary source from there on. A bare built-in is never a package, with or
+without the flag (docs/BUNDLER.md §1).
+
+**Platform gaps are diagnostics.** Under `--node` a built-in `packages/node` has not landed, or a
+member its module does not export yet while the pinned Node's module does, is `STA1214` naming
+Phase 11 (T11.6). So `explain --node`'s `diagnostics` lists the platform gaps the same way it
+lists the language ones, and `docs/NODE.md` is the coverage the two must agree with. A member
+Node itself does not have stays the checker's error (`STA0012`). Without `--node`, a built-in is
+`STA1214` with no phase, and its message names the flag.
+
+**`require`.** `STA1110` narrows to "without `--node`". In `ts` mode it stays, flag or not. With
+`--node` in `js` mode, a CommonJS project file goes to the bundler (T12.1, docs/BUNDLER.md §4),
+and a computed `require` over built-ins comes from `createRequire(import.meta.url)`; until T12.1
+lands, `require` there is `STA1214` naming Phase 12.
+
+**`__filename` and `__dirname`** (decided 2026-10-02, plan-notes 312; docs/BUNDLER.md §9). They
+exist where Node defines them: in a CommonJS project file and in the vendor module, both of which
+reach the build through T12.1's bundler. An ES module has neither, under `--node` or not, exactly
+as in Node (`ReferenceError: __dirname is not defined in ES module scope`); `js` mode compiles the
+free name as a dynamic read that throws a `ReferenceError`, and `ts` mode refuses the undeclared
+name (`STA0012`). The
+values are **relative to the executable, resolved at run time**:
+
+- `__dirname` is the directory of the running binary (the path `process.execPath` answers),
+  joined with the module's directory relative to the entry file's directory. For a module beside
+  the entry it is the binary's directory itself.
+- `__filename` is `__dirname` joined with the module's file name.
+- The vendor module is one module at the entry's level, so its `__dirname` is the binary's
+  directory.
+
+No build-machine path is ever baked into the binary. `import.meta.url` was the alternative and is
+not taken: in a native binary it has no meaning of its own, so it would need this same rule, and
+the subset does not compile `import.meta` yet. When it does, `import.meta.url` is the `file:` URL
+of the same `__filename`. The rule keeps the common idiom working: `join(__dirname, "data.json")`
+finds assets laid out beside the binary the way they sat beside the source. The values are
+injected by T12.1's CommonJS wrapper; T11.5 only fixes what they are.
 
 ## 7. One pipeline, one gate
 

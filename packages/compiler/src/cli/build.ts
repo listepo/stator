@@ -11,8 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import { emitC, type LibraryEmit } from '../codegen/index.ts';
 import { collectLinkFlags } from '../frontend/extern.ts';
 import {
@@ -31,6 +30,7 @@ import { lowerProgram } from '../lower/index.ts';
 import { optimize } from '../passes/index.ts';
 import { BuildError, type Diagnostic } from '../support/diagnostics.ts';
 import { runtimeFlavor } from '../support/features.ts';
+import { packageRoot } from '../support/package-root.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { isStaleLdSystemLibFailure, staleLdHint, staleLdRetryArgs } from '../support/toolchain.ts';
 import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
@@ -65,6 +65,9 @@ export interface BuildOptions {
   /** `--unit-name` override for the `stator_<unit>_<name>` mangling; defaults to the entry's
    * file basename. Sanitized to a C identifier wherever it came from. */
   readonly unitName?: string;
+  /** `--node`: the Node platform (plan.md §11c T11.5, docs/MODES.md §6). Node built-ins resolve
+   * to `packages/node`; a frontend policy, like the mode. */
+  readonly node?: boolean;
 }
 
 export { BuildError };
@@ -120,23 +123,10 @@ async function emitDiagnosticLines(lines: readonly Line[]): Promise<void> {
   await print(lines, process.stderr);
 }
 
-/** The C runtime (headers + built archive) is a sibling package. In the source tree it is
- * `<workspace>/packages/runtime`, reached identically from `src/cli` and the compiled `dist/cli`
- * because `dist` mirrors `src`'s depth; a published `statorc` bundles it beside `dist`.
- * `STATOR_RUNTIME_ROOT` overrides both. A wrong guess is caught at link time (missing archive),
- * exactly as before. */
-function resolveRuntimeRoot(): string {
-  const override = process.env['STATOR_RUNTIME_ROOT'];
-  if (override !== undefined && override !== '') {
-    return override;
-  }
-  const here = dirname(fileURLToPath(import.meta.url));
-  const sibling = join(here, '..', '..', '..', 'runtime'); // packages/compiler/<src|dist>/cli → packages/runtime
-  const bundled = join(here, '..', '..', 'runtime'); // published: runtime beside dist/
-  return existsSync(join(sibling, 'include')) ? sibling : bundled;
-}
-
-const RUNTIME_ROOT = resolveRuntimeRoot();
+/** The C runtime (headers + built archive) is a sibling package (`support/package-root.ts`).
+ * `STATOR_RUNTIME_ROOT` overrides the layout. A wrong guess is caught at link time (missing
+ * archive). */
+const RUNTIME_ROOT = packageRoot('STATOR_RUNTIME_ROOT', 'runtime', 'include');
 const RUNTIME_INCLUDE = join(RUNTIME_ROOT, 'include');
 
 /** `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so CI can run
@@ -186,7 +176,7 @@ export async function build(options: BuildOptions): Promise<number> {
     options.emitHeader === undefined
       ? undefined
       : sanitizeUnitName(options.unitName ?? defaultUnitName(options.entry));
-  const compiled = await compileToC(options.entry, options.mode, unit);
+  const compiled = await compileToC(options.entry, options.mode, unit, options.node ?? false);
   if (compiled === null) {
     return 1;
   }
@@ -259,9 +249,10 @@ export async function compileToC(
   entry: string,
   mode: Mode,
   unit?: string,
+  node = false,
 ): Promise<CompiledC | null> {
   try {
-    return await compileToCInner(entry, mode, unit);
+    return await compileToCInner(entry, mode, unit, node);
   } catch (error) {
     // Diagnostics are the contract for everything the pipeline can name; an ESCAPING exception is
     // a compiler bug by AGENTS.md's definition, and its contract is STA4072, never a raw stack
@@ -274,25 +265,35 @@ export async function compileToC(
   }
 }
 
-async function compileToCInner(
+/** The entry's `ts.Program`, the front door `build` and `explain` share: a missing entry is
+ * STA0007, and `node` is the `--node` platform. */
+export function entryProgram(
   entry: string,
   mode: Mode,
-  unit?: string,
-): Promise<CompiledC | null> {
+  node: boolean,
+): ReturnType<typeof createProgram> {
   if (!existsSync(entry)) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
+  return withSpan('frontend/program', {}, () => createProgram(entry, mode, undefined, node));
+}
 
+async function compileToCInner(
+  entry: string,
+  mode: Mode,
+  unit: string | undefined,
+  node: boolean,
+): Promise<CompiledC | null> {
   const {
     program,
     diagnostics: programDiagnostics,
     runtimeDynamicSymbols,
-  } = withSpan('frontend/program', {}, () => createProgram(entry, mode));
+  } = entryProgram(entry, mode, node);
   if (await report(programDiagnostics)) {
     return null;
   }
 
-  if (await report(withSpan('frontend/gate', {}, () => gateProgram(program, mode)))) {
+  if (await report(withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)))) {
     return null;
   }
 
