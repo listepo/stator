@@ -41,7 +41,7 @@ is rejected for using `var`.
 - `delete` on a class field: `STA1108` — class instances are C structs with a fixed layout.
 - `var` declarations: `STA1104` — function scoping, hoisting, and `undefined` initialization; use `let`/`const`.
 - `arguments` object: `STA1105` — use rest parameters.
-- `with`: `STA1109`, CommonJS `require()`: `STA1110`, `.jsx`/`.tsx`: `STA1111` — these apply in **both** modes, not just `ts`. `STA1110` is the one narrowed by a platform: `js` mode under `--node` hands CommonJS to the bundler (§6).
+- `with`: `STA1109`, CommonJS `require()`: `STA1110`, `.jsx`/`.tsx`: `STA1111` — these apply in **both** modes, not just `ts`. `STA1110` is the one narrowed by a platform: `js` mode under `--node` hands a CommonJS project file to the bundler (§6); without the flag its `require`, `module.exports` and `exports` are `STA1110`.
 - Untyped catch bindings: `STA1003` — the implicit-`any` rule; annotate the parameter `unknown` (or `Error`) and narrow.
 
 **Not on this list:** `Symbol` and `BigInt`. They are *deferred*, not rejected — `STA1212` and
@@ -63,7 +63,7 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
 
 - **Files:** Any mix of `.ts` and `.js` (and `.jsx`, `.tsx` in Phase 2+). ESM only; always strict (ESM enforces strict mode).
 - **Module format:** ESM enforced by the pipeline (not configurable).
-- **Packages and CommonJS (plan.md §11d T12.1, `docs/BUNDLER.md`):** a package import (a bare specifier that is not `node:*`, a built-in or `std/*`) and a CommonJS project file go to a bundler first. `--bundler=vite|none|<module>` picks it (default `vite`, the `vite-stator` package; `--bundler` in `ts` mode is `STA0004`), and it loads only when the graph has something to bundle. The bundle joins the program as one virtual ESM module, `__stator_vendor__.js` in the entry's directory, compiled under the same `js`-mode rules as every other `.js` file; each project import declaration of a package is rewritten in place to import from it, keeping every line, so project diagnostics and `#line` still point at the user's lines (only code after a rewritten import on the same line can shift columns). A CommonJS file is `.cjs`, a `.js` under `"type": "commonjs"`, or a `.js` with no `"type"`, no ES-module syntax and a read of `require`, `module.exports` or `exports` (plan-notes 320). Diagnostics inside the bundle are reported at the package's own file and line through the bundle's source map, or as `<package bundle>` with "(bundler runtime helper, no source mapping)". `STA0014` means the adapter cannot be loaded, `STA0015` that the bundle step failed. `--bundler=none` keeps a package import `STA1214`.
+- **Packages and CommonJS (plan.md §11d T12.1, `docs/BUNDLER.md`):** a package import (a bare specifier that is not `node:*`, a built-in or `std/*`) and, under `--node` only (plan-notes 315), a CommonJS project file go to a bundler first. `--bundler=vite|none|<module>` picks it (default `vite`, the `vite-stator` package; `--bundler` in `ts` mode is `STA0004`), and it loads only when the graph has something to bundle. The bundle joins the program as one virtual ESM module, `__stator_vendor__.js` in the entry's directory, compiled under the same `js`-mode rules as every other `.js` file; each project import declaration of a package is rewritten in place to import from it, keeping every line, so project diagnostics and `#line` still point at the user's lines (only code after a rewritten import on the same line can shift columns). A CommonJS file is `.cjs`, a `.js` under `"type": "commonjs"`, or a `.js` with no `"type"`, no ES-module syntax and a read of `require`, `module.exports` or `exports` (plan-notes 320). Without `--node` a CommonJS project file stays in the graph, and its free `require`, `module.exports` and `exports` are `STA1110`; packages are bundled with or without the flag. Diagnostics inside the bundle are reported at the package's own file and line through the bundle's source map, or as `<package bundle>` with "(bundler runtime helper, no source mapping)". `STA0014` means the adapter cannot be loaded, `STA0015` that the bundle step failed. `--bundler=none` keeps a package import `STA1214`.
 
 ### Typing rules
 
@@ -508,11 +508,15 @@ lists the language ones, and `docs/NODE.md` is the coverage the two must agree w
 Node itself does not have stays the checker's error (`STA0012`). Without `--node`, a built-in is
 `STA1214` with no phase, and its message names the flag.
 
-**`require`.** `STA1110` narrows to "without `--node`". In `ts` mode it stays, flag or not. A
-CommonJS project file goes to the bundler whole (T12.1, docs/BUNDLER.md §4) and never reaches the
-gate. With `--node` in `js` mode, a computed `require` over built-ins comes from
-`createRequire(import.meta.url)`; until that step of T11.5 lands, a free `require` there is
-`STA1214` naming it.
+**`require`, `module.exports`, `exports`.** `STA1110` narrows to "without `--node`". In `ts` mode
+it stays, flag or not. `--node` is also what routes a CommonJS project file to the bundler whole
+(T12.1, docs/BUNDLER.md §4; decided 2026-10-02, plan-notes 315), so under it such a file never
+reaches the gate. Without the flag the file stays in the graph and its free `require`,
+`module.exports` and `exports` are `STA1110`; a CommonJS file that reads none of them compiles as
+written. Packages are bundled either way. With `--node` in `js` mode, a computed `require` over
+built-ins comes from `createRequire(import.meta.url)`; until that step of T11.5 lands, a free
+`require` there is `STA1214` naming it. A `module.exports` or `exports` that still reaches the
+gate under `--node` (beside ES-module syntax, or under `--bundler=none`) is `STA1110`.
 
 **`__filename` and `__dirname`** (decided 2026-10-02, plan-notes 312; docs/BUNDLER.md §9). They
 exist where Node defines them: in a CommonJS project file and in the vendor module, both of which

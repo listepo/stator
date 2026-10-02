@@ -166,7 +166,7 @@ test('the rewrite keeps every line and splits type-only names onto the original 
   const { program } = createProgram(join(root, 'main.ts'), 'js');
   const entry = program.getSourceFile(join(root, 'main.ts'));
   assert.ok(entry !== undefined);
-  const plan = planVendor(program, entry);
+  const plan = planVendor(program, entry, false);
   assert.ok(plan !== undefined);
   assert.equal(plan.modulePath, `${root}/${VENDOR_MODULE_NAME}`);
   const rewritten = plan.rewrites.get(entry.fileName) ?? '';
@@ -201,6 +201,9 @@ test('CommonJS routing: .cjs always, "type": "commonjs", and a .js that reads re
     'esm/package.json': '{"type":"module"}',
     'esm/f.js': "const fs = require('fs');\n",
     'g.js': "function require(x) { return x; }\nrequire('y');\n",
+    'h.js': 'module.exports = 1;\n',
+    'i.js': 'exports.a = 1;\n',
+    'j.js': 'function f(exports) {\n  exports.a = 1;\n}\nf({});\n',
   });
   const verdict = (name: string): boolean => {
     const { program } = createProgram(join(root, name), 'js');
@@ -215,6 +218,10 @@ test('CommonJS routing: .cjs always, "type": "commonjs", and a .js that reads re
   assert.equal(verdict('cjs/e.js'), true);
   assert.equal(verdict('esm/f.js'), false);
   assert.equal(verdict('g.js'), false, 'a declared require is not Node’s');
+  // The checker declares `module` and `exports` by these very assignments; they are still Node's.
+  assert.equal(verdict('h.js'), true, 'module.exports alone makes CommonJS');
+  assert.equal(verdict('i.js'), true, 'exports.x alone makes CommonJS');
+  assert.equal(verdict('j.js'), false, 'a parameter named exports is not Node’s');
 });
 
 test('a CommonJS entry is all bundle: the vendor entry imports it for its effects', () => {
@@ -222,10 +229,41 @@ test('a CommonJS entry is all bundle: the vendor entry imports it for its effect
     'main.cjs': "const x = require('./x.cjs');\nconsole.log(x);\n",
     'x.cjs': 'module.exports = 1;\n',
   });
-  assert.deepEqual(vendorEntry(join(root, 'main.cjs'), 'js'), {
+  assert.deepEqual(vendorEntry(join(root, 'main.cjs'), 'js', true), {
     code: 'import "./main.cjs";\n',
     resolveDir: root,
   });
+  // Without --node a CommonJS project file is not routed: the gate answers it (plan-notes 315).
+  assert.equal(vendorEntry(join(root, 'main.cjs'), 'js'), undefined);
+});
+
+test('--node gates CommonJS routing of project files: STA1110 without it (plan-notes 315)', async () => {
+  const root = project({ 'main.cjs': 'exports.n = 1;\nconsole.log(exports.n);\n' });
+  const entry = join(root, 'main.cjs');
+  const bundle: BundleResult = {
+    code: 'console.log(1);\n',
+    map: lineMap('main.cjs', [2]),
+    inputs: [],
+  };
+  const routed = await compile({ entry, mode: 'js', node: true, bundle });
+  assert.equal(routed.ok, true, routed.stderr);
+  const refused = await compile({ entry, mode: 'js', bundle });
+  assert.equal(refused.ok, false);
+  assert.deepEqual(
+    refused.diagnostics.map((d) => [d.code, d.line, d.message]),
+    [
+      [
+        'STA1110',
+        1,
+        'CommonJS exports is not supported — without --node, Stator uses ES modules only',
+      ],
+      [
+        'STA1110',
+        2,
+        'CommonJS exports is not supported — without --node, Stator uses ES modules only',
+      ],
+    ],
+  );
 });
 
 test('compile: the bundle joins the program and #line names the package file', async () => {
