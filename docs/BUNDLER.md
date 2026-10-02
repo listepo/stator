@@ -185,16 +185,25 @@ file is CommonJS by Node's rule (https://nodejs.org/api/packages.html, docs v26.
 - `.js` under `"type": "commonjs"`;
 - `.js` with no `"type"` and no ES-module syntax. Syntax detection is unflagged since v22.7.0.
 
-**As implemented (T12.1, plan-notes 320).** The third case is narrowed: a `.js` with no `"type"`
-and no ES-module syntax is routed only when it reads a free `require(…)`, `module.exports` or
-`exports`. A script that touches none of them means the same thing as a module or a CommonJS
-file, and routing it would make every plain script — Test262's harness, a tmpdir-staged test
-fixture — need a bundler. ES-module syntax is an import or export statement, `import.meta`, or a
-top-level `await`. `src/frontend/vendor.ts` `isCommonJsFile`. A CommonJS entry becomes one
-side-effect import of itself in the vendor entry (`import "./main.cjs";`), and the program's
-entry is a one-line import of the vendor module. T12.1 routes these files in `js` mode with or
-without `--node`, which does not exist yet (plan.md §11d T12.1 step 2; the last paragraph below
-is T11.5's to reconcile, plan-notes 320).
+**As implemented (T12.1, plan-notes 320; the creator's decision, plan-notes 315).** The third case
+is narrowed: a `.js` with no `"type"` and no ES-module syntax is routed only when it reads a free
+`require(…)`, `module.exports` or `exports`. A script that touches none of them means the same
+thing as a module or a CommonJS file, and routing it would make every plain script — Test262's
+harness, a tmpdir-staged test fixture — need a bundler. "Free" means no binding of the user's: a
+parameter or `const` named `exports` is the user's, while TypeScript's own CommonJS model of a
+`.js` file (it declares `module` and `exports` by the assignments that use them) is not. ES-module
+syntax is an import or export statement, `import.meta`, or a top-level `await`.
+`src/frontend/vendor.ts` `isCommonJsFile`. A CommonJS entry becomes one side-effect import of
+itself in the vendor entry (`import "./main.cjs";`), and the program's entry is a one-line import
+of the vendor module.
+
+**`--node` gates the routing of project files** (decided 2026-10-02, plan-notes 315). Only under
+`--node` in `js` mode does a CommonJS project file go to the bundler. Without the flag it stays
+in Stator's graph, and the gate answers its free `require`, `module.exports` and `exports` with
+`STA1110`: ES modules are the only module system there. A CommonJS file that reads none of them
+(a plain `.cjs` script) compiles as written, since it means the same either way. Packages under
+`node_modules` are bundled with or without the flag; a package's format is the bundler's
+business, not the platform's.
 
 The bundle runs on Node unchanged (= Node). With `esmExternalRequirePlugin`, Stator then
 reports four things:
@@ -214,12 +223,17 @@ the bundler. T11.5 shrinks to the `--node` flag, the Node globals, external reso
 T11.5 already planned. With `--node` in `js` mode a CommonJS project file goes to the bundler,
 and T11.5 owns what `__filename`/`__dirname` mean then, under the rule that no build path is
 baked into the binary.
-Without `--node`, under `--bundler=none`, or in `ts` mode, `require` stays `STA1110`.
+Without `--node`, or in `ts` mode, a free `require`, `module.exports` or `exports` is `STA1110`.
+Under `--node` with `--bundler=none` nothing converts CommonJS: a free `require` is `STA1214`
+naming T11.5, and `module.exports` or `exports` is `STA1110`. Fixtures `subset_commonjs_require_*`
+and `subset_commonjs_file_*`; the `js` + `--node` cell needs an adapter and is proved in
+`unit/bundler.test.ts`.
 
 ## 5. The API
 
 `statorc/api` (T12.1). The compiler imports no bundler (§0.9). It loads an adapter by module
-name only when the graph imports a package.
+name only when the graph imports a package or, under `--node`, holds a CommonJS project file.
+`CompileRequest.node` and `vendorEntry(entry, mode, node)` carry the flag.
 
 ```ts
 export type VendorEntry = {

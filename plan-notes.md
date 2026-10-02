@@ -11034,6 +11034,169 @@ selfhost target and the package's `stator.config.json`. Built on T11.5's resolut
   whose `get` answers a union, and `basename`'s optional suffix is one) and
   `subset_node_path_win32_node_ts` (not-yet).
 
+## 314. T11.7, first slice: Node's own tests through vitest, and `node:assert` (2026-10-02)
+
+**Trigger.** The creator's Node-track order, step 3: the pin, the fetch script, a strict-TS
+`common`, a minimal `node:assert` and the vitest driver, with the `test-path*` files from Node's
+`test/parallel` as the first selection, their expectations and the ratchet, and the "node tests"
+column in `docs/NODE.md`. Built on T11.6's first slice (plan-notes 313), so the branch starts
+from that one.
+
+**What landed.**
+
+- **Pin and fetch.** `packages/tests/node-suite/pin.json` names `https://github.com/nodejs/node`
+  at tag `v26.7.0`; `suite.ts` refuses a tag other than `.node-version`'s. `fetch.ts` downloads
+  each selected `test/parallel/<file>` (and any `test/fixtures` files an entry lists) from
+  `raw.githubusercontent.com` at that tag into `node-suite/corpus/` (gitignored, or
+  `$STATOR_NODE_SUITE`). It stamps the tag, and a different tag re-fetches everything. It also
+  writes `corpus/package.json` as `{ "type": "commonjs" }`: Node's tree has no `"type"` above
+  `test/`, and without the file the corpus would inherit `@stator/tests`'s `"type": "module"`.
+- **`common`, in strict TS.** `node-suite/common/index.ts` ports the helpers the selection uses
+  from Node's `test/common/index.js`
+  (https://github.com/nodejs/node/blob/v26.7.0/test/common/index.js, read 2026-10-02): the
+  platform flags, `mustCall`, `mustCallAtLeast`, `mustNotCall`, `expectsError`, `skip`,
+  `printSkipMessage` and `invalidArgTypeHelper`. `common/fixtures.ts` ports `path` and
+  `fixturesDir` from `test/common/fixtures.js` (same tag). `invalidArgTypeHelper` keeps
+  upstream's behavior for long input: it calls `inspected.slice(inspected, 0, 25)`, which keeps
+  nothing, so a long value prints `...`. A unit test checks the helper against the pinned Node's
+  own `ERR_INVALID_ARG_TYPE` messages. `host-hook.ts` (`module.registerHooks`, loaded with
+  `--import`) points `../common` and `../common/fixtures` at these files, for requests from
+  inside the corpus only.
+- **The driver.** `node-suite.test.ts`, under its own `vitest.config.ts`, makes one vitest test
+  per selected file. A `skip` is reported and not run. Every other file first runs under the
+  pinned Node with the hook. If it fails there, the run fails and says to mark it `skip`. Then
+  it is built in-process with `--mode=js --node` (`buildFixture`) and its binary run; it passes
+  on exit 0. The ratchet works both ways: a `pass` that fails, or a `fail` that passes, fails
+  the run with what to change. `pnpm run test:node-suite` runs the fetch, then the driver. Like
+  `test262`, it is not part of `pnpm run ci`, because it needs the network.
+- **`node:assert`** (`packages/node/src/assert.ts`), after `lib/assert.js` and
+  `lib/internal/assert/assertion_error.js` (https://github.com/nodejs/node/blob/v26.7.0/lib/assert.js,
+  read 2026-10-02). It provides `ok`, `strictEqual`, `notStrictEqual`, `deepStrictEqual`, `match`,
+  `fail`, `throws` and `rejects`, and an `AssertionError` with Node's `name`, `code`
+  (`ERR_ASSERTION`), `operator`, `actual`, `expected`, `generatedMessage` and `toString`. The
+  missing-exception and missing-rejection messages are Node's. Three subset limits show:
+  - Extending a built-in is `STA1214`, so `AssertionError` does not extend `Error`.
+  - A function with properties is `STA1214`, so the default export is an object (the `PathModule`
+    pattern) and `assert(value)` is not callable yet. One selected file calls it.
+  - `instanceof` needs a class name, so `throws` takes a RegExp, a validation object or a
+    validation function, but not a class.
+
+  `Object.is` is not-yet either, so `sameValue` spells it out. A generated message prints
+  primitives only, and Node v26 appends a diff of the values even after a custom message, so the
+  goldens print a message's first line. A `RegExp` reached through a union narrowing must be
+  bound to a `RegExp`-typed local before `.test()` or `.toString()`. Called straight off the
+  narrowed union, the binary panics with `STA2006` ("calling a non-function"). That is a
+  compiler gap worth its own card.
+- **Proof.**
+  - Goldens: `ts/node_assert` (every member, each failure's code, operator, message and
+    `generatedMessage`, `toString`, `rejects` with a promise and with an async function) and
+    `js/node_assert` (the default export from `js` mode). Both match Node 26.7.0 byte for byte.
+  - `node_coverage.json` claims 10 members.
+  - Decision tests: `subset_node_assert_node_ts` / `_js` (dynamic).
+  - Selfhost: `packages/node/src/assert.ts` is a new target, `dynamic` with no codes, recorded
+    with `--update`. The compiler's own counts do not move.
+- **`docs/NODE.md`.** `node-coverage.ts` reads `expectations.json` and maps each test to the
+  longest built-in id whose dashed spelling starts its name (`test-path-posix-exists.js` →
+  `path/posix`). It adds a "Node tests" column (files expected to pass over files selected) and a
+  total line. The ratchet keeps the expectations honest, so the column needs no network in `ci`.
+
+**The selection and its result.** The 17 `test-path*` files. On the pinned Node all 17 pass with
+our `common`. Under Stator:
+
+| Result | Count | Files |
+| --- | --- | --- |
+| pass | 0 | — |
+| fail | 15 | every `fail` |
+| skip | 2 | `test-path-resolve.js` (it spawns a child process, N2); `test-path-win32-normalize-device-names.js` (Windows-only: `common.skip` on POSIX proves nothing) |
+
+Every `fail` is a CommonJS file. With `--node` in js mode a CommonJS project file goes to the T12
+bundler, so the build stops at `STA0014` until `vite-stator` lands (T12.2). Each reason also names
+what comes next: `path.win32` for 13 files, `path.matchesGlob` for one, `ERR_INVALID_ARG_TYPE`
+argument checks for three, and `__filename` for three. `docs/NODE.md` reads `node:path` 0 / 13 and
+`node:path/posix` 0 / 2 and `node:path/win32` 0 / 2.
+
+**Check.**
+- `pnpm run test:node-suite`: "node-suite: 17 selected at v26.7.0 — 0 passed, 15 expected-fail,
+  2 skipped"; vitest "Tests 15 passed | 2 skipped (17)"; exit 0.
+- Hand-flipping `test-path-posix-exists.js` to `pass` fails the run: "Tests 1 failed | 14 passed
+  | 2 skipped (17)", "expected to pass, failed: stator build failed: stator: STA0014 …", exit 1.
+- `pnpm run ci` is green.
+
+**Open.** No CI job runs the suite yet. A Linux job like `test262`'s, caching the corpus on the
+`pin.json` hash, is the natural next step, once a file passes.
+
+## 315. T11.5: `--node` gates CommonJS routing of project files (2026-10-02)
+
+**The creator's decisions** (2026-10-02, on plan-notes 320's open questions 1 and 2):
+
+1. **The CommonJS marker rule stays narrowed.** A `.js` with no `"type"` and no ES-module syntax
+   goes to the bundler only when it reads a free `require(`, `module.exports` or `exports`.
+   BUNDLER.md §4 already said so; 320 decision 1 now records the decision.
+2. **`--node` gates CommonJS routing of PROJECT files.** Without `--node` a CommonJS project file
+   is not routed and gets `STA1110`. Packages under `node_modules` are bundled with or without
+   the flag.
+
+**What changed.**
+
+- `planVendor(program, entryFile, node)` routes CommonJS project files only when `node` is
+  true. `src/cli/bundler.ts` passes the flag; `statorc/api` gains `CompileRequest.node` and
+  `vendorEntry(entry, mode, node = false)`.
+- **A bug in "free", found while testing decision 2.** In a `.js` file TypeScript models
+  CommonJS itself. It declares `module` and `exports` *by the assignments that use them*
+  (`module.exports = 1` → a `BinaryExpression` declaration; `exports.a = 1` → a
+  `PropertyAccessExpression` one). It also answers that model from `getSymbolAtLocation` even
+  under a parameter named `exports`. 320's rule ("no symbol, or only ambient declarations")
+  therefore saw neither binding as free. A `.js` file that only wrote `module.exports` was not
+  CommonJS, and it went on to the lowering, which failed with the internal `STA4035`. Measured
+  before this change with `explain --mode=js --bundler=none`: `module.exports = 1;` → `STA4035`, and
+  `exports.a = 1;` → `STA4035`. `isFreeGlobal` (vendor.ts, now shared with the gate) asks
+  `checker.resolveName` at the read instead. It counts as free nothing, an ambient declaration,
+  or TypeScript's own model (the source file, an identifier, or an assignment expression). A
+  parameter, variable, function or import of the name is the user's.
+- **The gate answers `module.exports` and `exports`.** A free `exports`, or `module` as the base
+  of `module.exports`, is `STA1110` (`commonJsExportVerdict`, node.ts), with three messages: `ts`
+  mode, `js` mode without `--node`, and `js` mode under `--node` in a file the bundler did not
+  take (ES-module syntax, or `--bundler=none`). `typeof module` / `typeof exports` passes. A UMD
+  wrapper probes both in every environment, and the probe answers `'undefined'`. `require` keeps
+  `requireVerdict`, now through the same `isFreeGlobal`.
+- **Interpretation, recorded here.** "A CommonJS project file gets `STA1110`" is applied per
+  binding. A `.cjs` script that reads none of `require`, `module.exports` and `exports` (for
+  example `console.log(1)`) compiles as written without `--node`: it means the same thing as an
+  ES module, and 320 decision 1 already declines to treat such files as CommonJS. A file that
+  does read them gets one `STA1110` per read.
+
+**Measured after the change** (`explain`, default bundler, no adapter installed):
+
+| File | `js` | `js --node` | `js --node --bundler=none` |
+| --- | --- | --- | --- |
+| `module.exports = 1;` (`.js`) | STA1110 | routed (STA0014, no adapter) | STA1110 |
+| `exports.a = 1;` (`.js`) | STA1110 | routed (STA0014) | STA1110 |
+| `require('path')` (`.js`) | STA1110 | routed (STA0014) | STA1214 (T11.5) |
+| `console.log(1);` (`.cjs`) | static | routed (STA0014) | static |
+
+In `ts` mode `exports.n = 1;` is `STA1110` with or without `--node` (beside the checker's
+`STA0012` "Cannot find name 'exports'").
+
+**Proof.** Decision tests `subset_commonjs_file_ts`, `_node_ts` and `_js` (a `.cjs` with
+`module.exports` and `exports.m`) all give `STA1110`. The `js` + `--node` cell needs an adapter,
+which the subset runner does not load. `unit/bundler.test.ts` proves it instead: `compile` with
+`node: true` and a ready bundle succeeds, and the same file without `node` reports `STA1110` on
+both lines. `vendorEntry(main.cjs, 'js', true)` routes the file, and `vendorEntry(main.cjs, 'js')`
+answers `undefined`. The classification test adds `module.exports`-only and `exports.x`-only
+files (CommonJS) and a parameter named `exports` (not CommonJS). Asking scope by name has one
+trap: a property NAME (`{ exports: 1 }`, `{ exports: e } = o`, a class member `require()`)
+resolves to nothing and would read as free, so the gate skips name sites the way it already
+skipped `o.require`; `subset_commonjs_names_ts` / `_js` stay `static`.
+
+**Self-compilation grows** by 2 × `STA1214` (1748 → 1750 on main 52b27d7), recorded with `--update` per v4.25.
+The two new gate helpers take `ts.Identifier` and `ts.TypeChecker` parameters where
+`isFreeRequire` took one pair. Each is a `QualifiedName` type annotation, the not-yet "Phase 5"
+construct the compiler's own source already holds hundreds of.
+
+**Left alone.** Decision 4 of the same review (skip checker diagnostics in vendor code) belongs to
+the T12.1 follow-up. A `typeof module` in a `.js` file that is not CommonJS is still the
+checker's `STA0012` "Cannot find name", as before this change.
+
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 
 **What landed.** `js` mode sends package imports and CommonJS project files to one bundler
@@ -11055,13 +11218,16 @@ did not settle it.
    `require(…)`, `module.exports` or `exports`. "Free" is the checker's answer: no symbol, or
    only ambient declarations (`@types/node`'s), so a local `const exports = …` does not count.
    `.cjs` and `.js` under `"type": "commonjs"` route always. `src/frontend/vendor.ts`
-   `isCommonJsFile`; BUNDLER.md §4 says so.
+   `isCommonJsFile`; BUNDLER.md §4 says so. **The creator kept this narrowed rule** (2026-10-02;
+   plan-notes 315, which also corrects what "free" meant for `module` and `exports`).
 2. **CommonJS files route with or without `--node`.** The card's step 2 routes them in `js` mode;
    BUNDLER.md §4's last paragraph and the T11.5 card tie routing to `--node`, which does not
    exist yet. Waiting would have left the step unbuildable. Today a routed CommonJS file is
    whatever its bundled code is (`STA1214` on the interop helpers, T12.3). **T11.5 must
    reconcile:** either `--node` becomes the gate and `js` mode without it reports `STA1110` for a
-   CommonJS file, or BUNDLER.md §4 drops the `--node` clause. Open question for the creator.
+   CommonJS file, or BUNDLER.md §4 drops the `--node` clause. **Decided by the creator
+   (2026-10-02, plan-notes 315): `--node` is the gate** for project files; packages are bundled
+   either way.
 3. **The rewrite is textual and keeps every line.** Each project import or re-export of a package
    is rewritten in place to `./__stator_vendor__.js` with the mangled names
    (`<stem>$default`, `<stem>$ns`, `<stem>$<name>`, `$2`/`$3` on a collision). The new text keeps

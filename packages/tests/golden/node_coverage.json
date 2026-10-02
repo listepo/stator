@@ -5,6 +5,18 @@
       "readFileSync": ["ts/node_fs_sync/main.ts"]
     }
   },
+  "assert": {
+    "AssertionError": ["ts/node_assert.ts"],
+    "AssertionError.prototype.toString": ["ts/node_assert.ts"],
+    "deepStrictEqual": ["ts/node_assert.ts", "js/node_assert.js"],
+    "fail": ["ts/node_assert.ts"],
+    "match": ["ts/node_assert.ts", "js/node_assert.js"],
+    "notStrictEqual": ["ts/node_assert.ts"],
+    "ok": ["ts/node_assert.ts", "js/node_assert.js"],
+    "rejects": ["ts/node_assert.ts"],
+    "strictEqual": ["ts/node_assert.ts", "js/node_assert.js"],
+    "throws": ["ts/node_assert.ts", "js/node_assert.js"]
+  },
   "path": {
     "basename": ["ts/node_path.ts", "js/node_path.js"],
     "delimiter": ["ts/node_path.ts"],

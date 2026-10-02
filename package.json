@@ -19,6 +19,7 @@
     "test:selfhost": "node packages/tests/selfhost/run.ts",
     "test262": "node packages/tests/test262/run.ts",
     "test262:fetch": "node packages/tests/test262/fetch.ts",
+    "test:node-suite": "node packages/tests/node-suite/fetch.ts && vitest run --config packages/tests/node-suite/vitest.config.ts --reporter=verbose",
     "differential": "node packages/tests/differential/run.ts",
     "bench:record": "node packages/tests/bench/record.ts",
     "test:runtime": "just -f packages/runtime/justfile -d packages/runtime runtime-test",

@@ -235,7 +235,7 @@ async function loadFrontendInner(
   if (mode !== 'js' || bundler.kind === 'none') return base;
   const entryFile = base.program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
   if (entryFile === undefined) return base;
-  const plan = planVendor(base.program, entryFile);
+  const plan = planVendor(base.program, entryFile, node);
   if (plan === undefined) return base;
   const bundle = await obtainBundle(bundler, plan.entry);
   if (bundle === undefined) return base;

@@ -11,7 +11,7 @@ src: {
 }
 
 bundle: {
-  label: "js mode only, when the graph imports a package\nor holds a CommonJS file (src/cli/bundler.ts)"
+  label: "js mode only, when the graph imports a package\nor, under --node, holds a CommonJS file (src/cli/bundler.ts)"
 
   vendor: "vendor entry (src/frontend/vendor.ts)\nexport { a } from 'pkg' …"
   adapter: "bundler adapter (--bundler, default vite\n→ vite-stator; loaded by name, never imported)"

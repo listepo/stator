@@ -128,13 +128,25 @@ function hasModuleSyntax(file: ts.SourceFile): boolean {
   return found;
 }
 
-/** A read of one of Node's CommonJS bindings that nothing in the program declares: the checker
- * finds no symbol, or only an ambient one from a declaration file. A file that declares its own
- * `require` is not using Node's. */
-function isFreeGlobal(node: ts.Expression, name: string, checker: ts.TypeChecker): boolean {
+/** A read of one of Node's CommonJS bindings that nothing in the program declares. Scope is asked
+ * by name at the read (`resolveName`), because `getSymbolAtLocation` answers TypeScript's CommonJS
+ * model even under a parameter named `exports`. What the checker then finds is nothing, an ambient
+ * declaration from a declaration file, or that model itself: in a `.js` file TypeScript declares
+ * `module` and `exports` at the file, an identifier, or the assignments that use them. A user's own
+ * binding (`function require`, a parameter `exports`) is a real declaration, and not Node's. */
+export function isFreeGlobal(node: ts.Expression, name: string, checker: ts.TypeChecker): boolean {
   if (!ts.isIdentifier(node) || node.text !== name) return false;
-  const symbol = checker.getSymbolAtLocation(node);
-  return (symbol?.declarations ?? []).every((d) => d.getSourceFile().isDeclarationFile);
+  const symbol = checker.resolveName(name, node, ts.SymbolFlags.Value, false);
+  return (symbol?.declarations ?? []).every(
+    (d) =>
+      d.getSourceFile().isDeclarationFile ||
+      ts.isSourceFile(d) ||
+      ts.isIdentifier(d) ||
+      ts.isBinaryExpression(d) ||
+      ts.isPropertyAccessExpression(d) ||
+      ts.isElementAccessExpression(d) ||
+      ts.isCallExpression(d),
+  );
 }
 
 /** Whether the file reads Node's CommonJS bindings: `require(…)`, `module.exports`, `exports.x`. */
@@ -475,13 +487,20 @@ function rewriteFile(
 }
 
 /** The vendor plan for a loaded program, or `undefined` when the graph imports no package and
- * holds no CommonJS file: then nothing is bundled and no adapter loads. */
-export function planVendor(program: ts.Program, entryFile: ts.SourceFile): VendorPlan | undefined {
+ * holds no CommonJS file: then nothing is bundled and no adapter loads. CommonJS project files
+ * are routed only under `--node` (`node`; plan-notes 315): without it they stay in the graph and
+ * the gate answers their `require`, `module.exports` and `exports` with `STA1110`. Packages are
+ * bundled either way. */
+export function planVendor(
+  program: ts.Program,
+  entryFile: ts.SourceFile,
+  node: boolean,
+): VendorPlan | undefined {
   const checker = program.getTypeChecker();
   const resolveDir = dirname(entryFile.fileName);
   const modulePath = `${resolveDir}/${VENDOR_MODULE_NAME}`;
   const project = program.getSourceFiles().filter((file) => isProjectFile(program, file));
-  const commonJs = new Set(project.filter((file) => isCommonJsFile(file, checker)));
+  const commonJs = new Set(node ? project.filter((file) => isCommonJsFile(file, checker)) : []);
 
   const sites: Site[] = [];
   const requests: Request[] = [];

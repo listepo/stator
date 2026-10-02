@@ -34,7 +34,7 @@ language of the subset matrix ([`SUBSET.md`](SUBSET.md)) and of
 ## Pipeline (current)
 
 ```
-[js mode, graph imports a package or holds a CommonJS file]
+[js mode, graph imports a package or, under --node, holds a CommonJS file]
   bundler adapter (--bundler, default vite) → one vendor ESM module + source map
 typescript API (parse + type-check, in-process; the vendor module joins as __stator_vendor__.js)
   → mode gate
@@ -112,7 +112,7 @@ node packages/compiler/src/cli/main.ts explain app.ts --json
 #   --emit=c --keep-c     keep generated C for inspection
 #   --mode=ts|js          frontend policy
 #   --node                the Node platform: node:* resolves to packages/node
-#   --bundler=vite|none|<module>  js mode: the bundler for packages and CommonJS files
+#   --bundler=vite|none|<module>  js mode: the bundler for packages and (--node) CommonJS files
 #   --config=<path>       options from a JSON file (default ./stator.config.json)
 #   --no-config           ignore stator.config.json
 ```

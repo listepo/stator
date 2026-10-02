@@ -63,7 +63,7 @@ entry.ts / entry.js (+ module graph)
         │
         ▼
   ts.createProgram  (typescript npm package, in-process; Stator owns compilerOptions)
-        │   js mode, graph imports a package or holds a CommonJS file (T12.1, docs/BUNDLER.md):
+        │   js mode, graph imports a package or (--node) holds a CommonJS file (T12.1, BUNDLER.md):
         │   vendor entry ──► bundler adapter (--bundler) ──► one virtual ESM module + source map;
         │   project imports rewritten in place, program reloaded over the overlay
         │
@@ -1413,6 +1413,7 @@ both modes and goldens, a full `pnpm run ci`, and the self-compilation baseline 
 8. **`Object.*` (21)** and destructuring (31, for-of, declarations, parameters).
 9. **Class expressions (~10)** and the remaining singletons (`encodeURI`, `Error.captureStackTrace`,
    `Function.prototype.call`/`apply`).
+10. ~~**A `RegExp` method called straight off a union narrowing** (`unknown` or a union narrowed by `instanceof RegExp`, then `.test()` / `.toString()`) panics at run time with `STA2006` "calling a non-function"; binding it to a `RegExp`-typed local first works (plan-notes 314). Primitive and built-in method dispatch, `jsrt_get_prop` included.~~ Fixed by step 4b (v4.35): `jsrt_get_prop` answers a RegExp's methods and data properties on an Unknown receiver.
 
 **Check:** `stator explain _tsc.js --mode=js --json` lists no `STA1214` in `diagnostics` and ends
 with a verdict, not `STA0013`/`STA4072` (PR #44 names the checker's stack overflow `STA0013`).
@@ -1437,19 +1438,18 @@ the bundler converts CommonJS. Rolldown wraps each module as a function over
 `(exports, module)`, and it already turns static `require` into graph edges, decides `"type"`
 and gives CJS cycles Node's partial `exports`. Stator writes none of that. A CommonJS project
 file (Node's rule: `.cjs`, `"type": "commonjs"`, or `.js` without ES-module syntax) is routed
-to the bundler by T12.1.
+to the bundler by T12.1, under `--node` only (decided 2026-10-02, plan-notes 315).
 
 **Status:** in progress — Claude Code / opus-5-5. The steps that do not need the bundler landed
 (plan-notes 312): the flag and its config key, platform-gap diagnostics, ESM resolution of
 `node:*` and bare built-ins, the `STA1110` narrowing, and the `__filename`/`__dirname` decision
-(`docs/MODES.md` §6). T12.1 has landed since (plan-notes 320) and routes a CommonJS project file
-to the bundler in `js` mode, with or without `--node`. **What is left, now unblocked:** the vendor
+(`docs/MODES.md` §6). T12.1 has landed since (plan-notes 320), and `--node` now gates its
+CommonJS routing (plan-notes 315): only under the flag does a CommonJS project file go to the
+bundler, and without it the file's free `require`, `module.exports` and `exports` are `STA1110`.
+Packages under `node_modules` are bundled either way. **What is left, now unblocked:** the vendor
 bundle's built-in imports, `require`/`createRequire` at run time, and the `__filename`/`__dirname`
 values in the CommonJS wrapper (`STA1218` until then, under the flag too). Until then a free
-`require` under `--node` in `js` mode is `STA1214` naming this card. **Open question for the
-creator** (plan-notes 320, decision 2): whether `--node` gates CommonJS routing, so that `js`
-mode without it reports `STA1110` for a CommonJS file, or BUNDLER.md §4 drops its `--node`
-clause. The card stays open.
+`require` under `--node` in `js` mode is `STA1214` naming this card. The card stays open.
 
 Steps:
 
@@ -1470,12 +1470,17 @@ Steps:
   measured in T12.0.
 - ~~**`STA1110`** narrows to "without `--node`".~~ Landed (plan-notes 312): it stays in `ts` mode
   with or without the flag, and in `js` mode without it. No new code.
+- ~~**`--node` gates CommonJS routing.**~~ Landed (plan-notes 315): `planVendor` routes a CommonJS
+  project file only under the flag, and the gate answers a free `module.exports` or `exports`
+  with `STA1110` (it used to reach the lowering as `STA4035`).
 
 Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORKS.md`,
 `CONFIG.md` — updated for the landed steps.
 
 **Check:** decision tests for `require` in all four mode × platform cells — **passing**
-(`subset_commonjs_require_*`). Goldens, byte-for-byte vs Node: `createRequire` of a built-in, a
+(`subset_commonjs_require_*`); for a CommonJS project file in all four — **passing**
+(`subset_commonjs_file_ts` / `_node_ts` / `_js`, and the `js` + `--node` cell, which needs an
+adapter, in `unit/bundler.test.ts`). Goldens, byte-for-byte vs Node: `createRequire` of a built-in, a
 computed `require` hit (a built-in) and miss (`MODULE_NOT_FOUND`) — open. The CJS
 cycle and `module.exports` replacement goldens moved to T12.3.
 
@@ -1518,7 +1523,8 @@ tests, synced at the pinned version, not by hand-written copies.
    `crypto-hash`, `timers`, `perf-hooks`). Start with `path`, then follow T11.6's order. Tests that
    need `// Flags: --expose-internals`, child processes or the network are `skip` until N2.
 3. **The harness, in strict TS.** `require('../common')` resolves to
-   `packages/tests/node-suite/common.ts`, a strict-TS implementation of the `common` helpers the
+   `packages/tests/node-suite/common/index.ts` (and `../common/fixtures` to
+   `common/fixtures.ts`), a strict-TS implementation of the `common` helpers the
    selected tests use (`mustCall`, `mustNotCall`, `expectsError`, `tmpdir`, platform flags). It
    grows with the selection. `node:assert` (`ok`, `strictEqual`, `deepStrictEqual`, `throws`,
    `rejects`) lands in `packages/node` as part of this card.
@@ -1535,6 +1541,15 @@ can land as soon as `node:path` exists.
 **Check:** `pnpm run test:node-suite` runs the selection through vitest against the pinned corpus,
 and its pass count is recorded in plan-notes; `docs/NODE.md` shows the column; a hand-flipped
 expectation fails the run.
+
+**Status:** in progress — Claude Code / opus-5-5. **First slice landed** (plan-notes 314): the
+pin, `fetch.ts`, `expectations.json`, the strict-TS `common/` with its host resolve hook, the
+vitest driver with the ratchet, `node:assert` in `packages/node`, and the "Node tests" column in
+`docs/NODE.md`. The selection is the 17 `test-path*` files: on the pinned Node all 17 pass with
+our `common`; under Stator 0 pass, 15 are `fail` and 2 are `skip` (a child process; a
+Windows-only file). Every `fail` is a CommonJS file, which goes to the T12 bundler, so STA0014
+until `vite-stator` lands (T12.2); after that, 13 of them also need `path.win32`. **Next:** flip
+the `path` files as T12.2 and `path.win32` land, then follow T11.6's module order.
 
 **Deferred — N2 (not a card yet).** `std/loop` written in Zig (the creator chose an own loop
 over libuv: kqueue/epoll first, Windows when the runtime builds there), real timers and
@@ -1558,7 +1573,7 @@ kinds of input:
 
 - every **package** import, meaning a bare specifier that is not `node:*`, a built-in or
   `std/*`;
-- every **CommonJS** project file.
+- every **CommonJS** project file, under `--node` (plan-notes 315).
 
 Both go into one generated vendor entry. The adapter bundles it into one ESM module plus a
 source map, and that module joins the graph as one `js`-mode module. A graph with neither kind
@@ -2323,3 +2338,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.40** (2026-10-02): **T12.1 lands: the bundler API** (plan-notes 320). In `js` mode, package imports and CommonJS project files go to one bundler call; the answer joins the program as the virtual `__stator_vendor__.js`, and project imports are rewritten to it, every line kept. `--bundler=vite|none|<module>` and the `bundler` config key choose the adapter (`STA0014` when it cannot load, `STA0015` when the bundle step fails); `statorc/api` exposes `compile` and `vendorEntry`. Diagnostics and `#line` inside the bundle map to the package's files, or `<package bundle>`. A free `__filename`/`__dirname` is the new not-yet `STA1218`. CommonJS routing is narrowed to files that read `require`, `module` or `exports`. `export *`, `import()` and attributed imports of packages stay `STA1214`. The card moves to done.md.
 - **v4.50** (2026-10-02): **T11.5, the steps that do not need the bundler** (plan-notes 312). `--node` on `build` and `explain`, and the config key `node`. Under it `node:*` and bare built-ins resolve to `packages/node` through `paths` entries, the mechanism `std/` uses. An unlanded module or member is `STA1214` naming Phase 11 (T11.6); without the flag a built-in is `STA1214` naming the flag. `STA1110` is implemented and narrowed: `ts` mode always, `js` mode without `--node`; with it, `STA1214` naming T11.5's `createRequire` step. `__filename`/`__dirname` are relative to the executable (docs/MODES.md §6); `STA1218` stays under the flag until the CommonJS wrapper injects them. One package-root rule for runtime, `std` and `node`. The card stays open for the CommonJS run-time steps, which T12.1 unblocked.
 - **v4.51** (2026-10-02): **T11.6, first slice: `packages/node` and `node:path`** (plan-notes 313). `packages/node` is created: strict TypeScript over `std`, a workspace package and moon project, a selfhost target (`node-goldens` smoke) and its own `stator.config.json` (`"node": true`). `node:path` and `node:path/posix` are POSIX-complete (14 of 16 members; `win32` and `matchesGlob` not-yet), proved by the `node_path*` goldens against Node 26.7.0, claimed in `node_coverage.json`, and `docs/NODE.md` is regenerated. Fixtures named `node_*` build with `--node`. A named import the module lacks is not-yet even when the checker answers TS2614 (the module has a default export).
+- **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.
+- **v4.53** (2026-10-02): **T11.5: `--node` gates CommonJS routing of project files** (plan-notes 315). The creator's decisions on plan-notes 320: the narrowed CommonJS marker rule stays, and only under `--node` does a CommonJS project file go to the bundler; packages are bundled either way. Without the flag a free `require`, `module.exports` or `exports` is `STA1110`; `module.exports`/`exports` used to reach the lowering as `STA4035`, because TypeScript declares them by their own assignments and the free-binding test missed them. `statorc/api` gains `CompileRequest.node`. T11.4 gains item 10, the `STA2006` panic on a `RegExp` method called off a union narrowing.
