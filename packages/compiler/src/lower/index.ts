@@ -982,7 +982,7 @@ function lowerStatement(
  * annotated parameter is the call-shaped form of the same edge `maybeBoundary` wraps. A parameter
  * a TypeScript file annotated also checks a CONCRETE argument of another type (`edgeBoundary`):
  * js mode suppresses the checker's TS2345, and `inc(jsLabel(1))` passed a string into a `number`
- * parameter (plan-notes 307). A `.js` callee's JSDoc keeps Node's coercion. `signature` is the
+ * parameter (plan-notes 308). A `.js` callee's JSDoc keeps Node's coercion. `signature` is the
  * callee's (or method's) type when the HIR has one; a constructor has none, so its parameters
  * answer from their annotations. A spread argument shifts every later slot, so a call with one
  * keeps the dynamic-value check alone, and so does a callee resolved to a declaration with no body:
@@ -1028,7 +1028,7 @@ function checkCallArgs(
  * meets `maybeBoundary`; a concrete value of ANOTHER type is checked too (`edgeBoundary`) when a
  * TypeScript file annotated the enclosing function's return -- js mode suppresses the checker's
  * TS2322, and `function g(): number { return jsLabel(2) }` returned a string as a `number`
- * (plan-notes 307). Async functions and generators are left out: their annotation is a `Promise`
+ * (plan-notes 308). Async functions and generators are left out: their annotation is a `Promise`
  * or a generator, not the type a returned value must have. */
 function returnBoundary(
   value: Expression,

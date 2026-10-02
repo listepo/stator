@@ -9731,7 +9731,7 @@ check cannot fail.
 is suppressed, and the `number` parameter holds a string). `function g(): number { return
 label(2); }` prints `2` (TS2322 on a return). Both should be `STA2001`. Neither is in the spike's
 repro, and the call edge must leave a `.js` callee alone: `golden/js/argument_mismatch.js` needs
-`increment("2")` to coerce the way Node does. Follow-up work, not this change. Closed by plan-notes 307.
+`increment("2")` to coerce the way Node does. Follow-up work, not this change. Closed by plan-notes 308.
 
 ## 302. Per-module namespaces get a card, T11.5a, before `packages/node` (2026-10-02)
 
@@ -10063,7 +10063,7 @@ the same change, and the growth is reviewed in `baseline.json`'s diff. A shrink 
 recorded too. `.jscpd-baseline.json` keeps its shrink-only rule; the two baselines answer
 different questions. The rule is in plan.md's Task 6.19 stub.
 
-## 307. js mode checks the call and return edges a `.ts` annotation claims (2026-10-02)
+## 308. js mode checks the call and return edges a `.ts` annotation claims (2026-10-02)
 
 **Trigger.** Plan-notes 301's "Not covered" paragraph. With `lib.js` exporting
 ``label(x) { return `${x}`; }`` (checker: `string`), two more `.js`→`.ts` edges ran a string as a
@@ -10135,6 +10135,11 @@ A `.js` callee is left alone. `golden/js/argument_mismatch.js` still prints `21`
   The predicate lives in its own module rather than in `frontend/narrowing.ts` because a fifth name
   wrapped `lower/index.ts`'s one-line `narrowing.ts` import, and that changed the text, and so the
   fingerprint, of an existing import-list clone against `frontend/gate.ts`.
+
+- `pnpm run test:selfhost`: `packages/compiler` grows from `STA1214` 2549 to 2568. Each new
+  reference into the bare `typescript` import counts (the `ts.is*` guards and `ts.*` types in
+  `isConciseReturnAt`, `checkCallArgs` and `returnBoundary`). The growth is recorded with
+  `--update` in this change, per plan.md v4.25 (plan-notes 306).
 
 **Not covered.** A setter's parameter (`o.x = label(1)` against `set x(v: number)`) goes through
 `accessorCall`, which still checks no argument. An async function's or a generator's returned
