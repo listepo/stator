@@ -11303,6 +11303,7 @@ Tests, in `packages/tests/unit/bundler.test.ts`:
 - The same `[1] < {}` in the project file is still `STA0012`.
 - A vendor TDZ read stays `STA0012` at `node_modules/leftpad/index.js:2`.
 
-Self-compilation grows by 3 × `STA1214` (1719 → 1722), recorded with `--update` per v4.25: the
+Self-compilation: on main 0d23526 the change added 3 × `STA1214` (1719 → 1722): the
 `new Set([...])` of `VENDOR_THROW_CODES` and the two `ts.`-qualified parameter types of
-`isUncheckedVendorError`, the shapes the neighbouring code already uses.
+`isUncheckedVendorError`, the shapes the neighbouring code already uses. Rebased onto 9a26b03 it is
+the same 3 (1760 → 1763), re-recorded with `--update` per v4.25.
