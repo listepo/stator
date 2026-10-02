@@ -757,6 +757,55 @@ which 1.1% exact) as debt. Extract a shared helper per clone family at the respo
 `pnpm run dupes:baseline` in the same change. **Check:** the baseline is empty; `pnpm run dupes`
 then runs with no baseline at all.
 
+**Task 6.19 — Stator compiles itself and its own packages: a self-compilation test — [D3]**
+(creator's direction 2026-10-02, plan-notes 304). The compiler must compile itself, and the
+packages written for programs to import (`std`, `node`, `webapi`, `interpreter`) must compile too.
+For now this is a **test**, not a shipped feature. It tracks progress and never lets it slip back.
+
+1. **Targets.** Every workspace package written for Stator to compile. Today those are
+   `packages/compiler` (entry `src/cli/main.ts`, `ts` mode) and `packages/std` (each `src/*.ts`).
+   `packages/node` (T11.6), `packages/webapi` (T13.1), `packages/renderer-clay` (T13.4) and
+   `packages/interpreter` (T14.1) join when they are created. The cards that create them add the
+   package to this test in the same change. The target list is checked in next to the baseline,
+   and a workspace package that is neither listed nor marked "not a target" fails the test.
+2. **What a run does.** `stator explain <entry> --json` per target, tallying the deciding
+   stage's diagnostics by code (plan-notes 291). A target whose verdict is `static` or `dynamic`
+   then goes through `stator build`, and the binary runs that package's own smoke check. For
+   `std`, that check is its goldens. For the compiler, the binary compiles a hello-world fixture
+   and its C output must be **byte-identical** to the C the Node-hosted compiler emits: the
+   stage-2 bootstrap check.
+3. **Ratchet.** `packages/tests/selfhost/baseline.json` holds, per target, the verdict and the
+   count per diagnostic code. The test fails when any count grows, a new code appears, or a
+   verdict gets worse. When a count shrinks, `--update` rewrites the baseline in the same change,
+   as `.jscpd-baseline.json` does (Task 6.16). Reaching zero for a target is that target's
+   milestone. From then on, its build and smoke check are part of the gate.
+4. **Cost.** One `explain` of the compiler takes about 35 s on the dev host (below). The test runs
+   in `ci` if the whole run stays under 60 s on that host; otherwise it runs nightly and on PRs
+   that Task 6.17's impact selection says reach `packages/compiler` or the target packages. The
+   choice and the timing go in plan-notes.
+5. **Config.** Each target's mode and entry come from its own `stator.config.json` (Task 6.18)
+   once that lands, so the test runs the same command a user would.
+
+**Baseline measured 2026-10-02** (main `f8db9eb`, darwin/arm64, `explain --json`):
+- **Compiler, `ts` mode:** `not-yet`, 2 522 × `STA1214`, 34.8 s. The top families are:
+  - 1 127 — an unsupported construct whose message prints the syntax kind as `FirstNode`. That is
+    an enum alias, so the message names the wrong kind: a diagnostics bug to fix with this task.
+  - 915 — method calls.
+  - 158 — unsupported globals.
+  - 52 — index access on a non-array.
+  - 52 — `for-of` over a user iterable.
+  - 47 — object spread without a fixed shape.
+  - 32 — package imports (`typescript`).
+- **Compiler, `js` mode:** `not-yet`, 2 586 × `STA1214`, 41.8 s.
+- **`packages/std`:** `env.ts` is `dynamic`; `fs.ts`, `path.ts`, `process.ts` and `time.ts` are
+  `static`.
+
+**Check:**
+- `pnpm run test:selfhost` passes against the committed baseline. It fails on a hand-raised count
+  and on an unlisted workspace package.
+- `std` builds and its smoke check runs.
+- The `FirstNode` message names the real syntax kind, and the baseline is re-recorded.
+
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
@@ -2237,3 +2286,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.17** (2026-10-02): **Phase 14: a JavaScript interpreter in strict TypeScript, `js` mode's second fallback** (plan-notes 300). New §11f: `packages/interpreter`, compiled by Stator, runs `eval`, `new Function` and the `not-yet` constructs it takes over, directly on `jsrt_value` (no marshaling layer). Order: compiled static, then compiled dynamic, then the interpreter. Phase 8's QuickJS-NG stays as an option behind its gate until T14.0 measures whether it is still needed. Cards T14.0 (design, `docs/INTERPRETER.md`, including §0.3's parser question), T14.1 parser front, T14.2 evaluator, T14.3 wiring, T14.4 async and the rest. `ts` mode is unchanged.
 - **v4.18** (2026-10-02): **T11.2 lands: `packages/std` is the real `std/*` package** (plan-notes 294). `std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` resolve through `paths` and link `libjsrt_std.a` only into programs that import them; unknown `std/foo` is the new `STA3002`. T10.1 steps 2–4 are struck (step 5 stays open); §11b's v0 table moves `std/env.args` to T11.3 as `std/process.argv`; T11.3's `std/fs` row drops `unlink`, `rmdir` and text reads. Record in `done.md`.
 - **v4.20** (2026-10-02): **T11.5a — per-module namespaces before T11.6** (plan-notes 302). Each module gets its own top-level namespace (module-qualified C names), and every aliasing shape lands: renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *`. This removes the one-namespace `STA1214` collisions that T11.2 found (plan-notes 294). T11.6 depends on it; T12.1 step 3 shares `export { a as b }` with it.
+- **v4.21** (2026-10-02): **Task 6.19 — self-compilation test** (plan-notes 304). Stator compiles itself and its own packages (`std`, later `node`, `webapi`, `renderer-clay`, `interpreter`) as a ratcheted test. Per-target diagnostic counts may only shrink. A target at zero builds and runs its smoke check, and for the compiler that check is a byte-identical stage-2 bootstrap. Baseline: compiler 2 522 `STA1214` in `ts` mode; `std` already compiles.
