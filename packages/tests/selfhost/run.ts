@@ -83,8 +83,9 @@ async function explain(job: Job): Promise<TargetResult> {
   return tally(report);
 }
 
-/** Build every module of a `std-goldens` target and run it; then the `std_*` goldens. */
-async function smokeStd(built: readonly Job[]): Promise<void> {
+/** Build every module of a library target and run it; then the goldens whose names start with
+ * `prefix` (`std_` for `std-goldens`, `node_` for `node-goldens`). */
+async function smokeLibrary(built: readonly Job[], prefix: string): Promise<void> {
   const work = mkdtempSync(join(tmpdir(), 'stator-selfhost-'));
   try {
     for (const job of built) {
@@ -104,11 +105,11 @@ async function smokeStd(built: readonly Job[]): Promise<void> {
   const goldens = await runProcess(process.execPath, [
     join(REPO, 'packages', 'tests', 'golden', 'run.ts'),
     '--filter',
-    'std_',
+    prefix,
   ]);
-  if (goldens.status !== 0) fail(`std goldens failed:\n${goldens.stdout}${goldens.stderr}`);
+  if (goldens.status !== 0) fail(`${prefix}* goldens failed:\n${goldens.stdout}${goldens.stderr}`);
   process.stdout.write(
-    `selfhost: std smoke — ${String(built.length)} modules built and run; ${goldens.stdout.split('\n')[0] ?? ''}\n`,
+    `selfhost: ${prefix}* smoke — ${String(built.length)} modules built and run; ${goldens.stdout.split('\n')[0] ?? ''}\n`,
   );
 }
 
@@ -151,8 +152,13 @@ async function main(): Promise<void> {
     const verdict = measured[job.name]?.verdict;
     return verdict === 'static' || verdict === 'dynamic';
   });
-  const std = passing.filter((job) => job.smoke === 'std-goldens');
-  if (std.length > 0) await smokeStd(std);
+  for (const [smoke, prefix] of [
+    ['std-goldens', 'std_'],
+    ['node-goldens', 'node_'],
+  ] as const) {
+    const library = passing.filter((job) => job.smoke === smoke);
+    if (library.length > 0) await smokeLibrary(library, prefix);
+  }
   for (const job of passing.filter((each) => each.smoke === 'stage2')) {
     fail(
       `${job.name} reached ${measured[job.name]?.verdict ?? '?'}: its stage-2 check ` +

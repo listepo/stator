@@ -491,6 +491,12 @@ program's own options, the same mechanism `std/` uses (`packages/compiler/src/fr
 A landed module is ordinary source from there on. A bare built-in is never a package, with or
 without the flag (docs/BUNDLER.md §1).
 
+**Landed modules** (T11.6, one slice at a time; `docs/NODE.md` is the per-member list):
+`node:path` and `node:path/posix`, POSIX semantics — Stator builds for POSIX hosts, so `path` is
+`path.posix`, as on the pinned Node there. Each module's default export is the module object
+(`import path from 'node:path'`), which the bundle's `import * as m` plus `m.default` also needs.
+`path.win32`, `node:path/win32` and `path.matchesGlob` have not landed.
+
 **Platform gaps are diagnostics.** Under `--node` a built-in `packages/node` has not landed, or a
 member its module does not export yet while the pinned Node's module does, is `STA1214` naming
 Phase 11 (T11.6). So `explain --node`'s `diagnostics` lists the platform gaps the same way it

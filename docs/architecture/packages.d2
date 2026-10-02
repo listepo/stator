@@ -2,6 +2,7 @@
 # Arrows mean "imports from". Two invariants: ts.Type stops at frontend; mode stops at the gate.
 # All src modules live in packages/compiler/; jsrt is packages/runtime/ (monorepo, plan-notes 204).
 # std is packages/std/ (plan.md §11c T11.2): the compiler resolves and links it, never imports it.
+# nodepkg is packages/node/ (plan.md §11c T11.6): resolved under --node only, strict TS over std.
 
 ...@theme
 
@@ -21,6 +22,10 @@ jsrt: {
 tsp: "typescript pkg"
 std: {
   label: "packages/std\nstd/* surface (strict TS)\n+ Zig backings → libjsrt_std.a"
+  shape: parallelogram
+}
+nodepkg: {
+  label: "packages/node\nnode:* built-ins (strict TS)\nover std/*"
   shape: parallelogram
 }
 
@@ -45,3 +50,8 @@ cli -> std: {
   style.stroke-dash: 3
   label: "links libjsrt_std.a\n(std importers only)"
 }
+frontend -> nodepkg: {
+  style.stroke-dash: 3
+  label: "resolves node:* to\n(--node only)"
+}
+nodepkg -> std

@@ -1,11 +1,12 @@
 /* plan.md §11c T11.5: the `--node` platform edge (docs/MODES.md §6).
  *
- * `packages/node` has no module yet (T11.6 lands the first), so these tests point
- * `STATOR_NODE_ROOT` at a stub package and prove the edge itself: a landed built-in resolves under
+ * These tests point `STATOR_NODE_ROOT` at a stub package, so they prove the edge itself whatever
+ * `packages/node` has landed (`node:path` since T11.6, proved by the `node_*` goldens): a landed
+ * built-in resolves under
  * both spellings and compiles like any other module, an unlanded member of a landed module names
  * T11.6, a member Node does not have stays the checker's error, the flag comes from the config
  * file as well as the command line, and nothing resolves without it. The decision tests cover the
- * unlanded modules and the four `require` cells against the real (empty) package. */
+ * unlanded modules and the four `require` cells against the real package. */
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';

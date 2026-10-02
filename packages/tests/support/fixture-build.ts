@@ -34,6 +34,8 @@ export interface BuildFixtureArgs {
   readonly unitName?: string;
   /** `js` mode's bundler; the compiler's default (`vite`) when absent. */
   readonly bundler?: BundlerChoice;
+  /** `--node`: the Node platform (docs/MODES.md §6). */
+  readonly node?: boolean;
 }
 
 /* In-process compile (plan.md §9 Task 6.6): `build()` under `withDiagnosticCapture` — the
@@ -55,6 +57,7 @@ export async function buildFixture(args: BuildFixtureArgs): Promise<void> {
         ...(args.emitHeader !== undefined ? { emitHeader: args.emitHeader } : {}),
         ...(args.unitName !== undefined ? { unitName: args.unitName } : {}),
         ...(args.bundler !== undefined ? { bundler: args.bundler } : {}),
+        ...(args.node !== undefined ? { node: args.node } : {}),
       }),
     ));
   } catch (error) {

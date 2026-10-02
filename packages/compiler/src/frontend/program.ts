@@ -911,8 +911,8 @@ const UNRESOLVED_NAME_CODES: ReadonlySet<number> = new Set([2304, 2580, 2591]);
  * error: `std/foo` resolves to no file because no such module exists (STA3002), or because it is
  * a threads module that has not landed (STA1214, Phase 10) — the same answer the gate gives a
  * specifier that did resolve (gate.ts `gateImport`), so the code never depends on whether a
- * stray file happens to sit where the mapping looked. TS2305/TS2724 ("has no exported member")
- * on a std module's Promise twin (`readTextAsync` from `std/fs`) is the same kind of refusal:
+ * stray file happens to sit where the mapping looked. TS2305/TS2724/TS2614 ("has no exported
+ * member") on a std module's Promise twin (`readTextAsync` from `std/fs`) is the same kind of refusal:
  * the member waits for T10.2 (T10.1 step 5). A Node built-in is the platform edge's (`./node.ts`):
  * without `--node` it names the flag, and under it an unlanded module or member names T11.6.
  *
@@ -954,8 +954,12 @@ function edgeRefusal(
   );
 }
 
+/** "Module has no exported member": TS2305 plainly, TS2724 with a near-miss name, TS2614 when the
+ * module has a default export the name might have meant (`node:path`'s module object does). */
+const MISSING_MEMBER_CODES: ReadonlySet<number> = new Set([2305, 2724, 2614]);
+
 /** What the std and Node edges say about a checker diagnostic at `start`: an unresolved-module
- * code names a specifier, TS2305/TS2724 a member of one. */
+ * code names a specifier, a missing-member code a member of one. */
 function edgeRefusalFor(
   code: number,
   file: ts.SourceFile,
@@ -968,7 +972,7 @@ function edgeRefusalFor(
     const specifier = literal.slice(1, -1);
     return classifyStdSpecifier(specifier) ?? classifyNodeSpecifier(specifier, node);
   }
-  if (code === 2305 || code === 2724) {
+  if (MISSING_MEMBER_CODES.has(code)) {
     const specifier = moduleSpecifierAt(file, start);
     return specifier === undefined
       ? undefined

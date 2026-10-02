@@ -18,7 +18,9 @@ const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
   error: 3,
 };
 
-export type Smoke = 'stage2' | 'std-goldens';
+/** `std-goldens` and `node-goldens` build and run every module of the target, then the goldens
+ * named `std_*` or `node_*`; `stage2` is the compiler's own check. */
+export type Smoke = 'stage2' | 'std-goldens' | 'node-goldens';
 
 export interface TargetSpec {
   /** Repo-relative package directory, e.g. `packages/std`. */
@@ -60,7 +62,7 @@ function isVerdict(value: unknown): value is Verdict {
 }
 
 function isSmoke(value: unknown): value is Smoke {
-  return value === 'stage2' || value === 'std-goldens';
+  return value === 'stage2' || value === 'std-goldens' || value === 'node-goldens';
 }
 
 function sortedCodes(codes: Readonly<Record<string, number>>): Record<string, number> {
