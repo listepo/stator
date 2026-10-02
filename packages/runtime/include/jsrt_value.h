@@ -208,6 +208,14 @@ double jsrt_to_number(jsrt_value v);
  * Non-ASCII code units -> NaN. */
 double jsrt_string_to_number(jsrt_value s);
 
+/* The global number functions (§19.2): `parseInt(string, radix)`, `parseFloat(string)`,
+ * `isNaN(x)`, `isFinite(x)`. Every argument is any value -- the string ones run ToString, the
+ * other two ToNumber -- and an omitted one arrives as JSRT_UNDEFINED (plan.md §11c T11.4). */
+jsrt_value jsrt_global_parse_int(jsrt_value string, jsrt_value radix);
+jsrt_value jsrt_global_parse_float(jsrt_value string);
+jsrt_value jsrt_global_is_nan(jsrt_value v);
+jsrt_value jsrt_global_is_finite(jsrt_value v);
+
 /* ToBoolean: convert a jsrt_value to a boolean.
  * Falsy: false, +0, -0, NaN, undefined, null, empty string.
  * Truthy: everything else (including "0" and "false" as strings). */

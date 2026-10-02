@@ -687,6 +687,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     // which the check at the top of this function has already answered.
     case 'date-components':
     case 'date-static':
+    case 'global-call':
     case 'object-static':
     case 'typed-op':
     case 'string-static':

@@ -19,6 +19,7 @@ import type {
   DateNew,
   DateOp,
   DateStaticCall,
+  GlobalCall,
   DeleteProp,
   DynEntry,
   DynFieldAccess,
@@ -73,6 +74,7 @@ import {
   isConsoleVariadicWidth,
   DATE_OPS,
   DATE_STATICS,
+  GLOBAL_CALLS,
   errorDescriptor,
   isAccessorEntry,
   isComputedEntry,
@@ -520,6 +522,7 @@ type CallSlotted =
   | DateNew
   | DateOp
   | DateStaticCall
+  | GlobalCall
   | DynMethodCall
   | DynObjectLiteral
   | ErrorNew
@@ -2223,6 +2226,7 @@ class Emitter {
       // `subarray` allocates the view while the bounds it was given are still live.
       case 'date-components':
       case 'date-static':
+      case 'global-call':
       case 'object-static':
       case 'typed-op':
         this.countRooted(expr, undefined, expr.args);
@@ -4838,6 +4842,7 @@ class Emitter {
       // pick the order (`Math.pow(f(), g())` must run f first).
       case 'date-components':
       case 'date-static':
+      case 'global-call':
       case 'math-call':
       case 'object-static':
       case 'typed-op': {
@@ -4848,9 +4853,11 @@ class Emitter {
               ? 'jsrt_date_from_components'
               : expr.kind === 'date-static'
                 ? DATE_STATICS[expr.method].fn
-                : expr.kind === 'typed-op'
-                  ? TYPED_OPS[expr.op].fn
-                  : `jsrt_object_${snakeCase(expr.method)}`;
+                : expr.kind === 'global-call'
+                  ? GLOBAL_CALLS[expr.name].fn
+                  : expr.kind === 'typed-op'
+                    ? TYPED_OPS[expr.op].fn
+                    : `jsrt_object_${snakeCase(expr.method)}`;
         // Math takes immediates, so a lone argument has neither an order to fix nor anything to
         // keep rooted and nests directly. An Object walk always uses its slots (see counting).
         if (expr.kind === 'math-call' && expr.args.length <= 1) {

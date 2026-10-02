@@ -5,5 +5,5 @@
 
 // Same in js mode: untyped source is never REJECTED, but a global the compiler has no binding for
 // is still deferred rather than answered with a compiler bug.
-const text = String(1);
+const text = escape('a b');
 console.log(text);

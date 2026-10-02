@@ -36,6 +36,7 @@ import {
   consoleEntryPoint,
   DATE_OPS,
   DATE_STATICS,
+  GLOBAL_CALLS,
   errorHType,
   externConventionMismatch,
   externKindHType,
@@ -2078,6 +2079,33 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           span: expr.span,
           code: 'STA4092',
           message: `Date.${expr.method} results in '${hTypeName(expr.type)}', not a number`,
+        });
+      }
+      break;
+    }
+
+    // `parseInt(s, r)`, `parseFloat(s)`, `isNaN(x)`, `isFinite(x)` (plan.md §11c T11.4): the
+    // arity is the row's exactly (the lowering padded an omitted argument with `undefined`), and
+    // the result is the row's. Argument types stay unchecked -- every entry point coerces.
+    case 'global-call': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const row = GLOBAL_CALLS[expr.name];
+      const want = row.result === 'number' ? H_NUMBER : H_BOOLEAN;
+      if (expr.args.length !== row.arity) {
+        problems.push({
+          kind: 'global-call',
+          span: expr.span,
+          code: 'STA4102',
+          message: `${expr.name} takes ${String(row.arity)} arguments, not ${String(expr.args.length)}`,
+        });
+      } else if (!hTypeEquals(expr.type, want)) {
+        problems.push({
+          kind: 'global-call',
+          span: expr.span,
+          code: 'STA4102',
+          message: `${expr.name} results in '${hTypeName(expr.type)}', not a ${row.result}`,
         });
       }
       break;
