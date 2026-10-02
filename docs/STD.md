@@ -61,7 +61,8 @@ with single quotes, a number is printed as JavaScript prints it, and `std/env.se
 only the variable, never the value (it may be a secret).
 
 `<CODE>` is a POSIX errno name from this closed vocabulary. It maps the backing's Zig error
-(`packages/std/zig/jsrt_std.zig` `failWith`), and once listed a code is never renamed:
+(`packages/std/zig/jsrt_std.zig` `failWith`) or, for a backing that calls libc directly, its
+errno (`failErrno`), and once listed a code is never renamed:
 
 | Code | Meaning (Zig error) |
 |---|---|
@@ -79,6 +80,10 @@ only the variable, never the value (it may be a secret).
 | `ENOMEM` | out of memory or system resources (`OutOfMemory`, `SystemResources`) |
 | `EINVAL` | an invalid argument: a bad path, an empty or `=`-holding variable name, an exit code outside `0..255`, a sleep outside `0..2^31-1` ms (`BadPathName`, or checked before the call) |
 | `EFBIG` | the file is too large (`FileTooBig`, `StreamTooLong`) |
+| `EBADF` | the descriptor names no open file, or is not an integer in `0..2^31-1` (`std/io`) |
+| `ENOTTY` | the descriptor is not a terminal (`std/io.terminalSize`) |
+| `EAGAIN` | a non-blocking descriptor has nothing to give or no room to take (`std/io`) |
+| `EPIPE` | the reading end of the pipe is closed (`std/io` writes) |
 | `EIO` | any other failure — never a guess at a closer code |
 
 **v0 carries the code in the message only.** The plan is an `Error` with a `code` property,
@@ -101,6 +106,8 @@ differ, `std` answers one way and says so (§5).
 | `std/path` | `isAbsolute`, `basename`, `dirname`, `join(a, b)` | pure TypeScript, no backing (see below) |
 | `std/fs` | `readText(path)`, `writeText(path, text)`, `stat(path): Stat`, `mkdir(path)`, `unlink(path)`, `rmdir(path)` | sync and path-only (see below); the `…Async` Promise twins are not-yet, T10.2 (§2) |
 | `std/time` | `nowMs(): number`, `sleepMs(ms)` | `nowMs` is whole milliseconds since the Unix epoch (`Date.now()`); `sleepMs` blocks the only thread on the monotonic clock, fractions truncated |
+| `std/os` | `platform()`, `arch()`, `release()`, `hostname()`, `homedir()`, `tmpdir()`, `cpuCount()`, `totalMemory()`, `eol` | the pinned Node's `node:os` answers (see below) |
+| `std/io` | `stdin`/`stdout`/`stderr` (`0`/`1`/`2`), `write(fd, text)`, `writeBytes(fd, bytes)`, `read(fd, max): Uint8Array`, `isatty(fd)`, `terminalSize(fd): TerminalSize` | raw descriptors through libc (see below) |
 | `std/sync` | — | not-yet, T10.2 |
 | `std/thread` | — | not-yet, T10.2 |
 
@@ -124,6 +131,25 @@ unlinking a directory is `EISDIR` on every platform (macOS's own answer is `EPER
 what Node reports there). `unlink` and `rmdir` were planned for T11.3 and landed here, because
 a test that creates files has to remove them.
 
+**`std/os` semantics** are the pinned Node's, because `packages/node` builds `node:os` on
+them. `platform` and `arch` are spelled as `process.platform`/`process.arch` and fixed at build
+time. `release` is `uname(2)`'s release (on macOS the Darwin kernel version). `homedir` is
+`$HOME` whenever it is set, even to the empty string, else the password database's entry
+(libuv's `uv_os_homedir`). `tmpdir` is the first non-empty of `$TMPDIR`, `$TMP`, `$TEMP`, else
+`/tmp`, minus one trailing `/` unless the path is `/`. `cpuCount` is
+`os.availableParallelism()`: the CPUs this process may run on (the affinity mask on Linux),
+and 1 when the OS will not say. `totalMemory` is physical memory in bytes. `eol` is `'\n'`.
+
+**`std/io` semantics.** Descriptors are integers in `0..2^31-1`; anything else is `EBADF`
+(Node's own range check throws a `RangeError` instead, and `isatty` answers `false`). `write`
+and `writeBytes` write everything, retrying short writes and `EINTR`, and flush C stdio first,
+so `console.log` and a write to the same stream keep program order. `write` takes text as UTF-8
+and stops at a NUL (the C-string boundary); `writeBytes` carries any byte. `read` is one
+`read(2)` of at most `max` bytes, and at most 1 MiB, because the buffer is allocated before the
+call; an empty answer is end of file, and `max` outside `0..2^31-1` is `EINVAL`.
+`terminalSize` answers a `TerminalSize` (`columns`, `rows`), a class like `Stat`; a descriptor
+that is not a terminal is `ENOTTY`, and one that names no open file is `EBADF`.
+
 **Verdicts.** A std module is ordinary strict TypeScript, and `explain` reports its functions
 like any other file in the graph: everything is `static` except `std/env.get`, whose
 `string | undefined` answer is a union the HIR boxes, so an importer of `std/env` explains as
@@ -137,6 +163,7 @@ packages/std/
   src/native/<module>.d.ts its `@statorExtern` declarations (module-form: they export)
   src/native/core.d.ts     `CString` and the shared result/error slots
   src/internal/error.ts    the §3 message builder
+  src/internal/bytes.ts    the byte channel's TypeScript end (§6)
   zig/jsrt_std.zig         the root: panic handler, allocator, result + error slots
   zig/<module>.zig         one backing file per module, exporting `jsrt_std_<module>_*`
   justfile                 `just std` → build/libjsrt_std.a
@@ -149,6 +176,13 @@ packages/std/
   status; the surface reads it with `jsrtStdResult()`, whose `CString` return the emitter
   copies into a JS string at once (`jsrt_string_from_cstr`). The slot frees the previous answer
   when the next one is parked, so nothing leaks and nothing is read after it is freed.
+- **Bytes.** The extern table has no `Uint8Array` row (docs/FFI.md §2), so bytes cross one
+  scalar call at a time through the **byte channel** in `jsrt_std.zig`. Going in,
+  `src/internal/bytes.ts` clears it and pushes each byte, then calls the backing, which reads
+  them. Coming out, the backing parks an owned slice, and the surface reads its length and each
+  byte into a fresh `Uint8Array`. A parked answer lives until the next one replaces it, like the
+  string slot. It costs one direct call per byte. A `Uint8Array` row in the FFI table would
+  replace it without changing any `std` signature.
 - **Status and errors.** A backing returns `0` for success and `1` for failure, after storing
   the §3 code where `jsrtStdLastError()` reads it; the surface throws.
 - **Panics.** A safety trap in a backing (ReleaseSafe) prints `stator std: internal error:`
@@ -176,13 +210,17 @@ test task depends on it.
   runs it.
 - **Decision tests** (`packages/tests/subset/subset_std_*`) cover each module in both modes,
   plus the unknown (`STA3002`), threads (`STA1214`) and Promise-twin (`STA1214`) refusals.
-- **Unit tests** (`packages/tests/unit/std.test.ts`) prove the conditional link and the two
-  exits a golden cannot run: a non-zero `exit` and `abort`.
+- **Unit tests** (`packages/tests/unit/std.test.ts`) prove the conditional link and what a golden
+  cannot run. That covers the two exits (a non-zero `exit`, `abort`), `std/io`'s ordering against
+  `console.log`, a real read from stdin, and a terminal (`script(1)` gives the binary a
+  pseudo-terminal). The golden runner's stdin is an open pipe and its stdout is never a
+  terminal.
 
 ## 8. v0 limitations
 
-- **C-string boundary.** `std/fs` text stops at a NUL byte, and every string argument is
-  passed as UTF-8 (§5).
+- **C-string boundary.** `std/fs` text and `std/io.write` stop at a NUL byte, and every string
+  argument is passed as UTF-8 (§5). Bytes (`std/io.writeBytes`, `read`) do not: they take the
+  byte channel (§6), which costs one call per byte.
 - **No `code` property** on thrown errors yet (§3).
 
 ## 9. Decisions that were open

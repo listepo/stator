@@ -29,15 +29,36 @@ function withProgram<T>(source: string, body: (entry: string, dir: string) => T)
   }
 }
 
-/** Build `source` and run the binary, handing back how it ended. */
-function buildAndRun(source: string): ReturnType<typeof spawnSync> & { stdout: string } {
+/** `script(1)`'s spelling of "run this command on a fresh pseudo-terminal": BSD/macOS take the
+ * command after the transcript file, util-linux takes it as `-c`. */
+function underTerminal(binary: string): [string, string[]] {
+  return process.platform === 'darwin'
+    ? ['script', ['-q', '/dev/null', binary]]
+    : ['script', ['-q', '-e', '-c', binary, '/dev/null']];
+}
+
+/** Build `source` and run the binary, handing back how it ended: fed `input` on stdin, or on a
+ * pseudo-terminal when `terminal` is set. */
+function buildAndRun(
+  source: string,
+  options: { readonly input?: string; readonly terminal?: boolean } = {},
+): ReturnType<typeof spawnSync> & { stdout: string } {
   return withProgram(source, (entry, dir) => {
     const out = join(dir, 'main');
     const build = spawnSync(process.execPath, [CLI, 'build', entry, '-o', out], {
       encoding: 'utf8',
     });
     assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
-    return spawnSync(out, [], { encoding: 'utf8' });
+    if (options.terminal === true) {
+      // stdin is /dev/null: BSD `script` refuses a socket there (spawnSync's default pipe).
+      const [command, args] = underTerminal(out);
+      return spawnSync(command, args, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 30_000,
+      });
+    }
+    return spawnSync(out, [], { encoding: 'utf8', input: options.input ?? '', timeout: 30_000 });
   });
 }
 
@@ -92,4 +113,38 @@ test('std/process abort ends the program with SIGABRT', NATIVE_ONLY, () => {
   );
   assert.equal(run.signal, 'SIGABRT');
   assert.equal(run.status, null);
+});
+
+test('std/io write keeps program order with console.log on the same stream', NATIVE_ONLY, () => {
+  const run = buildAndRun(
+    'import { stdout, write } from "std/io";\n' +
+      'console.log("one");\nwrite(stdout, "two\\n");\nconsole.log("three");\n',
+  );
+  assert.equal(run.status, 0);
+  assert.equal(run.stdout, 'one\ntwo\nthree\n');
+});
+
+test('std/io read takes what stdin holds, then an empty answer at end of file', NATIVE_ONLY, () => {
+  const run = buildAndRun(
+    'import { read, stdin, stdout, writeBytes } from "std/io";\n' +
+      'const first = read(stdin, 64);\nwriteBytes(stdout, first);\n' +
+      'console.log(first.length, read(stdin, 64).length);\n',
+    { input: 'h\u00e9 \u0000x\n' },
+  );
+  assert.equal(run.status, 0);
+  // The NUL survives: bytes never cross the C-string boundary.
+  assert.equal(run.stdout, 'h\u00e9 \u0000x\n7 0\n');
+});
+
+test('std/io sees a terminal on a pseudo-terminal', NATIVE_ONLY, () => {
+  const run = buildAndRun(
+    'import { isatty, stdout, terminalSize } from "std/io";\n' +
+      'const size = terminalSize(stdout);\n' +
+      'console.log(isatty(stdout), size.columns === Math.floor(size.columns) && size.columns >= 0, ' +
+      'size.rows === Math.floor(size.rows) && size.rows >= 0);\n',
+    { terminal: true },
+  );
+  assert.equal(run.status, 0, String(run.stderr));
+  // The terminal turns `\n` into `\r\n`, and BSD `script` echoes the EOF it reads (`^D`) first.
+  assert.match(run.stdout.replace(/\r\n/g, '\n'), /(^|\n|\b)true true true\n$/);
 });

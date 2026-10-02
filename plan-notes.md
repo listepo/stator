@@ -10272,3 +10272,53 @@ A `.js` callee is left alone. `golden/js/argument_mismatch.js` still prints `21`
 **Not covered.** A setter's parameter (`o.x = label(1)` against `set x(v: number)`) goes through
 `accessorCall`, which still checks no argument. An async function's or a generator's returned
 value is not checked against the awaited or yielded type.
+
+## 309. T11.3: the N1 `std` modules, in three steps (2026-10-02)
+
+**Context.** T11.3 (plan.md §11c) adds the N1 `std` modules. It is split into three PRs: os + io,
+encoding + hash, then process + fs. Each PR adds its own step section to this entry.
+
+### Step 1: `std/os`, `std/io` and the byte channel
+
+**Decisions.**
+
+- **Bytes cross the FFI edge one scalar at a time.** The extern table has no `Uint8Array` row
+  (docs/FFI.md §2: an object type is STA1115, an array STA1116), and widening it is compiler
+  work, while each §11c card changes one package. `zig/jsrt_std.zig` gains a byte channel:
+  `jsrt_std_bytes_clear`/`_push` going in, `jsrt_std_bytes_length`/`_at` coming out.
+  `src/internal/bytes.ts` is its only TypeScript caller. It costs one direct C call per byte.
+  A future FFI `Uint8Array` row would replace the channel without changing a `std` signature
+  (docs/STD.md §6).
+- **`std/io` calls libc, not Zig's `std.Io`.** Zig treats `EBADF` on a descriptor as a
+  programmer bug (`unreachable`, a panic under ReleaseSafe), but here a bad descriptor is the
+  caller's input. `jsrt_std.zig` gains `failErrno`, which maps errno into the same closed
+  vocabulary. docs/STD.md §3 gains `EBADF`, `ENOTTY`, `EAGAIN` and `EPIPE`.
+- **A write flushes C stdio first** (`fflush(NULL)`). `console.log` buffers in `stdout`, and
+  without the flush `io.write(stdout, …)` would overtake it.
+- **`terminalSize` refusals.** On a pipe, Darwin's `TIOCGWINSZ` fails with an errno other than
+  `ENOTTY`; the std_io golden first showed it as `EIO`. Every refusal except `EBADF` is
+  therefore `ENOTTY`, which is what Node's `tty.isatty` check implies.
+- **`std/os` follows the pinned Node**, observed with `node -e` probes on Node 26.7.0:
+  - `tmpdir` takes the first non-empty of `TMPDIR`/`TMP`/`TEMP` (`TMPDIR=''` with `TMP=/x`
+    gives `/x`), and `TEMPDIR` is not read. It strips one trailing `/` (`/a//` gives `/a/`;
+    `/` stays `/`).
+  - `homedir` returns `$HOME` even when it is empty (`HOME=''` gives `''`). When `HOME` is
+    unset it falls back to the password database.
+  - `cpuCount` is `os.availableParallelism()`; on this host it equals `os.cpus().length`
+    (16).
+  The golden drives these environment rules through `std/env` against the oracle's `node:os`.
+- **The `std_io` golden writes only through `io.write`.** The oracle's `console.log` is
+  asynchronous on a macOS pipe, so mixing it with `fs.writeSync` would test Node's scheduling.
+  The console ordering, a real stdin read and a terminal are unit tests instead
+  (`unit/std.test.ts`; `script(1)` provides the pseudo-terminal). The golden runner's stdin is
+  an open pipe, and a read from it would block.
+
+**Self-compilation.** `packages/std/src/os.ts` and `io.ts` join the baseline as `static` with
+no codes, recorded with `--update` (plan-notes 306).
+
+**Check evidence (step 1).**
+
+- `node packages/tests/golden/run.ts --filter std_`: 8 passed (`std_os` and `std_io` are new).
+- `node packages/tests/subset/run.ts --filter subset_std`: 18 passed, including
+  `subset_std_os_ts`/`_js` and `subset_std_io_ts`/`_js` (static).
+- `unit/std.test.ts`: 7 passed, including console ordering, stdin and pseudo-terminal.
