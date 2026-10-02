@@ -2855,4 +2855,10 @@ Every bundle that compiled matched Node byte-for-byte. The one known deviation i
 evaluation order, recorded in BUNDLER.md §1.
 
 T12.1 and T12.2 were edited, T12.3 is new, and T11.5 was re-scoped, all in the same change.
-Three questions stay open for the creator (BUNDLER.md §9).
+The three questions in BUNDLER.md §9 were answered by the creator on 2026-10-02:
+
+- "one file" means the dependencies;
+- `__filename`/`__dirname` are `not-yet` until `--node`, with no paths baked into the binary;
+- the order deviation is documented only.
+
+The T12.1, T12.2, T12.3 and T11.5 cards were edited to match.

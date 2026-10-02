@@ -1386,7 +1386,11 @@ Steps:
 - **The flag.** `--node` on the CLI and `explain`. Under `--node` an unlanded `node:*` or
   global member is a `not-yet` diagnostic naming T11.6, so `explain`'s `diagnostics` lists
   platform gaps (`docs/MODES.md` §6).
-- **The Node globals.**
+- **The Node globals.** These include `__filename` and `__dirname`, which lift T12.1's
+  `not-yet` under `--node`. They apply both in CommonJS project files and in the vendor
+  module. Their value must not bake a build-machine path into the binary (creator, 2026-10-02,
+  BUNDLER.md §9). Decide whether the value is relative to the executable or comes from
+  `import.meta.url`, then record it in `MODES.md`.
 - **Resolution.** `node:*` and bare built-ins resolve to `packages/node`, both as ESM imports
   in project files and in the vendor bundle. The bundle reaches them as
   `import * as m from "path"` plus `m.default` (`esmExternalRequirePlugin`), so built-ins need
@@ -1453,8 +1457,12 @@ The reasons are measured (BUNDLER.md §1):
 - It breaks existing goldens through Rolldown's helpers.
 - It saves nothing, since Stator's DCE already tree-shakes project code.
 
-Open for the creator: BUNDLER.md §9 (whether "one file" means the dependencies,
-`__filename`/`__dirname` values, the package evaluation-order deviation).
+Decided by the creator (2026-10-02, BUNDLER.md §9, plan-notes 296):
+
+- "one file" means the dependencies only, so this design stands;
+- `__filename`/`__dirname` are a `not-yet` diagnostic until `--node` (T11.5), and no path is
+  baked into a binary;
+- the package evaluation-order deviation is documented only, with no card to close it.
 
 The phase is not sequenced after Phase 8 (§15.1 exception, as Phases 9–11). It touches only
 `js` mode: `ts` mode keeps its own module graph, because a bundler strips the types `ts` mode
@@ -1494,10 +1502,18 @@ Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
    stability 1.1). A position with no mapping says it sits in a bundler runtime helper, never
    a user file.
 6. **The cache.** The program-cache key (Task 6.9) adds the sha256 of the vendor `code`.
+7. **`__filename`/`__dirname`.** Without `--node`, a free read of either in a project file
+   or in the vendor module is a `not-yet` diagnostic naming T11.5 (BUNDLER.md §4, §9). Inside
+   the vendor module it is reported at the mapped position. The code is allocated in
+   `docs/DIAGNOSTICS.md` when this lands.
+
+   Today such a read compiles as `dynamic`, and the binary throws `ReferenceError` where Node
+   prints the path. No path is ever baked into the binary.
 
 Docs: `HOW-IT-WORKS.md`; `MODES.md`, covering packages, the vendor module and the
-package-evaluation-order deviation (BUNDLER.md §1); `DIAGNOSTICS.md` (STA0014/STA0015 move
-from planned to emitted); `pipeline.d2` (a dependency-bundling stage before the frontend in
+package-evaluation-order deviation (BUNDLER.md §1, documented only, no card closes it), the
+latter next to top-level-await interleaving in §5; `DIAGNOSTICS.md` (STA0014/STA0015 move from
+planned to emitted, plus step 7's code); `pipeline.d2` (a dependency-bundling stage before the frontend in
 `js` mode).
 
 **Check:**
@@ -1509,6 +1525,7 @@ from planned to emitted); `pipeline.d2` (a dependency-bundling stage before the 
 - A diagnostic inside a vendored module reports the original file and line. One inside a
   runtime helper says "no source mapping".
 - `STA0014` is raised for a package import when the adapter is absent.
+- Decision tests: `__filename`/`__dirname` are `not-yet` in a project `.js` without `--node`.
 
 ### T12.2. `packages/vite-stator`: the default integration — **[D3]**
 
@@ -1521,8 +1538,8 @@ Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDe
   - Rolldown output `format: 'es'`, `codeSplitting: false` and `topLevelVar: false`;
   - `minify: false`, `sourcemap: true`, `std/*` external;
   - Vite's `esmExternalRequirePlugin` for built-ins;
-  - a transform that defines `__filename`/`__dirname` inside each CommonJS module, with the
-    value per BUNDLER.md §9 question 2;
+  - no `__filename`/`__dirname` transform. They stay free, and T12.1 reports them as
+    `not-yet` (BUNDLER.md §9);
 - the `stator()` Vite plugin (`vite build` produces the native binary);
 - an example under `examples/vite/` with its README.
 
@@ -1554,6 +1571,9 @@ where they are the same constructs. Each item below is measured in T12.0 (`docs/
   `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
 - **`import.meta.url`.**
 - **A computed `export default`.**
+
+Out of scope: `__filename`/`__dirname`. They stay `not-yet` until T11.5 (BUNDLER.md §9), so no
+golden here reads them.
 
 **Check:** CommonJS goldens through the default adapter, byte-for-byte vs Node:
 
@@ -2069,4 +2089,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
   - **Re-scopes.** T12.1–T12.2 were rewritten, and a new T12.3 compiles Rolldown's output.
     T11.5 drops its CommonJS lowering, because the bundler converts CJS.
   - **Diagnostics.** `STA0014`/`STA0015` are allocated as planned codes.
-  - **Open for the creator.** Three questions remain (BUNDLER.md §9).
+  - **Creator's answers (BUNDLER.md §9).**
+    - "One file" means the dependencies.
+    - `__filename`/`__dirname` are not-yet until `--node`, with no baked paths.
+    - The order deviation is documented only.

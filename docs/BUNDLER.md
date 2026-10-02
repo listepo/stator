@@ -2,8 +2,9 @@
 
 > **Status: design, nothing implemented.** This is T12.0's docs-first output (§15.6). It fixes
 > what T12.1 (`packages/compiler`: `statorc/api`) and T12.2 (`packages/vite-stator`) build, and
-> it records the measured spike the decisions rest on. The choice is plan-notes 296. On any
-> disagreement with `plan.md` §11d, the plan wins.
+> it records the measured spike the decisions rest on. The choice is plan-notes 296; the
+> creator settled §9's three questions on 2026-10-02. On any disagreement with `plan.md` §11d,
+> the plan wins.
 
 Checked 2026-10-02. Facts carry a primary source (URL + version or date checked) or a spike
 number. Lines marked *synthesis* are this document's reasoning, not a source's or a measurement.
@@ -11,15 +12,16 @@ number. Lines marked *synthesis* are this document's reasoning, not a source's o
 ## 0. The decision in one paragraph
 
 In `js` mode the bundler bundles the **dependencies, not the project**. Stator keeps compiling
-the project's own `.ts` and `.js` files as its own module graph, exactly as today. Two kinds of input go to the bundler instead:
+the project's own `.ts` and `.js` files as its own module graph, exactly as today. Two kinds
+of input go to the bundler instead:
 
 - every import of a **package**, meaning a bare specifier that is not `node:*`, a Node
   built-in or `std/*`;
 - every **CommonJS** project file, with its `require` closure. "CommonJS" uses Node's own
   rule (§4).
 
-They are collected into one generated *vendor entry*. The adapter bundles that entry into **one ESM file** with a
-source map: `node_modules` resolved, CommonJS converted, tree-shaken. Stator adds the file to
+They are collected into one generated *vendor entry*. The adapter bundles that entry into
+**one ESM file** with a source map: `node_modules` resolved, CommonJS converted, tree-shaken. Stator adds the file to
 the graph as one more `js`-mode module. A project that imports no package never calls the
 bundler, so it builds without Vite installed. This is option B of question 1, narrowed by the
 spike from "bundle all JS" to "bundle packages". The reasons are §1's numbers.
@@ -102,8 +104,8 @@ none of them imports a package. Project `.ts` stays typed, and the boundary chec
 *any* package, so a project module imported between two packages moves. In `order`, Node prints
 `pkg-a a pkg-b main` and B prints `pkg-a pkg-b a main`. Linear cases match, as `typed_app`
 does. This is the same kind of documented deviation as top-level-await interleaving
-(`docs/MODES.md` §5). T12.1 documents it there. A per-package init split would close it, and
-it waits for a program that needs it. *Synthesis.*
+(`docs/MODES.md` §5). **Decided (§9): documented only**, here and in `docs/MODES.md` §5 when
+T12.1 ships package imports. No card closes it. *Synthesis.*
 
 **Found by the spike, out of this card's scope.** In `boundary_inferred` (`.js` returns
 `` `${x}` ``; the `.ts` declares `number`), `tsc --strict` reports `TS2322` on `main.ts`. Stator
@@ -125,7 +127,7 @@ Vite 8.3.1 (the `vite-stator` adapter's defaults):
 | `…output.topLevelVar` | `false` | Vite's build sets Rolldown's `topLevelVar: true` (vite 8.3.1 `dist/node/chunks/node.js`; Rolldown's own default is `false`). That rewrites top-level `let`/`const` to `var`, and `js` mode lowers `var` with function-scope tracking. Measured: `fib`'s `const n` came out as `var n` |
 | `build.rolldownOptions.external` | `[/^std\//]` | §3 |
 | `build.target` | `'esnext'` | no down-levelling, so Stator sees the source's own syntax |
-| plugins | `esmExternalRequirePlugin` and the `__filename` transform | §4 |
+| plugins | `esmExternalRequirePlugin` | §4 |
 
 **What Rolldown output always contains.** Two things the contract cannot switch off, so
 Stator must lower them (T12.3):
@@ -170,7 +172,7 @@ What the bundle leaves for Stator:
 | interop helpers `__toESM`, `__copyProps` | `Object.create`, `Object.defineProperty` (getter descriptors), `getOwnPropertyDescriptor`, `getOwnPropertyNames`, `getPrototypeOf`, `Object.prototype.hasOwnProperty.call`, `Function.prototype.bind`: 9 STA1214 in `cjs` | T12.3 (overlaps T11.4's `Object.*` and method-call families) |
 | `require('path')` of a built-in | `__require("path")` through `createRequire(import.meta.url)`. With `esmExternalRequirePlugin({ external: [/^node:/, …builtinModules] })` (re-exported by Vite 8.3.1) it becomes `import * as m from "path"` and `module.exports = m.default` | the plugin in `vite-stator` (T12.2). Built-ins need a default export (T11.6) |
 | computed `require('./' + n)` | stays `__require(...)`, and Node itself fails on the bundle with `Cannot find module './five.js'` | T11.5: a `require` over built-ins only. Anything else throws `MODULE_NOT_FOUND` |
-| `__filename`, `__dirname` | left free, so **Node itself crashes on the bundle** (`ReferenceError: __filename is not defined in ES module scope`) | a `vite-stator` transform defines both inside each CJS module. The spike's 6-line version works. Their value is open question 2 |
+| `__filename`, `__dirname` | left free, so **Node itself crashes on the bundle** (`ReferenceError: __filename is not defined in ES module scope`) | **decided (§9):** a `not-yet` diagnostic naming T11.5 until `--node`, raised by T12.1's gate. No path is baked into the binary, so the spike's 6-line transform (which baked the build machine's absolute path) is not adopted. Unbundled, Stator today compiles a free `__filename` as `dynamic` and the binary throws `ReferenceError` where Node prints the path (measured), so the same diagnostic covers project files |
 
 **CommonJS project files** (`cjs_entry`, the shape of `_tsc.js`) go to the bundler whole. A
 file is CommonJS by Node's rule (https://nodejs.org/api/packages.html, docs v26.10.0, checked
@@ -195,7 +197,9 @@ file's code, so it is dynamic like any `.js`. *Measured; the routing itself is T
 `require` edges, the `"type"` decision and the CJS-cycle exemption from `STA3001` all move to
 the bundler. T11.5 shrinks to the `--node` flag, the Node globals, external resolution of
 `node:*` and built-ins, and a `createRequire`/`require` over built-ins. `STA1110` narrows as
-T11.5 already planned. With `--node` in `js` mode a CommonJS project file goes to the bundler.
+T11.5 already planned. With `--node` in `js` mode a CommonJS project file goes to the bundler,
+and T11.5 owns what `__filename`/`__dirname` mean then, under the rule that no build path is
+baked into the binary.
 Without `--node`, under `--bundler=none`, or in `ts` mode, `require` stays `STA1110`.
 
 ## 5. The API
@@ -306,9 +310,10 @@ list is what `vite-stator` hands Vite's watcher in dev, not moon.
   - the vendor bundle as one virtual `js` module, and `export { a as b }` lowering;
   - source-map mapping of diagnostics, `#line` and call-site strings (§6);
   - the cache key (§7);
+  - the `not-yet` diagnostic for `__filename`/`__dirname` without `--node` (§4, §9);
   - docs: `MODES.md` (packages and the order deviation), `HOW-IT-WORKS.md`, `pipeline.d2`.
-- **T12.2** (`packages/vite-stator`): §2's configuration, `esmExternalRequirePlugin`, the
-  `__filename`/`__dirname` transform, and the `stator()` Vite plugin.
+- **T12.2** (`packages/vite-stator`): §2's configuration, `esmExternalRequirePlugin`, and the
+  `stator()` Vite plugin.
 - **T12.3** (new): make Rolldown's output compile:
   - `var`/`let X = class {}`;
   - the interop helpers (§4 table);
@@ -317,25 +322,28 @@ list is what `vite-stator` hands Vite's watcher in dev, not moon.
     bundle;
   - `import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`);
   - a computed `export default` (`cjs_entry`).
-- **T11.5**: re-scoped per §4.
+- **T11.5**: re-scoped per §4, plus the meaning of `__filename`/`__dirname` under `--node`.
 
-## 9. Open questions for the creator
+## 9. Decided by the creator (2026-10-02)
+
+These were open questions in the first draft. The creator answered them on 2026-10-02
+(plan-notes 296).
 
 1. **"One file" means the dependencies.** plan-notes 290 says the module graph is bundled
-   into one file. This design bundles only the packages into one file and keeps the project
-   in Stator's graph. The reasons are §1's numbers: types, boundary checks and goldens are
-   kept, and tree-shaking is not lost. If you want the literal whole-graph bundle, T12.1 and
-   T12.3 grow: classes, namespace helpers, `export` renames hit every project, and project
-   `.ts` turns dynamic.
+   into one file. **Decided: the dependencies only. Decision B stands.** Only the packages and
+   CommonJS project files are bundled into one file, and the project stays in Stator's graph.
+   That keeps types, boundary checks and goldens (§1's numbers).
 2. **`__filename`/`__dirname` in a native binary.** CJS packages read them, and a binary has no
-   source files at run time. There are three options:
-   - bake the build machine's absolute path, which is what the spike did. It works, but the
-     path ends up in the binary;
-   - make it relative to the executable;
-   - make it `not-yet`.
-   This is a product choice, not a measurement.
-3. **The evaluation-order deviation** (§1, `order`). Is documenting it enough, as with
-   top-level await, or must package bodies run in exact Node order before T12.2 ships?
+   source files at run time. The options were:
+   - bake the build machine's absolute path;
+   - make them relative to the executable;
+   - make them `not-yet`.
+
+   **Decided: a `not-yet` diagnostic until `--node` (T11.5).** No path is baked into the
+   binary. T12.1 raises the diagnostic, and T11.5 defines the values under `--node`.
+3. **The evaluation-order deviation** (§1, `order`). **Decided: documented only**, in this
+   file and in `docs/MODES.md` §5 next to top-level-await interleaving. No card makes package
+   bodies run in exact Node order.
 
 ## Sources
 
