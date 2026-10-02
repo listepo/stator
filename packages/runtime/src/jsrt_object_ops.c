@@ -229,10 +229,22 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
  * path. Source-level `Object.assign` with an array source never reaches here (the gate holds the
  * source to the object layouts); the object-spread-of-array desugar is the only caller that can
  * hand one over, and it is also why this loop rather than `jsrt_dynobj_spread` carries the case
- * (that entry point copies fixed-shape fields and panics on anything else). */
+ * (that entry point copies fixed-shape fields and panics on anything else). A STRING source (an
+ * untyped spread operand) has no elements to read, so its index keys answer one code unit each.
+ *
+ * Any other source copies nothing. CopyDataProperties (§13.2.5.5) and Object.assign skip
+ * `undefined` and `null`, ToObject of a boolean or number has no own enumerable string key, and a
+ * closure carries no own properties in this runtime. The object-spread fold of an untyped operand
+ * hands all of these over (plan-notes 297). */
 jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   if (!jsrt_is_dynobj(target)) {
     jsrt_panic("STA4084: Object.assign onto a value that is not a dynamic-shape object");
+  }
+  if (
+    !jsrt_is(source, JSRT_TAG_OBJECT) && !jsrt_is(source, JSRT_TAG_ARRAY) &&
+    !jsrt_is(source, JSRT_TAG_STRING)
+  ) {
+    return target;
   }
   const jsrt_value keys = collect(source, OBJ_KEYS);
   if (jsrt_pending()) {
@@ -240,13 +252,17 @@ jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   }
   const bool sourceIsArray = jsrt_is(source, JSRT_TAG_ARRAY);
   const JSRTArray *srcArray = sourceIsArray ? jsrt_as_array(source) : NULL;
+  const bool sourceIsString = jsrt_is(source, JSRT_TAG_STRING);
   const JSRTArray *list = jsrt_as_array(keys);
   for (uint32_t i = 0; i < list->length; i++) {
     const char *key = jsrt_shape_key(list->elements[i]);
     uint32_t index = 0;
+    const bool indexed = jsrt_key_is_array_index(key, &index);
+    uint16_t unit = 0;
     const jsrt_value value =
-        srcArray != NULL && jsrt_key_is_array_index(key, &index) && index < srcArray->length
-            ? srcArray->elements[index]
+        srcArray != NULL && indexed && index < srcArray->length ? srcArray->elements[index]
+        : sourceIsString && indexed
+            ? (unit = jsrt_string_char(source, index), jsrt_string_from_units(&unit, 1))
             : jsrt_get_prop(source, key, NULL);
     if (jsrt_pending()) {
       return JSRT_UNDEFINED;

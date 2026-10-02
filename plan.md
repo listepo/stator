@@ -497,9 +497,12 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     methods).
     **Computed keys landed 2026-09-12** (plan-notes 229; evidence in [done.md](done.md) → Phase 5
     step 12c computed keys).
-    **Residue:** a spread of an unknown value (`gate.ts:3221,3446`), of a value with no fixed
-    shape (`gate.ts:3225,3448`), and the methods-order shapes (`gate.ts` spread-prefix arms)
-    stay `STA1214` — all need the dynamic tier (step 39), not this slice. Spread of any
+    **A spread of an untyped value into a literal the checker types `any` landed** (plan-notes
+    297: the operand folds through the shape-table `assign`, beside the array spread).
+    **Residue:** a dropped `as` assertion's unknown operand, a value with no fixed shape in a
+    fixed-typed literal (`{ ...null }`, an array beside an own key), and the methods-order
+    shapes (`gate.ts` spread-prefix arms) stay `STA1214` — all need the dynamic tier (step 39),
+    not this slice. Spread of any
     fixed-shape EXPRESSION compiles — variable, call, or member access, evaluated once via
     a scratch slot (`tests/golden/ts|js/spread_call_result.*`, `gate.test.ts` spread-call
     acceptance) — so the old "anything but a variable" line is retired here.
@@ -1355,7 +1358,9 @@ Depends on T11.1, T11.2. Zig backings, POSIX first (STD.md §4). Errors throw wi
 ### T11.4. `packages/compiler`: js-mode coverage for the `tsc` bundle — **[D5]**
 
 The largest P0 item (plan-notes 286). Prerequisites run in their own sessions: the `STA4072`
-stack overflow on large inputs and the js-mode false rejections. Then the `STA1214` families on
+stack overflow on large inputs and the js-mode false rejections (the TS2630/TS2698 pair landed,
+plan-notes 297; the 45 `STA0012` left on `_tsc.js` are Node globals, the platform's work). Then
+the `STA1214` families on
 `_tsc.js`: method calls on inferred shapes (402), assignment to non-variables (518),
 unsupported globals (111), spreads (~190), Map/Set from iterables (71), `new` on non-class (50),
 index access on non-array (33), `Object.*` (24), destructuring (31), class expressions (~8).

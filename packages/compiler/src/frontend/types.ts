@@ -707,6 +707,10 @@ export function objectLiteralIsDynamic(
   const own = checker.getTypeAtLocation(literal);
   const contextual = checker.getContextualType(literal);
   return (
+    // The checker typed the literal `any`: a spread of an `any` value, or one it refused (TS2698,
+    // a js-mode runtime code). Its key set is then a run-time question, and only the shape table
+    // can answer it (plan-notes 297).
+    (own.flags & ts.TypeFlags.Any) !== 0 ||
     literalHasRuntimeComputedKey(literal, checker) ||
     (contextual !== undefined && isDynamicShape(contextual, checker)) ||
     isDynamicShape(own, checker)

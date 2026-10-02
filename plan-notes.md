@@ -9331,6 +9331,89 @@ unchanged. The Linux-only extras (`test262`, Linux arm64 `frontend`, Linux `runt
 `ffi`) are in neither stage and stay ungated, so a long conformance run never delays stage 2.
 `revert-on-failure` now lists every job id. No action or tool version changed.
 
+## 297. Which checker diagnostics are fatal in js mode; TS2630 and TS2698 degrade (2026-10-02)
+
+**Trigger.** TypeScript 6.0.3's `_tsc.js` through `--mode=js` (plan-notes 286, item 3):
+two `checkJs` refusals surface as `STA0012` on
+JavaScript Node runs as is, contradicting §1.2.
+- `Cannot assign to 'log' because it is a function` (TS2630), at the namespace IIFE
+  `function log() {} … })(log = Debug2.log || (Debug2.log = {}))` (`_tsc.js` line ~1232).
+- `Spread types may only be created from object types` (TS2698), at
+  `{ ...defaultLevels, ...customLevels }` (line ~3994). `customLevels` is assigned only inside a
+  nested function, so the checker's control flow sees `undefined` at the `return`, narrows the
+  truthy branch to `never`, and refuses the spread. Node spreads the object the closure built.
+
+**Decision (creator, 2026-10-02).** In js mode:
+1. **Always fatal:** syntactic diagnostics and JavaScript early errors. "Early error" is
+   TypeScript's own classification: the binder and grammar groups of `plainJSErrors` in its
+   `program.ts` (typescript@6.0.3, `lib/typescript.js` line 127388), the codes `tsc` reports for
+   a `.js` file without `checkJs`. Its third group ("Type errors", only TS2839, `===` on object
+   literals) is a lint, not an early error. The list is internal to the package;
+   `tests/unit/js-early-errors.test.ts` reads it out of the pinned bundle and holds
+   `JS_MODE_RUNTIME_CODES` and `BOTH_MODES_RUNTIME_CODES` clear of it.
+2. **Degraded to the dynamic path:** a type-level refusal listed in `JS_MODE_RUNTIME_CODES`
+   with its run-time answer and a test. This change adds TS2630 and TS2698.
+3. **Fatal until listed:** every other type-level refusal. The list stays enumerated.
+
+**Why not ranged.** The first proposal was the ranged rule: on a `.js` file, drop every semantic
+diagnostic that is not an early error. A prototype of it was measured on this branch and refused:
+- `const c = 1; try { c = 2 } catch (e) { … }; console.log(c)` compiled and printed `2`. Node
+  throws `TypeError: Assignment to constant variable.` TS2588 is a refusal whose run-time answer
+  (a throw) the lowering does not raise, so dropping it is a silent miscompile. TS2448/TS2449
+  (TDZ) are the same shape (the 2454 comment above `JS_MODE_RUNTIME_CODES` already says TDZ is
+  unmodelled).
+- `/** @type {{ a: number, b: string }} */ const o = { a: 1 }` died as `STA4052` internal error:
+  the lowering lays the literal out by its JSDoc type. docs/VALUE.md §4.8 rests on "a lying JSDoc
+  never reaches this path — `checkJs` makes that a compile error"; a ranged drop breaks it.
+- TS2630 dropped bare turned `greet = 5` after `function greet() {}` into `STA4004` (the slot
+  kept the function type): every degraded code needs its own downstream answer.
+The creator chose the enumerated rule over the ranged one (and over a ranged rule with a JSDoc
+exception) after these measurements.
+
+**What landed.**
+- `src/frontend/program.ts`: TS2630 and TS2698 join `JS_MODE_RUNTIME_CODES`. TS2630 widens its
+  target like TS2322 does. The set's doc comment now states the three-way rule. TS2630 drops
+  only when its target is a function DECLARATION: the checker also reports it on a named
+  function expression's own name (`function imm() { imm = 1; }`), whose binding is immutable
+  (§15.2.5; a TypeError in strict code, ignored in sloppy code), so that one stays `STA0012`
+  (`subset_named_function_expression_assign_js`, which the first cut of this change broke).
+- `src/lower/index.ts` (`typeAt`): a function declaration whose symbol is widened binds an
+  `Unknown` slot, so the slot holds the function and then whatever replaces it.
+- `src/frontend/types.ts` (`objectLiteralIsDynamic`): a literal the checker types `any` (an `any`
+  spread operand, or one it refused as TS2698) is dynamic. Before this, every such literal was
+  refused at the gate, so no previously accepted program changes layout.
+- `src/frontend/gate.ts` + `src/lower/index.ts`: an `Unknown` spread operand of a dynamic literal
+  folds through the shape-table `assign` that already copies an array spread (plan.md §8 step
+  12(c) residue, partly). The lowering folds any non-object operand of a dynamic literal: a
+  `never`-narrowed operand lowers at its binding's static type (`undefined` here), which says
+  nothing about the run-time value.
+- `runtime/src/jsrt_object_ops.c` (`jsrt_object_assign`): a source with no own enumerable string
+  keys (`undefined`, `null`, a boolean, a number, a closure) returns the target unchanged, as
+  §20.1.2.1 / §13.2.5.5 CopyDataProperties answer. It used to panic `STA4084`. A string source
+  copies one code unit per index key (`{ ..."hi" }` is `{ 0: "h", 1: "i" }`); the property read
+  it used before answered `undefined` for those keys. Source-level `Object.assign` still holds
+  its source to object layouts at the gate.
+
+**Tests.** Decision: `subset_function_binding_assign_js` (dynamic) / `_ts` (error STA0012),
+`subset_spread_refused_operand_js` (dynamic) / `_ts` (error STA0012),
+`subset_spread_unknown_object_js` (dynamic); `subset_spread_dynamic_js` keeps only the shapes
+still not-yet (`{ ...null }` written literally, an array beside an own key). Golden:
+`tests/golden/js/checker_type_refusals.js`. Unit: `tests/unit/js-early-errors.test.ts`.
+
+**Test262 (full corpus, before vs after, same machine).** Base (main `bb16d27`): 2372 passed,
+2021 failed, 49187 skipped. First cut: 2370 passed, 1982 failed, 49228 skipped. 39 positive tests
+moved from failed (`STA0012` on TS2630 or TS2698) to an honest not-yet (`STA1214`/`STA1206` further
+down the pipeline, mostly annexB block-level function tests). Two passed tests regressed:
+`assignment/id-eval-strict.js` and `parenthesized-identifierreference-eval-strict.js`. Their only
+refusal of `eval = 1` was TS2630 against lib's ambient `declare function eval`, so that drop is
+restricted to declarations with a body. Final run: 2372 passed, 1982 failed, 49226 skipped.
+The ratchet holds, and the only verdict changes against the base are the 39 failed -> not-yet.
+
+**`_tsc.js` (typescript 6.0.3, `--mode=js`).** STA0012 went from 47 to 45; the two that are gone
+are the TS2630 and TS2698 sites. The remaining 45 are Node globals with no `@types/node`:
+41 `Cannot find name` (30 of them `process`) and 4 shorthand properties with no value in scope.
+These are node-mode (T11) work, not type-level refusals.
+
 ## 298. Phase 13: a Web API package with a pluggable render API; Clay is the default renderer (2026-10-02)
 
 **Plan:** new §11e Phase 13 (T13.0 design, T13.1 DOM, T13.2 CSS, T13.3 render API + recording
