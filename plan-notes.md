@@ -10322,3 +10322,87 @@ no codes, recorded with `--update` (plan-notes 306).
 - `node packages/tests/subset/run.ts --filter subset_std`: 18 passed, including
   `subset_std_os_ts`/`_js` and `subset_std_io_ts`/`_js` (static).
 - `unit/std.test.ts`: 7 passed, including console ordering, stdin and pseudo-terminal.
+
+## 310. T11.4 re-measured, and the Test262 harness needs more than `String` and `JSON` (2026-10-02)
+
+**Baseline.** `node --stack-size=7600 packages/compiler/src/cli/main.ts explain _tsc.js --mode=js
+--json` on main 68c8d57, with `_tsc.js` copied from the pinned `typescript` 6.0.3
+(`node_modules/typescript/lib/_tsc.js`, 6 239 091 bytes), Apple M3 Max, Node 26.7.0:
+verdict `not-yet` (`STA1214`) after 110 s, 1 560 diagnostics — 1 514 `STA1214`, 45 `STA0012`,
+1 `STA1210`. Plan-notes 291's first baseline was 1 589 (1 541 / 47 / 1). `STA1214` by message:
+
+| Count | Message (abridged) |
+| --- | --- |
+| 411 | compound assignment to anything but a variable |
+| 403 | method calls |
+| 114 | assignment to anything but a variable |
+| 92 | spread argument to function call |
+| 78 | the global '…' |
+| 59 | spread of unknown in array literal |
+| 55 | property not a field of the shape |
+| 43 / 30 | Map / Set from iterable |
+| 39 / 11 | new on this type / new on anything but a named class |
+| 33 | index access on non-array |
+| 25 / 12 | spread argument to method call / to array method |
+| 21 / 10 / 2 | destructuring in for-of / declarations / parameters |
+| 21 | `Object.defineProperties` 7, `setPrototypeOf` 5, `create` 4, `keys` 3, `defineProperty` 2 |
+| ~10 | class expressions (named, anonymous, member read through a class object) |
+| rest | singletons |
+
+**The 78 global refusals** split three ways:
+- About 22 are not references at all. The property NAME of an object binding pattern
+  (`const { setTimeout: setTimeout2 } = host`, `function f({ validatedIncludeSpecs: include })`,
+  `const { length: length3 } = …`) resolves, through the checker, to a property declared in a
+  `.d.ts`, and the gate's global arm refused it. A gate bug.
+- The global converters and number functions as callees: `parseInt` 20, `Array` 13
+  (`Array.isArray` 8, `Array(n)` 4, `Array.from` 1), `Number` 3, `String` 3, `isFinite` 3,
+  `encodeURI` 3, `isNaN` 1.
+- Out of this family: `require` 9 (CommonJS, T11.5), `arguments` 1, `Error.captureStackTrace` 2
+  (V8-only, behind an existence test).
+
+**The Test262 harness.** T11.4's Check said (from plan-notes 302) that once `String` and `JSON`
+read as values, `assert.js` + `sta.js` compile. Measured: `explain --mode=js` over
+`harness/assert.js` + `harness/sta.js` + the runner's `$DONE` host adapter + `assert.sameValue(1, 1);`
+refuses 21 sites, and only 4 are globals (`typeof JSON` at line 27, `String(…)` at 29, 36, 44).
+The other 17 are method calls on inferred shapes (4), assignment to a property of a function
+object (`assert.sameValue = function …`, `Test262Error.prototype.toString = …`; 9), `new` on a
+function constructor (2), `instanceof` against one (1) and a property access on a function (1).
+
+**Decision.** The clause stays in T11.4's Check, but it is met by families 1–4 together (globals,
+method calls, assignment to non-variables, `new` on non-class), not by the globals family alone.
+The card is edited to say so and to carry the new baseline and the family order.
+
+**Family 1 landed: the global functions** (same day). What changed:
+- The gate no longer reads the property NAME of an object binding pattern as a reference
+  (`isGlobalReference`). The lowering reads `const { length: n } = xs` as `xs.length`, through a
+  `lengthRead` helper shared with `xs.length`. Before this, the shorthand `const { length } = "s"`
+  passed the gate and failed the lowering with `STA4060`, an internal error.
+- `String(x)`, `Number(x)` and `Boolean(x)` lower to the nodes they already are: a template hole,
+  unary `+` and `!!x`. With no argument, each is its constant. No runtime code.
+- `parseInt`, `parseFloat`, `isNaN` and `isFinite` are one new HIR node, `global-call`. Its table
+  is `GLOBAL_CALLS`, and its verifier code is the new `STA4102`. The node reaches four C entry
+  points in `jsrt_numeric.c` (`jsrt_global_*`). They are C, not Zig: they extend the existing
+  numeric conversions and reuse that file's static StrWhiteSpace set and literal parser. They
+  manage no memory beyond a scratch `malloc`, and nothing in them is platform-specific (golden
+  rule 9).
+- `parseInt` rounding matches V8 (checked against Node 26.7.0 in `golden/js/global_functions`):
+  - Radix 10: strtod over the digit run.
+  - Power-of-two radices: one round-to-nearest-even.
+  - Other radices: V8's 32-bit chunked multiply-add. The spec leaves this case
+    implementation-defined, and V8 drifts from the exact value past 2^53.
+- `Array.isArray(x)` is the builtin `x instanceof Array` node.
+- `typeof` of ECMA-262's globals folds to `"object"` or `"function"`.
+- `jscpd` shrank by 9 fingerprints.
+
+**Result.**
+- `_tsc.js` (same command, 115 s): 1 502 diagnostics — 1 456 `STA1214`, 45 `STA0012`,
+  1 `STA1210` (−58).
+- The global refusals fell from 78 to 19, plus 1 `Array.from`. What is left:
+  - `require` 9 (T11.5).
+  - `Array(n)` 4 and `Array.from` 1, which go with family 4: `new Array(n)` is a holey array, and
+    the `new` family owns it.
+  - `encodeURI` 3, which needs a URIError-throwing runtime entry. It goes to the singletons.
+  - `Error.captureStackTrace` 2 and `arguments` 1.
+- Self-compilation: `STA1214` 1771 → 1648.
+- The Test262 harness went from 21 refusals to 17, with no globals left. The module-code pass
+  count does not move until families 2–4 land.

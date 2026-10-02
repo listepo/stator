@@ -33,6 +33,8 @@ import {
   OBJECT_STATICS,
   PROMISE_STATICS,
 } from '../frontend/gate.ts';
+import { globalFunctionOf, globalTypeofOf, isGlobalArray } from '../frontend/gate.ts';
+import type { GlobalFunction } from '../frontend/gate.ts';
 import {
   classReferenceTuple,
   genericAliasTarget,
@@ -181,6 +183,7 @@ import {
   typedMember,
   typedResultType,
 } from '../hir/nodes.ts';
+import { GLOBAL_CALLS } from '../hir/nodes.ts';
 import type { HField, HObject, HType } from '../hir/types.ts';
 import {
   accessorName,
@@ -1712,6 +1715,25 @@ function collectDynamicReturnsPass(
  * it in rather than synthesising a VariableStatement matters: a factory-made node has no source
  * position, and asking one for its start is a hard failure inside the TypeScript API. */
 
+/** `x.length` on a value that answers it without a shape: an array, a function, or (anything
+ * else the gate let through) a string. The three are different nodes because they become
+ * different runtime calls. A function's `length` -- a method value (`const f = o.m`) included,
+ * whose closure already excludes the receiver from its arity (docs/VALUE.md §4.16). An
+ * Unknown-typed receiver never reaches here: it takes the dynamic path and answers through
+ * `jsrt_get_prop` (plan.md §8 step 21b). */
+function lengthRead(operand: Expression, span: Span): Expression {
+  if (operand.type.kind === 'array') {
+    const length: ArrayLength = { kind: 'array-length', type: H_NUMBER, span, operand };
+    return length;
+  }
+  if (operand.type.kind === 'fn') {
+    const length: FunctionLength = { kind: 'function-length', type: H_NUMBER, span, operand };
+    return length;
+  }
+  const length: StringLength = { kind: 'string-length', type: H_NUMBER, span, operand };
+  return length;
+}
+
 function lowerPatternRead(
   target: Expression,
   field: string | number,
@@ -1731,6 +1753,13 @@ function lowerPatternRead(
   const member = namespaceObjectField(target, field, checker, bindings);
   if (member !== undefined) {
     return { kind: 'identifier', type: member.type, span, name: member.name };
+  }
+  // `const { length: n } = xs` reads what `xs.length` reads (plan-notes 310).
+  if (
+    field === 'length' &&
+    (target.type.kind === 'array' || target.type.kind === 'fn' || target.type.kind === 'string')
+  ) {
+    return lengthRead(target, span);
   }
   if (target.type.kind === 'unknown') {
     const access: DynFieldAccess = {
@@ -4957,21 +4986,10 @@ function lowerExpression(
     if (!operand) {
       return null;
     }
-    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-    if (operand.type.kind === 'array') {
-      const length: ArrayLength = { kind: 'array-length', type: H_NUMBER, span, operand };
-      return length;
-    }
-    // `fn.length` on a statically-typed function -- a method value (`const f = o.m`) included,
-    // whose closure already excludes the receiver from its arity (docs/VALUE.md §4.16). An
-    // Unknown-typed receiver never reaches here: it took the dynamic path above and answers
-    // through `jsrt_get_prop` (plan.md §8 step 21b).
-    if (operand.type.kind === 'fn') {
-      const length: FunctionLength = { kind: 'function-length', type: H_NUMBER, span, operand };
-      return length;
-    }
-    const length: StringLength = { kind: 'string-length', type: H_NUMBER, span, operand };
-    return length;
+    return lengthRead(
+      operand,
+      makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    );
   }
 
   if (ts.isArrayLiteralExpression(node)) {
@@ -5942,6 +5960,19 @@ function lowerExpression(
         value: 'function',
       };
     }
+    // `typeof JSON`: a global the language defines answers a fixed string, so the read folds and
+    // no value is built (plan.md §11c T11.4). The gate accepted exactly the names this folds.
+    const globalTypeof = ts.isIdentifier(operandNode)
+      ? globalTypeofOf(operandNode, checker)
+      : undefined;
+    if (globalTypeof !== undefined) {
+      return {
+        kind: 'string-literal',
+        type: H_STRING,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        value: globalTypeof,
+      };
+    }
     if (ts.isIdentifier(operandNode) && isUnresolvableIdentifier(operandNode, checker, bindings)) {
       return {
         kind: 'string-literal',
@@ -6212,6 +6243,14 @@ function lowerExpression(
     }
     const expr = node.expression;
 
+    // A global function called by name (plan.md §11c T11.4). The gate proved the name, the
+    // absence of a spread and the arity bound; the function itself is never lowered.
+    const globalFunction = globalFunctionOf(expr, checker);
+    if (globalFunction !== undefined) {
+      const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+      return prologue === null ? null : globalFunctionNode(globalFunction, prologue);
+    }
+
     // Check if this is a property access (console.log)
     if (ts.isPropertyAccessExpression(expr)) {
       const obj = expr.expression;
@@ -6362,6 +6401,31 @@ function lowerExpression(
           method: propName as StringStaticMethod,
           args: prologue.args,
         };
+      }
+
+      // `Array.isArray(x)` is the builtin `x instanceof Array` (plan.md §11c T11.4): in one realm
+      // and without Proxy the two agree on every value, so it takes that node rather than a
+      // second spelling of the same tag test. `Array.isArray()` asks about `undefined`.
+      if (isGlobalArray(obj, checker) && propName === 'isArray') {
+        const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
+          return null;
+        }
+        const { span } = prologue;
+        const target: Expression = prologue.args[0] ?? {
+          kind: 'undefined-literal',
+          type: H_UNDEFINED,
+          span,
+        };
+        const test: InstanceOf = {
+          kind: 'instanceof',
+          type: H_BOOLEAN,
+          span,
+          target,
+          className: 'Array',
+          builtin: true,
+        };
+        return test;
       }
 
       const receiverType = typeAt(obj, checker, bindings);
@@ -10472,6 +10536,55 @@ function typedOpNode(
     op,
     args: receiver === undefined ? padded : [receiver, ...padded],
   };
+}
+
+/** A global function call's node (plan.md §11c T11.4). The three conversions ARE existing
+ * operations -- `String(x)` is a template hole (ToString, never the `valueOf`-first ToPrimitive
+ * `"" + x` runs), `Number(x)` is unary `+`, `Boolean(x)` is `!!x` -- and with no argument each is
+ * its constant. The four number functions are one `global-call` each, padded to their row's
+ * arity because an omitted argument is `undefined` to the runtime. */
+function globalFunctionNode(
+  name: GlobalFunction,
+  prologue: { readonly args: readonly Expression[]; readonly span: Span },
+): Expression {
+  const { args, span } = prologue;
+  const [arg] = args;
+  switch (name) {
+    case 'String':
+      return arg === undefined
+        ? { kind: 'string-literal', type: H_STRING, span, value: '' }
+        : { kind: 'template-literal', type: H_STRING, span, quasis: ['', ''], expressions: [arg] };
+    case 'Number':
+      return arg === undefined
+        ? { kind: 'number-literal', type: H_NUMBER, span, value: 0 }
+        : { kind: 'unary-op', type: H_NUMBER, span, operator: '+', operand: arg };
+    case 'Boolean': {
+      if (arg === undefined) {
+        return { kind: 'boolean-literal', type: H_BOOLEAN, span, value: false };
+      }
+      const not: Expression = {
+        kind: 'unary-op',
+        type: H_BOOLEAN,
+        span,
+        operator: '!',
+        operand: arg,
+      };
+      return { kind: 'unary-op', type: H_BOOLEAN, span, operator: '!', operand: not };
+    }
+    case 'parseInt':
+    case 'parseFloat':
+    case 'isNaN':
+    case 'isFinite': {
+      const row = GLOBAL_CALLS[name];
+      return {
+        kind: 'global-call',
+        type: row.result === 'number' ? H_NUMBER : H_BOOLEAN,
+        span,
+        name,
+        args: padToArity(args, row.arity, span),
+      };
+    }
+  }
 }
 
 function padToArity(args: readonly Expression[], arity: number, span: Span): Expression[] {

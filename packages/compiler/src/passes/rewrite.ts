@@ -435,6 +435,7 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     }
     case 'date-components':
     case 'date-static':
+    case 'global-call':
     case 'math-call':
     case 'object-static':
     case 'string-static':

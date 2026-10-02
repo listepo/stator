@@ -746,6 +746,30 @@ export interface StringStaticCall extends Node {
   readonly args: readonly Expression[];
 }
 
+/** The global functions that are calls rather than conversions (§19.2, plan.md §11c T11.4):
+ * `parseInt`, `parseFloat`, `isNaN`, `isFinite`. On the `DateStaticCall` precedent -- no function
+ * value exists, each name is one runtime function over boxed operands, and the lowering pads an
+ * omitted argument with `undefined`, so `arity` is exact below the gate. `String(x)`, `Number(x)`
+ * and `Boolean(x)` are not here: each IS an existing operation (a template hole, unary `+`, `!!`)
+ * and lowers to that node instead of to a second spelling of it. */
+export const GLOBAL_CALLS = {
+  parseInt: { arity: 2, fn: 'jsrt_global_parse_int', result: 'number' },
+  parseFloat: { arity: 1, fn: 'jsrt_global_parse_float', result: 'number' },
+  isNaN: { arity: 1, fn: 'jsrt_global_is_nan', result: 'boolean' },
+  isFinite: { arity: 1, fn: 'jsrt_global_is_finite', result: 'boolean' },
+} as const satisfies Record<
+  string,
+  { readonly arity: number; readonly fn: string; readonly result: 'number' | 'boolean' }
+>;
+
+export type GlobalCallName = keyof typeof GLOBAL_CALLS;
+
+export interface GlobalCall extends Node {
+  readonly kind: 'global-call';
+  readonly name: GlobalCallName;
+  readonly args: readonly Expression[];
+}
+
 /** The `Array.prototype` methods the HIR can spell, with their POST-LOWERING arity and result
  * kind — the same single-vocabulary contract as `STRING_OPS`, read by the gate, the lowering, the
  * verifier, and the emitter (C names derive mechanically: `jsrt_array_` + snake_case, with the
@@ -1982,6 +2006,7 @@ export type Expression =
   | MathCall
   | StringOp
   | StringStaticCall
+  | GlobalCall
   | RegExpLiteral
   | RegExpOp
   | FunctionExpr

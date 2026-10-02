@@ -1398,15 +1398,44 @@ unsupported globals (111), spreads (~190), Map/Set from iterables (71), `new` on
 index access on non-array (33), `Object.*` (24), destructuring (31), class expressions (~8).
 Each family is its own sub-step with its own fixtures — none of it is Node-specific.
 
+**Status:** in progress — Claude Code / opus-5-5. One PR per family, each with decision tests in
+both modes and goldens, a full `pnpm run ci`, and the self-compilation baseline re-recorded with
+`--update` when its counts move.
+
+**Execution plan** (re-measured on 68c8d57, plan-notes 310; counts are `STA1214` messages):
+
+1. **Unsupported globals (78) — landed** (plan-notes 310; 78 → 20: `require`, `Array(n)`,
+   `Array.from`, `encodeURI`, `Error.captureStackTrace` and `arguments` remain, each assigned to a
+   later family). Exempt the property NAME of an object binding pattern, which is
+   not a reference (about 22 of the 78: `{ setTimeout: setTimeout2 } = host`). Lower the global
+   converters and number functions as callees through one table-driven node, the
+   `String.fromCharCode` pattern: `String(x)`, `Number(x)`, `Boolean(x)`, `parseInt`,
+   `parseFloat`, `isNaN`, `isFinite`, plus `Array.isArray`. `typeof` of a global the compiler
+   knows answers its constant. `require`, `arguments` and `Error.captureStackTrace` stay refused
+   (CommonJS is T11.5; the other two are not values Stator models).
+2. **Method calls on inferred shapes (403).**
+3. **Assignment and compound assignment to non-variables (525).**
+4. **`new` on non-class (50)**, with function constructors and their `prototype` writes, and
+   `Array(n)` / `new Array(n)` / `Array.from`.
+5. **Spreads (~190):** call, method-call and array-method arguments; unknown and non-array
+   array-literal spreads; object spread.
+6. **Map/Set from iterables (73)**, Map `add`/`remove` misuse included.
+7. **Property not a field of the shape (55)** and index access on non-array (33).
+8. **`Object.*` (21)** and destructuring (31, for-of, declarations, parameters).
+9. **Class expressions (~10)** and the remaining singletons (`encodeURI`, `Error.captureStackTrace`).
+
 **Check:** `stator explain _tsc.js --mode=js --json` lists no `STA1214` in `diagnostics` and ends
 with a verdict, not `STA0013`/`STA4072` (PR #44 names the checker's stack overflow `STA0013`).
-Baseline 2026-10-02 at `--stack-size=7600`: 1 589 diagnostics — 1 541 `STA1214`, 47 `STA0012`,
-1 `STA1210` (plan-notes 291). Every landed
-construct has decision tests in both modes + a golden (Testing rules).
-Also, moved here from T11.5a (plan-notes 302): once the unsupported-globals family lets `String`
-and `JSON` be read as values, the Test262 harness (`assert.js`, `sta.js`) compiles, and the
-`test262` `language/module-code` pass count rises above T11.5a's baseline of 152 passed (426 skipped,
-21 failed; measured with T11.5a's runner fix, which compiles a module test beside its fixtures).
+Baseline 2026-10-02 on 68c8d57 at `--stack-size=7600` (110 s): 1 560 diagnostics — 1 514
+`STA1214`, 45 `STA0012`, 1 `STA1210` (plan-notes 310; the first baseline, 1 589, is plan-notes
+291). Every landed construct has decision tests in both modes + a golden (Testing rules).
+Also, moved here from T11.5a (plan-notes 302): once the Test262 harness (`assert.js`, `sta.js`)
+compiles, the `test262` `language/module-code` pass count rises above T11.5a's baseline of 152
+passed (426 skipped, 21 failed; measured with T11.5a's runner fix, which compiles a module test
+beside its fixtures). `String` and `JSON` as values are not enough on their own (plan-notes 310):
+the harness also needs method calls on inferred shapes, assignment to a function's properties
+(`assert.sameValue = function …`, `Test262Error.prototype.toString = …`), `new` on a function
+constructor and `instanceof` against one, so this clause is met by families 1–4 together.
 
 ### T11.5. `packages/compiler`: the `--node` flag and CommonJS — **[D4]**
 
@@ -2319,3 +2348,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.26** (2026-10-02): **T11.5a lands: per-module namespaces** (plan-notes 302). Every module keeps its own top-level namespace, so a user `function get()` beside `import { has } from "std/env"` builds. Renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *` (with ES's ambiguity rule, new `STA3003`) and `export * as ns from` are static in both modes. The test262 runner now compiles module tests beside their fixtures. The self-compilation baseline shrinks (`STA1214` 2572 → 1771). The card moves to done.md. The creator moved its test262 "pass count rises" clause to T11.4, with a baseline of 152 passed, because the corpus harness needs `String` and `JSON` as values (plan-notes 302).
 - **v4.27** (2026-10-02): **T10.1 lands: the `std/fs` Promise twins are not-yet** (plan-notes 307). `readTextAsync`, `writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync` and `rmdirAsync` — each sync call's name plus `Async` — are `STA1214` naming Phase 10 (T10.2's thread pool) in both modes, instead of the checker's "no exported member" (`STA0012`, which every other missing name keeps). No new code. Subset rows `subset_std_fs_async_ts`/`_js`, `subset_std_fs_missing_ts`; docs/STD.md §2, SUBSET.md, DIAGNOSTICS.md (STA0012 row). T10.1 moves to `done.md`.
 - **v4.28** (2026-10-02): **T11.3 step 1: `std/os`, `std/io` and the byte channel** (plan-notes 309). `std/os` (`platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol`) answers what the pinned Node's `node:os` answers. `std/io` does raw descriptor I/O through libc; writes flush C stdio first. Bytes cross the FFI edge through a byte channel in `jsrt_std.zig`. STD.md §3 gains `EBADF`, `ENOTTY`, `EAGAIN` and `EPIPE`. The T11.3 card is claimed with its three-PR execution plan; it stays open until process + fs land.
+- **v4.31** (2026-10-02): **T11.4 claimed; family 1, the global functions, lands** (plan-notes 310). The card now carries the family order, a re-measured baseline (1 560 diagnostics on 68c8d57), and a corrected test262 clause: the Test262 harness needs families 1–4, not just `String` and `JSON` as values. Landed: `String`/`Number`/`Boolean` lower to the operations they are. `parseInt`/`parseFloat`/`isNaN`/`isFinite` lower to a new `global-call` node (verifier `STA4102`, C entry points `jsrt_global_*`). `Array.isArray` lowers to the builtin `instanceof Array`, and `typeof` of a language global folds. An object binding pattern's property name is no longer refused as a global. `_tsc.js`: 1 514 → 1 456 `STA1214`. Self-compilation: 1771 → 1648.

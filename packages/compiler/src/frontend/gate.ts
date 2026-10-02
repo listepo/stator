@@ -7,6 +7,8 @@ import type {
   ErrorClass,
   RegExpOperation,
 } from '../hir/nodes.ts';
+import { GLOBAL_CALLS } from '../hir/nodes.ts';
+import type { GlobalCallName } from '../hir/nodes.ts';
 import type { HType } from '../hir/types.ts';
 import { accessorName, hTypeEquals, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
 import {
@@ -1178,8 +1180,8 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
   if (node.text === 'outSlot' && isOutSlotCallee(node, typeChecker)) {
     return { kind: 'accept' };
   }
-  // A global the compiler does not model -- `String`, `Number`, `parseInt`, `NaN`, `Infinity`,
-  // `Math`, `globalThis`, `console` as a value, and everything else that resolves outside the
+  // A global the compiler does not model -- `JSON`, `Math`, `globalThis`, `console` as a value, a
+  // global function read rather than called, and everything else that resolves outside the
   // module being compiled. The lowering creates bindings only for declarations it lowers, so every
   // one of these used to be ACCEPTED here and then hit `STA4035 identifier used before
   // declaration` -- an INTERNAL error, for legal source. The accept set has to equal the HIR's
@@ -1240,6 +1242,21 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
           return { kind: 'accept' };
         }
         return symbolNotYet();
+      }
+      // A global function as a CALLEE: gateCall already vetted the call (plan.md §11c T11.4), and
+      // the lowering answers it with one node -- the function itself is never a value.
+      if (
+        ts.isCallExpression(node.parent) &&
+        node.parent.expression === node &&
+        globalFunctionOf(node, typeChecker) !== undefined
+      ) {
+        return { kind: 'accept' };
+      }
+      // `typeof JSON`, `typeof parseInt`: a global the language defines has a fixed `typeof`,
+      // which the lowering folds to its string -- the feature test `typeof JSON !== "undefined"`
+      // reads no value at all.
+      if (ts.isTypeOfExpression(node.parent) && globalTypeofOf(node, typeChecker) !== undefined) {
+        return { kind: 'accept' };
       }
       // A catch-all keeps the phase that owns MOST of what it refuses (plan §7 Task 4.7 step 5).
       // What is left of the global surface is `Symbol` and the iterator protocol around it, which
@@ -1394,6 +1411,12 @@ function isGlobalReference(node: ts.Identifier): boolean {
   if (ts.isTypeNode(parent)) {
     return false;
   }
+  // The property NAME in an object binding pattern (`const { length: n } = xs`) names a key of
+  // the value being destructured. The checker resolves it to that property's declaration, which
+  // for a lib type lives in a `.d.ts` -- but it reads no binding (plan-notes 310).
+  if (ts.isBindingElement(parent) && parent.propertyName === node) {
+    return false;
+  }
   if (ts.isNewExpression(parent) && parent.expression === node) {
     return false;
   }
@@ -1409,11 +1432,13 @@ function isGlobalReference(node: ts.Identifier): boolean {
     // gateMemberAccess and gateCall judge the member itself, with a sharper message than a
     // blanket "the global 'Math'" — and the declaration-file test in isGlobalMath keeps a user
     // binding named Math on the ordinary identifier path. `String` is exempt the same way for
-    // its namespace calls (`String.fromCharCode`, plan.md §8 step 19).
+    // its namespace calls (`String.fromCharCode`, plan.md §8 step 19), and `Array` for
+    // `Array.isArray` (plan.md §11c T11.4).
     return !(
       parent.name === node ||
       (parent.expression === node &&
         (isConsoleLog(parent) ||
+          node.text === 'Array' ||
           node.text === 'Date' ||
           node.text === 'Uint8Array' ||
           node.text === 'ArrayBuffer' ||
@@ -2373,6 +2398,25 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     return gateOutSlotCall(call, typeChecker);
   }
 
+  // A global function called by name (plan.md §11c T11.4): `String(x)`, `Number(x)`,
+  // `Boolean(x)`, `parseInt(s, r)`, `parseFloat(s)`, `isNaN(x)`, `isFinite(x)`. Each lowers to
+  // one fixed-arity node, so a spread (whose count is not its arity) and an argument past the
+  // last parameter (evaluated, then ignored) are refused rather than lowered wrong. Any argument
+  // type is accepted -- every one of these coerces.
+  const globalFunction = globalFunctionOf(callee, typeChecker);
+  if (globalFunction !== undefined) {
+    if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+      return notYet(`a spread argument to ${globalFunction} is not yet supported`, 5);
+    }
+    const arity = globalFunctionArity(globalFunction);
+    return call.arguments.length > arity
+      ? notYet(
+          `${globalFunction} with ${String(call.arguments.length)} arguments is not yet supported`,
+          5,
+        )
+      : { kind: 'accept' };
+  }
+
   // Two property-access callees, each its own HIR node: `console.log`, and a method of a class
   // this subset lays out. Anything else -- a method on a built-in, on an object literal, on an
   // interface-typed value -- needs the shape lookup the dynamic path will bring.
@@ -2554,6 +2598,24 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
         return notYet('a spread argument to String.fromCharCode is not yet supported', 5);
       }
       return { kind: 'accept' };
+    }
+    // `Array.isArray(x)` (plan.md §11c T11.4) is the builtin `x instanceof Array` -- one realm and
+    // no Proxy is where the two agree -- so it takes that node's one operand. Every other member
+    // is deferred by name rather than by the method-call catch-all.
+    if (isGlobalArray(callee.expression, typeChecker)) {
+      const method = callee.name.text;
+      if (method !== 'isArray') {
+        return notYet(`Array.${method} is not yet supported`, 5);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to Array.isArray is not yet supported', 5);
+      }
+      return call.arguments.length > 1
+        ? notYet(
+            `Array.isArray with ${String(call.arguments.length)} arguments is not yet supported`,
+            5,
+          )
+        : { kind: 'accept' };
     }
     // A method ON a promise. then/catch/finally land via jsrt_call_protected (Phase 5 step 11).
     if (
@@ -5465,6 +5527,17 @@ function gateMemberAccess(
     return notYet(`String.${member} is not yet supported`, 5);
   }
 
+  // `Array` follows them too: `isArray` exists only as a callee (plan.md §11c T11.4).
+  if (isGlobalArray(access.expression, checker)) {
+    const member = access.name.text;
+    if (member === 'isArray') {
+      return ts.isCallExpression(access.parent) && access.parent.expression === access
+        ? { kind: 'accept' } // gateCall vets the arguments themselves
+        : notYet('using Array.isArray as a value is not yet supported', 5);
+    }
+    return notYet(`Array.${member} is not yet supported`, 5);
+  }
+
   // A String.prototype method exists only as a callee -- there is no function value to bind, the
   // same rule a collection method follows. `.length` is handled by its own node and never gets
   // here; any other string member is a real property of the real String.prototype that has not
@@ -6159,6 +6232,80 @@ export const CALLBACK_ARRAY_OPS = {
 /** The `JSON` namespace, by the same test. */
 export function isGlobalJson(node: ts.Expression, checker: ts.TypeChecker): boolean {
   return isGlobalNamed(node, checker, 'JSON');
+}
+
+/** The `Array` constructor read as a namespace -- `Array.isArray`. The same declaration-file
+ * test, so a user `class Array` stays on the ordinary class path. */
+export function isGlobalArray(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'Array');
+}
+
+/** The three conversion functions: each lowers to the operation it is (`String(x)` to a template
+ * hole, `Number(x)` to unary `+`, `Boolean(x)` to `!!x`), so they have no `GLOBAL_CALLS` row. */
+const GLOBAL_CONVERSIONS: ReadonlySet<string> = new Set(['String', 'Number', 'Boolean']);
+
+export type GlobalFunction = GlobalCallName | 'String' | 'Number' | 'Boolean';
+
+/** The global function this callee names, by the declaration-file test, or undefined. */
+export function globalFunctionOf(
+  node: ts.Expression,
+  checker: ts.TypeChecker,
+): GlobalFunction | undefined {
+  if (!ts.isIdentifier(node)) {
+    return undefined;
+  }
+  const name = node.text;
+  if (!Object.hasOwn(GLOBAL_CALLS, name) && !GLOBAL_CONVERSIONS.has(name)) {
+    return undefined;
+  }
+  return isGlobalNamed(node, checker, name) ? (name as GlobalFunction) : undefined;
+}
+
+/** The most arguments a global function's node holds: a conversion reads one. */
+export function globalFunctionArity(name: GlobalFunction): number {
+  return name === 'String' || name === 'Number' || name === 'Boolean'
+    ? 1
+    : GLOBAL_CALLS[name].arity;
+}
+
+/** `typeof` of the ECMAScript globals (ECMA-262 §19), which no program can change without
+ * shadowing the name -- and a shadowing binding fails the declaration-file test. The namespace
+ * objects answer "object" and every constructor and function "function". `Symbol` is absent on
+ * purpose: its identifier keeps its own refusal until the primitive lands. */
+const GLOBAL_OBJECTS: ReadonlySet<string> = new Set(
+  'globalThis JSON Math Reflect Atomics Intl'.split(' '),
+);
+const GLOBAL_CALLABLES: ReadonlySet<string> = new Set(
+  (
+    'Object Function Array String Number Boolean BigInt Date RegExp Map Set WeakMap WeakSet ' +
+    'WeakRef FinalizationRegistry Promise Proxy ArrayBuffer SharedArrayBuffer DataView ' +
+    'Int8Array Uint8Array Uint8ClampedArray Int16Array Uint16Array Int32Array Uint32Array ' +
+    'Float32Array Float64Array BigInt64Array BigUint64Array Error EvalError RangeError ' +
+    'ReferenceError SyntaxError TypeError URIError AggregateError parseInt parseFloat isNaN ' +
+    'isFinite encodeURI encodeURIComponent decodeURI decodeURIComponent'
+  ).split(' '),
+);
+
+/** The folded `typeof` of a global this identifier names, or undefined. */
+export function globalTypeofOf(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+): 'object' | 'function' | undefined {
+  const answer = GLOBAL_OBJECTS.has(node.text)
+    ? 'object'
+    : GLOBAL_CALLABLES.has(node.text)
+      ? 'function'
+      : undefined;
+  if (answer === undefined) {
+    return undefined;
+  }
+  const declarations = checker.getSymbolAtLocation(node)?.declarations ?? [];
+  // `globalThis` has no declaration at all -- the checker models it that way -- and is still
+  // the global; every other name must be declared, and only in declaration files.
+  return declarations.every((d) => d.getSourceFile().isDeclarationFile) &&
+    (declarations.length > 0 || node.text === 'globalThis')
+    ? answer
+    : undefined;
 }
 
 /** True when `type` (or any union arm of it) admits `undefined` or a function — the values
