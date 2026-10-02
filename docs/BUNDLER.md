@@ -118,7 +118,7 @@ that program aborts with `STA2001` (golden `js/boundary_inferred` pins the passi
 ## 2. Output contract
 
 One ESM file, no code splitting, no minification, a source map. Measured configuration for
-Vite 8.3.1 (the `vite-stator` adapter's defaults):
+Vite 8.3.1, re-checked on the 8.3.2 pin (the `vite-stator` adapter's defaults):
 
 | Setting | Value | Why (source) |
 | --- | --- | --- |
@@ -152,10 +152,10 @@ table leaves open:
 - `inputs` are the chunk's absolute module ids, less the virtual entry. A build that answers
   more than one chunk, or no map, is an error, so `STA0015`.
 
-The pin is Vite **8.3.1** (npm registry, published 2026-09-24T12:26:19.940Z, checked
-2026-10-02), the version the lockfile already held through vitest. The latest stable,
-**8.3.2** (published 2026-10-01T10:17:44.767Z), is younger than pnpm's `minimumReleaseAge`, and
-installing it would also move vitest's own `vite`, an unrequested bump (plan-notes 321).
+The pin is Vite **8.3.2** (npm registry `https://registry.npmjs.org/vite`, published
+2026-10-01T10:17:44.767Z, `dist-tags.latest` checked 2026-10-02), bumped from 8.3.1 with the
+creator's permission; vitest's own `vite` moved with it (plan-notes 321 item 2). The measurements
+in this section were taken on 8.3.1; the unit tests and goldens re-ran green on 8.3.2.
 
 **The `stator()` plugin** (`src/plugin.ts`) makes `vite build` produce the binary:
 
