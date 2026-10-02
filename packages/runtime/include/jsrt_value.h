@@ -637,6 +637,12 @@ jsrt_value jsrt_array_concat_many(jsrt_value array, uint32_t n, ...);
 /* Replace every hole of `array` with `undefined`, in place, and answer it: an array-literal
  * spread iterates its operand, so `[...xs]` has no holes where `xs.concat()` keeps them. */
 jsrt_value jsrt_array_fill_holes(jsrt_value array);
+/* `[...x]`'s operand as an array: an array itself, anything else drained through its iterator, a
+ * non-iterable a pending TypeError (jsrt_typed.zig, docs/VALUE.md §4.23). */
+jsrt_value jsrt_spread_operand(jsrt_value source);
+/* `Array.from(items)` with one argument (§23.1.2.1): iterables drained, array-likes read by
+ * `length`, nullish a pending TypeError. */
+jsrt_value jsrt_array_from(jsrt_value source);
 jsrt_value jsrt_array_reverse(jsrt_value array);
 jsrt_value jsrt_array_fill(jsrt_value array, jsrt_value value, jsrt_value start, jsrt_value end);
 
@@ -1539,6 +1545,10 @@ jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
 /* Same as jsrt_call, with a `file:line` baked in so a non-function callee names the site
  * (STA2006). `loc` may be NULL, which keeps the unlocated TypeError for builtin-internal calls. */
 jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv, const char *loc);
+/* A call whose arguments include a spread: `args` is the array of all of them. `receiver` is the
+ * method call's receiver, passed to a closure that declares one, or NULL for a plain call. */
+jsrt_value jsrt_call_spread_at(jsrt_value callee, const jsrt_value *receiver, jsrt_value args,
+                               const char *loc);
 
 /* `new v(...)`: the one caller of a class object's constructor (docs/VALUE.md §4.17).
  *

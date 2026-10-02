@@ -215,7 +215,8 @@ function isSubstitutable(expr: Expression): boolean {
 }
 
 function inlineCall(expr: Expression, candidates: ReadonlyMap<string, Candidate>): Expression {
-  if (expr.kind !== 'call' || expr.callee.kind !== 'identifier') {
+  // A spread call's one argument is the whole list, not the first parameter.
+  if (expr.kind !== 'call' || expr.spread === true || expr.callee.kind !== 'identifier') {
     return expr;
   }
   const candidate = candidates.get(expr.callee.name);

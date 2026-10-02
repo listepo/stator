@@ -4093,9 +4093,14 @@ class Emitter {
         this.beginCall(parts, expr.callee, expr.args, expr.span, base);
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);
+        // A spread call's one argument is the folded list (verifier STA4104).
+        const call =
+          expr.spread === true
+            ? `jsrt_call_spread_at(${this.slotAt(base)}, NULL, ${this.slotAt(base + 1)}, ${loc})`
+            : `jsrt_call_at(${this.slotAt(base)}, ${expr.args.length}, ${argv}, ${loc})`;
         return this.finishStatement(
           parts,
-          `${this.slotAt(base)} = jsrt_call_at(${this.slotAt(base)}, ${expr.args.length}, ${argv}, ${loc})`,
+          `${this.slotAt(base)} = ${call}`,
           this.slotAt(base),
           expr.span,
         );
@@ -4316,6 +4321,14 @@ class Emitter {
         }
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);
+        if (expr.kind === 'dyn-method-call' && expr.spread === true) {
+          return this.finishStatement(
+            [],
+            `${this.slotAt(base)} = jsrt_call_spread_at(${method}, &${this.slotAt(base)}, ${this.slotAt(base + 1)}, ${loc})`,
+            this.slotAt(base),
+            expr.span,
+          );
+        }
         const withReceiver = `jsrt_call_at(${method}, ${String(1 + expr.args.length)}, &${this.slotAt(base)}, ${loc})`;
         const withoutReceiver = `jsrt_call_at(${method}, ${String(expr.args.length)}, ${argv}, ${loc})`;
         return this.finishStatement(

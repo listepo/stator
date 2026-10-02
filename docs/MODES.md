@@ -96,7 +96,8 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
   (TS2532), `"" == 0` (TS2367), a namespace IIFE reassigning a function declaration's binding
   (TS2630; a named function expression's own name is immutable and stays fatal), a spread the
   checker narrowed to `never` (TS2698), `new F()` on a function that returns a value and a read of
-  `F.prototype` before the program replaces it (TS2350, TS2565; docs/VALUE.md §4.20), and two
+  `F.prototype` before the program replaces it (TS2350, TS2565; docs/VALUE.md §4.20), a spread
+  into fixed parameters, which calls with the list's own count (TS2556; docs/VALUE.md §4.23), and two
   `export *` re-exports binding one name differently
   (TS2308: ES drops the name from the namespace, and importing it by name is `STA3003`, plan.md
   §11c T11.5a; `ts` mode keeps TS2308 fatal).

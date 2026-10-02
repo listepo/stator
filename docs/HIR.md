@@ -238,6 +238,15 @@ with one argument, result an array of an Unknown element). A row with `throws` g
 after the call. `Array()` and `Array(a, b, …)` are not calls at all: they lower to the array literal
 they equal. An `ArrayOp` with `spread` set is the `concat` an array-literal spread lowers to; its
 answer has its holes filled with `undefined`, because a spread iterates (docs/VALUE.md §4.4).
+Since step 5 two rows are not callee names: `Array.from` (`jsrt_array_from`) and `...`
+(`jsrt_spread_operand`), which the lowering wraps around any spread operand that is not an array,
+so the `concat` receives the drained iterable rather than appending it whole (docs/VALUE.md §4.23).
+
+A `CallExpr` or `DynMethodCall` with `spread` set (step 5) has exactly ONE argument: the array the
+lowering folded the whole argument list into, exactly as it folds an array literal's. The emitter
+calls `jsrt_call_spread_at`, which calls with the list's own count; the verifier holds the one
+array (`STA4104`), a spread `DynMethodCall` may have any receiver type (the method read is the
+shape table's, `STA4059` does not apply), and the inline pass never inlines one.
 
 The seven ES2025 set operations are `op`s too, and they are the only ones whose ARGUMENT is a
 collection: the emitter passes it to a runtime function that reads it as a `JSRTMap`, so the

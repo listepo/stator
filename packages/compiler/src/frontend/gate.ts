@@ -1,5 +1,6 @@
 import * as ts from 'typescript';
 import { ambiguousStarExports, namespaceModule } from './modules.ts';
+import { hasTypeScriptAnnotation } from './annotation.ts';
 import type {
   ConsoleMethod,
   DateOperation,
@@ -10,7 +11,7 @@ import type {
 import { GLOBAL_CALLS, NUMBER_OPS } from '../hir/nodes.ts';
 import type { GlobalCallName } from '../hir/nodes.ts';
 import type { HType } from '../hir/types.ts';
-import { accessorName, hTypeEquals, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
+import { accessorName, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
 import { callableFieldSlot } from '../hir/types.ts';
 import {
   ARRAY_OPS,
@@ -2873,8 +2874,15 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       if (!Object.hasOwn(ARRAY_OPS, op)) {
         return notYet(`Array.prototype.${op} is not yet supported`, 5);
       }
+      // A spread calls the bound method (`jsrt_array_method`) with the drained argument list, which
+      // reads `push`/`unshift`/`splice`/`concat` by COUNT the way the specification does (step 5).
+      // The callback ops stay refused: the callback rule below cannot see an argument a spread
+      // carries, and `reduce` tells an absent initial value from an `undefined` one by count the
+      // bound entry does not keep. `toSpliced` reads a fixed pair and drops its insertion tail.
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet('a spread argument to an array method is not yet supported', 5);
+        return Object.hasOwn(CALLBACK_ARRAY_OPS, op) || op === 'toSpliced'
+          ? notYet(`a spread argument to Array.prototype.${op} is not yet supported`, 5)
+          : { kind: 'accept' };
       }
       if (op === 'lastIndexOf' && call.arguments.length > 2) {
         return notYet('lastIndexOf with more than two arguments is not yet supported', 5);
@@ -3000,13 +3008,10 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     if (collection !== undefined) {
       return collection;
     }
-    // A spread's count is not its arity: the lowering pads every other call to a fixed argv, and
-    // a spread needs a dynamic one nothing builds (plan.md §8 step 37). Refused here rather than
-    // lowered wrong — the lowering's STA4031 on SpreadElement is the same bug wearing an
-    // internal error's clothes, in both modes. The builtin namespaces refuse their own spreads
-    // above with their own messages; what reaches here is a user function or method.
+    // The builtin namespaces refuse their own spreads above with their own messages; what reaches
+    // here is a user function or method, which a spread calls through the shape table (step 5).
     if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
-      return notYet('a spread argument to a method call is not yet supported', 5);
+      return gateSpreadMethodCall(call, callee, typeChecker, mode);
     }
     // `C.m(…)` -- a static method, which is an ordinary function with no receiver. It is decided
     // before the instance case because the receiver's type answers the same for both.
@@ -3114,10 +3119,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
 
   // `super(...)`, which the gate reaches only after gateClass proved it is the first statement of a
   // derived constructor: it is the base constructor run against the receiver this one was handed.
-  // A spread needs the same dynamic argv an ordinary spread call does (above), so it waits with it.
+  // A spread would run the base constructor through `jsrt_call_spread_at`, which passes no `this`
+  // a constructor call can bind; it waits with the spread `new` (`gateNew`).
   if (callee.kind === ts.SyntaxKind.SuperKeyword) {
     return call.arguments.some((argument) => ts.isSpreadElement(argument))
-      ? notYet('a spread argument to a function call is not yet supported', 5)
+      ? notYet('a spread argument to a super call is not yet supported', 5)
       : { kind: 'accept' };
   }
 
@@ -3131,11 +3137,70 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   //
   // The argument count is deliberately unchecked: JavaScript drops extras and fills missing ones
   // with `undefined`, and the calling convention does that at runtime rather than making it a gate
-  // decision. A spread is the one argument form with no fixed count at all (plan.md §8 step 37).
+  // decision. A spread is the one argument form with no fixed count at all: its list is built at
+  // run time and called through `jsrt_call_spread_at` (step 5).
   if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
-    return notYet('a spread argument to a function call is not yet supported', 5);
+    return spreadCallRefusal(call, typeChecker, mode) ?? { kind: 'accept' };
   }
   return { kind: 'accept' };
+}
+
+/** What every spread call is still refused for (plan.md §11c T11.4 step 5): a call inside an
+ * optional chain, whose short-circuit the spread lowering does not build, and -- in js mode -- a
+ * callee with a TypeScript-annotated parameter. That annotation is a claim the edge check keeps
+ * (`STA2001`, plan-notes 308), and a spread's elements reach parameters by position only at run
+ * time, where no check stands. ts mode's checker proved the spread against the parameters itself. */
+function spreadCallRefusal(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+  mode: Mode,
+): GateResult | undefined {
+  if (ts.isOptionalChain(call)) {
+    return notYet('a spread argument in an optional chain is not yet supported', 5);
+  }
+  if (mode !== 'js') {
+    return undefined;
+  }
+  const declaration = checker.getResolvedSignature(call)?.declaration;
+  return declaration !== undefined &&
+    !ts.isJSDocSignature(declaration) &&
+    declaration.parameters.some((parameter) => hasTypeScriptAnnotation(parameter))
+    ? notYet(
+        'a spread argument to a function with annotated TypeScript parameters is not yet supported in js mode',
+        5,
+      )
+    : undefined;
+}
+
+/** `o.m(...xs)`: the method read through the shape table and called with `o` as its receiver
+ * (`jsrt_call_spread_at`). That read answers an Unknown or plain-object receiver, a class instance
+ * (its methods are the class's closures), an array, and a function's own property; the other
+ * receivers the static arms own -- iterators, collections, RegExp matches -- stay refused, as does
+ * `super.m(...)`, which names no value to read through. */
+function gateSpreadMethodCall(
+  call: ts.CallExpression,
+  callee: ts.PropertyAccessExpression,
+  checker: ts.TypeChecker,
+  mode: Mode,
+): GateResult {
+  const refused = spreadCallRefusal(call, checker, mode);
+  if (refused !== undefined) {
+    return refused;
+  }
+  if (callee.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    return notYet('a spread argument to a super method call is not yet supported', 5);
+  }
+  if (staticMemberOf(callee, checker, true) !== undefined) {
+    return { kind: 'accept' };
+  }
+  if (isFunctionValueMember(callee.expression, callee.name.text, checker)) {
+    return functionMemberResult(mode);
+  }
+  const receiver = tsTypeToHType(checker.getTypeAtLocation(callee.expression), checker);
+  return (receiver.kind === 'unknown' || receiver.kind === 'object') &&
+    !isMatchReceiver(callee.expression, checker)
+    ? { kind: 'accept' }
+    : notYet('a spread argument to a method call is not yet supported', 5);
 }
 
 /** Whether `fn` is an overload signature with a runnable implementation: bodiless, named,
@@ -3544,45 +3609,11 @@ function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeCh
       return outSlotInValuePosition('an array literal');
     }
   }
-  for (const element of literal.elements) {
-    if (ts.isOmittedExpression(element)) {
-      return notYet('a hole in an array literal is not yet supported', 5);
-    }
-    if (ts.isSpreadElement(element)) {
-      // Judged by the type the lowering gives the operand (spreadOperandType), not by the
-      // checker's asserted type: a checker-level array the HType model calls Unknown — a tuple,
-      // a union of arrays — emits the same uncompilable concat as a directly unknown value.
-      const hir = spreadOperandType(element.expression, checker);
-      if (hir.kind === 'array') {
-        continue;
-      }
-      const operandType = checker.getTypeAtLocation(element.expression);
-      if ((operandType.flags & ts.TypeFlags.StringLike) !== 0) {
-        return notYet('spread of a string in an array literal is not yet supported', 5);
-      }
-      if (hir.kind === 'unknown') {
-        // Unknown is three different things and only two of them are this gate's to report. An
-        // `any` operand, a tuple, or a dropped `as` assertion is silent at the checker and fatal
-        // at the verifier (STA4082): spreading one stays refused even though the GetIterator
-        // dispatch exists now (plan.md §8 step 2a(c) landed it for `for-of`), because driving an
-        // element walk is not copying elements — spread-of-unknown is step 12(c) residue with
-        // its own card, not this dispatch's second caller. A directly-`unknown` operand
-        // is the third thing and is excluded: in ts mode the checker refuses it (TS2488) before
-        // the gate runs, so speaking here too would double-report one mistake — and `explain`
-        // would answer not-yet where the build answers error. In js mode that refusal is
-        // suppressed (plan.md §8 step 2a(c)), so the operand falls through to the lowering's
-        // own STA1214 arm instead (subset_spread_direct_unknown_js.js pins the wake).
-        if (
-          spreadAdmitsAny(operandType) ||
-          isArrayOrTuple(operandType, checker) ||
-          isDroppedSpreadAssertion(element.expression, checker)
-        ) {
-          return notYet('spread of an unknown value in an array literal is not yet supported', 5);
-        }
-        continue;
-      }
-      return notYet('spread in an array literal of a non-array value is not yet supported', 5);
-    }
+  // A spread of any operand is accepted (plan.md §11c T11.4 step 5): the lowering spreads an array
+  // through the concat and drains anything else at run time, where a non-iterable is Node's
+  // `TypeError` (docs/VALUE.md §4.23).
+  if (literal.elements.some((element) => ts.isOmittedExpression(element))) {
+    return notYet('a hole in an array literal is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -3618,44 +3649,6 @@ function spreadOperandType(expression: ts.Expression, checker: ts.TypeChecker): 
     return spreadOperandType(current.expression, checker);
   }
   return tsTypeToHType(checker.getTypeAtLocation(current), checker);
-}
-
-/** Whether `expression` is an `as` assertion the lowering drops rather than checks.
- *
- * Only consulted where the effective operand type is already Unknown, so the BoundaryCheck case
- * (a checkable assertion, which keeps the ASSERTED type and never lands here) is unreachable by
- * construction. What remains is an assertion to a type no tag settles — an array, a fixed shape —
- * off a value that stays dynamic: exactly the spelling the checker waves through and the verifier
- * then rejects. An `as unknown`/`as any` is not one: it asserts nothing, and the `any` half is
- * refused (or owned by the checker's own diagnostic) through the operand-type rule beside this
- * one. */
-function isDroppedSpreadAssertion(expression: ts.Expression, checker: ts.TypeChecker): boolean {
-  let current = expression;
-  while (ts.isParenthesizedExpression(current)) {
-    current = current.expression;
-  }
-  if (!ts.isAsExpression(current)) {
-    return false;
-  }
-  const asserted = tsTypeToHType(checker.getTypeAtLocation(current), checker);
-  return (
-    asserted.kind !== 'unknown' &&
-    !hTypeEquals(asserted, spreadOperandType(current.expression, checker))
-  );
-}
-
-/** Whether the checker lets this operand's Unknown through untouched: an `any` (whose spread
- * needs no iterator method to satisfy the checker) or a union carrying one. A directly-`unknown`
- * operand is excluded on purpose in ts mode — spreading it is TS2488, the checker's own
- * diagnostic — so the gate stays silent there rather than reporting one mistake twice (and
- * `explain` answering not-yet where the build answers error). In js mode that refusal is
- * suppressed (plan.md §8 step 2a(c)): the operand still skips this gate arm, but it lands on the
- * lowering's own STA1214 rather than compiling. */
-function spreadAdmitsAny(type: ts.Type): boolean {
-  if ((type.flags & ts.TypeFlags.Any) !== 0) {
-    return true;
-  }
-  return type.isUnion() && type.types.some((arm) => (arm.flags & ts.TypeFlags.Any) !== 0);
 }
 
 /** Whether `name` is a key a FIXED layout can carry.
@@ -5127,6 +5120,13 @@ function gateCollectionCall(
   if (arity === undefined) {
     return notYet(`${callee.name.text} on a ${collectionName(collection)} is not yet supported`, 5);
   }
+  // Each op is one fixed-arity node, and a spread's count is not its arity.
+  if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
+    return notYet(
+      `a spread argument to a ${collectionName(collection)} method is not yet supported`,
+      5,
+    );
+  }
   if (call.arguments.length !== arity) {
     return notYet(
       `${collectionName(collection)}.${callee.name.text} with ${String(call.arguments.length)} arguments is not yet supported`,
@@ -6469,10 +6469,11 @@ function calleeOnlyMember(access: ts.Expression, what: string): GateResult {
     : notYet(`using ${what} as a value is not yet supported`, 5);
 }
 
-/** The namespace members that exist only as callees, by namespace. `Number.parseInt` and
- * `Number.parseFloat` are the global functions themselves (§21.1.2.12-13). */
+/** The namespace members that exist only as callees, by namespace. `Array.from` is a global-call
+ * row (step 5); `Number.parseInt` and `Number.parseFloat` are the global functions themselves
+ * (§21.1.2.12-13). */
 const CALLEE_ONLY_STATICS: Readonly<Record<string, readonly string[]>> = {
-  Array: ['isArray'],
+  Array: ['isArray', 'from'],
   Number: ['parseInt', 'parseFloat'],
 };
 
@@ -6492,6 +6493,9 @@ export function globalFunctionOf(
     (node.name.text === 'parseInt' || node.name.text === 'parseFloat')
   ) {
     return isGlobalNamed(node.expression, checker, 'Number') ? node.name.text : undefined;
+  }
+  if (ts.isPropertyAccessExpression(node) && node.name.text === 'from') {
+    return isGlobalArray(node.expression, checker) ? 'Array.from' : undefined;
   }
   if (!ts.isIdentifier(node)) {
     return undefined;
