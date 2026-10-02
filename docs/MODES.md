@@ -504,7 +504,15 @@ without the flag (docs/BUNDLER.md §1).
 `path.posix`, as on the pinned Node there. `node:assert` (T11.7), the slice Node's own tests use:
 `ok`, `strictEqual`, `notStrictEqual`, `deepStrictEqual`, `match`, `fail`, `throws`, `rejects` and
 `AssertionError`; its default export is an object, not yet a callable function. `node:module`
-(T11.5): `createRequire`, `isBuiltin` and `builtinModules`. Each module's default export is the module object
+(T11.5): `createRequire`, `isBuiltin` and `builtinModules`. `node:fs` (T11.6), the synchronous
+subset `tsc` calls: `closeSync`, `existsSync`, `mkdirSync`, `openSync`, `readFileSync`,
+`readdirSync`, `realpathSync`, `rmdirSync`, `statSync`, `unlinkSync`, `utimesSync`,
+`writeFileSync` and `writeSync`, failing with Node's system errors (`code`, `errno`, `syscall`,
+`path` and the same message). Its gaps: paths are strings only (no `Buffer` or `URL`);
+`readFileSync` without an encoding answers a `Uint8Array` until `Buffer` lands; `readdirSync` lists
+in byte order; a `Dirent` follows symbolic links; a `Stats` carries `size`, `mtimeMs`, `mtime`,
+`isFile`, `isDirectory` and `isSymbolicLink` only; a system error is not an `Error` instance;
+`watch`, `watchFile` and `unwatchFile` wait on the event loop (N2). Each module's default export is the module object
 (`import path from 'node:path'`), which the bundle's `import * as m` plus `m.default` also needs.
 `path.win32`, `node:path/win32` and `path.matchesGlob` have not landed.
 

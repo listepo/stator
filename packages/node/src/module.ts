@@ -9,6 +9,7 @@
 
 import assert from './assert.ts';
 import { NodeError } from './internal/errors.ts';
+import fs from './fs.ts';
 import { fileHrefToPath } from './internal/url.ts';
 import path from './path.ts';
 
@@ -104,6 +105,8 @@ function landed(id: string): unknown {
   switch (id) {
     case 'assert':
       return assert;
+    case 'fs':
+      return fs;
     case 'module':
       return moduleObject;
     case 'path':

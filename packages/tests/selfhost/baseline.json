@@ -10,6 +10,10 @@
     "verdict": "dynamic",
     "codes": {}
   },
+  "packages/node/src/fs.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
   "packages/node/src/module.ts": {
     "verdict": "dynamic",
     "codes": {}

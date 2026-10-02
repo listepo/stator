@@ -11280,6 +11280,89 @@ tuple, a spread of a `Set`, a generic function as a value); the rest of the chan
 `packages/node/src/module.ts` joins as a target (`dynamic`). The runner now skips declaration
 files in an `entries` directory: `globals.d.ts` declares and is no module to compile.
 
+## 317. T11.6, second slice: the `node:fs` sync subset (2026-10-02)
+
+**What lands.** `packages/node/src/fs.ts` lands 12 of the 15 `fs` functions `tsc` calls
+(`docs/NODE.md` **tsc** column): `closeSync`, `existsSync`, `mkdirSync`, `openSync`,
+`readFileSync`, `readdirSync`, `realpathSync`, `statSync`, `unlinkSync`, `utimesSync`,
+`writeFileSync` and `writeSync`. It also lands `rmdirSync`, which the goldens need to remove what
+they create. Everything sits over `std/fs`, `std/encoding` and `std/env`. `require('fs')` answers
+it, through `node:module`'s landed table. Two internals join:
+
+- `internal/system-error.ts`: Node's `uvException` shape.
+- `internal/encoding.ts`: Node's encoding names over `std/encoding`. `Buffer` will reuse it.
+
+Slice N1 moves from 3 / 37 to 15 / 37.
+
+**The default export is a namespace, not a class.** `node:path` and `node:assert` build their
+default export as a class whose fields copy each function (`readonly join = join;`). At 13
+members, `fs`'s copy of that pattern is a `dupes` clone of `path.ts`'s. Every later module would
+repeat it too. So the members live in `internal/fs.ts`. `fs.ts` re-exports them with `export *` and
+default-exports `import * as fs`, the namespace T11.5a compiles. That is also Node's shape: the
+default export is the exports object, `Stats` and `Dirent` included. A new member is listed once.
+A self-import (`import * as self from './fs.ts'`) would be shorter, but the checker refuses it
+("Circular definition of import alias", STA0012). An unlanded member such as `watch` is still the
+gate's STA1214.
+
+**Node's errors, measured** on the pinned Node v26.7.0 (darwin-arm64, 2026-10-02). Sources: Node
+v26.7.0 `lib/internal/errors.js` (`uvException`,
+https://github.com/nodejs/node/blob/v26.7.0/lib/internal/errors.js) and
+`util.getSystemErrorMap()`.
+
+- **The message and keys.** The message is `<CODE>: <description>, <syscall>` plus ` '<path>'`
+  when there is a path. The own keys are `errno`, `code`, `syscall` and `path`.
+- **The syscalls each function reports:**
+  - `readFileSync`, `openSync` and `writeFileSync` report `open`. A directory gives `EISDIR`,
+    `read`, with no path.
+  - `statSync` → `stat`, `mkdirSync` → `mkdir`, `unlinkSync` → `unlink`, `rmdirSync` → `rmdir`.
+  - `readdirSync` → `scandir`, `utimesSync` → `utime`.
+  - `closeSync` → `close` and `writeSync` → `write`, both with no path.
+- **`realpathSync` reports `lstat`** on the first missing component, spelled from the canonical
+  path (`/private/tmp/…` on macOS). Our walk does the same from the realpath of the deepest
+  existing ancestor.
+- **Platform-dependent errno.** `errno` comes from libuv's table. `ELOOP`, `ENAMETOOLONG` and
+  `ENOTEMPTY` differ between Darwin (-62, -63, -66) and Linux (-40, -36, -39), so the table reads
+  `std/os.platform()`.
+- **Option results:**
+  - `statSync(p, { throwIfNoEntry: false })` answers `undefined`.
+  - `mkdirSync(p, { recursive: true })` answers the first directory it created, or `undefined`
+    when nothing was missing.
+- **An unknown encoding** throws `TypeError [ERR_INVALID_ARG_VALUE]` "The argument 'encoding' is
+  invalid encoding. Received '<name>'". It reuses T11.5's `NodeError`.
+
+**Gaps, each in docs/MODES.md §6 and SUBSET.md:**
+
+- Paths are strings only.
+- `readFileSync` without an encoding answers a `Uint8Array` until `Buffer` lands. The `Buffer`
+  slice switches it.
+- `readdirSync` lists in byte order.
+- A `Dirent` follows symbolic links.
+- `Stats` carries `size`, `mtimeMs`, `mtime` and the three kind tests only.
+- A system error is a plain class, not an `Error` instance. Extending `Error` is STA1214, the gap
+  `AssertionError` and `NodeError` share.
+- `watch`, `watchFile` and `unwatchFile` need the event loop (N2) and stay STA1214. The
+  coordinator agreed on 2026-10-02.
+
+**A compiler bug found on the way, worked around.** A member call on a `Date` narrowed out of
+`number | Date` compiles but panics at run time. `typeof t === 'number' ? t * 1000 :
+t.getTime()` gives `PANIC: STA2006: calling a non-function`, and so do `t instanceof Date` and
+`t.valueOf()`. `Number(t)` gives `NaN`. Passing the narrowed value to a `Date`-typed parameter and
+calling `getTime()` there works. `utimesSync` does that (`dateMs`), with a comment. The bug is the
+union's dynamic member dispatch, which has no `Date` methods. It belongs to the dynamic
+representation, not to this slice.
+
+**Proof.**
+- Goldens `ts/node_fs`: every landed function, each error above with its code, syscall and
+  masked message, the encodings, and `Stats`/`Dirent`.
+- Golden `js/node_fs`: the bare specifier, the default export and untyped options.
+- Both run in a scratch directory named from `Date.now()`. Stator's `Math.random` has a fixed
+  seed (jsrt_math.c), so a name drawn from it alone collides with a crashed earlier run. Both
+  remove what they create.
+- Decision tests `subset_node_fs_node_ts` / `_js` are `dynamic`.
+- 16 `node_coverage.json` claims, with `docs/NODE.md` regenerated.
+- Self-compilation gains the target `packages/node/src/fs.ts` (`dynamic`, no codes), recorded
+  with `--update`; the other counts do not move.
+
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 
 **What landed.** `js` mode sends package imports and CommonJS project files to one bundler
