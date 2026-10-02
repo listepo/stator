@@ -10063,6 +10063,42 @@ the same change, and the growth is reviewed in `baseline.json`'s diff. A shrink 
 recorded too. `.jscpd-baseline.json` keeps its shrink-only rule; the two baselines answer
 different questions. The rule is in plan.md's Task 6.19 stub.
 
+## 307. T10.1 lands: the `std/fs` Promise twins are not-yet, named and refused (2026-10-02)
+
+**Context.** T10.1 step 5 said Promise-flavored `std/fs` waits for T10.2's thread pool. Until
+this change "waits" meant "absent": `import { readTextAsync } from 'std/fs'` failed as the
+checker's TS2305 ("has no exported member"), passed through as `STA0012`, the same as a typo.
+The card's Check wants a `not-yet` that names Phase 10.
+
+**Decision.**
+
+- The twins are each sync call's name plus `Async`: `readTextAsync`, `writeTextAsync`,
+  `statAsync`, `mkdirAsync`, `unlinkAsync`, `rmdirAsync`. The list lives in one place,
+  `THREAD_POOL_MEMBERS` in `packages/compiler/src/frontend/std.ts`, beside `THREAD_MODULES`.
+- `stdImportRefusal` (frontend/program.ts) already turns TS2307 on a `std/` specifier into
+  `STA3002`/`STA1214`. It now also turns TS2305/TS2724 into `STA1214` (Phase 10) when the
+  missing name is a twin of the import's `std/` module (`classifyStdMember`). Any other missing
+  name keeps `STA0012`: a misspelt member is an error, not a promise.
+- No new code. `STA1214` is the generic not-yet code and already carries `std/sync` and
+  `std/thread`; a member-level refusal is the same verdict one level down. docs/DIAGNOSTICS.md is
+  touched only to say where the mapping happens (the `STA0012` row).
+- Not shipped as sync calls under `async`: that would block main inside an async program and
+  freeze the API's timing before the pool exists.
+
+**Self-compilation.** The new code raises the compiler's `STA1214` count in
+`packages/tests/selfhost/baseline.json` from 2549 to 2553, recorded with `--update` per
+plan-notes 306 / v4.25.
+
+**Check evidence.**
+
+- `node packages/tests/subset/run.ts --filter subset_std` → 17 passed (new:
+  `subset_std_fs_async_ts`, `subset_std_fs_async_js` — not-yet `STA1214`;
+  `subset_std_fs_missing_ts` — error `STA0012`).
+- `node packages/tests/golden/run.ts --filter std_` → 6 passed (`std_env`, `std_path`,
+  `std_process`, `std_fs`, `std_time` in ts mode and `std_js` in js mode).
+- `packages/std/package.json` has no runtime dependency (one `typescript` devDependency): no
+  Node polyfill.
+
 ## 308. js mode checks the call and return edges a `.ts` annotation claims (2026-10-02)
 
 **Trigger.** Plan-notes 301's "Not covered" paragraph. With `lib.js` exporting

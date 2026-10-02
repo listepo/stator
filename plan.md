@@ -1182,7 +1182,7 @@ the existing pipeline (`node:worker_threads` / a process pool), not Zig/Rust/Go 
    | `std/env` | `get`/`set`/`has`/`unset`, `cwd` | `args` moved to T11.3 as `std/process.argv` (plan-notes 294): the generated `main` takes no `argv` yet |
    | `std/process` | `exit`, `pid`, `abort` | no signals yet |
    | `std/path` | `join`/`dirname`/`basename`/`isAbsolute` | pure TS or tiny C; UTF-16 ↔ bytes at the FS edge only |
-   | `std/fs` | sync read/write/stat/mkdir/unlink/rmdir; Promise twins | Promise twins are thin `async` wrappers that `await` a thread-pool job (see B) once T10.2 exists; until then sync-only is honest |
+   | `std/fs` | sync read/write/stat/mkdir/unlink/rmdir; Promise twins | Promise twins (`readTextAsync`, … — the sync name plus `Async`) are thin `async` wrappers that `await` a thread-pool job (see B) once T10.2 exists; until then importing one is not-yet naming Phase 10 (T10.1 step 5) |
    | `std/time` | `nowMs`, `sleepMs` (sync) | timers in the microtask sense stay out until a macrotask phase exists |
    | `std/sync` | `Mutex`, `CondVar`, `Channel` | with T10.2 |
    | `std/thread` | `spawn`, `join`, `availableParallelism` | with T10.2 |
@@ -1257,25 +1257,11 @@ step remains). `pnpm run ci` green.
 
 ---
 
-### T10.1. `std` low-level API (sans threads) — **[D4]**
-
-Steps:
-
-1. Write `docs/STD.md` (module path, error model, v0 table above). Add stub `SUBSET.md` rows /
-   diagnostics that name Phase 10.
-2. ~~Wire `std/env` and `std/path` end-to-end (types → runtime → golden).~~ Landed (plan-notes
-   284), then moved into `packages/std` by T11.2.
-3. ~~Add `std/process` (`exit`/`pid`).~~ Landed in `packages/std` by T11.2 (plan-notes 294).
-4. ~~Add sync `std/fs` + `std/time` (`nowMs`; sync `sleepMs` only).~~ Landed in `packages/std`
-   by T11.2 (plan-notes 294).
-5. Promise-flavored `std/fs` APIs: either `not-yet` until T10.2, or implemented as sync under a
-   documented lie — **prefer not-yet** so async programs do not block main by accident.
-
-Steps 2–4 live in `packages/std` since T11.2 (plan-notes 294); step 5 is what remains — today
-`std/fs` simply has no Promise members, and the card closes when that refusal is a `not-yet`
-naming Phase 10.
-
-**Check:** goldens for env/path/process/fs sync; subset rows match; no Node polyfill dependency.
+~~**T10.1. `std` low-level API (sans threads).**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 10 T10.1 (plan-notes 284, 294, 307).
+`std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` live in `packages/std`. The
+`std/fs` Promise twins (`readTextAsync`, …) are `STA1214` naming Phase 10 until T10.2 implements
+them as `async` wrappers over the thread pool (docs/STD.md §2).
 
 ### T10.2. OS threads + async bridge — **[D5]**
 
@@ -2338,3 +2324,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.23** (2026-10-02): **Task 6.17 — test impact selection** (plan-notes 293). Creator-directed: on pull requests and locally, build and run only the tests whose execution reaches a changed line, through TypeScript and on into the C/Zig runtime, using a per-test coverage map recorded by the full run on `main`. Falls back to the full run when the map cannot be trusted; `test:affected` is replaced.
 - **v4.24** (2026-10-02): **Task 6.19 lands: the self-compilation ratchet** (plan-notes 306). `pnpm run test:selfhost` runs `explain --json` over `packages/compiler` and each `packages/std` module, compares verdicts and per-code counts with `packages/tests/selfhost/baseline.json`, builds the `std` modules and runs the `std_*` goldens. It runs in `ci` (38–47 s). The `FirstNode` message now names `QualifiedName`. The Task 6.19 card shrinks to its standing rules and the unbuilt stage-2 check.
 - **v4.25** (2026-10-02): **Self-compilation counts may grow when recorded** (plan-notes 306). The creator answered 306's open question: a change that raises a `test:selfhost` count records it with `--update` in the same change, and review sees the diff.
+- **v4.27** (2026-10-02): **T10.1 lands: the `std/fs` Promise twins are not-yet** (plan-notes 307). `readTextAsync`, `writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync` and `rmdirAsync` — each sync call's name plus `Async` — are `STA1214` naming Phase 10 (T10.2's thread pool) in both modes, instead of the checker's "no exported member" (`STA0012`, which every other missing name keeps). No new code. Subset rows `subset_std_fs_async_ts`/`_js`, `subset_std_fs_missing_ts`; docs/STD.md §2, SUBSET.md, DIAGNOSTICS.md (STA0012 row). T10.1 moves to `done.md`.
