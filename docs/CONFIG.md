@@ -38,6 +38,7 @@ One key per flag. The schema is generated from `packages/compiler/src/cli/config
 | `unitName` | string | `--unit-name` | entry basename | `build` |
 | `bundler` | `"vite"` \| `"none"` \| module | `--bundler` | `"vite"` | both, `js` mode only (`STA0004` in `ts` mode) |
 | `diagnostics` | `"text"` \| `"json"` | `--json`, `--diagnostics=text\|json` | `"text"` | `explain` |
+| `node` | boolean | `--node` | `false` | both |
 
 A key a command does not use is ignored by that command, so one file serves both.
 
@@ -45,8 +46,10 @@ A key a command does not use is ignored by that command, so one file serves both
 paths on the command line resolve against the current directory. Each `link` entry splits on
 whitespace like one `--link` value; `-L` paths inside it are passed to clang as written.
 
-Planned flags get their keys in the same change as the flag: `node` (T11.5),
-`renderer` (T13), `interpreter` (T14). Every new flag lands with its key and a regenerated schema
+Planned flags get their keys in the same change as the flag: `renderer` (T13), `interpreter`
+(T14); `bundler` landed with T12.1 and `node` with `--node` (T11.5). Like `keepC`, `node: true`
+has no command-line negation: `--no-config` is how a build turns it off. Every new flag lands with
+its key and a regenerated schema
 (AGENTS.md).
 
 ## Precedence

@@ -10619,6 +10619,89 @@ vitest passed 51 files and 683 tests, including `unit/extern-bytes.test.ts` and 
 `unit/std.test.ts` tests. selfhost matched its baseline, so no `--update` was needed. The full
 record is in done.md, Phase 11 T11.3a.
 
+## 312. T11.5, the steps that do not need the bundler: `--node`, resolution, `STA1110` (2026-10-02)
+
+**Trigger.** The creator's Node-track order: T11.6 depends on T11.5, and T11.5's CommonJS part
+depends on T12.1 (the bundler API), which another agent is building. So T11.5 lands what the
+bundler does not touch, and the card stays open for the rest.
+
+**What landed.**
+
+- **The flag.** `--node` on `build` and `explain`, and the config key `node` (boolean, default
+  `false`) that docs/CONFIG.md reserved for it; the schema is regenerated. Like `keepC`, there is
+  no command-line negation. The flag reaches only the frontend: `createProgram` (the `paths`
+  entries and the edge refusals) and `gateProgram` (`require`). Nothing below the gate reads it.
+- **Resolution** (`packages/compiler/src/frontend/node.ts`). A built-in is `node:<id>` for a
+  public id of the pinned Node's `builtinModules`, or a bare `<id>` that list also holds bare
+  (Node 26.7.0 lists `node:sea`, `node:sqlite`, `node:test` and `node:test/reporters` only with
+  the prefix: `node -e 'console.log(require("node:module").builtinModules)'`, checked 2026-10-02).
+  `_`-prefixed ids are Node internals, the exclusion `docs/NODE.md` already makes. Under `--node`
+  `node:*` maps by wildcard and each bare id by name to `packages/node/src/<id>.ts`, on the
+  program's own `paths`, the mechanism `std/` uses (plan-notes 294), so the checker, the gate and
+  `moduleOrder` agree. A bare wildcard is not used because it would capture every package. The
+  list comes from the Node running the compiler, which `pnpm run ci` pins to `.node-version`, so
+  it is the list `docs/NODE.md` counts. No `statorc/api` was needed.
+- **Platform gaps.** TypeScript answers an unresolved built-in specifier with 2580/2591 ("Do
+  you need to install type definitions for node?"), not 2307, so the edge mapping in
+  `program.ts` (`edgeRefusal`, which absorbed `stdImportRefusal`) reads all three. Without
+  `--node` a built-in is `STA1214` with no phase and a message naming the flag, the
+  `support/phases.ts` no-phase case (a flag to turn on, not a release to wait for). It used to be
+  "importing a package", which was wrong for a built-in. Under `--node` an unlanded module is
+  `STA1214` naming Phase 11 (T11.6), and so is a member the landed module lacks while
+  `process.getBuiltinModule` says Node's has it; any other missing member stays `STA0012`. No new
+  code: these are the subset-boundary code's job, and a platform gap is a subset gap.
+- **`STA1110`.** Not implemented before this change: both fixtures were `@expected-fail`, `ts`
+  mode said `STA0012` ("Cannot find name 'require'") and `js` mode said `STA1214` Phase 5 (the
+  global catch-all). The gate now rules on a `require` no program declaration binds, in every
+  file. In a `.ts` file that name is unresolved; in a `.js` file the checker binds it itself and
+  declares it nowhere. A user's own `function require` and a property name `o.require` are not
+  it. The checker's 2580 on that name is dropped so the gate's answer stands alone. Cells: `ts`
+  mode `STA1110` with or without `--node`; `js` mode `STA1110` without, and `STA1214` naming
+  Phase 11 (T11.5's `createRequire` step) with it. Since T12.1 a CommonJS project file goes to the
+  bundler whole and never reaches the gate, so the `require` this cell sees is the bundle's own
+  call on a built-in, or one beside ES-module syntax.
+- **`__filename`/`__dirname`.** Decided, recorded in docs/MODES.md §6: relative to the
+  executable, resolved at run time. `__dirname` is the binary's directory joined with the
+  module's directory relative to the entry's; `__filename` adds the file name; the vendor module
+  sits at the entry's level. `import.meta.url` is not the source, because in a native binary it
+  needs the same rule, and the subset does not compile `import.meta` yet; when it does, it is
+  the `file:` URL of `__filename`. In an ES module the names stay undefined, as in Node 26.7.0
+  (`ReferenceError: __dirname is not defined in ES module scope`, measured with
+  `node --input-type=module -e 'console.log(__dirname)'`). Injection belongs to the CommonJS
+  wrapper; until then T12.1's `STA1218` stands under the flag too, with a message that names the
+  wrapper instead of the flag.
+- **One root rule.** `std.ts`'s package-root lookup was a copy of `build.ts`'s runtime-root
+  lookup, and `node` would have been a third. They are one function now,
+  `support/package-root.ts`; `STATOR_NODE_ROOT` joins `STATOR_STD_ROOT` and
+  `STATOR_RUNTIME_ROOT`. `build` and `explain` share `entryProgram`. The jscpd baseline shrinks
+  by two (206 → 204).
+
+**Proof.** Decision tests: the four `require` cells (`subset_commonjs_require_ts`/`_js`, now
+passing, and `subset_commonjs_require_node_ts`/`_js`), built-ins without the flag
+(`subset_node_builtin_ts`/`_js`), unlanded under it (`subset_node_unlanded_node_ts`/`_js`).
+`packages/node` has no module yet (T11.6 lands `node:path` next), so
+`unit/node-platform.test.ts` points `STATOR_NODE_ROOT` at a stub package and checks the landed
+path: both spellings resolve and compile `static`, the config key equals the flag, an unlanded
+member names T11.6, an unknown member stays `STA0012`, and a built-in builds and runs through
+the stub. The self-compilation count rises 1711 → 1722 `STA1214` (1648 → 1658 before the merge with T12.1), re-recorded with `--update`
+(plan-notes 306): the new `node.ts` and `package-root.ts` import `node:*` modules and read
+`process`, which the compiler's own `ts`-mode explain counts.
+
+`pnpm run ci` on the branch, merged with T12.1: vitest 53 files, 710 tests passed; subset 831
+fixtures, 798 passed, 33 expected-fail (two fewer: the `require` pair), 0 failed; golden 415/415;
+selfhost matches the re-recorded baseline; builtins 242/304; NODE.md current; leak plateaus; ASan
+gate green.
+
+**Merged after T12.1 (plan-notes 320).** T12.1 landed while this branch was open. Both drive
+the frontend through `cli/bundler.ts` `loadFrontend` now, so `node` threads through it into
+`createProgram` (whose cache keys on it beside the overlay key) and `entryProgram` is gone: the
+clone it removed is `loadFrontend`'s job. T12.1 routes CommonJS project files with or without
+`--node`; whether `--node` should gate that routing is 320's open question 2, left to the creator.
+
+**Still open in T11.5.** The vendor bundle's `import * as m from "path"` plus `m.default`;
+`require`/`createRequire` at run time and its three goldens; and the `__filename`/`__dirname`
+values in the CommonJS wrapper.
+
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 
 **What landed.** `js` mode sends package imports and CommonJS project files to one bundler

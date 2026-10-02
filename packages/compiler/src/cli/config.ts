@@ -74,6 +74,13 @@ export const ConfigSchema = Type.Object(
         description: 'explain: report format; "json" is --json (default "text").',
       }),
     ),
+    node: Type.Optional(
+      Type.Boolean({
+        description:
+          'build and explain: the Node platform (--node). node:* and bare built-ins resolve to ' +
+          'packages/node (docs/MODES.md §6). Default false.',
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -218,6 +225,7 @@ export interface CliOptions {
   unitName: string | undefined;
   bundler: string | undefined;
   diagnostics: 'text' | 'json' | undefined;
+  node: boolean | undefined;
 }
 
 export interface ResolvedOptions {
@@ -232,6 +240,7 @@ export interface ResolvedOptions {
   unitName: string | undefined;
   bundler: string | undefined;
   diagnostics: 'text' | 'json';
+  node: boolean;
 }
 
 /** Whitespace-separated clang flags, the same split as one `--link` value. */
@@ -266,5 +275,6 @@ export function resolveOptions(
       cli.bundler ??
       (config.bundler?.startsWith('.') === true ? fromFile(config.bundler) : config.bundler),
     diagnostics: cli.diagnostics ?? config.diagnostics ?? 'text',
+    node: cli.node ?? config.node ?? false,
   };
 }

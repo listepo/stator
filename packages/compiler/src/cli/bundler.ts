@@ -210,26 +210,28 @@ export interface Frontend extends LoadedProgram {
   readonly vendor?: VendorModule;
 }
 
-/** The program a build compiles. Without a package import or a CommonJS project file, or under
+/** The program a build compiles; `node` is the `--node` platform (docs/MODES.md §6). Without a package import or a CommonJS project file, or under
  * `none`, it is the plain program and no adapter loads (the goldens' case). Otherwise the bundle
  * joins it as the virtual vendor module and the project's package imports name that module. */
 export async function loadFrontend(
   entry: string,
   mode: Mode,
   bundler: BundlerChoice,
+  node = false,
 ): Promise<Frontend> {
   if (!existsSync(entry)) {
     throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
   }
-  return withSpanAsync('frontend/program', {}, () => loadFrontendInner(entry, mode, bundler));
+  return withSpanAsync('frontend/program', {}, () => loadFrontendInner(entry, mode, bundler, node));
 }
 
 async function loadFrontendInner(
   entry: string,
   mode: Mode,
   bundler: BundlerChoice,
+  node: boolean,
 ): Promise<Frontend> {
-  const base = createProgram(entry, mode);
+  const base = createProgram(entry, mode, undefined, undefined, node);
   if (mode !== 'js' || bundler.kind === 'none') return base;
   const entryFile = base.program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
   if (entryFile === undefined) return base;
@@ -242,7 +244,7 @@ async function loadFrontendInner(
   // The bundle's code is what the card keys on (T12.1 step 6); the rewrites follow from the
   // entry's bytes and the bundle, but hashing them too costs nothing and keys on every byte read.
   const key = sha256(JSON.stringify([...files]));
-  const loaded = createProgram(entry, mode, undefined, { files, key });
+  const loaded = createProgram(entry, mode, undefined, { files, key }, node);
   return {
     ...loaded,
     vendor: { path: plan.modulePath, map: sourceMapper(bundle.map, plan.entry.resolveDir) },

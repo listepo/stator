@@ -11,8 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import { emitC, type LibraryEmit } from '../codegen/index.ts';
 import { collectLinkFlags } from '../frontend/extern.ts';
 import {
@@ -29,6 +28,7 @@ import { verifyHir } from '../hir/verify.ts';
 import { optimize } from '../passes/index.ts';
 import { BuildError, type Diagnostic } from '../support/diagnostics.ts';
 import { runtimeFlavor } from '../support/features.ts';
+import { packageRoot } from '../support/package-root.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { isStaleLdSystemLibFailure, staleLdHint, staleLdRetryArgs } from '../support/toolchain.ts';
 import {
@@ -73,6 +73,9 @@ export interface BuildOptions {
   /** `js` mode: the bundler for package imports and CommonJS project files (docs/BUNDLER.md
    * §5). Default `vite`; it loads only when the graph needs it. */
   readonly bundler?: BundlerChoice;
+  /** `--node`: the Node platform (plan.md §11c T11.5, docs/MODES.md §6). Node built-ins resolve
+   * to `packages/node`; a frontend policy, like the mode. */
+  readonly node?: boolean;
 }
 
 export { BuildError };
@@ -130,23 +133,10 @@ async function emitDiagnosticLines(lines: readonly Line[]): Promise<void> {
   await print(lines, process.stderr);
 }
 
-/** The C runtime (headers + built archive) is a sibling package. In the source tree it is
- * `<workspace>/packages/runtime`, reached identically from `src/cli` and the compiled `dist/cli`
- * because `dist` mirrors `src`'s depth; a published `statorc` bundles it beside `dist`.
- * `STATOR_RUNTIME_ROOT` overrides both. A wrong guess is caught at link time (missing archive),
- * exactly as before. */
-function resolveRuntimeRoot(): string {
-  const override = process.env['STATOR_RUNTIME_ROOT'];
-  if (override !== undefined && override !== '') {
-    return override;
-  }
-  const here = dirname(fileURLToPath(import.meta.url));
-  const sibling = join(here, '..', '..', '..', 'runtime'); // packages/compiler/<src|dist>/cli → packages/runtime
-  const bundled = join(here, '..', '..', 'runtime'); // published: runtime beside dist/
-  return existsSync(join(sibling, 'include')) ? sibling : bundled;
-}
-
-const RUNTIME_ROOT = resolveRuntimeRoot();
+/** The C runtime (headers + built archive) is a sibling package (`support/package-root.ts`).
+ * `STATOR_RUNTIME_ROOT` overrides the layout. A wrong guess is caught at link time (missing
+ * archive). */
+const RUNTIME_ROOT = packageRoot('STATOR_RUNTIME_ROOT', 'runtime', 'include');
 const RUNTIME_INCLUDE = join(RUNTIME_ROOT, 'include');
 
 /** `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so CI can run
@@ -196,7 +186,13 @@ export async function build(options: BuildOptions): Promise<number> {
     options.emitHeader === undefined
       ? undefined
       : sanitizeUnitName(options.unitName ?? defaultUnitName(options.entry));
-  const compiled = await compileToC(options.entry, options.mode, unit, options.bundler);
+  const compiled = await compileToC(
+    options.entry,
+    options.mode,
+    unit,
+    options.bundler,
+    options.node ?? false,
+  );
   if (compiled === null) {
     return 1;
   }
@@ -270,9 +266,10 @@ export async function compileToC(
   mode: Mode,
   unit?: string,
   bundler: BundlerChoice = DEFAULT_BUNDLER,
+  node = false,
 ): Promise<CompiledC | null> {
   try {
-    return await compileToCInner(entry, mode, unit, bundler);
+    return await compileToCInner(entry, mode, unit, bundler, node);
   } catch (error) {
     // Diagnostics are the contract for everything the pipeline can name; an ESCAPING exception is
     // a compiler bug by AGENTS.md's definition, and its contract is STA4072, never a raw stack
@@ -290,8 +287,9 @@ async function compileToCInner(
   mode: Mode,
   unit: string | undefined,
   bundler: BundlerChoice,
+  node: boolean,
 ): Promise<CompiledC | null> {
-  const frontend = await loadFrontend(entry, mode, bundler);
+  const frontend = await loadFrontend(entry, mode, bundler, node);
   const { program } = frontend;
   // Every stage's diagnostics in the vendor module are mapped before they print (T12.1 step 5).
   const report = (diagnostics: readonly Diagnostic[]): Promise<boolean> =>
@@ -300,7 +298,7 @@ async function compileToCInner(
     return null;
   }
 
-  if (await report(withSpan('frontend/gate', {}, () => gateProgram(program, mode)))) {
+  if (await report(withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)))) {
     return null;
   }
 

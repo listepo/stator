@@ -98,8 +98,9 @@ export async function explain(
   mode: Mode,
   json: boolean,
   bundler: BundlerChoice = DEFAULT_BUNDLER,
+  node = false,
 ): Promise<number> {
-  const result = await explainFile(entry, mode, bundler);
+  const result = await explainFile(entry, mode, bundler, node);
 
   if (json) {
     // The machine path NEVER goes through ink (decision tests parse this verbatim).
@@ -140,19 +141,23 @@ export async function explain(
   return 0;
 }
 
+/** `node` is the `--node` platform (docs/MODES.md §6): under it a Node built-in `packages/node`
+ * has not landed is a `not-yet` naming T11.6, so `diagnostics` lists the platform gaps the same
+ * way it lists the language ones. */
 export async function explainFile(
   entry: string,
   mode: Mode,
   bundler: BundlerChoice = DEFAULT_BUNDLER,
+  node = false,
 ): Promise<Explanation> {
-  const frontend = await loadFrontend(entry, mode, bundler);
+  const frontend = await loadFrontend(entry, mode, bundler, node);
   const { program } = frontend;
   // The same mapping `build` applies (T12.1 step 5): a vendor diagnostic names the package file.
   const classify = (diagnostics: readonly Diagnostic[]): Explanation | null =>
     classifyDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
   const verdictFromDiagnostics = classify([
     ...frontend.diagnostics,
-    ...withSpan('frontend/gate', {}, () => gateProgram(program, mode)),
+    ...withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)),
   ]);
   if (verdictFromDiagnostics !== null) {
     return verdictFromDiagnostics;

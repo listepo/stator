@@ -3,7 +3,7 @@
     "verdict": "not-yet",
     "codes": {
       "STA1207": 1,
-      "STA1214": 1711
+      "STA1214": 1722
     }
   },
   "packages/std/src/encoding.ts": {

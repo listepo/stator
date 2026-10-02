@@ -205,8 +205,8 @@ This matrix operationalizes plan.md §1 (product spec). Rows must not contradict
 | Prototype mutation: `Object.setPrototypeOf()`, `__proto__` writes | error(STA1107) | not-yet(STA1204, Phase 8) | Prototype changes after object construction break compile-time shape assumptions. Forbidden in `ts` mode; deferred in `js` mode. This row is post-construction writes only: a `{ __proto__: v }` DEFINITION in an object literal is the prototype setter, not a write, and compiles to the dynamic shape with no own property for the key (see Objects & classes). |
 | `delete` on a statically-shaped object (class field, fixed literal) | error(STA1108) | not-yet(STA1205, Phase 8) | The refused REMAINDER of `delete`; the dynamic-shape case landed (see Objects & classes). A fixed layout lists its fields at compile-time offsets and has no way to spell one as missing, so the field cannot go. `ts` mode forbids it — that layout is the mode — and in practice only a class field can reach the diagnostic, since TS2790 makes every other type-correct receiver dynamic. `js` mode defers to the Phase-8 dictionary-mode escape. An Unknown receiver that turns out fixed at run time aborts with STA2007. |
 | `with` statement, sloppy mode | error(STA1109) | error(STA1109) | ESM is always strict, and `with` is illegal in strict mode — so this is not a Stator restriction, it is the language's. |
-| CommonJS `require()` | error(STA1110) | error(STA1110) | ESM is the only module system in both modes. Since T12.1 a `js`-mode CommonJS project file — `.cjs`, `.js` under `"type": "commonjs"`, or a `.js` with no ES-module syntax that reads `require`, `module.exports` or `exports` — never reaches this row: it goes to the bundler whole and joins the program as ESM (`docs/BUNDLER.md` §4, plan-notes 320). |
-| `__filename` / `__dirname` | not-yet(STA1218, Phase 11) | not-yet(STA1218, Phase 11) | **T12.1 step 7.** A free read of Node's CommonJS path globals, in a project file or in the vendor module. Before T12.1 it compiled as `dynamic` and threw `ReferenceError` at run time where Node prints a path. T11.5's `--node` gives them a value that bakes no build-machine path into the binary. Fixtures `subset_node_filename_*`, `subset_node_dirname_*`. |
+| CommonJS `require()` | error(STA1110), with or without `--node` | error(STA1110) without `--node`; not-yet(STA1214, Phase 11) with it | **Narrowed (plan.md §11c T11.5).** ESM is the only module system in `ts` mode and without `--node`. Since T12.1 a `js`-mode CommonJS project file — `.cjs`, `.js` under `"type": "commonjs"`, or a `.js` with no ES-module syntax that reads `require`, `module.exports` or `exports` — never reaches this row: it goes to the bundler whole and joins the program as ESM (`docs/BUNDLER.md` §4, plan-notes 320). A `require` that does reach it in `js` mode with `--node` (the bundle's own call on a built-in, or one beside ES-module syntax) waits for T11.5's `createRequire` step. The rule is on a `require` no program declaration binds: a user's own `function require` is an ordinary function. Fixtures `subset_commonjs_require_ts` / `_js` and `subset_commonjs_require_node_ts` / `_js` (the four mode × platform cells). |
+| `__filename` / `__dirname` | not-yet(STA1218, Phase 11) | not-yet(STA1218, Phase 11) | **T12.1 step 7.** A free read of Node's CommonJS path globals, in a project file or in the vendor module. Before T12.1 it compiled as `dynamic` and threw `ReferenceError` at run time where Node prints a path. T11.5's `--node` gives them a value that bakes no build-machine path into the binary: relative to the executable, resolved at run time (`docs/MODES.md` §6). Under `--node` they stay not-yet until the CommonJS wrapper injects them; in an ES module they stay undefined, as in Node. Fixtures `subset_node_filename_*`, `subset_node_dirname_*`. |
 
 ---
 
@@ -276,6 +276,21 @@ flags each backing call as an unchecked boundary (docs/FFI.md §5), exactly as f
 | `import … from 'std/hash'` (`sha256`/`sha1`/`md5`/`randomBytes`) | dynamic | dynamic | A digest takes `Uint8Array \| string`, a union the HIR boxes; `randomBytes` is static. Fixtures `subset_std_hash_ts` / `_js`; golden `std_hash`; `randomBytes` ranges in `unit/std.test.ts`. |
 | `import … from 'std/sync'` / `'std/thread'` | not-yet (STA1214, Phase 10, T10.2) | not-yet (same) | Needs the OS-threads ↔ async bridge (STD.md §5). Fixtures `subset_std_thread_ts` / `_js`. |
 | `import … from 'std/<anything else>'` | error (STA3002) | error (same) | The prefix is reserved: an unknown name — including the library's own `std/internal/…` and `std/native/…` — is never a package lookup. Fixtures `subset_std_unknown_ts` / `_js`. |
+
+## Node built-ins — the `--node` platform (plan.md §11c T11.5)
+
+`--node` is a platform flag, orthogonal to the mode (docs/MODES.md §6). A Node built-in is
+`node:<id>` for any public id of the pinned Node's `builtinModules`, or the bare `<id>` where
+Node accepts one (`path`, `fs/promises`); a bare built-in is never a package (docs/BUNDLER.md
+§1). Under `--node` both spellings resolve to `packages/node/src/<id>.ts`, strict TypeScript over
+`std`, and compile like any other module. `docs/NODE.md` is the per-member coverage.
+
+| Feature | `ts` mode | `js` mode | Notes |
+|---|---|---|---|
+| A Node built-in without `--node` | not-yet (STA1214, no phase) | not-yet (same) | The message names the flag rather than a phase: the answer is a flag to turn on, not a release to wait for (`support/phases.ts`). Fixtures `subset_node_builtin_ts` / `_js`. |
+| A Node built-in under `--node` that `packages/node` has not landed | not-yet (STA1214, Phase 11, T11.6) | not-yet (same) | Under either spelling. So `explain --node` lists the platform's gaps beside the language's. Fixtures `subset_node_unlanded_node_ts` / `_js`. |
+| A member the landed module does not export yet, but the pinned Node's module does | not-yet (STA1214, Phase 11, T11.6) | not-yet (same) | A member Node itself does not have stays the checker's error (STA0012). Proof: `unit/node-platform.test.ts`, against a stub package. |
+| A landed built-in under `--node` | as its source compiles | as its source compiles | Resolution is a `paths` entry on the program's own options, as for `std/`, so the checker, the gate and the module graph agree. Proof: `unit/node-platform.test.ts` builds and runs one through a stub package; the first real module is T11.6's `node:path`. |
 
 ## Out of scope for v1
 
