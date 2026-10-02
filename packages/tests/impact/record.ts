@@ -52,6 +52,7 @@ import {
   UNIT_DIR,
   VITEST,
   VITEST_CONFIG,
+  archiveCommands,
   currentTests,
   git,
   justCommand,
@@ -358,7 +359,7 @@ async function main(): Promise<void> {
       'impact: the tree has uncommitted changes — the map will be marked dirty and the selector will not trust it\n',
     );
   }
-  runInherited(justCommand('runtime'));
+  for (const command of archiveCommands()) runInherited(command);
   if (options.harnesses.includes('asan')) runInherited(justCommand('runtime-asan'));
 
   const tmp = mkdtempSync(join(tmpdir(), 'stator-impact-'));

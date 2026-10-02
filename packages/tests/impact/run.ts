@@ -22,6 +22,7 @@ import {
   RUNNERS,
   VITEST,
   VITEST_CONFIG,
+  archiveCommands,
   computeSelection,
   justCommand,
   nodeCommand,
@@ -147,7 +148,7 @@ function main(): number {
   const runtimeSelected = chosen.some((entry) => entry.harness === 'runtime');
   const commands: Command[] = [];
   if (chosen.some((entry) => LINKS_RUNTIME.has(entry.harness))) {
-    commands.push(justCommand('runtime'));
+    commands.push(...archiveCommands());
   }
   const tmp = mkdtempSync(join(tmpdir(), 'stator-impact-run-'));
   const timings: string[] = [];

@@ -65,6 +65,18 @@ export function justCommand(recipe: string): Command {
   };
 }
 
+/** The archives `pnpm run runtime` builds: `libjsrt.a`, then the std package's `libjsrt_std.a`. */
+export function archiveCommands(): Command[] {
+  return [
+    justCommand('runtime'),
+    {
+      label: 'just std',
+      command: 'just',
+      args: ['-f', 'packages/std/justfile', '-d', 'packages/std', 'std'],
+    },
+  ];
+}
+
 export function nodeCommand(
   label: string,
   script: string,
