@@ -1605,6 +1605,21 @@ where they are the same constructs. Each item below is measured in T12.0 (`docs/
 316, proved with a ready bundle in `unit/bundler.test.ts`); a golden here may read them, printing
 no path.
 
+**Status:** in progress — Claude Code / sonnet-5-5.
+
+**Execution plan** (measured on 0afd141 with 12 probe fixtures through the default adapter):
+
+1. **First slice, no overlap with T11.4:** the comma operator types as its right operand
+   (`__commonJSMin`'s `STA4013`); `var`/`let X = class {}` that nothing repoints lowers like
+   `const`; attributed package imports reach the entry; `export * from` one package re-exports
+   the names the built bundle exports for it; `import('p')` becomes a clean `STA1214` instead of
+   the internal `STA4031`. Goldens: nested `require`, CJS cycle, `.cjs` entry,
+   `node_pkg_location`, top-level class, `export *`, attributed JSON import, the comma itself.
+2. **Blocked, needs a decision:** `__toESM`/`__copyProps` (default import of a CJS package,
+   `module.exports` replacement) need T11.4 step 8's `Object.*`. `__exportAll` (namespace import,
+   `import('p')`, a package's inlined `import()`) also needs `Symbol.toStringTag`, which is
+   `STA1212` (Phase 5): the runtime has no symbol values.
+
 **Check:** CommonJS goldens through the default adapter, byte-for-byte vs Node:
 
 - `exports.x`;
