@@ -222,7 +222,7 @@ function checkField(
   target: Expression,
   field: string,
   slot: number,
-  kind: 'field-access' | 'field-assignment',
+  kind: 'field-access' | 'field-assignment' | 'field-call',
   problems: VerifyProblem[],
 ): void {
   if (target.type.kind !== 'object') {
@@ -1328,6 +1328,17 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
+    // The slot rule a field read follows; whether the loaded value is callable is the runtime's
+    // question (STA2006), exactly as for an ordinary call of an Unknown callee.
+    case 'field-call': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      checkField(expr.target, expr.field, expr.slot, 'field-call', problems);
+      break;
+    }
+
     case 'method-value': {
       verifyExpression(expr.target, problems, bindings);
       checkMethodReceiver(expr, problems);
@@ -2031,6 +2042,28 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           span: expr.span,
           code: 'STA4092',
           message: `${expr.op} results in '${hTypeName(expr.type)}', not a ${want.result}`,
+        });
+      }
+      break;
+    }
+
+    // A `Number.prototype` call: the runtime reads the receiver as a number without a tag test,
+    // and the lowering pads the one argument.
+    case 'number-op': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (
+        expr.target.type.kind !== 'number' ||
+        expr.args.length !== 1 ||
+        !hTypeEquals(expr.type, H_STRING)
+      ) {
+        problems.push({
+          kind: 'number-op',
+          span: expr.span,
+          code: 'STA4103',
+          message: `${expr.op} on '${hTypeName(expr.target.type)}' with ${String(expr.args.length)} arguments, typed '${hTypeName(expr.type)}'`,
         });
       }
       break;

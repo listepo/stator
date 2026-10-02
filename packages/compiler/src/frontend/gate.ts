@@ -7,10 +7,11 @@ import type {
   ErrorClass,
   RegExpOperation,
 } from '../hir/nodes.ts';
-import { GLOBAL_CALLS } from '../hir/nodes.ts';
+import { GLOBAL_CALLS, NUMBER_OPS } from '../hir/nodes.ts';
 import type { GlobalCallName } from '../hir/nodes.ts';
 import type { HType } from '../hir/types.ts';
 import { accessorName, hTypeEquals, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
+import { callableFieldSlot } from '../hir/types.ts';
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
@@ -1515,12 +1516,13 @@ function isGlobalReference(node: ts.Identifier): boolean {
     // blanket "the global 'Math'" — and the declaration-file test in isGlobalMath keeps a user
     // binding named Math on the ordinary identifier path. `String` is exempt the same way for
     // its namespace calls (`String.fromCharCode`, plan.md §8 step 19), and `Array` for
-    // `Array.isArray` (plan.md §11c T11.4).
+    // `Array.isArray` and `Number` for `Number.parseInt` (plan.md §11c T11.4).
     return !(
       parent.name === node ||
       (parent.expression === node &&
         (isConsoleLog(parent) ||
           node.text === 'Array' ||
+          node.text === 'Number' ||
           node.text === 'Date' ||
           node.text === 'Uint8Array' ||
           node.text === 'ArrayBuffer' ||
@@ -2684,6 +2686,30 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     // `Array.isArray(x)` (plan.md §11c T11.4) is the builtin `x instanceof Array` -- one realm and
     // no Proxy is where the two agree -- so it takes that node's one operand. Every other member
     // is deferred by name rather than by the method-call catch-all.
+    // `Number.parseInt` and `Number.parseFloat` were accepted above as the global functions
+    // they are; every other `Number` member is deferred by name here.
+    if (isGlobalNamed(callee.expression, typeChecker, 'Number')) {
+      return notYet(`Number.${callee.name.text} is not yet supported`, 5);
+    }
+    // `Number.prototype.toString(radix)` and `toFixed(digits)` (plan-notes 310): one runtime
+    // function each over a number receiver. Every other member is deferred by name.
+    if (
+      tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind === 'number'
+    ) {
+      const method = callee.name.text;
+      if (!Object.hasOwn(NUMBER_OPS, method)) {
+        return notYet(`Number.prototype.${method} is not yet supported`, 5);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet(`a spread argument to Number.prototype.${method} is not yet supported`, 5);
+      }
+      return call.arguments.length > 1
+        ? notYet(
+            `${method} with ${String(call.arguments.length)} arguments is not yet supported`,
+            5,
+          )
+        : { kind: 'accept' };
+    }
     if (isGlobalArray(callee.expression, typeChecker)) {
       const method = callee.name.text;
       if (method !== 'isArray') {
@@ -3018,6 +3044,12 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
         return { kind: 'accept' };
       }
       if (shape.kind === 'object' && shape.methods.some((m) => m.name === callee.name.text)) {
+        return { kind: 'accept' };
+      }
+      // `o.f()` where `f` is a field holding a closure -- an object literal's `{ f: () => … }`
+      // or `{ scan }` (plan-notes 310): the callee loads from its slot and the receiver rides
+      // along exactly as a dynamic method call passes it.
+      if (callableFieldSlot(shape, callee.name.text) !== undefined) {
         return { kind: 'accept' };
       }
       return notYet('method calls are not yet supported', 5);
@@ -5510,9 +5542,7 @@ function gateMemberAccess(
       return { kind: 'accept' };
     }
     if (MATH_METHODS.has(member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Math method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Math method');
     }
     return notYet(`Math.${member} is not yet supported`, 5);
   }
@@ -5522,9 +5552,7 @@ function gateMemberAccess(
   if (isGlobalObject(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(OBJECT_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using an Object method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'an Object method');
     }
     return notYet(`Object.${member} is not yet supported`, OBJECT_STATIC_OWNER[member] ?? 5);
   }
@@ -5534,11 +5562,19 @@ function gateMemberAccess(
   if (isGlobalDate(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(DATE_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Date method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Date method');
     }
     return dateNotYet(`Date.${member}`, 5);
+  }
+
+  // A Number.prototype method follows the same rule (plan-notes 310). A number has no data
+  // properties, so any other member is a method of the real prototype that has not landed.
+  if (tsTypeToHType(checker.getTypeAtLocation(access.expression), checker).kind === 'number') {
+    const member = access.name.text;
+    if (Object.hasOwn(NUMBER_OPS, member)) {
+      return calleeOnlyMember(access, 'a Number method');
+    }
+    return notYet(`Number.prototype.${member} is not yet supported`, 5);
   }
 
   // A Date.prototype method exists only as a callee, the rule every builtin receiver follows.
@@ -5547,9 +5583,7 @@ function gateMemberAccess(
   if (isDateReceiver(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(DATE_OPS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Date method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Date method');
     }
     return dateNotYet(`Date.prototype.${member}`);
   }
@@ -5560,9 +5594,7 @@ function gateMemberAccess(
   if (isGlobalPromise(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(PROMISE_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Promise method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Promise method');
     }
     return notYet(`Promise.${member} is not yet supported`, 5);
   }
@@ -5570,9 +5602,7 @@ function gateMemberAccess(
   if (tsTypeToHType(checker.getTypeAtLocation(access.expression), checker).kind === 'promise') {
     const member = access.name.text;
     if (member === 'then' || member === 'catch' || member === 'finally') {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet(`using Promise.prototype.${member} as a value is not yet supported`, 5);
+      return calleeOnlyMember(access, `Promise.prototype.${member}`);
     }
     return {
       kind: 'not-yet',
@@ -5589,9 +5619,7 @@ function gateMemberAccess(
   if (isGlobalJson(access.expression, checker)) {
     const member = access.name.text;
     if (member === 'stringify' || member === 'parse') {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet(`using JSON.${member} as a value is not yet supported`, 5);
+      return calleeOnlyMember(access, `JSON.${member}`);
     }
     return notYet(`JSON.${member} is not yet supported`, 5);
   }
@@ -5602,22 +5630,24 @@ function gateMemberAccess(
   if (isGlobalString(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(STRING_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' } // gateCall vets the arguments themselves
-        : notYet(`using String.${member} as a value is not yet supported`, 5);
+      return calleeOnlyMember(access, `String.${member}`);
     }
     return notYet(`String.${member} is not yet supported`, 5);
   }
 
-  // `Array` follows them too: `isArray` exists only as a callee (plan.md §11c T11.4).
-  if (isGlobalArray(access.expression, checker)) {
-    const member = access.name.text;
-    if (member === 'isArray') {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' } // gateCall vets the arguments themselves
-        : notYet('using Array.isArray as a value is not yet supported', 5);
+  // `Array` and `Number` follow them too: `Array.isArray`, `Number.parseInt` and
+  // `Number.parseFloat` exist only as callees (plan.md §11c T11.4).
+  if (numberConstant(access, checker) !== undefined) {
+    return { kind: 'accept' }; // the lowering folds it to a literal
+  }
+  for (const [base, members] of Object.entries(CALLEE_ONLY_STATICS)) {
+    if (isGlobalNamed(access.expression, checker, base)) {
+      const member = access.name.text;
+      if (members.includes(member)) {
+        return calleeOnlyMember(access, `${base}.${member}`);
+      }
+      return notYet(`${base}.${member} is not yet supported`, 5);
     }
-    return notYet(`Array.${member} is not yet supported`, 5);
   }
 
   // A String.prototype method exists only as a callee -- there is no function value to bind, the
@@ -5826,9 +5856,7 @@ function gateMemberAccess(
         return { kind: 'accept' };
       }
       if (shape.methods.some((m) => m.name === access.name.text)) {
-        return ts.isCallExpression(access.parent) && access.parent.expression === access
-          ? { kind: 'accept' }
-          : notYet('using a method as a value is not yet supported', 5);
+        return calleeOnlyMember(access, 'a method');
       }
       return notYet('a property that is not a field of the shape is not yet supported', 5);
     }
@@ -5963,9 +5991,7 @@ function gateElementAccess(
         return { kind: 'accept' };
       }
       if (hir.methods.some((m) => m.name === key)) {
-        return ts.isCallExpression(access.parent) && access.parent.expression === access
-          ? { kind: 'accept' }
-          : notYet('using a method as a value is not yet supported', 5);
+        return calleeOnlyMember(access, 'a method');
       }
       // An accessor read is a call to the getter, so a read is fine; a read-modify-write in
       // VALUE position lowers the target to the getter call, which is not an update place --
@@ -6125,6 +6151,34 @@ export const MATH_CONSTANTS: ReadonlySet<string> = new Set([
   'SQRT1_2',
   'SQRT2',
 ]);
+
+/** `Number`'s constants (§21.1.2), folded the same way: each is non-writable and
+ * non-configurable, so no program can observe a different value (plan-notes 310). */
+const NUMBER_CONSTANTS: ReadonlyMap<string, number> = new Map(
+  (
+    [
+      'EPSILON',
+      'MAX_SAFE_INTEGER',
+      'MAX_VALUE',
+      'MIN_SAFE_INTEGER',
+      'MIN_VALUE',
+      'NaN',
+      'NEGATIVE_INFINITY',
+      'POSITIVE_INFINITY',
+    ] as const
+  ).map((name) => [name, Number[name]]),
+);
+
+/** The value a `Number.MAX_VALUE` read folds to, or undefined for any other access. */
+export function numberConstant(
+  node: ts.PropertyAccessExpression,
+  checker: ts.TypeChecker,
+): number | undefined {
+  const value = NUMBER_CONSTANTS.get(node.name.text);
+  return value !== undefined && isGlobalNamed(node.expression, checker, 'Number')
+    ? value
+    : undefined;
+}
 
 /** `Math` the GLOBAL, not a user binding that borrowed the name: every declaration behind the
  * symbol is ambient. A local `const Math = …` shadows the global at runtime and must win here
@@ -6322,6 +6376,21 @@ export function isGlobalArray(node: ts.Expression, checker: ts.TypeChecker): boo
   return isGlobalNamed(node, checker, 'Array');
 }
 
+/** A builtin member that exists only as a callee -- there is no function value to bind -- is
+ * accepted as one and refused by name anywhere else; `gateCall` vets the arguments. */
+function calleeOnlyMember(access: ts.Expression, what: string): GateResult {
+  return ts.isCallExpression(access.parent) && access.parent.expression === access
+    ? { kind: 'accept' }
+    : notYet(`using ${what} as a value is not yet supported`, 5);
+}
+
+/** The namespace members that exist only as callees, by namespace. `Number.parseInt` and
+ * `Number.parseFloat` are the global functions themselves (§21.1.2.12-13). */
+const CALLEE_ONLY_STATICS: Readonly<Record<string, readonly string[]>> = {
+  Array: ['isArray'],
+  Number: ['parseInt', 'parseFloat'],
+};
+
 /** The three conversion functions: each lowers to the operation it is (`String(x)` to a template
  * hole, `Number(x)` to unary `+`, `Boolean(x)` to `!!x`), so they have no `GLOBAL_CALLS` row. */
 const GLOBAL_CONVERSIONS: ReadonlySet<string> = new Set(['String', 'Number', 'Boolean']);
@@ -6333,6 +6402,12 @@ export function globalFunctionOf(
   node: ts.Expression,
   checker: ts.TypeChecker,
 ): GlobalFunction | undefined {
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    (node.name.text === 'parseInt' || node.name.text === 'parseFloat')
+  ) {
+    return isGlobalNamed(node.expression, checker, 'Number') ? node.name.text : undefined;
+  }
   if (!ts.isIdentifier(node)) {
     return undefined;
   }

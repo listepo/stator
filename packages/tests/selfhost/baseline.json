@@ -3,7 +3,7 @@
     "verdict": "not-yet",
     "codes": {
       "STA1207": 1,
-      "STA1214": 1723
+      "STA1214": 1719
     }
   },
   "packages/node/src/path.ts": {

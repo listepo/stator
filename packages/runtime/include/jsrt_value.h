@@ -216,6 +216,18 @@ jsrt_value jsrt_global_parse_float(jsrt_value string);
 jsrt_value jsrt_global_is_nan(jsrt_value v);
 jsrt_value jsrt_global_is_finite(jsrt_value v);
 
+/* `n.toString(radix)` and `n.toFixed(digits)` (§21.1.3): `number` is the receiver, a number; the
+ * argument is any value, JSRT_UNDEFINED when omitted. An out-of-range argument leaves Node's
+ * RangeError pending and answers undefined. */
+jsrt_value jsrt_number_to_string_radix(jsrt_value number, jsrt_value radix);
+jsrt_value jsrt_number_to_fixed(jsrt_value number, jsrt_value digits);
+/* Number.prototype and String.prototype as VALUES for an Unknown receiver (plan.md §11c T11.4,
+ * plan-notes 310), on the `jsrt_array_method` contract: true when `key` names a landed method of
+ * the receiver's primitive type, with `*out` a closure bound to the receiver. `jsrt_get_prop`
+ * asks them, since a primitive has no shape table to walk. */
+bool jsrt_number_method(jsrt_value number, const char *key, jsrt_value *out);
+bool jsrt_string_method(jsrt_value string, const char *key, jsrt_value *out);
+
 /* ToBoolean: convert a jsrt_value to a boolean.
  * Falsy: false, +0, -0, NaN, undefined, null, empty string.
  * Truthy: everything else (including "0" and "false" as strings). */
@@ -1414,6 +1426,14 @@ static inline jsrt_value jsrt_method(jsrt_value obj, uint32_t slot) {
  * the closure is reachable only through it. */
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
                             uint32_t arity, const char *name, JSRTEnv *env, bool has_receiver);
+
+/* The closure every `jsrt_*_method` answers: environment slot 0 holds the receiver (kept alive by
+ * the trace) and slot 1 the table row as a number, so `jsrt_call` needs no new protocol.
+ * `has_receiver` is false: the receiver is already bound, and a second one in argv would shift
+ * every user argument. `length` is the method's `length`, and `name` must outlive the program. */
+jsrt_value jsrt_bound_method(jsrt_value receiver, uint32_t row,
+                             jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
+                             uint32_t length, const char *name);
 
 static inline const JSRTClosure *jsrt_as_closure(jsrt_value v) {
   return (const JSRTClosure *)jsrt_ptr(v);
