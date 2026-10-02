@@ -11051,6 +11051,78 @@ argument checks for three, and `__filename` for three. `docs/NODE.md` reads `nod
 **Open.** No CI job runs the suite yet. A Linux job like `test262`'s, caching the corpus on the
 `pin.json` hash, is the natural next step, once a file passes.
 
+## 315. T11.5: `--node` gates CommonJS routing of project files (2026-10-02)
+
+**The creator's decisions** (2026-10-02, on plan-notes 320's open questions 1 and 2):
+
+1. **The CommonJS marker rule stays narrowed.** A `.js` with no `"type"` and no ES-module syntax
+   goes to the bundler only when it reads a free `require(`, `module.exports` or `exports`.
+   BUNDLER.md §4 already said so; 320 decision 1 now records the decision.
+2. **`--node` gates CommonJS routing of PROJECT files.** Without `--node` a CommonJS project file
+   is not routed and gets `STA1110`. Packages under `node_modules` are bundled with or without
+   the flag.
+
+**What changed.**
+
+- `planVendor(program, entryFile, node)` routes CommonJS project files only when `node` is
+  true. `src/cli/bundler.ts` passes the flag; `statorc/api` gains `CompileRequest.node` and
+  `vendorEntry(entry, mode, node = false)`.
+- **A bug in "free", found while testing decision 2.** In a `.js` file TypeScript models
+  CommonJS itself. It declares `module` and `exports` *by the assignments that use them*
+  (`module.exports = 1` → a `BinaryExpression` declaration; `exports.a = 1` → a
+  `PropertyAccessExpression` one). It also answers that model from `getSymbolAtLocation` even
+  under a parameter named `exports`. 320's rule ("no symbol, or only ambient declarations")
+  therefore saw neither binding as free. A `.js` file that only wrote `module.exports` was not
+  CommonJS, and it went on to the lowering, which failed with the internal `STA4035`. Measured
+  before this change with `explain --mode=js --bundler=none`: `module.exports = 1;` → `STA4035`, and
+  `exports.a = 1;` → `STA4035`. `isFreeGlobal` (vendor.ts, now shared with the gate) asks
+  `checker.resolveName` at the read instead. It counts as free nothing, an ambient declaration,
+  or TypeScript's own model (the source file, an identifier, or an assignment expression). A
+  parameter, variable, function or import of the name is the user's.
+- **The gate answers `module.exports` and `exports`.** A free `exports`, or `module` as the base
+  of `module.exports`, is `STA1110` (`commonJsExportVerdict`, node.ts), with three messages: `ts`
+  mode, `js` mode without `--node`, and `js` mode under `--node` in a file the bundler did not
+  take (ES-module syntax, or `--bundler=none`). `typeof module` / `typeof exports` passes. A UMD
+  wrapper probes both in every environment, and the probe answers `'undefined'`. `require` keeps
+  `requireVerdict`, now through the same `isFreeGlobal`.
+- **Interpretation, recorded here.** "A CommonJS project file gets `STA1110`" is applied per
+  binding. A `.cjs` script that reads none of `require`, `module.exports` and `exports` (for
+  example `console.log(1)`) compiles as written without `--node`: it means the same thing as an
+  ES module, and 320 decision 1 already declines to treat such files as CommonJS. A file that
+  does read them gets one `STA1110` per read.
+
+**Measured after the change** (`explain`, default bundler, no adapter installed):
+
+| File | `js` | `js --node` | `js --node --bundler=none` |
+| --- | --- | --- | --- |
+| `module.exports = 1;` (`.js`) | STA1110 | routed (STA0014, no adapter) | STA1110 |
+| `exports.a = 1;` (`.js`) | STA1110 | routed (STA0014) | STA1110 |
+| `require('path')` (`.js`) | STA1110 | routed (STA0014) | STA1214 (T11.5) |
+| `console.log(1);` (`.cjs`) | static | routed (STA0014) | static |
+
+In `ts` mode `exports.n = 1;` is `STA1110` with or without `--node` (beside the checker's
+`STA0012` "Cannot find name 'exports'").
+
+**Proof.** Decision tests `subset_commonjs_file_ts`, `_node_ts` and `_js` (a `.cjs` with
+`module.exports` and `exports.m`) all give `STA1110`. The `js` + `--node` cell needs an adapter,
+which the subset runner does not load. `unit/bundler.test.ts` proves it instead: `compile` with
+`node: true` and a ready bundle succeeds, and the same file without `node` reports `STA1110` on
+both lines. `vendorEntry(main.cjs, 'js', true)` routes the file, and `vendorEntry(main.cjs, 'js')`
+answers `undefined`. The classification test adds `module.exports`-only and `exports.x`-only
+files (CommonJS) and a parameter named `exports` (not CommonJS). Asking scope by name has one
+trap: a property NAME (`{ exports: 1 }`, `{ exports: e } = o`, a class member `require()`)
+resolves to nothing and would read as free, so the gate skips name sites the way it already
+skipped `o.require`; `subset_commonjs_names_ts` / `_js` stay `static`.
+
+**Self-compilation grows** by 2 × `STA1214` (1748 → 1750 on main 52b27d7), recorded with `--update` per v4.25.
+The two new gate helpers take `ts.Identifier` and `ts.TypeChecker` parameters where
+`isFreeRequire` took one pair. Each is a `QualifiedName` type annotation, the not-yet "Phase 5"
+construct the compiler's own source already holds hundreds of.
+
+**Left alone.** Decision 4 of the same review (skip checker diagnostics in vendor code) belongs to
+the T12.1 follow-up. A `typeof module` in a `.js` file that is not CommonJS is still the
+checker's `STA0012` "Cannot find name", as before this change.
+
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 
 **What landed.** `js` mode sends package imports and CommonJS project files to one bundler
@@ -11072,13 +11144,16 @@ did not settle it.
    `require(…)`, `module.exports` or `exports`. "Free" is the checker's answer: no symbol, or
    only ambient declarations (`@types/node`'s), so a local `const exports = …` does not count.
    `.cjs` and `.js` under `"type": "commonjs"` route always. `src/frontend/vendor.ts`
-   `isCommonJsFile`; BUNDLER.md §4 says so.
+   `isCommonJsFile`; BUNDLER.md §4 says so. **The creator kept this narrowed rule** (2026-10-02;
+   plan-notes 315, which also corrects what "free" meant for `module` and `exports`).
 2. **CommonJS files route with or without `--node`.** The card's step 2 routes them in `js` mode;
    BUNDLER.md §4's last paragraph and the T11.5 card tie routing to `--node`, which does not
    exist yet. Waiting would have left the step unbuildable. Today a routed CommonJS file is
    whatever its bundled code is (`STA1214` on the interop helpers, T12.3). **T11.5 must
    reconcile:** either `--node` becomes the gate and `js` mode without it reports `STA1110` for a
-   CommonJS file, or BUNDLER.md §4 drops the `--node` clause. Open question for the creator.
+   CommonJS file, or BUNDLER.md §4 drops the `--node` clause. **Decided by the creator
+   (2026-10-02, plan-notes 315): `--node` is the gate** for project files; packages are bundled
+   either way.
 3. **The rewrite is textual and keeps every line.** Each project import or re-export of a package
    is rewritten in place to `./__stator_vendor__.js` with the mangled names
    (`<stem>$default`, `<stem>$ns`, `<stem>$<name>`, `$2`/`$3` on a collision). The new text keeps

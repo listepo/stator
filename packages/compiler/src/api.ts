@@ -34,6 +34,9 @@ export interface CompileRequest {
   readonly bundler?: BundlerAdapter | string;
   /** Link an executable here. Without it, `compile` stops at C and answers the text. */
   readonly out?: string;
+  /** `--node`, the Node platform (docs/MODES.md §6). It also gates CommonJS project files: only
+   * under it do they go to the bundler (plan-notes 315). */
+  readonly node?: boolean;
 }
 
 export interface CompileResult {
@@ -69,7 +72,13 @@ export async function compile(request: CompileRequest): Promise<CompileResult> {
   try {
     if (out === undefined) {
       const { result, stderr, diagnostics } = await withDiagnosticCapture(() =>
-        compileToC(request.entry, request.mode, undefined, bundler ?? DEFAULT_BUNDLER),
+        compileToC(
+          request.entry,
+          request.mode,
+          undefined,
+          bundler ?? DEFAULT_BUNDLER,
+          request.node ?? false,
+        ),
       );
       return result === null
         ? { ok: false, diagnostics, stderr }
@@ -83,6 +92,7 @@ export async function compile(request: CompileRequest): Promise<CompileResult> {
         emitCOnly: false,
         keepC: false,
         bundler: bundler ?? DEFAULT_BUNDLER,
+        node: request.node ?? false,
       }),
     );
     return { ok: result === 0, diagnostics, stderr };
@@ -98,10 +108,15 @@ export async function compile(request: CompileRequest): Promise<CompileResult> {
 }
 
 /** What the bundler would be asked to bundle for this program, or `undefined` when the graph
- * imports no package and holds no CommonJS file. `ts` mode never bundles. */
-export function vendorEntry(entry: string, mode: 'ts' | 'js'): VendorEntry | undefined {
+ * imports no package and holds no CommonJS file it may route (`node`, as in `CompileRequest`).
+ * `ts` mode never bundles. */
+export function vendorEntry(
+  entry: string,
+  mode: 'ts' | 'js',
+  node = false,
+): VendorEntry | undefined {
   if (mode === 'ts') return undefined;
-  const { program } = createProgram(entry, mode);
+  const { program } = createProgram(entry, mode, undefined, undefined, node);
   const entryFile = program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
-  return entryFile === undefined ? undefined : planVendor(program, entryFile)?.entry;
+  return entryFile === undefined ? undefined : planVendor(program, entryFile, node)?.entry;
 }

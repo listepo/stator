@@ -163,3 +163,26 @@ export function requireVerdict(
         : 'CommonJS require() is not supported — without --node, Stator uses ES modules only',
   };
 }
+
+/** The verdict on a free `module.exports` or `exports` (plan-notes 315). Never, in every cell: in
+ * `ts` mode and without `--node` ESM is the only module system, and with `--node` in `js` mode a
+ * CommonJS project file goes to the bundler whole. One that reaches the gate there is an ES module
+ * by Node's rule (ES-module syntax, or `"type": "module"`), where Node has no `module` or `exports`
+ * either, or a build under `--bundler=none`, which has nothing to convert CommonJS with. */
+export function commonJsExportVerdict(
+  binding: 'module.exports' | 'exports',
+  mode: Mode,
+  node: boolean,
+): { kind: 'never'; code: 'STA1110'; message: string } {
+  const why =
+    mode === 'ts'
+      ? 'ts mode uses ES modules only'
+      : node
+        ? 'under --node only a CommonJS file built through a bundler has it'
+        : 'without --node, Stator uses ES modules only';
+  return {
+    kind: 'never',
+    code: 'STA1110',
+    message: `CommonJS ${binding} is not supported — ${why}`,
+  };
+}
