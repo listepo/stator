@@ -221,7 +221,7 @@ What the bundle leaves for Stator:
 | interop helpers `__toESM`, `__copyProps` | `Object.create`, `Object.defineProperty` (getter descriptors), `getOwnPropertyDescriptor`, `getOwnPropertyNames`, `getPrototypeOf`, `Object.prototype.hasOwnProperty.call`, `Function.prototype.bind`: 9 STA1214 in `cjs` | T12.3 (overlaps T11.4's `Object.*` and method-call families) |
 | `require('path')` of a built-in | `__require("path")` through `createRequire(import.meta.url)`. With `esmExternalRequirePlugin({ external: [/^node:/, …builtinModules] })` (re-exported by Vite 8.3.1) it becomes `import * as m from "path"` and `module.exports = m.default` | the plugin in `vite-stator` (T12.2). Built-ins need a default export (T11.6) |
 | computed `require('./' + n)` | stays `__require(...)`, and Node itself fails on the bundle with `Cannot find module './five.js'` | T11.5: a `require` over built-ins only. Anything else throws `MODULE_NOT_FOUND` |
-| `__filename`, `__dirname` | left free, so **Node itself crashes on the bundle** (`ReferenceError: __filename is not defined in ES module scope`) | **decided (§9):** a `not-yet` diagnostic naming T11.5 until `--node`, raised by T12.1's gate. No path is baked into the binary, so the spike's 6-line transform (which baked the build machine's absolute path) is not adopted. Unbundled, Stator today compiles a free `__filename` as `dynamic` and the binary throws `ReferenceError` where Node prints the path (measured), so the same diagnostic covers project files |
+| `__filename`, `__dirname` | left free, so **Node itself crashes on the bundle** (`ReferenceError: __filename is not defined in ES module scope`) | **decided (§9):** under `--node` the frontend injects a value relative to the executable (T11.5, plan-notes 316); a read that reaches the gate is `STA1110` (it was T12.1's not-yet `STA1218`, now retired). No path is baked into the binary, so the spike's 6-line transform (which baked the build machine's absolute path) is not adopted. Before T12.1, Stator compiled an unbundled free `__filename` as `dynamic` and the binary threw `ReferenceError` where Node prints the path (measured), so the same diagnostic covers project files |
 
 **CommonJS project files** (`cjs_entry`, the shape of `_tsc.js`) go to the bundler whole. A
 file is CommonJS by Node's rule (https://nodejs.org/api/packages.html, docs v26.10.0, checked
@@ -269,11 +269,17 @@ the bundler. T11.5 shrinks to the `--node` flag, the Node globals, external reso
 T11.5 already planned. With `--node` in `js` mode a CommonJS project file goes to the bundler,
 and T11.5 owns what `__filename`/`__dirname` mean then, under the rule that no build path is
 baked into the binary.
-Without `--node`, or in `ts` mode, a free `require`, `module.exports` or `exports` is `STA1110`.
-Under `--node` with `--bundler=none` nothing converts CommonJS: a free `require` is `STA1214`
-naming T11.5, and `module.exports` or `exports` is `STA1110`. Fixtures `subset_commonjs_require_*`
-and `subset_commonjs_file_*`; the `js` + `--node` cell needs an adapter and is proved in
-`unit/bundler.test.ts`.
+Landed (plan-notes 316): the bundle's `__require` is `node:module`'s `createRequire`, a `require`
+over built-ins that throws `MODULE_NOT_FOUND` for anything else, and the frontend rewrites each
+free `__filename`/`__dirname` left in the vendor module, and each `import.meta.url`, into a
+run-time value relative to the executable, using the source map to find the file the read was
+written in (`docs/MODES.md` §6).
+Without `--node`, or in `ts` mode, a free `require`, `module.exports`, `exports`, `__filename` or
+`__dirname` is `STA1110`. Under `--node` one that reaches the gate is in an ES module (Node has
+none of them there) or in a build under `--bundler=none`, where nothing converts CommonJS, and it
+is `STA1110` too. Fixtures `subset_commonjs_require_*`, `subset_commonjs_file_*`,
+`subset_node_filename_*` and `subset_node_dirname_*`; the `js` + `--node` cell needs an adapter
+and is proved in `unit/bundler.test.ts`.
 
 ## 5. The API
 
@@ -388,7 +394,7 @@ reported:
 - a checker error where Node throws at run time and the compiled program would not: a binding
   read in its temporal dead zone (TS2448, TS2449, TS2450) and an assignment to a `const`
   (TS2588). They stay `STA0012` at the mapped position (`VENDOR_THROW_CODES`);
-- every Stator verdict: the gate, the module edges and the lowering (`STA1214`, `STA1218`, …).
+- every Stator verdict: the gate, the module edges and the lowering (`STA1214`, `STA1110`, …).
 
 The same complaint in a project file is still `STA0012`.
 
@@ -435,7 +441,8 @@ list is what `vite-stator` hands Vite's watcher in dev, not moon.
   - the dynamic-import namespace helpers (`__esmMin`, `__exportAll`: `Object.defineProperty`,
     `Symbol.toStringTag`, zero-argument `Promise.resolve()`), measured in `dynamic_import`'s A
     bundle and in every namespace import of a package (T12.2, plan-notes 321);
-  - `import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`);
+  - ~~`import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`)~~: landed under `--node` by T11.5
+    (plan-notes 316); without the flag it stays STA1214;
   - a computed `export default` (`cjs_entry`).
 - **T11.5**: re-scoped per §4, plus the meaning of `__filename`/`__dirname` under `--node`.
 

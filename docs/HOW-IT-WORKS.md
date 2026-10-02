@@ -37,6 +37,7 @@ language of the subset matrix ([`SUBSET.md`](SUBSET.md)) and of
 [js mode, graph imports a package or, under --node, holds a CommonJS file]
   bundler adapter (--bundler, default vite) → one vendor ESM module + source map
 typescript API (parse + type-check, in-process; the vendor module joins as __stator_vendor__.js)
+[--node, a module reads its location] import.meta.url, the vendor module's __filename → run-time calls
   → mode gate
   → typed HIR
   → passes (monomorphize, boundary-insert, const-fold, DCE, inline, …)
@@ -59,6 +60,12 @@ in place to name it, line for line; a diagnostic inside it is reported at the pa
 and line through the bundle's source map (`src/cli/bundler.ts`, `src/frontend/vendor.ts`,
 `src/support/sourcemap.ts`). The library entry `statorc/api` (`compile`, `vendorEntry`) runs the
 same driver.
+
+Under `--node` one more frontend step follows: every `import.meta.url`, `.filename` and
+`.dirname`, and every free `__filename`/`__dirname` the bundler left in the vendor module, is
+rewritten in place into a call to `packages/node`'s location helpers, which answer relative to the
+executable when the program runs (`src/frontend/location.ts`, [`MODES.md`](MODES.md) §6). The
+program reloads over the rewrite, so no build-machine path reaches the binary.
 
 Invariants that matter when reading code or docs:
 

@@ -25,6 +25,9 @@ mode existed (plan §0.8).
 In `js` mode a graph that imports a package or holds a CommonJS file takes one detour first
 (T12.1, `docs/BUNDLER.md`): the dependencies are bundled into one virtual module and the program
 is reloaded over it. Below the gate the vendor module is one more `js` file.
+Under `--node` a program whose modules read their own location (`import.meta.url`, the vendor
+module's `__filename`) is reloaded once more, over a rewrite that turns each read into a run-time
+call (T11.5, `docs/MODES.md` §6).
 
 ![Compile pipeline](architecture/pipeline.svg)
 

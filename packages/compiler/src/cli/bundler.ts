@@ -11,6 +11,7 @@ import { builtinModules, createRequire } from 'node:module';
 import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type * as ts from 'typescript';
+import { locationRewrites } from '../frontend/location.ts';
 import { planVendor, type VendorEntry } from '../frontend/vendor.ts';
 import { createProgram, type LoadedProgram, sha256 } from '../frontend/program.ts';
 import type { Module } from '../hir/nodes.ts';
@@ -231,14 +232,31 @@ async function loadFrontendInner(
   bundler: BundlerChoice,
   node: boolean,
 ): Promise<Frontend> {
+  const bundled = await bundledFrontend(entry, mode, bundler, node);
+  return node ? located(entry, mode, bundled) : bundled.frontend;
+}
+
+/** A frontend and the overlay it was loaded with (none for the plain program). */
+interface Overlaid {
+  readonly frontend: Frontend;
+  readonly files: ReadonlyMap<string, string>;
+}
+
+async function bundledFrontend(
+  entry: string,
+  mode: Mode,
+  bundler: BundlerChoice,
+  node: boolean,
+): Promise<Overlaid> {
   const base = createProgram(entry, mode, undefined, undefined, node);
-  if (mode !== 'js' || bundler.kind === 'none') return base;
+  const plain = { frontend: base, files: new Map<string, string>() };
+  if (mode !== 'js' || bundler.kind === 'none') return plain;
   const entryFile = base.program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
-  if (entryFile === undefined) return base;
+  if (entryFile === undefined) return plain;
   const plan = planVendor(base.program, entryFile, node);
-  if (plan === undefined) return base;
+  if (plan === undefined) return plain;
   const bundle = await obtainBundle(bundler, plan.entry);
-  if (bundle === undefined) return base;
+  if (bundle === undefined) return plain;
   const files = new Map(plan.rewrites);
   files.set(plan.modulePath, bundle.code);
   // The bundle's code is what the card keys on (T12.1 step 6); the rewrites follow from the
@@ -252,9 +270,30 @@ async function loadFrontendInner(
     node,
   );
   return {
-    ...loaded,
-    vendor: { path: plan.modulePath, map: sourceMapper(bundle.map, plan.entry.resolveDir) },
+    frontend: {
+      ...loaded,
+      vendor: { path: plan.modulePath, map: sourceMapper(bundle.map, plan.entry.resolveDir) },
+    },
+    files,
   };
+}
+
+/** Under `--node`, the frontend again with every module-location read rewritten into a run-time
+ * call (`frontend/location.ts`, plan-notes 316); the same frontend when nothing reads one. */
+function located(entry: string, mode: Mode, { frontend, files }: Overlaid): Frontend {
+  const entryFile = frontend.program.getSourceFile(resolve(entry).replace(/\\/g, '/'));
+  if (entryFile === undefined) return frontend;
+  const rewrites = locationRewrites(frontend.program, entryFile, frontend.vendor);
+  if (rewrites.size === 0) return frontend;
+  const merged = new Map([...files, ...rewrites]);
+  const loaded = createProgram(
+    entry,
+    mode,
+    undefined,
+    { files: merged, key: sha256(JSON.stringify([...merged])) },
+    true,
+  );
+  return frontend.vendor === undefined ? loaded : { ...loaded, vendor: frontend.vendor };
 }
 
 /** The lowering of a loaded frontend, with vendor spans mapped (T12.1 step 5). */
