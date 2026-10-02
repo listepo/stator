@@ -7,6 +7,7 @@
   "ignore": [
     "**/.claude/worktrees/**",
     "**/.moon/cache/**",
+    ".cache/**",
     "**/node_modules/**",
     "**/dist/**",
     "coverage/**",

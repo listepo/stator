@@ -1,7 +1,10 @@
 /* Golden-test runner (plan.md §5 Task 2.6).
  *
  * Usage: node packages/tests/golden/run.ts [--filter <substring> | --filter=<substring>]
- *          [--shard=N/M] [--shards=N]
+ *          [--only=<file>] [--shard=N/M] [--shards=N]
+ *
+ * `--only=<file>` runs just the fixtures (`ts/name.ts`, one per line) named in the file — the
+ * selection `pnpm run test:impact` hands over (plan.md §9 Task 6.17). It composes with `--filter`.
  *
  * `--shard=N/M` runs one round-robin slice of the (filtered) fixtures; `--shards=N` fans out to
  * N worker processes of this same runner and merges their per-item records back by index, so the
@@ -20,13 +23,17 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { InProcessRecorder } from '../impact/recorder.ts';
+import { impactRecorder } from '../support/impact-hook.ts';
 import {
   fanOutWorkers,
   mergeShardFiles,
   parseShardArgs,
   pool,
+  readOnlyList,
   runProcess,
   shardSlice,
+  workerBaseArgs,
   writeShardFile,
   type Shard,
 } from '../support/parallel.ts';
@@ -177,23 +184,34 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStre
 }
 
 /* One result per fixture, indexed by fixture: the pool completes out of order, and a golden
- * report whose failure order shifted run to run would be unreadable as a diff. */
-async function collect(all: readonly Fixture[]): Promise<(string | undefined)[]> {
+ * report whose failure order shifted run to run would be unreadable as a diff. With an impact
+ * recorder the pool is one wide (the recorder insists), so the take after each fixture holds
+ * exactly what that fixture ran — its binary's runtime members included. */
+async function collect(
+  all: readonly Fixture[],
+  impact: InProcessRecorder | undefined,
+): Promise<(string | undefined)[]> {
   return pool(all, async (fixture): Promise<string | undefined> => {
-    try {
-      const [actual, expected] = await Promise.all([
-        runCompiled(fixture.path, fixture.mode),
-        runNodeOracle(fixture.path, PINNED_ENV),
-      ]);
-      if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
-        return undefined;
-      }
-      const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
-      return `${fixture.mode}/${fixture.name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`;
-    } catch (error) {
-      return `${fixture.mode}/${fixture.name}: ${error instanceof Error ? error.message : String(error)}`;
-    }
+    const result = await check(fixture);
+    await impact?.take(fixtureKey(fixture));
+    return result;
   });
+}
+
+async function check(fixture: Fixture): Promise<string | undefined> {
+  try {
+    const [actual, expected] = await Promise.all([
+      runCompiled(fixture.path, fixture.mode),
+      runNodeOracle(fixture.path, PINNED_ENV),
+    ]);
+    if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
+      return undefined;
+    }
+    const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
+    return `${fixture.mode}/${fixture.name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`;
+  } catch (error) {
+    return `${fixture.mode}/${fixture.name}: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 /* The one report, shared verbatim by the serial run, a direct `--shard` slice, and the merged
@@ -233,8 +251,11 @@ async function main(): Promise<void> {
     missingFilterMessage: '--filter requires a value',
   });
   const filter = args.filter;
+  const only = args.only === undefined ? undefined : readOnlyList(args.only);
   const filtered = [...fixtures('ts'), ...fixtures('js')].filter(
-    (fixture) => filter === undefined || `${fixture.mode}/${fixture.name}`.includes(filter),
+    (fixture) =>
+      (filter === undefined || fixtureKey(fixture).includes(filter)) &&
+      (only === undefined || only.has(fixtureKey(fixture))),
   );
 
   // `--shards=N`: fan out to N workers of this same runner and merge by fixture index. The merge
@@ -248,7 +269,7 @@ async function main(): Promise<void> {
     try {
       await fanOutWorkers({
         script,
-        baseArgs: args.filter === undefined ? [] : [`--filter=${args.filter}`],
+        baseArgs: workerBaseArgs(args),
         shards: args.shards,
         dir,
       });
@@ -273,7 +294,17 @@ async function main(): Promise<void> {
           fixture: entry.item,
           index: entry.index,
         }));
-  const results = await collect(slice.map((entry) => entry.fixture));
+  // The ASan stage of `test:asan` runs this same runner; its map record is its own harness.
+  const impact = await impactRecorder(
+    process.env['STATOR_RUNTIME'] === 'asan' ? 'asan' : 'golden',
+    ['packages/tests/golden/ts/', 'packages/tests/golden/js/'],
+  );
+  await impact?.loaded();
+  const results = await collect(
+    slice.map((entry) => entry.fixture),
+    impact,
+  );
+  impact?.finish();
   if (args.jsonOut !== undefined) {
     // Per-item failures are DATA for the driver: exit 0 on a completed slice, nonzero only when
     // the worker itself broke (which `fanOutWorkers` reports as the fatal error).
