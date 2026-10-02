@@ -942,6 +942,10 @@ resume's `goto` jumps over the initializer and the local reads back as garbage. 
 keeps the cursor in the heap object, which is what a stored `arr.values()` already does; the
 zero-alloc inlined loops stay the sync-unit form.
 
+`JSRT_ITER_UINT8ARRAY` (§4.19) is the boxed walk over a `Uint8Array`: it is what both the static
+`for-of` (through `get-iterator`, element `number`) and the dynamic dispatch use. The cursor
+re-reads the view's length on every step, so a walk over a view stays inside its window.
+
 ### Generators
 
 A generator is a different object, not a tagged `JSRTIterator`. The cursor is a resume point and
@@ -1231,6 +1235,73 @@ called bare, §4.16), and a non-function callee panics exactly as an ordinary ca
 (`STA2006` with the site's `file:line`). A computed VALUE key with a statically-known name
 (`[k]` with `k: "dyn"`) never reaches any of this: it is the name the direct spelling
 writes, and the literal takes the fixed path (§4.5) like the direct spelling does.
+
+## 4.19 Typed arrays — a byte block, a view over it, and one table (plan.md §11c T11.1)
+
+`ArrayBuffer` and `Uint8Array` are **objects with a class descriptor**, like a Date or an Error:
+the first word is `const JSRTClass *cls`, the descriptor has no fields, and every member is a
+direct runtime call. The layouts live in `jsrt_value.h`; the storage and every entry point live in
+the Zig memory core (`runtime/src/jsrt_typed.zig`, exported through the C ABI only).
+
+```c
+typedef struct JSRTArrayBuffer {
+  const JSRTClass *cls; /* &jsrt_class_arraybuffer */
+  uint8_t *data;        /* GC_malloc_atomic: pointer-free, zero-filled */
+  size_t byte_length;
+} JSRTArrayBuffer;
+
+typedef struct JSRTTypedArray {
+  const JSRTClass *cls;     /* &jsrt_class_uint8array */
+  JSRTArrayBuffer *buffer;  /* the bytes; a GC root through this field */
+  size_t byte_offset;
+  size_t length;            /* in elements; one byte each for Uint8Array */
+} JSRTTypedArray;
+```
+
+**The bytes are atomic.** The collector never scans a buffer's data block, so a million-byte
+buffer costs no mark time and no byte pattern in it can pin an unrelated object. The block is
+allocated BEFORE the header, so the only live pointer to it across the second allocation is a
+Zig local -- a stack root under the conservative scan. A zero-length buffer still gets a 1-byte
+block, so `data` is never NULL.
+
+**A view never owns bytes.** `subarray` makes a new view over the same buffer (writes show
+through, `u.subarray(1).buffer === u.buffer`); `slice` and `new Uint8Array(view)` allocate a new
+buffer and copy. `set` copies with `memmove`, so a source that overlaps the target is read as it
+was before the copy, which is what §23.2.3.26.1 step 24 requires when the two share a buffer.
+
+**Element access.** `jsrt_uint8array_get(array, index)` answers `undefined` past the end and for a
+key that is not a canonical numeric string (`"-0"`, `"1.5"` and `"01"` are not indices; `"1"`
+is). `jsrt_uint8array_put` converts the value with ToUint8 FIRST and then drops a store to an
+invalid index, which is §10.4.5.16's order -- the conversion's side effects happen even when the
+store does not. A non-numeric key degrades to the shape-table path; a non-view receiver degrades
+to `jsrt_dyn_index_get`/`_set`, so the entry points are total.
+
+**Construction** dispatches on the first argument's tag: a non-object is a length (ToIndex: a
+negative or non-integral-after-truncation length past 2^53 throws `RangeError: Invalid typed
+array length`); an `ArrayBuffer` is a window (`Start offset N is outside the bounds of the
+buffer`, `Invalid typed array length: N`); a view is copied; a Map, Set, iterator, generator or
+an object with `[Symbol.iterator]` is drained into an array first (rooted in a shadow-stack frame
+across the drain, because the drain runs compiled code); anything else is read as an array-like.
+
+**The compiler side is one table.** `TYPED_OPS` (hir/nodes.ts) lists every landed member as a
+row `{ form: new | get | call, receiver, arity, required, fn, result }`, and one `typed-op` HIR
+node carries any of them; the verifier checks the receiver kind, the operand count and the result
+type against the row (`STA4101`). Two HTypes name the receivers: `uint8array` and `arraybuffer`,
+leaves with no element parameter -- the next element type is a new leaf and new rows, not a
+generic. `u[i]` / `u[i] = v` reuse the ordinary index nodes and emit `jsrt_uint8array_get` /
+`_put` when the target's HType is `uint8array`.
+
+**Untyped receivers** reach the same functions: `jsrt_get_prop` asks `jsrt_typed_get_prop` first
+(index keys, the four data properties, and the methods as closures over the receiver), and
+`jsrt_dyn_index_get`/`_set` route a view to the element entry points. A typed array is NOT a
+fixed-shape object for `Object.*` (`is_fixed_shape_object` excludes both classes), and an expando
+write on one panics with `STA2004` like every other statically shaped builtin.
+
+**Printing and strings.** `console.log` uses the array printer with a label
+(`Uint8Array(3) [ 1, 2, 3 ]`, grouped and capped at 100 entries like an array) and prints a
+buffer as `ArrayBuffer { [Uint8Contents]: <01 02>, [byteLength]: 2 }`, the hex capped at 100
+bytes. `String(u)` is the comma join; `JSON.stringify` writes a view as its index-keyed object
+and a buffer as `{}`, which is what Node does because neither has a `toJSON`.
 
 ## 5. What Phase 2 actually implements
 

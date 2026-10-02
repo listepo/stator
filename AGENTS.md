@@ -104,6 +104,7 @@ pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lin
 pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)
 pnpm run dupes                  # jscpd over our source (no tests/vendor/docs): fails on any clone not in .jscpd-baseline.json
 pnpm run dupes:baseline         # rewrite .jscpd-baseline.json — only to SHRINK it after removing clones
+pnpm run schema:config          # regenerate packages/compiler/schema/stator.config.schema.json after a config key changes
 pnpm run docs:node              # regenerate docs/NODE.md (Node API coverage, % per module and member)
 pnpm run test:node-coverage     # fail when docs/NODE.md is stale (part of `ci`)
 pnpm run test                   # unit tests (vitest) — the default; use this for the gate
@@ -127,6 +128,7 @@ pnpm run ci                     # all of the above, in order — run before clai
 moon run tests:ci               # same gate through moon (dependency graph + caching); wraps the above
 node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]
 node packages/compiler/src/cli/main.ts explain file.ts --json   # per-construct verdicts (decision tests use this)
+node packages/compiler/src/cli/main.ts build                   # entry, -o, mode, … from ./stator.config.json (docs/CONFIG.md); flags override it
 ```
 
 The monorepo (plan-notes 204): `packages/{compiler,runtime,std,tests}` under a pnpm workspace,
@@ -138,8 +140,9 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 
 - `tsconfig.json` is locked (full flag list in plan §4 Task 1.0): `strict` + `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`, `erasableSyntaxOnly`, NodeNext modules.
 - oxlint (`.oxlintrc.json`, type-aware through `oxlint-tsgolint`) enforces: no `any`, no non-null assertions, exhaustive switches, type-only imports. Model discriminated unions and switch exhaustively — this is a compiler; unhandled cases are bugs.
-- Runtime dependency budget: **`typescript` only**, plus the owner-directed CLI/observability set recorded in `plan-notes.md` 187 (ink, react, dotenv, `@opentelemetry/*` behind `STATOR_OTEL`; execa is dev-only). This set may not leak below `src/cli/` (except `src/support/telemetry.ts`, which is the pipeline's only OTel seam). New dependencies (even dev) need a `plan-notes.md` entry saying what a few lines couldn't do.
+- Runtime dependency budget: **`typescript` only**, plus the owner-directed CLI/observability set recorded in `plan-notes.md` 187 (ink, react, dotenv, `@opentelemetry/*` behind `STATOR_OTEL`; execa is dev-only), and `typebox` + `jsonc-parser` for `stator.config.json`, confined to `src/cli/config.ts` (plan-notes 303). This set may not leak below `src/cli/` (except `src/support/telemetry.ts`, which is the pipeline's only OTel seam). New dependencies (even dev) need a `plan-notes.md` entry saying what a few lines couldn't do.
 - User-facing failures are diagnostics (stable `STA` code + span + mode), never thrown stack traces. A thrown exception reaching the CLI is a compiler bug (`STA4xxx`).
+- **Every new CLI flag lands with its config key** in `src/cli/config.ts` and a regenerated schema (`pnpm run schema:config`) in the same change, plus its row in `docs/CONFIG.md`. Only `--config`, `--no-config`, `--help` and `--version` have no key (plan.md §9 Task 6.18).
 - `ts.Type` never leaks past `src/frontend/` — everything downstream speaks HType.
 - Comments state invariants the code can't (`// pops must mirror frame pushes, incl. landing pads`), not narration.
 

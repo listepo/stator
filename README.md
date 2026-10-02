@@ -25,6 +25,10 @@ node packages/compiler/src/cli/main.ts explain app.ts --json
 # After `pnpm run build`, the same commands are available as `stator …`
 ```
 
+Every option can also live in a `stator.config.json` next to where you run the CLI, validated
+against a generated JSON Schema; the command line overrides it, and `--no-config` ignores it.
+Keys, precedence and an example: [`docs/CONFIG.md`](docs/CONFIG.md).
+
 `explain` reports per-construct verdicts: `static`, `dynamic`, `error`, or `not-yet`. Decision tests in `packages/tests/subset/` are that matrix.
 
 ## Setup

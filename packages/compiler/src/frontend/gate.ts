@@ -20,6 +20,9 @@ import {
   REGEXP_OPS,
   STRING_OPS,
   STRING_STATICS,
+  TYPED_OPS,
+  typedClassName,
+  typedMember,
 } from '../hir/nodes.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { diagnosticFromFile, diagnosticFromNode } from '../support/diagnostics.ts';
@@ -1231,6 +1234,8 @@ export const INSTANCEOF_BUILTINS: ReadonlySet<string> = new Set([
   'Set',
   'RegExp',
   'Promise',
+  'Uint8Array',
+  'ArrayBuffer',
   ...ERROR_CLASSES,
   'Boolean',
   'Number',
@@ -1358,6 +1363,8 @@ function isGlobalReference(node: ts.Identifier): boolean {
       (parent.expression === node &&
         (isConsoleLog(parent) ||
           node.text === 'Date' ||
+          node.text === 'Uint8Array' ||
+          node.text === 'ArrayBuffer' ||
           node.text === 'Math' ||
           node.text === 'Object' ||
           node.text === 'Promise' ||
@@ -1527,6 +1534,8 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
         operandType.kind === 'iterator' ||
         operandType.kind === 'regexp' ||
         operandType.kind === 'date' ||
+        operandType.kind === 'uint8array' ||
+        operandType.kind === 'arraybuffer' ||
         operandType.kind === 'promise' ||
         operandType.kind === 'fn'
       ) {
@@ -2685,6 +2694,30 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       return untyped || isStringReceiver(subject, typeChecker)
         ? { kind: 'accept' }
         : notYet(`${op} of a value that is not a string is not yet supported`, 5);
+    }
+    // A Uint8Array / ArrayBuffer method: a landed row is vetted for the argument count it allows;
+    // any other member is the rest of the family's surface, refused by its qualified name (the
+    // refusal stops the walk, so the member gate never gets to say it).
+    const typedReceiver = typedReceiverKind(callee.expression, typeChecker);
+    const typedOp =
+      typedReceiver === undefined ? undefined : typedMember(typedReceiver, callee.name.text);
+    if (typedReceiver !== undefined && typedOp === undefined) {
+      return notYet(
+        `${typedClassName(typedReceiver)}.prototype.${callee.name.text} is not yet supported`,
+        11,
+      );
+    }
+    if (typedOp !== undefined) {
+      const shape = TYPED_OPS[typedOp];
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet(`a spread argument to ${typedOp} is not yet supported`, 11);
+      }
+      return call.arguments.length > shape.arity || call.arguments.length < shape.required
+        ? notYet(
+            `${typedOp} with ${String(call.arguments.length)} arguments is not yet supported`,
+            11,
+          )
+        : { kind: 'accept' };
     }
     // `Date.prototype`'s methods. Slice A is the TZ-independent core: the UTC getters and setters,
     // the three string forms, and the two time-value reads. Every LOCAL-time member (getFullYear,
@@ -4885,6 +4918,22 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
     }
     return { kind: 'accept' };
   }
+  // `new Uint8Array(...)` / `new ArrayBuffer(n)` (plan.md T11.1). Every argument form the
+  // checker accepts is one the runtime dispatches on by tag -- a length, a buffer with an offset
+  // and a length, a typed array, an array, an iterable, an array-like -- so the arity ceiling is
+  // the only test. `new ArrayBuffer(n, { maxByteLength })` is the resizable buffer, which has not
+  // landed.
+  const typedCtor = typedConstructorOf(node.expression, checker);
+  if (typedCtor !== undefined) {
+    const args = node.arguments ?? [];
+    const op = typedCtor === 'uint8array' ? 'new Uint8Array' : 'new ArrayBuffer';
+    if (args.some((argument) => ts.isSpreadElement(argument))) {
+      return notYet(`a spread argument to ${op} is not yet supported`, 11);
+    }
+    return args.length <= TYPED_OPS[op].arity
+      ? { kind: 'accept' }
+      : notYet(`${op} with ${String(args.length)} arguments is not yet supported`, 11);
+  }
   // `new TypeError('x')`. The descriptor lives in the runtime rather than being emitted from a
   // class declaration, so this never reaches the classDeclarationOf test below (plan.md §8 step
   // 2a(c)). At most one argument: `options` (the `cause` bag, ES2022) is a second slot this layout
@@ -5376,6 +5425,29 @@ function gateMemberAccess(
     return { kind: 'accept' }; // gateCall vets the operation itself
   }
 
+  // `Uint8Array.from`, `ArrayBuffer.isView` and the rest of the two namespaces: none has landed
+  // (plan.md T11.1 lands the instances; the statics follow the corpus).
+  const typedNamespace = typedConstructorOf(access.expression, checker);
+  if (typedNamespace !== undefined) {
+    return notYet(`${typedClassName(typedNamespace)}.${access.name.text} is not yet supported`, 11);
+  }
+  // A Uint8Array / ArrayBuffer member: the TYPED_OPS rows, a method only as a callee and a data
+  // property only as a read (the assignment gate refuses a write into a builtin, as it does for
+  // `re.lastIndex`). Everything else on the prototype is the rest of the family's surface.
+  const typedReceiver = typedReceiverKind(access.expression, checker);
+  if (typedReceiver !== undefined) {
+    const member = access.name.text;
+    const qualified = `${typedClassName(typedReceiver)}.prototype.${member}`;
+    const op = typedMember(typedReceiver, member);
+    if (op === undefined) {
+      return notYet(`${qualified} is not yet supported`, 11);
+    }
+    const isCallee = ts.isCallExpression(access.parent) && access.parent.expression === access;
+    return TYPED_OPS[op].form !== 'call' || isCallee
+      ? { kind: 'accept' }
+      : notYet(`using ${qualified} as a value is not yet supported`, 11);
+  }
+
   // RegExp.prototype follows String's and Array's rule for its METHODS: one is a CALLEE and
   // nothing else. Its DATA properties are the other half of the surface -- `REGEXP_FIELDS` is the
   // closed set of them -- and they are reads, so they are admitted here and nowhere else.
@@ -5611,6 +5683,15 @@ function gateElementAccess(
     // Untyped receivers (plan.md §8 step 4) take the same path.
     const receiver = checker.getTypeAtLocation(access.expression);
     const hir = tsTypeToHType(receiver, checker);
+    // `u[i]` on a Uint8Array (plan.md T11.1): an element read or a ToUint8 write. A string key
+    // (`u['0']`, `u['length']`) is a property NAME on the dynamic path, which the static index
+    // node does not model, so only a numeric key is the element access.
+    if (hir.kind === 'uint8array') {
+      const key = checker.getTypeAtLocation(access.argumentExpression);
+      return (key.flags & ts.TypeFlags.NumberLike) !== 0
+        ? { kind: 'accept' }
+        : notYet('a non-numeric key on a Uint8Array is not yet supported', 11);
+    }
     // An index into `T`: the bound is what is indexed (almost always an array), and the lowering
     // substitutes the call's concrete element type per specialization, under which this is the
     // same node as an index into the bound itself.
@@ -5719,6 +5800,7 @@ function gateForOf(statement: ts.ForOfStatement, mode: Mode, checker: ts.TypeChe
     hir.kind !== 'map' &&
     hir.kind !== 'set' &&
     hir.kind !== 'iterator' &&
+    hir.kind !== 'uint8array' &&
     userIteratorMethod(hir) === undefined
   ) {
     if (mode === 'js') {
@@ -5837,6 +5919,28 @@ export function isGlobalDate(node: ts.Expression, checker: ts.TypeChecker): bool
  * the lowering agree on what a date receiver is, exactly as they do for a regexp. */
 export function isDateReceiver(expression: ts.Expression, checker: ts.TypeChecker): boolean {
   return tsTypeToHType(checker.getTypeAtLocation(expression), checker).kind === 'date';
+}
+
+/** The typed-array class this expression names when it is the GLOBAL constructor (plan.md
+ * T11.1), by the declaration-file test every other global uses. */
+export function typedConstructorOf(
+  node: ts.Expression,
+  checker: ts.TypeChecker,
+): 'uint8array' | 'arraybuffer' | undefined {
+  if (isGlobalNamed(node, checker, 'Uint8Array')) {
+    return 'uint8array';
+  }
+  return isGlobalNamed(node, checker, 'ArrayBuffer') ? 'arraybuffer' : undefined;
+}
+
+/** The checker says the receiver is a Uint8Array or an ArrayBuffer -- through the HType mapping,
+ * so the gate and the lowering agree on it the way they do for a Date. */
+export function typedReceiverKind(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+): 'uint8array' | 'arraybuffer' | undefined {
+  const kind = tsTypeToHType(checker.getTypeAtLocation(expression), checker).kind;
+  return kind === 'uint8array' || kind === 'arraybuffer' ? kind : undefined;
 }
 
 /** The standard error constructor this expression names, or undefined. The same declaration-file

@@ -2394,6 +2394,81 @@ reopen has the full picture.
 Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output names
 `differential/run.ts` among analyzed files.
 
+### Task 6.18 — `stator.config.json`: every CLI option in one validated file ✅ (landed 2026-10-02)
+
+(creator's direction 2026-10-02, plan-notes 303). Stator works both with a config file and without
+one. Every option a command takes can come from the file, from the command line, or from both.
+
+1. **The file.** It is `stator.config.json`, JSON only: no code runs to read it, and §0.10 holds.
+   Without `--config`, Stator reads `./stator.config.json` from the current directory if it
+   exists. `--config=<path>` reads that file instead, and a missing file is an error.
+   `--no-config` skips the file. `--config`, `--no-config`, `--help` and `--version` are the only
+   flags with **no** key in the file: a config cannot name a config.
+2. **Keys.** One key per flag: `entry`, `out`, `mode`, `opt`, `link` (array), `emit`, `keepC`,
+   `emitHeader`, `unitName`, `diagnostics`, plus `$schema`. Planned flags get their keys in the
+   same change as the flag: `node` (T11.5), `bundler` (T12.1), `renderer` (T13), `interpreter`
+   (T14). Unknown keys are errors (`additionalProperties: false`), so a typo cannot pass silently.
+   Paths are resolved against the config file's directory; command-line paths against the current
+   directory.
+3. **Precedence.** Command line, then environment (`STATOR_OPT`, …), then the config file, then
+   the built-in default. `link` from the file and from the command line are concatenated, file
+   first.
+4. **Schema and validation from one source.** The JSON Schema is generated from the config's type,
+   committed at `packages/compiler/schema/stator.config.schema.json`, and checked by a drift test
+   in `pnpm run test`. One module (`src/cli/config.ts`) owns finding, loading and validating the
+   file (AGENTS.md, Config files). Pick the best ready solution before writing a validator (for
+   example zod 4 with `toJSONSchema`, TypeBox, or `ts-json-schema-generator` with ajv). Record the
+   choice and why in the plan-notes entry. Any runtime dependency stays inside `src/cli/` (§0.9).
+5. **Diagnostics.** Errors are reported as `STA0xxx` codes from the free range, allocated in
+   `docs/DIAGNOSTICS.md`. There are three cases: the file cannot be read or is not valid JSON
+   (message includes line and column), the file does not match the schema (message includes the
+   JSON pointer and the expected type), and `--config` names a missing file. None of them is a
+   stack trace.
+6. **Docs.** A new `docs/CONFIG.md` covers the keys, precedence, discovery and an example, and
+   `docs/README.md` lists it. `--help` mentions `--config` and `--no-config`. AGENTS.md gets a rule:
+   every new CLI flag lands with its config key and a regenerated schema in the same change.
+
+**Check:**
+- Unit tests cover every key from the file alone, every key overridden from the command line,
+  `--no-config`, a missing `--config` path, invalid JSON, a schema violation and an unknown key.
+  Each error case asserts its `STA` code.
+- The drift test fails after a hand edit of the schema.
+- `build` and `explain` with no config file behave byte-for-byte as before: all subset and golden
+  runs pass unchanged.
+
+**Check — PASSED** (2026-10-02, `pnpm run ci` exit 0 on Node 26.7.0, after merging main at
+ce66355):
+
+- **Unit tests** (`packages/tests/unit/config.test.ts`, 14 tests; the whole suite is 621/621 in
+  47 files). They cover:
+  - every key read from the file alone, with paths resolved against the file's directory;
+  - every key overridden from the command line, including `--emit=binary` and
+    `--diagnostics=text`, with `link` concatenated file-first;
+  - `STATOR_OPT` between the command line and the file;
+  - the built-in defaults when there is no file;
+  - `--no-config` over a broken file;
+  - `--config` with a relative path;
+  - a missing `--config` path → `STA0018`;
+  - invalid JSON, trailing commas and a directory → `STA0016`, with `path:line:column`;
+  - schema violations → `STA0017`, with JSON pointers and the expected types;
+  - unknown keys, including `config`, `noConfig`, `help` and `version` → `STA0017`;
+  - an end-to-end `explain` spawn proving the `parse()` wiring.
+- **Drift test.** It fails after a hand edit of the schema. Measured: adding `"py"` to
+  `/properties/mode/enum` in the committed file gave `× drift: the committed schema equals the
+  one config.ts generates`, and restoring the file made it pass again.
+- **No config file, unchanged behaviour.**
+  - subset: 761 fixtures, 724 passed, 37 expected-fail, 0 failed;
+  - golden: 402/402 (2 `intl_*` skipped as designed);
+  - runtime print corpus matches Node, plain and ASan;
+  - builtins 223/238;
+  - `docs/NODE.md` is current;
+  - leak plateaus: 3632 KB and 3664 KB of a 65536 KB cap;
+  - golden-asan 402/402.
+- **Gate.** `typecheck`, `lint` and `dupes` are clean, with no new clones.
+
+Libraries: `typebox` 1.3.34 and `jsonc-parser` 3.3.1. Why each was chosen is recorded in
+plan-notes 303.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is
@@ -2931,3 +3006,67 @@ error (STD.md §1); move `std/env` + `std/path` in; land T10.1 steps 3–4 (`std
   under ASan/UBSan, golden-asan 402 passed, 0 failed.
 
 Design decisions, deviations, the emitter fix and the pre-existing gaps it found: plan-notes 294.
+
+## Phase 11 — T11.1 typed arrays ✅ (2026-10-02)
+
+### T11.1. `packages/runtime`: typed arrays — **[D4]**
+
+`Buffer` is a `Uint8Array` subclass, and every byte-level API (file reads, hashes, codecs) needs
+a byte container; the tree has none. Steps: `ArrayBuffer` + `Uint8Array` first (constructor
+forms, indexing, `length`, `subarray`, `set`, `slice`, iteration), storage in Zig (§0.5), then the
+rest of the `TypedArray` family only as the corpus needs it. Docs: `docs/SUBSET.md` rows,
+`builtins_coverage.json` namespaces.
+
+**Check:** decision tests (both modes) + goldens for every landed member; `test:builtins` lists
+the new namespaces; ASan clean.
+
+**Execution plan (Claude Code / opus-5-5, branch `t11-1-typed-arrays`):**
+1. Runtime: `JSRTArrayBuffer` / `JSRTTypedArray` layouts + entry points in `jsrt_value.h`; storage,
+   construction, element get/set (ToUint8), `subarray`/`slice`/`set`, `ArrayBuffer.slice` and the
+   dynamic-method closures in a new `src/jsrt_typed.zig` (byte storage is pointer-free memory).
+   C hooks only where the existing C dispatches: `jsrt_get_prop` / `jsrt_dyn_index_*` (dynamic
+   tier), `jsrt_get_iterator` (a typed-array walk kind), `console.log` (Node's `Uint8Array(n) [ … ]`
+   / `ArrayBuffer { [Uint8Contents]: <…>, [byteLength]: n }`), `String()` / `JSON.stringify`,
+   `instanceof`.
+2. Compiler: HTypes `uint8array` and `arraybuffer` (leaves -- the next element type is a new leaf
+   and new rows, not a generic); one HIR node `typed-op`
+   driven by one table (`TYPED_OPS`, hir/nodes.ts) that the gate, lowering, verifier (new
+   STA4101) and emitter all read; `u[i]` / `u[i] = v` reuse the index nodes; `for-of` goes through
+   `get-iterator` with a `number` element.
+3. Tests: decision tests (ts + js, static + a dynamic js case + not-yet for unlanded members),
+   goldens `ts/typed_arrays.ts` + `js/typed_arrays.js` (+ dynamic js), ASan gate.
+4. Docs: `docs/SUBSET.md` row, `docs/VALUE.md` §4.19, `docs/DIAGNOSTICS.md` STA4101,
+   `builtins_coverage.json` namespaces; then the record moves to `done.md`.
+
+**Landed.** Runtime: `packages/runtime/src/jsrt_typed.zig` (new) holds the two classes, the
+storage (an atomic, zero-filled byte block per buffer; `jsrt_gc.zig` gained `allocAtomic`), every
+entry point and the method closures the dynamic tier hands out; `jsrt_value.h` declares the
+layouts and the C ABI. C hooks: `jsrt_get_prop` → `jsrt_typed_get_prop`, `jsrt_dyn_index_get`/`_set`,
+`jsrt_get_iterator` (`JSRT_ITER_UINT8ARRAY`), `console.log` (`inspect_list` now prints arrays and
+views from one layout; `inspect_heap` is the shared builtin dispatch), `String()` /
+`JSON.stringify`, `instanceof`, and `is_fixed_shape_object`. Compiler: `TYPED_OPS` rows for
+`new ArrayBuffer`, `new Uint8Array`, `ArrayBuffer.prototype.byteLength`/`slice`,
+`Uint8Array.prototype.length`/`byteLength`/`byteOffset`/`buffer`/`subarray`/`slice`/`set`; the gate
+refuses everything else by its qualified name (`STA1214`, phase 11); verifier `STA4101`;
+codegen's `indexGetCall`/`indexSetCall` pick `jsrt_uint8array_get`/`_put` for a `uint8array`
+target. Tests: decision tests `subset_typed_arrays_{ts,js,dynamic_ts,dynamic_js,not_yet_ts,not_yet_js}`,
+goldens `ts/typed_arrays.ts` + `js/typed_arrays.js` (the js one also drives the dynamic tier),
+`unit/typed-arrays.test.ts`. Docs: `docs/SUBSET.md` (two rows, plus `for-of` and `instanceof`),
+`docs/VALUE.md` §4.19, `docs/DIAGNOSTICS.md` STA4101, `builtins_coverage.json` (globals
+`Uint8Array`/`ArrayBuffer`; namespaces `Uint8Array`, `Uint8Array.prototype`, `ArrayBuffer`,
+`ArrayBuffer.prototype`).
+
+**Known ceilings** (documented in docs/SUBSET.md): an expando write on an untyped view panics with
+`STA2004`, like every statically shaped builtin; a dynamic call of an unlanded method reads
+`undefined` and throws the missing-method TypeError; `Object.keys` on a view is refused by the
+existing argument gate; a constructor of another element type falls under the generic `new`
+refusal. No runtime print corpus was added: the corpora are `.mjs` scripts, the no-JS rule (plan.md §0
+item 10, plan-notes 289) stops a new one until Task 6.15 migrates them, and the goldens prove the
+same printer against Node.
+
+**Check — PASSED** (2026-10-02, rebased on T11.2 `ce66355`):
+- decision tests: `node packages/tests/subset/run.ts` → `subset: 767 fixtures — 730 passed, 37 expected-fail, 0 failed` (six new typed-array fixtures, both modes, static / dynamic / not-yet);
+- goldens: `node packages/tests/golden/run.ts` → `golden: 404 fixtures — 404 passed, 0 failed`;
+- `node packages/tests/golden/builtins.ts` → `builtins: 234/294 surface members landed (80%)`, listing `Uint8Array: 0/5`, `Uint8Array.prototype: 7/40`, `ArrayBuffer: 0/1`, `ArrayBuffer.prototype: 2/8`;
+- ASan: `node packages/tests/golden/asan-gate.ts` → `golden: 404 fixtures — 404 passed, 0 failed` under ASan/UBSan, `golden-asan green`;
+- also clean: `tsc` (compiler, tests, std), `oxlint --deny-warnings`, `oxfmt --check`, `cpd` (217 clones, no new ones against the baseline), `vitest` (47 files, 613 tests), `node-coverage --check`, `just runtime-test`, `zig fmt --check`.

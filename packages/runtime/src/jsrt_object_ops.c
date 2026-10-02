@@ -283,7 +283,8 @@ static bool is_fixed_shape_object(jsrt_value v) {
   const JSRTClass *cls = jsrt_as_object(v)->cls;
   return cls != &jsrt_class_promise && cls != &jsrt_class_date && cls != &jsrt_class_map &&
          cls != &jsrt_class_set && cls != &jsrt_class_regexp && cls != &jsrt_class_iterator &&
-         cls != &jsrt_class_generator;
+         cls != &jsrt_class_generator && cls != &jsrt_class_uint8array &&
+         cls != &jsrt_class_arraybuffer;
 }
 
 jsrt_value jsrt_object_freeze(jsrt_value v) {

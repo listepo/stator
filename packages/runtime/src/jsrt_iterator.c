@@ -134,6 +134,16 @@ static bool string_step(JSRTIterator *it, jsrt_value *out) {
   return true;
 }
 
+/* The Uint8Array element walk: the length is re-read every step, through the view's own
+ * accessor, so the cursor never indexes past the bytes. */
+static bool uint8array_step(JSRTIterator *it, jsrt_value *out) {
+  if (it->index >= jsrt_number_value(jsrt_uint8array_length(it->target))) {
+    return false;
+  }
+  *out = jsrt_uint8array_get(it->target, jsrt_number((double)it->index++));
+  return true;
+}
+
 const JSRTClass jsrt_class_generator = {"Generator", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
 
 jsrt_value jsrt_generator_new(JSRTEnv *env, JSRTGenResume resume) {
@@ -236,11 +246,13 @@ jsrt_value jsrt_get_iterator(jsrt_value value) {
   }
   if (jsrt_is(value, JSRT_TAG_OBJECT)) {
     const JSRTClass *cls = jsrt_as_object(value)->cls;
-    if (cls == &jsrt_class_map) {
-      return jsrt_iterator_new(value, JSRT_ITER_MAP_ENTRIES);
-    }
-    if (cls == &jsrt_class_set) {
-      return jsrt_iterator_new(value, JSRT_ITER_SET_VALUES);
+    /* The builtin iterables, each with its default walk (a Map yields entries, a Set values). */
+    const int walk = cls == &jsrt_class_map          ? JSRT_ITER_MAP_ENTRIES
+                     : cls == &jsrt_class_set        ? JSRT_ITER_SET_VALUES
+                     : cls == &jsrt_class_uint8array ? JSRT_ITER_UINT8ARRAY
+                                                     : -1;
+    if (walk >= 0) {
+      return jsrt_iterator_new(value, (uint8_t)walk);
     }
     /* A user iterable: the method the frontend names `__@iterator`, resolved the way any
      * dynamic method call resolves it (fixed method table or shape table alike). It must be
@@ -286,6 +298,8 @@ bool jsrt_iterator_step(jsrt_value itv, jsrt_value *out) {
     more = jsrt_regexp_match_all_step(it->extra, it->target, out);
   } else if (it->kind == JSRT_ITER_STRING) {
     more = string_step(it, out);
+  } else if (it->kind == JSRT_ITER_UINT8ARRAY) {
+    more = uint8array_step(it, out);
   } else {
     more = is_map_kind(it->kind) ? map_step(it, out) : array_step(it, out);
   }

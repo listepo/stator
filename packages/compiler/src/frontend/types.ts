@@ -188,6 +188,17 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
     return H_DATE;
   }
 
+  // `Uint8Array<TArrayBuffer>` is one runtime layout whatever buffer type it is instantiated over,
+  // and `ArrayBufferLike` (what `.buffer` answers on an unparameterized `Uint8Array`) is the union
+  // `ArrayBuffer | SharedArrayBuffer` -- whose second member no program here can construct (the
+  // gate refuses `SharedArrayBuffer`), so it is the buffer type (plan.md T11.1).
+  if (isLibInterface(type, 'Uint8Array')) {
+    return { kind: 'uint8array' };
+  }
+  if (isBufferType(type)) {
+    return { kind: 'arraybuffer' };
+  }
+
   /* The five standard error interfaces are their runtime LAYOUT, not an unknown. `new Error('x')`
    * lowers to `error-new` typed `errorHType`, so a binding declared from one -- `const e = new
    * Error('x')` -- has to have the same HType as the value it holds. It did not: the interface fell
@@ -1501,6 +1512,15 @@ function arrayTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number)
  * builtin is DECLARED and never defined — every one of its declarations lives in a `.d.ts` — while
  * a user's class has a body, and a body only exists in a source file. (`hasNoDefaultLib` looks like
  * the test for this and is not: it is false for every split lib file.) */
+function isBufferType(type: ts.Type): boolean {
+  if (type.isUnion()) {
+    return type.types.every(
+      (t) => isLibInterface(t, 'ArrayBuffer') || isLibInterface(t, 'SharedArrayBuffer'),
+    );
+  }
+  return isLibInterface(type, 'ArrayBuffer');
+}
+
 function isLibInterface(type: ts.Type, name: string): boolean {
   const symbol = type.getSymbol();
   if (symbol?.getName() !== name) {

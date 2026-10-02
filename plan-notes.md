@@ -483,6 +483,7 @@ untouched — other agents own them.
 
 Baselines at branch start (`agent/p5-class-surface`, pinned Node 26.7.0): subset 675
 fixtures (637 passed, 38 expected-fail, 0 failed), golden 386/386, unit 564/564.
+
 ## 242. CI run 34778195179: shard 1 died in the checker's stack overflow through the in-process path 213 missed (2026-09-14)
 
 **Plan:** §9 Task 6.1 (the Test262 heartbeat) and the CI decomposition map in
@@ -7348,6 +7349,7 @@ miscompile: `{ function outer() {} }` under an enclosing `outer` is `STA1214`, a
 non-shadowing spelling compiles. The `let`/`const` case older than this note stays unrefused —
 gating it now would reject code the compiler has accepted since Phase 3, with the rename as the
 only replacement — and step 14 owns removing both the defect and the refusal together.
+
 ## 210. `delete` lands by rebuilding the shape chain; a fixed shape refuses instead of shrinking (2026-09-09)
 
 **What was open.** §8 step 2a(c) carried a Check with a question inside it: the two `delete` checker
@@ -7447,6 +7449,7 @@ where it is, because lowering it would bank someone else's regression as this ta
 boolean"), narrows `STA1205`'s message and widens `STA1108`'s note; `docs/SUBSET.md` gains the
 dynamic-shape `delete` row and re-words the two class-field rows; `docs/VALUE.md` §4.10 replaces the
 sentence that is now wrong with the rebuild contract.
+
 ## 211. The human is the only author: no agent attribution on commits, merges or PRs (2026-09-11)
 
 **Request.** Owner-directed rule, added as `AGENTS.md` golden rule 7 (so also `CLAUDE.md`, which is
@@ -8577,6 +8580,7 @@ mise pin). One shared action covers runtime/asan/intl/ffi/frontend jobs; no `ci.
 change needed. `docs/TOOLCHAIN.md` (Zig row + "Not yet required" list) and the
 `plan.md` §11 line that held the decision open now record the install as landed.
 No frontend, justfile, or Zig-source changes; no Zig growth past the memory core.
+
 ## 279. Inline generic arrows land: the 12(f) callback slice (2026-09-16)
 
 **Plan:** §8 step 12(f). `plan.md` edited in this change (the (f) bullet records the landed
@@ -9331,6 +9335,87 @@ unchanged. The Linux-only extras (`test262`, Linux arm64 `frontend`, Linux `runt
 `ffi`) are in neither stage and stay ungated, so a long conformance run never delays stage 2.
 `revert-on-failure` now lists every job id. No action or tool version changed.
 
+## 294. T11.2 lands: `packages/std` is the real `std/*` package (2026-10-02)
+
+**Plan:** §11c T11.2 (+ T10.1 steps 3–4, which the card absorbs). `plan.md` edited in the same
+change: the T11.2 record moves to `done.md`; T10.1 steps 2–4 are struck (step 5 stays open);
+§11b's v0 table drops `std/env.args`; T11.3's `std/fs` row drops what landed here.
+
+**What landed.**
+
+- `packages/std` (`@stator/std`): a pnpm workspace member and a moon project (`build`,
+  `typecheck`, `lint`). `src/<module>.ts` is the surface, `src/native/<module>.d.ts` its
+  `@statorExtern` bindings, `zig/<module>.zig` the backings, and `just std` builds
+  `build/libjsrt_std.a`. The modules are `std/env`, `std/path` (pure TS), `std/process`,
+  sync `std/fs` and `std/time`.
+- Compiler: `frontend/std.ts` owns the `std/` prefix. Resolution goes through a `paths` entry
+  on the program's own options. `std/sync` and `std/thread` are `STA1214` (Phase 10). Any other
+  `std/…` is the new `STA3002`, reported once: by the TS2307 mapping when nothing resolved, and
+  by the gate when the mapping reached a non-module file (`std/internal/error`). `cli/build.ts`
+  links the archive, before `-ljsrt`, only when the module graph holds a std source file;
+  `STA0011` now covers a missing std archive.
+- The plan-notes 284 fixtures are gone: no `declare` helper, no fixture C, no `node_shim.mjs`.
+
+**Decisions.**
+
+1. **Binding files are module-form `.d.ts`** (`export declare function`), imported by relative
+   path. A global `declare namespace` for `CString` was tried first; the qualified name is
+   `STA1214`. Module form keeps `CString` and every binding out of the user's global scope,
+   with no compiler change. docs/FFI.md §1 item 5 records it.
+2. **Errors carry the code in the message**: `std/<module>.<fn>(<arg>): <CODE>`, with codes from
+   one closed POSIX errno table (docs/STD.md §3). `class StdError extends Error` is `STA1214`
+   today (Phase 5). So there is no `code` property yet; it arrives with the same strings.
+   `std/env.set` names the variable, never the value.
+3. **The archive calls only libc.** It has its own panic handler, so it never depends on
+   `libjsrt`. One ReleaseSafe flavor therefore serves the plain, ASan and intl runtimes; the
+   ASan gate builds it and hashes its sources.
+4. **Strings out** go through one result slot. A backing parks an owned string and returns a
+   status, and `jsrtStdResult()` is the `CString` return the emitter copies at once. The next
+   park frees the previous value.
+5. **`std/fs.Stat` is a class.** An interface-typed object literal compiles dynamic; a class
+   instance is static. `std/env.get` stays `string | undefined`, so an importer of `std/env`
+   explains as `dynamic`. That is the honest verdict, and docs/SUBSET.md records it.
+6. **`std/path` is POSIX `basename(3)`/`dirname(3)`**, not `path.posix`, with no normalization
+   and a two-segment `join`. It answers STD.md's old open question 2.
+7. **The Node oracle is a TS resolve hook** (`golden/std-oracle.ts`, `module.registerHooks`). It
+   maps `std/<m>` to a Node-API twin, or, for `std/path`, to the real source. No `.mjs` file is
+   involved (§0.10).
+
+**Deviations from the card's wording.**
+
+- `std/env.args` (§11b v0 table) moves to T11.3 as `std/process.argv`. The table's note "argv
+  already exists for `main`" was wrong: the generated entry is `int main(void)`. Exposing argv
+  touches codegen and the runtime, so it belongs in T11.3, which already lists `argv`.
+- `std/fs.unlink` and `rmdir` landed early (T11.3 listed `unlink`), because `std_fs` must
+  remove what it creates.
+
+**Emitter bug found and fixed.** Two calls to a zero-argument extern wrapper in one scope
+(`nowMs()` twice) failed in clang with "redefinition of `_jsrt_exr_N`". Inlining emits the
+wrapper's single `ExternCall` node, so both sites get one slot base, and the temporaries were
+named by that base. They are now named by an emission-unique site counter
+(`codegen/index.ts` `externSiteCount`). Regression: `unit/extern.test.ts` "an inlined extern
+wrapper called twice declares each C temporary once" fails without the fix.
+
+**Found, not fixed (pre-existing; outside this card).**
+
+- **One namespace.** Importing a std module reserves its top-level names, exported or not, for
+  the whole program: a user `function get()` beside `import { has } from "std/env"` is
+  `STA1214`. Renamed imports and exports are also `STA1214`, so the library cannot hide its
+  names. `packages/node` (T11.6) will hit this on every module; module namespaces (Phase 5)
+  are a prerequisite worth a card before T11.6.
+- `catch (e) { if (e instanceof Error) e.message.lastIndexOf(":") }` is `STA4081`, an internal
+  error on a method call over a receiver typed `unknown`. The fixtures avoid it.
+- `Number.isInteger(x)` is "method calls not yet supported" in ts mode, and
+  `JSON.stringify(string | undefined)` is `STA1214`. The fixtures avoid both.
+
+**Dependency note.** `packages/std/package.json` lists `typescript` 6.0.3 as a devDependency
+(already pinned at the root and in both packages). pnpm writes no lockfile importer for a
+member with no dependencies, and `--frozen-lockfile` then refuses the workspace
+(`ERR_PNPM_PACKAGE_MANAGER_NO_IMPORTER`). The package also really is type-checked with `tsc`.
+No new package entered the tree.
+
+**Proof:** see done.md → Phase 11 T11.2.
+
 ## 296. T12.0 lands: `js` mode bundles the dependencies, not the project; the bundler converts CommonJS (2026-10-02)
 
 **Plan sections touched:**
@@ -9547,6 +9632,7 @@ TypeScript.
   is what T13.0 §2's damage tracking builds on.
 - Drawing backends in `renderers/` at `main`: GLES3, SDL2, SDL3, cairo, playdate, raylib, sokol,
   termbox2, terminal, web, win32_gdi.
+
 ## 299. Web API coverage is generated into `docs/WEBAPI.md`, the way `docs/NODE.md` is (2026-10-02)
 
 **Plan:** new card §11e T13.5; T13.0 now writes its design to `docs/WEBAPI-DESIGN.md`; T13.1
@@ -9591,104 +9677,6 @@ package and an additional fallback for `js` mode.
   an `Interpret` node. The emitter links the package on demand, so binaries that never interpret
   are unchanged in size.
 
-
-## 294. T11.2 lands: `packages/std` is the real `std/*` package (2026-10-02)
-
-**Plan:** §11c T11.2 (+ T10.1 steps 3–4, which the card absorbs). `plan.md` edited in the same
-change: the T11.2 record moves to `done.md`; T10.1 steps 2–4 are struck (step 5 stays open);
-§11b's v0 table drops `std/env.args`; T11.3's `std/fs` row drops what landed here.
-
-**What landed.**
-
-- `packages/std` (`@stator/std`): a pnpm workspace member and a moon project (`build`,
-  `typecheck`, `lint`). `src/<module>.ts` is the surface, `src/native/<module>.d.ts` its
-  `@statorExtern` bindings, `zig/<module>.zig` the backings, and `just std` builds
-  `build/libjsrt_std.a`. The modules are `std/env`, `std/path` (pure TS), `std/process`,
-  sync `std/fs` and `std/time`.
-- Compiler: `frontend/std.ts` owns the `std/` prefix. Resolution goes through a `paths` entry
-  on the program's own options. `std/sync` and `std/thread` are `STA1214` (Phase 10). Any other
-  `std/…` is the new `STA3002`, reported once: by the TS2307 mapping when nothing resolved, and
-  by the gate when the mapping reached a non-module file (`std/internal/error`). `cli/build.ts`
-  links the archive, before `-ljsrt`, only when the module graph holds a std source file;
-  `STA0011` now covers a missing std archive.
-- The plan-notes 284 fixtures are gone: no `declare` helper, no fixture C, no `node_shim.mjs`.
-
-**Decisions.**
-
-1. **Binding files are module-form `.d.ts`** (`export declare function`), imported by relative
-   path. A global `declare namespace` for `CString` was tried first; the qualified name is
-   `STA1214`. Module form keeps `CString` and every binding out of the user's global scope,
-   with no compiler change. docs/FFI.md §1 item 5 records it.
-2. **Errors carry the code in the message**: `std/<module>.<fn>(<arg>): <CODE>`, with codes from
-   one closed POSIX errno table (docs/STD.md §3). `class StdError extends Error` is `STA1214`
-   today (Phase 5). So there is no `code` property yet; it arrives with the same strings.
-   `std/env.set` names the variable, never the value.
-3. **The archive calls only libc.** It has its own panic handler, so it never depends on
-   `libjsrt`. One ReleaseSafe flavor therefore serves the plain, ASan and intl runtimes; the
-   ASan gate builds it and hashes its sources.
-4. **Strings out** go through one result slot. A backing parks an owned string and returns a
-   status, and `jsrtStdResult()` is the `CString` return the emitter copies at once. The next
-   park frees the previous value.
-5. **`std/fs.Stat` is a class.** An interface-typed object literal compiles dynamic; a class
-   instance is static. `std/env.get` stays `string | undefined`, so an importer of `std/env`
-   explains as `dynamic`. That is the honest verdict, and docs/SUBSET.md records it.
-6. **`std/path` is POSIX `basename(3)`/`dirname(3)`**, not `path.posix`, with no normalization
-   and a two-segment `join`. It answers STD.md's old open question 2.
-7. **The Node oracle is a TS resolve hook** (`golden/std-oracle.ts`, `module.registerHooks`). It
-   maps `std/<m>` to a Node-API twin, or, for `std/path`, to the real source. No `.mjs` file is
-   involved (§0.10).
-
-**Deviations from the card's wording.**
-
-- `std/env.args` (§11b v0 table) moves to T11.3 as `std/process.argv`. The table's note "argv
-  already exists for `main`" was wrong: the generated entry is `int main(void)`. Exposing argv
-  touches codegen and the runtime, so it belongs in T11.3, which already lists `argv`.
-- `std/fs.unlink` and `rmdir` landed early (T11.3 listed `unlink`), because `std_fs` must
-  remove what it creates.
-
-**Emitter bug found and fixed.** Two calls to a zero-argument extern wrapper in one scope
-(`nowMs()` twice) failed in clang with "redefinition of `_jsrt_exr_N`". Inlining emits the
-wrapper's single `ExternCall` node, so both sites get one slot base, and the temporaries were
-named by that base. They are now named by an emission-unique site counter
-(`codegen/index.ts` `externSiteCount`). Regression: `unit/extern.test.ts` "an inlined extern
-wrapper called twice declares each C temporary once" fails without the fix.
-
-**Found, not fixed (pre-existing; outside this card).**
-
-- **One namespace.** Importing a std module reserves its top-level names, exported or not, for
-  the whole program: a user `function get()` beside `import { has } from "std/env"` is
-  `STA1214`. Renamed imports and exports are also `STA1214`, so the library cannot hide its
-  names. `packages/node` (T11.6) will hit this on every module; module namespaces (Phase 5)
-  are a prerequisite worth a card before T11.6.
-- `catch (e) { if (e instanceof Error) e.message.lastIndexOf(":") }` is `STA4081`, an internal
-  error on a method call over a receiver typed `unknown`. The fixtures avoid it.
-- `Number.isInteger(x)` is "method calls not yet supported" in ts mode, and
-  `JSON.stringify(string | undefined)` is `STA1214`. The fixtures avoid both.
-
-**Dependency note.** `packages/std/package.json` lists `typescript` 6.0.3 as a devDependency
-(already pinned at the root and in both packages). pnpm writes no lockfile importer for a
-member with no dependencies, and `--frozen-lockfile` then refuses the workspace
-(`ERR_PNPM_PACKAGE_MANAGER_NO_IMPORTER`). The package also really is type-checked with `tsc`.
-No new package entered the tree.
-
-**Proof:** see done.md → Phase 11 T11.2.
-## 302. Per-module namespaces get a card, T11.5a, before `packages/node` (2026-10-02)
-
-**Plan:** new §11c T11.5a; T11.6 depends on it; T12.1 step 3 cross-reference; changelog v4.20.
-
-**Evidence (plan-notes 294, T11.2).** Importing a `std/*` module reserves its top-level names for
-the whole program. A user `function get()` next to `import { has } from "std/env"` is `STA1214`,
-and renamed imports and exports are `STA1214` too, so a library cannot hide its helpers.
-`packages/node` (T11.6) is a library of many modules over `std`, so it would hit this on every
-module.
-
-**Creator's decision:** add the card before T11.6.
-
-**Scope, and why:** one card covers per-module symbols plus every aliasing shape (renamed,
-default, namespace imports; renamed and default exports; re-exports), because they share one
-mechanism: resolving an imported name to its defining module's binding. Splitting them would
-build that resolution twice. `export { a as b }` is also T12.1 step 3. Whichever card lands first
-owns it, so it is written once.
 
 ## 301. js mode keeps a `.ts` annotation the checker's TS2322 disagrees with, and checks it (2026-10-02)
 
@@ -9745,3 +9733,158 @@ label(2); }` prints `2` (TS2322 on a return). Both should be `STA2001`. Neither 
 repro, and the call edge must leave a `.js` callee alone: `golden/js/argument_mismatch.js` needs
 `increment("2")` to coerce the way Node does. Follow-up work, not this change.
 
+## 302. Per-module namespaces get a card, T11.5a, before `packages/node` (2026-10-02)
+
+**Plan:** new §11c T11.5a; T11.6 depends on it; T12.1 step 3 cross-reference; changelog v4.20.
+
+**Evidence (plan-notes 294, T11.2).** Importing a `std/*` module reserves its top-level names for
+the whole program. A user `function get()` next to `import { has } from "std/env"` is `STA1214`,
+and renamed imports and exports are `STA1214` too, so a library cannot hide its helpers.
+`packages/node` (T11.6) is a library of many modules over `std`, so it would hit this on every
+module.
+
+**Creator's decision:** add the card before T11.6.
+
+**Scope, and why:** one card covers per-module symbols plus every aliasing shape (renamed,
+default, namespace imports; renamed and default exports; re-exports), because they share one
+mechanism: resolving an imported name to its defining module's binding. Splitting them would
+build that resolution twice. `export { a as b }` is also T12.1 step 3. Whichever card lands first
+owns it, so it is written once.
+
+## 303. A config file for the CLI: `stator.config.json` with a generated JSON Schema (2026-10-02)
+
+**Plan:** new §9 Task 6.18; changelog v4.19 (v4.18 went to T11.2).
+
+**Creator's direction:** a config file with a JSON Schema and validation. Move every parameter
+such as `--mode` and `--node` into it, so Stator can be used with the config or without it. The
+parameter that points to the config path must not appear in the config.
+
+**Creator's choice:** the format is JSON (`stator.config.json`), not a `.ts` or `.js` config.
+Reading it runs no code, and editors validate it through `$schema`.
+
+**What the card fixes in place, and why:**
+
+- **The command line beats the file.** A committed file sets the project default, and a flag is
+  the per-run override. The environment sits between them, matching how `STATOR_OPT` already
+  yields to `--opt`.
+- **Discovery is the current directory only.** Walking up the tree would let a parent project's
+  file change a build without anyone seeing it. `--config` covers every other location.
+- **The schema and the type come from one source.** That is the Config files rule. The
+  implementation picks the library and records the choice here.
+
+**Implementation (Task 6.18 landed, 2026-10-02).**
+
+**The library choice** (registry data from https://registry.npmjs.org, checked 2026-10-02):
+
+- **TypeBox** (`typebox` 1.3.34, released 2026-09-18, MIT, zero dependencies, 1.56 MB
+  unpacked; https://github.com/sinclairzx81/typebox, last push 2026-10-01). **Chosen.** A TypeBox
+  schema *is* a JSON Schema object:
+  - `Static<typeof ConfigSchema>` is the `Config` type;
+  - the committed file is that object plus `$schema` and `title`;
+  - `Value.Check`/`Value.Errors` validate against the same object.
+
+  One source, and no conversion step that could lose a constraint. Its errors carry ajv-style
+  `instancePath` values, which are JSON pointers, so `STA0017` names `/mode` and the expected
+  values without extra code.
+- **zod** (4.6.5, released 2026-09-13, zero dependencies, 6.14 MB unpacked). Also maintained.
+  `z.toJSONSchema` is a conversion from zod's own model rather than the model itself, the
+  package is four times larger, and it adds nothing this file needs.
+- **`ts-json-schema-generator` 2.9.0 (2026-03-04) + ajv 8.20.0 (2026-04-24).** Rejected:
+  - two packages with twelve direct dependencies between them (`glob`, `commander`, its own
+    `typescript`, …);
+  - the type → schema step runs a second TypeScript program at generation time.
+
+**JSON parsing.** `JSON.parse` stays the authority on validity and produces the value. Node
+26.7.0's V8 message omits the position for an unexpected token (measured:
+`{"mode": ,}` → `Unexpected token ','… is not valid JSON`, no offset). The other candidates fail
+here too:
+
+- `ts.parseJsonText` is lenient: it accepts comments, trailing commas and single quotes;
+- `json-parse-even-better-errors` 6.0.0 reports position 0 for the same input (measured).
+
+**`jsonc-parser`** (3.3.1, MIT, zero dependencies, 213 KB; Microsoft,
+https://github.com/microsoft/node-jsonc-parser, commits through 2026-09-29) locates every case
+correctly with `disallowComments: true, allowTrailingComma: false`. It runs only after
+`JSON.parse` has failed. Writing that locator by hand would be a JSON parser, which golden rule 5's
+spirit rules out.
+
+**Confinement.** Both are runtime `dependencies` of `statorc`, confined to `src/cli/config.ts`.
+The §0.9 and AGENTS.md budget lines name them, and docs/TOOLCHAIN.md has their rows.
+
+**Shape.**
+
+- `src/cli/config.ts` owns discovery (`./stator.config.json` only), loading, validation and the
+  precedence merge (`resolveOptions`), so the merge is unit-tested without spawning the CLI.
+- `parse()` in `src/cli/main.ts` scans flags into "absent or given" and then merges.
+- New flags, so every key can be overridden from the command line: `--emit=binary` (against
+  `"emit": "c"`) and `--diagnostics=text` (against `"diagnostics": "json"`).
+- The schema generator is `packages/tests/support/config-schema.ts` (`pnpm run schema:config`).
+  It runs `oxfmt` on its output, so `lint` accepts the file. The drift test compares the parsed
+  file with `configSchemaDocument()`, so whitespace is not drift and every semantic edit is.
+- Codes: `STA0016` (unreadable / not JSON), `STA0017` (schema), `STA0018` (missing `--config`).
+
+## 304. Stator must compile itself and its own packages: a ratcheted self-compilation test (2026-10-02)
+
+**Plan:** new §9 Task 6.19; changelog v4.21.
+
+**Creator's direction:** the compiler must compile itself and packages like `node` and `webapi`.
+For now that has to work at the level of a test.
+
+**Measured** on main `f8db9eb` (darwin/arm64, Node per `.node-version`) by
+`node packages/compiler/src/cli/main.ts explain packages/compiler/src/cli/main.ts --mode=<m> --json`:
+
+| Target | Mode | Verdict | Diagnostics | Wall |
+| --- | --- | --- | --- | --- |
+| `packages/compiler` | ts | not-yet | 2 522 × STA1214 | 34.8 s |
+| `packages/compiler` | js | not-yet | 2 586 × STA1214 | 41.8 s |
+| `packages/std/src/env.ts` | ts | dynamic | none | — |
+| `packages/std/src/{fs,path,process,time}.ts` | ts | static | none | — |
+
+Top `ts`-mode families:
+- 1 127 unsupported constructs reported as `FirstNode`, a `ts.SyntaxKind` alias, so the message
+  prints the wrong kind name;
+- 915 method calls;
+- 158 globals;
+- 52 index access on a non-array;
+- 52 `for-of` over a user iterable;
+- 47 object spread without a fixed shape;
+- 32 package imports.
+
+**Why a ratchet and not a pass/fail test:** the compiler is far from compiling itself, so a
+pass/fail test would be red for a long time and get ignored. A per-code count that may only
+shrink makes every subset card's progress visible, and blocks regressions today.
+
+**Why the stage-2 check is byte-identical C:** a self-compiled compiler that emits different C
+for the same input is a miscompilation of the compiler. That is the strongest end-to-end
+correctness test the project can run on itself.
+
+## 305. `node` and `webapi` are tested by their upstream suites, synced; Phase 11 outranks Phase 13 (2026-10-02)
+
+**Plan:** new §11c T11.7 and §11e T13.6; Phase 11 tagged `P1` and Phase 13 `P3`; changelog v4.22.
+
+**Creator's direction:** add tests for `node` and `webapi`. Sync the existing upstream tests if
+that is not hard; otherwise copy them and rewrite them on vitest. Also: `node` has a higher
+priority than `webapi` and Clay.
+
+**Decision: sync, with vitest as the driver.** Copying and rewriting thousands of upstream files
+drifts the moment upstream changes and costs far more than a harness. Fetching a pinned slice, as
+Test262 already is (Task 6.1), keeps upstream's files unchanged, and a version bump shows up as a
+results diff. vitest runs each upstream file as one generated test, so the suites read like the
+rest of the unit tests without being rewritten. The only code we write is strict TS: the fetch
+scripts, `common`, the `testharness` subset and `node:assert` (§0.10). The upstream `.js` files
+are fetched data, not our source.
+
+**Facts (checked 2026-10-02):**
+- **Node.** The GitHub tree API on `nodejs/node` at tag `v26.7.0`
+  (<https://github.com/nodejs/node/tree/v26.7.0/test/parallel>) lists 4 641 `test/parallel/test-*`
+  files. 615 of them have a name matching `test-(fs|path|os|buffer|process|crypto-hash|timers|perf-hooks)`.
+  The license is MIT (`LICENSE` at the tag).
+- **web-platform-tests.** `master` is at `c5e80ef1dca9`, last pushed 2026-10-02
+  (<https://github.com/web-platform-tests/wpt>). Counted from the tree API:
+  - `dom/`: 937 files — 651 `.html`, 66 `.any.js`/`.window.js`;
+  - `css/cssom/`: 352 files — 295 `.html`, 1 `.any.js`.
+
+  The license is the 3-Clause BSD License (`LICENSE.md`).
+
+**Open for T13.0:** most WPT DOM tests are `.html`, so the document comes from markup. Either
+`webapi` gets an HTML parser, or a dev-only pre-pass converts the markup into DOM-building calls.

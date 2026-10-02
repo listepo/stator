@@ -20,7 +20,7 @@
 6. **The runtime is the moat, not the codegen.** GC, builtins coverage, strings, RegExp, and ICU are where the years go. Budget accordingly; tree-shake builtins from day 1.
 7. **Allocation dominates, not dispatch.** Boa's Cranelift JIT experiment proved it: 10× on numeric loops, <5% on allocation-bound benchmarks; GC tracing 10–16% of time, dispatch only ~13%. This ordering drives the optimization ladder (§12).
 8. **One pipeline, two modes.** A mode is a *policy layer* (which files are accepted, which constructs are errors, how untyped code is typed) over one shared pipeline. If a feature seems to require forking the pipeline per mode, the design is wrong — stop and fix the design (usually: the feature belongs to the dynamic representation or the Phase-8 tier).
-9. **The compiler itself is strict TypeScript.** Locked `tsconfig` (§4 Task 1.0), no `any` in compiler source, vitest for unit tests (dev-only, run on Node's own type stripping — plan-notes 285), runtime dependency budget: the `typescript` package only — **owner-directed exception (2026-09-04, plan-notes 187):** `src/cli/` may use ink + react (human-facing rendering plus per-command help, long-form flags) and dotenv (environment loading), and OpenTelemetry tracing (`@opentelemetry/*`, opt-in via `STATOR_OTEL`, standard OTLP env config — works with Maple and any OTLP backend) is wired through `src/support/telemetry.ts`; execa is dev-only for `tests/unit/cli.test.ts`. The budget still rules everything else: no pass, lowering, or codegen code may depend on these. The compiler must always pass its own `ts` mode's *philosophy*: fully typed, no dynamic escape hatches.
+9. **The compiler itself is strict TypeScript.** Locked `tsconfig` (§4 Task 1.0), no `any` in compiler source, vitest for unit tests (dev-only, run on Node's own type stripping — plan-notes 285), runtime dependency budget: the `typescript` package only — **owner-directed exception (2026-09-04, plan-notes 187):** `src/cli/` may use ink + react (human-facing rendering plus per-command help, long-form flags) and dotenv (environment loading), and `typebox` + `jsonc-parser` for `stator.config.json` (`src/cli/config.ts` only, plan-notes 303), and OpenTelemetry tracing (`@opentelemetry/*`, opt-in via `STATOR_OTEL`, standard OTLP env config — works with Maple and any OTLP backend) is wired through `src/support/telemetry.ts`; execa is dev-only for `tests/unit/cli.test.ts`. The budget still rules everything else: no pass, lowering, or codegen code may depend on these. The compiler must always pass its own `ts` mode's *philosophy*: fully typed, no dynamic escape hatches.
 10. **No JavaScript in the project's own source** (creator's direction 2026-10-02, plan-notes 289). The compiler, runtime, `std`, the `node:*` wrappers, test harnesses, oracle shims and scripts are strict TypeScript, C or Zig. `.js` / `.mjs` / `.cjs` files exist only as: `js`-mode test inputs and examples (the thing under test), vendored upstream code, generated output, and assets a browser loads as-is (`site/public/`). The existing harness `.mjs` files migrate under §9 Task 6.15.
 
 **Non-goals (v1):** npm-ecosystem compatibility (Phase 11 targets Node *programs* such as `tsc`, not the npm ecosystem at large); `eval`/`new Function` (never in `ts` mode; `js` mode not before Phase 8); `Proxy`; `with`; prototype mutation after construction; decorators; full Intl; Node API emulation outside Phase 11's `--node` platform (§11c); Windows (POSIX + clang first); self-hosting the compiler.
@@ -757,6 +757,57 @@ which 1.1% exact) as debt. Extract a shared helper per clone family at the respo
 `pnpm run dupes:baseline` in the same change. **Check:** the baseline is empty; `pnpm run dupes`
 then runs with no baseline at all.
 
+~~**Task 6.18 — `stator.config.json`: every CLI option in one validated file.**~~ ✅ **landed 2026-10-02** — evidence in [done.md](done.md) → Phase 6 Task 6.18 (plan-notes 303; `docs/CONFIG.md`).
+
+**Task 6.19 — Stator compiles itself and its own packages: a self-compilation test — [D3]**
+(creator's direction 2026-10-02, plan-notes 304). The compiler must compile itself, and the
+packages written for programs to import (`std`, `node`, `webapi`, `interpreter`) must compile too.
+For now this is a **test**, not a shipped feature. It tracks progress and never lets it slip back.
+
+1. **Targets.** Every workspace package written for Stator to compile. Today those are
+   `packages/compiler` (entry `src/cli/main.ts`, `ts` mode) and `packages/std` (each `src/*.ts`).
+   `packages/node` (T11.6), `packages/webapi` (T13.1), `packages/renderer-clay` (T13.4) and
+   `packages/interpreter` (T14.1) join when they are created. The cards that create them add the
+   package to this test in the same change. The target list is checked in next to the baseline,
+   and a workspace package that is neither listed nor marked "not a target" fails the test.
+2. **What a run does.** `stator explain <entry> --json` per target, tallying the deciding
+   stage's diagnostics by code (plan-notes 291). A target whose verdict is `static` or `dynamic`
+   then goes through `stator build`, and the binary runs that package's own smoke check. For
+   `std`, that check is its goldens. For the compiler, the binary compiles a hello-world fixture
+   and its C output must be **byte-identical** to the C the Node-hosted compiler emits: the
+   stage-2 bootstrap check.
+3. **Ratchet.** `packages/tests/selfhost/baseline.json` holds, per target, the verdict and the
+   count per diagnostic code. The test fails when any count grows, a new code appears, or a
+   verdict gets worse. When a count shrinks, `--update` rewrites the baseline in the same change,
+   as `.jscpd-baseline.json` does (Task 6.16). Reaching zero for a target is that target's
+   milestone. From then on, its build and smoke check are part of the gate.
+4. **Cost.** One `explain` of the compiler takes about 35 s on the dev host (below). The test runs
+   in `ci` if the whole run stays under 60 s on that host; otherwise it runs nightly and on PRs
+   that Task 6.17's impact selection says reach `packages/compiler` or the target packages. The
+   choice and the timing go in plan-notes.
+5. **Config.** Each target's mode and entry come from its own `stator.config.json` (Task 6.18)
+   once that lands, so the test runs the same command a user would.
+
+**Baseline measured 2026-10-02** (main `f8db9eb`, darwin/arm64, `explain --json`):
+- **Compiler, `ts` mode:** `not-yet`, 2 522 × `STA1214`, 34.8 s. The top families are:
+  - 1 127 — an unsupported construct whose message prints the syntax kind as `FirstNode`. That is
+    an enum alias, so the message names the wrong kind: a diagnostics bug to fix with this task.
+  - 915 — method calls.
+  - 158 — unsupported globals.
+  - 52 — index access on a non-array.
+  - 52 — `for-of` over a user iterable.
+  - 47 — object spread without a fixed shape.
+  - 32 — package imports (`typescript`).
+- **Compiler, `js` mode:** `not-yet`, 2 586 × `STA1214`, 41.8 s.
+- **`packages/std`:** `env.ts` is `dynamic`; `fs.ts`, `path.ts`, `process.ts` and `time.ts` are
+  `static`.
+
+**Check:**
+- `pnpm run test:selfhost` passes against the committed baseline. It fails on a hand-raised count
+  and on an unlisted workspace package.
+- `std` builds and its smoke check runs.
+- The `FirstNode` message names the real syntax kind, and the baseline is re-recorded.
+
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
@@ -1283,7 +1334,7 @@ byte-identical emitted C for the fixture; CI green.
 
 ---
 
-## 11c. Phase 11 — `--node`: the Node platform — **[D5]**
+## 11c. Phase 11 — `--node`: the Node platform — **[D5 · P1]**
 
 Creator's direction (2026-10-02, plan-notes 286, decided in 289). A program may use the Node
 platform: CommonJS `require` / `module.exports`, `process`, `Buffer`, timers and the `node:*`
@@ -1322,16 +1373,10 @@ gains each package in the change that creates it.
 ~~**T11.0. Research: what `--node` means and what it costs.**~~ ✅ **landed 2026-10-02** —
 evidence in [done.md](done.md) → Phase 11 T11.0 (plan-notes 288, decision 289).
 
-### T11.1. `packages/runtime`: typed arrays — **[D4]**
-
-`Buffer` is a `Uint8Array` subclass, and every byte-level API (file reads, hashes, codecs) needs
-a byte container; the tree has none. Steps: `ArrayBuffer` + `Uint8Array` first (constructor
-forms, indexing, `length`, `subarray`, `set`, `slice`, iteration), storage in Zig (§0.5), then the
-rest of the `TypedArray` family only as the corpus needs it. Docs: `docs/SUBSET.md` rows,
-`builtins_coverage.json` namespaces.
-
-**Check:** decision tests (both modes) + goldens for every landed member; `test:builtins` lists
-the new namespaces; ASan clean.
+~~**T11.1. `packages/runtime`: typed arrays.**~~ ✅ **landed 2026-10-02** — `ArrayBuffer` +
+`Uint8Array`; evidence in [done.md](done.md) → Phase 11 T11.1. Still open from the card: the rest
+of the `TypedArray` family lands with the card whose corpus first needs it (docs/SUBSET.md lists
+the refused surface, `builtins_coverage.json` counts it as missing).
 
 ~~**T11.2. `packages/std`: the real `std/*` package.**~~ ✅ **landed 2026-10-02** — evidence in
 [done.md](done.md) → Phase 11 T11.2 (plan-notes 294).
@@ -1457,6 +1502,40 @@ the same change.
 
 **Check:** `tsc --version` and `tsc -p` on a small fixture project, compiled by Stator, print
 byte-for-byte what `node _tsc.js` prints on Node 26.7.0; `docs/NODE.md` slice N1 at 100%.
+
+### T11.7. Node's own test suite, synced and run through vitest — **[D3 · P1]**
+
+Creator's direction (2026-10-02, plan-notes 305). The `node:*` wrappers are proven by Node's own
+tests, synced at the pinned version, not by hand-written copies.
+
+1. **Sync, don't copy.** `packages/tests/node-suite/pin.json` pins the tag matching
+   `.node-version` (v26.7.0). A strict-TS fetch script downloads the selected
+   `test/parallel/test-*.js` files and the `test/fixtures` they read. The corpus is fetched, not
+   vendored (gitignored), the same way Test262 is (Task 6.1). A Node bump re-pins it, and the diff
+   of results is the review.
+2. **Selection.** A checked-in expectations file lists each selected test as `pass`, `fail` or
+   `skip` with a reason. At v26.7.0, `test/parallel` has 4 641 `test-*` files, and 615 of them
+   have a name starting with an N1 module (`fs`, `path`, `os`, `buffer`, `process`,
+   `crypto-hash`, `timers`, `perf-hooks`). Start with `path`, then follow T11.6's order. Tests that
+   need `// Flags: --expose-internals`, child processes or the network are `skip` until N2.
+3. **The harness, in strict TS.** `require('../common')` resolves to
+   `packages/tests/node-suite/common.ts`, a strict-TS implementation of the `common` helpers the
+   selected tests use (`mustCall`, `mustNotCall`, `expectsError`, `tmpdir`, platform flags). It
+   grows with the selection. `node:assert` (`ok`, `strictEqual`, `deepStrictEqual`, `throws`,
+   `rejects`) lands in `packages/node` as part of this card.
+4. **vitest drives it.** The runner generates one vitest test per selected file. Each test builds
+   the file with `--mode=js --node`, runs the binary, and passes on exit 0. The same file must also
+   pass under the pinned Node, so a test that fails on the host is `skip`, never `fail`.
+5. **Ratchet and coverage.** A `pass` that starts failing fails the run. A `fail` that starts
+   passing must be flipped in the same change, as Test262's ratchet does. `docs/NODE.md` gains a
+   "node tests" column with passes over the selected count per module.
+
+Depends on T11.5 (`--node`, CommonJS through the T12 bundler) and T11.6. The harness and `path`
+can land as soon as `node:path` exists.
+
+**Check:** `pnpm run test:node-suite` runs the selection through vitest against the pinned corpus,
+and its pass count is recorded in plan-notes; `docs/NODE.md` shows the column; a hand-flipped
+expectation fails the run.
 
 **Deferred — N2 (not a card yet).** `std/loop` written in Zig (the creator chose an own loop
 over libuv: kqueue/epoll first, Windows when the runtime builds there), real timers and
@@ -1625,7 +1704,11 @@ golden here reads them.
 
 ---
 
-## 11e. Phase 13 — Web API with a pluggable render API — **[D5]**
+## 11e. Phase 13 — Web API with a pluggable render API — **[D5 · P3]**
+
+**Priority (creator, 2026-10-02, plan-notes 305):** Phase 11 (`--node`) comes before this phase.
+When an agent picks its next card, a Phase 11 card wins over any Phase 13 card, `webapi` and
+`renderer-clay` alike.
 
 Creator's direction (2026-10-02, plan-notes 298). Stator programs get the Web platform's DOM and
 CSS as a **separate package**. That package knows nothing about pixels: it talks to a renderer
@@ -1764,6 +1847,30 @@ checked in `ci`.
 **Check:** `pnpm run test:webapi-coverage` passes on a fresh tree and fails after a hand edit of
 `docs/WEBAPI.md`; before T13.1 the doc shows 0% over the full denominator; a claim naming a
 missing fixture fails with the claim's path.
+
+### T13.6. Web-platform-tests for `webapi`, synced and run through vitest — **[D3 · P3]**
+
+Creator's direction (2026-10-02, plan-notes 305). This is T13.0 §8's DOM oracle, made concrete.
+It follows T11.7's design, so the two suites share one fetch, expectation and ratchet mechanism
+(Task 6.16: one helper, not two).
+
+1. **Sync.** `packages/tests/wpt/pin.json` pins a web-platform-tests commit, fetched and not
+   vendored. Scope is `dom/` (937 files: 651 `.html`, 66 `.any.js`/`.window.js`) and `css/cssom/`
+   (352 files: 295 `.html`, 1 `.any.js`), counted at `c5e80ef1dca9`.
+2. **Script tests first.** `.any.js` and `.window.js` need no markup and run first. `.html` tests
+   need their markup turned into a document. T13.0 decides between an HTML parser in `webapi`
+   (which `innerHTML` would also need) and a dev-only pre-pass at fetch time that turns markup into
+   DOM-building calls. Until then `.html` tests are `skip`.
+3. **The harness, in strict TS.** A strict-TS `testharness` subset (`test`, `promise_test`,
+   `async_test`, `assert_*`, `done`) replaces `testharness.js` for the selected tests.
+4. **vitest drives it,** with the same per-file ratchet as T11.7. `docs/WEBAPI.md` (T13.5) gains a
+   "WPT" column.
+
+Depends on T13.1 and T13.5. Lower priority than T11.7 (Phase 11 first).
+
+**Check:** `pnpm run test:wpt` runs the selection through vitest against the pinned commit, and
+its pass count is recorded in plan-notes; `docs/WEBAPI.md` shows the column; a hand-flipped
+expectation fails the run.
 
 **Low priority — the other Web APIs (not cards yet).** `URL`, `TextEncoder`/`TextDecoder`, timers,
 `fetch`, `WebSocket`, storage, `Canvas`, `structuredClone` and the rest. They land in
@@ -2242,4 +2349,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
     - The order deviation is documented only.
 - **v4.17** (2026-10-02): **Phase 14: a JavaScript interpreter in strict TypeScript, `js` mode's second fallback** (plan-notes 300). New §11f: `packages/interpreter`, compiled by Stator, runs `eval`, `new Function` and the `not-yet` constructs it takes over, directly on `jsrt_value` (no marshaling layer). Order: compiled static, then compiled dynamic, then the interpreter. Phase 8's QuickJS-NG stays as an option behind its gate until T14.0 measures whether it is still needed. Cards T14.0 (design, `docs/INTERPRETER.md`, including §0.3's parser question), T14.1 parser front, T14.2 evaluator, T14.3 wiring, T14.4 async and the rest. `ts` mode is unchanged.
 - **v4.18** (2026-10-02): **T11.2 lands: `packages/std` is the real `std/*` package** (plan-notes 294). `std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` resolve through `paths` and link `libjsrt_std.a` only into programs that import them; unknown `std/foo` is the new `STA3002`. T10.1 steps 2–4 are struck (step 5 stays open); §11b's v0 table moves `std/env.args` to T11.3 as `std/process.argv`; T11.3's `std/fs` row drops `unlink`, `rmdir` and text reads. Record in `done.md`.
+- **v4.19** (2026-10-02): **Task 6.18 — `stator.config.json`** (plan-notes 303). Every CLI option can come from a JSON config validated against a generated JSON Schema, or from the command line, or both. `--config`/`--no-config` pick the file and never appear in it. Precedence: CLI > env > file > default.
 - **v4.20** (2026-10-02): **T11.5a — per-module namespaces before T11.6** (plan-notes 302). Each module gets its own top-level namespace (module-qualified C names), and every aliasing shape lands: renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *`. This removes the one-namespace `STA1214` collisions that T11.2 found (plan-notes 294). T11.6 depends on it; T12.1 step 3 shares `export { a as b }` with it.
+- **v4.21** (2026-10-02): **Task 6.19 — self-compilation test** (plan-notes 304). Stator compiles itself and its own packages (`std`, later `node`, `webapi`, `renderer-clay`, `interpreter`) as a ratcheted test. Per-target diagnostic counts may only shrink. A target at zero builds and runs its smoke check, and for the compiler that check is a byte-identical stage-2 bootstrap. Baseline: compiler 2 522 `STA1214` in `ts` mode; `std` already compiles.
+- **v4.22** (2026-10-02): **Upstream test suites for `node` and `webapi`; Phase 11 outranks Phase 13** (plan-notes 305). New T11.7: Node's own `test/parallel` slice, pinned to `.node-version` and fetched rather than vendored, runs through vitest with a strict-TS `common` and `node:assert`, ratcheted, and adds a column to `docs/NODE.md`. New T13.6 does the same for web-platform-tests `dom/` and `css/cssom/`. Phase 11 is now `P1` and Phase 13 is `P3`.

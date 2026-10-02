@@ -3,7 +3,9 @@
   "globals": {
     "NaN": ["ts/math_builtins.ts", "js/math_builtins.js"],
     "Infinity": ["ts/math_builtins.ts", "js/math_builtins.js"],
-    "undefined": ["ts/arrays.ts"]
+    "undefined": ["ts/arrays.ts"],
+    "Uint8Array": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "ArrayBuffer": ["ts/typed_arrays.ts", "js/typed_arrays.js"]
   },
   "Math": {
     "abs": ["ts/math_builtins.ts"],
@@ -303,5 +305,67 @@
     "then": ["ts/promise_then.ts", "js/promise_then.js"],
     "catch": ["ts/promise_then.ts", "js/promise_then.js"],
     "finally": ["ts/promise_then.ts", "js/promise_then.js"]
+  },
+  "Uint8Array": {
+    "from": [],
+    "of": [],
+    "BYTES_PER_ELEMENT": [],
+    "fromBase64": [],
+    "fromHex": []
+  },
+  "Uint8Array.prototype": {
+    "buffer": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "byteLength": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "byteOffset": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "length": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "entries": [],
+    "keys": [],
+    "values": [],
+    "at": [],
+    "copyWithin": [],
+    "every": [],
+    "fill": [],
+    "filter": [],
+    "find": [],
+    "findIndex": [],
+    "findLast": [],
+    "findLastIndex": [],
+    "forEach": [],
+    "includes": [],
+    "indexOf": [],
+    "join": [],
+    "lastIndexOf": [],
+    "map": [],
+    "reverse": [],
+    "reduce": [],
+    "reduceRight": [],
+    "set": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "slice": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "some": [],
+    "sort": [],
+    "subarray": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "toReversed": [],
+    "toSorted": [],
+    "with": [],
+    "toLocaleString": [],
+    "toString": [],
+    "BYTES_PER_ELEMENT": [],
+    "toBase64": [],
+    "setFromBase64": [],
+    "toHex": [],
+    "setFromHex": []
+  },
+  "ArrayBuffer": {
+    "isView": []
+  },
+  "ArrayBuffer.prototype": {
+    "byteLength": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "slice": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "maxByteLength": [],
+    "resizable": [],
+    "resize": [],
+    "transfer": [],
+    "transferToFixedLength": [],
+    "detached": []
   }
 }

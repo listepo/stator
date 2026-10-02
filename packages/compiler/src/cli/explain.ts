@@ -688,6 +688,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     case 'date-components':
     case 'date-static':
     case 'object-static':
+    case 'typed-op':
     case 'string-static':
       return expr.args.some(expressionHasUnknown);
     // A promise's own value type is what makes the awaited result dynamic or not, and that type

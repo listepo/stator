@@ -536,25 +536,35 @@ static void init_more_entry(JSRTBuf *entry, uint32_t remaining) {
   jsrt_buf_puts(entry, more);
 }
 
-static void inspect_array(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
-  const JSRTArray *a = jsrt_as_array(v);
-  const uint32_t length = a->length;
+/* An array's element `i`, and a Uint8Array's: the two lists inspect_list prints. */
+static jsrt_value array_element(jsrt_value v, uint32_t i) { return jsrt_as_array(v)->elements[i]; }
+
+static jsrt_value uint8array_element(jsrt_value v, uint32_t i) {
+  return jsrt_uint8array_get(v, jsrt_number((double)i));
+}
+
+/* `[ 1, 2 ]` and `Uint8Array(2) [ 1, 2 ]`: one layout, which is Node's own -- formatList is
+ * reached for every array-like, with `label` (empty for an array) in front of the bracket and
+ * counted in the line budget the way braces[0] is. `abbrev` is what prints past the depth cap. */
+static void inspect_list(JSRTBuf *out, jsrt_value v, uint32_t length,
+                         jsrt_value (*element)(jsrt_value, uint32_t), const char *label,
+                         const char *abbrev, int recurse, size_t indent) {
+  const JSRTArray *a = jsrt_is(v, JSRT_TAG_ARRAY) ? jsrt_as_array(v) : NULL;
   const size_t shown = length > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : length;
   const bool truncated = length > shown;
   /* A RegExp match is an array with NAMED properties, and Node prints them after the elements:
    * `[ 'a', index: 0, input: 'a', groups: undefined ]`. Every other array has none, so this is
    * zero and nothing below it changes. */
-  const size_t props = jsrt_shape_property_count(a->shape);
+  const size_t props = a != NULL ? jsrt_shape_property_count(a->shape) : 0;
   const size_t count = shown + (truncated ? 1 : 0) + props;
 
   /* Emptiness first: Node prints an empty container in full past the depth cap
    * (`[[[[]]]]` is `[ [ [ [] ] ] ]`), abbreviating only the non-empty ones. */
-  if (count == 0) {
-    jsrt_buf_puts(out, "[]");
-    return;
-  }
-  if (recurse > INSPECT_MAX_DEPTH) {
-    jsrt_buf_puts(out, "[Array]");
+  if (count == 0 || recurse > INSPECT_MAX_DEPTH) {
+    jsrt_buf_puts(out, count == 0 ? label : abbrev);
+    if (count == 0) {
+      jsrt_buf_puts(out, "[]");
+    }
     return;
   }
 
@@ -564,8 +574,9 @@ static void inspect_array(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
     jsrt_buf_init(&entries[i]);
     /* Elements are rendered two columns deeper: that indent is what a multi-line layout uses,
      * and it also shortens the budget a nested array has before it breaks. */
-    inspect_value(&entries[i], a->elements[i], recurse + 1, indent + 2);
-    all_numbers = all_numbers && jsrt_is_number(a->elements[i]);
+    const jsrt_value item = element(v, (uint32_t)i);
+    inspect_value(&entries[i], item, recurse + 1, indent + 2);
+    all_numbers = all_numbers && jsrt_is_number(item);
   }
   if (truncated) {
     init_more_entry(&entries[shown], length - (uint32_t)shown);
@@ -599,7 +610,8 @@ static void inspect_array(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
   const JSRTBuf *lines = row_count > 0 ? rows : entries;
   const size_t line_count = row_count > 0 ? row_count : count;
 
-  if (row_count == 0 && fits_one_line(entries, count, indent, 1 /* "[" */)) {
+  jsrt_buf_puts(out, label);
+  if (row_count == 0 && fits_one_line(entries, count, indent, strlen(label) + 1 /* "[" */)) {
     join_one_line(out, "[ ", " ]", entries, count);
   } else {
     join_multi_line(out, "[\n", ']', lines, line_count, indent);
@@ -609,6 +621,50 @@ static void inspect_array(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
   if (rows != NULL) {
     free_entries(rows, row_count);
   }
+}
+
+static void inspect_array(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
+  inspect_list(out, v, jsrt_as_array(v)->length, array_element, "", "[Array]", recurse, indent);
+}
+
+static void inspect_uint8array(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
+  const uint32_t length = (uint32_t)jsrt_number_value(jsrt_uint8array_length(v));
+  char label[48];
+  snprintf(label, sizeof label, "Uint8Array(%u) ", length);
+  inspect_list(out, v, length, uint8array_element, label, "[Uint8Array]", recurse, indent);
+}
+
+/* `ArrayBuffer { [Uint8Contents]: <00 ff>, [byteLength]: 2 }` -- Node's formatArrayBuffer: the
+ * first INSPECT_MAX_ARRAY bytes as two-digit lowercase hex, then `... N more byte(s)`. Past the
+ * depth cap it is `[ArrayBuffer]` even when empty: the abbreviation is decided before the bytes
+ * are looked at, unlike an array's. */
+static void inspect_arraybuffer(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
+  if (recurse > INSPECT_MAX_DEPTH) {
+    jsrt_buf_puts(out, "[ArrayBuffer]");
+    return;
+  }
+  const JSRTArrayBuffer *b = (const JSRTArrayBuffer *)jsrt_ptr(v);
+  const size_t shown = b->byte_length > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : b->byte_length;
+  JSRTBuf *entries = alloc_entries(2);
+  jsrt_buf_init(&entries[0]);
+  jsrt_buf_puts(&entries[0], "[Uint8Contents]: <");
+  for (size_t i = 0; i < shown; i++) {
+    char hex[4];
+    snprintf(hex, sizeof hex, i == 0 ? "%02x" : " %02x", b->data[i]);
+    jsrt_buf_puts(&entries[0], hex);
+  }
+  if (b->byte_length > shown) {
+    char more[64];
+    const size_t remaining = b->byte_length - shown;
+    snprintf(more, sizeof more, " ... %zu more byte%s", remaining, remaining == 1 ? "" : "s");
+    jsrt_buf_puts(&entries[0], more);
+  }
+  jsrt_buf_putc(&entries[0], '>');
+  jsrt_buf_init(&entries[1]);
+  jsrt_buf_puts(&entries[1], "[byteLength]: ");
+  inspect_value(&entries[1], jsrt_number((double)b->byte_length), recurse + 1, indent + 2);
+  jsrt_buf_puts(out, "ArrayBuffer ");
+  emit_braced(out, entries, 2, indent, strlen("ArrayBuffer") + 1 /* the space */ + 1 /* "{" */);
 }
 
 /* `Name { field: value, … }`.
@@ -957,6 +1013,34 @@ static void inspect_class(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
   emit_braced(out, entries, count, indent, strlen(label) + 1 /* the space */ + 1 /* "{" */);
 }
 
+/* Every heap value with a printer of its own, in the order the tests must run (a builtin object
+ * before the generic TAG_OBJECT walk). False for a scalar or a closure, which the callers print
+ * differently: inspect_value quotes a string, console.log's top level does not. */
+static bool inspect_heap(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
+  /* The typed-array classes first: like every class below they are TAG_OBJECT pointers, and the
+   * classes are disjoint, so only the generic object walk has to come after them. */
+  if (jsrt_is_uint8array(v) || jsrt_is_arraybuffer(v)) {
+    (jsrt_is_uint8array(v) ? inspect_uint8array : inspect_arraybuffer)(out, v, recurse, indent);
+    return true;
+  }
+  if (jsrt_is_date(v)) {
+    inspect_date(out, v);
+  } else if (jsrt_is_regexp(v)) {
+    inspect_regexp(out, v);
+  } else if (jsrt_is_promise(v)) {
+    inspect_promise(out, v, recurse, indent);
+  } else if (jsrt_is_map_or_set(v)) {
+    inspect_map(out, v, recurse, indent);
+  } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
+    inspect_object(out, v, recurse, indent);
+  } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
+    inspect_array(out, v, recurse, indent);
+  } else {
+    return false;
+  }
+  return true;
+}
+
 static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   /* An accessor cell is a SLOT value, never a value the language can hold, so this is the one
    * place it can surface -- and util.inspect never calls a getter to print it. Node writes what
@@ -973,19 +1057,7 @@ static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
     inspect_class(out, v, recurse, indent);
     return;
   }
-  if (jsrt_is_date(v)) {
-    inspect_date(out, v);
-  } else if (jsrt_is_regexp(v)) {
-    inspect_regexp(out, v);
-  } else if (jsrt_is_promise(v)) {
-    inspect_promise(out, v, recurse, indent);
-  } else if (jsrt_is_map_or_set(v)) {
-    inspect_map(out, v, recurse, indent);
-  } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
-    inspect_object(out, v, recurse, indent);
-  } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
-    inspect_array(out, v, recurse, indent);
-  } else {
+  if (!inspect_heap(out, v, recurse, indent)) {
     inspect_scalar(out, v, true);
   }
 }
@@ -1031,19 +1103,7 @@ static void write_grouped(const char *text, size_t len, FILE *stream) {
  * no such exception -- it inspects whatever it is given, which is the whole difference between
  * the two entry points. */
 static void print_one(JSRTBuf *out, jsrt_value v, bool bare) {
-  if (jsrt_is_date(v)) {
-    inspect_date(out, v);
-  } else if (jsrt_is_regexp(v)) {
-    inspect_regexp(out, v);
-  } else if (jsrt_is_promise(v)) {
-    inspect_promise(out, v, 0, 0);
-  } else if (jsrt_is_map_or_set(v)) {
-    inspect_map(out, v, 0, 0);
-  } else if (jsrt_is(v, JSRT_TAG_OBJECT)) {
-    inspect_object(out, v, 0, 0);
-  } else if (jsrt_is(v, JSRT_TAG_ARRAY)) {
-    inspect_array(out, v, 0, 0);
-  } else {
+  if (!inspect_heap(out, v, 0, 0)) {
     inspect_scalar(out, v, !bare);
   }
 }
@@ -1795,8 +1855,23 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
     return;
   }
   if (jsrt_is(v, JSRT_TAG_OBJECT)) {
-    if (jsrt_is_map_or_set(v) || jsrt_is_regexp(v) || jsrt_is_promise(v)) {
+    if (jsrt_is_map_or_set(v) || jsrt_is_regexp(v) || jsrt_is_promise(v) ||
+        jsrt_is_arraybuffer(v)) {
       jsrt_buf_puts(out, "{}"); /* no enumerable own properties, Node's own answer */
+      return;
+    }
+    if (jsrt_is_uint8array(v)) {
+      /* A view is an ordinary object to JSON: its own enumerable keys are the indices, so
+       * `{"0":5,"1":6}`. Its elements are numbers, so no cycle and no throw can arise. */
+      const uint32_t length = (uint32_t)jsrt_number_value(jsrt_uint8array_length(v));
+      jsrt_buf_putc(out, '{');
+      for (uint32_t i = 0; i < length; i++) {
+        char item[32];
+        snprintf(item, sizeof item, "%s\"%u\":%u", i > 0 ? "," : "", i,
+                 (unsigned)jsrt_number_value(jsrt_uint8array_get(v, jsrt_number((double)i))));
+        jsrt_buf_puts(out, item);
+      }
+      jsrt_buf_putc(out, '}');
       return;
     }
     json_check_cycle(jsrt_ptr(v), chain);
@@ -1895,6 +1970,11 @@ jsrt_value jsrt_to_string(jsrt_value v) {
     return jsrt_error_to_string(v);
   } else if (jsrt_is_promise(v)) {
     snprintf(buf, sizeof buf, "[object Promise]");
+  } else if (jsrt_is_uint8array(v)) {
+    /* `%TypedArray%.prototype.toString` IS `Array.prototype.toString`: the elements joined. */
+    return jsrt_uint8array_text(v);
+  } else if (jsrt_is_arraybuffer(v)) {
+    snprintf(buf, sizeof buf, "[object ArrayBuffer]");
   } else {
     snprintf(buf, sizeof buf, "[object Object]");
   }

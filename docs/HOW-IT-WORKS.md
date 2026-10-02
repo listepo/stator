@@ -94,7 +94,12 @@ node packages/compiler/src/cli/main.ts explain app.ts --json
 # Useful flags (see CLI help / AGENTS.md Commands)
 #   --emit=c --keep-c     keep generated C for inspection
 #   --mode=ts|js          frontend policy
+#   --config=<path>       options from a JSON file (default ./stator.config.json)
+#   --no-config           ignore stator.config.json
 ```
+
+Every flag above can also be a key in `stator.config.json`; the command line wins. See
+[CONFIG.md](CONFIG.md).
 
 Useful local gates (not a product feature list — just what the repo runs):
 

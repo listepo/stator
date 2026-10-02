@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "stator.config.json",
+  "description": "Stator CLI options (docs/CONFIG.md). The command line overrides the environment, which overrides this file, which overrides the built-in defaults.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL of this JSON Schema, for editors. Ignored."
+    },
+    "entry": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Entry file; relative to this file. The positional <entry> overrides it."
+    },
+    "out": {
+      "type": "string",
+      "minLength": 1,
+      "description": "build: output path, relative to this file. -o/--out overrides it."
+    },
+    "mode": {
+      "enum": ["ts", "js"],
+      "description": "--mode: strict ts (default) or dynamic js."
+    },
+    "opt": {
+      "enum": [0, 1, 2, 3],
+      "description": "build: clang -O level (default 2). --opt and STATOR_OPT override it."
+    },
+    "link": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "\\S"
+      },
+      "description": "build: extra clang link flags; each entry splits on spaces like one --link value. Command-line --link flags are appended after these."
+    },
+    "emit": {
+      "enum": ["binary", "c"],
+      "description": "build: \"c\" stops after writing C to out (--emit=c). Default \"binary\"."
+    },
+    "keepC": {
+      "type": "boolean",
+      "description": "build: keep the intermediate .c next to the binary."
+    },
+    "emitHeader": {
+      "type": "string",
+      "minLength": 1,
+      "description": "build: write a C header for the unit exports; relative to this file."
+    },
+    "unitName": {
+      "type": "string",
+      "minLength": 1,
+      "description": "build: prefix for stator_<unit>_<name>."
+    },
+    "diagnostics": {
+      "enum": ["text", "json"],
+      "description": "explain: report format; \"json\" is --json (default \"text\")."
+    }
+  },
+  "additionalProperties": false
+}
