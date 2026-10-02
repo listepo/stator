@@ -1,0 +1,17 @@
+{
+  "extends": "../compiler/tsconfig.json",
+  "compilerOptions": {
+    // The options the compiler gives every program it builds (frontend/program.ts), not the
+    // compiler's own Node-hosted ones: std is compiled INTO user programs, so it sees ES2025 and
+    // no Node or DOM types, and resolves like any Stator source.
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "target": "es2025",
+    "lib": ["es2025"],
+    "types": [],
+    "noEmit": true,
+    "rootDir": "src"
+  },
+  "include": ["src"]
+}

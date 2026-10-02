@@ -1146,10 +1146,10 @@ the existing pipeline (`node:worker_threads` / a process pool), not Zig/Rust/Go 
 
    | Module | v0 contents | Notes |
    |---|---|---|
-   | `std/env` | `get`/`set`/`has`, `args`, `cwd` | argv already exists for `main`; expose it |
+   | `std/env` | `get`/`set`/`has`/`unset`, `cwd` | `args` moved to T11.3 as `std/process.argv` (plan-notes 294): the generated `main` takes no `argv` yet |
    | `std/process` | `exit`, `pid`, `abort` | no signals yet |
    | `std/path` | `join`/`dirname`/`basename`/`isAbsolute` | pure TS or tiny C; UTF-16 ↔ bytes at the FS edge only |
-   | `std/fs` | sync read/write/stat/mkdir; Promise twins | Promise twins are thin `async` wrappers that `await` a thread-pool job (see B) once T10.2 exists; until then sync-only is honest |
+   | `std/fs` | sync read/write/stat/mkdir/unlink/rmdir; Promise twins | Promise twins are thin `async` wrappers that `await` a thread-pool job (see B) once T10.2 exists; until then sync-only is honest |
    | `std/time` | `nowMs`, `sleepMs` (sync) | timers in the microtask sense stay out until a macrotask phase exists |
    | `std/sync` | `Mutex`, `CondVar`, `Channel` | with T10.2 |
    | `std/thread` | `spawn`, `join`, `availableParallelism` | with T10.2 |
@@ -1230,14 +1230,17 @@ Steps:
 
 1. Write `docs/STD.md` (module path, error model, v0 table above). Add stub `SUBSET.md` rows /
    diagnostics that name Phase 10.
-2. Wire `std/env` and `std/path` end-to-end (types → runtime → golden).
-3. Add `std/process` (`exit`/`pid`).
-4. Add sync `std/fs` + `std/time` (`nowMs`; sync `sleepMs` only).
+2. ~~Wire `std/env` and `std/path` end-to-end (types → runtime → golden).~~ Landed (plan-notes
+   284), then moved into `packages/std` by T11.2.
+3. ~~Add `std/process` (`exit`/`pid`).~~ Landed in `packages/std` by T11.2 (plan-notes 294).
+4. ~~Add sync `std/fs` + `std/time` (`nowMs`; sync `sleepMs` only).~~ Landed in `packages/std`
+   by T11.2 (plan-notes 294).
 5. Promise-flavored `std/fs` APIs: either `not-yet` until T10.2, or implemented as sync under a
    documented lie — **prefer not-yet** so async programs do not block main by accident.
 
-Steps 3–4 land inside `packages/std` once §11c T11.2 creates it (plan-notes 289), not as more
-`declare`-extern fixtures.
+Steps 2–4 live in `packages/std` since T11.2 (plan-notes 294); step 5 is what remains — today
+`std/fs` simply has no Promise members, and the card closes when that refusal is a `not-yet`
+naming Phase 10.
 
 **Check:** goldens for env/path/process/fs sync; subset rows match; no Node polyfill dependency.
 
@@ -1330,17 +1333,8 @@ rest of the `TypedArray` family only as the corpus needs it. Docs: `docs/SUBSET.
 **Check:** decision tests (both modes) + goldens for every landed member; `test:builtins` lists
 the new namespaces; ASan clean.
 
-### T11.2. `packages/std`: the real `std/*` package — **[D4]**
-
-Today `std/env` and `std/path` are golden fixtures over `declare` externs (plan-notes 284), not an
-importable package. Steps: create `packages/std` (workspace member + moon project; `src/<module>.ts`
-surface, `zig/<module>.zig` backings building `libjsrt_std.a`); the compiler resolves `std/*` to
-it and links the library only when a program imports `std/*`; unknown `std/foo` stays a hard
-error (STD.md §1); move `std/env` + `std/path` in; land T10.1 steps 3–4 (`std/process`, sync
-`std/fs`, `std/time`) here. Update `docs/STD.md` (no longer a skeleton) and `packages.d2`.
-
-**Check:** `std_env` / `std_path` goldens pass through `import … from 'std/…'` with no
-`declare` fixture; T10.1's Check; a program without `std/*` imports links no `libjsrt_std.a`.
+~~**T11.2. `packages/std`: the real `std/*` package.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 11 T11.2 (plan-notes 294).
 
 ### T11.3. `packages/std`: the N1 modules — **[D3]**
 
@@ -1350,7 +1344,7 @@ Depends on T11.1, T11.2. Zig backings, POSIX first (STD.md §4). Errors throw wi
 | Module | Functions |
 | --- | --- |
 | `std/process` (extend) | `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode` |
-| `std/fs` (extend) | `open`/`read`/`write`/`close` on fds, `readdir`, `realpath`, `utimes`, `unlink`, `exists`, bytes and string reads |
+| `std/fs` (extend) | `open`/`read`/`write`/`close` on fds, `readdir`, `realpath`, `utimes`, `exists`, bytes reads (`unlink`, `rmdir` and UTF-8 text reads landed with T11.2) |
 | `std/os` | `platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol` |
 | `std/io` | `stdin`/`stdout`/`stderr` fds, `write`, `read`, `isatty`, `terminalSize` |
 | `std/hash` | `sha256`, `sha1`, `md5` over bytes or strings; `randomBytes` |
@@ -2209,3 +2203,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
     - `__filename`/`__dirname` are not-yet until `--node`, with no baked paths.
     - The order deviation is documented only.
 - **v4.17** (2026-10-02): **Phase 14: a JavaScript interpreter in strict TypeScript, `js` mode's second fallback** (plan-notes 300). New §11f: `packages/interpreter`, compiled by Stator, runs `eval`, `new Function` and the `not-yet` constructs it takes over, directly on `jsrt_value` (no marshaling layer). Order: compiled static, then compiled dynamic, then the interpreter. Phase 8's QuickJS-NG stays as an option behind its gate until T14.0 measures whether it is still needed. Cards T14.0 (design, `docs/INTERPRETER.md`, including §0.3's parser question), T14.1 parser front, T14.2 evaluator, T14.3 wiring, T14.4 async and the rest. `ts` mode is unchanged.
+- **v4.18** (2026-10-02): **T11.2 lands: `packages/std` is the real `std/*` package** (plan-notes 294). `std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` resolve through `paths` and link `libjsrt_std.a` only into programs that import them; unknown `std/foo` is the new `STA3002`. T10.1 steps 2–4 are struck (step 5 stays open); §11b's v0 table moves `std/env.args` to T11.3 as `std/process.argv`; T11.3's `std/fs` row drops `unlink`, `rmdir` and text reads. Record in `done.md`.

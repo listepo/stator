@@ -1,0 +1,47 @@
+# Stator std (plan.md §11c T11.2, docs/STD.md §6): the Zig backings of the `std/*` modules →
+# packages/std/build/libjsrt_std.a. The compiler links this archive only into programs that
+# import `std/*`; every other program's link line never names it.
+#
+# One flavor for every runtime flavor: the backings are ReleaseSafe (a bounds or overflow trap
+# aborts with a message rather than corrupting memory), they call only libc, and the sanitized
+# runtime links the same object — ASan instruments the generated C and the runtime, not Zig.
+
+set minimum-version := "1.50.0"
+set shell := ["bash", "-cu"]
+
+cc := env("CC", "clang")
+ar := env("AR", "ar")
+
+default:
+    @just --list
+
+# packages/std/build/libjsrt_std.a (zig build-obj -O ReleaseSafe)
+std:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CC='{{cc}}'
+    AR='{{ar}}'
+    # Zig's native macOS target is the running OS release; clang's is its deployment target.
+    # Linking objects from both warns on every program link, so the object takes clang's — the
+    # same rule packages/runtime/justfile applies to the runtime's Zig object.
+    ZIG_TARGET=''
+    if [[ "$(uname -s)" == 'Darwin' ]]; then
+      MACOS_MIN="$(${CC} -### -x c -c /dev/null 2>&1 | grep -oE 'apple-macosx[0-9.]+' | head -1)"
+      ZIG_TARGET="-target native-macos.${MACOS_MIN#apple-macosx}"
+    fi
+    # -fPIC and -mcpu=baseline: the archive links into PIE executables and must run wherever the
+    # runtime does. Section splitting lets the program link dead-strip unused backings.
+    ZIG_FLAGS="-O ReleaseSafe ${ZIG_TARGET} -lc -fPIC -mcpu=baseline -ffunction-sections -fdata-sections -fno-stack-check"
+    DIR=build
+    mkdir -p "${DIR}"
+    # Zig's cache tracks every input, so an unchanged tree costs one lookup; `fmt --check` is the
+    # style gate.
+    zig fmt --check zig/*.zig
+    zig build-obj ${ZIG_FLAGS} --cache-dir "${DIR}/zig-cache" -femit-bin="${DIR}/jsrt_std.o" zig/jsrt_std.zig
+    # Recreated, never updated in place: `ar r` keeps stale members.
+    rm -f "${DIR}/libjsrt_std.a"
+    ${AR} rcs "${DIR}/libjsrt_std.a" "${DIR}/jsrt_std.o"
+    echo "std built: ${DIR}/libjsrt_std.a"
+
+std-clean:
+    rm -rf build

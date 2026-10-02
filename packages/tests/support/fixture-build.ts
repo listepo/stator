@@ -9,9 +9,13 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BuildError, build, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
 import { nodePath } from './node-path.ts';
 import { runProcess } from './parallel.ts';
+
+/** The `std/*` resolve hook every oracle run preloads (golden/std-oracle.ts). */
+const STD_ORACLE = fileURLToPath(new URL('../golden/std-oracle.ts', import.meta.url));
 
 /** Both streams: console.error/warn write to STDERR in Node and the runtime mirrors that —
  * comparing stdout alone would let a wrong-stream bug pass. */
@@ -103,11 +107,12 @@ export async function compileFixtureC(entry: string, work: string): Promise<stri
  * comes from the pinned Node (or `STATOR_NODE`). A fixture directory may carry a
  * `node_shim.mjs` preloading native bindings Node-side (FFI fixtures cannot run under Node
  * as written — an ambient `declare function` erases to nothing), loaded via `--import`
- * before the entry and invisible to Stator, which never imports it. `env` is the caller's
+ * before the entry and invisible to Stator, which never imports it. Every run also loads
+ * `golden/std-oracle.ts`, the resolve hook that answers `std/*` imports Node-side. `env` is the caller's
  * pinned environment (TZ=UTC on both sides), kept per-caller so this helper owns no clock. */
 export async function runNodeOracle(path: string, env: NodeJS.ProcessEnv): Promise<FixtureStreams> {
   const shim = join(dirname(path), 'node_shim.mjs');
-  const args = existsSync(shim) ? ['--import', shim, path] : [path];
+  const args = ['--import', STD_ORACLE, ...(existsSync(shim) ? ['--import', shim] : []), path];
   const result = await runProcess(nodePath(), args, { env });
   if (result.status !== 0) {
     throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);

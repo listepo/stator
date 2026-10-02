@@ -246,22 +246,23 @@ only when the flag is passed, which the decision runner never passes).
 
 ---
 
-## `std` — systems library (Phase 10, T10.1 — `std/env` + `std/path` wired)
+## `std` — systems library (plan.md §11c T11.2)
 
-`docs/STD.md` is the contract. T10.1 step 2 has landed: `std/env` (real libc
-`getenv`/`setenv`/`unsetenv` under `std`-shaped names) and `std/path` (pure-C POSIX
-string walking) compile to direct C calls through the extern surface — declarations
-in `.d.ts`, thin TS wrappers, byte-for-byte goldens (`std_env`, `std_path`). No `STA`
-code was allocated: every signature is accepted, so no gate arm was needed. `std/*`
-*import* syntax still fails like any unrecognized module edge — the surface is
-`declare` + wrapper, not `import … from 'std/…'` (that edge is a later slice).
+`docs/STD.md` is the contract. `std/*` is a reserved import prefix that resolves to the
+first-party `packages/std` (STD.md §1): each module is strict TypeScript over Zig backings in
+`libjsrt_std.a`, linked only into a program that imports one. A std module is ordinary source
+once resolved, so an importer's verdict covers the std functions it pulls in, and `explain`
+flags each backing call as an unchecked boundary (docs/FFI.md §5), exactly as for user FFI.
 
 | Feature | `ts` mode | `js` mode | Notes |
 |---|---|---|---|
-| `std/env` (`get`/`set`/`unset` over real libc) | static (+ unchecked-boundary flag) | static + flag (same — the surface is `.ts` declarations either way) | Decision fixtures `subset_std_env_ts` (+ js twin when the surface gains one); golden `std_env` holds the `@statorError null` throw message byte-for-byte. |
-| `std/path` (`isAbsolute`/`basename`/`dirname`/`join` over fixture C shims) | static (+ unchecked-boundary flag) | static + flag (same) | Decision fixture `subset_std_path_ts`; golden `std_path` holds all ten lines byte-for-byte. `join` is two-segment here; the variadic form is a later slice. |
-| `import … from 'std/env'` / `'std/path'` / `'std/process'` / `'std/fs'` / `'std/time'` | not-yet (Phase 10) | not-yet (Phase 10) | First-party modules, not packages: the `std/` prefix is reserved and recognized at the module-graph edge (`docs/STD.md` §1). Unknown `std/foo` will be a hard error. |
-| `import … from 'std/sync'` / `'std/thread'` | not-yet (Phase 10, T10.2) | not-yet (Phase 10, T10.2) | Needs the OS-threads ↔ async bridge; refuses until it exists (`docs/STD.md` §5). |
+| `import … from 'std/env'` (`has`/`get`/`set`/`unset`/`cwd`) | dynamic | dynamic | `get` answers `string \| undefined`, a union the HIR boxes; every other function is static. Fixtures `subset_std_env_ts` / `_js`; golden `std_env`. |
+| `import … from 'std/path'` (`isAbsolute`/`basename`/`dirname`/`join`) | static | static | Pure TypeScript, no backing; POSIX `basename(3)`/`dirname(3)` semantics (STD.md §5). Fixtures `subset_std_path_ts` / `_js`; golden `std_path`. |
+| `import … from 'std/process'` (`exit`/`pid`/`abort`) | static | static | Fixtures `subset_std_process_ts` / `_js`; golden `std_process`; non-zero `exit` and `abort` in `unit/std.test.ts`. |
+| `import … from 'std/fs'` (`readText`/`writeText`/`stat`/`mkdir`/`unlink`/`rmdir`) | static | static | Sync, path-only, UTF-8 text; `Stat` is a class so it compiles static. Fixtures `subset_std_fs_ts` / `_js`; golden `std_fs`. |
+| `import … from 'std/time'` (`nowMs`/`sleepMs`) | static | static | Fixtures `subset_std_time_ts` / `_js`; golden `std_time`. A js-mode importer is golden `js/std_js`. |
+| `import … from 'std/sync'` / `'std/thread'` | not-yet (STA1214, Phase 10, T10.2) | not-yet (same) | Needs the OS-threads ↔ async bridge (STD.md §5). Fixtures `subset_std_thread_ts` / `_js`. |
+| `import … from 'std/<anything else>'` | error (STA3002) | error (same) | The prefix is reserved: an unknown name — including the library's own `std/internal/…` and `std/native/…` — is never a package lookup. Fixtures `subset_std_unknown_ts` / `_js`. |
 
 ## Out of scope for v1
 

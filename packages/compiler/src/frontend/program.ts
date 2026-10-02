@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
+import { classifyStdSpecifier, stdPathMapping } from './std.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -563,6 +564,10 @@ function createProgramUncached(
     module: ts.ModuleKind.ESNext,
     moduleResolution: ts.ModuleResolutionKind.Bundler,
     moduleDetection: ts.ModuleDetectionKind.Force,
+    // `std/<name>` resolves to the std package's own source (plan.md §11c T11.2). On the options
+    // rather than in a custom host so the module graph's `ts.resolveModuleName` reads the same
+    // mapping the checker did; an unknown name is refused by `classifyStdSpecifier`, never here.
+    paths: stdPathMapping(),
 
     // Target and libs. `lib` takes FILE names, not the tsconfig shorthand: "es2025" resolves to
     // nothing and silently leaves the program without Array, Object, or any other global type.
@@ -700,6 +705,11 @@ function createProgramUncached(
       }
       continue;
     }
+    const stdRefusal = stdImportRefusal(diag, mode);
+    if (stdRefusal !== undefined) {
+      diagnostics.push(stdRefusal);
+      continue;
+    }
     const file = diag.file;
     if (file === undefined) {
       // File-less diagnostic (e.g., "tsconfig.json not found")
@@ -736,6 +746,37 @@ function createProgramUncached(
   }
 
   return { program, diagnostics, runtimeDynamicSymbols };
+}
+
+/** TS2307 ("cannot find module") on a `std/…` specifier is the std edge's refusal, not a checker
+ * error: `std/foo` resolves to no file because no such module exists (STA3002), or because it is
+ * a threads module that has not landed (STA1214, Phase 10) — the same answer the gate gives a
+ * specifier that did resolve (gate.ts `gateImport`), so the code never depends on whether a
+ * stray file happens to sit where the mapping looked. */
+function stdImportRefusal(diag: ts.Diagnostic, mode: Mode): Diagnostic | undefined {
+  const file = diag.file;
+  if (diag.code !== 2307 || file === undefined || diag.start === undefined) {
+    return undefined;
+  }
+  const literal = file.text.slice(diag.start, diag.start + (diag.length ?? 0));
+  const std = classifyStdSpecifier(literal.slice(1, -1));
+  if (std === undefined || std.kind === 'module') {
+    return undefined;
+  }
+  const { line, character } = file.getLineAndCharacterOfPosition(diag.start);
+  const span = { start: diag.start, length: diag.length ?? 1 };
+  const notYet = std.kind === 'not-yet';
+  return diagnosticFromFile(
+    file.fileName,
+    line + 1,
+    character + 1,
+    std.code,
+    notYet ? 'not-yet' : 'error',
+    mode,
+    std.message,
+    span,
+    notYet ? std.phase : undefined,
+  );
 }
 
 /** Format and print diagnostics for user output. */

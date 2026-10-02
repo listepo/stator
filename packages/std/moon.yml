@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+layer: 'library'
+language: 'typescript'
+
+# The std library (plan.md §11c T11.2): a strict-TypeScript surface the compiler resolves `std/*`
+# to, plus Zig backings built by this project's justfile into `build/libjsrt_std.a`. Tools are
+# called directly, never through pnpm (see compiler/moon.yml and plan-notes 204).
+tasks:
+  build:
+    script: 'just std'
+    toolchain: 'system'
+    inputs:
+      - 'zig/**/*'
+      - 'justfile'
+    outputs:
+      - 'build/libjsrt_std.a'
+  typecheck:
+    script: './node_modules/.bin/tsc --noEmit -p packages/std/tsconfig.json'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  lint:
+    script: './node_modules/.bin/oxlint --deny-warnings packages/std && ./node_modules/.bin/oxfmt --check "packages/std/**/*.{ts,json}"'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true

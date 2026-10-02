@@ -701,6 +701,10 @@ class Emitter {
    * rest of the emission state: the declaration opens lazily inside the literal's own
    * statements, so the number only has to be unique within one emission. */
   private spreadOrderCount: number = 0;
+  /* Extern-call sites minted while emitting: the suffix of each site's C temporaries
+   * (`_jsrt_exr_N`, `_jsrt_exc_N_i`, `_jsrt_exe_N`). Not the slot base — an inlined body emits
+   * the same node, hence the same base, once per call site in one C scope. */
+  private externSiteCount: number = 0;
   /* Labels a `goto` actually targets. C warns on a label nothing jumps to, and the runtime builds
    * with -Wall -Wextra -Werror, so an unconditional `brk_N:` after every loop would turn a plain
    * `while` into a build failure. Every jump is emitted before its target line, so consulting this
@@ -750,6 +754,7 @@ class Emitter {
     this.enclosing = [];
     this.loopCount = 0;
     this.spreadOrderCount = 0;
+    this.externSiteCount = 0;
     this.usedLabels.clear();
     this.padStack = [];
     this.unwindUsed = false;
@@ -3367,9 +3372,10 @@ class Emitter {
    * - `errno` is zeroed before the call and read into a C local immediately after, before the
    *   frees: the read precedes every other runtime call, exactly as §4's sequence demands.
    *
-   * Temporary names derive from the slot base, which counting hands out once per node: two
-   * sites never share a base, so nested extern calls cannot redeclare each other's locals. */
+   * Temporary names carry an emission-unique site number, not the slot base: inlining emits one
+   * node — one base — at every call site, and those sites can share a C scope. */
   private emitExternCall(expr: ExternCall, base: number): string {
+    const site = String(this.externSiteCount++);
     const argStart = expr.retKind === 'void' ? 0 : 1;
     const parts: string[] = [];
     this.sequenceArgs(parts, expr.args, expr.span, base, argStart);
@@ -3380,7 +3386,7 @@ class Emitter {
       const slot = this.slotAt(base + argStart + index);
       const kind = expr.argKinds[index];
       if (kind === 'cstring' || kind === 'cstring-owned') {
-        const temp = `_jsrt_exc_${String(base)}_${String(index)}`;
+        const temp = `_jsrt_exc_${site}_${String(index)}`;
         this.appendLine(`char *${temp} = jsrt_string_to_cstr(${slot});`, expr.span);
         cArgs.push(temp);
       } else if (kind === 'number') {
@@ -3428,7 +3434,7 @@ class Emitter {
     const call = `${expr.cName}(${cArgs.join(', ')})`;
     // The raw C result travels in a C local, never through a converted expression: for a
     // `cstring` return it is the library's pointer, NULL-checked below before the copy.
-    const raw = `_jsrt_exr_${String(base)}`;
+    const raw = `_jsrt_exr_${site}`;
     if (expr.retKind === 'void') {
       this.appendLine(`${call};`, expr.span);
     } else {
@@ -3450,7 +3456,7 @@ class Emitter {
       this.appendLine(`${this.slotRef(write.name)} = ${write.slot};`, expr.span);
     }
     if (expr.error === 'errno') {
-      this.appendLine(`int _jsrt_exe_${String(base)} = errno;`, expr.span);
+      this.appendLine(`int _jsrt_exe_${site} = errno;`, expr.span);
     }
     // Box the result BEFORE freeing borrows (see the order note above): the copy-out
     // must precede the frees, while frees and the throw check still follow for every
@@ -3486,7 +3492,7 @@ class Emitter {
     // (`cstring-owned`) copy is the callee's now and is never freed here.
     for (let index = 0; index < expr.args.length; index++) {
       if (expr.argKinds[index] === 'cstring') {
-        this.appendLine(`free(_jsrt_exc_${String(base)}_${String(index)});`, expr.span);
+        this.appendLine(`free(_jsrt_exc_${site}_${String(index)});`, expr.span);
       }
     }
     if (expr.error !== undefined) {
@@ -3507,7 +3513,7 @@ class Emitter {
             ? `${raw} < 0`
             : expr.error === 'null'
               ? `${raw} == NULL`
-              : `_jsrt_exe_${String(base)} != 0`;
+              : `_jsrt_exe_${site} != 0`;
       this.appendLine(
         `if (${failed}) { jsrt_throw_error(&jsrt_class_error, ` +
           `"extern call '${this.escapeCString(expr.tsName)}' failed: ${detail}"); }`,

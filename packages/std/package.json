@@ -1,0 +1,11 @@
+{
+  "name": "@stator/std",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stator's standard library: the std/* modules (strict TypeScript surface + Zig backings in libjsrt_std.a)",
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

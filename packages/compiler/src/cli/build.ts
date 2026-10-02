@@ -25,6 +25,7 @@ import {
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
 import { createProgram } from '../frontend/program.ts';
+import { isStdSourceFile, STD_ROOT } from '../frontend/std.ts';
 import { verifyHir } from '../hir/verify.ts';
 import { lowerProgram } from '../lower/index.ts';
 import { optimize } from '../passes/index.ts';
@@ -152,6 +153,10 @@ const RUNTIME_JUST_RECIPE = {
 } as const;
 const RUNTIME_LIB_DIR = join(RUNTIME_ROOT, RUNTIME_DIR_OF[FLAVOR]);
 const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
+/** The std backings (plan.md §11c T11.2): one archive for every runtime flavor — ReleaseSafe Zig
+ * over libc, with no dependency on libjsrt.a (packages/std/justfile). Linked only into a program
+ * whose module graph holds a std file. */
+const STD_ARCHIVE = join(STD_ROOT, 'build', 'libjsrt_std.a');
 const SANITIZER_FLAGS = ['-O1', '-g', '-fsanitize=address,undefined'];
 
 /** What a program linking this archive must pass — Boehm's `-lgc` when the runtime was built
@@ -221,10 +226,13 @@ export async function build(options: BuildOptions): Promise<number> {
     writeFileSync(cPath, compiled.c, 'utf8');
     // Default -O2; STATOR_OPT=0 / --opt=0 skips most clang opts for faster iterate compiles.
     // Per-module parallel .o cache stays a follow-up (plan.md §12).
-    linkExecutable(cPath, options.out, options.opt ?? 2, [
-      ...compiled.linkFlags,
-      ...(options.linkFlags ?? []),
-    ]);
+    linkExecutable(
+      cPath,
+      options.out,
+      options.opt ?? 2,
+      [...compiled.linkFlags, ...(options.linkFlags ?? [])],
+      compiled.std,
+    );
     return 0;
   } finally {
     if (scratch !== null) {
@@ -240,6 +248,8 @@ export async function build(options: BuildOptions): Promise<number> {
 export interface CompiledC {
   readonly c: string;
   readonly linkFlags: readonly string[];
+  /** Whether the module graph holds a `std/*` file, so the link owes `libjsrt_std.a`. */
+  readonly std: boolean;
   readonly header?: string;
 }
 
@@ -354,6 +364,7 @@ async function compileToCInner(
     // slot layout and so is the only stage that can place them (steps 3–5).
     c: emitC(optimized, library) + (unit === undefined ? '' : exportVersionDefinition(unit)),
     linkFlags: withSpan('frontend/link-flags', {}, () => collectLinkFlags(program)),
+    std: order.some((file) => isStdSourceFile(file.fileName)),
     ...(header !== undefined && { header }),
   }));
 }
@@ -370,9 +381,10 @@ function linkExecutable(
   out: string,
   opt: OptLevel,
   externFlags: readonly string[],
+  std: boolean,
 ): void {
   withSpan('link/clang', {}, () => {
-    link(cPath, out, opt, externFlags);
+    link(cPath, out, opt, externFlags, std);
   });
 }
 
@@ -491,17 +503,16 @@ function compileObject(cPath: string, out: string, opt: OptLevel): void {
   }
 }
 
-function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly string[]): void {
-  if (!existsSync(RUNTIME_ARCHIVE)) {
-    throw new BuildError(
-      'STA0011',
-      `runtime archive not found at ${RUNTIME_ARCHIVE} — run \`just -f ${join(RUNTIME_ROOT, 'justfile')} -d ${RUNTIME_ROOT} ${RUNTIME_JUST_RECIPE[FLAVOR]}\``,
-    );
-  }
-
-  // conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
-  // initialization on the current macOS host (see selectCC above).
-  const cc = selectCC();
+/** The clang link line, pure so a test can read it: the generated C, `libjsrt_std.a` exactly
+ * when the program imports `std/*` (plan.md §11c T11.2 Check), the runtime archive, the
+ * recorded and extern flags. Exported for that test only. */
+export function linkArguments(
+  cPath: string,
+  out: string,
+  opt: OptLevel,
+  externFlags: readonly string[],
+  std: boolean,
+): string[] {
   // Tree-shaking builtins (plan.md Task 3.12): builtins live in libjsrt.a, and the archive links
   // at .o granularity -- one referenced symbol drags in every builtin its object file holds. The
   // linker's dead-stripping restores function granularity: a builtin the program never references
@@ -514,13 +525,16 @@ function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly s
     : process.platform === 'darwin'
       ? ['-Wl,-dead_strip']
       : ['-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections'];
-  const args: string[] = [
+  return [
     '-std=c11',
     ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
     ...shakeFlags,
     '-I',
     RUNTIME_INCLUDE,
     cPath,
+    // The std archive before the runtime's, though neither depends on the other: the order a
+    // static link reads archives is load-bearing in general, and fixing it here keeps it stable.
+    ...(std ? [STD_ARCHIVE] : []),
     '-L',
     RUNTIME_LIB_DIR,
     '-ljsrt',
@@ -532,6 +546,40 @@ function link(cPath: string, out: string, opt: OptLevel, externFlags: readonly s
     '-o',
     out,
   ];
+}
+
+/** STA0011 for a missing archive (the runtime's, or the std library's for a `std/*` importer),
+ * naming the just recipe that builds it. */
+function requireArchive(
+  what: 'runtime' | 'std',
+  archive: string,
+  root: string,
+  recipe: string,
+): void {
+  if (!existsSync(archive)) {
+    throw new BuildError(
+      'STA0011',
+      `${what} archive not found at ${archive} — run \`just -f ${join(root, 'justfile')} -d ${root} ${recipe}\``,
+    );
+  }
+}
+
+function link(
+  cPath: string,
+  out: string,
+  opt: OptLevel,
+  externFlags: readonly string[],
+  std: boolean,
+): void {
+  requireArchive('runtime', RUNTIME_ARCHIVE, RUNTIME_ROOT, RUNTIME_JUST_RECIPE[FLAVOR]);
+  if (std) {
+    requireArchive('std', STD_ARCHIVE, STD_ROOT, 'std');
+  }
+
+  // conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
+  // initialization on the current macOS host (see selectCC above).
+  const cc = selectCC();
+  const args = linkArguments(cPath, out, opt, externFlags, std);
   const first = runClangCaptured(cc, args);
   const startError = clangStartError(cc, first);
   if (startError !== undefined) {

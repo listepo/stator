@@ -1,0 +1,117 @@
+/* The `std/` import edge (plan.md §11c T11.2, docs/STD.md §1): the one place that knows which
+ * specifiers name Stator's first-party standard library and where its sources live.
+ *
+ * `std/<name>` is a RESERVED prefix, not a package: a known name resolves to
+ * `packages/std/src/<name>.ts` through a `paths` entry on the program's own options (so the
+ * checker, the gate and the module graph all resolve it identically), `std/sync` and
+ * `std/thread` are not-yet until T10.2's threads exist, and every other `std/…` is a hard error
+ * (STA3002) — never a silent fall-through to a package lookup. A std file is ordinary strict
+ * TypeScript once resolved: below this edge nothing knows it came from `std`, except the link,
+ * which adds `libjsrt_std.a` when the module graph holds one (cli/build.ts).
+ *
+ * Nothing here depends on the mode: `std` is the same library under `ts` and `js` (§0.8). */
+
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PREFIX = 'std/';
+
+/** The std package root: `STATOR_STD_ROOT`, else the sibling workspace package
+ * (`packages/compiler/<src|dist>/frontend` → `packages/std`), else a published `std` beside
+ * `dist`. Mirrors cli/build.ts's runtime-root rule, and a wrong guess fails the same way: the
+ * module list comes back empty and every `std/` import is STA3002 naming no modules. */
+function resolveStdRoot(): string {
+  const override = process.env['STATOR_STD_ROOT'];
+  if (override !== undefined && override !== '') {
+    return override;
+  }
+  const here = dirname(fileURLToPath(import.meta.url));
+  const sibling = join(here, '..', '..', '..', 'std');
+  const bundled = join(here, '..', '..', 'std');
+  return existsSync(join(sibling, 'src')) ? sibling : bundled;
+}
+
+export const STD_ROOT = resolveStdRoot();
+
+/** Real path, forward slashes: the checker resolves modules to real paths and normalizes every
+ * `fileName` to `/`, so a prefix test against a source file's name must compare like with like —
+ * a root reached through a symlink (macOS `/tmp`) would otherwise never match. */
+function sourceDir(): string {
+  const dir = join(STD_ROOT, 'src');
+  return (existsSync(dir) ? realpathSync(dir) : dir).replace(/\\/g, '/');
+}
+
+const STD_SOURCE_DIR = sourceDir();
+
+/** Modules whose surface needs T10.2's OS threads (docs/STD.md §5). */
+const THREAD_MODULES: ReadonlySet<string> = new Set(['sync', 'thread']);
+
+let moduleNames: readonly string[] | undefined;
+
+/** The std modules: one per lower-case top-level `src/<name>.ts`. Subdirectories (`native/`,
+ * `internal/`) are the library's own plumbing and never importable. */
+export function stdModuleNames(): readonly string[] {
+  if (moduleNames === undefined) {
+    let names: string[];
+    try {
+      names = readdirSync(STD_SOURCE_DIR);
+    } catch {
+      names = [];
+    }
+    moduleNames = names
+      .filter((name) => /^[a-z]+\.ts$/.test(name))
+      .map((name) => name.slice(0, -'.ts'.length))
+      .sort();
+  }
+  return moduleNames;
+}
+
+/** The `paths` entry that resolves `std/<name>` for the checker and the module graph. An unknown
+ * name finds no file here; `classifyStdSpecifier` is what refuses it. */
+export function stdPathMapping(): Record<string, string[]> {
+  return { [`${PREFIX}*`]: [`${STD_SOURCE_DIR}/*.ts`] };
+}
+
+/** What an import specifier means at the std edge, or `undefined` when it does not start with
+ * `std/` (an ordinary relative import or a package, which the gate rules on as before). */
+export type StdSpecifier =
+  | { readonly kind: 'module'; readonly name: string }
+  | {
+      readonly kind: 'not-yet';
+      readonly code: 'STA1214';
+      readonly message: string;
+      readonly phase: 10;
+    }
+  | { readonly kind: 'unknown'; readonly code: 'STA3002'; readonly message: string };
+
+export function classifyStdSpecifier(specifier: string): StdSpecifier | undefined {
+  if (!specifier.startsWith(PREFIX)) {
+    return undefined;
+  }
+  const name = specifier.slice(PREFIX.length);
+  if (stdModuleNames().includes(name)) {
+    return { kind: 'module', name };
+  }
+  if (THREAD_MODULES.has(name)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1214',
+      message: `'${specifier}' is not yet supported; planned for Phase 10 (T10.2: OS threads)`,
+      phase: 10,
+    };
+  }
+  const known = stdModuleNames()
+    .map((m) => PREFIX + m)
+    .join(', ');
+  return {
+    kind: 'unknown',
+    code: 'STA3002',
+    message: `unknown std module '${specifier}' — the std modules are ${known === '' ? '(none found)' : known}`,
+  };
+}
+
+/** Whether a program source file is part of the std library — what decides the archive link. */
+export function isStdSourceFile(fileName: string): boolean {
+  return fileName.startsWith(`${STD_SOURCE_DIR}/`);
+}
