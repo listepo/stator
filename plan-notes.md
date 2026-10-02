@@ -10662,6 +10662,85 @@ as a single declarator does.
 **Not covered.** The 92 growth writes and the 5 builtin-receiver writes, assigned above.
 Destructuring with defaults, rest or nesting, in either form, stays with step 8.
 
+**Family 4 landed: function constructors** (same day). Re-measured on 11f4c52 (family 3's head):
+688 diagnostics, 638 `STA1214`. Of the 50 refusals of `new` on a non-class, 22 were function
+values: `new SymbolConstructor(flags, name)` after `SymbolConstructor = objectAllocator.
+getSymbolConstructor()`, which is how `_tsc.js` builds every `Symbol`, `Type`, `Signature` and
+`Node`, and the ten `new (X || (X = getXConstructor()))(…)` sites. The Test262 harness needs the
+same surface: `assert.sameValue = function …`, `Test262Error.prototype.toString = …`, `new
+Test262Error(msg)`. What changed (docs/VALUE.md §4.20 is the reference):
+- **The runtime has a prototype now, for objects `new` builds through a function.** A
+  `JSRTClosure` carries `constructible`, a lazily created `prototype`, and `props`, its own
+  properties as a dynamic object. A `JSRTDynObject` carries `proto` and a hidden `ctor`. A read
+  that misses the own shape walks the chain, getters run with the original receiver, and a write
+  of a new name honors a setter on the chain. Chain hits fill no inline cache. No class layout
+  changed, and `Object.setPrototypeOf`/`__proto__` writes stay Phase 8's.
+- **`jsrt_construct` follows §10.2.2 for an ordinary function.** It builds the object, sets its
+  prototype to `F.prototype` when that is an object, runs F with it as `this`, and answers F's
+  return when that is an object. An arrow, a method or a generator is `X is not a constructor`.
+  `jsrt_instanceof_ctor` walks the chain against `F.prototype` (§7.3.22). An arrow on the right
+  is Node's `Function has non-object prototype 'undefined' in instanceof check`.
+- **The printer names instances the way `util.inspect` does.** The first `constructor` on the
+  chain names the instance (`P { x: 3 }`), and a function prints its own properties after its
+  label (`[Function: assert] { same: [Function (anonymous)] }`). Top-level `console.log(f)` takes
+  that path too.
+- **The frontend decides with three predicates in `frontend/types.ts`.** `isFunctionValueCallee`
+  admits a function the program wrote or an Unknown, never a class or a lib builtin.
+  `isFunctionValueMember` admits `f.x` on such a function, except `length` (the static arity
+  read) and the lib's `call`/`apply`/`bind` (step 9). `isFunctionMemberRead` admits `F.prototype`
+  as a receiver: after `F.prototype = { kind: 'x' }` the checker types it as that literal, a layout
+  the runtime never built. Each lowers to an existing node: `new-value`, `instanceof-value`, and
+  the `dyn-*` nodes, whose verifier now admits a `fn` target. A `function` declaration or
+  expression carries `FunctionExpr.constructible`. A non-capturing one becomes a non-`const` file
+  static, because `P.count = 0` writes it. A capturing one is marked by
+  `jsrt_closure_constructible`. `ts` mode keeps both refusals: a function's properties are
+  `STA1214`, and `new` on a function is an implicit `any` (`STA1003`, TS7009).
+- **Two checker codes become js-mode runtime codes.** TS2350 (`new` on a function that returns a
+  value) is how a factory-style constructor is written, and TS2565 (`F.prototype` read before the
+  program replaces it) is the same idiom's other half. Neither occurs in `_tsc.js`; both occur in
+  ordinary pre-class JavaScript.
+
+**Two defects found on the way, fixed here.** `new-value` had an emitter arm but no lowering, and
+the arm passed its arguments as varargs to `jsrt_construct(ctor, argc, argv)`, so it would not
+have compiled. It now takes the call layout: the constructor and its arguments in one rooted run
+that is also the `argv`, landing as a statement with its pending check. `instanceof-value` had no
+pending check either, so a TypeError from the walk escaped an enclosing `try` and surfaced at the
+next check. It now lands the same way.
+
+**Evidence** (this branch, Node 26.7.0):
+- Golden `js/function_constructors` matches Node byte for byte. It covers construction,
+  `prototype` methods, function properties and their printing, a constructor reached through a
+  variable and an allocator, an object-returning constructor, `in` through the chain, `new` and
+  `instanceof` on an arrow (both TypeErrors), replacing `F.prototype` after construction, a
+  capturing constructor and a loop over constructor values. There is no ts golden, because every
+  ts-mode spelling is a refusal.
+- Decision fixtures: `subset_function_construct_js` (dynamic) and `_ts` (`STA1003`),
+  `subset_function_prototype_js` (dynamic), `subset_function_props_ts` (`STA1214`), and
+  `subset_function_instanceof_js` (dynamic).
+- `_tsc.js` (`--stack-size=8000`, `--bundler=none`): 665 diagnostics, of which 615 `STA1214`
+  (−23), 45 `STA0012`, 4 `STA1218` and 1 `STA1210`. All 11 "new on anything but a named class"
+  and 11 of the 39 "new on this type" are gone, plus one property read on a function. The 28
+  left are builtins: `new Array(n)` 13, `new RegExp` 8, `WeakMap` 4, `WeakSet` 2 and
+  `Uint16Array` 1.
+- Test262 harness prelude (`assert.js`, `sta.js`, `doneprintHandle.js`): the only
+  refusals left are `Object.prototype.toString.call(value)` and `Array.prototype.map.call(…)`,
+  which are step 9's `.call`. The plan's test262 clause now names step 9 with families 1–4.
+- Self-compilation: `STA1214` 1738 → 1748, recorded with `--update`. The new gate and lowering
+  code adds `ts.*` type references, the same cause family 3 recorded.
+- jscpd: 196 → 193. The new runtime code shared three bodies with old code, now one helper each:
+  `call_with_receiver`, `write_own_slot` and `emit_labeled`. The gate's two compound-assignment
+  case lists collapsed into one `FirstCompoundAssignment`..`LastCompoundAssignment` range test.
+  The six import-list clones between `gate.ts` and `lower/index.ts` re-hashed because those lists
+  grew.
+
+**Not covered: step 4b.** The 28 builtin constructors are split off as step 4b, plan edited
+here. `Array(n)` needs holes, which the dense array refuses (plan-notes 55, `STA2002`). It needs
+a runtime design of its own (a hole marker that every element op honors or refuses) rather than
+a slice of this one. `new RegExp` needs a runtime-compiled pattern that throws `SyntaxError`
+where today's literal path aborts `STA2005`. `WeakMap`/`WeakSet` need their own descriptors and
+printing (`WeakMap { <items unknown> }`). `Uint16Array` is T11.1's typed-array surface. A spread
+argument to `new` on a function stays not-yet with the other spreads (step 5).
+
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
 
 **Trigger.** The creator's priority change: the T11.3 byte channel (plan-notes 309 step 1) cost

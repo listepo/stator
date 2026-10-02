@@ -113,8 +113,19 @@ pub export fn jsrt_closure_new(
         // A heap closure is never a class object: class objects are file-scope constants the
         // emitter writes with their descriptor (docs/VALUE.md §4.17).
         .klass = null,
+        .constructible = false,
+        .has_prototype = false,
+        .prototype = 0,
+        .props = null,
     };
     return c.jsrt_closure(closure);
+}
+
+/// Marks a fresh heap closure as a capturing `function`, one `new` builds through (plan-notes 310).
+pub export fn jsrt_closure_constructible(value: Value) Value {
+    const closure: *c.JSRTClosure = @ptrCast(@alignCast(c.jsrt_ptr(value)));
+    closure.constructible = true;
+    return value;
 }
 
 export fn jsrt_args_rest(argc: u32, argv: [*c]const Value, from: u32) Value {
@@ -130,6 +141,8 @@ fn dynobjNew(cls: *const c.JSRTClass) Value {
         .capacity = 0,
         .slots = null,
         .frozen = false,
+        .proto = 0,
+        .ctor = 0,
     };
     return c.JSRT_BOX(c.JSRT_TAG_OBJECT, @intFromPtr(o));
 }

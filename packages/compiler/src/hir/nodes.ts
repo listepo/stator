@@ -300,7 +300,9 @@ export interface NewExpr extends Node {
   readonly args: readonly Expression[];
 }
 
-/** `new v(a, b)` where `v` is a class-object VALUE rather than a name (docs/VALUE.md §4.17).
+/** `new v(a, b)` where `v` is a class-object VALUE rather than a name (docs/VALUE.md §4.17), or
+ * an ordinary function the program wrote -- `new P(1)` for `function P(x) { this.x = x; }`, or an
+ * Unknown callee -- which builds a dynamic object through `P.prototype` (§4.20, plan-notes 310).
  *
  * The instance's CLASS is a run-time fact: `v` may name one class statically and hold another
  * (a `typeof Base` parameter receiving a subclass's object constructs the subclass in
@@ -336,13 +338,13 @@ export interface InstanceOf extends Node {
 }
 
 /** `x instanceof v` where the right operand is a class-object VALUE rather than a name
- * (docs/VALUE.md §4.17).
+ * (docs/VALUE.md §4.17), or an ordinary function (§4.20).
  *
  * The class being tested against is a run-time fact for exactly the reason `NewValue` exists:
  * `v` may hold a subclass's object where its type names the base, and the prototype question is
  * about the VALUE. The emitter answers through one runtime entry (`jsrt_instanceof_ctor`), which
- * raises Node's TypeError for a right operand that is not a constructor and answers `false` for
- * an ordinary function (the `f.prototype` case is Phase 8's surface). The node's `type` is always
+ * raises Node's TypeError for a right operand that is not a constructor and walks the left side's
+ * prototype chain against `f.prototype` for an ordinary function. The node's `type` is always
  * `boolean`, and `target` may be any expression at all, exactly as on `InstanceOf`. */
 export interface InstanceOfValue extends Node {
   readonly kind: 'instanceof-value';
@@ -1096,6 +1098,10 @@ export interface FunctionExpr extends Node {
    * one of its bindings lives in the heap environment for the same reason an async function's do:
    * a `yield` pops the C frame. Mutually exclusive with `isAsync` in this landing. */
   readonly isGenerator: boolean;
+  /** A `function` declaration or expression that is neither async nor a generator: the one kind
+   * of function JavaScript constructs (`new f()`), and therefore the one with a `prototype`
+   * (plan-notes 310). Absent for an arrow, a method, an accessor and a constructor. */
+  readonly constructible?: true;
   /** Where this function's SIGNATURE types came from (plan.md §8 step 1). About the signature
    * alone, not the body: the signature is what a caller — and therefore a boundary — can see. */
   readonly provenance: Provenance;
