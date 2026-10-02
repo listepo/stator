@@ -2139,7 +2139,8 @@ export interface FieldAssignment extends Node {
 
 /** `o.x = v` against a dynamic object: overwrite in place when the key exists, shape transition
  * when it does not. Same evaluation order as FieldAssignment (target, then value), and both land
- * in rooted slots first — `jsrt_set_prop` may grow the slot array, which allocates. */
+ * in rooted slots first — `jsrt_set_prop` may grow the slot array, which allocates. `xs.length = n`
+ * on an array-typed target is this node too: the same entry resizes the array (plan-notes 310). */
 export interface DynFieldAssignment extends Node {
   readonly kind: 'dyn-field-assignment';
   readonly target: Expression;

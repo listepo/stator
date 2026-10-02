@@ -421,7 +421,8 @@ The consequences worth stating:
 Two ceilings are deliberate and recorded rather than hidden:
 
 - **No holes.** `jsrt_array_set` refuses a write more than one past the end (`STA2002`, raised at
-  runtime). ECMA-262 leaves the skipped indices absent, and a dense buffer cannot be absent;
+  runtime), and `jsrt_set_prop` refuses `a.length = n` with `n` past the end the same way; a
+  smaller `n` truncates (ECMA-262 §10.4.2.4, plan-notes 310). ECMA-262 leaves the skipped indices absent, and a dense buffer cannot be absent;
   filling them with `undefined` would make `console.log` print a different program's output.
 - **A read out of range is `undefined`**, which is why `noUncheckedIndexedAccess` types `a[i]` as
   `T | undefined` and the HIR types it `Unknown` until Task 3.5 narrows it (plan-notes 53).

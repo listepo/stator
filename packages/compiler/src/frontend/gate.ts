@@ -1607,6 +1607,31 @@ export function isSimpleBindingPattern(name: ts.BindingName): boolean {
   return false;
 }
 
+/** `({ a, b: c } = rhs)` / `[a, , b] = rhs`: the assignment twin of isSimpleBindingPattern, whose
+ * targets are variables rather than new bindings (plan-notes 310). */
+function isSimpleAssignmentPattern(
+  pattern: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
+): boolean {
+  if (ts.isObjectLiteralExpression(pattern)) {
+    return pattern.properties.every(
+      (p) =>
+        (ts.isShorthandPropertyAssignment(p) && p.objectAssignmentInitializer === undefined) ||
+        (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && ts.isIdentifier(p.initializer)),
+    );
+  }
+  return pattern.elements.every((el) => ts.isOmittedExpression(el) || ts.isIdentifier(el));
+}
+
+/** Whether the value of `node` is discarded: the whole of an expression statement, parentheses
+ * aside. */
+function isStatementPosition(node: ts.Expression): boolean {
+  let at: ts.Node = node;
+  while (ts.isParenthesizedExpression(at.parent)) {
+    at = at.parent;
+  }
+  return ts.isExpressionStatement(at.parent);
+}
+
 function gateDeclaration(decl: ts.VariableDeclaration, checker: ts.TypeChecker): GateResult {
   if (!isSimpleBindingPattern(decl.name)) {
     return notYet('destructuring declarations are not yet supported', 5);
@@ -1787,15 +1812,24 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       // A bare name is HIR Assignment, `a[i] = v` is IndexAssignment, `o.x = v` is FieldAssignment.
       // Neither member form is re-checked here for what it is a member OF: this node's child is
       // gated in its own right, and gateElementAccess and gateMemberAccess are where that lives.
-      // A dynamic-shape member is a fourth target, plain `=` only: the compound forms fold to a
-      // read of the place, and the read-once machinery hoists SLOTS, which a shape-table entry
-      // is not -- so they stay refused below, not admitted here.
+      // A dynamic-shape or Unknown member is a fourth target, DynFieldAssignment, for every
+      // assignment form: the key is static, so the read-once machinery need only hoist the
+      // receiver, and the fold reads and writes the shape-table entry through it.
       // A name the class never declared is refused first: growing a fixed layout is Phase 8's
       // dictionary mode (the write twin of the dynamic read, plan.md §8 step 37). In `ts` mode
       // the checker's own TS2339 owns the program, so refusing here too would report one mistake
       // twice — and `explain` would answer not-yet where the build answers error.
       if (mode === 'js' && isAbsentClassMemberWrite(bin.left, typeChecker)) {
         return notYet('assigning a new property on a class instance is not yet supported', 8);
+      }
+      if (ts.isObjectLiteralExpression(bin.left) || ts.isArrayLiteralExpression(bin.left)) {
+        return isStatementPosition(bin) && isSimpleAssignmentPattern(bin.left)
+          ? { kind: 'accept' }
+          : notYet(
+              'destructuring assignment is supported only as a statement whose targets are ' +
+                'variables, with no default, rest or nesting',
+              5,
+            );
       }
       // An Out-bound name takes only slots: anything else stored would read back as a handle
       // the callee never wrote (docs/FFI.md §2). Property targets hold copied bits and are
@@ -1817,13 +1851,26 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
           }
         }
       }
-      return isAssignableTarget(bin.left, typeChecker) ||
-        (ts.isPropertyAccessExpression(bin.left) &&
-          (isDynamicShape(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker) ||
-            tsTypeToHType(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker).kind ===
-              'unknown'))
-        ? { kind: 'accept' }
-        : notYet('assignment to anything but a variable is not yet supported', 5);
+      if (isAssignableTarget(bin.left, typeChecker)) {
+        return { kind: 'accept' };
+      }
+      // The object-shape twin of the class refusal above: a fixed layout cannot grow a name its
+      // type never declared, which waits on Phase 8's dictionary mode (plan-notes 310). In `ts`
+      // mode the checker's TS2339 owns the program, for the same reason as there.
+      if (
+        ts.isPropertyAccessExpression(bin.left) &&
+        tsTypeToHType(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker).kind ===
+          'object'
+      ) {
+        if (mode === 'ts') {
+          return { kind: 'accept' };
+        }
+        return notYet(
+          "assigning a property the object's shape does not declare is not yet supported",
+          8,
+        );
+      }
+      return notYet('assignment to anything but a variable is not yet supported', 5);
 
     // `x += e` on an identifier folds to `x = x + e`, sound because a bare identifier cannot have
     // side effects. An element target cannot use that fold -- `a[i()] += 1` must call `i` ONCE --
@@ -1888,9 +1935,11 @@ function gatePrefixUnary(
   }
 }
 
-/** What a read-modify-write may be applied to: a variable, or an array element.
+/** What a read-modify-write may be applied to: a variable, an array element, a layout field, an
+ * array's `length`, or a member of a dynamic-shape or Unknown receiver.
  *
- * Both are the HIR's vocabulary -- `Assignment` and `IndexAssignment` -- and the gate's accept set
+ * Each is the HIR's vocabulary -- `Assignment`, `IndexAssignment`, `FieldAssignment` and
+ * `DynFieldAssignment` -- and the gate's accept set
  * must equal that vocabulary exactly, which is why this is one predicate rather than a check
  * duplicated at each operator. The element case is admitted here and vetted for real by
  * gateElementAccess when the child node is reached. */
@@ -1901,8 +1950,7 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   if (!ts.isPropertyAccessExpression(node)) {
     return false;
   }
-  // A field, and ONLY a field: `a.length = 0` is a property access too, and writing it resizes an
-  // array -- which is a hole-creating operation the dense representation refuses (STA2002).
+  // A class or constraint layout field.
   if (
     classLikeOf(checker.getTypeAtLocation(node.expression)) !== undefined ||
     constraintDeclaration(checker.getTypeAtLocation(node.expression), checker) !== undefined
@@ -1913,9 +1961,6 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   // against it, and the lowering substitutes the concrete type per specialization. Method slots
   // take the same rule here classes do — a write replaces whatever the slot holds.
   const receiver = checker.getTypeAtLocation(node.expression);
-  // A field through `T`: the constraint declares the layout, the checker proved the access
-  // against it, and the lowering substitutes the concrete type per specialization. Method slots
-  // take the same rule classes do — a write replaces whatever the slot holds.
   const constraint = typeParameterConstraint(receiver, checker);
   if (
     constraint !== undefined &&
@@ -1923,11 +1968,20 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   ) {
     return true;
   }
+  // A dynamic-shape or Unknown receiver: the shape table is the place, read and written by name
+  // through the receiver the lowering evaluates once (plan-notes 310).
   if (isDynamicShape(receiver, checker)) {
     return true;
   }
   const shape = tsTypeToHType(receiver, checker);
-  return shape.kind === 'object' && shape.fields.some((f) => f.name === node.name.text);
+  // `a.length = n` resizes an array (ECMA-262 §10.4.2.4): shrinking drops the tail, a non-uint32
+  // is a RangeError, and growing would create holes, which the runtime refuses (STA2002) as it
+  // refuses a write past the end (plan-notes 310).
+  return (
+    shape.kind === 'unknown' ||
+    (shape.kind === 'array' && node.name.text === 'length') ||
+    (shape.kind === 'object' && shape.fields.some((f) => f.name === node.name.text))
+  );
 }
 
 /** A write to a name a class never declared (`c.missing = 1`): JavaScript grows the object,
@@ -3495,6 +3549,15 @@ function isFunctionLength(access: ts.PropertyAccessExpression, checker: ts.TypeC
  * iteration — and the dense runtime array has no way to be absent. A spread needs the iterator
  * protocol. Both are rejected rather than approximated. */
 function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeChecker): GateResult {
+  // The left side of `[a, , b] = rhs` builds no array: its hole skips an index of the right side,
+  // and the `=` arm rules on the pattern (plan-notes 310).
+  if (
+    ts.isBinaryExpression(literal.parent) &&
+    literal.parent.left === literal &&
+    literal.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  ) {
+    return { kind: 'accept' };
+  }
   for (const element of literal.elements) {
     if (!ts.isOmittedExpression(element) && isOutSlotValue(element, checker)) {
       return outSlotInValuePosition('an array literal');
