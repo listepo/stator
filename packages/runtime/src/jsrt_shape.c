@@ -377,6 +377,13 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
     }
     return JSRT_UNDEFINED;
   }
+  /* ArrayBuffer and Uint8Array have no shape: their data properties, index keys and methods are
+   * answered by the layout itself (jsrt_typed.zig), and a key neither class has reads undefined. */
+  if (jsrt_is_uint8array(obj) || jsrt_is_arraybuffer(obj)) {
+    jsrt_value out = JSRT_UNDEFINED;
+    (void)jsrt_typed_get_prop(obj, key, &out);
+    return out;
+  }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
       const int32_t slot = fixed_slot(obj, key);
@@ -658,12 +665,19 @@ jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic) {
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
     return jsrt_array_get(obj, index);
   }
+  if (jsrt_is_uint8array(obj)) {
+    return jsrt_uint8array_get(obj, index);
+  }
   return jsrt_get_prop(obj, jsrt_shape_key(jsrt_to_string(index)), ic);
 }
 
 void jsrt_dyn_index_set(jsrt_value obj, jsrt_value index, jsrt_value value, JSRTIC *ic) {
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
     jsrt_array_set(obj, index, value);
+    return;
+  }
+  if (jsrt_is_uint8array(obj)) {
+    jsrt_uint8array_put(obj, index, value);
     return;
   }
   jsrt_set_prop(obj, jsrt_shape_key(jsrt_to_string(index)), value, ic);

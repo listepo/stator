@@ -1,7 +1,8 @@
 //! The runtime's memory core in Zig (plan.md T9.1, plan-notes 238): the GC glue, the growable
-//! buffers, the shape table and the value allocation helpers. The justfile builds this root into
-//! one object, `jsrt_zig.o`, and archives it into libjsrt.a beside the C objects. Every symbol it
-//! exports is a C-ABI function or variable declared in jsrt.h, jsrt_value.h or src/jsrt_mem.h.
+//! buffers, the shape table, the value allocation helpers and the typed-array storage (T11.1).
+//! The justfile builds this root into one object, `jsrt_zig.o`, and archives it into libjsrt.a
+//! beside the C objects. Every symbol it exports is a C-ABI function or variable declared in
+//! jsrt.h, jsrt_value.h or src/jsrt_mem.h.
 
 const std = @import("std");
 
@@ -53,4 +54,5 @@ comptime {
     _ = @import("jsrt_buf.zig");
     _ = @import("jsrt_shape.zig");
     _ = @import("jsrt_alloc.zig");
+    _ = @import("jsrt_typed.zig");
 }

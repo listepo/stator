@@ -62,6 +62,7 @@ import type {
   SwitchStatement,
   TemplateLiteral,
   TryStatement,
+  TypedOp,
   UnaryOp,
   UpdateExpr,
   VtableEntry,
@@ -79,8 +80,9 @@ import {
   REGEXP_OPS,
   SET_OPS,
   stringOpCanThrow,
+  TYPED_OPS,
 } from '../hir/nodes.ts';
-import type { HField } from '../hir/types.ts';
+import type { HField, HType } from '../hir/types.ts';
 import {
   exportInitName,
   exportLastErrorName,
@@ -506,6 +508,38 @@ function escapeBytes(bytes: readonly number[]): string {
   return result;
 }
 
+/** Every node that claims a contiguous run of rooted call slots (see `callSlots`). */
+type CallSlotted =
+  | ArrayOp
+  | CallExpr
+  | ConsoleLogCall
+  | JsonParse
+  | JsonStringify
+  | CollectionOp
+  | DateComponents
+  | DateNew
+  | DateOp
+  | DateStaticCall
+  | DynMethodCall
+  | DynObjectLiteral
+  | ErrorNew
+  | ExternCall
+  | MathCall
+  | MethodCall
+  | NewExpr
+  | ObjectLiteral
+  | ObjectStaticCall
+  | PromiseConstruct
+  | PromiseMethodCall
+  | PromiseStaticCall
+  | RegExpLiteral
+  | RegExpOp
+  | StringOp
+  | StringStaticCall
+  | SuperCall
+  | TypedOp
+  | IteratorNext;
+
 class Emitter {
   private lines: string[] = [];
   private indent: number = 0;
@@ -545,37 +579,7 @@ class Emitter {
   /* Frame slot holding a call's callee and its arguments: 1 + argc CONTIGUOUS slots, so `argv` can
    * point at the first argument and every already-evaluated operand stays rooted while the rest are
    * evaluated. Keyed by node identity, like the other temporaries. */
-  private callSlots: Map<
-    | ArrayOp
-    | CallExpr
-    | ConsoleLogCall
-    | JsonParse
-    | JsonStringify
-    | CollectionOp
-    | DateComponents
-    | DateNew
-    | DateOp
-    | DateStaticCall
-    | DynMethodCall
-    | DynObjectLiteral
-    | ErrorNew
-    | ExternCall
-    | MathCall
-    | MethodCall
-    | NewExpr
-    | ObjectLiteral
-    | ObjectStaticCall
-    | PromiseConstruct
-    | PromiseMethodCall
-    | PromiseStaticCall
-    | RegExpLiteral
-    | RegExpOp
-    | StringOp
-    | StringStaticCall
-    | SuperCall
-    | IteratorNext,
-    number
-  > = new Map();
+  private callSlots = new Map<CallSlotted, number>();
 
   /* Every class declared anywhere in the file, in the order counting reached them. The index is
    * the descriptor's C identity (`_jsrt_class_N`), and the name is how NewExpr and MethodCall --
@@ -1923,6 +1927,24 @@ class Emitter {
     this.countExpression(value);
   }
 
+  /** One contiguous run of rooted slots for `expr`: the leading operand (a callee or receiver)
+   * when there is one, then each argument -- so every operand already evaluated stays rooted
+   * while the rest run, and source order is pinned against C's unspecified argument order. */
+  private countRooted(
+    expr: CallSlotted,
+    lead: Expression | undefined,
+    args: readonly Expression[],
+  ): void {
+    this.callSlots.set(expr, this.slotCount);
+    this.slotCount += (lead === undefined ? 0 : 1) + args.length;
+    if (lead !== undefined) {
+      this.countExpression(lead);
+    }
+    for (const arg of args) {
+      this.countExpression(arg);
+    }
+  }
+
   private countExpression(expr: Expression): void {
     switch (expr.kind) {
       case 'logical-op':
@@ -2051,12 +2073,7 @@ class Emitter {
       case 'call':
         // 1 + argc CONTIGUOUS slots -- the callee, then each argument -- so `argv` can point at the
         // first argument slot and every operand already evaluated stays rooted while the rest run.
-        this.callSlots.set(expr, this.slotCount);
-        this.slotCount += 1 + expr.args.length;
-        this.countExpression(expr.callee);
-        for (const arg of expr.args) {
-          this.countExpression(arg);
-        }
+        this.countRooted(expr, expr.callee, expr.args);
         break;
       // An extern call takes the call layout minus the callee: there is no function value, only
       // a C symbol, so the arguments start where a plain call keeps its callee and the result —
@@ -2196,25 +2213,19 @@ class Emitter {
         this.countExpression(expr.executor);
         break;
       case 'promise-method':
-        this.callSlots.set(expr, this.slotCount);
-        this.slotCount += 1 + expr.args.length;
-        this.countExpression(expr.target);
-        for (const arg of expr.args) {
-          this.countExpression(arg);
-        }
+        this.countRooted(expr, expr.target, expr.args);
         break;
       // The same reachability promise, one slot per argument: an Object walk allocates its
       // result, and `Object.hasOwn(o, k)` must hold BOTH operands across the call.
       // `Date.UTC(y, m, ...)` sequences for the same reason, even though every operand is an
       // immediate: C would otherwise pick the order of the calls that produce them.
+      // A typed-array op (plan.md T11.1) roots its receiver and arguments the same way: a
+      // `subarray` allocates the view while the bounds it was given are still live.
       case 'date-components':
       case 'date-static':
       case 'object-static':
-        this.callSlots.set(expr, this.slotCount);
-        this.slotCount += expr.args.length;
-        for (const arg of expr.args) {
-          this.countExpression(arg);
-        }
+      case 'typed-op':
+        this.countRooted(expr, undefined, expr.args);
         break;
       // Same discipline for a string or array op: the receiver and every argument stay rooted
       // while the rest are evaluated, and evaluation order is pinned against C's unspecified
@@ -2228,12 +2239,7 @@ class Emitter {
       case 'date-op':
       case 'regexp-op':
       case 'string-op':
-        this.callSlots.set(expr, this.slotCount);
-        this.slotCount += 1 + expr.args.length;
-        this.countExpression(expr.target);
-        for (const arg of expr.args) {
-          this.countExpression(arg);
-        }
+        this.countRooted(expr, expr.target, expr.args);
         break;
       case 'iterator-next':
         this.callSlots.set(expr, this.slotCount);
@@ -2553,10 +2559,7 @@ class Emitter {
         this.appendLine(`${target} = ${this.emitExpression(stmt.target)};`, stmt.span);
         this.appendLine(`${index} = ${this.emitExpression(stmt.index)};`, stmt.span);
         this.appendLine(`${value} = ${this.emitExpression(stmt.value)};`, stmt.span);
-        const set =
-          stmt.target.type.kind === 'unknown'
-            ? `jsrt_dyn_index_set(${target}, ${index}, ${value}, NULL)`
-            : `jsrt_array_set(${target}, ${index}, ${value})`;
+        const set = indexSetCall(stmt.target.type, target, index, value);
         this.appendLine(`${set};`, stmt.span);
         // Both arms can throw: the dynamic set on a nullish receiver, the static one on a
         // statically-typed array that arrives as something else (STA2008's degrade-to-dynamic
@@ -3344,6 +3347,23 @@ class Emitter {
    * expression), so the pending check can sit between the call and whatever consumes the
    * result. Which arms take this tail -- always, or only when they can throw -- stays with
    * each arm; only the landing is shared. */
+  /* The tail of an op whose answer lands in its first rooted slot: an op that can throw becomes a
+   * statement followed by its pending check (the check has to sit between the op and whatever
+   * consumes the result, which a comma expression gives it nowhere to stand); any other op stays
+   * the sequenced expression. */
+  private finishOp(
+    parts: string[],
+    base: number,
+    opCall: string,
+    span: Span,
+    flushed: boolean,
+    canThrow: boolean,
+  ): string {
+    return canThrow
+      ? this.finishStatement(parts, `${this.slotAt(base)} = ${opCall}`, this.slotAt(base), span)
+      : this.finishSequenced(parts, opCall, span, flushed);
+  }
+
   private finishStatement(parts: string[], assignment: string, result: string, span: Span): string {
     parts.push(assignment);
     this.flushParts(parts, span);
@@ -3992,10 +4012,7 @@ class Emitter {
         const parts: string[] = [];
         this.sequencePart(parts, expr.target, expr.span, (v) => `${target} = ${v}`);
         this.sequencePart(parts, expr.index, expr.span, (v) => `${index} = ${v}`);
-        const read =
-          expr.target.type.kind === 'unknown'
-            ? `jsrt_dyn_index_get(${target}, ${index}, NULL)`
-            : `jsrt_array_get(${target}, ${index})`;
+        const read = indexGetCall(expr.target.type, target, index);
         // Both arms land as statements: the dynamic read throws on a nullish receiver, and the
         // static one degrades to it on a statically-typed array that arrives as something else
         // (plan.md §8 step 20). The answer reuses the receiver's slot, which is dead by then --
@@ -4694,15 +4711,14 @@ class Emitter {
         // a runtime constant, not an emitted one, so it rides in front of the rooted slot.
         const leading = expr.kind === 'error-new' ? `&${errorDescriptor(expr.ctor)}, ` : '';
         const opCall = `${runtimeCall}(${leading}${this.slotAt(base)})`;
-        if (expr.kind === 'json-stringify') {
-          return this.finishStatement(
-            parts,
-            `${this.slotAt(base)} = ${opCall}`,
-            this.slotAt(base),
-            expr.span,
-          );
-        }
-        return this.finishSequenced(parts, opCall, expr.span, flushed);
+        return this.finishOp(
+          parts,
+          base,
+          opCall,
+          expr.span,
+          flushed,
+          expr.kind === 'json-stringify',
+        );
       }
 
       case 'promise-construct': {
@@ -4819,15 +4835,7 @@ class Emitter {
           (expr.kind === 'collection-op' && expr.op === 'forEach') ||
           (expr.kind === 'date-op' && expr.op === 'toISOString') ||
           (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
-        if (canThrow) {
-          return this.finishStatement(
-            parts,
-            `${this.slotAt(base)} = ${opCall}`,
-            this.slotAt(base),
-            expr.span,
-          );
-        }
-        return this.finishSequenced(parts, opCall, expr.span, flushed);
+        return this.finishOp(parts, base, opCall, expr.span, flushed, canThrow);
       }
 
       // One runtime function per method, number -> number. The single-argument form nests
@@ -4836,7 +4844,8 @@ class Emitter {
       case 'date-components':
       case 'date-static':
       case 'math-call':
-      case 'object-static': {
+      case 'object-static':
+      case 'typed-op': {
         const name =
           expr.kind === 'math-call'
             ? `jsrt_math_${expr.method}`
@@ -4844,7 +4853,9 @@ class Emitter {
               ? 'jsrt_date_from_components'
               : expr.kind === 'date-static'
                 ? DATE_STATICS[expr.method].fn
-                : `jsrt_object_${snakeCase(expr.method)}`;
+                : expr.kind === 'typed-op'
+                  ? TYPED_OPS[expr.op].fn
+                  : `jsrt_object_${snakeCase(expr.method)}`;
         // Math takes immediates, so a lone argument has neither an order to fix nor anything to
         // keep rooted and nests directly. An Object walk always uses its slots (see counting).
         if (expr.kind === 'math-call' && expr.args.length <= 1) {
@@ -4859,15 +4870,16 @@ class Emitter {
         const flushed = this.sequenceArgs(parts, expr.args, expr.span, base, 0);
         const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
         const opCall = `${name}(${operands})`;
-        if (expr.kind === 'object-static') {
-          return this.finishStatement(
-            parts,
-            `${this.slotAt(base)} = ${opCall}`,
-            this.slotAt(base),
-            expr.span,
-          );
-        }
-        return this.finishSequenced(parts, opCall, expr.span, flushed);
+        // Every typed op can throw: a RangeError for a length or bound, or the TypeError a lying
+        // receiver gets (golden rule 4) -- so each one is a statement with its pending check.
+        return this.finishOp(
+          parts,
+          base,
+          opCall,
+          expr.span,
+          flushed,
+          expr.kind === 'object-static' || expr.kind === 'typed-op',
+        );
       }
 
       // `String.fromCharCode(...codes)` (plan.md §8 step 19): the one `String` namespace call.
@@ -5710,14 +5722,9 @@ class Emitter {
         const index = this.slotAt(base + 1);
         this.appendLine(`${target} = ${this.emitExpression(place.target)};`, expr.span);
         this.appendLine(`${index} = ${this.emitExpression(place.index)};`, expr.span);
-        const dyn = place.target.type.kind === 'unknown';
-        read = dyn
-          ? `jsrt_dyn_index_get(${target}, ${index}, NULL)`
-          : `jsrt_array_get(${target}, ${index})`;
-        write = (value: string) =>
-          dyn
-            ? `jsrt_dyn_index_set(${target}, ${index}, ${value}, NULL)`
-            : `jsrt_array_set(${target}, ${index}, ${value})`;
+        const targetType = place.target.type;
+        read = indexGetCall(targetType, target, index);
+        write = (value: string) => indexSetCall(targetType, target, index, value);
         break;
       }
       case 'field-access': {
@@ -5913,6 +5920,32 @@ const ITER_KINDS = {
   matchAll: 9,
   string: 10,
 } as const;
+
+/** `t[i]` on a target of type `t`: the dynamic read for an Unknown target, the typed-array read
+ * for a Uint8Array (ToUint8 storage, `undefined` out of range), the array read otherwise. The static
+ * forms degrade to the dynamic one for a receiver that arrives as something else (STA2008). */
+function indexGetCall(target: HType, object: string, index: string): string {
+  switch (target.kind) {
+    case 'unknown':
+      return `jsrt_dyn_index_get(${object}, ${index}, NULL)`;
+    case 'uint8array':
+      return `jsrt_uint8array_get(${object}, ${index})`;
+    default:
+      return `jsrt_array_get(${object}, ${index})`;
+  }
+}
+
+/** The write half of {@link indexGetCall}. */
+function indexSetCall(target: HType, object: string, index: string, value: string): string {
+  switch (target.kind) {
+    case 'unknown':
+      return `jsrt_dyn_index_set(${object}, ${index}, ${value}, NULL)`;
+    case 'uint8array':
+      return `jsrt_uint8array_put(${object}, ${index}, ${value})`;
+    default:
+      return `jsrt_array_set(${object}, ${index}, ${value})`;
+  }
+}
 
 function iteratorBoxCall(expr: ArrayOp | CollectionOp, operands: string): string | undefined {
   if (expr.op !== 'keys' && expr.op !== 'values' && expr.op !== 'entries') {

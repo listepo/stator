@@ -127,6 +127,22 @@ export interface HDate {
   readonly kind: 'date';
 }
 
+/** A `Uint8Array` (plan.md T11.1, docs/VALUE.md §4.19): a fixed-length view of bytes in an
+ * `ArrayBuffer`.
+ *
+ * A leaf, because its element type is fixed by the kind: every read is a `number` in [0, 255] and
+ * every write converts with ToUint8. The rest of the TypedArray family would be a sibling kind per
+ * element type when the corpus needs one (the card's own scoping), not a parameter of this one. */
+export interface HUint8Array {
+  readonly kind: 'uint8array';
+}
+
+/** An `ArrayBuffer`: the bytes a view reads and writes. A leaf like `date` -- a buffer holds no
+ * values, only bytes, and its contents are reached only through a view. */
+export interface HArrayBuffer {
+  readonly kind: 'arraybuffer';
+}
+
 /** A `Promise<T>`: the value a call to an async function evaluates to, and the only thing `await`
  * accepts without first wrapping it.
  *
@@ -206,6 +222,8 @@ export type HType =
   | HIterator
   | HRegExp
   | HDate
+  | HUint8Array
+  | HArrayBuffer
   | HPromise
   | HObject
   | HTypeParam;
@@ -217,6 +235,8 @@ export const H_UNDEFINED: HUndefined = { kind: 'undefined' };
 export const H_NULL: HNull = { kind: 'null' };
 export const H_REGEXP: HRegExp = { kind: 'regexp' };
 export const H_DATE: HDate = { kind: 'date' };
+export const H_UINT8ARRAY: HUint8Array = { kind: 'uint8array' };
+export const H_ARRAYBUFFER: HArrayBuffer = { kind: 'arraybuffer' };
 
 export function hFunction(params: readonly HType[], ret: HType): HFunction {
   return { kind: 'fn', params, ret };
@@ -498,12 +518,20 @@ export function hTypeName(t: HType): string {
   if (t.kind === 'fn') {
     return `(${t.params.map((p, i) => `a${String(i)}: ${hTypeName(p)}`).join(', ')}) => ${hTypeName(t.ret)}`;
   }
-  // The one leaf whose spelling is not its kind: TypeScript calls it `RegExp`, and a message that
-  // said `regexp` would not match what the user reads in their own editor.
-  if (t.kind === 'regexp') {
-    return 'RegExp';
+  // The builtin leaves spell themselves the way TypeScript does: a message that said `regexp`
+  // would not match what the user reads in their own editor.
+  switch (t.kind) {
+    case 'regexp':
+      return 'RegExp';
+    case 'date':
+      return 'Date';
+    case 'uint8array':
+      return 'Uint8Array';
+    case 'arraybuffer':
+      return 'ArrayBuffer';
+    default:
+      return t.kind;
   }
-  return t.kind === 'date' ? 'Date' : t.kind;
 }
 
 /** Replaces every type parameter with what `lookup` binds it to.

@@ -147,6 +147,8 @@ import type {
   SuperCall,
   SwitchClause,
   TemplateLiteral,
+  TypedOp,
+  TypedOperation,
   UnaryOp,
   UpdateExpr,
   UpdatePlace,
@@ -167,6 +169,9 @@ import {
   REGEXP_OPS,
   STRING_OPS,
   STRING_STATICS,
+  TYPED_OPS,
+  typedMember,
+  typedResultType,
 } from '../hir/nodes.ts';
 import type { HField, HObject, HType } from '../hir/types.ts';
 import {
@@ -2077,9 +2082,11 @@ function wrapDynamicIterator(iterable: Expression): Expression {
   ) {
     return iterable;
   }
+  // A Uint8Array has no inlined walk; the runtime dispatch boxes its element walk, whose every
+  // step is a byte -- so the element is `number`, the one concrete element this node may carry.
   return {
     kind: 'get-iterator',
-    type: hIterator(hUnknown(false)),
+    type: hIterator(iterable.type.kind === 'uint8array' ? H_NUMBER : hUnknown(false)),
     span: iterable.span,
     target: iterable,
   };
@@ -4566,6 +4573,30 @@ function lowerExpression(
     }
   }
 
+  // `u.length`, `u.buffer`, `b.byteLength` and their siblings: the TYPED_OPS `get` rows. Keyed on
+  // the BINDING's type, not the checker's, so a receiver widened to Unknown keeps the dynamic read
+  // (which answers the same properties through `jsrt_typed_get_prop`). Ahead of the dynamic-shape
+  // arm, because the lib interface's numeric index signature makes the checker's type look dynamic.
+  if (ts.isPropertyAccessExpression(node)) {
+    const receiverKind = typeAt(node.expression, checker, bindings).kind;
+    const op =
+      receiverKind === 'uint8array' || receiverKind === 'arraybuffer'
+        ? typedMember(receiverKind, node.name.text)
+        : undefined;
+    if (op !== undefined && TYPED_OPS[op].form === 'get') {
+      const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+      if (target === null) {
+        return null;
+      }
+      return typedOpNode(
+        op,
+        target,
+        [],
+        makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+      );
+    }
+  }
+
   // `o.x` on a DYNAMIC shape: no slot exists, so the read resolves the NAME through the shape
   // table with a per-site cache (docs/VALUE.md §4.10). The result is Unknown -- an absent optional
   // property reads as `undefined`, and narrowing it back is the caller's job, like a Map get.
@@ -5526,6 +5557,20 @@ function lowerExpression(
       };
       return { kind: 'error-new', type: errorHType(errorCtor), span, ctor: errorCtor, arg };
     }
+    // `new Uint8Array(...)` / `new ArrayBuffer(n)`: one TYPED_OPS row each, padded to the row's
+    // arity -- every constructor form reads an absent argument as `undefined` (plan.md T11.1).
+    // The gate admitted only the global constructors, so the result type names the row.
+    if (type.kind === 'uint8array' || type.kind === 'arraybuffer') {
+      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+      return args === null
+        ? null
+        : typedOpNode(
+            type.kind === 'uint8array' ? 'new Uint8Array' : 'new ArrayBuffer',
+            undefined,
+            args,
+            makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+          );
+    }
     // A Date is allocated too, but unlike a collection it takes an ARGUMENT: the one-argument form
     // is the only one the gate let through, and `jsrt_date_from_value` discriminates its three
     // shapes -- a time value, an ISO string, another Date -- by tag.
@@ -6277,6 +6322,21 @@ function lowerExpression(
         const padded = padToArity(prologue.args, DATE_OPS[op].arity, span);
         const type = DATE_OPS[op].result === 'number' ? H_NUMBER : H_STRING;
         return { kind: 'date-op', type, span, op, target, args: padded };
+      }
+
+      // The landed Uint8Array / ArrayBuffer METHODS (plan.md T11.1), padded to the row's arity --
+      // every one reads an omitted bound as `undefined`, the spec's own default. Unknown
+      // receivers take the dynamic path (the 2454 rule above).
+      const typedOp =
+        receiverType.kind === 'uint8array' || receiverType.kind === 'arraybuffer'
+          ? typedMember(receiverType.kind, propName)
+          : undefined;
+      if (typedOp !== undefined && TYPED_OPS[typedOp].form === 'call') {
+        const prologue = lowerReceiverCall(obj, node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
+          return null;
+        }
+        return typedOpNode(typedOp, prologue.target, prologue.args, prologue.span);
       }
 
       // The landed RegExp.prototype METHODS. The result is taken from the node rather than the
@@ -9943,6 +10003,25 @@ function lowerReceiverCall(
 /** Pads omitted trailing arguments with undefined-literals up to the table's arity. For every
  * op in these tables the spec gives an explicitly-passed undefined the same meaning as an
  * absent argument, which is what makes the padding observably identical to the source. */
+/** A `typed-op` for one TYPED_OPS row: the receiver first (none for a constructor), then the
+ * arguments padded to the row's arity, typed by the row's result (plan.md §11c T11.1). */
+function typedOpNode(
+  op: TypedOperation,
+  receiver: Expression | undefined,
+  args: readonly Expression[],
+  span: Span,
+): TypedOp {
+  const shape = TYPED_OPS[op];
+  const padded = padToArity(args, shape.arity, span);
+  return {
+    kind: 'typed-op',
+    type: typedResultType(shape.result),
+    span,
+    op,
+    args: receiver === undefined ? padded : [receiver, ...padded],
+  };
+}
+
 function padToArity(args: readonly Expression[], arity: number, span: Span): Expression[] {
   const padded: Expression[] = [...args];
   while (padded.length < arity) {

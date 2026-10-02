@@ -8,7 +8,15 @@
  */
 
 import type { HObject, HType } from './types.ts';
-import { H_BOOLEAN, H_NUMBER, H_STRING, H_UNDEFINED, hUnknown } from './types.ts';
+import {
+  H_ARRAYBUFFER,
+  H_BOOLEAN,
+  H_NUMBER,
+  H_STRING,
+  H_UINT8ARRAY,
+  H_UNDEFINED,
+  hUnknown,
+} from './types.ts';
 
 /* jscpd:ignore-start
  *
@@ -1500,6 +1508,155 @@ export const DATE_OPS = {
 
 export type DateOperation = keyof typeof DATE_OPS;
 
+/** What a {@link TYPED_OPS} row's result is. A kind name rather than an HType so the table stays a
+ * plain constant the gate, the lowering and the verifier read alike; `typedResultType` maps it. */
+export type TypedResult = 'number' | 'undefined' | 'uint8array' | 'arraybuffer';
+
+/** `ArrayBuffer` and `Uint8Array` (plan.md T11.1, docs/VALUE.md §4.19): every landed member, one
+ * runtime function each, keyed by the spelling a diagnostic uses.
+ *
+ * `form` is how the source reaches it: `new` (no receiver), `get` (a data property read off the
+ * receiver) or `call` (a method, which exists only as a callee). `receiver` is the HType kind the
+ * first argument must have -- the verifier pins it because the runtime reads the layout after a
+ * class test that turns a lie into a TypeError, and a wrong kind here is a lowering bug, not a
+ * user error. `arity` counts the source arguments after the receiver, and the lowering pads to it
+ * with `undefined`, which every runtime entry point reads as absence, exactly what the spec's
+ * defaults do; `required` is how many the source must pass.
+ *
+ * `.buffer` answers `arraybuffer` whatever the checker says: an unparameterized `Uint8Array` types
+ * it `ArrayBufferLike`, whose `SharedArrayBuffer` half no program here can construct. */
+export const TYPED_OPS = {
+  'new ArrayBuffer': {
+    form: 'new',
+    receiver: null,
+    arity: 1,
+    required: 0,
+    fn: 'jsrt_arraybuffer_new',
+    result: 'arraybuffer',
+  },
+  'new Uint8Array': {
+    form: 'new',
+    receiver: null,
+    arity: 3,
+    required: 0,
+    fn: 'jsrt_uint8array_new',
+    result: 'uint8array',
+  },
+  'ArrayBuffer.prototype.byteLength': {
+    form: 'get',
+    receiver: 'arraybuffer',
+    arity: 0,
+    required: 0,
+    fn: 'jsrt_arraybuffer_byte_length',
+    result: 'number',
+  },
+  'ArrayBuffer.prototype.slice': {
+    form: 'call',
+    receiver: 'arraybuffer',
+    arity: 2,
+    required: 0,
+    fn: 'jsrt_arraybuffer_slice',
+    result: 'arraybuffer',
+  },
+  'Uint8Array.prototype.length': {
+    form: 'get',
+    receiver: 'uint8array',
+    arity: 0,
+    required: 0,
+    fn: 'jsrt_uint8array_length',
+    result: 'number',
+  },
+  'Uint8Array.prototype.byteLength': {
+    form: 'get',
+    receiver: 'uint8array',
+    arity: 0,
+    required: 0,
+    fn: 'jsrt_uint8array_byte_length',
+    result: 'number',
+  },
+  'Uint8Array.prototype.byteOffset': {
+    form: 'get',
+    receiver: 'uint8array',
+    arity: 0,
+    required: 0,
+    fn: 'jsrt_uint8array_byte_offset',
+    result: 'number',
+  },
+  'Uint8Array.prototype.buffer': {
+    form: 'get',
+    receiver: 'uint8array',
+    arity: 0,
+    required: 0,
+    fn: 'jsrt_uint8array_buffer',
+    result: 'arraybuffer',
+  },
+  'Uint8Array.prototype.subarray': {
+    form: 'call',
+    receiver: 'uint8array',
+    arity: 2,
+    required: 0,
+    fn: 'jsrt_uint8array_subarray',
+    result: 'uint8array',
+  },
+  'Uint8Array.prototype.slice': {
+    form: 'call',
+    receiver: 'uint8array',
+    arity: 2,
+    required: 0,
+    fn: 'jsrt_uint8array_slice',
+    result: 'uint8array',
+  },
+  'Uint8Array.prototype.set': {
+    form: 'call',
+    receiver: 'uint8array',
+    arity: 2,
+    required: 1,
+    fn: 'jsrt_uint8array_set',
+    result: 'undefined',
+  },
+} as const satisfies Record<
+  string,
+  {
+    readonly form: 'new' | 'get' | 'call';
+    readonly receiver: 'uint8array' | 'arraybuffer' | null;
+    readonly arity: number;
+    readonly required: number;
+    readonly fn: string;
+    readonly result: TypedResult;
+  }
+>;
+
+export type TypedOperation = keyof typeof TYPED_OPS;
+
+export function typedResultType(result: TypedResult): HType {
+  switch (result) {
+    case 'number':
+      return H_NUMBER;
+    case 'undefined':
+      return H_UNDEFINED;
+    case 'uint8array':
+      return H_UINT8ARRAY;
+    case 'arraybuffer':
+      return H_ARRAYBUFFER;
+  }
+}
+
+/** The class a typed receiver kind prints as, which is also the first half of its table keys. */
+export function typedClassName(
+  receiver: 'uint8array' | 'arraybuffer',
+): 'Uint8Array' | 'ArrayBuffer' {
+  return receiver === 'uint8array' ? 'Uint8Array' : 'ArrayBuffer';
+}
+
+/** The table row `receiver.member` names, or undefined for a member that has not landed. */
+export function typedMember(
+  receiver: 'uint8array' | 'arraybuffer',
+  member: string,
+): TypedOperation | undefined {
+  const key = `${typedClassName(receiver)}.prototype.${member}`;
+  return Object.hasOwn(TYPED_OPS, key) ? (key as TypedOperation) : undefined;
+}
+
 /** The `Date` namespace calls slice A lands. `parse` accepts the §21.4.1.32 Date Time String
  * Format only -- a documented divergence from Node, whose non-ISO heuristics are TZ-dependent and
  * implementation-defined (docs/SUBSET.md).
@@ -1617,6 +1774,14 @@ export interface DateNew extends Node {
  * trailing components arrive as `undefined`, which the runtime reads as the spec's default. */
 export interface DateComponents extends Node {
   readonly kind: 'date-components';
+  readonly args: readonly Expression[];
+}
+
+/** One {@link TYPED_OPS} row applied: the receiver first (for a `get` or a `call`), then the
+ * source arguments padded to the row's arity. */
+export interface TypedOp extends Node {
+  readonly kind: 'typed-op';
+  readonly op: TypedOperation;
   readonly args: readonly Expression[];
 }
 
@@ -1772,6 +1937,7 @@ export type Expression =
   | ReferenceErrorRead
   | TypeErrorThrow
   | DateOp
+  | TypedOp
   | DateStaticCall
   | NumberLiteral
   | StringLiteral
