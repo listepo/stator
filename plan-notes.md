@@ -11481,7 +11481,12 @@ details the §2 table left open are written up under "As implemented (T12.2)" th
    vitest's own transitive `vite` from 8.3.1 to 8.3.2, a version bump nobody approved. So the pin
    is **8.3.1** (published 2026-09-24T12:26:19.940Z), the version the lockfile already held and
    the one T12.0's spike measured. Moving to 8.3.2 once it is old enough is a one-line bump that
-   needs the creator's permission. **Open for the creator.**
+   needs the creator's permission. **Decided (creator, 2026-10-02): bump to 8.3.2.**
+   Landed after T12.2: `packages/vite-stator` (exact dev `8.3.2`, peer `^8.3.2`) and
+   `examples/vite` pin 8.3.2, and the lockfile moves vitest's `vite` with them. pnpm 12.3.4 wrote
+   a `minimumReleaseAgeExclude: [vite@8.3.2]` entry during the install; it was dropped rather than
+   committed, because a frozen install of the resulting lockfile passes the supply-chain policy
+   without it and the exclusion would outlive this one bump.
 3. **Tree-shaking, measured** (plan.md T12.2 Check). A package `forty` with forty exported
    functions `f1`…`f40`; `main.js` imports `f7` and prints `f7(12)`:
    - the vendor bundle holds one function, `function f7(x)` (unit test
