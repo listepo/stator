@@ -1554,6 +1554,31 @@ compiles from.
 
 Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
 
+**In progress** — Claude Code / sonnet-5-5. Execution plan, one PR, one commit per step:
+
+1. `src/api.ts` (`statorc/api` in `package.json` `exports`): the §5 types, `compile` and
+   `vendorEntry`. Adapter and bundle results are `unknown` until validated (golden rule 4).
+2. `src/frontend/vendor.ts`: collect package imports (bare, not `node:*`, a built-in or `std/*`)
+   and CommonJS project files from the loaded program, mangle names, generate the entry.
+3. Same module: rewrite each project import of a package into an import of one virtual
+   `__stator_vendor__.js` module, line count kept; `createProgram` takes the overlay (the
+   rewritten files plus the bundle) and its cache key gains the bundle's sha256 (step 6). The
+   module graph resolves edges through the checker, so the virtual module is an edge.
+4. `src/cli/bundler.ts`: `--bundler` on `build`/`explain` and the config key; STA0004 in `ts`
+   mode, STA0014 when the adapter cannot load, STA0015 when `bundle()` rejects or returns no
+   valid bundle. `build` and `explain` share one frontend driver.
+5. `src/support/sourcemap.ts`: one wrapper over `node:module` `SourceMap`. Diagnostics in the
+   vendor module are mapped after each stage; the lowering maps vendor spans, so `#line` and
+   `jsrt_call_at` strings name the original file, or `<package bundle>` with no mapping.
+6. Card step 7: the gate raises a new `not-yet` code (STA1218, Phase 11) for a free `__filename` or
+   `__dirname`; `program.ts` drops the checker's "cannot find name" for the two names so the
+   gate's verdict stands in both modes.
+
+Tests: unit tests over a stub adapter (vendor entry, rebinding, mapping, STA0014/STA0015),
+decision tests for STA1218 in both modes, and the `js` goldens under `--bundler=none` and the
+default. Docs: `BUNDLER.md`, `MODES.md`, `HOW-IT-WORKS.md`, `DIAGNOSTICS.md`, `CONFIG.md`,
+`pipeline.d2`; plan-notes 320, changelog v4.40.
+
 1. **The API.** `statorc/api`: a programmatic `compile` that takes an optional vendor bundle
    (`{ code, map, inputs }`), and the adapter interface
    `BundlerAdapter = { name, bundle(entry: { code, resolveDir }, { external }) → Promise<{ code, map, inputs }> }`.
