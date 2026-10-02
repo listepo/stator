@@ -390,6 +390,37 @@ member, because the buffer grows and a flexible member cannot move without inval
 `jsrt_value` that boxes the header. The header's address is therefore stable for the array's whole
 life, which is what lets the emitter hold an array in a frame slot across a push.
 
+### Holes (plan.md §11c T11.4 step 4b)
+
+An index below `length` can be ABSENT: `new Array(3)`, `a[5] = 1` on a shorter array, and
+`delete a[i]` all leave one. An absent element is stored as `JSRT_HOLE`, `JSRT_BOX(TAG_UNDEFINED,
+1)` — a box no program can produce, because `undefined` has exactly one value and it is
+`JSRT_BOX(TAG_UNDEFINED, 0)`. Every reader that hands an element to a program goes through
+`jsrt_unhole`, which turns the hole into `undefined`: the indexed read, `at`/`pop`/`shift`, the
+iterators and the inlined for-of, `join`, `JSON.stringify` (where it is `null`), an array-literal
+spread (`[...a]` is the iteration, so `jsrt_array_fill_holes` runs over the copied `concat`), and
+the ES2023 copies (`toReversed`, `toSorted`, `toSpliced`, `with`). What the spec makes skip a hole
+skips it: `in` and `Object.keys`, the callback methods (`forEach`, `map`, `filter`, `some`,
+`every`, `reduce`, `reduceRight`, `flatMap`; `map` keeps the hole in its answer), `flat`, and
+`sort`, which moves holes after every `undefined`. `indexOf` never finds one, because a hole's bits
+are not `undefined`'s; `includes(undefined)` does. `concat` and `slice` copy holes as holes.
+
+Only an array whose element type is Unknown may hold one. A typed element (`number[]`) has no value
+that stands for "absent", so the compiler keeps holes out of it: `Array(n)` with a typed element
+and `delete` on one are `STA1214`, an indexed write to an Unknown-element array emits
+`jsrt_array_set_sparse` (which fills the gap with holes), and the typed write `jsrt_array_set` still
+aborts `STA2002` past the end. `a.length = n` growing the array is `STA2002` on both paths, because
+the property write cannot tell which element type it serves. A literal hole (`[1, , 3]`) is still
+refused by `gateArrayLiteral`.
+
+`Array(n)` / `new Array(n)` is `jsrt_array_construct`: a number argument must be a uint32
+(`RangeError: Invalid array length` otherwise) and answers that many holes; any other single
+argument is a one-element array, and zero or two or more arguments are an array literal, lowered as
+one. `console.log` prints a run of holes as Node's `formatSpecialArray` does — `<1 empty item>`,
+`<3 empty items>` — counting each run as one entry against the 100-entry cap, and a hole makes the
+grouped layout left-aligned, since Node right-aligns only when every `value[i]` it looks at is a
+number.
+
 ### An array with properties
 
 An array can also carry NAMED properties, in the same `shape` + out-of-line `slots` layout §4.10
@@ -421,7 +452,8 @@ The consequences worth stating:
 Two ceilings are deliberate and recorded rather than hidden:
 
 - **No holes.** `jsrt_array_set` refuses a write more than one past the end (`STA2002`, raised at
-  runtime). ECMA-262 leaves the skipped indices absent, and a dense buffer cannot be absent;
+  runtime), and `jsrt_set_prop` refuses `a.length = n` with `n` past the end the same way; a
+  smaller `n` truncates (ECMA-262 §10.4.2.4, plan-notes 310). ECMA-262 leaves the skipped indices absent, and a dense buffer cannot be absent;
   filling them with `undefined` would make `console.log` print a different program's output.
 - **A read out of range is `undefined`**, which is why `noUncheckedIndexedAccess` types `a[i]` as
   `T | undefined` and the HIR types it `Unknown` until Task 3.5 narrows it (plan-notes 53).
@@ -1308,11 +1340,111 @@ generic. `u[i]` / `u[i] = v` reuse the ordinary index nodes and emit `jsrt_uint8
 fixed-shape object for `Object.*` (`is_fixed_shape_object` excludes both classes), and an expando
 write on one panics with `STA2004` like every other statically shaped builtin.
 
+**Across the extern boundary** (docs/FFI.md §2, plan.md §11c T11.3a). A `Uint8Array` extern
+parameter passes `jsrt_uint8array_bytes(view)` (`buffer->data + byte_offset`) and
+`jsrt_uint8array_count(view)` (`length`), the two inline accessors in `jsrt_value.h`, after
+`jsrt_check_uint8array` has proven the value a view. The layout above is what makes that pointer
+safe for the call: the block never moves, never resizes, and stays reachable through the view's
+rooted argument slot.
+
 **Printing and strings.** `console.log` uses the array printer with a label
 (`Uint8Array(3) [ 1, 2, 3 ]`, grouped and capped at 100 entries like an array) and prints a
 buffer as `ArrayBuffer { [Uint8Contents]: <01 02>, [byteLength]: 2 }`, the hex capped at 100
 bytes. `String(u)` is the comma join; `JSON.stringify` writes a view as its index-keyed object
 and a buffer as `{}`, which is what Node does because neither has a `toJSON`.
+
+## 4.20 Ordinary functions as constructors — a prototype on the closure, a chain on the object (plan.md §11c T11.4 family 4)
+
+JavaScript before classes builds objects with `function P(x) { this.x = x; }`, `P.prototype.m =
+function () { … }` and `new P(1)`, and stores data on functions themselves (`assert.sameValue =
+function …`, `P.count += 1`). TypeScript's own `_tsc.js` builds every `Symbol`, `Type`, `Signature`
+and `Node` that way, and the Test262 harness is written in it. In `js` mode all of it is the
+dynamic tier: no layout is invented, every access goes through the shape table (§4.10).
+
+**The closure carries the function's own state.** `JSRTClosure` gains four fields:
+
+| Field | Meaning |
+|---|---|
+| `constructible` | A `function` declaration or expression — not an arrow, a method, an accessor, an async function or a generator. Only these reach construction. |
+| `has_prototype`, `prototype` | `F.prototype`, created on first observation by `jsrt_function_prototype`: a fresh `JSRTDynObject` whose hidden `ctor` is F. A function nobody constructs or inspects pays nothing. An assignment (`F.prototype = { … }`) stores whatever value it is given. |
+| `props` | The function's own enumerable properties as a `JSRTDynObject`, NULL until the first write. `name` and `length` stay the closure's read-only fields; writing them throws a `TypeError` worded like Node's `Cannot assign to read only property 'name' of function '…'`, except that Node quotes the function's source text and Stator, with no `Function.prototype.toString`, quotes its name. |
+
+A class object never uses `prototype` or `props`: its statics and methods are its descriptor's
+(§4.5). A non-capturing function is a file-static `JSRTClosure` in generated C; it is emitted
+**non-`const`**, because the first `P.count = 0` writes it. A capturing one is built by
+`jsrt_closure_new` and marked by `jsrt_closure_constructible`, which sets `constructible`. The collector scans
+both: file statics are data-segment roots, like the inline caches.
+
+**The object carries its chain.** `JSRTDynObject` gains `proto` (the `[[Prototype]]` an object
+`new F()` built was given, 0 for the default `%Object.prototype%`, which holds nothing a lookup can
+find) and `ctor` (the hidden, non-enumerable `constructor` of an auto-created `F.prototype`). A
+read that misses the own shape walks `ctor` and then `proto`, link by link; a getter found on the
+chain runs with the ORIGINAL receiver, and a write of a new own name first looks for a setter on
+the chain (§10.1.9.2 OrdinarySetWithOwnDescriptor). Chain hits fill no inline cache: the cache
+keys on the receiver's own shape, and a chain hit is not in it. `in` sees the chain;
+printing and own-key enumeration do not.
+
+**Construction** (`jsrt_construct` on a closure without `klass`, §10.2.2 [[Construct]]): a
+non-constructible callee leaves Node's `X is not a constructor` TypeError pending; otherwise a
+fresh dynamic object is rooted, its `proto` set to `F.prototype` when that is an object, F runs
+with it as `this` (when F declares a receiver), and the answer is F's return value when that is
+an object, the new object otherwise. `new v(…)` in generated C lays the callee and its arguments
+out in one contiguous run of rooted slots, the call layout, and lands as a statement followed by
+its pending check.
+
+**`instanceof`** (`jsrt_instanceof_ctor`, §7.3.22 OrdinaryHasInstance): a primitive left side is
+`false`; a right side whose `prototype` is not an object (an arrow's) is Node's `Function has
+non-object prototype 'undefined' in instanceof check`; otherwise the left side's `proto` chain is
+compared with `F.prototype`. Replacing `F.prototype` after construction therefore makes older
+instances answer `false`, as in Node.
+
+**Printing** follows `util.inspect`: an instance prints under the name of the first `constructor`
+on its chain (`P { x: 3 }`), an object whose chain names none prints as a plain object, and a
+function with own properties prints them after its label (`[Function: assert] { same: [Function
+(anonymous)] }`, `[Function]` past the depth cap).
+
+**Gate and lowering.** The member predicates live in `frontend/types.ts`: `isFunctionValueCallee`
+(the callee of `new`/`instanceof` is a function the program wrote, or Unknown — never a class or a
+lib builtin), `isFunctionValueMember` (`f.x` on such a function, except `length` and the lib's
+`call`/`apply`/`bind`), and `isFunctionMemberRead` (`F.prototype` used as a receiver, whose
+checker type — inferred from one `F.prototype = { … }` — is no layout). They lower to the
+existing `new-value`, `instanceof-value`, `dyn-field-access`, `dyn-field-assignment` and
+`dyn-method-call` nodes; `FunctionExpr.constructible` tells the emitter which closures `new` may
+build through. `ts` mode refuses a function's properties as not-yet (`STA1214`) and `new` on a
+function through the checker (TS7009, an implicit `any`).
+
+## 4.21 `new RegExp(pattern, flags)` — a pattern the source does not spell (plan.md §11c T11.4 step 4b)
+
+`new RegExp(p, f)` and `RegExp(p, f)` are one `global-call` row (`jsrt_regexp_construct`). A RegExp
+`p` lends its source, and its flags when `f` is `undefined` (§22.2.4.1 steps 4-5); otherwise both
+go through ToString, with `undefined` meaning the empty string. The source is escaped the way V8's
+`EscapeRegExpPattern` does it — `/` outside a class becomes `\/`, a line terminator becomes
+`\n`/`\r`/`\u2028`/`\u2029` — so `source`, `toString` and `console.log` match Node. An invalid flag
+string throws `SyntaxError: Invalid flags supplied to RegExp constructor '<f>'`, and an invalid
+pattern throws `SyntaxError: Invalid regular expression: /<source>/<flags>: <reason>`. The reason
+comes from the vendored libregexp, translated to V8's words where one libregexp reason has exactly
+one V8 counterpart (`Unterminated group`, `Unmatched ')'`, `Nothing to repeat`, `numbers out of
+order in {} quantifier`, `Duplicate capture group name`, `Invalid capture group name`, `Invalid
+group`, `Invalid property name`). **Known divergence:** the other reasons keep libregexp's wording
+(`unexpected end` where Node says `Unterminated character class` or `\ at end of pattern`, `invalid
+class range`, `invalid escape sequence in regular expression`). A regexp literal is unchanged: its
+pattern is compiled by `jsrt_regexp_new`, which still aborts `STA2005` on a bad one.
+
+## 4.22 WeakMap and WeakSet — a Map and a Set that refuse primitives (plan.md §11c T11.4 step 4b)
+
+A WeakMap and a WeakSet are `JSRTMap`s (§4.6) under two more descriptors, `jsrt_class_weakmap` and
+`jsrt_class_weakset`. The type model folds them into `Map`/`Set` HTypes — the checker already keeps
+`size`, `forEach`, `clear` and the iterators off them — so `CollectionNew.weak` is the one place the
+difference is recorded: it picks `jsrt_weak_collection_new`. `set`/`add` throw Node's
+`TypeError` (`Invalid value used as weak map key` / `Invalid value used in weak set`) on a key that
+is not an object, function or array; the emitter adds the pending check only where the key type is
+open (Unknown or a type parameter), since a primitive key type means an ordinary Map and an object
+key type always passes. `get`, `has` and `delete` of a primitive answer `undefined`/`false` with no
+check. `console.log` prints `WeakMap { <items unknown> }` (`[WeakMap]` past the depth cap), `String`
+answers `[object WeakMap]`, `JSON.stringify` answers `{}`, and `instanceof` tells all four apart.
+**Known divergence:** the keys are held STRONGLY. Nothing is collected while the collection lives,
+which no program can observe except through memory use; true weakness needs ephemeron support in
+the collector.
 
 ## 5. What Phase 2 actually implements
 

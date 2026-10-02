@@ -1,6 +1,6 @@
 // @mode: js
 // @verdict: static
-// SUBSET.md: Arrays: an empty literal takes its element type from context (plan-notes 311).
+// SUBSET.md: Arrays: an empty literal takes its element type from context (plan-notes 322).
 // The JSDoc spelling of the ts fixture: `@type` and `@returns` are the context `[]` reads.
 
 /** @returns {number[]} */

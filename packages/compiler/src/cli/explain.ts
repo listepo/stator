@@ -13,19 +13,23 @@
  * not-yet is a fact about the compiler's current progress.
  */
 
-import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
-import { createProgram } from '../frontend/program.ts';
 import type { Expression, FunctionExpr, Module, Provenance, Statement } from '../hir/nodes.ts';
 import type { ExternCall } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
-import { lowerProgram } from '../lower/index.ts';
 import { rewriteModule } from '../passes/rewrite.ts';
 import { type Diagnostic, type DiagnosticSite, renderDiagnostic } from '../support/diagnostics.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { BuildError } from './build.ts';
+import {
+  type BundlerChoice,
+  DEFAULT_BUNDLER,
+  loadFrontend,
+  lowerFrontend,
+  mapVendorDiagnostics,
+} from './bundler.ts';
 import { diagnosticLines, INK_COLORS, type InkColor, type Line, print } from './render.ts';
 
 type Mode = 'ts' | 'js';
@@ -89,8 +93,14 @@ const VERDICT_COLOR: Record<Verdict, InkColor> = {
   'not-yet': INK_COLORS.notYet,
 };
 
-export async function explain(entry: string, mode: Mode, json: boolean): Promise<number> {
-  const result = await explainFile(entry, mode);
+export async function explain(
+  entry: string,
+  mode: Mode,
+  json: boolean,
+  bundler: BundlerChoice = DEFAULT_BUNDLER,
+  node = false,
+): Promise<number> {
+  const result = await explainFile(entry, mode, bundler, node);
 
   if (json) {
     // The machine path NEVER goes through ink (decision tests parse this verbatim).
@@ -131,19 +141,23 @@ export async function explain(entry: string, mode: Mode, json: boolean): Promise
   return 0;
 }
 
-export async function explainFile(entry: string, mode: Mode): Promise<Explanation> {
-  if (!existsSync(entry)) {
-    throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
-  }
-
-  const {
-    program,
-    diagnostics: programDiagnostics,
-    runtimeDynamicSymbols,
-  } = withSpan('frontend/program', {}, () => createProgram(entry, mode));
+/** `node` is the `--node` platform (docs/MODES.md §6): under it a Node built-in `packages/node`
+ * has not landed is a `not-yet` naming T11.6, so `diagnostics` lists the platform gaps the same
+ * way it lists the language ones. */
+export async function explainFile(
+  entry: string,
+  mode: Mode,
+  bundler: BundlerChoice = DEFAULT_BUNDLER,
+  node = false,
+): Promise<Explanation> {
+  const frontend = await loadFrontend(entry, mode, bundler, node);
+  const { program } = frontend;
+  // The same mapping `build` applies (T12.1 step 5): a vendor diagnostic names the package file.
+  const classify = (diagnostics: readonly Diagnostic[]): Explanation | null =>
+    classifyDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
   const verdictFromDiagnostics = classify([
-    ...programDiagnostics,
-    ...withSpan('frontend/gate', {}, () => gateProgram(program, mode)),
+    ...frontend.diagnostics,
+    ...withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)),
   ]);
   if (verdictFromDiagnostics !== null) {
     return verdictFromDiagnostics;
@@ -168,9 +182,7 @@ export async function explainFile(entry: string, mode: Mode): Promise<Explanatio
     return graphVerdict;
   }
 
-  const { module, diagnostics } = withSpan('lower', {}, () =>
-    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols, mode),
-  );
+  const { module, diagnostics } = withSpan('lower', {}, () => lowerFrontend(frontend, order, mode));
   const verdictFromLowering = classify(diagnostics);
   if (verdictFromLowering !== null) {
     return verdictFromLowering;
@@ -259,7 +271,7 @@ function functionReports(module: Module): readonly FunctionReport[] {
 }
 
 /** null means "nothing here decides the verdict" — carry on to the typed answer. */
-function classify(diagnostics: readonly Diagnostic[]): Explanation | null {
+function classifyDiagnostics(diagnostics: readonly Diagnostic[]): Explanation | null {
   const decided = (verdict: 'error' | 'not-yet', code: string): Explanation => ({
     verdict,
     code,
@@ -513,7 +525,8 @@ function expressionHasUnknown(expr: Expression): boolean {
   // not a dynamic value, and pointer arguments cross unboxed with no check to fail — so the
   // call is static unless a CHECKABLE argument is dynamic (docs/FFI.md §§5, 9). The kind, not
   // the HType, decides: every handle-typed value reads `unknown`, which would otherwise paint
-  // every honest round-trip dynamic.
+  // every honest round-trip dynamic. A `bytes` argument is checkable (`jsrt_check_uint8array`),
+  // so it reads like a number: static when proven, dynamic when the call checks it.
   if (expr.kind === 'extern-call') {
     return expr.args.some(
       (arg, index) =>
@@ -618,7 +631,9 @@ function expressionHasUnknown(expr: Expression): boolean {
     // the top of this function has already answered.
     case 'match-read':
       return false;
+    // A field call loads its callee from a typed slot: only the operands can be dynamic.
     case 'method-call':
+    case 'field-call':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
     // Dynamic by construction: the receiver is Unknown, which the check at the top of this
     // function has already answered for the node itself; the arguments may add more.
@@ -669,6 +684,7 @@ function expressionHasUnknown(expr: Expression): boolean {
       return expr.args.some(expressionHasUnknown);
     case 'array-op':
     case 'date-op':
+    case 'number-op':
     case 'string-op':
       return expressionHasUnknown(expr.target) || expr.args.some(expressionHasUnknown);
     case 'iterator-next':
@@ -687,6 +703,7 @@ function expressionHasUnknown(expr: Expression): boolean {
     // which the check at the top of this function has already answered.
     case 'date-components':
     case 'date-static':
+    case 'global-call':
     case 'object-static':
     case 'typed-op':
     case 'string-static':

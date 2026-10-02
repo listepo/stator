@@ -2,10 +2,12 @@
   "$comment": "plan.md §9 Task 6.19. Every directory under packages/ is a target or listed in notTargets; the test fails otherwise. A target's mode (and the compiler's entry) come from its own stator.config.json. entries names a directory whose *.ts files are each a target; without it the config's entry is the target.",
   "targets": [
     { "package": "packages/compiler", "smoke": "stage2" },
-    { "package": "packages/std", "entries": "src", "smoke": "std-goldens" }
+    { "package": "packages/std", "entries": "src", "smoke": "std-goldens" },
+    { "package": "packages/node", "entries": "src", "smoke": "node-goldens" }
   ],
   "notTargets": {
     "packages/runtime": "C and Zig, built by clang and zig; Stator links it, it does not compile it",
-    "packages/tests": "test harnesses for the pinned Node, not code written for Stator to compile"
+    "packages/tests": "test harnesses for the pinned Node, not code written for Stator to compile",
+    "packages/vite-stator": "a Vite plugin and the bundler adapter: they run inside Vite on Node at build time, and the compiler loads them by name, never compiles them"
   }
 }

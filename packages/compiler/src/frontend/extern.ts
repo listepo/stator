@@ -318,7 +318,9 @@ export function exportAbiKindOf(
   position: 'param' | 'return',
 ): ExternAbiKind | undefined {
   const kind = classifyPosition(type, checker, position);
-  return typeof kind === 'string' ? kind : undefined;
+  // A `Uint8Array` crosses INTO C only: an export taking one would need the runtime to wrap a
+  // foreign `uint8_t *` it does not own as a view, so that position keeps the `jsrt_value` form.
+  return typeof kind === 'string' && kind !== 'bytes' ? kind : undefined;
 }
 
 /** One signature position through the ABI table: the C kind, or the refusal that owns it.
@@ -403,6 +405,17 @@ function classifyPosition(
         'object type in an extern signature has no C representation; ' +
           'use a branded pointer or CString (docs/FFI.md)',
       );
+    case 'uint8array':
+      // The view's own storage, pointer + length, for the call (docs/FFI.md §2, plan.md §11c
+      // T11.3a). Parameter-only: a returned buffer would need an owner and a length the C
+      // signature cannot carry, so a callee that produces bytes fills a view the caller passes.
+      return position === 'param'
+        ? 'bytes'
+        : refused(
+            'STA1119',
+            'Uint8Array as a return is outside the ABI table (docs/FFI.md) — ' +
+              'pass a Uint8Array in and let the callee fill it',
+          );
     case 'array':
       return refused(
         'STA1116',

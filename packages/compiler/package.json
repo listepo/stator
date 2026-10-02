@@ -11,6 +11,10 @@
     "schema"
   ],
   "type": "module",
+  "exports": {
+    "./api": "./src/api.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "0.222.0",

@@ -82,10 +82,10 @@ static bool array_step(JSRTIterator *it, jsrt_value *out) {
       *out = jsrt_number((double)i);
       return true;
     case JSRT_ITER_ARRAY_VALUES:
-      *out = a->elements[i];
+      *out = jsrt_unhole(a->elements[i]);
       return true;
     case JSRT_ITER_ARRAY_ENTRIES: {
-      jsrt_value items[2] = {jsrt_number((double)i), a->elements[i]};
+      jsrt_value items[2] = {jsrt_number((double)i), jsrt_unhole(a->elements[i])};
       *out = jsrt_array_new(2, items);
       return true;
     }

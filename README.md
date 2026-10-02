@@ -29,6 +29,10 @@ Every option can also live in a `stator.config.json` next to where you run the C
 against a generated JSON Schema; the command line overrides it, and `--no-config` ignores it.
 Keys, precedence and an example: [`docs/CONFIG.md`](docs/CONFIG.md).
 
+In `js` mode, `node_modules` packages go through a bundler: `vite-stator`, the default, bundles
+them into one tree-shaken module, and its `stator()` Vite plugin makes `vite build` write the
+native binary ([`examples/vite`](examples/vite), [`docs/BUNDLER.md`](docs/BUNDLER.md)).
+
 `explain` reports per-construct verdicts: `static`, `dynamic`, `error`, or `not-yet`. Decision tests in `packages/tests/subset/` are that matrix.
 
 ## Setup
@@ -53,6 +57,7 @@ pnpm run test:subset     # feature × mode decision matrix
 pnpm run test:golden     # compile + run vs the pinned Node, byte-for-byte
 pnpm run test:selfhost   # Stator explains (and builds) its own packages; per-code counts may only shrink
 pnpm run test262         # Test262 slice (CI heartbeat; corpus fetched separately)
+pnpm run test:node-suite # Node's own test/parallel slice through vitest (fetches its pinned corpus)
 pnpm run differential    # fuzzer vs Node
 just -f packages/runtime/justfile -d packages/runtime runtime             # libjsrt.a (clang -O2 -Werror; thin LTO where the linker can read it)
 just -f packages/runtime/justfile -d packages/runtime runtime-asan        # ASan/UBSan archive

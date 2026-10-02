@@ -8,6 +8,13 @@ import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/dia
 import { hasTypeScriptAnnotation } from './annotation.ts';
 import { isCheckable } from './narrowing.ts';
 import {
+  classifyNodeMember,
+  classifyNodeSpecifier,
+  type NodeNotYet,
+  nodeGlobalsFile,
+  nodePathMapping,
+} from './node.ts';
+import {
   classifyStdMember,
   classifyStdSpecifier,
   type StdSpecifier,
@@ -29,6 +36,22 @@ function identifierAt(source: ts.SourceFile, position: number): ts.Identifier | 
   };
   visit(source);
   return found;
+}
+
+/** The checker codes for an undeclared name — plain, with the `@types/node` hint (two spellings),
+ * and as a shorthand property — when the name is one of Node's two CommonJS path globals. */
+const UNDECLARED_NAME_CODES: ReadonlySet<number> = new Set([2304, 2580, 2591, 18004]);
+
+function isNodePathGlobalRead(diag: ts.Diagnostic): boolean {
+  if (
+    !UNDECLARED_NAME_CODES.has(diag.code) ||
+    diag.file === undefined ||
+    diag.start === undefined
+  ) {
+    return false;
+  }
+  const name = identifierAt(diag.file, diag.start)?.text;
+  return name === '__filename' || name === '__dirname';
 }
 
 /** A TS1117 duplicate-key diagnostic that must NOT be swallowed by the js-mode carve-out:
@@ -445,6 +468,14 @@ export const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // `assign` that already copies an array spread (plan.md §8 step 12(c)). ts mode keeps the
   // refusal (STA0012).
   2698, // Spread types may only be created from object types.
+  // An ordinary function is a constructor (§10.2.4 MakeConstructor), and `new F()` where `F`
+  // returns an object answers that object (§10.2.2 [[Construct]] step 10), so a non-void return
+  // is how a factory-style constructor is written. Replacing `F.prototype` after reading it is
+  // the same idiom's other half: the read sees the auto-created prototype, the write replaces
+  // it for later `new F()` -- both have exact runtime answers (`construct_function`,
+  // docs/VALUE.md §4.20). ts mode keeps the refusal (STA0012; plan-notes 310, family 4).
+  2350, // Only a void function can be called with the 'new' keyword.
+  2565, // Property 'X' is used before being assigned.
   // Two `export *` re-exports binding one name differently: ES makes the name AMBIGUOUS, which
   // drops it from the namespace and makes importing it by name a SyntaxError -- not an error at
   // the `export *` itself (§16.2.1.6.3 ResolveExport). The namespace type drops the name
@@ -466,30 +497,58 @@ export const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2407, // The right-hand side of a 'for...in' statement must be of type 'any', an object type...
 ]);
 
-/** Last in-process `createProgram` result for an unchanged entry.
+/** Source text the program reads instead of the disk (plan.md §11d T12.1 step 3): the vendor
+ * bundle as one virtual module, and the project files whose package imports were rewritten to
+ * name it. `key` is the sha256 of the bundle's code, so the program cache (Task 6.9, T12.1 step 6)
+ * misses when a dependency changed even though the entry did not. */
+export interface ProgramOverlay {
+  readonly files: ReadonlyMap<string, string>;
+  readonly key: string;
+  /** A file whose type-checker errors are not reported: the vendor module (plan-notes 320 Q4).
+   * It is package code, untyped JavaScript on the dynamic path that the user cannot edit, so a
+   * checker complaint there must not fail the build (`isUncheckedVendorError`). Every Stator
+   * verdict -- the gate, the edges, the lowering -- still applies to it. */
+  readonly unchecked?: string;
+}
+
+/** The sha256 the cache keys on: entry bytes, and a vendor bundle's code. */
+export function sha256(data: string | Buffer): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+/** Last in-process `createProgram` results for an unchanged entry.
  *
- * Keyed by absolute entry path + mode + entry CONTENT hash. v0 invalidates on bytes, not mtime:
+ * Keyed by absolute entry path + mode + platform + entry CONTENT hash + the overlay's key (the
+ * vendor bundle's sha256, empty without one). v0 invalidates on bytes, not mtime:
  * test262 stages thousands of tests through a handful of slot-reused temp paths, so (path, mtime)
  * can repeat for different contents on a coarse-tick filesystem and serve a stale program under
  * the wrong test's name (plan-notes 245). A dep edit without an entry touch still does not bust
  * the cache — no runner does that mid-run; a watch daemon with a full dependency set is the
- * follow-up. Custom `host` (memfs tests) always bypasses the cache. */
+ * follow-up. Custom `host` (memfs tests) always bypasses the cache.
+ *
+ * Two slots: a graph that imports a package loads twice per build — once to find the imports,
+ * once over the bundle — and one slot would evict each with the other. */
 interface ProgramCacheEntry {
   readonly absEntry: string;
   readonly mode: Mode;
+  readonly node: boolean;
   readonly contentHash: string;
-  readonly result: {
-    program: ts.Program;
-    diagnostics: Diagnostic[];
-    runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
-  };
+  readonly overlayKey: string;
+  readonly result: LoadedProgram;
 }
 
-let programCache: ProgramCacheEntry | null = null;
+export interface LoadedProgram {
+  readonly program: ts.Program;
+  readonly diagnostics: Diagnostic[];
+  readonly runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
+}
+
+const PROGRAM_CACHE_SLOTS = 2;
+let programCache: ProgramCacheEntry[] = [];
 
 /** Drop the cached `ts.Program` (tests that mutate files under a reused entry need this). */
 export function clearProgramCache(): void {
-  programCache = null;
+  programCache = [];
 }
 
 /** Build a ts.Program from an entry file, using Stator-owned compilerOptions.
@@ -498,46 +557,70 @@ export function clearProgramCache(): void {
  *
  * `host` is the seam for tests (plan-notes 187): unit suites back programs with a memfs volume
  * through it. Omitted means ts.sys against the real disk — the ONLY mode the shipped compiler
- * runs in, since every production call passes no host.
+ * runs in, since every production call passes no host. `overlay` lays virtual text over either.
  *
- * Unchanged re-builds of the same absolute entry+mode reuse the previous `ts.Program` when the
- * entry's bytes are unchanged (see `clearProgramCache`). */
+ * `node` is the `--node` platform (plan.md §11c T11.5): Node built-ins resolve to `packages/node`
+ * (`./node.ts`). Like the mode, it is a frontend policy nothing below the gate reads.
+ *
+ * Unchanged re-builds of the same absolute entry+mode+platform+overlay reuse the previous `ts.Program`
+ * when the entry's bytes are unchanged (see `clearProgramCache`). */
 export function createProgram(
   entryFile: string,
   mode: Mode,
   host?: ts.CompilerHost,
-): {
-  program: ts.Program;
-  diagnostics: Diagnostic[];
-  runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
-} {
+  overlay?: ProgramOverlay,
+  node = false,
+): LoadedProgram {
   // Custom hosts (memfs) have no meaningful disk mtime; never cache those.
   if (host === undefined) {
     const absEntry = resolve(entryFile).replace(/\\/g, '/');
+    const overlayKey = overlay?.key ?? '';
     // Hash, not mtime: one small-file read is noise against a ~380 ms frontend, and it closes
     // the stale-hit hole for slot-reused temp paths airtightly instead of by timestamp luck.
     let contentHash: string | undefined;
     try {
-      contentHash = createHash('sha256').update(readFileSync(absEntry)).digest('hex');
+      contentHash = sha256(readFileSync(absEntry));
     } catch {
       contentHash = undefined;
     }
-    if (
-      contentHash !== undefined &&
-      programCache !== null &&
-      programCache.absEntry === absEntry &&
-      programCache.mode === mode &&
-      programCache.contentHash === contentHash
-    ) {
-      return programCache.result;
+    const hit = programCache.find(
+      (entry) =>
+        entry.absEntry === absEntry &&
+        entry.mode === mode &&
+        entry.node === node &&
+        entry.contentHash === contentHash &&
+        entry.overlayKey === overlayKey,
+    );
+    if (contentHash !== undefined && hit !== undefined) {
+      return hit.result;
     }
-    const result = createProgramUncached(entryFile, mode, host);
+    const result = createProgramUncached(entryFile, mode, host, overlay, node);
     if (contentHash !== undefined) {
-      programCache = { absEntry, mode, contentHash, result };
+      programCache = [
+        { absEntry, mode, node, contentHash, overlayKey, result },
+        ...programCache,
+      ].slice(0, PROGRAM_CACHE_SLOTS);
     }
     return result;
   }
-  return createProgramUncached(entryFile, mode, host);
+  return createProgramUncached(entryFile, mode, host, overlay, node);
+}
+
+/** `base`, with `files` served from memory: the vendor module exists nowhere on disk, and a
+ * rewritten project file must be read as rewritten. Everything else passes through. */
+function overlayHost(base: ts.CompilerHost, files: ReadonlyMap<string, string>): ts.CompilerHost {
+  const normal = (name: string): string => resolve(name).replace(/\\/g, '/');
+  return {
+    ...base,
+    fileExists: (name) => files.has(normal(name)) || base.fileExists(name),
+    readFile: (name) => files.get(normal(name)) ?? base.readFile(name),
+    getSourceFile: (name, languageVersion, onError, shouldCreate) => {
+      const text = files.get(normal(name));
+      return text === undefined
+        ? base.getSourceFile(name, languageVersion, onError, shouldCreate)
+        : ts.createSourceFile(name, text, languageVersion, true);
+    },
+  };
 }
 
 /** `ts.getPreEmitDiagnostics`, with the checker's stack overflow named as STA0013 instead of
@@ -567,12 +650,10 @@ function preEmitDiagnostics(program: ts.Program): readonly ts.Diagnostic[] {
 function createProgramUncached(
   entryFile: string,
   mode: Mode,
-  host?: ts.CompilerHost,
-): {
-  program: ts.Program;
-  diagnostics: Diagnostic[];
-  runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
-} {
+  host: ts.CompilerHost | undefined,
+  overlay: ProgramOverlay | undefined,
+  node: boolean,
+): LoadedProgram {
   // Stator owns these options — strict family on, noEmit true
   const compilerOptions: ts.CompilerOptions = {
     // Strict mode (Stator's policy)
@@ -627,9 +708,10 @@ function createProgramUncached(
     moduleResolution: ts.ModuleResolutionKind.Bundler,
     moduleDetection: ts.ModuleDetectionKind.Force,
     // `std/<name>` resolves to the std package's own source (plan.md §11c T11.2). On the options
-    // rather than in a custom host so the module graph's `ts.resolveModuleName` reads the same
-    // mapping the checker did; an unknown name is refused by `classifyStdSpecifier`, never here.
-    paths: stdPathMapping(),
+    // rather than in a custom host so every resolution reads one mapping (the module graph asks
+    // the checker, T12.1); an unknown name is refused by `classifyStdSpecifier`, never here.
+    // `--node` adds the Node built-ins the same way (`./node.ts`).
+    paths: node ? { ...stdPathMapping(), ...nodePathMapping() } : stdPathMapping(),
 
     // Target and libs. `lib` takes FILE names, not the tsconfig shorthand: "es2025" resolves to
     // nothing and silently leaves the program without Array, Object, or any other global type.
@@ -666,10 +748,17 @@ function createProgramUncached(
   // import edge silently fails the `getSourceFile` lookup and the module graph loses its
   // dependencies -- legal multi-file source then dies as STA4035 in the lowering. Forward slashes
   // because that is the separator TypeScript normalizes every fileName to.
+  const nodeGlobals = node ? nodeGlobalsFile() : undefined;
   const program = ts.createProgram(
-    [globals, resolve(entryFile).replace(/\\/g, '/')],
+    [
+      globals,
+      ...(nodeGlobals === undefined ? [] : [nodeGlobals]),
+      resolve(entryFile).replace(/\\/g, '/'),
+    ],
     compilerOptions,
-    host,
+    overlay === undefined
+      ? host
+      : overlayHost(host ?? ts.createCompilerHost(compilerOptions), overlay.files),
   );
   const diagnostics: Diagnostic[] = [];
   const runtimeDynamicSymbols = new Set<ts.Symbol>();
@@ -677,6 +766,13 @@ function createProgramUncached(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = preEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
+    // A free `__filename` or `__dirname` is the gate's STA1110 (plan-notes 316), in both modes:
+    // the checker's "cannot find name" would make it an STA0012 type error in ts mode and silent
+    // in js mode, where Node either defines it (CommonJS) or throws. The vendor module's reads
+    // never get here: under `--node` the frontend rewrites them (`location.ts`).
+    if (isNodePathGlobalRead(diag)) {
+      continue;
+    }
     // Duplicate `__proto__` data properties are the one 1117 js mode keeps: an early
     // SyntaxError (spec B.3.1), not last-wins JavaScript — see isDuplicateProtoDataProperty.
     const keepProtoRefusal =
@@ -776,9 +872,12 @@ function createProgramUncached(
       }
       continue;
     }
-    const stdRefusal = stdImportRefusal(diag, mode);
-    if (stdRefusal !== undefined) {
-      diagnostics.push(stdRefusal);
+    const edge = edgeRefusal(diag, mode, node);
+    if (edge === 'gate') {
+      continue;
+    }
+    if (edge !== undefined) {
+      diagnostics.push(edge);
       continue;
     }
     const file = diag.file;
@@ -795,6 +894,13 @@ function createProgramUncached(
           ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
         ),
       );
+    } else if (isUncheckedVendorError(diag, file, overlay)) {
+      // The binding the complaint is about stops trusting its inferred type, the 2322 widening
+      // above: skipping the error alone would hand the lowering a type the code breaks (STA4004).
+      const token = identifierAt(file, diag.start ?? 0);
+      const symbol =
+        token === undefined ? undefined : program.getTypeChecker().getSymbolAtLocation(token);
+      if (symbol !== undefined) runtimeDynamicSymbols.add(symbol);
     } else {
       // Diagnostic has a location
       const { line, character } = file.getLineAndCharacterOfPosition(diag.start ?? 0);
@@ -819,20 +925,67 @@ function createProgramUncached(
   return { program, diagnostics, runtimeDynamicSymbols };
 }
 
-/** TS2307 ("cannot find module") on a `std/…` specifier is the std edge's refusal, not a checker
+/** Checker codes in the vendor module that stay reported: where the checker sees one, Node
+ * throws at run time (a binding read in its temporal dead zone, an assignment to a `const`), and
+ * the compiled program would not -- the lowering refuses the first and would silently perform the
+ * second. Measured on the pinned Node (plan-notes 320 Q4). */
+const VENDOR_THROW_CODES: ReadonlySet<number> = new Set([
+  2448, // Block-scoped variable 'x' used before its declaration.
+  2449, // Class 'X' used before its declaration.
+  2450, // Enum 'X' used before its declaration.
+  2588, // Cannot assign to 'x' because it is a constant.
+]);
+
+/** A type-checker complaint about the vendor module that is not reported (plan-notes 320 Q4,
+ * docs/BUNDLER.md §6): package code is untyped JavaScript on the dynamic path. Codes below 2000
+ * are syntax and grammar errors, which Node raises too. */
+function isUncheckedVendorError(
+  diag: ts.Diagnostic,
+  file: ts.SourceFile,
+  overlay: ProgramOverlay | undefined,
+): boolean {
+  return (
+    file.fileName === overlay?.unchecked && diag.code >= 2000 && !VENDOR_THROW_CODES.has(diag.code)
+  );
+}
+
+/** Checker codes for a name or module nothing declares. TypeScript answers a Node built-in
+ * specifier and the name `require` with the two "install type definitions for node" spellings
+ * (2580, 2591) rather than 2307/2304. */
+const UNRESOLVED_MODULE_CODES: ReadonlySet<number> = new Set([2307, 2580, 2591]);
+const UNRESOLVED_NAME_CODES: ReadonlySet<number> = new Set([2304, 2580, 2591]);
+
+/** The module-edge refusals a checker diagnostic stands for, or `'gate'` when the gate owns the
+ * answer and the checker's must not be reported beside it.
+ *
+ * TS2307 ("cannot find module") on a `std/…` specifier is the std edge's refusal, not a checker
  * error: `std/foo` resolves to no file because no such module exists (STA3002), or because it is
  * a threads module that has not landed (STA1214, Phase 10) — the same answer the gate gives a
  * specifier that did resolve (gate.ts `gateImport`), so the code never depends on whether a
- * stray file happens to sit where the mapping looked. TS2305/TS2724 ("has no exported member")
- * on a std module's Promise twin (`readTextAsync` from `std/fs`) is the same kind of refusal:
- * the member waits for T10.2 (T10.1 step 5). */
-function stdImportRefusal(diag: ts.Diagnostic, mode: Mode): Diagnostic | undefined {
+ * stray file happens to sit where the mapping looked. TS2305/TS2724/TS2614 ("has no exported
+ * member") on a std module's Promise twin (`readTextAsync` from `std/fs`) is the same kind of refusal:
+ * the member waits for T10.2 (T10.1 step 5). A Node built-in is the platform edge's (`./node.ts`):
+ * without `--node` it names the flag, and under it an unlanded module or member names T11.6.
+ *
+ * An unresolved `require` is the gate's: it rules on `require` in every file, including the `.js`
+ * ones where the checker binds the name itself and reports nothing. */
+function edgeRefusal(
+  diag: ts.Diagnostic,
+  mode: Mode,
+  node: boolean,
+): Diagnostic | 'gate' | undefined {
   const file = diag.file;
   if (file === undefined || diag.start === undefined) {
     return undefined;
   }
   const start = diag.start;
-  const std = stdRefusalFor(diag.code, file, start, diag.length ?? 0);
+  if (
+    UNRESOLVED_NAME_CODES.has(diag.code) &&
+    file.text.slice(start, start + (diag.length ?? 0)) === 'require'
+  ) {
+    return 'gate';
+  }
+  const std = edgeRefusalFor(diag.code, file, start, diag.length ?? 0, node);
   if (std === undefined || std.kind === 'module') {
     return undefined;
   }
@@ -852,21 +1005,29 @@ function stdImportRefusal(diag: ts.Diagnostic, mode: Mode): Diagnostic | undefin
   );
 }
 
-/** What the std edge says about a checker diagnostic at `start`: TS2307 names a specifier,
- * TS2305/TS2724 a member of one. */
-function stdRefusalFor(
+/** "Module has no exported member": TS2305 plainly, TS2724 with a near-miss name, TS2614 when the
+ * module has a default export the name might have meant (`node:path`'s module object does). */
+const MISSING_MEMBER_CODES: ReadonlySet<number> = new Set([2305, 2724, 2614]);
+
+/** What the std and Node edges say about a checker diagnostic at `start`: an unresolved-module
+ * code names a specifier, a missing-member code a member of one. */
+function edgeRefusalFor(
   code: number,
   file: ts.SourceFile,
   start: number,
   length: number,
-): StdSpecifier | undefined {
+  node: boolean,
+): StdSpecifier | NodeNotYet | undefined {
   const literal = file.text.slice(start, start + length);
-  if (code === 2307) {
-    return classifyStdSpecifier(literal.slice(1, -1));
+  if (UNRESOLVED_MODULE_CODES.has(code) && /^["']/.test(literal)) {
+    const specifier = literal.slice(1, -1);
+    return classifyStdSpecifier(specifier) ?? classifyNodeSpecifier(specifier, node);
   }
-  if (code === 2305 || code === 2724) {
+  if (MISSING_MEMBER_CODES.has(code)) {
     const specifier = moduleSpecifierAt(file, start);
-    return specifier === undefined ? undefined : classifyStdMember(specifier, literal);
+    return specifier === undefined
+      ? undefined
+      : (classifyStdMember(specifier, literal) ?? classifyNodeMember(specifier, literal, node));
   }
   return undefined;
 }

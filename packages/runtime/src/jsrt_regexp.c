@@ -121,9 +121,9 @@ static char *pattern_utf8(jsrt_value source, bool unicode, size_t *out_len) {
   return out;
 }
 
-/* The flag string, in any order, as the LRE_FLAG_* set. A flag the engine does not know, or one
- * written twice, is a SyntaxError in the spec; builtins cannot raise yet, so it aborts loudly with
- * the STA2005 pattern rather than compiling a pattern the program did not write. */
+/* The flag string, in any order, as the LRE_FLAG_* set -- or -1 for one §22.2.3.1 refuses: a
+ * letter the engine does not know, a letter written twice, or `u` with `v`. A literal's flags were
+ * checked at compile time, so only `new RegExp(p, flags)` can meet the -1 with data. */
 static int flags_to_lre(jsrt_value flags) {
   const JSString *str = (const JSString *)jsrt_ptr(flags);
   int out = 0;
@@ -138,20 +138,15 @@ static int flags_to_lre(jsrt_value flags) {
       case 'u': bit = LRE_FLAG_UNICODE; break;
       case 'v': bit = LRE_FLAG_UNICODE_SETS; break;
       case 'y': bit = LRE_FLAG_STICKY; break;
-      default: {
-        char msg[96];
-        snprintf(msg, sizeof msg, "STA2005: invalid regular expression flag '%c'",
-                 (char)str->data[i]);
-        jsrt_panic(msg);
-      }
+      default: return -1;
     }
     if ((out & bit) != 0) {
-      jsrt_panic("STA2005: a regular expression flag is written twice");
+      return -1;
     }
     out |= bit;
   }
   if ((out & LRE_FLAG_UNICODE) != 0 && (out & LRE_FLAG_UNICODE_SETS) != 0) {
-    jsrt_panic("STA2005: the regular expression flags 'u' and 'v' cannot be combined");
+    return -1;
   }
   return out;
 }
@@ -211,27 +206,73 @@ jsrt_value jsrt_regexp_to_string(jsrt_value re_value) {
   return out;
 }
 
-jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags) {
-  const int lre_flags = flags_to_lre(flags);
+/* RegExp.prototype read as a value from a regexp the compiler only knows as Unknown (plan-notes
+ * 314, 310): narrowing an `unknown` with `instanceof RegExp`, or a `string | RegExp` with
+ * `typeof`, leaves an Unknown receiver, and a regexp has no shape table, so `x.test(s)` read
+ * `undefined` and the call aborted STA2006 where Node runs. The `jsrt_string_method` contract
+ * (jsrt_string_methods.c) for the three methods, and the derived data properties of §22.2.6. */
+static const char *const REGEXP_METHODS[] = {"test", "exec", "toString"};
+
+static jsrt_value regexp_method_call(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {
+  const jsrt_value re = env->slots[0];
+  const jsrt_value str = jsrt_to_string(jsrt_arg(argc, argv, 0));
+  switch ((int)jsrt_to_number(env->slots[1])) {
+    case 0: return jsrt_bool(jsrt_regexp_test(re, str));
+    case 1: return jsrt_regexp_exec(re, str);
+    default: return jsrt_regexp_to_string(re);
+  }
+}
+
+static const struct {
+  const char *name;
+  char letter;
+} REGEXP_FLAG_PROPERTIES[] = {
+    {"hasIndices", 'd'}, {"global", 'g'},  {"ignoreCase", 'i'},  {"multiline", 'm'},
+    {"dotAll", 's'},     {"unicode", 'u'}, {"unicodeSets", 'v'}, {"sticky", 'y'},
+};
+
+bool jsrt_regexp_property(jsrt_value re, const char *key, jsrt_value *out) {
+  if (!jsrt_is_regexp(re)) {
+    return false;
+  }
+  if (strcmp(key, "source") == 0 || strcmp(key, "flags") == 0) {
+    *out = key[0] == 's' ? jsrt_regexp_source(re) : jsrt_regexp_flags(re);
+    return true;
+  }
+  if (strcmp(key, "lastIndex") == 0) {
+    *out = jsrt_regexp_last_index(re);
+    return true;
+  }
+  for (size_t i = 0; i < sizeof REGEXP_FLAG_PROPERTIES / sizeof REGEXP_FLAG_PROPERTIES[0]; i++) {
+    if (strcmp(REGEXP_FLAG_PROPERTIES[i].name, key) == 0) {
+      *out = jsrt_bool(jsrt_regexp_flag(re, REGEXP_FLAG_PROPERTIES[i].letter));
+      return true;
+    }
+  }
+  for (uint32_t i = 0; i < sizeof REGEXP_METHODS / sizeof REGEXP_METHODS[0]; i++) {
+    if (strcmp(REGEXP_METHODS[i], key) == 0) {
+      *out = jsrt_bound_method(re, i, regexp_method_call, i == 2 ? 0 : 1, REGEXP_METHODS[i]);
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Compiles `source` under `lre_flags` into a regexp, or answers false with the engine's reason in
+ * `error` and allocates nothing. `source` is what `.source` will read, so the caller has already
+ * escaped it (§22.2.6.13.1); an escaped `/` or line terminator compiles to the same pattern. */
+static bool regexp_build(jsrt_value source, int lre_flags, char *error, size_t error_len,
+                         jsrt_value *out) {
   size_t pattern_len = 0;
   char *pattern =
       pattern_utf8(source, (lre_flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS)) != 0,
                    &pattern_len);
-
-  char error[128];
   int bytecode_len = 0;
-  uint8_t *bytecode =
-      lre_compile(&bytecode_len, error, sizeof error, pattern, pattern_len, lre_flags, NULL);
+  uint8_t *bytecode = lre_compile(&bytecode_len, error, (int)error_len, pattern, pattern_len,
+                                  lre_flags, NULL);
   free(pattern);
   if (bytecode == NULL) {
-    /* The spec throws SyntaxError here. Every spelling the subset accepts has its pattern in the
-     * SOURCE, so this is a program that cannot work rather than data that happened to be bad. */
-    char msg[224];
-    snprintf(msg, sizeof msg,
-             "STA2005: invalid regular expression: %s; the spec throws SyntaxError, which builtins "
-             "cannot raise yet",
-             error);
-    jsrt_panic(msg);
+    return false;
   }
 
   JSRTRegExp *re = (JSRTRegExp *)jsrt_gc_alloc(sizeof(JSRTRegExp), "regexp");
@@ -241,13 +282,166 @@ jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags) {
    * reader of `source` (printing today, the `.source` property later) wants the same answer. */
   re->source = jsrt_string_length(source) == 0 ? jsrt_string_from_utf8("(?:)", 4) : source;
   /* Not the string the program wrote: §22.2.6.4 orders the flags, and every reader wants that
-   * one answer. `flags` above has already been validated by `flags_to_lre`. */
+   * one answer. */
   re->flags = canonical_flags(lre_flags);
   re->lre_flags = lre_flags;
   re->last_index = 0;
   re->bytecode = bytecode;
   re->bytecode_len = bytecode_len;
-  return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)re);
+  *out = JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)re);
+  return true;
+}
+
+jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags) {
+  /* The spec throws SyntaxError for either refusal. Every literal had its pattern and flags checked
+   * at compile time, so this is a program that cannot work rather than data that happened to be
+   * bad. */
+  const int lre_flags = flags_to_lre(flags);
+  if (lre_flags < 0) {
+    jsrt_panic("STA2005: invalid regular expression flags");
+  }
+  char error[128];
+  jsrt_value out = JSRT_UNDEFINED;
+  if (!regexp_build(source, lre_flags, error, sizeof error, &out)) {
+    char msg[224];
+    snprintf(msg, sizeof msg, "STA2005: invalid regular expression: %s", error);
+    jsrt_panic(msg);
+  }
+  return out;
+}
+
+/* The line terminators §22.2.6.13.1 makes EscapeRegExpPattern spell as escapes, by the letter that
+ * follows the backslash: `\n`, `\r`, `\u2028`, `\u2029`. NULL for any other unit. */
+static const char *line_terminator_escape(uint16_t unit) {
+  switch (unit) {
+    case 0x0A: return "n";
+    case 0x0D: return "r";
+    case 0x2028: return "u2028";
+    case 0x2029: return "u2029";
+    default: return NULL;
+  }
+}
+
+/* EscapeRegExpPattern (§22.2.6.13.1) as V8 spells it, which is what the pinned Node prints: a `/`
+ * outside a character class becomes `\/`, and a line terminator becomes its escape -- after a
+ * backslash, the backslash is reused (`"\\\n"` reads back as `\n`). Everything else is copied, so
+ * the result compiles to the pattern the program passed. */
+static jsrt_value escape_pattern(jsrt_value pattern) {
+  const JSString *str = (const JSString *)jsrt_ptr(pattern);
+  /* `\u2028` is the longest spelling: six units for one. */
+  uint16_t *out = (uint16_t *)malloc(((size_t)str->length * 6 + 1) * sizeof(uint16_t));
+  if (out == NULL) {
+    jsrt_panic("out of memory: regexp source");
+  }
+  uint32_t n = 0;
+  bool in_class = false;
+  for (uint32_t i = 0; i < str->length; i++) {
+    const uint16_t unit = str->data[i];
+    const char *escape = line_terminator_escape(unit);
+    if (escape != NULL) {
+      out[n++] = '\\';
+      for (const char *c = escape; *c != '\0'; c++) {
+        out[n++] = (uint16_t)*c;
+      }
+      continue;
+    }
+    if (unit == '\\' && i + 1 < str->length) {
+      out[n++] = unit;
+      const uint16_t next = str->data[i + 1];
+      const char *escaped = line_terminator_escape(next);
+      if (escaped != NULL) {
+        for (const char *c = escaped; *c != '\0'; c++) {
+          out[n++] = (uint16_t)*c;
+        }
+      } else {
+        out[n++] = next;
+      }
+      i++;
+      continue;
+    }
+    if (unit == '[') {
+      in_class = true;
+    } else if (unit == ']') {
+      in_class = false;
+    } else if (unit == '/' && !in_class) {
+      out[n++] = '\\';
+    }
+    out[n++] = unit;
+  }
+  const jsrt_value escaped = jsrt_string_from_units(out, n);
+  free(out);
+  return escaped;
+}
+
+/* libregexp's reasons that name exactly one V8 reason, in V8's words (checked against the pinned
+ * Node). A reason with more than one V8 counterpart (`unexpected end` is both `Unterminated
+ * character class` and `\ at end of pattern`) keeps libregexp's wording; docs/VALUE.md §4.21. */
+static const char *v8_reason(const char *reason) {
+  static const char *const table[][2] = {
+      {"expecting ')'", "Unterminated group"},
+      {"extraneous characters at the end", "Unmatched ')'"},
+      {"nothing to repeat", "Nothing to repeat"},
+      {"invalid repetition count", "numbers out of order in {} quantifier"},
+      {"duplicate group name", "Duplicate capture group name"},
+      {"invalid group name", "Invalid capture group name"},
+      {"invalid group", "Invalid group"},
+      {"unknown unicode property name", "Invalid property name"},
+  };
+  for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+    if (strcmp(reason, table[i][0]) == 0) {
+      return table[i][1];
+    }
+  }
+  return reason;
+}
+
+/* Throws `SyntaxError: <head><detail>` and answers undefined for the caller to return. */
+static jsrt_value regexp_syntax_error(jsrt_value head, jsrt_value detail) {
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_string_concat(head, detail);
+  jsrt_throw(jsrt_error_new(&jsrt_class_syntax_error, JSRT_LOCAL(0)));
+  JSRT_FRAME_POP();
+  return JSRT_UNDEFINED;
+}
+
+jsrt_value jsrt_regexp_construct(jsrt_value pattern, jsrt_value flags) {
+  JSRT_FRAME(3);
+  /* §22.2.4.1 steps 4-5: a RegExp argument lends its source, and its flags when none are given. */
+  if (jsrt_is_regexp(pattern)) {
+    JSRT_LOCAL(1) = flags == JSRT_UNDEFINED ? jsrt_regexp_flags(pattern) : jsrt_to_string(flags);
+    JSRT_LOCAL(0) = jsrt_regexp_source(pattern);
+  } else {
+    JSRT_LOCAL(0) = pattern == JSRT_UNDEFINED ? jsrt_string_from_utf8("", 0)
+                                                : jsrt_to_string(pattern);
+    JSRT_LOCAL(1) = flags == JSRT_UNDEFINED ? jsrt_string_from_utf8("", 0) : jsrt_to_string(flags);
+  }
+  jsrt_value out = JSRT_UNDEFINED;
+  if (jsrt_pending()) {
+    JSRT_FRAME_POP();
+    return out;
+  }
+  const int lre_flags = flags_to_lre(JSRT_LOCAL(1));
+  if (lre_flags < 0) {
+    JSRT_LOCAL(2) = jsrt_string_concat(JSRT_LOCAL(1), jsrt_string_from_utf8("'", 1));
+    regexp_syntax_error(jsrt_string_from_cstr("Invalid flags supplied to RegExp constructor '"),
+                        JSRT_LOCAL(2));
+    JSRT_FRAME_POP();
+    return out;
+  }
+  JSRT_LOCAL(0) = escape_pattern(JSRT_LOCAL(0));
+  char error[128];
+  const bool built = regexp_build(JSRT_LOCAL(0), lre_flags, error, sizeof error, &out);
+  if (!built) {
+    /* V8's head, `/source/flags: `, then the reason, in V8's words where one maps to it. */
+    JSRT_LOCAL(2) = jsrt_string_concat(jsrt_string_from_cstr("Invalid regular expression: /"),
+                                       JSRT_LOCAL(0));
+    JSRT_LOCAL(2) = jsrt_string_concat(JSRT_LOCAL(2), jsrt_string_from_cstr("/"));
+    JSRT_LOCAL(2) = jsrt_string_concat(JSRT_LOCAL(2), canonical_flags(lre_flags));
+    JSRT_LOCAL(2) = jsrt_string_concat(JSRT_LOCAL(2), jsrt_string_from_cstr(": "));
+    regexp_syntax_error(JSRT_LOCAL(2), jsrt_string_from_cstr(v8_reason(error)));
+  }
+  JSRT_FRAME_POP();
+  return built ? out : JSRT_UNDEFINED;
 }
 
 /* ============================================================================

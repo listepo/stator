@@ -30,12 +30,13 @@ test('prologue includes jsrt_init and the globals frame', () => {
   const c = emitC(module);
 
   assert.match(c, /#include "jsrt_value.h"/);
-  assert.match(c, /int main\(void\)/);
-  assert.match(c, /jsrt_init\(\);/);
+  assert.match(c, /int main\(int argc, char \*\*argv\)/);
+  // `#line` markers may sit between the two calls.
+  assert.match(c, /jsrt_init\(\);\n(?:#line [^\n]*\n)?\s*jsrt_process_args\(argc, argv\);/);
+  assert.match(c, /return \(int\)jsrt_process_exit_code\(\);/);
   // A zero-length array is not valid C11, and a program with no module-level binding is.
   assert.match(c, /JSRT_GLOBALS\(1\);/);
   assert.match(c, /JSRT_GLOBALS_ENTER\(1\);/);
-  assert.match(c, /return 0;/);
 });
 
 test('console.log(1 + 2 * 3) emits correct calls', () => {
@@ -161,7 +162,7 @@ test('main does not pop the globals frame, but an emitted function pops its own'
   // module-level binding. Popping it in main would unroot values still reachable from a callee.
   const mainOnly = emitC(makeModule([decl('x', num(1), 'let')]));
   assert.ok(!mainOnly.includes('JSRT_FRAME_POP()'), 'main must not pop the globals frame');
-  assert.match(mainOnly, /return 0;/);
+  assert.match(mainOnly, /return \(int\)jsrt_process_exit_code\(\);/);
 
   // A function frame is the opposite: it must pop on every exit path, the explicit return
   // included, and the value has to be read out of a rooted slot before the pop happens.
@@ -351,7 +352,7 @@ test('an uncaught throw in main lands on an unwind pad that calls jsrt_uncaught'
   assert.match(c, /jsrt_throw\(/);
   assert.match(c, /goto _jsrt_unwind;/);
   // The pad sits after main's normal return, so a program that does not throw never reaches it.
-  const ret0 = c.indexOf('return 0;');
+  const ret0 = c.indexOf('return (int)jsrt_process_exit_code();');
   const pad = c.indexOf('_jsrt_unwind: ;');
   assert.ok(ret0 > -1 && pad > ret0, 'the unwind pad follows the normal return');
   assert.match(c, /jsrt_uncaught\(\);/);

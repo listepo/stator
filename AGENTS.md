@@ -59,15 +59,21 @@ packages/runtime/  C11 + Zig memory core (plan-notes 238 / T9.1; NOT an npm pack
   vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
 packages/std/      "@stator/std" — the std/* modules (docs/STD.md): src/<module>.ts surface (strict TS,
                    Stator's own subset) + zig/<module>.zig backings → packages/std/build/libjsrt_std.a (justfile)
+packages/node/     "@stator/node" — the --node platform (docs/MODES.md §6): src/<id>.ts is node:<id>, strict TS
+                   over std/*; resolved by the compiler only under --node, compiled into the importer
+packages/vite-stator/ "vite-stator" — the default bundler adapter (`--bundler=vite`) and the stator() Vite
+                   plugin (docs/BUNDLER.md); calls statorc/api only, never compiler internals
 packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
   unit/            vitest unit tests (*.test.ts; config: packages/tests/vitest.config.ts)
   subset/          decision tests (feature × mode matrix)
   golden/ts|js     machine-checked vs Node, byte-for-byte
   differential/    fuzzer corpus       bench/  baselines + results
   test262/         runner + pin (corpus fetched, not vendored)
+  node-suite/      Node's own test/parallel slice: pin, expectations, strict-TS common/, vitest driver (corpus fetched)
   leak/            GC hygiene: a 10M-object loop whose RSS must plateau
   impact/          test impact: map recorder, selector driver (`test:impact`), mutation check
   selfhost/        self-compilation ratchet: targets.json, baseline.json (plan §9 Task 6.19)
+examples/vite/     `vite build` → native binary through vite-stator (a workspace package)
 ```
 
 Paths in prose below are written relative to their package (`src/frontend/` = `packages/compiler/src/frontend/`, `runtime/vendor/` = `packages/runtime/vendor/`, `tests/subset/` = `packages/tests/subset/`).
@@ -120,6 +126,7 @@ pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-f
 pnpm run test:asan              # golden fixtures with runtime + generated C under ASan/UBSan
 pnpm run test:leak              # 10M-object loop; RSS must plateau (skips without Boehm)
 pnpm run test262                # Test262 slice against packages/tests/test262/pin.json (not part of `ci`)
+pnpm run test:node-suite        # Node's own tests (packages/tests/node-suite/pin.json) through vitest, ratcheted (not part of `ci`)
 pnpm run differential           # fuzzer vs Node (failures land in packages/tests/differential/failures/)
 pnpm run bench:record           # refresh packages/tests/bench/baseline.json (valid for this machine only)
 pnpm run runtime                # build libjsrt.a (clang, -Wall -Wextra -Werror; wraps the just recipe), then libjsrt_std.a
@@ -130,7 +137,7 @@ just -f packages/std/justfile -d packages/std std                  # the std/* b
 pnpm run test:intl              # the intl_* golden fixtures against that build (not part of `ci`)
 pnpm run ci                     # all of the above, in order — run before claiming any task done
 moon run tests:ci               # same gate through moon (dependency graph + caching); wraps the above
-node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]
+node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--node] [--emit=c] [--keep-c]
 node packages/compiler/src/cli/main.ts explain file.ts --json   # per-construct verdicts (decision tests use this)
 node packages/compiler/src/cli/main.ts build                   # entry, -o, mode, … from ./stator.config.json (docs/CONFIG.md); flags override it
 ```
@@ -161,7 +168,7 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 ## Testing rules
 
 - **Decision tests** (`tests/subset/`): first-line directives `// @mode: ts|js`, `// @verdict: static|dynamic|error|not-yet`, `// @code: STAxxxx` (required for error/not-yet). Pre-implementation tests carry `// @expected-fail: true`; the runner reports (never hides) that count; removing the marker happens in the same commit that makes the test pass.
-- **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug.
+- **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug. A fixture named `node_*` builds with `--node`, so its `node:*` imports resolve to `packages/node`.
 - Every new language construct lands with: decision test(s) for both modes + at least one golden test + HIR-verifier-clean build. Non-trivial runtime code lands with a unit test.
 - Differential ground truth is the pinned Node LTS in `.node-version` — that Node, and only that Node.
 - **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (the stage-1 `frontend (linux/x64)` job, id `frontend-coverage`, owns the lcov artifact; Windows and macOS jobs never collect coverage), not on every local run.

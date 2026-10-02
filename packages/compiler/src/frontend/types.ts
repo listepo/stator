@@ -131,7 +131,7 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
   // out by the call and a return was copied in at it (docs/FFI.md §3), so the brand is a phantom
   // that only the extern signature reads. Without this, `const v = native()` and an arrow whose
   // return is inferred from an extern call are Unknown, and the module explains dynamic
-  // (plan-notes 311).
+  // (plan-notes 322).
   if (isCStringType(type)) {
     return H_STRING;
   }
@@ -226,6 +226,13 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
   // would invent a layout for bits. Like a brand it takes the opaque HType, while the nodes
   // that create, pass, and read it still carry the slot, which is what the emitter reads.
   if (outSlotInner(type, checker) !== undefined) {
+    return hUnknown(false);
+  }
+
+  // An instance of a JavaScript constructor function: the checker gives `new P()` a class-like
+  // type listing what P's body assigns to `this`, but the value is a dynamic object
+  // `jsrt_construct` built (plan-notes 310) -- no layout exists, so no slot may be read.
+  if (isFunctionConstructorInstance(type)) {
     return hUnknown(false);
   }
 
@@ -1311,6 +1318,78 @@ export function classDisplayName(
   return ts.isClassExpression(node) ? expressionClassName(node) : node.name?.text;
 }
 
+/** The type of `new P()` for a JavaScript constructor function `P`: TypeScript gives the
+ * function's symbol the Class flag in a `.js` file whose body assigns to `this`, with no class
+ * declaration behind it. */
+function isFunctionConstructorInstance(type: ts.Type): boolean {
+  const symbol = type.getSymbol();
+  if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Class) === 0) {
+    return false;
+  }
+  const declarations = symbol.getDeclarations() ?? [];
+  return declarations.length > 0 && !declarations.some((d) => ts.isClassLike(d));
+}
+
+/** True for a symbol only declaration files declare: a builtin (`RegExp`, `Function.prototype.call`,
+ * `console.log`) rather than something the program wrote. */
+function declaredOnlyInDeclarationFiles(symbol: ts.Symbol | undefined): boolean {
+  const declarations = symbol?.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/** Whether `new callee(...)` and `x instanceof callee` dispatch through a function VALUE at run
+ * time (`jsrt_construct`, `jsrt_instanceof_ctor`; plan-notes 310): an ordinary function the
+ * program wrote, or a value of unknown type. A class keeps its descriptor path, and a builtin
+ * constructor (declared only in a declaration file) keeps its own rules. */
+export function isFunctionValueCallee(callee: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (declaredOnlyInDeclarationFiles(checker.getSymbolAtLocation(callee))) {
+    return false;
+  }
+  const type = checker.getTypeAtLocation(callee);
+  if (classLikeOf(type) !== undefined || declaredOnlyInDeclarationFiles(type.getSymbol())) {
+    return false;
+  }
+  const shape = tsTypeToHType(type, checker);
+  return shape.kind === 'fn' || shape.kind === 'unknown';
+}
+
+/** A member of an ordinary function value -- `f.count`, `F.prototype`, `assert.sameValue` -- which
+ * lives in the closure's own properties at run time (plan-notes 310), not in any layout. The
+ * receiver is a function the program wrote: a class object has its descriptor's statics, and a
+ * builtin function has no property table. `length` keeps its static arity read, and the other
+ * `Function.prototype` members (`call`, `apply`, `bind`, ...) are not own properties at all. */
+export function isFunctionValueMember(
+  receiver: ts.Expression,
+  name: string,
+  checker: ts.TypeChecker,
+): boolean {
+  if (name === 'length') {
+    return false;
+  }
+  const type = checker.getTypeAtLocation(receiver);
+  if (classLikeOf(type) !== undefined || tsTypeToHType(type, checker).kind !== 'fn') {
+    return false;
+  }
+  if (declaredOnlyInDeclarationFiles(checker.getSymbolAtLocation(receiver))) {
+    return false;
+  }
+  if (name === 'prototype' || name === 'name') {
+    return true;
+  }
+  return !declaredOnlyInDeclarationFiles(checker.getPropertyOfType(type, name));
+}
+
+/** Whether `expr` READS a member of an ordinary function value (`F.prototype`, `f.cache`). The
+ * value is whatever the program last stored there, so the checker's type for it -- inferred from
+ * one assignment such as `F.prototype = { … }` -- is no layout, and every use of it goes through
+ * the shape table like an Unknown receiver (plan-notes 310). */
+export function isFunctionMemberRead(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    isFunctionValueMember(expr.expression, expr.name.text, checker)
+  );
+}
+
 /** The class-like (declaration or expression) a type came from, or `undefined` for anything
  * else. Beside `classDeclarationOf`: existing declaration-only consumers keep their shape,
  * and only the use sites class expressions newly reach migrate to this one. */
@@ -1540,6 +1619,13 @@ function isLibInterface(type: ts.Type, name: string): boolean {
   return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
 }
 
+/** Whether `node` is typed as the lib's WeakMap or WeakSet, which the HType model folds into Map
+ * and Set (see collectionTypeToHType): the one bit a `collection-new` records. */
+export function isWeakCollection(node: ts.Node, checker: ts.TypeChecker): boolean {
+  const type = checker.getTypeAtLocation(node);
+  return isLibInterface(type, 'WeakMap') || isLibInterface(type, 'WeakSet');
+}
+
 function iteratorTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number): HType | null {
   const name = type.getSymbol()?.getName();
   if (
@@ -1569,7 +1655,13 @@ function collectionTypeToHType(
     return null;
   }
   const name = type.getSymbol()?.getName();
-  if (name !== 'Map' && name !== 'Set' && name !== 'Promise') {
+  if (
+    name !== 'Map' &&
+    name !== 'Set' &&
+    name !== 'WeakMap' &&
+    name !== 'WeakSet' &&
+    name !== 'Promise'
+  ) {
     return null;
   }
   if (!isLibInterface(type, name)) {
@@ -1582,7 +1674,8 @@ function collectionTypeToHType(
     const [value] = args;
     return value === undefined ? null : hPromise(tsTypeToHType(value, checker, depth + 1));
   }
-  if (name === 'Set') {
+  // A WeakMap/WeakSet is a Map/Set the checker keeps every walk off (docs/VALUE.md §4.22).
+  if (name === 'Set' || name === 'WeakSet') {
     const [element] = args;
     return element === undefined ? null : hSet(tsTypeToHType(element, checker, depth + 1));
   }

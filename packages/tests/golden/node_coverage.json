@@ -1,4 +1,57 @@
 {
   "_comment": "plan.md §11c coverage: node:* module -> member -> golden fixtures exercising it (paths relative to tests/golden/), or {\"nondeterministic\": \"<proof under tests/>\"}. The member list itself is read from the pinned Node by node-coverage.ts, so a member absent here is counted as not covered rather than hidden. A claim is verified like test:builtins: the fixture must exist and mention both the module specifier and the member. Members are spelled as docs/NODE.md lists them: `readFileSync`, `Buffer.from`, `Buffer.prototype.toString`.",
-  "_example": { "fs": { "readFileSync": ["ts/node_fs_sync/main.ts"] } }
+  "_example": {
+    "fs": {
+      "readFileSync": ["ts/node_fs_sync/main.ts"]
+    }
+  },
+  "assert": {
+    "AssertionError": ["ts/node_assert.ts"],
+    "AssertionError.prototype.toString": ["ts/node_assert.ts"],
+    "deepStrictEqual": ["ts/node_assert.ts", "js/node_assert.js"],
+    "fail": ["ts/node_assert.ts"],
+    "match": ["ts/node_assert.ts", "js/node_assert.js"],
+    "notStrictEqual": ["ts/node_assert.ts"],
+    "ok": ["ts/node_assert.ts", "js/node_assert.js"],
+    "rejects": ["ts/node_assert.ts"],
+    "strictEqual": ["ts/node_assert.ts", "js/node_assert.js"],
+    "throws": ["ts/node_assert.ts", "js/node_assert.js"]
+  },
+  "module": {
+    "builtinModules": ["ts/node_module.ts"],
+    "createRequire": ["ts/node_module.ts", "js/node_module.js"],
+    "isBuiltin": ["ts/node_module.ts", "js/node_module.js"]
+  },
+  "path": {
+    "basename": ["ts/node_path.ts", "js/node_path.js"],
+    "delimiter": ["ts/node_path.ts"],
+    "dirname": ["ts/node_path.ts", "js/node_path.js"],
+    "extname": ["ts/node_path.ts", "js/node_path.js"],
+    "format": ["ts/node_path.ts", "js/node_path.js"],
+    "isAbsolute": ["ts/node_path.ts", "js/node_path.js"],
+    "join": ["ts/node_path.ts", "js/node_path.js"],
+    "normalize": ["ts/node_path.ts"],
+    "parse": ["ts/node_path.ts", "js/node_path.js"],
+    "posix": ["ts/node_path.ts"],
+    "relative": ["ts/node_path.ts", "js/node_path.js"],
+    "resolve": ["ts/node_path.ts"],
+    "sep": ["ts/node_path.ts"],
+    "toNamespacedPath": ["ts/node_path.ts"]
+  },
+  "path/posix": {
+    "basename": ["ts/node_path_posix.ts"],
+    "delimiter": ["ts/node_path_posix.ts"],
+    "dirname": ["ts/node_path_posix.ts"],
+    "extname": ["ts/node_path_posix.ts"],
+    "format": ["ts/node_path_posix.ts"],
+    "isAbsolute": ["ts/node_path_posix.ts"],
+    "join": ["ts/node_path_posix.ts"],
+    "normalize": ["ts/node_path_posix.ts"],
+    "parse": ["ts/node_path_posix.ts"],
+    "posix": ["ts/node_path_posix.ts"],
+    "relative": ["ts/node_path_posix.ts"],
+    "resolve": ["ts/node_path_posix.ts"],
+    "sep": ["ts/node_path_posix.ts"],
+    "toNamespacedPath": ["ts/node_path_posix.ts"]
+  }
 }

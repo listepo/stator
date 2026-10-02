@@ -52,9 +52,18 @@
       "minLength": 1,
       "description": "build: prefix for stator_<unit>_<name>."
     },
+    "bundler": {
+      "type": "string",
+      "minLength": 1,
+      "description": "js mode: \"vite\" (default; the vite-stator package), \"none\", or an adapter module — a path relative to this file when it starts with \".\", else a package name (docs/BUNDLER.md)."
+    },
     "diagnostics": {
       "enum": ["text", "json"],
       "description": "explain: report format; \"json\" is --json (default \"text\")."
+    },
+    "node": {
+      "type": "boolean",
+      "description": "build and explain: the Node platform (--node). node:* and bare built-ins resolve to packages/node (docs/MODES.md §6). Default false."
     }
   },
   "additionalProperties": false

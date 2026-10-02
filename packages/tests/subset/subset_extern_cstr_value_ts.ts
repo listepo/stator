@@ -1,6 +1,6 @@
 // @mode: ts
 // @verdict: static
-// SUBSET.md: FFI — a `CString` value is a string (docs/FFI.md section 3, plan-notes 311). A
+// SUBSET.md: FFI — a `CString` value is a string (docs/FFI.md section 3, plan-notes 322). A
 // binding and an arrow whose types are inferred from an extern's `CString` return are static:
 // the return was copied into a runtime string at the boundary, and the brand is a phantom.
 /// <reference path="./helper_extern_cstr.d.ts" />

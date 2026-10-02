@@ -8,8 +8,8 @@
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'vitest';
@@ -41,7 +41,11 @@ function underTerminal(binary: string): [string, string[]] {
  * pseudo-terminal when `terminal` is set. */
 function buildAndRun(
   source: string,
-  options: { readonly input?: string; readonly terminal?: boolean } = {},
+  options: {
+    readonly input?: string;
+    readonly terminal?: boolean;
+    readonly args?: readonly string[];
+  } = {},
 ): ReturnType<typeof spawnSync> & { stdout: string } {
   return withProgram(source, (entry, dir) => {
     const out = join(dir, 'main');
@@ -58,7 +62,11 @@ function buildAndRun(
         timeout: 30_000,
       });
     }
-    return spawnSync(out, [], { encoding: 'utf8', input: options.input ?? '', timeout: 30_000 });
+    return spawnSync(out, options.args ?? [], {
+      encoding: 'utf8',
+      input: options.input ?? '',
+      timeout: 30_000,
+    });
   });
 }
 
@@ -78,17 +86,23 @@ test('the link line names libjsrt_std.a only when asked to', () => {
   );
 });
 
-async function compiledStd(source: string): Promise<boolean> {
+async function compiledStdC(
+  source: string,
+): Promise<{ readonly c: string; readonly std: boolean }> {
   const dir = mkdtempSync(join(tmpdir(), 'stator-std-'));
   try {
     const entry = join(dir, 'main.ts');
     writeFileSync(entry, source);
     const compiled = await compileToC(entry, 'ts');
     assert.ok(compiled !== null, 'the program compiles');
-    return compiled.std;
+    return compiled;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+async function compiledStd(source: string): Promise<boolean> {
+  return (await compiledStdC(source)).std;
 }
 
 test('a std importer is a std link; a program without std imports is not', async () => {
@@ -136,6 +150,65 @@ test('std/io read takes what stdin holds, then an empty answer at end of file', 
   assert.equal(run.stdout, 'h\u00e9 \u0000x\n7 0\n');
 });
 
+// plan.md §11c T11.3a: a `Uint8Array` crosses as its storage, so std/io's bytes take ONE call
+// whatever their length — the byte channel this replaced made one call per byte.
+test('std/io passes a Uint8Array to its backing as one pointer + length call', async () => {
+  const { c } = await compiledStdC(
+    'import { read, stdin, stdout, writeBytes } from "std/io";\n' +
+      'writeBytes(stdout, read(stdin, 1048576));\n',
+  );
+  // A call site lands its raw result in an `_jsrt_exr_` local; the forward declaration does not.
+  const lines = c.split('\n');
+  for (const backing of ['jsrt_std_io_write_bytes', 'jsrt_std_io_read']) {
+    const calls = lines.filter((line) => line.includes(`= ${backing}(`));
+    assert.equal(calls.length, 1, `one call site for ${backing}`);
+    assert.match(calls[0] ?? '', /\(void \*\)jsrt_uint8array_bytes\(.*\), jsrt_uint8array_count\(/);
+  }
+  assert.ok(!c.includes('jsrt_std_bytes_'), 'no byte channel is left');
+});
+
+// The same row carries std/hash and std/encoding: a digest, a random fill and a bytes-to-text
+// conversion are each one call, the answer's view passed in for the backing to fill.
+test('std/hash and std/encoding pass their bytes as one pointer + length call', async () => {
+  const { c } = await compiledStdC(
+    'import { bytesToHex } from "std/encoding";\n' +
+      'import { randomBytes, sha256 } from "std/hash";\n' +
+      'console.log(bytesToHex(sha256(randomBytes(1048576))));\n',
+  );
+  const lines = c.split('\n');
+  const want: ReadonlyArray<readonly [string, number]> = [
+    ['jsrt_std_hash_digest', 2],
+    ['jsrt_std_hash_random_bytes', 1],
+    ['jsrt_std_encoding_to_text', 1],
+  ];
+  for (const [backing, views] of want) {
+    const calls = lines.filter((line) => line.includes(`= ${backing}(`));
+    assert.equal(calls.length, 1, `one call site for ${backing}`);
+    assert.equal(
+      (calls[0] ?? '').split('jsrt_uint8array_count(').length - 1,
+      views,
+      `${backing} takes ${String(views)} view(s)`,
+    );
+  }
+  assert.ok(!c.includes('jsrt_std_bytes_'), 'no byte channel is left');
+});
+
+test('std/io moves a MiB through read and writeBytes byte for byte', NATIVE_ONLY, () => {
+  const input = Array.from({ length: 1 << 20 }, (_, i) => String.fromCharCode(32 + (i % 95))).join(
+    '',
+  );
+  const run = buildAndRun(
+    'import { read, stderr, stdin, stdout, write, writeBytes } from "std/io";\n' +
+      'let total = 0;\nlet chunk = read(stdin, 1048576);\n' +
+      'while (chunk.length > 0) {\n  writeBytes(stdout, chunk);\n  total += chunk.length;\n' +
+      '  chunk = read(stdin, 1048576);\n}\nwrite(stderr, `${total}\\n`);\n',
+    { input },
+  );
+  assert.equal(run.status, 0);
+  assert.equal(run.stderr, `${String(1 << 20)}\n`);
+  assert.ok(run.stdout === input, 'the MiB comes back unchanged');
+});
+
 test('std/io sees a terminal on a pseudo-terminal', NATIVE_ONLY, () => {
   const run = buildAndRun(
     'import { isatty, stdout, terminalSize } from "std/io";\n' +
@@ -148,3 +221,84 @@ test('std/io sees a terminal on a pseudo-terminal', NATIVE_ONLY, () => {
   // The terminal turns `\n` into `\r\n`, and BSD `script` echoes the EOF it reads (`^D`) first.
   assert.match(run.stdout.replace(/\r\n/g, '\n'), /(^|\n|\b)true true true\n$/);
 });
+
+test('std/hash randomBytes draws fresh bytes that cover the whole byte range', NATIVE_ONLY, () => {
+  // Two 32-byte draws collide with probability 2^-256, and 65536 bytes miss one of the 256
+  // values with probability about 256 * (255/256)^65536, below 10^-100.
+  const run = buildAndRun(
+    'import { bytesToHex } from "std/encoding";\n' +
+      'import { randomBytes } from "std/hash";\n' +
+      'console.log(bytesToHex(randomBytes(32)) !== bytesToHex(randomBytes(32)));\n' +
+      'const seen = new Uint8Array(256);\n' +
+      'for (const byte of randomBytes(65536)) {\n  seen[byte] = 1;\n}\n' +
+      'let distinct = 0;\nfor (const flag of seen) {\n  distinct += flag;\n}\n' +
+      'console.log(distinct);\n',
+  );
+  assert.equal(run.status, 0, String(run.stderr));
+  assert.equal(run.stdout, 'true\n256\n');
+});
+
+// plan.md §11c T11.3 step 3: what the `std_process` golden cannot run — the golden runner passes
+// no arguments and demands status 0, and a pid, a clock or a memory size differs every run.
+test("std/process argv is main's argument vector, byte for byte", NATIVE_ONLY, () => {
+  const args = ['plain', 'two words', '', 'h\u00e9 \u{1f600}', '--flag=x'];
+  const run = buildAndRun(
+    'import { argv } from "std/process";\nconst all = argv();\n' +
+      'console.log(all.length);\nfor (const arg of all.slice(1)) {\n  console.log(`[${arg}]`);\n}\n' +
+      'console.log((all[0] ?? "").endsWith("/main"));\n',
+    { args },
+  );
+  assert.equal(run.status, 0, String(run.stderr));
+  assert.equal(
+    run.stdout,
+    `${String(args.length + 1)}\n${args.map((arg) => `[${arg}]\n`).join('')}true\n`,
+  );
+});
+
+test(
+  'std/process setExitCode is the status of a normal end; exit and a throw still win',
+  NATIVE_ONLY,
+  () => {
+    const set = 'import { exit, exitCode, setExitCode } from "std/process";\nsetExitCode(7);\n';
+    const normal = buildAndRun(`${set}console.log(exitCode());\n`);
+    assert.equal(normal.status, 7);
+    assert.equal(normal.stdout, '7\n');
+    assert.equal(buildAndRun(`${set}exit(3);\n`).status, 3);
+    assert.equal(buildAndRun(`${set}throw new Error("boom");\n`).status, 1);
+    assert.equal(buildAndRun(`${set}setExitCode(0);\n`).status, 0);
+  },
+);
+
+test(
+  'std/process and std/os identity, clock and memory answer plausible values',
+  NATIVE_ONLY,
+  () => {
+    const run = withProgram(
+      'import { hostname } from "std/os";\n' +
+        'import { execPath, hrtimeNs, memoryUsage, pid, ppid } from "std/process";\n' +
+        'import { sleepMs } from "std/time";\n' +
+        'const t0 = hrtimeNs();\nsleepMs(20);\nconst t1 = hrtimeNs();\n' +
+        'console.log(pid());\nconsole.log(ppid());\nconsole.log(execPath());\n' +
+        'console.log(t1 - t0);\nconsole.log(memoryUsage().rss);\nconsole.log(hostname());\n',
+      (entry, dir) => {
+        const out = join(dir, 'main');
+        const build = spawnSync(process.execPath, [CLI, 'build', entry, '-o', out], {
+          encoding: 'utf8',
+        });
+        assert.equal(build.status, 0, `build failed:\n${build.stdout}${build.stderr}`);
+        const ran = spawnSync(out, [], { encoding: 'utf8', timeout: 30_000 });
+        return { ran, exe: realpathSync(out) };
+      },
+    );
+    assert.equal(run.ran.status, 0, run.ran.stderr);
+    const [pid, ppid, exe, elapsed, rss, host] = run.ran.stdout.trimEnd().split('\n');
+    // spawnSync starts the binary directly, so its parent is this test process.
+    assert.equal(Number(ppid), process.pid);
+    assert.ok(Number(pid) > 0 && Number(pid) !== process.pid);
+    assert.equal(exe, run.exe);
+    assert.equal(host, hostname());
+    // A 20 ms sleep on the monotonic clock: at least 20 ms, and well under the run's timeout.
+    assert.ok(Number(elapsed) >= 20e6 && Number(elapsed) < 30e9, `elapsed ${String(elapsed)} ns`);
+    assert.ok(Number(rss) >= 1 << 20 && Number(rss) < 2 ** 34, `rss ${String(rss)}`);
+  },
+);

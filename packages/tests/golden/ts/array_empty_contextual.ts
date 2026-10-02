@@ -1,4 +1,4 @@
-// An empty array literal takes its element type from its context (plan-notes 311): an
+// An empty array literal takes its element type from its context (plan-notes 322): an
 // annotation, an `as`, a return type, a parameter, an assignment target. Each one starts empty,
 // grows, and prints as the array its context names; an arrow typed only by the callback it is
 // passed to fills one, which is the shape `std`'s string lists are built in.

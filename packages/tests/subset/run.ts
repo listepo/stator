@@ -5,6 +5,7 @@
  *   // @verdict: static | dynamic | error | not-yet
  *   // @code: STA1101          (required for error/not-yet)
  *   // @expected-fail: true    (pre-implementation; reported, never hidden)
+ *   // @node: true             (explain with `--node`, the Node platform; docs/MODES.md §6)
  *
  * Verdicts come from in-process `explainFile` (the same function the `stator explain`
  * CLI prints as `--json`). Fixtures marked expected-fail are not
@@ -48,6 +49,7 @@ interface Directives {
   verdict: Verdict;
   code?: string;
   expectedFail: boolean;
+  node: boolean;
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +90,7 @@ function parseDirectives(file: string, source: string): Directives {
     mode,
     verdict: verdict as Verdict,
     expectedFail: directive(source, 'expected-fail') === 'true',
+    node: directive(source, 'node') === 'true',
   };
   return code === undefined ? parsed : { ...parsed, code };
 }
@@ -95,13 +98,14 @@ function parseDirectives(file: string, source: string): Directives {
 async function explain(
   file: string,
   mode: 'ts' | 'js',
+  node: boolean,
 ): Promise<{ verdict: string; code?: string }> {
   // In-process (plan.md §9 Task 6.6): one `explainFile` call instead of a fresh
   // `node …/cli/main.ts explain --json` spawn per fixture. The `explain` CLI always
   // exits 0 with the verdict as the answer — a refusal is a result, not a throw — and
   // `explainFile` preserves that: rejections come back as a verdict, and only a missing
   // entry throws (which the caller reports per fixture, as the spawn failure was).
-  const result = await explainFile(file, mode);
+  const result = await explainFile(file, mode, undefined, node);
   return result.code === undefined
     ? { verdict: result.verdict }
     : { verdict: result.verdict, code: result.code };
@@ -170,7 +174,7 @@ async function evaluateOne(name: string, allocated: ReadonlySet<string>): Promis
   // Expected-fail fixtures are still evaluated. A marker that outlives the work it was waiting
   // for is worse than no marker: it silently exempts a fixture that would now hold the line.
   try {
-    const got = await explain(path, want.mode);
+    const got = await explain(path, want.mode, want.node);
     const matches =
       got.verdict === want.verdict && (want.code === undefined || got.code === want.code);
     if (want.expectedFail) {

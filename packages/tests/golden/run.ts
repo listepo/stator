@@ -109,6 +109,17 @@ function skippedIntlCount(): number {
   return skipped;
 }
 
+/** `--bundler=none` (plan.md §11d T12.1 Check): every fixture builds with the bundle step off,
+ * except the ones that import a package from their own `node_modules` (T12.2's `pkg_*`), which
+ * need the bundler and are skipped. The default leaves the compiler's own default, `vite`, which
+ * loads `vite-stator` only for those. */
+const BUNDLER_NONE = process.argv.includes('--bundler=none');
+
+/** A fixture that ships packages: only the bundler can build it. */
+function needsBundler(dir: string, name: string): boolean {
+  return existsSync(join(dir, name, 'node_modules'));
+}
+
 interface Fixture {
   readonly mode: 'ts' | 'js';
   readonly path: string;
@@ -130,6 +141,7 @@ function fixtures(mode: 'ts' | 'js'): Fixture[] {
     .filter(
       (name) =>
         (INTL || !name.startsWith('intl_')) &&
+        !(BUNDLER_NONE && needsBundler(dir, name)) &&
         (name.endsWith(`.${mode}`) ||
           statSync(join(dir, name), { throwIfNoEntry: false })?.isDirectory()),
     )
@@ -167,12 +179,27 @@ function decodeFailure(value: unknown): string | undefined {
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
  * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
  * compile into each other's `app`. */
-async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStreams> {
+
+/** Fixtures named `node_*` build on the `--node` platform (plan.md §11c T11.6, docs/MODES.md
+ * §6): their `node:*` imports resolve to `packages/node`, and Node runs them like any fixture. */
+function onNodePlatform(fixture: Fixture): boolean {
+  return fixture.name.startsWith('node_');
+}
+
+async function runCompiled(fixture: Fixture): Promise<FixtureStreams> {
+  const { path, mode } = fixture;
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
     const objects = await compileFixtureC(path, dirname(out));
-    await buildFixture({ entry: path, out, mode, linkFlags: objects });
+    await buildFixture({
+      entry: path,
+      out,
+      mode,
+      linkFlags: objects,
+      node: onNodePlatform(fixture),
+      ...(BUNDLER_NONE ? { bundler: { kind: 'none' } } : {}),
+    });
     const exec = await runProcess(out, [], { env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
@@ -201,7 +228,7 @@ async function collect(
 async function check(fixture: Fixture): Promise<string | undefined> {
   try {
     const [actual, expected] = await Promise.all([
-      runCompiled(fixture.path, fixture.mode),
+      runCompiled(fixture),
       runNodeOracle(fixture.path, PINNED_ENV),
     ]);
     if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
@@ -239,6 +266,13 @@ function printReport(
       `golden: SKIPPED ${String(skippedIntl)} intl_* fixtures (STATOR_RUNTIME is not intl; run \`pnpm run test:intl\` to include them)\n`,
     );
   }
+  if (BUNDLER_NONE) {
+    const dir = join(HERE, 'js');
+    const packaged = readdirSync(dir).filter((name) => needsBundler(dir, name)).length;
+    process.stdout.write(
+      `golden: SKIPPED ${String(packaged)} fixtures that import packages (--bundler=none)\n`,
+    );
+  }
   if (failed.length > 0) {
     process.exitCode = 1;
   }
@@ -269,7 +303,7 @@ async function main(): Promise<void> {
     try {
       await fanOutWorkers({
         script,
-        baseArgs: workerBaseArgs(args),
+        baseArgs: [...workerBaseArgs(args), ...(BUNDLER_NONE ? ['--bundler=none'] : [])],
         shards: args.shards,
         dir,
       });

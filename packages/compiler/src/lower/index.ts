@@ -33,6 +33,9 @@ import {
   OBJECT_STATICS,
   PROMISE_STATICS,
 } from '../frontend/gate.ts';
+import { globalFunctionOf, globalTypeofOf, isGlobalArray } from '../frontend/gate.ts';
+import { numberConstant } from '../frontend/gate.ts';
+import type { GlobalFunction } from '../frontend/gate.ts';
 import {
   classReferenceTuple,
   genericAliasTarget,
@@ -83,6 +86,9 @@ import {
   ITERATOR_METHOD_NAME,
   instanceMethodName,
   isDynamicShape,
+  isFunctionValueCallee,
+  isFunctionMemberRead,
+  isFunctionValueMember,
   isStaticMember,
   isSymbolIteratorKey,
   methodDeclaringClass,
@@ -93,6 +99,7 @@ import {
   tsTypeToHType,
   userIteratorMethod,
   outSlotInner,
+  isWeakCollection,
 } from '../frontend/types.ts';
 import type {
   ArrayLength,
@@ -110,6 +117,7 @@ import type {
   ConsoleLogCall,
   ConsoleMethod,
   DateOperation,
+  NumberOperation,
   DateStatic,
   Declaration,
   DynEntry,
@@ -121,6 +129,8 @@ import type {
   OutGet,
   OutNew,
   FieldAccess,
+  GlobalCallName,
+  FieldCall,
   FunctionDeclaration,
   FunctionExpr,
   FunctionLength,
@@ -128,6 +138,7 @@ import type {
   IfStatement,
   IndexAccess,
   InstanceOf,
+  InstanceOfValue,
   IteratorView,
   LogicalOp,
   MatchField,
@@ -137,6 +148,7 @@ import type {
   MethodValue,
   Module,
   NewExpr,
+  NewValue,
   ObjectEntry,
   ObjectLiteral,
   ObjectStaticMethod,
@@ -165,6 +177,7 @@ import {
   ARRAY_OPS,
   CONSOLE_METHODS,
   DATE_OPS,
+  NUMBER_OPS,
   DATE_STATICS,
   errorHType,
   externKindHType,
@@ -181,13 +194,16 @@ import {
   typedMember,
   typedResultType,
 } from '../hir/nodes.ts';
+import { GLOBAL_CALLS } from '../hir/nodes.ts';
 import type { HField, HObject, HType } from '../hir/types.ts';
 import {
   accessorName,
   accessorProperty,
+  callableFieldSlot,
   fieldSlot,
   H_BOOLEAN,
   H_NUMBER,
+  H_REGEXP,
   H_STRING,
   H_UNDEFINED,
   hArray,
@@ -204,6 +220,7 @@ import {
   objectFieldsPrefix,
 } from '../hir/types.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
+import { UNMAPPED_FILE, type PositionMapper } from '../support/sourcemap.ts';
 import { diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, enclosingFunction, isFunctionLike, RECEIVER_NAME } from './captures.ts';
@@ -290,6 +307,46 @@ function lowerDiagnostic(
   message: string,
 ): Diagnostic {
   return diagnosticFromNode(node, sourceFile, code, diagClass, lowerDiagMode, message);
+}
+
+/** The vendor module and its source map (plan.md §11d T12.1 step 5, docs/BUNDLER.md §6): spans
+ * in that one file name the original package file and line, so `#line` and the runtime's
+ * call-site strings point where the code was written. Set once per `lowerProgram` call. */
+export interface SpanRemap {
+  /** The vendor module's fileName, as the program holds it. */
+  readonly file: string;
+  readonly map: PositionMapper;
+}
+
+let spanRemap: SpanRemap | undefined;
+
+/** Where `start` in `sourceFile` came from: itself, or through the vendor map. A position the
+ * bundler mapped to nothing (a runtime helper it wrote) answers `<package bundle>` and the
+ * bundle's own line, never a user file. */
+function remapPosition(
+  start: number,
+  sourceFile: ts.SourceFile,
+): { readonly file: string; readonly line: number; readonly column: number } {
+  const { line, character } = sourceFile.getLineAndCharacterOfPosition(start);
+  if (spanRemap === undefined || sourceFile.fileName !== spanRemap.file) {
+    return { file: sourceFile.fileName, line: line + 1, column: character + 1 };
+  }
+  return (
+    spanRemap.map(line + 1, character + 1) ?? {
+      file: UNMAPPED_FILE,
+      line: line + 1,
+      column: character + 1,
+    }
+  );
+}
+
+/** `sourceLocation`, through the vendor map: the `file:line:col` a failed check reports. */
+function checkLocation(node: ts.Node, sourceFile: ts.SourceFile): string {
+  if (spanRemap === undefined || sourceFile.fileName !== spanRemap.file) {
+    return sourceLocation(node, sourceFile);
+  }
+  const at = remapPosition(node.getStart(sourceFile), sourceFile);
+  return `${at.file}:${String(at.line)}:${String(at.column)}`;
 }
 
 export function lowerSourceFile(
@@ -406,9 +463,11 @@ export function lowerProgram(
   checker: ts.TypeChecker,
   runtimeDynamicSymbols: ReadonlySet<ts.Symbol> = new Set(),
   mode: Mode = 'ts',
+  remap?: SpanRemap,
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
   lowerDiagMode = mode;
+  spanRemap = remap;
   const bindings = Scope.root();
   // Steps 44c/45/46 run before anything is lowered: an Unknown (or mismatched) value reaching
   // a fixed-shape slot widens the receiving binding, and the widening must be visible to the
@@ -1156,7 +1215,7 @@ function boundaryCheck(
     type: expected,
     span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
     value,
-    where: sourceLocation(node, sourceFile),
+    where: checkLocation(node, sourceFile),
   };
 }
 
@@ -1718,6 +1777,25 @@ function collectDynamicReturnsPass(
  * it in rather than synthesising a VariableStatement matters: a factory-made node has no source
  * position, and asking one for its start is a hard failure inside the TypeScript API. */
 
+/** `x.length` on a value that answers it without a shape: an array, a function, or (anything
+ * else the gate let through) a string. The three are different nodes because they become
+ * different runtime calls. A function's `length` -- a method value (`const f = o.m`) included,
+ * whose closure already excludes the receiver from its arity (docs/VALUE.md §4.16). An
+ * Unknown-typed receiver never reaches here: it takes the dynamic path and answers through
+ * `jsrt_get_prop` (plan.md §8 step 21b). */
+function lengthRead(operand: Expression, span: Span): Expression {
+  if (operand.type.kind === 'array') {
+    const length: ArrayLength = { kind: 'array-length', type: H_NUMBER, span, operand };
+    return length;
+  }
+  if (operand.type.kind === 'fn') {
+    const length: FunctionLength = { kind: 'function-length', type: H_NUMBER, span, operand };
+    return length;
+  }
+  const length: StringLength = { kind: 'string-length', type: H_NUMBER, span, operand };
+  return length;
+}
+
 function lowerPatternRead(
   target: Expression,
   field: string | number,
@@ -1737,6 +1815,13 @@ function lowerPatternRead(
   const member = namespaceObjectField(target, field, checker, bindings);
   if (member !== undefined) {
     return { kind: 'identifier', type: member.type, span, name: member.name };
+  }
+  // `const { length: n } = xs` reads what `xs.length` reads (plan-notes 310).
+  if (
+    field === 'length' &&
+    (target.type.kind === 'array' || target.type.kind === 'fn' || target.type.kind === 'string')
+  ) {
+    return lengthRead(target, span);
   }
   if (target.type.kind === 'unknown') {
     const access: DynFieldAccess = {
@@ -1802,6 +1887,30 @@ function bindPatternElement(
   return true;
 }
 
+/** What a pattern reads its parts from: `rhs` itself when it is a variable, a temporary holding it
+ * otherwise, so the right side runs once however many targets read it. */
+function patternSource(
+  rhs: Expression,
+  span: Span,
+  bindings: Scope,
+  statements: Statement[],
+): Expression {
+  if (rhs.kind === 'identifier') {
+    return rhs;
+  }
+  const tmp = nextBindTemp();
+  bindings.set(tmp, rhs.type);
+  statements.push({
+    kind: 'declaration',
+    type: rhs.type,
+    span,
+    name: tmp,
+    declKind: 'const',
+    value: rhs,
+  });
+  return { kind: 'identifier', type: rhs.type, span, name: tmp };
+}
+
 function lowerBindingPattern(
   name: ts.BindingName,
   rhs: Expression,
@@ -1814,20 +1923,7 @@ function lowerBindingPattern(
 ): Statement[] | null {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
   const statements: Statement[] = [];
-  let source = rhs;
-  if (rhs.kind !== 'identifier') {
-    const tmp = nextBindTemp();
-    bindings.set(tmp, rhs.type);
-    statements.push({
-      kind: 'declaration',
-      type: rhs.type,
-      span,
-      name: tmp,
-      declKind: 'const',
-      value: rhs,
-    });
-    source = { kind: 'identifier', type: rhs.type, span, name: tmp };
-  }
+  const source = patternSource(rhs, span, bindings, statements);
   if (ts.isIdentifier(name)) {
     diagnostics.push(
       lowerDiagnostic(name, sourceFile, 'STA4031', 'internal', 'expected a binding pattern'),
@@ -1918,15 +2014,45 @@ function lowerDeclarationList(
     return lowerVarList(list, at, sourceFile, checker, bindings, diagnostics, fail);
   }
 
-  // One binding per Declaration node, so `let a = 1, b = 2;` has nowhere to go yet.
-  if (list.declarations.length > 1) {
-    return fail(at, 'multiple declarations in one statement not supported');
-  }
-  const decl = list.declarations[0];
-  if (decl === undefined) {
-    return fail(at, 'empty variable declaration list');
-  }
   const declKind: 'let' | 'const' = list.flags & ts.NodeFlags.Const ? 'const' : 'let';
+  const only = list.declarations.length === 1 ? list.declarations[0] : undefined;
+  if (only !== undefined) {
+    return lowerDeclarator(only, declKind, at, sourceFile, checker, bindings, diagnostics, fail);
+  }
+  // `let a = 1, b;` is its declarators in order, one Declaration each, in a sequence that binds
+  // into the enclosing statement list (plan-notes 310). Each spans its own declarator.
+  const statements: Statement[] = [];
+  for (const decl of list.declarations) {
+    const lowered = lowerDeclarator(
+      decl,
+      declKind,
+      decl,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+      fail,
+    );
+    if (lowered === null) {
+      return null;
+    }
+    statements.push(lowered);
+  }
+  const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
+  return { kind: 'block', type: H_UNDEFINED, span, statements, flatten: true };
+}
+
+/** One declarator of a `let`/`const` list; `at` is what its spans cover. */
+function lowerDeclarator(
+  decl: ts.VariableDeclaration,
+  declKind: 'let' | 'const',
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+  fail: (target: ts.Node, message: string) => null,
+): Statement | null {
   if (!ts.isIdentifier(decl.name)) {
     if (!isSimpleBindingPattern(decl.name) || decl.initializer === undefined) {
       return fail(decl, 'destructuring declaration without initializer');
@@ -2438,6 +2564,26 @@ function lowerExpressionAsStatement(
 ): Statement | null {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
 
+  let bare = expr;
+  while (ts.isParenthesizedExpression(bare)) {
+    bare = bare.expression;
+  }
+  if (
+    ts.isBinaryExpression(bare) &&
+    bare.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    (ts.isObjectLiteralExpression(bare.left) || ts.isArrayLiteralExpression(bare.left))
+  ) {
+    return lowerDestructuringAssignment(
+      bare.left,
+      bare.right,
+      span,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
+  }
+
   // A member target is a different statement shape, so it is tried first: assignmentParts would
   // otherwise report `a[i] = v` as an internal "target must be an identifier" error.
   const member = memberAssignment(expr, at, sourceFile, checker, bindings, diagnostics);
@@ -2491,20 +2637,7 @@ function lowerExpressionAsStatement(
     return null;
   }
   if (assignment !== undefined) {
-    if (immutableSelfBindings.has(assignment.target)) {
-      return {
-        kind: 'expression-statement',
-        type: H_UNDEFINED,
-        span,
-        expression: {
-          kind: 'type-error',
-          type: H_UNDEFINED,
-          span,
-          message: 'Assignment to constant variable.',
-        },
-      };
-    }
-    return { kind: 'assignment', type: assignment.value.type, span, ...assignment };
+    return assignmentStatement(assignment, span);
   }
 
   const exp = lowerExpression(expr, sourceFile, checker, bindings, diagnostics);
@@ -2745,11 +2878,33 @@ function privateOwnerMember(
  * layout — but the object is a `JSRTDynObject` (docs/VALUE.md §4.15), and the binding is the only
  * place that is recorded. Inside a class member the binding is the layout, so this answers false
  * and the fixed-slot path takes over, unchanged. */
+/** A method receiver's type as its lowering will carry it. A property read through a dynamic
+ * target lowers to a `dyn-field-access`, which is Unknown whatever the checker says: `this.name`
+ * in an object literal's `function` reads through an Unknown receiver, while the checker types it
+ * from the literal. Asking the checker instead sent `this.name.toUpperCase()` to the string-op
+ * arm with an Unknown target, an internal STA4081 (plan-notes 310); the dynamic method call is
+ * what runs it, `jsrt_get_prop` answering the bound String.prototype method. */
+function receiverTypeAt(obj: ts.Expression, checker: ts.TypeChecker, bindings: Scope): HType {
+  // `Math.PI` and `Number.EPSILON` read through a global with no HType, but they fold to number
+  // literals before any dynamic read is considered, so they keep the checker's `number`.
+  const folds =
+    ts.isPropertyAccessExpression(obj) &&
+    ((isGlobalMath(obj.expression, checker) && MATH_CONSTANTS.has(obj.name.text)) ||
+      numberConstant(obj, checker) !== undefined);
+  return ts.isPropertyAccessExpression(obj) &&
+    !folds &&
+    (targetIsDynamic(obj.expression, checker, bindings) ||
+      isFunctionValueMember(obj.expression, obj.name.text, checker))
+    ? hUnknown(false)
+    : typeAt(obj, checker, bindings);
+}
+
 function targetIsDynamic(target: ts.Expression, checker: ts.TypeChecker, bindings: Scope): boolean {
   if (target.kind === ts.SyntaxKind.ThisKeyword) {
     return bindings.get(RECEIVER)?.kind === 'unknown';
   }
   return (
+    isFunctionMemberRead(target, checker) ||
     isDynamicShape(checker.getTypeAtLocation(target), checker) ||
     typeAt(target, checker, bindings).kind === 'unknown'
   );
@@ -2784,6 +2939,151 @@ function slotOf(
   return slot;
 }
 
+/** The statement writing `assignment`: a TypeError for a named function expression's own name,
+ * which is immutable inside its body, and the assignment otherwise. */
+function assignmentStatement(
+  assignment: { target: string; value: Expression },
+  span: Span,
+): Statement {
+  if (immutableSelfBindings.has(assignment.target)) {
+    return {
+      kind: 'expression-statement',
+      type: H_UNDEFINED,
+      span,
+      expression: {
+        kind: 'type-error',
+        type: H_UNDEFINED,
+        span,
+        message: 'Assignment to constant variable.',
+      },
+    };
+  }
+  return { kind: 'assignment', type: assignment.value.type, span, ...assignment };
+}
+
+/** `({ a, b: c } = rhs)` / `[a, , b] = rhs` as a statement: the right side once, then one
+ * assignment per target, each reading what the declaration form `const { a, b: c } = rhs` reads
+ * (plan-notes 310). The gate admitted only variable targets with no default, rest or nesting. */
+function lowerDestructuringAssignment(
+  pattern: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
+  rhsNode: ts.Expression,
+  span: Span,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Statement | null {
+  const rhs = lowerExpression(rhsNode, sourceFile, checker, bindings, diagnostics);
+  if (rhs === null) {
+    return null;
+  }
+  const statements: Statement[] = [];
+  const source = patternSource(rhs, span, bindings, statements);
+  const targets: { key: string | number; name: ts.Expression; at: ts.Node }[] = [];
+  if (ts.isObjectLiteralExpression(pattern)) {
+    for (const p of pattern.properties) {
+      if (ts.isShorthandPropertyAssignment(p)) {
+        targets.push({ key: p.name.text, name: p.name, at: p });
+      } else if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name)) {
+        targets.push({ key: p.name.text, name: p.initializer, at: p });
+      }
+    }
+  } else {
+    pattern.elements.forEach((el, index) => {
+      if (!ts.isOmittedExpression(el)) {
+        targets.push({ key: index, name: el, at: el });
+      }
+    });
+  }
+  for (const { key, name, at } of targets) {
+    if (!ts.isIdentifier(name)) {
+      diagnostics.push(
+        lowerDiagnostic(
+          name,
+          sourceFile,
+          'STA4033',
+          'internal',
+          'assignment target must be an identifier',
+        ),
+      );
+      return null;
+    }
+    const parts = identifierAssignment(
+      name,
+      () => lowerPatternRead(source, key, name, at, sourceFile, checker, bindings, diagnostics),
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
+    if (parts === null) {
+      return null;
+    }
+    statements.push(assignmentStatement(parts, span));
+  }
+  return { kind: 'block', type: H_UNDEFINED, span, flatten: true, statements };
+}
+
+/** The `{ target, value }` of an assignment to the variable `targetNode` names, `make` building the
+ * value from the variable's current reading. Shared by `x = e` and its folds (assignmentParts) and
+ * by each target of a destructuring assignment (plan-notes 310). */
+function identifierAssignment(
+  targetNode: ts.Expression,
+  make: (current: Identifier) => Expression | null,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): { target: string; value: Expression } | null {
+  const target = placeName(targetNode, sourceFile, checker);
+  if (target === undefined) {
+    diagnostics.push(
+      lowerDiagnostic(
+        targetNode,
+        sourceFile,
+        'STA4033',
+        'internal',
+        'assignment target must be an identifier',
+      ),
+    );
+    return null;
+  }
+  const binding = bindings.get(target);
+  if (!binding) {
+    diagnostics.push(
+      lowerDiagnostic(
+        targetNode,
+        sourceFile,
+        'STA4034',
+        'internal',
+        `identifier '${target}' assigned before declaration`,
+      ),
+    );
+    return null;
+  }
+  const current: Identifier = {
+    kind: 'identifier',
+    type: binding,
+    span: makeSpan(targetNode.getStart(sourceFile), targetNode.getWidth(sourceFile), sourceFile),
+    // The HIR name: a shadowing binding writes to its own slot, not the outer one it shadows
+    // (plan.md §8 step 14).
+    name: bindings.hirName(target),
+  };
+  const raw = make(current);
+  if (raw === null) {
+    return null;
+  }
+  // Step 17's rule, extended to assignment: `h = () => ...` prints `[Function: h]`. Only a
+  // simple identifier target names its value -- a static member write (`C.f = ...`) keeps
+  // today's output, matching Node, which prints those anonymous. The display spelling is the
+  // target's SOURCE text, never the HIR name a shadowed binding writes under.
+  const value = ts.isIdentifier(targetNode) ? withDisplayName(raw, targetNode.text) : raw;
+  return {
+    target: bindings.hirName(target),
+    value: edgeBoundary(value, binding, targetNode, sourceFile),
+  };
+}
+
 /** The target and value of `x = e`, `x += e`, `x++` and `--x`, or `undefined` if `expr` is none of
  * those. `null` means it was one and lowering it failed.
  *
@@ -2803,55 +3103,8 @@ function assignmentParts(
   const build = (
     targetNode: ts.Expression,
     make: (current: Identifier) => Expression | null,
-  ): { target: string; value: Expression } | null => {
-    const target = placeName(targetNode, sourceFile, checker);
-    if (target === undefined) {
-      diagnostics.push(
-        lowerDiagnostic(
-          targetNode,
-          sourceFile,
-          'STA4033',
-          'internal',
-          'assignment target must be an identifier',
-        ),
-      );
-      return null;
-    }
-    const binding = bindings.get(target);
-    if (!binding) {
-      diagnostics.push(
-        lowerDiagnostic(
-          targetNode,
-          sourceFile,
-          'STA4034',
-          'internal',
-          `identifier '${target}' assigned before declaration`,
-        ),
-      );
-      return null;
-    }
-    const current: Identifier = {
-      kind: 'identifier',
-      type: binding,
-      span: makeSpan(targetNode.getStart(sourceFile), targetNode.getWidth(sourceFile), sourceFile),
-      // The HIR name: a shadowing binding writes to its own slot, not the outer one it shadows
-      // (plan.md §8 step 14).
-      name: bindings.hirName(target),
-    };
-    const raw = make(current);
-    if (raw === null) {
-      return null;
-    }
-    // Step 17's rule, extended to assignment: `h = () => ...` prints `[Function: h]`. Only a
-    // simple identifier target names its value -- a static member write (`C.f = ...`) keeps
-    // today's output, matching Node, which prints those anonymous. The display spelling is the
-    // target's SOURCE text, never the HIR name a shadowed binding writes under.
-    const value = ts.isIdentifier(targetNode) ? withDisplayName(raw, targetNode.text) : raw;
-    return {
-      target: bindings.hirName(target),
-      value: edgeBoundary(value, binding, targetNode, sourceFile),
-    };
-  };
+  ): { target: string; value: Expression } | null =>
+    identifierAssignment(targetNode, make, sourceFile, checker, bindings, diagnostics);
 
   if (ts.isBinaryExpression(expr)) {
     if (expr.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
@@ -3160,52 +3413,22 @@ function memberAssignment(
         ? accessorOwner(targetNode.expression, literalKey, checker, bindings, sourceFile)
         : undefined;
     if (placeOwner !== undefined && literalKey !== null) {
-      const read = hasAccessorHalf(
-        targetNode.expression,
+      const place = accessorPlace(
+        placeOwner,
+        target,
         literalKey,
-        'get',
-        checker,
-        bindings,
+        hasAccessorHalf(targetNode.expression, literalKey, 'get', checker, bindings, sourceFile),
+        placeType,
+        span,
+        targetNode,
         sourceFile,
-      )
-        ? accessorCall(
-            'get',
-            placeOwner,
-            target,
-            literalKey,
-            [],
-            placeType,
-            span,
-            targetNode,
-            sourceFile,
-            checker,
-            diagnostics,
-          )
-        : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
-      if (read === null) {
+        checker,
+        diagnostics,
+      );
+      if (place === null) {
         return null;
       }
-      current = read;
-      write = (value) => {
-        const call = accessorCall(
-          'set',
-          placeOwner,
-          target,
-          literalKey,
-          [value],
-          H_UNDEFINED,
-          span,
-          targetNode,
-          sourceFile,
-          checker,
-          diagnostics,
-        );
-        // `accessorCall` already reported; a null here would be the same miss the read
-        // survived.
-        return call === null
-          ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
-          : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
-      };
+      ({ current, write } = place);
     } else if (literalKey !== null && target.type.kind === 'object') {
       const slot = slotOf(target, literalKey, targetNode, sourceFile, diagnostics);
       if (slot === null) {
@@ -3293,50 +3516,38 @@ function memberAssignment(
       writePriv !== undefined
         ? privateAccessorHalves(writePriv.owner, writeRaw).get
         : hasAccessorHalf(targetNode.expression, field, 'get', checker, bindings, sourceFile);
-    const read = writeHasGet
-      ? accessorCall(
-          'get',
-          owner,
-          target,
-          field,
-          [],
-          placeType,
-          span,
-          targetNode,
-          sourceFile,
-          checker,
-          diagnostics,
-        )
-      : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
-    if (read === null) {
+    const place = accessorPlace(
+      owner,
+      target,
+      field,
+      writeHasGet,
+      placeType,
+      span,
+      targetNode,
+      sourceFile,
+      checker,
+      diagnostics,
+    );
+    if (place === null) {
       return null;
     }
-    current = read;
-    write = (value) => {
-      const call = accessorCall(
-        'set',
-        owner,
-        target,
-        field,
-        [value],
-        H_UNDEFINED,
-        span,
-        targetNode,
-        sourceFile,
-        checker,
-        diagnostics,
-      );
-      // `accessorCall` already reported; a null here would be the same miss the read survived.
-      return call === null
-        ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
-        : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
-    };
-  } else if (targetIsDynamic(targetNode.expression, checker, bindings)) {
-    // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). Only plain `=`
-    // reaches here -- the gate refused the compound and update forms -- so `current` is never
-    // read; it is built anyway so the two halves of a place stay one shape.
+    ({ current, write } = place);
+  } else if (
+    targetIsDynamic(targetNode.expression, checker, bindings) ||
+    isFunctionValueMember(targetNode.expression, targetNode.name.text, checker) ||
+    (target.type.kind === 'array' && targetNode.name.text === 'length')
+  ) {
+    // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). The compound and
+    // update forms read `current` through the same receiver, which `hoisted` evaluated once, so
+    // `f().n += 1` calls `f` a single time (plan-notes 310). An array's `length` is written by the
+    // same runtime entry, which resizes the array instead of touching a table (ECMA-262
+    // §10.4.2.4), and read as any `xs.length` is. So is an ordinary function's own property
+    // (`f.count += 1`), which lives in the closure's property table.
     const field = targetNode.name.text;
-    current = { kind: 'dyn-field-access', type: hUnknown(false), span, target, field };
+    current =
+      target.type.kind === 'array'
+        ? lengthRead(target, span)
+        : { kind: 'dyn-field-access', type: hUnknown(false), span, target, field };
     write = (value) => ({
       kind: 'dyn-field-assignment',
       type: value.type,
@@ -3541,6 +3752,18 @@ function lowerUpdatePlace(
     expr.kind === 'dyn-field-access'
   ) {
     return expr;
+  }
+  // `(xs.length = n)` in value position: the place is the array's `length`, which the runtime's
+  // property entries read and resize (plan-notes 310) -- the dynamic place over a typed array.
+  if (expr.kind === 'array-length') {
+    const place: DynFieldAccess = {
+      kind: 'dyn-field-access',
+      type: hUnknown(false),
+      span: expr.span,
+      target: expr.operand,
+      field: 'length',
+    };
+    return place;
   }
   diagnostics.push(
     lowerDiagnostic(
@@ -3762,11 +3985,12 @@ function lowerBlock(
   return block;
 }
 
-/** `receiver.concat(other)` as an HIR node — the lowering for array-literal spread. */
+/** `receiver.concat(other)` as an HIR node — the lowering for array-literal spread, marked so
+ * the holes it copies read as `undefined`. */
 function arrayConcatExpr(target: Expression, other: Expression, span: Span): Expression {
   const shape = ARRAY_OPS.concat;
   const type: HType = shape.result === 'self' ? target.type : hUnknown(false);
-  return { kind: 'array-op', type, span, op: 'concat', target, args: [other] };
+  return { kind: 'array-op', type, span, op: 'concat', target, args: [other], spread: true };
 }
 
 function emptyArrayLiteral(type: HType, span: Span): ArrayLiteral {
@@ -3919,7 +4143,7 @@ function lowerArrayLiteralExpression(
  * every importer dynamic. The CONTEXT is the type the empty array will be read as
  * (`const out: string[] = []`, `[] as string[]`, `return []` under a `string[]` return), so an
  * array context is the literal's type. A context still naming a type parameter is a generic
- * callee's, not this scope's, and keeps the checker's answer (plan-notes 311). */
+ * callee's, not this scope's, and keeps the checker's answer (plan-notes 322). */
 function arrayLiteralType(
   node: ts.ArrayLiteralExpression,
   checker: ts.TypeChecker,
@@ -4750,6 +4974,14 @@ function lowerExpression(
       value: constants[node.name.text] ?? Number.NaN,
     };
   }
+  // `Number.MAX_VALUE` and the other Number constants fold the same way (plan-notes 310).
+  const numberValue = ts.isPropertyAccessExpression(node)
+    ? numberConstant(node, checker)
+    : undefined;
+  if (numberValue !== undefined) {
+    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+    return { kind: 'number-literal', type: H_NUMBER, span, value: numberValue };
+  }
 
   // `c?.m` on a nullable single-class receiver: the static twin of the dynamic read below.
   // Without it the union maps to Unknown and the shape-table read misses (methods live in no
@@ -4817,7 +5049,8 @@ function lowerExpression(
   if (
     ts.isPropertyAccessExpression(node) &&
     !isMatchReceiver(node.expression, checker) &&
-    targetIsDynamic(node.expression, checker, bindings)
+    (targetIsDynamic(node.expression, checker, bindings) ||
+      isFunctionValueMember(node.expression, node.name.text, checker))
   ) {
     const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (target === null) {
@@ -4997,21 +5230,10 @@ function lowerExpression(
     if (!operand) {
       return null;
     }
-    const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
-    if (operand.type.kind === 'array') {
-      const length: ArrayLength = { kind: 'array-length', type: H_NUMBER, span, operand };
-      return length;
-    }
-    // `fn.length` on a statically-typed function -- a method value (`const f = o.m`) included,
-    // whose closure already excludes the receiver from its arity (docs/VALUE.md §4.16). An
-    // Unknown-typed receiver never reaches here: it took the dynamic path above and answers
-    // through `jsrt_get_prop` (plan.md §8 step 21b).
-    if (operand.type.kind === 'fn') {
-      const length: FunctionLength = { kind: 'function-length', type: H_NUMBER, span, operand };
-      return length;
-    }
-    const length: StringLength = { kind: 'string-length', type: H_NUMBER, span, operand };
-    return length;
+    return lengthRead(
+      operand,
+      makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+    );
   }
 
   if (ts.isArrayLiteralExpression(node)) {
@@ -5720,7 +5942,32 @@ function lowerExpression(
   // `new C(...)`. The class is named, not evaluated: the gate accepted only an identifier callee,
   // and what the emitter needs is the descriptor that identifier resolves to.
   if (ts.isNewExpression(node)) {
+    // `new F(...)` through a function value, or through an untyped one: the runtime constructs
+    // (`jsrt_construct`), and the result is a dynamic object whatever the checker infers from F's
+    // body (plan-notes 310).
+    if (isFunctionValueCallee(node.expression, checker)) {
+      const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
+      const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics);
+      if (target === null || args === null) {
+        return null;
+      }
+      const created: NewValue = {
+        kind: 'new-value',
+        type: hUnknown(false),
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        target,
+        args,
+      };
+      return created;
+    }
     const type = typeAt(node, checker, bindings);
+    // `new RegExp(p, f)` and `new Array(n)` are the calls without `new` (§22.2.4.1, §23.1.1.1);
+    // the gate admitted no other global function here.
+    const globalFunction = globalFunctionOf(node.expression, checker);
+    if (globalFunction === 'RegExp' || globalFunction === 'Array') {
+      const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+      return prologue === null ? null : globalFunctionNode(globalFunction, prologue, type);
+    }
     // A Map and a Set are allocated, not constructed: there is no descriptor to name and no
     // constructor to run, so the node carries which of the two it is and nothing else.
     if (type.kind === 'map' || type.kind === 'set') {
@@ -5729,6 +5976,7 @@ function lowerExpression(
         type,
         span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
         collection: type.kind,
+        weak: isWeakCollection(node, checker),
       };
       return created;
     }
@@ -5951,7 +6199,7 @@ function lowerExpression(
         type: narrowing.narrowed,
         span: ident.span,
         value: ident,
-        where: sourceLocation(node, sourceFile),
+        where: checkLocation(node, sourceFile),
       };
     }
     return ident;
@@ -5980,6 +6228,19 @@ function lowerExpression(
         type: H_STRING,
         span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
         value: 'function',
+      };
+    }
+    // `typeof JSON`: a global the language defines answers a fixed string, so the read folds and
+    // no value is built (plan.md §11c T11.4). The gate accepted exactly the names this folds.
+    const globalTypeof = ts.isIdentifier(operandNode)
+      ? globalTypeofOf(operandNode, checker)
+      : undefined;
+    if (globalTypeof !== undefined) {
+      return {
+        kind: 'string-literal',
+        type: H_STRING,
+        span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
+        value: globalTypeof,
       };
     }
     if (ts.isIdentifier(operandNode) && isUnresolvableIdentifier(operandNode, checker, bindings)) {
@@ -6059,7 +6320,7 @@ function lowerExpression(
       type: assertion.asserted,
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       value: operand,
-      where: sourceLocation(node, sourceFile),
+      where: checkLocation(node, sourceFile),
     };
   }
 
@@ -6122,6 +6383,22 @@ function lowerExpression(
         target,
         className: node.right.text,
         builtin: true,
+      };
+      return test;
+    }
+    // Against an ordinary function or an untyped value, the prototype question is the VALUE's,
+    // answered at run time (`jsrt_instanceof_ctor`, plan-notes 310).
+    if (isFunctionValueCallee(node.right, checker)) {
+      const ctor = lowerExpression(node.right, sourceFile, checker, bindings, diagnostics);
+      if (ctor === null) {
+        return null;
+      }
+      const test: InstanceOfValue = {
+        kind: 'instanceof-value',
+        type: H_BOOLEAN,
+        span,
+        target,
+        ctor,
       };
       return test;
     }
@@ -6251,6 +6528,16 @@ function lowerExpression(
       return lowerImportCall(node, sourceFile, checker, bindings, diagnostics);
     }
     const expr = node.expression;
+
+    // A global function called by name (plan.md §11c T11.4). The gate proved the name, the
+    // absence of a spread and the arity bound; the function itself is never lowered.
+    const globalFunction = globalFunctionOf(expr, checker);
+    if (globalFunction !== undefined) {
+      const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+      return prologue === null
+        ? null
+        : globalFunctionNode(globalFunction, prologue, typeAt(node, checker, bindings));
+    }
 
     // Check if this is a property access (console.log)
     if (ts.isPropertyAccessExpression(expr)) {
@@ -6404,7 +6691,32 @@ function lowerExpression(
         };
       }
 
-      const receiverType = typeAt(obj, checker, bindings);
+      // `Array.isArray(x)` is the builtin `x instanceof Array` (plan.md §11c T11.4): in one realm
+      // and without Proxy the two agree on every value, so it takes that node rather than a
+      // second spelling of the same tag test. `Array.isArray()` asks about `undefined`.
+      if (isGlobalArray(obj, checker) && propName === 'isArray') {
+        const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
+          return null;
+        }
+        const { span } = prologue;
+        const target: Expression = prologue.args[0] ?? {
+          kind: 'undefined-literal',
+          type: H_UNDEFINED,
+          span,
+        };
+        const test: InstanceOf = {
+          kind: 'instanceof',
+          type: H_BOOLEAN,
+          span,
+          target,
+          className: 'Array',
+          builtin: true,
+        };
+        return test;
+      }
+
+      const receiverType = receiverTypeAt(obj, checker, bindings);
       if (
         receiverType.kind === 'promise' &&
         (propName === 'then' || propName === 'catch' || propName === 'finally')
@@ -6492,6 +6804,19 @@ function lowerExpression(
           method: propName as MathMethod,
           args,
         };
+      }
+
+      // `n.toString(radix)` and `n.toFixed(digits)` (plan-notes 310): the one argument padded
+      // with `undefined`, which the runtime reads as the spec's default.
+      if (receiverType.kind === 'number' && Object.hasOwn(NUMBER_OPS, propName)) {
+        const prologue = lowerReceiverCall(obj, node, sourceFile, checker, bindings, diagnostics);
+        if (prologue === null) {
+          return null;
+        }
+        const { target, span } = prologue;
+        const op = propName as NumberOperation;
+        const args = padToArity(prologue.args, 1, span);
+        return { kind: 'number-op', type: H_STRING, span, op, target, args };
       }
 
       // The landed `Date.prototype` surface, on the string ops' padding discipline and for the
@@ -6708,7 +7033,7 @@ function lowerExpression(
       // `m.get(k)`, `s.add(v)` and the rest. Decided before the class case because a Map has no
       // class declaration at all: the receiver's TYPE is the whole test, and each operation is one
       // runtime function shared by every collection in the program.
-      const receiver = typeAt(obj, checker, bindings);
+      const receiver = receiverTypeAt(obj, checker, bindings);
       if (receiver.kind === 'map' || receiver.kind === 'set') {
         // Asked of the TYPE before anything is lowered: `super.m()` reaches this same branch, and
         // `super` names no value, so lowering the receiver to find out what it is would report an
@@ -6979,9 +7304,60 @@ function lowerExpression(
   return null;
 }
 
+/** The two calls whose callee loads off the receiver at run time. */
+type ReceiverCall = DynMethodCall | FieldCall;
+
+/** `o.m(a)` where `o`'s HIR type is Unknown, or `o.f(a)` where `f` is a layout FIELD holding a
+ * closure (`FieldCall`, plan-notes 310).
+ *
+ * `undefined` means "not this shape" and the ordinary call path applies; `null` means a
+ * diagnostic was pushed. Every typed receiver took a specialized arm before this point, so a
+ * receiver that still has a layout here is a field holding a closure; the two calls differ only
+ * in where the callee loads from. `super` and match receivers are excluded the same way: neither
+ * is a shape-table read. */
+function lowerDynMethodCall(
+  node: ts.CallExpression,
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): ReceiverCall | null | undefined {
+  if (!ts.isPropertyAccessExpression(expr)) {
+    return undefined;
+  }
+  const obj = expr.expression;
+  if (obj.kind === ts.SyntaxKind.SuperKeyword || isMatchReceiver(obj, checker)) {
+    return undefined;
+  }
+  const receiver = receiverTypeAt(obj, checker, bindings);
+  const slot = callableFieldSlot(receiver, expr.name.text);
+  // `assert.sameValue(a, b)`: a function's own property, called with the function as receiver.
+  // Its result is Unknown: the checker types it from whatever was assigned, which no layout holds
+  // the program to (plan-notes 310).
+  const functionMember = isFunctionValueMember(obj, expr.name.text, checker);
+  if (receiver.kind !== 'unknown' && slot === undefined && !functionMember) {
+    return undefined;
+  }
+  const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
+  if (target === null) {
+    return null;
+  }
+  const args = lowerCallArguments(node, sourceFile, checker, bindings, diagnostics);
+  if (args === null) {
+    return null;
+  }
+  const type = functionMember ? hUnknown(false) : typeAt(node, checker, bindings);
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const field = expr.name.text;
+  return slot === undefined
+    ? { kind: 'dyn-method-call', type, span, target, method: field, args }
+    : { kind: 'field-call', type, span, target, field, slot, args };
+}
+
 /** A call's arguments, lowered left to right: spread elements as expressions, generic arguments
- * as their specializations, everything else ordinarily. Shared by the ordinary call above and
- * the dynamic method call below, whose arguments are the same list. */
+ * as their specializations, everything else ordinarily. Shared by the ordinary call and
+ * the receiver calls above, whose arguments are the same list. */
 function lowerCallArguments(
   node: ts.CallExpression,
   sourceFile: ts.SourceFile,
@@ -7021,49 +7397,6 @@ function lowerCallArguments(
     args.push(lowered);
   }
   return args;
-}
-
-/** `o.m(a)` where `o`'s HIR type is Unknown.
- *
- * `undefined` means "not this shape" and the ordinary call path applies; `null` means a
- * diagnostic was pushed. Every typed receiver took a specialized arm before this point, so a
- * receiver that still has a layout here is a field holding a closure -- which the gate refuses
- * -- and only Unknown arrives. `super` and match receivers are excluded the same way: neither
- * is a shape-table read. */
-function lowerDynMethodCall(
-  node: ts.CallExpression,
-  expr: ts.Expression,
-  sourceFile: ts.SourceFile,
-  checker: ts.TypeChecker,
-  bindings: Scope,
-  diagnostics: Diagnostic[],
-): DynMethodCall | null | undefined {
-  if (!ts.isPropertyAccessExpression(expr)) {
-    return undefined;
-  }
-  const obj = expr.expression;
-  if (obj.kind === ts.SyntaxKind.SuperKeyword || isMatchReceiver(obj, checker)) {
-    return undefined;
-  }
-  if (typeAt(obj, checker, bindings).kind !== 'unknown') {
-    return undefined;
-  }
-  const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
-  if (target === null) {
-    return null;
-  }
-  const args = lowerCallArguments(node, sourceFile, checker, bindings, diagnostics);
-  if (args === null) {
-    return null;
-  }
-  return {
-    kind: 'dyn-method-call',
-    type: typeAt(node, checker, bindings),
-    span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
-    target,
-    method: expr.name.text,
-    args,
-  };
 }
 
 /** How V8 spells a non-function callee (verified against the pinned Node): a nameable
@@ -7844,6 +8177,15 @@ function lowerFunction(
       : node.name !== undefined && ts.isIdentifier(node.name)
         ? node.name.text
         : undefined;
+    const isAsync = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+    const isGenerator =
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isMethodDeclaration(node)
+        ? node.asteriskToken !== undefined
+        : false;
+    const constructible =
+      (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) && !isAsync && !isGenerator;
     const fn: FunctionExpr = {
       kind: 'function',
       type,
@@ -7852,13 +8194,9 @@ function lowerFunction(
       ...(selfBinding !== undefined && { selfBinding }),
       params,
       body: bodyWithParams,
-      isAsync: node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true,
-      isGenerator:
-        ts.isFunctionDeclaration(node) ||
-        ts.isFunctionExpression(node) ||
-        ts.isMethodDeclaration(node)
-          ? node.asteriskToken !== undefined
-          : false,
+      isAsync,
+      isGenerator,
+      ...(constructible && { constructible: true }),
       // The capture analysis resolved references by SYMBOL, so a name it reports is the one the
       // SOURCE wrote; the HIR may have renamed the declaration it points at. Both lists are
       // spelled in HIR names here, which is the only form the emitter's environment layout and
@@ -8170,6 +8508,37 @@ function isOverridden(name: string, method: string, checker: ts.TypeChecker): bo
     }
   }
   return false;
+}
+
+/** An accessor property as an assignment place: the read calls `get <key>` (or is `undefined`
+ * when the property has only a setter, which only the compound forms ever read), the write calls
+ * `set <key>`. One helper for the dot and the literal-key spellings, which name the same place. */
+function accessorPlace(
+  owner: string,
+  target: Expression,
+  key: string,
+  hasGet: boolean,
+  placeType: HType,
+  span: Span,
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  diagnostics: Diagnostic[],
+): { current: Expression; write: (value: Expression) => Statement } | null {
+  const call = (kind: 'get' | 'set', args: readonly Expression[], type: HType): MethodCall | null =>
+    accessorCall(kind, owner, target, key, args, type, span, at, sourceFile, checker, diagnostics);
+  const current = hasGet
+    ? call('get', [], placeType)
+    : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
+  if (current === null) {
+    return null;
+  }
+  const write = (value: Expression): Statement => {
+    const set = call('set', [value], H_UNDEFINED);
+    // `accessorCall` already reported; a null here would be the same miss the read survived.
+    return { kind: 'expression-statement', type: H_UNDEFINED, span, expression: set ?? value };
+  };
+  return { current, write };
 }
 
 /** `o.x` and `o.x = v` on an accessor: a call to the member function the mangled name holds.
@@ -9587,14 +9956,14 @@ function lowerFunctionBody(
 }
 
 function makeSpan(start: number, width: number, sourceFile: ts.SourceFile): Span {
-  const line = sourceFile.getLineAndCharacterOfPosition(start).line + 1; // 1-indexed
+  const { file, line } = remapPosition(start, sourceFile); // 1-indexed
   return {
     start,
     length: width,
     line,
     // The file, per span rather than per module: a merged program's statements come from many
     // files, and a #line directive naming the wrong one would point every debugger at it.
-    file: sourceFile.fileName,
+    file,
   };
 }
 
@@ -10436,13 +10805,20 @@ function lowerArguments(
  * arguments lowered left to right plus the span the node hangs off. `null` when lowering
  * failed. The namespace object itself is never lowered -- it names the table, not a value. */
 function lowerGlobalCall(
-  node: ts.CallExpression,
+  node: ts.CallExpression | ts.NewExpression,
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   bindings: Scope,
   diagnostics: Diagnostic[],
 ): { args: Expression[]; span: Span } | null {
-  const args = lowerArguments(node.arguments, sourceFile, checker, bindings, diagnostics, node);
+  const args = lowerArguments(
+    node.arguments,
+    sourceFile,
+    checker,
+    bindings,
+    diagnostics,
+    ts.isCallExpression(node) ? node : undefined,
+  );
   if (args === null) {
     return null;
   }
@@ -10511,6 +10887,74 @@ function typedOpNode(
     span,
     op,
     args: receiver === undefined ? padded : [receiver, ...padded],
+  };
+}
+
+/** A global function call's node (plan.md §11c T11.4). The three conversions ARE existing
+ * operations -- `String(x)` is a template hole (ToString, never the `valueOf`-first ToPrimitive
+ * `"" + x` runs), `Number(x)` is unary `+`, `Boolean(x)` is `!!x` -- and with no argument each is
+ * its constant. `Array()` and `Array(a, b, ...)` are the array literal of their arguments
+ * (§23.1.1.1 steps 4 and 6); the one-argument form may be a length and stays a call. The rest are
+ * one `global-call` each, padded to their row's arity because an omitted argument is `undefined`
+ * to the runtime. `created` is the checker's type of the whole call: the array an `Array` call
+ * builds. */
+function globalFunctionNode(
+  name: GlobalFunction,
+  prologue: { readonly args: readonly Expression[]; readonly span: Span },
+  created: HType,
+): Expression {
+  const { args, span } = prologue;
+  const [arg] = args;
+  switch (name) {
+    case 'String':
+      return arg === undefined
+        ? { kind: 'string-literal', type: H_STRING, span, value: '' }
+        : { kind: 'template-literal', type: H_STRING, span, quasis: ['', ''], expressions: [arg] };
+    case 'Number':
+      return arg === undefined
+        ? { kind: 'number-literal', type: H_NUMBER, span, value: 0 }
+        : { kind: 'unary-op', type: H_NUMBER, span, operator: '+', operand: arg };
+    case 'Boolean': {
+      if (arg === undefined) {
+        return { kind: 'boolean-literal', type: H_BOOLEAN, span, value: false };
+      }
+      const not: Expression = {
+        kind: 'unary-op',
+        type: H_BOOLEAN,
+        span,
+        operator: '!',
+        operand: arg,
+      };
+      return { kind: 'unary-op', type: H_BOOLEAN, span, operator: '!', operand: not };
+    }
+    case 'Array':
+      if (args.length !== 1) {
+        return { kind: 'array-literal', type: created, span, elements: args };
+      }
+      return globalCallNode(name, args, created, span);
+    case 'RegExp':
+      return globalCallNode(name, args, H_REGEXP, span);
+    case 'parseInt':
+    case 'parseFloat':
+      return globalCallNode(name, args, H_NUMBER, span);
+    case 'isNaN':
+    case 'isFinite':
+      return globalCallNode(name, args, H_BOOLEAN, span);
+  }
+}
+
+function globalCallNode(
+  name: GlobalCallName,
+  args: readonly Expression[],
+  type: HType,
+  span: Span,
+): Expression {
+  return {
+    kind: 'global-call',
+    type,
+    span,
+    name,
+    args: padToArity(args, GLOBAL_CALLS[name].arity, span),
   };
 }
 
@@ -10594,7 +11038,14 @@ function lowerExternCall(
     } else {
       argTags.push(undefined);
     }
-    args.push(maybeBoundary(arg, externKindHType(kind), site, sourceFile));
+    // A `bytes` argument is checked whenever it is not PROVEN a view: the emitter reads the
+    // view's layout straight after the check, so a dynamic value or a js-mode value of another
+    // type must fail as STA2001 here, never reach C as a misread struct (docs/FFI.md §2).
+    args.push(
+      kind === 'bytes' && arg.type.kind !== 'uint8array'
+        ? boundaryCheck(arg, externKindHType(kind), site, sourceFile)
+        : maybeBoundary(arg, externKindHType(kind), site, sourceFile),
+    );
   }
   // The declaration file's header, if it names one: the prologue includes it and skips the
   // forward declaration, so the header's real prototype governs the call (docs/FFI.md §9).

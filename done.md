@@ -3412,3 +3412,427 @@ on main `ede4537`):
   - `builtins`: 234/294. `node-coverage --check`: current.
   - leak: plateau.
   - ASan: `node packages/tests/golden/asan-gate.ts` → 408 passed, `golden-asan green`.
+
+## Phase 11 — T11.3a `Uint8Array` across the extern boundary ✅ (2026-10-02)
+
+**Landed 2026-10-02** (plan-notes 311, changelog v4.39). A `Uint8Array` is a parameter row of
+the FFI table (docs/FFI.md §2). The new ABI kind is `bytes`: one TS parameter, two C arguments
+(`uint8_t *`, `size_t`), pointing at the view's own storage for the call, with no copy. The
+classifier maps it in `frontend/extern.ts`, and a return is STA1119 because a returned buffer has
+no owner and no length. Exports keep the `jsrt_value` form. The lowering checks a dynamic
+argument, and the emitter guards every other one with `jsrt_check_uint8array` (STA2001), because a
+js-mode caller can reach an annotated `.ts` parameter with anything. The runtime gains the
+`jsrt_uint8array_bytes`/`_count` accessors and the check. `std/io.writeBytes`/`read` take the row,
+and the byte channel (`internal/bytes.ts`, `jsrt_std_bytes_*`) is deleted. A new fixture's Node
+twin may be `node_shim.ts`.
+
+**GC rule, as checked against T11.1's design.** The view stays in its rooted argument slot for the
+call, and its `buffer` edge keeps the data block alive. Boehm is non-moving and the no-GC build is
+plain malloc. A buffer never resizes or detaches. The C call runs no Stator code. So the pointer
+is stable until the callee returns. No design change was needed.
+
+**Check evidence:**
+
+- **Decision tests, both modes:** `pnpm run test:subset` → 813 fixtures, 778 passed,
+  35 expected-fail, 0 failed. New: `subset_extern_bytes_ts`/`_js` (static),
+  `subset_extern_bytes_dynamic_js` (dynamic: the lowering's check), and
+  `subset_extern_bytesret_ts`/`_js` (error `STA1119`).
+- **Goldens, byte for byte vs Node:** `pnpm run test:golden` → 413 passed.
+  - `golden/ts/extern_bytes` passes views into fixture C (`ffi.c`) and gets bytes back. It
+    covers a fill through a `subarray`, a reverse in place, a window over `buf.buffer`, empty
+    views and a 1 MiB fill. Its Node twin is `node_shim.ts`.
+  - `golden/ts/std_io` writes a whole view and an offset `subarray` through `std/io.writeBytes`.
+  - `unit/std.test.ts` reads a MiB from stdin through `std/io.read` and writes it back
+    unchanged.
+- **ASan:** `node packages/tests/golden/asan-gate.ts` → the print corpus matches Node under
+  ASan/UBSan, 413 passed, `golden-asan green`.
+- **One call, not 1M:** `extern_bytes` prints `calls for 1 MiB: 1` on both sides.
+  `unit/std.test.ts` asserts a single `jsrt_std_io_write_bytes(`/`jsrt_std_io_read(` call site,
+  each passing pointer + length.
+- **Timing (hyperfine, M3 Max):** 10 MiB written goes from 87.1 to 3.9 ms, and 10 MiB read from
+  247.5 to 5.3 ms, against a 3.6 ms startup floor. The numbers are in plan-notes 311.
+- **The guard:** `unit/extern-bytes.test.ts` (5 tests) covers four things.
+  - The classifier: a parameter is `bytes`, a return is `STA1119`, and the export position falls
+    back to `jsrt_value`.
+  - The paired prototype and arguments.
+  - One guard per call, and none doubled on a dynamic argument.
+  - A string through `std/io.writeBytes` from js mode ends with SIGABRT and `STA2001`, not
+    SIGSEGV.
+- **Rest of `pnpm run ci` (exit 0):** typecheck and lint are clean. `cpd`: 207 clones, none new.
+  vitest: 51 files, 683 tests. `builtins` 242/304; `node-coverage` current; leak plateau.
+  selfhost: 8 targets match the baseline, no `--update` needed (`std/io` stays static).
+
+The card as it stood in plan.md:
+
+### T11.3a. `Uint8Array` across the extern boundary — **[D3 · P1]**
+
+Depends on T11.1 (the storage) and replaces T11.3's byte channel before T11.3 steps 2 and 3
+merge.
+
+- `Uint8Array` becomes a parameter row in the extern table (docs/FFI.md §2), and a return row
+  too if that is cheap; decide and document it.
+- The emitter passes pointer + length from the T11.1 Zig-owned storage; the backing copies at
+  most once.
+- GC rule: the buffer stays rooted and does not move for the call. Check the T11.1 design and
+  say how it is guaranteed.
+- `packages/std` drops `internal/bytes.ts` and the push/at channel; `io.writeBytes`/`read` move
+  to the new row.
+- Docs: FFI.md, STD.md §6, SUBSET.md, DIAGNOSTICS.md if STA1115's wording changes.
+
+**Check:** decision tests in both modes; goldens that pass a `Uint8Array` to an extern and get
+bytes back, byte-for-byte vs Node (for std/io); an ASan run; a unit or bench measurement showing
+1 MB crosses in one call, not 1M, with numbers recorded in plan-notes.
+
+## Phase 11 — T11.3 the N1 `std` modules ✅ (2026-10-02)
+
+**Landed 2026-10-02** in three PRs (plan-notes 309; changelog v4.28, v4.29, v4.30), with T11.3a
+(plan-notes 311) between steps 1 and 2.
+
+- **Step 1** (#70): `std/os` and `std/io`. `std/io` calls libc directly, so a bad descriptor is
+  `EBADF` rather than a Zig panic, and a write flushes C stdio first. Its bytes first crossed a
+  byte channel; T11.3a replaced that with the extern table's `Uint8Array` row.
+- **Step 2** (#71): `std/encoding` (Node's `Buffer` conversions; bytes-to-text through the
+  backing, in NUL-free runs) and `std/hash` (Zig's `std.crypto` digests, `std.Io` secure
+  random), both over the row.
+- **Step 3**: `std/process` gains `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`,
+  `memoryUsage`, `exitCode`/`setExitCode`. The emitter's `main` takes `argc`/`argv` and returns
+  the runtime's exit-code slot (`packages/runtime/src/jsrt_process.c`). `std/fs` gains
+  descriptors (`open`/`read`/`write`/`close`), `readBytes`, `readdir`, `realpath`, `utimes` and
+  `exists`.
+
+**Check evidence:**
+
+- **A golden per module against Node's equivalent:** `std_os`, `std_io`, `std_encoding`,
+  `std_hash`, `std_process` and `std_fs`, each against its `golden/std-oracle/` twin.
+  `pnpm run test:golden` → 415 passed.
+- **Nondeterministic results by unit-test ranges** (`unit/std.test.ts`, 14 tests):
+  `randomBytes` draws are fresh and cover all 256 byte values; `pid`, `ppid` (the spawning
+  process), `execPath` (the binary's real path), `hrtimeNs` (a 20 ms sleep measures at least
+  20 ms), `memoryUsage().rss` (1 MiB to 16 GiB) and `hostname` (Node's `os.hostname()`).
+  Real arguments, a non-zero `setExitCode`/`exit`, an uncaught throw's status 1 and `abort` are
+  there too, since the golden runner passes no arguments and demands status 0.
+- **Subset rows in both modes:** `pnpm run test:subset` → 821 fixtures, 786 passed,
+  35 expected-fail, 0 failed; `subset_std_{os,io,encoding,hash,process,process_n1,fs,fs_fd}_ts`
+  and `_js` are all static except `std/hash`'s, which are dynamic (the `Uint8Array | string`
+  union, STD.md §5).
+- **Rest of `pnpm run ci` (exit 0):** typecheck and lint clean; `cpd` 206 clones (one fewer:
+  the two async entries share `emitAsyncModuleRun`); vitest 51 files, 688 tests; selfhost matches
+  its baseline; `builtins` 242/304; `docs/NODE.md` current; leak plateau; `golden-asan green`.
+
+The card as it stood in plan.md:
+
+### T11.3. `packages/std`: the N1 modules — **[D3]**
+
+Depends on T11.1, T11.2. Zig backings, POSIX first (STD.md §4). Errors throw with a stable
+`code` (STD.md §3).
+
+| Module | Functions |
+| --- | --- |
+| `std/process` (extend) | `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode` |
+| `std/fs` (extend) | `open`/`read`/`write`/`close` on fds, `readdir`, `realpath`, `utimes`, `exists`, bytes reads (`unlink`, `rmdir` and UTF-8 text reads landed with T11.2) |
+| `std/os` | `platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol` |
+| `std/io` | `stdin`/`stdout`/`stderr` fds, `write`, `read`, `isatty`, `terminalSize` |
+| `std/hash` | `sha256`, `sha1`, `md5` over bytes or strings; `randomBytes` |
+| `std/encoding` | UTF-8 / latin1 / base64 / base64url / hex ↔ bytes |
+
+**In progress** — Claude Code / opus-5-5. Execution plan, three PRs in this order, each with its
+own Check evidence (a golden per module it lands). Steps 1 and 2 land with plan-notes 309:
+
+1. `std/os` + `std/io`. `io` writes flush C stdio first so `console.log` and `io.write` keep
+   program order. New §3 codes `EBADF` and `ENOTTY`. Bytes first crossed through a byte channel
+   (one FFI call per byte); T11.3a replaced it with the extern table's `Uint8Array` row.
+2. `std/encoding` + `std/hash`: encoding is strict TypeScript over `Uint8Array` (no OS edge;
+   a string never crosses the C-string boundary, so a NUL survives); hash is Zig's
+   `std.crypto` (`Sha256`, `Sha1`, `Md5`) over the `Uint8Array` row (T11.3a), `randomBytes` is
+   `std.Io`'s secure random filling a caller-sized view.
+3. `std/process` + `std/fs` extensions: `argv` needs `int main(int argc, char **argv)` from the
+   emitter and a runtime slot (plan-notes 294); fd calls own a second lifetime (STD.md §9.3).
+
+Each step: `zig/<module>.zig`, `src/<module>.ts`, `src/native/<module>.d.ts`, a Node twin in
+`golden/std-oracle/`, a `std_<module>` golden, subset rows in both modes, unit-test ranges for
+nondeterministic values, docs/STD.md §3/§5 and docs/SUBSET.md rows.
+
+**Check:** a golden per module against Node's equivalent (nondeterministic results — `hostname`,
+`pid`, `randomBytes` — proved by unit-test ranges, as `test:builtins` carves them out).
+
+## Phase 12 — T12.1 bundler API ✅ (2026-10-02)
+
+### T12.1. `packages/compiler`: the bundler API — **[D4]**
+
+Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
+
+**Landed 2026-10-02** (plan-notes 320). The execution plan it was claimed with:
+
+1. `src/api.ts` (`statorc/api` in `package.json` `exports`): the §5 types, `compile` and
+   `vendorEntry`. Adapter and bundle results are `unknown` until validated (golden rule 4).
+2. `src/frontend/vendor.ts`: collect package imports (bare, not `node:*`, a built-in or `std/*`)
+   and CommonJS project files from the loaded program, mangle names, generate the entry.
+3. Same module: rewrite each project import of a package into an import of one virtual
+   `__stator_vendor__.js` module, line count kept; `createProgram` takes the overlay (the
+   rewritten files plus the bundle) and its cache key gains the bundle's sha256 (step 6). The
+   module graph resolves edges through the checker, so the virtual module is an edge.
+4. `src/cli/bundler.ts`: `--bundler` on `build`/`explain` and the config key; STA0004 in `ts`
+   mode, STA0014 when the adapter cannot load, STA0015 when `bundle()` rejects or returns no
+   valid bundle. `build` and `explain` share one frontend driver.
+5. `src/support/sourcemap.ts`: one wrapper over `node:module` `SourceMap`. Diagnostics in the
+   vendor module are mapped after each stage; the lowering maps vendor spans, so `#line` and
+   `jsrt_call_at` strings name the original file, or `<package bundle>` with no mapping.
+6. Card step 7: the gate raises a new `not-yet` code (STA1218, Phase 11) for a free `__filename` or
+   `__dirname`; `program.ts` drops the checker's "cannot find name" for the two names so the
+   gate's verdict stands in both modes.
+
+Tests: unit tests over a stub adapter (vendor entry, rebinding, mapping, STA0014/STA0015),
+decision tests for STA1218 in both modes, and the `js` goldens under `--bundler=none` and the
+default. Docs: `BUNDLER.md`, `MODES.md`, `HOW-IT-WORKS.md`, `DIAGNOSTICS.md`, `CONFIG.md`,
+`pipeline.d2`; plan-notes 320, changelog v4.40.
+
+1. **The API.** `statorc/api`: a programmatic `compile` that takes an optional vendor bundle
+   (`{ code, map, inputs }`), and the adapter interface
+   `BundlerAdapter = { name, bundle(entry: { code, resolveDir }, { external }) → Promise<{ code, map, inputs }> }`.
+2. **The vendor entry.** After the program loads, collect the package imports and route the
+   CommonJS project files. Generate the vendor entry:
+   - named imports become `export { a } from 'p'`;
+   - default and namespace imports get mangled names;
+   - a name is mangled only on collision.
+3. **The vendor module.** Add the bundle as one virtual `js`-mode module and rebind the
+   imports to its exports. `export { a as b }`, the form Rolldown emits for renamed exports, is
+   lowered already: it landed with §11c T11.5a step 3 (`subset_export_renamed_*`).
+4. **The CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
+   - the default in `js` mode is `vite`, loading `vite-stator`;
+   - in `ts` mode the flag is `STA0004`;
+   - the adapter loads only when step 2 found something;
+   - `STA0014` means the adapter cannot be loaded, and its message names the package;
+   - `STA0015` means the bundle step failed, with the bundler's message passed through.
+5. **Source maps.** Diagnostics, `#line` and runtime call-site strings in the vendor module
+   map through the source map (`node:module` `SourceMap`, wrapped once in `src/support/`;
+   stability 1.1). A position with no mapping says it sits in a bundler runtime helper, never
+   a user file.
+6. **The cache.** The program-cache key (Task 6.9) adds the sha256 of the vendor `code`.
+7. **`__filename`/`__dirname`.** Without `--node`, a free read of either in a project file
+   or in the vendor module is a `not-yet` diagnostic naming T11.5 (BUNDLER.md §4, §9). Inside
+   the vendor module it is reported at the mapped position. The code is allocated in
+   `docs/DIAGNOSTICS.md` when this lands.
+
+   Today such a read compiles as `dynamic`, and the binary throws `ReferenceError` where Node
+   prints the path. No path is ever baked into the binary.
+
+Docs: `HOW-IT-WORKS.md`; `MODES.md`, covering packages, the vendor module and the
+package-evaluation-order deviation (BUNDLER.md §1, documented only, no card closes it), the
+latter next to top-level-await interleaving in §5; `DIAGNOSTICS.md` (STA0014/STA0015 move from
+planned to emitted, plus step 7's code); `pipeline.d2` (a dependency-bundling stage before the frontend in
+`js` mode).
+
+**Check:**
+
+- Unit tests drive `compile` and the vendor-entry generator through a stub adapter.
+- Every existing `js` golden passes byte-for-byte under `--bundler=none` **and** under the
+  default, with Vite not installed. None of them imports a package, so the adapter must not
+  load.
+- A diagnostic inside a vendored module reports the original file and line. One inside a
+  runtime helper says "no source mapping".
+- `STA0014` is raised for a package import when the adapter is absent.
+- Decision tests: `__filename`/`__dirname` are `not-yet` in a project `.js` without `--node`.
+
+**What landed.**
+
+- `src/frontend/vendor.ts`: package imports and CommonJS project files out of the loaded
+  program; the vendor entry with mangled names; the in-place rewrite of each project declaration
+  to `./__stator_vendor__.js`, every line kept, type-only names split onto the original module.
+- `src/cli/bundler.ts`: the one frontend driver `build`, `explain` and `statorc/api` share. It
+  loads the adapter by name only when the vendor plan is not empty, checks every answer
+  (golden rule 4), reloads the program over the overlay, and maps diagnostics.
+- `src/frontend/program.ts`: `createProgram` takes the overlay; the program cache has two slots
+  and keys on the overlay's sha256 as well. `src/frontend/graph.ts` resolves edges through the
+  checker, so the virtual module is an edge.
+- `src/support/sourcemap.ts`: the wrapper over `node:module` `SourceMap`. The lowering maps
+  vendor spans, so `#line`, `jsrt_call_at` strings and STA2001 locations name the package file,
+  or `<package bundle>`.
+- `--bundler=vite|none|<module>` on both commands and the `bundler` config key (schema
+  regenerated). STA0014, STA0015 emitted; STA0004 for `--bundler` in `ts` mode.
+- `src/api.ts` (`statorc/api` in `package.json` `exports`): `compile`, `vendorEntry`, the §5 types.
+- STA1218 (step 6) for a free `__filename`/`__dirname`, in both modes.
+- Decisions this card had to make (CommonJS routing narrowed to files that read `require`,
+  `module` or `exports`; `sources` resolved against `resolveDir`; `export *`/`import()` of a
+  package left refused): plan-notes 320.
+
+**Check evidence.**
+
+- Unit tests over stub adapters, `packages/tests/unit/bundler.test.ts` (16 tests): the vendor
+  entry and mangling, the rewrite, CommonJS routing, `compile` with a stub (C carries
+  `#line 3 "<root>/node_modules/leftpad/index.js"`), a vendor diagnostic at
+  `node_modules/leftpad/index.js:6:1 STA1214`, a helper diagnostic at `<package bundle>` with
+  "(bundler runtime helper, no source mapping)", STA0014 with no `vite-stator` installed and for
+  a missing or export-less module, STA0015 for a rejecting adapter and a map-less bundle, an
+  adapter that is never called when nothing needs bundling, STA0004, and the cache key.
+  `pnpm run test` → `Test Files  52 passed (52)`, `Tests  704 passed (704)`.
+- `js` goldens with Vite not installed (`node_modules/vite`, `node_modules/vite-stator` absent):
+  `pnpm run test:golden` → `golden: 415 fixtures — 415 passed, 0 failed`;
+  `node packages/tests/golden/run.ts --bundler=none` → `golden: 415 fixtures — 415 passed, 0 failed`.
+  The default run is the proof that no adapter loads: a fixture that needed one would fail STA0014.
+- Decision tests `subset_node_{filename,dirname}_{ts,js}` (not-yet, STA1218):
+  `pnpm run test:subset` → `subset: 825 fixtures — 790 passed, 35 expected-fail, 0 failed`.
+- Self-compilation: the new code adds 1 × STA1207 (the adapter's `import()` of a computed
+  specifier) and 63 × STA1214 to `packages/compiler` (1648 → 1711), recorded with `--update` (plan-notes 306);
+  `pnpm run test:selfhost` → `selfhost: 10 targets match the baseline`.
+- `pnpm run ci` on the branch rebased onto 10930d1: exit 0 (typecheck, lint, dupes at 205 clones,
+  runtime, unit, runtime corpus, subset, golden, selfhost, builtins, node-coverage, leak, ASan).
+
+## Phase 12 — T12.2 `packages/vite-stator` ✅ (2026-10-02)
+
+### T12.2. `packages/vite-stator`: the default integration — **[D3]**
+
+Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDependency`
+(plan-notes entry: the integration *is* Vite, no few lines replace it). It ships:
+
+- the adapter `stator build --mode=js` uses by default, configured per BUNDLER.md §2:
+  - an SSR build with `ssr.noExternal: true` and `ssr.target: 'node'`. Library mode is wrong:
+    it stubs `node:*` out;
+  - Rolldown output `format: 'es'`, `codeSplitting: false` and `topLevelVar: false`;
+  - `minify: false`, `sourcemap: true`, `std/*` external;
+  - Vite's `esmExternalRequirePlugin` for built-ins;
+  - no `__filename`/`__dirname` transform. They stay free, and T12.1 reports them as
+    `not-yet` (BUNDLER.md §9);
+- the `stator()` Vite plugin (`vite build` produces the native binary);
+- an example under `examples/vite/` with its README.
+
+**Check:**
+
+- New goldens with a `node_modules` package pass through the default adapter, byte-for-byte
+  vs Node: named, default and namespace imports, and two packages sharing a dependency (one
+  instance).
+- `examples/vite` builds a binary with `vite build`.
+- Tree-shaking, measured on a package, because project code is already tree-shaken by
+  Stator's DCE (BUNDLER.md §1, 93 976 B both ways). Import 1 of 40 functions from a package:
+  - the vendor module holds only that function;
+  - the binary is within 1% of the same function written in the project.
+  The numbers go in plan-notes.
+
+**Landed 2026-10-02** (plan-notes 321). The execution plan it was claimed with:
+
+1. `packages/vite-stator` (workspace package, strict TS): `src/adapter.ts`, the default adapter,
+   with §2's configuration as one Vite SSR build of an in-memory vendor entry; `src/plugin.ts`,
+   `stator()`; `src/index.ts` (default export = the adapter). `vite` is a peer and a dev
+   dependency at the version the lockfile already holds; root `devDependencies` gains
+   `vite-stator` so the compiler resolves it. tsconfig, `typecheck`, moon project, TOOLCHAIN.md.
+2. Goldens `packages/tests/golden/js/pkg_*` with a committed `node_modules` (`.gitignore`
+   exception): named, default and namespace imports, and two packages sharing one dependency.
+   `golden/run.ts --bundler=none` skips fixtures that hold a `node_modules`.
+3. `examples/vite`: a workspace example whose `vite build` writes a native binary; a unit test
+   runs it.
+4. Tree-shaking: a 40-function package, one imported; the vendor module and the binary size
+   against the same function in the project, in plan-notes.
+5. Docs (BUNDLER.md, README, AGENTS.md repo map, TOOLCHAIN.md), plan-notes, changelog, done.md.
+
+**Re-scoped on landing (plan-notes 321).** The namespace import of a package moved to T12.3's
+Check: the vendor entry's `export * as p$ns` makes Rolldown emit `__exportAll`
+(`Object.defineProperty`, `Symbol.toStringTag`), T12.3's helper item. Vite is pinned at 8.3.1,
+not the latest 8.3.2, because 8.3.2 is inside pnpm's `minimumReleaseAge` and would bump vitest's
+`vite` (open for the creator).
+
+**What landed.**
+
+- `packages/vite-stator`: `src/adapter.ts` (one `vite.build()` per compile: the vendor entry
+  served in memory as `<resolveDir>/__stator_vendor_entry__.js`, `outDir: resolveDir` with
+  `write: false` so map sources are relative to `resolveDir`, one chunk or an error),
+  `src/plugin.ts` (`stator({ entry, out?, mode? })`: `build.ssr` at the entry with nothing
+  written, `compile` in `closeBundle`, the Vite build fails on a failed compile), `src/index.ts`,
+  tsconfig, `moon.yml`; root `typecheck` and moon's `tests:ci` include it.
+- The adapter passes the external list to `esmExternalRequirePlugin` only, so `require` of a
+  built-in becomes an `import` (Rolldown's own `external` pre-empted the plugin; plan-notes 321).
+- `examples/vite`: `src/main.js` imports `greeting` (`link:./greeting`); `vite build` writes
+  `dist/hello`.
+- Goldens `pkg_imports` and `pkg_shared_dependency` with committed `node_modules`;
+  `golden/run.ts --bundler=none` skips them and says so.
+- Docs: BUNDLER.md (status, "As implemented (T12.2)", the plugin, §8), README, AGENTS.md repo map,
+  TOOLCHAIN.md (`vite`, `vite-stator`), ARCHITECTURE.md and `packages.d2`/`.svg` (the package is
+  loaded, never imported), `examples/vite/README.md`.
+
+**Check evidence.**
+
+- Goldens through the default adapter, byte-for-byte vs Node: `pkg_imports` (named and default
+  imports, a package `exports` map) and `pkg_shared_dependency` (`a1 b2 a3` / `4 4`: one
+  `counter` instance). `pnpm run test:golden` → `golden: 433 fixtures — 433 passed, 0 failed`;
+  `node packages/tests/golden/run.ts --bundler=none --filter pkg_` →
+  `golden: SKIPPED 2 fixtures that import packages (--bundler=none)`.
+- `examples/vite` builds a binary with `vite build`: unit test `examples/vite: vite build writes
+  a binary that prints what Node prints` (`packages/tests/unit/vite-stator.test.ts`, 4 tests).
+- Tree-shaking: 1 of 40 functions imported; the vendor module holds only `function f7` (unit
+  test `the adapter tree-shakes`); the binary is 116 880 B through the package and 116 880 B with
+  the function in the project, 0% apart (plan-notes 321).
+- The Node suite (T11.7): `pnpm run test:node-suite` → `Tests  15 passed | 2 skipped (17)`; the
+  15 CommonJS `test-path*` files now stop at `STA0015` (`../common` resolves only through the
+  harness's host hook), not `STA0014` (plan-notes 321).
+- `pnpm run ci` on the branch rebased onto 9a26b03: exit 0 (typecheck, lint, dupes at 188
+  clones, runtime, unit `Test Files  55 passed (55)` / `Tests  721 passed (721)`, runtime
+  corpus, subset `879 fixtures — 846 passed, 33 expected-fail, 0 failed`, golden 433/433,
+  selfhost `12 targets match the baseline`, builtins, node-coverage, leak, ASan golden 433/433).
+
+## Phase 11 — T11.5 `--node` and CommonJS ✅ (2026-10-02)
+
+### T11.5. `packages/compiler`: the `--node` flag and CommonJS — **[D4]**
+
+Depends on T11.2. **Re-scoped by T12.0** (question 4, plan-notes 296; `docs/BUNDLER.md` §4):
+the bundler converts CommonJS. Rolldown wraps each module as a function over
+`(exports, module)`, and it already turns static `require` into graph edges, decides `"type"`
+and gives CJS cycles Node's partial `exports`. Stator writes none of that. A CommonJS project
+file (Node's rule: `.cjs`, `"type": "commonjs"`, or `.js` without ES-module syntax) is routed
+to the bundler by T12.1, under `--node` only (decided 2026-10-02, plan-notes 315).
+
+**Landed 2026-10-02** (plan-notes 312, 315, 316), in three changes: the steps that do not need
+the bundler (312); `--node` gating CommonJS routing of project files (315); and the run-time
+steps (316): `node:module` with a `require` over built-ins, `import.meta` under `--node`, and the
+vendor module's `__filename`/`__dirname` injected relative to the executable. `STA1218` is
+retired; every free CommonJS binding that reaches the gate is `STA1110`.
+
+Steps:
+
+- ~~**The flag.**~~ Landed (plan-notes 312): `--node` on `build` and `explain`, the config key
+  `node`. An unlanded `node:*` module or member is `STA1214` naming Phase 11 (T11.6). A Node
+  global member under `--node` joins this when `packages/node` declares its globals (T11.6).
+- ~~**The Node globals' location.**~~ Decided (plan-notes 312, `docs/MODES.md` §6): relative to
+  the executable, resolved at run time, never `import.meta.url`. Landed (plan-notes 316): the vendor
+  module's values are injected; `STA1218` is retired.
+- **Resolution.** ~~ESM imports in project files~~ landed (plan-notes 312): `node:*` and bare
+  built-ins resolve to `packages/node` through `paths` entries. Landed (plan-notes 316): `node:module` and every landed built-in have a default export. The
+  vendor bundle reaches them as `import * as m from "path"` plus `m.default`
+  (`esmExternalRequirePlugin`), so built-ins need a default export (T11.6 provides it).
+- ~~**`require` at run time.**~~ Landed (plan-notes 316). `import.meta.url` + `node:module.createRequire`
+  give a `require` over built-ins only. It serves Rolldown's `__require` for computed
+  `require(expr)`, and anything that is not a built-in throws Node's `MODULE_NOT_FOUND`. A
+  computed require of a bundled file cannot resolve: Node itself fails on the bundle, as
+  measured in T12.0.
+- ~~**`STA1110`** narrows to "without `--node`".~~ Landed (plan-notes 312): it stays in `ts` mode
+  with or without the flag, and in `js` mode without it. No new code.
+- ~~**`--node` gates CommonJS routing.**~~ Landed (plan-notes 315): `planVendor` routes a CommonJS
+  project file only under the flag, and the gate answers a free `module.exports` or `exports`
+  with `STA1110` (it used to reach the lowering as `STA4035`).
+
+Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORKS.md`,
+`CONFIG.md` — updated for the landed steps.
+
+**Check:** decision tests for `require` in all four mode × platform cells — **passing**
+(`subset_commonjs_require_*`); for a CommonJS project file in all four — **passing**
+(`subset_commonjs_file_ts` / `_node_ts` / `_js`, and the `js` + `--node` cell, which needs an
+adapter, in `unit/bundler.test.ts`). Goldens, byte-for-byte vs Node: `createRequire` of a built-in, a
+computed `require` hit (a built-in) and miss (`MODULE_NOT_FOUND`) — landed (plan-notes 316). The CJS
+cycle and `module.exports` replacement goldens moved to T12.3.
+
+**Check — PASSED** (2026-10-02, on main 9a26b03):
+
+- Decision tests for `require` in all four mode × platform cells (`subset_commonjs_require_*`,
+  all `STA1110`), for a CommonJS project file in all four (`subset_commonjs_file_*`, the `js` +
+  `--node` cell in `unit/bundler.test.ts`), and for `__filename`/`__dirname` and `import.meta`
+  (`subset_node_filename_*`, `subset_node_dirname_*`, `subset_node_import_meta_*`):
+  `pnpm run test:subset` → `subset: 887 fixtures — 854 passed, 33 expected-fail, 0 failed`.
+- Goldens byte-for-byte vs Node: `createRequire` of a built-in, a computed `require` hit (a
+  built-in) and miss (`MODULE_NOT_FOUND`), in `ts/node_module.ts` and `js/node_module.js`:
+  `pnpm run test:golden` → `golden: 433 fixtures — 433 passed, 0 failed`.
+- The vendor module's injected `__filename`/`__dirname`, with a ready bundle in Rolldown's shape
+  (`unit/bundler.test.ts`), and the `landed` table (`unit/node-module.test.ts`):
+  `pnpm run test` → `Tests  720 passed (720)`.
+- `pnpm run ci` → exit 0 (typecheck, lint, dupes at 188 clones, runtime, unit, runtime corpus,
+  subset, golden, selfhost at 13 targets, builtins, node-coverage, leak, ASan).
+
+Left to other cards: `esmExternalRequirePlugin` in `vite-stator` (T12.2) and the CommonJS goldens
+through the default adapter (T12.3). The CJS cycle and `module.exports` replacement goldens moved
+to T12.3 earlier.

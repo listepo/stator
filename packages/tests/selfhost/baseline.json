@@ -2,8 +2,25 @@
   "packages/compiler": {
     "verdict": "not-yet",
     "codes": {
-      "STA1214": 1775
+      "STA1207": 1,
+      "STA1214": 1781
     }
+  },
+  "packages/node/src/assert.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/node/src/module.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/node/src/path.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/std/src/encoding.ts": {
+    "verdict": "static",
+    "codes": {}
   },
   "packages/std/src/env.ts": {
     "verdict": "dynamic",
@@ -11,6 +28,10 @@
   },
   "packages/std/src/fs.ts": {
     "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/hash.ts": {
+    "verdict": "dynamic",
     "codes": {}
   },
   "packages/std/src/io.ts": {

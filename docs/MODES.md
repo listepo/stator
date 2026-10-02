@@ -15,7 +15,7 @@ Stator compiles TypeScript/JavaScript to native binaries in one of two modes tha
 
 - **Files:** `.ts` only. A `.js`, `.jsx`, or `.tsx` file anywhere in the module graph (including transitive dependencies) is `STA1002` (error) with message "expected .ts, got [ext]; use `--mode=js` for untyped code."
 - **Module format:** ESM only (enforced by `tsconfig.json` `module: NodeNext`).
-- **Semantic:** ECMAScript semantics, not Node.js; no global `__dirname`, `require`, `process` (these are runtime-provided via standard library or rejected as undefined).
+- **Semantic:** ECMAScript semantics, not Node.js; no global `__dirname`, `require`, `process` (these are runtime-provided via standard library or rejected as undefined). Node's modules are a platform, not a mode: `--node` (§6) resolves `node:*` and bare built-ins to `packages/node` in either mode.
 
 ### Typing contract
 
@@ -41,7 +41,7 @@ is rejected for using `var`.
 - `delete` on a class field: `STA1108` — class instances are C structs with a fixed layout.
 - `var` declarations: `STA1104` — function scoping, hoisting, and `undefined` initialization; use `let`/`const`.
 - `arguments` object: `STA1105` — use rest parameters.
-- `with`: `STA1109`, CommonJS `require()`: `STA1110`, `.jsx`/`.tsx`: `STA1111` — these apply in **both** modes, not just `ts`.
+- `with`: `STA1109`, CommonJS `require()`: `STA1110`, `.jsx`/`.tsx`: `STA1111` — these apply in **both** modes, not just `ts`. `STA1110` is the one narrowed by a platform: `js` mode under `--node` hands a CommonJS project file to the bundler (§6); without the flag its `require`, `module.exports` and `exports` are `STA1110`.
 - Untyped catch bindings: `STA1003` — the implicit-`any` rule; annotate the parameter `unknown` (or `Error`) and narrow.
 
 **Not on this list:** `Symbol` and `BigInt`. They are *deferred*, not rejected — `STA1212` and
@@ -63,6 +63,7 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
 
 - **Files:** Any mix of `.ts` and `.js` (and `.jsx`, `.tsx` in Phase 2+). ESM only; always strict (ESM enforces strict mode).
 - **Module format:** ESM enforced by the pipeline (not configurable).
+- **Packages and CommonJS (plan.md §11d T12.1, `docs/BUNDLER.md`):** a package import (a bare specifier that is not `node:*`, a built-in or `std/*`) and, under `--node` only (plan-notes 315), a CommonJS project file go to a bundler first. `--bundler=vite|none|<module>` picks it (default `vite`, the `vite-stator` package; `--bundler` in `ts` mode is `STA0004`), and it loads only when the graph has something to bundle. The bundle joins the program as one virtual ESM module, `__stator_vendor__.js` in the entry's directory, compiled under the same `js`-mode rules as every other `.js` file; each project import declaration of a package is rewritten in place to import from it, keeping every line, so project diagnostics and `#line` still point at the user's lines (only code after a rewritten import on the same line can shift columns). A CommonJS file is `.cjs`, a `.js` under `"type": "commonjs"`, or a `.js` with no `"type"`, no ES-module syntax and a read of `require`, `module.exports` or `exports` (plan-notes 320). Without `--node` a CommonJS project file stays in the graph, and its free `require`, `module.exports` and `exports` are `STA1110`; packages are bundled with or without the flag. Diagnostics inside the bundle are reported at the package's own file and line through the bundle's source map, or as `<package bundle>` with "(bundler runtime helper, no source mapping)". `STA0014` means the adapter cannot be loaded, `STA0015` that the bundle step failed. `--bundler=none` keeps a package import `STA1214`.
 
 ### Typing rules
 
@@ -94,13 +95,21 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
   widened binding, a dynamic read, a runtime throw. Examples: a possibly-`undefined` read
   (TS2532), `"" == 0` (TS2367), a namespace IIFE reassigning a function declaration's binding
   (TS2630; a named function expression's own name is immutable and stays fatal), a spread the
-  checker narrowed to `never` (TS2698), and two `export *` re-exports binding one name differently
+  checker narrowed to `never` (TS2698), `new F()` on a function that returns a value and a read of
+  `F.prototype` before the program replaces it (TS2350, TS2565; docs/VALUE.md §4.20), and two
+  `export *` re-exports binding one name differently
   (TS2308: ES drops the name from the namespace, and importing it by name is `STA3003`, plan.md
   §11c T11.5a; `ts` mode keeps TS2308 fatal).
 - **Fatal until listed:** every other type-level refusal. The lowering trusts JSDoc types and
   the checker's control flow, so dropping a refusal it has no answer for compiles to an internal
   error at best and to a silent miscompile at worst (`const c = 1; c = 2` printed `2` where Node
   throws a `TypeError`). A code moves to the degraded list with its answer and a test.
+- **The bundler's vendor module is the exception** (plan-notes 320 Q4, `docs/BUNDLER.md` §6):
+  package code is not the user's to fix, so there a type-level refusal is never fatal. The
+  binding it names is widened to dynamic instead, and the four codes where Node throws and the
+  compiled program would not (TDZ reads TS2448/2449/2450, `const` assignment TS2588) stay fatal.
+  A construct the lowering still has no answer for surfaces as an internal error (`STA4xxx`) at
+  the package file's position: a compiler bug to report, never a user error.
 
 ### JS-only constructs that compile
 
@@ -333,6 +342,8 @@ Stator evaluates the program's modules in Task 3.11's topological order (depende
 
 Node's ESM loader may **interleave sibling subgraphs** — two modules that do not import each other can both run their prefix, hit `await`, and continue in registration order. Stator does not. A dependency's top-level await runs to completion before the next file in topological order begins. The difference is observable only in sibling interleavings; a linear import chain matches Node. Mirroring Node would need per-file init promises and a scheduler, which the whole-program unit does not have.
 
+**Package evaluation order** (`docs/BUNDLER.md` §1, documented only): every package body runs together, where the project first imports *any* package, because the packages are one vendor module. A project module imported between two packages therefore moves: where Node prints `pkg-a a pkg-b main`, Stator prints `pkg-a pkg-b a main`. A linear import chain matches Node.
+
 Imports are **live bindings**, as in Node, however they are spelled: a named, renamed or default import and every member read through a namespace (`ns.x`, `const { x } = ns`, `ns["x"]`) read the exporter's own binding. The namespace OBJECT is where Stator differs: it is built once, when its first importer starts, so a value that reaches it without a member name (`console.log(ns)`, `Object.keys(ns)`, `ns` passed to a function taking a plain object type) sees each export as it was then, and prints as a plain object rather than Node's `[Module: null prototype]`. docs/VALUE.md §4.14.
 
 ## 6. `stator explain` — what the compiler will do with a program
@@ -469,13 +480,82 @@ example.js: dynamic
 
 Untyped `pluck` is not an error in `js` mode — it compiles through the dynamic representation.
 
-### Planned: `--node` (Phase 11)
+### `--node`: the Node platform (Phase 11)
 
 `--node` (plan §11c T11.5) is a platform flag, orthogonal to `--mode`, and `explain` accepts it
-like `build` does. Under it, a `node:*` or Node-global member that `packages/node` has not landed
-yet is a `not-yet` diagnostic naming T11.6, so `diagnostics` lists the platform gaps the same way
-it lists the language ones, and `docs/NODE.md` is the coverage the two must agree with. Until
-T11.5 lands, `--node` is an unknown flag (`STA0005`).
+like `build` does; `stator.config.json` spells it `"node": true` (docs/CONFIG.md). Like the mode,
+it is a frontend policy: nothing below the gate reads it. It changes four things, and only these.
+
+```bash
+stator build app.ts -o app --node            # ts mode on the Node platform
+stator explain app.js --mode=js --node --json
+```
+
+**Resolution.** A Node built-in is `node:<id>` for any public id of the pinned Node's
+`builtinModules`, or the bare `<id>` where Node accepts one (`path`, `fs/promises`; `test` and
+`sqlite` only with the prefix, as in Node). Under `--node` both spellings resolve to
+`packages/node/src/<id>.ts`, strict TypeScript over `std`, through `paths` entries on the
+program's own options, the same mechanism `std/` uses (`packages/compiler/src/frontend/node.ts`).
+A landed module is ordinary source from there on. A bare built-in is never a package, with or
+without the flag (docs/BUNDLER.md §1).
+
+**Landed modules** (T11.6, one slice at a time; `docs/NODE.md` is the per-member list):
+`node:path` and `node:path/posix`, POSIX semantics — Stator builds for POSIX hosts, so `path` is
+`path.posix`, as on the pinned Node there. `node:assert` (T11.7), the slice Node's own tests use:
+`ok`, `strictEqual`, `notStrictEqual`, `deepStrictEqual`, `match`, `fail`, `throws`, `rejects` and
+`AssertionError`; its default export is an object, not yet a callable function. `node:module`
+(T11.5): `createRequire`, `isBuiltin` and `builtinModules`. Each module's default export is the module object
+(`import path from 'node:path'`), which the bundle's `import * as m` plus `m.default` also needs.
+`path.win32`, `node:path/win32` and `path.matchesGlob` have not landed.
+
+**Platform gaps are diagnostics.** Under `--node` a built-in `packages/node` has not landed, or a
+member its module does not export yet while the pinned Node's module does, is `STA1214` naming
+Phase 11 (T11.6). So `explain --node`'s `diagnostics` lists the platform gaps the same way it
+lists the language ones, and `docs/NODE.md` is the coverage the two must agree with. A member
+Node itself does not have stays the checker's error (`STA0012`). Without `--node`, a built-in is
+`STA1214` with no phase, and its message names the flag.
+
+**`require`, `module.exports`, `exports`.** `STA1110` narrows to "without `--node`". In `ts` mode
+it stays, flag or not. `--node` is also what routes a CommonJS project file to the bundler whole
+(T12.1, docs/BUNDLER.md §4; decided 2026-10-02, plan-notes 315), so under it such a file never
+reaches the gate. Without the flag the file stays in the graph and its free `require`,
+`module.exports` and `exports` are `STA1110`; a CommonJS file that reads none of them compiles as
+written. Packages are bundled either way. With `--node` in `js` mode the bundle's `require` is
+`createRequire(import.meta.url)` (Rolldown's `__require`), a `require` over built-ins only:
+`node:module` (T11.5) answers every built-in `packages/node` has landed, throws
+`ERR_UNKNOWN_BUILTIN_MODULE` naming T11.6 for one it has not, and throws Node's
+`MODULE_NOT_FOUND` for anything else, because the project's files and packages were bundled at
+build time and nothing is left to load. An ES module gets the same `require` from
+`createRequire(import.meta.url)`. A free `require`, `module.exports` or `exports` that still
+reaches the gate under `--node` (beside ES-module syntax, or under `--bundler=none`) is `STA1110`,
+as in Node, where an ES module has none of them. `require` is a plain function: `require.resolve`,
+`require.cache` and `require.main` are absent (a function with properties is not-yet).
+
+**`__filename`, `__dirname` and `import.meta`** (decided 2026-10-02, plan-notes 312; landed in
+plan-notes 316; docs/BUNDLER.md §9). `__filename` and `__dirname` exist where Node defines them:
+in a CommonJS file, which under `--node` reaches the build through the bundler, so in the vendor
+module. An ES module has neither, exactly as in Node (`ReferenceError: __dirname is not defined in
+ES module scope`), so a free read that reaches the gate is `STA1110`, under the flag or not.
+`import.meta.url`, `import.meta.filename` and `import.meta.dirname` exist in every module under
+`--node`; without the flag `import.meta` is `STA1214`. The values are **relative to the
+executable, resolved at run time**:
+
+- `__dirname` is the directory of the running binary (the path `process.execPath` answers),
+  joined with the module's directory relative to the entry file's directory. For a module beside
+  the entry it is the binary's directory itself.
+- `__filename` is `__dirname` joined with the module's file name.
+- Inside the vendor module a read takes the location of the file it was written in, which the
+  bundle's source map names (`node_modules/edge/index.js` reads `<bin dir>/node_modules/edge`). A
+  read with no mapping, in a bundler helper, takes the vendor module's own: it sits at the entry's
+  level, so its `__dirname` is the binary's directory.
+- `import.meta.filename` is `__filename`, `import.meta.dirname` is `__dirname`, and
+  `import.meta.url` is the `file:` URL of `__filename` (`url.pathToFileURL`'s encoding).
+
+No build-machine path is ever baked into the binary. The frontend rewrites every read into a call
+to `packages/node/src/internal/location.ts` that carries the file's path relative to the entry
+(`frontend/location.ts`); the call joins it to the binary's directory when the program runs. The
+rule keeps the common idiom working: `join(__dirname, "data.json")` finds assets laid out beside
+the binary the way they sat beside the source.
 
 ## 7. One pipeline, one gate
 

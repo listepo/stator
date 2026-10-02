@@ -11,38 +11,18 @@
  *
  * Nothing here depends on the mode: `std` is the same library under `ts` and `js` (§0.8). */
 
-import { existsSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { checkerDir, packageRoot } from '../support/package-root.ts';
 
 const PREFIX = 'std/';
 
-/** The std package root: `STATOR_STD_ROOT`, else the sibling workspace package
- * (`packages/compiler/<src|dist>/frontend` → `packages/std`), else a published `std` beside
- * `dist`. Mirrors cli/build.ts's runtime-root rule, and a wrong guess fails the same way: the
- * module list comes back empty and every `std/` import is STA3002 naming no modules. */
-function resolveStdRoot(): string {
-  const override = process.env['STATOR_STD_ROOT'];
-  if (override !== undefined && override !== '') {
-    return override;
-  }
-  const here = dirname(fileURLToPath(import.meta.url));
-  const sibling = join(here, '..', '..', '..', 'std');
-  const bundled = join(here, '..', '..', 'std');
-  return existsSync(join(sibling, 'src')) ? sibling : bundled;
-}
+/** The std package root: `STATOR_STD_ROOT`, else the sibling workspace package, else a published
+ * `std` beside `dist` (`support/package-root.ts`). A wrong guess leaves the module list empty, and
+ * every `std/` import is STA3002 naming no modules. */
+export const STD_ROOT = packageRoot('STATOR_STD_ROOT', 'std', 'src');
 
-export const STD_ROOT = resolveStdRoot();
-
-/** Real path, forward slashes: the checker resolves modules to real paths and normalizes every
- * `fileName` to `/`, so a prefix test against a source file's name must compare like with like —
- * a root reached through a symlink (macOS `/tmp`) would otherwise never match. */
-function sourceDir(): string {
-  const dir = join(STD_ROOT, 'src');
-  return (existsSync(dir) ? realpathSync(dir) : dir).replace(/\\/g, '/');
-}
-
-const STD_SOURCE_DIR = sourceDir();
+const STD_SOURCE_DIR = checkerDir(join(STD_ROOT, 'src'));
 
 /** Modules whose surface needs T10.2's OS threads (docs/STD.md §5). */
 const THREAD_MODULES: ReadonlySet<string> = new Set(['sync', 'thread']);

@@ -11,8 +11,8 @@ import {
   jsrtStdIoWrite,
   jsrtStdIoWriteBytes,
 } from './native/io.js';
-import { __stdBytesIn, __stdBytesOut } from './internal/bytes.ts';
 import { __stdFailure } from './internal/error.ts';
+import { __stdReadAnswer, __stdReadView } from './internal/read.ts';
 
 export const stdin: number = 0;
 export const stdout: number = 1;
@@ -40,19 +40,21 @@ export function write(fd: number, text: string): void {
 
 /** Writes all of `bytes` to `fd`. */
 export function writeBytes(fd: number, bytes: Uint8Array): void {
-  __stdBytesIn(bytes);
-  if (jsrtStdIoWriteBytes(fd) !== 0) {
+  if (jsrtStdIoWriteBytes(fd, bytes) !== 0) {
     throw __stdFailure('std/io.writeBytes', `${fd}`);
   }
 }
 
 /** One read of at most `max` bytes (and at most 1 MiB) from `fd`; an empty answer is end of
- * file. Blocks until the descriptor has something to give. `max` outside `0..2^31-1` is EINVAL. */
+ * file. Blocks until the descriptor has something to give. `max` outside `0..2^31-1` is EINVAL.
+ * The backing reads straight into the answer's storage; only a short read copies, once. */
 export function read(fd: number, max: number): Uint8Array {
-  if (jsrtStdIoRead(fd, max) !== 0) {
+  const into = __stdReadView(max);
+  const count = jsrtStdIoRead(fd, max, into);
+  if (count < 0) {
     throw __stdFailure('std/io.read', `${fd}`);
   }
-  return __stdBytesOut();
+  return __stdReadAnswer(into, count);
 }
 
 /** Whether `fd` is a terminal; false (never an error) for anything that is not. */

@@ -8,6 +8,7 @@ language: 'typescript'
 # why moon calls tools directly rather than through pnpm). All tasks run from the workspace root.
 dependsOn:
   - 'compiler'
+  - 'node'
   - 'runtime'
   - 'std'
 
@@ -116,6 +117,8 @@ tasks:
       - 'compiler:dupes'
       - 'tests:typecheck'
       - 'std:typecheck'
+      - 'node:typecheck'
+      - 'vite-stator:typecheck'
       - 'runtime:build'
       - 'std:build'
       - 'tests:unit'

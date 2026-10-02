@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+layer: 'library'
+language: 'typescript'
+
+# The default bundler adapter and the `stator()` Vite plugin (plan.md §11d T12.2,
+# docs/BUNDLER.md). Nothing to build: Node runs the TypeScript source. Tools are called directly,
+# never through pnpm (plan-notes 204).
+tasks:
+  typecheck:
+    script: './node_modules/.bin/tsc --noEmit -p packages/vite-stator/tsconfig.json'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  lint:
+    script: './node_modules/.bin/oxlint --deny-warnings packages/vite-stator && ./node_modules/.bin/oxfmt --check "packages/vite-stator/**/*.{ts,json}"'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true

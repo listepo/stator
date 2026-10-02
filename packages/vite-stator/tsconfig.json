@@ -1,0 +1,10 @@
+{
+  "extends": "../compiler/tsconfig.json",
+  "compilerOptions": {
+    // Type-checked only: the package runs from source on the pinned Node, like the compiler, and
+    // reaches the compiler through `statorc/api` (its `exports` point at `src/`).
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": ["src"]
+}

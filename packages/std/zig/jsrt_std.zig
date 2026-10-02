@@ -3,13 +3,14 @@
 //! links that archive only into programs whose module graph holds a `std` file. Every symbol
 //! exported here is a C-ABI function named `jsrt_std_*` that a `src/native/*.d.ts` declaration
 //! file binds through the extern surface (docs/FFI.md), so the ABI is the FFI table's: `f64` for
-//! `number`, NUL-terminated UTF-8 for `CString`, nothing else.
+//! `number`, NUL-terminated UTF-8 for `CString`, and a `[*]u8` + `usize` pair for a `Uint8Array`
+//! (the view's own bytes, valid for the call), nothing else.
 //!
 //! Shared channels carry what one scalar return cannot:
 //! - a failing call returns 1 and records a stable error code (docs/STD.md §3), which the TS
 //!   wrapper reads back through `jsrt_std_last_error` and throws;
 //! - a string answer is parked in one result buffer and read back through `jsrt_std_result`;
-//!   a byte answer, and bytes going in, use the byte channel below.
+//!   bytes travel in the caller's `Uint8Array`, which the backing reads or fills in place.
 //!   The emitter copies a `CString` return into a runtime string at the call site
 //!   (docs/FFI.md §3), so the buffer only has to outlive that copy: the next call that parks a
 //!   result frees the previous one. Nothing here is thread-safe; v0 std is single-threaded like
@@ -102,6 +103,13 @@ pub fn failErrno(err: std.c.E) f64 {
     return fail(switch (err) {
         .NOENT => "ENOENT",
         .ACCES, .PERM => "EACCES",
+        .EXIST => "EEXIST",
+        .NOTDIR => "ENOTDIR",
+        .NOTEMPTY => "ENOTEMPTY",
+        .NAMETOOLONG => "ENAMETOOLONG",
+        .LOOP => "ELOOP",
+        .ROFS => "EROFS",
+        .BUSY, .TXTBSY => "EBUSY",
         .BADF => "EBADF",
         .NOTTY => "ENOTTY",
         .AGAIN => "EAGAIN",
@@ -113,42 +121,6 @@ pub fn failErrno(err: std.c.E) f64 {
         .FBIG => "EFBIG",
         else => "EIO",
     });
-}
-
-/// The byte channel (docs/STD.md §6): the extern table has no `Uint8Array` row (docs/FFI.md §2),
-/// so bytes cross one scalar call at a time. In: the surface clears the channel and pushes each
-/// byte, then calls the backing, which reads `bytesIn()`. Out: the backing parks an owned slice
-/// with `setBytes`, and the surface reads its length and each byte back. Like the string slot, a
-/// parked answer lives until the next one replaces it.
-var bytes_in: std.ArrayList(u8) = .empty;
-var bytes_out: []u8 = &.{};
-
-pub fn bytesIn() []const u8 {
-    return bytes_in.items;
-}
-
-pub fn setBytes(owned: []u8) void {
-    if (bytes_out.len != 0) allocator.free(bytes_out);
-    bytes_out = owned;
-}
-
-export fn jsrt_std_bytes_clear() void {
-    bytes_in.clearRetainingCapacity();
-}
-
-/// The surface pushes a `Uint8Array` element, so anything outside `0..255` is a bug in `std`.
-export fn jsrt_std_bytes_push(byte: f64) void {
-    const b = intIn(byte, 0, 255) orelse @panic("byte channel: not a byte");
-    bytes_in.append(allocator, @intCast(b)) catch @panic("byte channel: out of memory");
-}
-
-export fn jsrt_std_bytes_length() f64 {
-    return @floatFromInt(bytes_out.len);
-}
-
-export fn jsrt_std_bytes_at(index: f64) f64 {
-    const i = intIn(index, 0, std.math.maxInt(c_int)) orelse @panic("byte channel: bad index");
-    return @floatFromInt(bytes_out[@intCast(i)]);
 }
 
 /// A JS number as a C `int` argument, or null when it is not an integer in `[lo, hi]`.
@@ -165,4 +137,6 @@ comptime {
     _ = @import("time.zig");
     _ = @import("os.zig");
     _ = @import("io.zig");
+    _ = @import("encoding.zig");
+    _ = @import("hash.zig");
 }

@@ -1,6 +1,6 @@
 // @mode: js
 // @verdict: static
-// SUBSET.md: FFI — a `CString` value is a string (docs/FFI.md section 3, plan-notes 311). The
+// SUBSET.md: FFI — a `CString` value is a string (docs/FFI.md section 3, plan-notes 322). The
 // JSDoc spelling of the ts fixture: the binding and the arrow take the extern's `CString`.
 /// <reference path="./helper_extern_cstr.d.ts" />
 

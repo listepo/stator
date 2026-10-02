@@ -78,6 +78,10 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
     snprintf(digits, sizeof(digits), "%u", i);
     jsrt_value value;
     if (array && arr != NULL) {
+      /* A hole is no key at all (§10.4.2's OwnPropertyKeys lists only present indices). */
+      if (arr->elements[i] == JSRT_HOLE) {
+        continue;
+      }
       value = arr->elements[i];
     } else {
       const uint16_t unit = jsrt_string_char(v, i);
@@ -197,14 +201,14 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
   jsrt_value out = jsrt_dynobj_new();
   const JSRTArray *list = jsrt_as_array(pairs);
   for (uint32_t i = 0; i < list->length; i++) {
-    const jsrt_value pair = list->elements[i];
+    const jsrt_value pair = jsrt_unhole(list->elements[i]);
     if (!jsrt_is(pair, JSRT_TAG_ARRAY)) {
       jsrt_panic("STA2005: Object.fromEntries over entries that are not arrays is not yet "
                  "supported");
     }
     const JSRTArray *entry = jsrt_as_array(pair);
-    const jsrt_value key = entry->length > 0 ? entry->elements[0] : JSRT_UNDEFINED;
-    const jsrt_value value = entry->length > 1 ? entry->elements[1] : JSRT_UNDEFINED;
+    const jsrt_value key = entry->length > 0 ? jsrt_unhole(entry->elements[0]) : JSRT_UNDEFINED;
+    const jsrt_value value = entry->length > 1 ? jsrt_unhole(entry->elements[1]) : JSRT_UNDEFINED;
     if (!jsrt_is(key, JSRT_TAG_STRING)) {
       jsrt_panic("STA2005: Object.fromEntries with a non-string key is not yet supported");
     }
@@ -282,7 +286,8 @@ static bool is_fixed_shape_object(jsrt_value v) {
   }
   const JSRTClass *cls = jsrt_as_object(v)->cls;
   return cls != &jsrt_class_promise && cls != &jsrt_class_date && cls != &jsrt_class_map &&
-         cls != &jsrt_class_set && cls != &jsrt_class_regexp && cls != &jsrt_class_iterator &&
+         cls != &jsrt_class_set && cls != &jsrt_class_weakmap && cls != &jsrt_class_weakset &&
+         cls != &jsrt_class_regexp && cls != &jsrt_class_iterator &&
          cls != &jsrt_class_generator && cls != &jsrt_class_uint8array &&
          cls != &jsrt_class_arraybuffer;
 }

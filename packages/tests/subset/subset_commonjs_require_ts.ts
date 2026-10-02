@@ -1,8 +1,7 @@
 // @mode: ts
 // @verdict: error
 // @code: STA1110
-// @expected-fail: true
-// SUBSET.md: CommonJS require()
+// SUBSET.md: CommonJS require() — ts mode is ES modules only, with or without --node.
 
 require("module");
 export {};

@@ -37,7 +37,10 @@ const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), '..', 'golden', 'ts
  * corpus the three invariants below hold over. */
 function functionsIn(c: string): EmittedFunction[] {
   return splitEmittedFunctions(c, (line) => {
-    const start = /^(?:static jsrt_value (_jsrt_fn_\d+)\(uint32_t|(int main)\(void\))/.exec(line);
+    const start =
+      /^(?:static jsrt_value (_jsrt_fn_\d+)\(uint32_t|(int main)\(int argc, char \*\*argv\))/.exec(
+        line,
+      );
     if (start === null) {
       return undefined;
     }

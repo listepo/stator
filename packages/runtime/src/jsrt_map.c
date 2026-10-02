@@ -21,6 +21,12 @@
  * subset can reach them by name. */
 const JSRTClass jsrt_class_map = {"Map", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
 const JSRTClass jsrt_class_set = {"Set", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
+/* A WeakMap and a WeakSet are a Map and a Set that refuse a non-object key and cannot be walked
+ * (the type checker keeps `size`, `forEach` and the iterators off them). They hold their keys
+ * STRONGLY: nothing is collected while the collection lives -- a divergence that no program can
+ * observe except through memory use (docs/VALUE.md §4.22). */
+const JSRTClass jsrt_class_weakmap = {"WeakMap", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
+const JSRTClass jsrt_class_weakset = {"WeakSet", 0, NULL, NULL, 0, NULL, NULL, NULL, NULL};
 
 /* ============================================================================
  * Keys — SameValueZero and a hash that agrees with it
@@ -117,6 +123,9 @@ static jsrt_value map_new(const JSRTClass *cls) {
 
 jsrt_value jsrt_map_new(void) { return map_new(&jsrt_class_map); }
 jsrt_value jsrt_set_new(void) { return map_new(&jsrt_class_set); }
+jsrt_value jsrt_weak_collection_new(bool map) {
+  return map_new(map ? &jsrt_class_weakmap : &jsrt_class_weakset);
+}
 
 /* Probe for `key`. Returns the live entry holding it, or NULL; either way `*slot` is left on the
  * index position the key belongs at — the entry's own position on a hit, the first empty one on a
@@ -223,6 +232,14 @@ static jsrt_value normalized_key(jsrt_value key) {
 static jsrt_value map_put(jsrt_value map, jsrt_value raw_key, jsrt_value value) {
   const jsrt_value key = normalized_key(raw_key);
   JSRTMap *m = jsrt_as_map(map);
+  /* §24.3.3.5 step 3 / §24.4.3.1 step 3: CanBeHeldWeakly, which is "is an object" here (no value
+   * of ours is a Symbol). `get`, `has` and `delete` need no check: a primitive is never stored. */
+  if ((m->cls == &jsrt_class_weakmap || m->cls == &jsrt_class_weakset) && !jsrt_is_object(key)) {
+    jsrt_throw_error(&jsrt_class_type_error, m->cls == &jsrt_class_weakmap
+                                                 ? "Invalid value used as weak map key"
+                                                 : "Invalid value used in weak set");
+    return map;
+  }
   uint32_t slot;
   JSRTMapEntry *entry = probe(m, key, &slot);
   if (entry != NULL) {

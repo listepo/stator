@@ -1,6 +1,6 @@
 // @mode: ts
 // @verdict: static
-// SUBSET.md: Arrays: an empty literal takes its element type from context (plan-notes 311).
+// SUBSET.md: Arrays: an empty literal takes its element type from context (plan-notes 322).
 // `[]` alone is the checker's `never[]`; under an array annotation, an `as`, a return type or a
 // parameter it is that array, so no Unknown element reaches the module.
 

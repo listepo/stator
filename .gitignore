@@ -1,4 +1,6 @@
 node_modules/
+# Golden fixtures that import packages ship them (plan.md §11d T12.2).
+!packages/tests/golden/js/*/node_modules/
 dist/
 coverage/
 packages/runtime/build/
@@ -20,6 +22,7 @@ packages/tests/differential/failures/
 .differential-*/
 packages/tests/bench/results/
 packages/tests/test262/corpus/
+packages/tests/node-suite/corpus/
 packages/tests/test262/results.json
 # `--shard=N/M` writes one of these per shard; `--aggregate` merges them into results.json.
 packages/tests/test262/results-*-of-*.json

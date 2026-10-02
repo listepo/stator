@@ -218,8 +218,9 @@ test('.length is accepted on a string type and deferred on anything else', () =>
 // raised by legal source. These tests are position tests, and every one of them once passed the
 // gate (plan-notes 61).
 test('a global the compiler does not model is a not-yet, never an internal error', () => {
-  assert.deepEqual(codesFor('const s: string = String(1);\nconsole.log(s);'), ['STA1214']);
-  assert.deepEqual(codesFor('console.log(parseInt("4"));'), ['STA1214']);
+  assert.deepEqual(codesFor('const s: string = escape("a b");\nconsole.log(s);'), ['STA1214']);
+  // A global function READ as a value has no node either (plan.md §11c T11.4 lands only the call).
+  assert.deepEqual(codesFor('const f = parseInt;\nconsole.log(f("4"));'), ['STA1214']);
   // Declared nowhere at all rather than in a lib file — the checker synthesizes it, and
   // `globalThis` slipped through a valueDeclaration-based test.
   assert.deepEqual(codesFor('const g = globalThis;\nconsole.log(1);'), ['STA1214']);
@@ -253,6 +254,56 @@ test('a user binding that shadows a global name is a user binding', () => {
     ),
     [],
   );
+});
+
+test('the global functions land as callees only, each refused by name otherwise', () => {
+  // plan.md §11c T11.4: calls, typeof and Array.isArray are accepted ...
+  assert.deepEqual(codesFor('console.log(Number("1"), Boolean(0), parseFloat("2"));'), []);
+  assert.deepEqual(codesFor('console.log(isNaN(1), isFinite(1), parseInt("8", 8));'), []);
+  assert.deepEqual(codesFor('console.log(typeof JSON, typeof Math, typeof parseInt);'), []);
+  assert.deepEqual(codesFor('console.log(Array.isArray([1]));'), []);
+  assert.deepEqual(codesFor('const { length: n } = [1, 2];\nconsole.log(n);'), []);
+  // ... and everything around them stays a named not-yet.
+  assert.deepEqual(codesFor('console.log(parseInt("1", 10, 3));'), ['STA1214']);
+  assert.deepEqual(codesFor('const a: [string] = ["1"];\nconsole.log(Number(...a));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(Array.from([1]));'), ['STA1214']);
+  assert.deepEqual(codesFor('const f = Array.isArray;\nconsole.log(f([]));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(typeof Symbol);'), ['STA1212']);
+  // A user binding that shadows the name is an ordinary call.
+  assert.deepEqual(
+    codesFor(
+      'function parseInt(s: string): number {\n  return s.length;\n}\nconsole.log(parseInt("ab"));',
+    ),
+    [],
+  );
+});
+
+test('a function-valued field is callable through its object', () => {
+  // plan-notes 310: an arrow, a function expression and a shorthand function in a literal.
+  assert.deepEqual(
+    codesFor(
+      'function f(): number {\n  return 1;\n}\nconst o = { f, g: (x: number): number => x, h: function (): void {} };\nconsole.log(o.f(), o.g(2));\no.h();',
+    ),
+    [],
+  );
+  // A number-typed field is read, then its own method called: no field call involved.
+  assert.deepEqual(codesFor('const o = { n: 1 };\nconsole.log(o.n.toFixed(1));'), []);
+});
+
+test('Number methods, statics and constants land by name; the rest are refused by name', () => {
+  assert.deepEqual(
+    codesFor('const n: number = 255;\nconsole.log(n.toString(16), n.toFixed(2), n.toString());'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('console.log(Number.parseInt("8"), Number.parseFloat("1"), Number.MAX_VALUE);'),
+    [],
+  );
+  assert.deepEqual(codesFor('const n: number = 1;\nconsole.log(n.toPrecision(2));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(Number.isInteger(1));'), ['STA1214']);
+  assert.deepEqual(codesFor('const n: number = 1;\nconst f = n.toFixed;\nconsole.log(f);'), [
+    'STA1214',
+  ]);
 });
 
 test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is shared', () => {
@@ -803,8 +854,10 @@ test('String.fromCharCode lands with any count; the rest of String is named', ()
   assert.deepEqual(codesFor('console.log(String.fromCodePoint(65));'), ['STA1214']);
   // A namespace method as a value: there is no function object to hand out.
   assert.deepEqual(codesFor('const f = String.fromCharCode;\nconsole.log(typeof f);'), ['STA1214']);
-  // `String(x)` the converter is a different surface and stays deferred.
-  assert.deepEqual(codesFor('console.log(String(42));'), ['STA1214']);
+  // `String(x)` the converter is a different surface: it landed with the global functions
+  // (plan.md §11c T11.4), and `String` read as a value stays deferred.
+  assert.deepEqual(codesFor('console.log(String(42));'), []);
+  assert.deepEqual(codesFor('const S = String;\nconsole.log(S(42));'), ['STA1214']);
 });
 
 test('Array.prototype ops in the landed set are accepted', () => {

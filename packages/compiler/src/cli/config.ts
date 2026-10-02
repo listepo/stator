@@ -63,9 +63,22 @@ export const ConfigSchema = Type.Object(
       nonEmpty('build: write a C header for the unit exports; relative to this file.'),
     ),
     unitName: Type.Optional(nonEmpty('build: prefix for stator_<unit>_<name>.')),
+    bundler: Type.Optional(
+      nonEmpty(
+        'js mode: "vite" (default; the vite-stator package), "none", or an adapter module — a ' +
+          'path relative to this file when it starts with ".", else a package name (docs/BUNDLER.md).',
+      ),
+    ),
     diagnostics: Type.Optional(
       Type.Enum(['text', 'json'], {
         description: 'explain: report format; "json" is --json (default "text").',
+      }),
+    ),
+    node: Type.Optional(
+      Type.Boolean({
+        description:
+          'build and explain: the Node platform (--node). node:* and bare built-ins resolve to ' +
+          'packages/node (docs/MODES.md §6). Default false.',
       }),
     ),
   },
@@ -210,7 +223,9 @@ export interface CliOptions {
   keepC: boolean | undefined;
   emitHeader: string | undefined;
   unitName: string | undefined;
+  bundler: string | undefined;
   diagnostics: 'text' | 'json' | undefined;
+  node: boolean | undefined;
 }
 
 export interface ResolvedOptions {
@@ -223,7 +238,9 @@ export interface ResolvedOptions {
   keepC: boolean;
   emitHeader: string | undefined;
   unitName: string | undefined;
+  bundler: string | undefined;
   diagnostics: 'text' | 'json';
+  node: boolean;
 }
 
 /** Whitespace-separated clang flags, the same split as one `--link` value. */
@@ -253,6 +270,11 @@ export function resolveOptions(
     keepC: cli.keepC ?? config.keepC ?? false,
     emitHeader: cli.emitHeader ?? fromFile(config.emitHeader),
     unitName: cli.unitName ?? config.unitName,
+    // A relative module path names a file next to the config; a package name stays a name.
+    bundler:
+      cli.bundler ??
+      (config.bundler?.startsWith('.') === true ? fromFile(config.bundler) : config.bundler),
     diagnostics: cli.diagnostics ?? config.diagnostics ?? 'text',
+    node: cli.node ?? config.node ?? false,
   };
 }

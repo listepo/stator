@@ -1,8 +1,9 @@
 # STD.md — Stator's `std` library
 
-> **Status: v0 implemented** (plan.md §11c T11.2): `std/env`, `std/path`, `std/process`, sync
-> `std/fs` and `std/time` live in `packages/std` and compile into any program that imports them.
-> `std/sync` and `std/thread` wait for T10.2; the N1 additions (`std/os`, `std/io`, …) are T11.3.
+> **Status: v0 implemented** (plan.md §11c T11.2, T11.3): `std/env`, `std/path`, `std/process`,
+> sync `std/fs`, `std/time`, `std/os`, `std/io`, `std/encoding` and `std/hash` live in
+> `packages/std` and compile into any program that imports them. `std/sync` and `std/thread` wait
+> for T10.2.
 > On any disagreement between this file and plan.md §11b/§11c, the plan wins (§15.3).
 
 `std` is a **first-party systems-style standard library**, not a Node compatibility layer and
@@ -80,7 +81,7 @@ errno (`failErrno`), and once listed a code is never renamed:
 | `ENOMEM` | out of memory or system resources (`OutOfMemory`, `SystemResources`) |
 | `EINVAL` | an invalid argument: a bad path, an empty or `=`-holding variable name, an exit code outside `0..255`, a sleep outside `0..2^31-1` ms (`BadPathName`, or checked before the call) |
 | `EFBIG` | the file is too large (`FileTooBig`, `StreamTooLong`) |
-| `EBADF` | the descriptor names no open file, or is not an integer in `0..2^31-1` (`std/io`) |
+| `EBADF` | the descriptor names no open file, or is not an integer in `0..2^31-1` (`std/fs` descriptor calls, `std/io`) |
 | `ENOTTY` | the descriptor is not a terminal (`std/io.terminalSize`) |
 | `EAGAIN` | a non-blocking descriptor has nothing to give or no room to take (`std/io`) |
 | `EPIPE` | the reading end of the pipe is closed (`std/io` writes) |
@@ -102,12 +103,14 @@ differ, `std` answers one way and says so (§5).
 | Module | v0 surface | Notes |
 |---|---|---|
 | `std/env` | `has(name): boolean`, `get(name): string \| undefined`, `set(name, value)`, `unset(name)`, `cwd(): string` | `setenv`/`unsetenv` semantics: an empty name or one containing `=` is `EINVAL`; unsetting an unset name succeeds. `args` moved to T11.3 as `std/process.argv` (plan-notes 294) |
-| `std/process` | `exit(code)`, `pid(): number`, `abort()` | `exit` takes an integer `0..255` (else `EINVAL`, and nothing exits) and runs libc `exit`, so buffered output is flushed. `abort` raises `SIGABRT`. No signals yet |
+| `std/process` | `argv(): string[]`, `execPath()`, `platform()`, `arch()`, `pid()`, `ppid()`, `hrtimeNs()`, `memoryUsage(): MemoryUsage`, `exitCode()`, `setExitCode(code)`, `exit(code)`, `abort()` | `exit` takes an integer `0..255` (else `EINVAL`, and nothing exits) and runs libc `exit`, so buffered output is flushed. `abort` raises `SIGABRT`. No signals yet (see below) |
 | `std/path` | `isAbsolute`, `basename`, `dirname`, `join(a, b)` | pure TypeScript, no backing (see below) |
-| `std/fs` | `readText(path)`, `writeText(path, text)`, `stat(path): Stat`, `mkdir(path)`, `unlink(path)`, `rmdir(path)` | sync and path-only (see below); the `…Async` Promise twins are not-yet, T10.2 (§2) |
+| `std/fs` | `readText(path)`, `writeText(path, text)`, `readBytes(path): Uint8Array`, `stat(path): Stat`, `exists(path)`, `realpath(path)`, `utimes(path, atimeMs, mtimeMs)`, `readdir(path): string[]`, `mkdir(path)`, `unlink(path)`, `rmdir(path)`; on descriptors `open(path, flags)`, `read(fd, length, position)`, `write(fd, data, position)`, `close(fd)` | sync (see below); the `…Async` Promise twins are not-yet, T10.2 (§2) |
 | `std/time` | `nowMs(): number`, `sleepMs(ms)` | `nowMs` is whole milliseconds since the Unix epoch (`Date.now()`); `sleepMs` blocks the only thread on the monotonic clock, fractions truncated |
 | `std/os` | `platform()`, `arch()`, `release()`, `hostname()`, `homedir()`, `tmpdir()`, `cpuCount()`, `totalMemory()`, `eol` | the pinned Node's `node:os` answers (see below) |
 | `std/io` | `stdin`/`stdout`/`stderr` (`0`/`1`/`2`), `write(fd, text)`, `writeBytes(fd, bytes)`, `read(fd, max): Uint8Array`, `isatty(fd)`, `terminalSize(fd): TerminalSize` | raw descriptors through libc (see below) |
+| `std/encoding` | `utf8ToBytes`/`bytesToUtf8`, `latin1ToBytes`/`bytesToLatin1`, `base64ToBytes`/`bytesToBase64`, `base64urlToBytes`/`bytesToBase64url`, `hexToBytes`/`bytesToHex` | Node's `Buffer` conversions (see below) |
+| `std/hash` | `sha256(data)`, `sha1(data)`, `md5(data)` over `Uint8Array \| string`, `randomBytes(size)` | digests as `Uint8Array`; text hashes as its UTF-8 |
 | `std/sync` | — | not-yet, T10.2 |
 | `std/thread` | — | not-yet, T10.2 |
 
@@ -120,8 +123,8 @@ otherwise the two meet at exactly one `/`.
 
 **`std/fs` semantics.** Paths are absolute or relative to the working directory, resolved by
 the OS; nothing is normalized. Text is UTF-8 both ways: an invalid byte sequence read back
-becomes U+FFFD, and a NUL byte ends the text, because file contents cross the C-string
-boundary (docs/FFI.md §3) until byte reads land with T11.3. `stat` follows symbolic links and
+becomes U+FFFD, and a NUL byte ends the text, because text crosses the C-string boundary
+(docs/FFI.md §3); `readBytes` carries every byte. `stat` follows symbolic links and
 answers a `Stat` with `size`, `isFile`, `isDirectory` and `mtimeMs` (whole milliseconds).
 `Stat` is a class rather than an interface because a class instance has a fixed layout and
 compiles static (an interface-typed object literal is a dynamic object); programs get one from
@@ -129,7 +132,32 @@ compiles static (an interface-typed object literal is a dynamic object); program
 removes only an empty one (`ENOTEMPTY` otherwise), and `unlink` removes a non-directory —
 unlinking a directory is `EISDIR` on every platform (macOS's own answer is `EPERM`, which is
 what Node reports there). `unlink` and `rmdir` were planned for T11.3 and landed here, because
-a test that creates files has to remove them.
+a test that creates files has to remove them. `exists` follows symbolic links and answers
+`false`, never an error, for anything it cannot reach (Node's `existsSync`). `realpath` is
+`realpath(3)`; the path must exist. `utimes` takes milliseconds since the Unix epoch (Node's
+`utimesSync` takes seconds), and a time outside a `Date`'s range is `EINVAL`. `readdir` answers
+the entry names without `.` and `..`, in byte order, as libuv sorts them for Node.
+
+**`std/fs` descriptors.** `open` answers a descriptor the program owns until it calls `close`:
+nothing closes one for it, and closing one twice is `EBADF` (§9.3). `flags` is one of Node's
+flag strings: `'r'`, `'r+'`, `'w'`, `'w+'`, `'a'`, `'a+'` and the synchronous (`s`) and
+exclusive (`x`) variants Node accepts, in either order (`'rs+'`, `'wx'`, `'xa+'`, …); any other
+is `EINVAL`, and a created file gets mode `0666` before the umask. `read` is
+one read of at most `length` bytes, and at most 1 MiB, like `std/io.read`; `write` writes all of
+`data` and answers its length. Both take a `position`: `-1` (the default) uses and advances the
+descriptor's own offset, and any other value is a byte offset (`pread`/`pwrite`), an integer in
+`0..2^53`, else `EINVAL`. Descriptors are the same integers `std/io` takes.
+
+**`std/process` semantics** follow the pinned Node's `process`, minus the `node` binary.
+`argv()` is `main`'s argument vector exactly: `argv()[0]` is the program as it was invoked,
+where Node's `process.argv` puts `node` and then the script. `execPath` is the running
+executable's absolute path with symbolic links resolved (libuv's `uv_exepath`). `platform` and
+`arch` are `std/os`'s. `hrtimeNs` is the monotonic clock in nanoseconds from an arbitrary origin
+(`process.hrtime.bigint()` as a number: exact below 2^53 ns). `memoryUsage()` answers a
+`MemoryUsage` with `rss`, the resident set size in bytes (libuv's `uv_resident_set_memory`), a
+class like `Stat`. `exitCode()` is the status a normal end returns, 0 until `setExitCode`
+changes it; `setExitCode` takes an integer `0..255` (else `EINVAL`, and nothing changes), and
+`exit(code)` or an uncaught exception (status 1) still win.
 
 **`std/os` semantics** are the pinned Node's, because `packages/node` builds `node:os` on
 them. `platform` and `arch` are spelled as `process.platform`/`process.arch` and fixed at build
@@ -150,10 +178,32 @@ call; an empty answer is end of file, and `max` outside `0..2^31-1` is `EINVAL`.
 `terminalSize` answers a `TerminalSize` (`columns`, `rows`), a class like `Stat`; a descriptor
 that is not a terminal is `ENOTTY`, and one that names no open file is `EBADF`.
 
+**`std/encoding` semantics** are Node's `Buffer`, because `packages/node` builds `Buffer` on
+them, and nothing throws. `utf8ToBytes` encodes a lone surrogate as U+FFFD (`EF BF BD`).
+`bytesToUtf8` turns each maximal invalid subsequence into one U+FFFD. `latin1ToBytes` keeps
+each UTF-16 code unit's low byte. `bytesToBase64` pads with `=`, while `bytesToBase64url` uses
+`-`/`_` and no padding. The two base64 decoders are one decoder:
+- it reads either alphabet and skips any other character;
+- the first `=` ends the input;
+- a final group of two or three digits gives one or two bytes, and a single digit gives none.
+
+`hexToBytes` reads digit pairs in either case up to the first pair that is not one, and drops
+an odd last digit. Text-to-bytes is plain TypeScript (`charCodeAt`). Bytes-to-text goes
+through the backing, because `String.fromCharCode` is not in the subset, so a string can only
+be made at the C-string edge. UTF-8 and Latin-1 text therefore crosses in NUL-free runs, with
+each `0x00` put back as U+0000.
+
+**`std/hash` semantics.** `sha256`, `sha1` and `md5` return the digest as a fresh `Uint8Array`
+(32, 20 and 16 bytes). A string argument is hashed as its UTF-8, as Node's `update(text)`
+hashes it. The digests are Zig's `std.crypto`, which ships with the pinned toolchain, so no C
+is vendored. SHA-1 and MD5 are there for interop, not security. `randomBytes(size)` reads the
+OS's secure source through `std.Io`, and a `size` outside `0..2^31-1` is `EINVAL`.
+
 **Verdicts.** A std module is ordinary strict TypeScript, and `explain` reports its functions
 like any other file in the graph: everything is `static` except `std/env.get`, whose
-`string | undefined` answer is a union the HIR boxes, so an importer of `std/env` explains as
-`dynamic` (docs/SUBSET.md).
+`string | undefined` answer is a union the HIR boxes, and `std/hash`'s digests, whose
+`Uint8Array | string` parameter is one. An importer of `std/env` or `std/hash` therefore
+explains as `dynamic` (docs/SUBSET.md).
 
 ## 6. Implementation layers
 
@@ -163,7 +213,6 @@ packages/std/
   src/native/<module>.d.ts its `@statorExtern` declarations (module-form: they export)
   src/native/core.d.ts     `CString` and the shared result/error slots
   src/internal/error.ts    the §3 message builder
-  src/internal/bytes.ts    the byte channel's TypeScript end (§6)
   zig/jsrt_std.zig         the root: panic handler, allocator, result + error slots
   zig/<module>.zig         one backing file per module, exporting `jsrt_std_<module>_*`
   justfile                 `just std` → build/libjsrt_std.a
@@ -176,13 +225,20 @@ packages/std/
   status; the surface reads it with `jsrtStdResult()`, whose `CString` return the emitter
   copies into a JS string at once (`jsrt_string_from_cstr`). The slot frees the previous answer
   when the next one is parked, so nothing leaks and nothing is read after it is freed.
-- **Bytes.** The extern table has no `Uint8Array` row (docs/FFI.md §2), so bytes cross one
-  scalar call at a time through the **byte channel** in `jsrt_std.zig`. Going in,
-  `src/internal/bytes.ts` clears it and pushes each byte, then calls the backing, which reads
-  them. Coming out, the backing parks an owned slice, and the surface reads its length and each
-  byte into a fresh `Uint8Array`. A parked answer lives until the next one replaces it, like the
-  string slot. It costs one direct call per byte. A `Uint8Array` row in the FFI table would
-  replace it without changing any `std` signature.
+- **Bytes.** A `Uint8Array` is a row of the extern table (docs/FFI.md §2, plan.md §11c
+  T11.3a): the backing receives the view's own bytes and its length (`[*]u8`, `usize`) for the
+  call, one call whatever the length, with no copy. Going in, the backing reads the caller's
+  view. Coming out, the surface allocates the answer first and the backing fills it in place:
+  `std/io.read` and `std/fs.read` size a view (at most 1 MiB), the backing `read(2)`s straight
+  into it and returns the count, and only a short read copies, once, into a view of the right
+  length. The row is parameter-only, so no backing returns bytes. `std/fs.readBytes` cannot
+  size its answer before the read, so it takes two calls: the backing reads the file, parks it
+  and answers the count, and the second call copies it into a view of that size and frees it.
+- **Process slots.** `argv` and the exit status belong to `main`, so they live in the runtime
+  (`packages/runtime/src/jsrt_process.c`), not in this archive. The generated
+  `int main(int argc, char **argv)` hands its argument vector to `jsrt_process_args` before any
+  module code runs and returns `jsrt_process_exit_code()`; `std/process` binds the slots as
+  `@statorExtern` functions.
 - **Status and errors.** A backing returns `0` for success and `1` for failure, after storing
   the §3 code where `jsrtStdLastError()` reads it; the surface throws.
 - **Panics.** A safety trap in a backing (ReleaseSafe) prints `stator std: internal error:`
@@ -211,7 +267,9 @@ test task depends on it.
 - **Decision tests** (`packages/tests/subset/subset_std_*`) cover each module in both modes,
   plus the unknown (`STA3002`), threads (`STA1214`) and Promise-twin (`STA1214`) refusals.
 - **Unit tests** (`packages/tests/unit/std.test.ts`) prove the conditional link and what a golden
-  cannot run. That covers the two exits (a non-zero `exit`, `abort`), `std/io`'s ordering against
+  cannot run. That covers the two exits (a non-zero `exit`, `abort`), real arguments, a
+  non-zero `setExitCode`, ranges for the values that differ every run (`pid`, `ppid`,
+  `execPath`, `hrtimeNs`, `memoryUsage`, `randomBytes`), `std/io`'s ordering against
   `console.log`, a real read from stdin, and a terminal (`script(1)` gives the binary a
   pseudo-terminal). The golden runner's stdin is an open pipe and its stdout is never a
   terminal.
@@ -219,8 +277,9 @@ test task depends on it.
 ## 8. v0 limitations
 
 - **C-string boundary.** `std/fs` text and `std/io.write` stop at a NUL byte, and every string
-  argument is passed as UTF-8 (§5). Bytes (`std/io.writeBytes`, `read`) do not: they take the
-  byte channel (§6), which costs one call per byte.
+  argument is passed as UTF-8 (§5). Bytes (`std/io.writeBytes`/`read`, `std/fs.readBytes`/
+  `read`/`write`) do not: a `Uint8Array` crosses as its own storage (§6), so any byte, NUL
+  included, survives.
 - **No `code` property** on thrown errors yet (§3).
 
 ## 9. Decisions that were open
@@ -229,8 +288,10 @@ test task depends on it.
    anything outside it.
 2. **`std/path` edge semantics** (§5): POSIX `basename(3)`/`dirname(3)`, no normalization,
    two-segment `join`; Node's `path.posix` is not the reference.
-3. **`std/fs` surface**: path-only in v0. File descriptors are T11.3, with a second lifetime
-   to own.
+3. **`std/fs` surface**: path calls since T11.2; descriptors since T11.3. A descriptor is a
+   plain integer the program owns from `open` to `close`, with no finalizer: a GC-driven close
+   would make the descriptor's lifetime depend on the collector, and a reused number would then
+   close someone else's file.
 4. **Encoding**: UTF-8 at every native edge. Invalid bytes coming back become U+FFFD, as
    FFI's `from_cstr` already does; nothing throws over encoding.
 

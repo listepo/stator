@@ -425,6 +425,8 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'array-op':
     case 'method-call':
     case 'dyn-method-call':
+    case 'field-call':
+    case 'number-op':
     case 'collection-op':
     case 'date-op':
     case 'regexp-op':
@@ -435,6 +437,7 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     }
     case 'date-components':
     case 'date-static':
+    case 'global-call':
     case 'math-call':
     case 'object-static':
     case 'string-static':
