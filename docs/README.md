@@ -17,7 +17,7 @@ How stator is specified. [`plan.md`](../plan.md) is the authority for what is st
 | [HIR.md](HIR.md) | Typed IR: node kinds, HType, `Unknown`, verifier invariants |
 | [TOOLCHAIN.md](TOOLCHAIN.md) | Pinned Node/pnpm/LLVM/just, commands, native libraries |
 | [FFI.md](FFI.md) | Calling C from TS: extern surface, ABI table, ownership |
-| [STD.md](STD.md) | DRAFT skeleton: `std` systems library, threads chapters live here at T10.2 |
+| [STD.md](STD.md) | The `std/*` systems library (`packages/std`): module path, error codes, v0 modules, layers; threads chapters land here at T10.2 |
 | [NODE.md](NODE.md) | Generated: Node API coverage by Stator, % per `node:*` module and member (`pnpm run docs:node`) |
 | [research/node-mode.md](research/node-mode.md) | T11.0 research: `--node` platform, `std`-first layering, cost and go / no-go (not normative) |
 

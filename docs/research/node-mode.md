@@ -19,7 +19,7 @@ pinned oracle.
   - `node:*` modules are ordinary Stator TypeScript modules written over `std`. They contain no C
     of their own.
   - Node semantics live only in the wrapper layer: error codes, EventEmitter, stream state
-    machines, the `exports` object, legacy aliases. `std` stays POSIX-shaped, as `docs/STD.md` §7
+    machines, the `exports` object, legacy aliases. `std` stays POSIX-shaped, as `docs/STD.md` §10
     already demands.
 - **`--node` is a platform flag, not a third mode.** It decides three things:
   - which module specifiers resolve: `node:*`, bare built-ins, CommonJS `require`;

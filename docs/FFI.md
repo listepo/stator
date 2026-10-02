@@ -62,6 +62,12 @@ bindings exist (plan §10 Task 7.1 step 1):
 4. **Overloads resolve to the first marked declaration.** The surface is one C
    symbol per TS name, so overloads of an extern are a user error the arity
    rule answers, not a second signature.
+5. **A binding file may be a module.** `export declare function` (and `export type`
+   for `CString` and the brands) turns the `.d.ts` into a module whose bindings are
+   imported by relative path (`import { f } from './native/env.js'`) rather than
+   seen globally, so two binding files can spell `CString` without colliding. The
+   marker, the ABI and the call-site rules are the same either way; `packages/std`
+   is written this way (docs/STD.md §6).
 
 ---
 

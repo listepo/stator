@@ -2,12 +2,14 @@
 layer: 'application'
 language: 'typescript'
 
-# The test harnesses spawn the compiler CLI and link the built runtime archive, so runtime-touching
-# tasks depend on `runtime:build`. Commands mirror package.json's scripts (see compiler/moon.yml for
+# The test harnesses spawn the compiler CLI and link the built runtime archive (and, for a program
+# that imports `std/*`, the std archive), so linking tasks depend on `runtime:build` and
+# `std:build`. Commands mirror package.json's scripts (see compiler/moon.yml for
 # why moon calls tools directly rather than through pnpm). All tasks run from the workspace root.
 dependsOn:
   - 'compiler'
   - 'runtime'
+  - 'std'
 
 tasks:
   typecheck:
@@ -25,6 +27,7 @@ tasks:
     # against a concurrent archive rebuild. `pnpm run ci` is serial and never hit it.
     deps:
       - 'runtime:build'
+      - 'std:build'
   coverage:
     script: './node_modules/.bin/c8 ./node_modules/.bin/vitest run --config packages/tests/vitest.config.ts'
     toolchain: 'system'
@@ -35,6 +38,7 @@ tasks:
     # run against a concurrent archive rebuild (moon parity audit, plan-notes 269).
     deps:
       - 'runtime:build'
+      - 'std:build'
   subset:
     script: 'node packages/tests/subset/run.ts'
     toolchain: 'system'
@@ -50,6 +54,7 @@ tasks:
       runFromWorkspaceRoot: true
     deps:
       - 'runtime:build'
+      - 'std:build'
   builtins:
     script: 'node packages/tests/golden/builtins.ts'
     toolchain: 'system'
@@ -57,6 +62,7 @@ tasks:
       runFromWorkspaceRoot: true
     deps:
       - 'runtime:build'
+      - 'std:build'
   node-coverage:
     script: 'node packages/tests/golden/node-coverage.ts --check'
     toolchain: 'system'
@@ -76,6 +82,7 @@ tasks:
       runFromWorkspaceRoot: true
     deps:
       - 'runtime:build'
+      - 'std:build'
   ffi:
     script: 'node packages/tests/ffi/run.ts'
     toolchain: 'system'
@@ -83,6 +90,7 @@ tasks:
       runFromWorkspaceRoot: true
     deps:
       - 'runtime:build'
+      - 'std:build'
   asan:
     script: 'node packages/tests/golden/asan-gate.ts'
     toolchain: 'system'
@@ -98,7 +106,9 @@ tasks:
       - 'compiler:lint'
       - 'compiler:dupes'
       - 'tests:typecheck'
+      - 'std:typecheck'
       - 'runtime:build'
+      - 'std:build'
       - 'tests:unit'
       - 'tests:runtime-corpus'
       - 'tests:subset'

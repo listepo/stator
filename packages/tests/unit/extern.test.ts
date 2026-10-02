@@ -327,6 +327,38 @@ test('a borrowed copy is freed before the throw; a transfer never is', async () 
   }
 });
 
+test('an inlined extern wrapper called twice declares each C temporary once', async () => {
+  // A zero-argument wrapper inlines to the very same ExternCall node — one slot base — at both
+  // call sites, in one C scope: temporaries named by the base redeclared each other (T11.2,
+  // std/time's `nowMs`). An argument-taking wrapper is the control: its sites differ already.
+  const { work, entry } = writeExternProgram({
+    'main.ts':
+      '/// <reference path="./helper.d.ts" />\n' +
+      'function tick(): number { return extTick(); }\n' +
+      'function check(s: string): number { return extCheckStr(s as CString); }\n' +
+      'console.log(tick() + tick(), check("a") + check("b"));\n' +
+      'export {};\n',
+    'helper.d.ts':
+      DIRECT_HELPER +
+      '/** @statorExtern @statorError errno */\ndeclare function extTick(): number;\n',
+  });
+  try {
+    const compiled = await compileToC(entry, 'ts');
+    assert.ok(compiled !== null, 'a valid extern program emits C');
+    for (const pattern of [
+      / (_jsrt_exr_\d+) =/g,
+      / (_jsrt_exe_\d+) =/g,
+      /\*(_jsrt_exc_\d+_\d+) =/g,
+    ]) {
+      const names: (string | undefined)[] = [...compiled.c.matchAll(pattern)].map((m) => m[1]);
+      assert.ok(names.length >= 2, `${pattern.source}: both call sites emit a temporary`);
+      assert.equal(new Set(names).size, names.length, `${pattern.source}: no name declared twice`);
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('the errno sequence zeroes, calls, reads immediately, then checks', async () => {
   const { work, entry } = writeExternProgram({
     'main.ts': '/// <reference path="./helper.d.ts" />\nconsole.log(extErrno(4));\nexport {};\n',

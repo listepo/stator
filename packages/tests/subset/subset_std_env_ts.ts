@@ -1,14 +1,9 @@
 // @mode: ts
-// @verdict: static
-// SUBSET.md: std/env — first-party libc environment access (docs/STD.md §5, T10.1
-// step 2). The declarations live beside this fixture (`helper_std_env.d.ts`: real
-// getenv/setenv/unsetenv under `std`-shaped names); the calls are direct C calls.
-// The verdict is the call-site's: `static` + the unchecked-boundary flag alongside
-// (docs/FFI.md §5), proved byte-for-byte by the `std_env` golden.
-/// <reference path="./helper_std_env.d.ts" />
+// @verdict: dynamic
+// SUBSET.md: std/* imports — `std/env` resolves to packages/std/src/env.ts (docs/STD.md §1, §5).
+// The std module is ordinary strict TypeScript once resolved and the verdict covers the whole
+// module graph, so it is `dynamic`: `get` answers `string | undefined`, a union the HIR boxes.
+// The byte-for-byte proof is the `std_env` golden.
+import { get, has } from "std/env";
 
-console.log(stdEnvGet("TZ" as CString));
-stdEnvSet("STATOR_STD_ENV_SUBSET" as CString, "x" as CString, 1);
-console.log(stdEnvGet("STATOR_STD_ENV_SUBSET" as CString));
-stdEnvUnset("STATOR_STD_ENV_SUBSET" as CString);
-export {};
+console.log(has("TZ"), get("TZ"));

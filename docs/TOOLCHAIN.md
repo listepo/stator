@@ -20,7 +20,7 @@ that changes the pin, and note the reason in `plan-notes.md`.
 | pnpm                      | `12.3.4`           | `packageManager` in root `package.json`, `npm:pnpm` in `mise.toml`                                                                                                                                                               |
 | LLVM                      | `21.1.8`           | `mise.toml` (`conda:llvm` + `conda:clang`, Unix). The C compiler the justfile and `packages/compiler/src/cli/build.ts` look up as `$CC`/`clang`. Conda prebuilts — the asdf llvm plugin compiles from source and is not the pin. |
 | just                      | `1.58.0`           | `mise.toml`. The runtime build (`just -f packages/runtime/justfile -d packages/runtime runtime`, `runtime-asan`, `runtime-intl`).                                                                                                |
-| Zig                       | `0.16.0`           | `mise.toml` (`zig`, Unix). The memory-core objects in `libjsrt.a` (plan-notes 238, T9.1). CI install via `mlugg/setup-zig@v2` in `.github/actions/setup` (skipped on Windows, which never builds the runtime). |
+| Zig                       | `0.16.0`           | `mise.toml` (`zig`, Unix). The memory-core objects in `libjsrt.a` (plan-notes 238, T9.1) and the `std/*` backings in `libjsrt_std.a` (T11.2). CI install via `mlugg/setup-zig@v2` in `.github/actions/setup` (skipped on Windows, which never builds the runtime). |
 
 Node ≥ 24 is required because dev runs the compiler's TypeScript sources directly
 (`node packages/compiler/src/cli/main.ts`) via native type stripping — there is no build step in development.
@@ -66,6 +66,7 @@ just -f packages/runtime/justfile -d packages/runtime runtime-asan     # package
 just -f packages/runtime/justfile -d packages/runtime runtime-intl     # packages/runtime/build-intl/libjsrt.a     (ICU feature build)
 just -f packages/runtime/justfile -d packages/runtime runtime-test     # print corpus vs Node
 just -f packages/runtime/justfile -d packages/runtime runtime-clean
+just -f packages/std/justfile -d packages/std std                    # packages/std/build/libjsrt_std.a        (zig -O ReleaseSafe; `pnpm run runtime` builds it too)
 node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js]
 node packages/compiler/src/cli/main.ts explain file.ts --json
 ```
@@ -147,9 +148,9 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 | Tool            | Used by                                                              | For                                                      |
 | --------------- | -------------------------------------------------------------------- | -------------------------------------------------------- |
 | `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`                       | the runtime, the emitted C, and the final link           |
-| `ar` (`$AR`)    | justfile                                                             | archiving `libjsrt.a`                                    |
+| `ar` (`$AR`)    | justfiles                                                            | archiving `libjsrt.a` and `libjsrt_std.a`                |
 | `just`          | justfile                                                             | the runtime build (pinned `1.58.0` in `mise.toml`)       |
-| `zig`           | justfile (T9.1)                                                      | memory-core objects into `libjsrt.a` (pinned `0.16.0` in `mise.toml`; required) |
+| `zig`           | justfiles (T9.1, T11.2)                                              | memory-core objects into `libjsrt.a`, std backings into `libjsrt_std.a` (pinned `0.16.0` in `mise.toml`; required) |
 | `pkg-config`    | justfile                                                             | finding bdw-gc and ICU; absent means both are simply off |
 | `diff`          | `just -f packages/runtime/justfile -d packages/runtime runtime-test` | the print corpus against Node, byte-for-byte             |
 

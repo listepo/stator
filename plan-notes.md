@@ -9591,3 +9591,84 @@ package and an additional fallback for `js` mode.
   an `Interpret` node. The emitter links the package on demand, so binaries that never interpret
   are unchanged in size.
 
+
+## 294. T11.2 lands: `packages/std` is the real `std/*` package (2026-10-02)
+
+**Plan:** §11c T11.2 (+ T10.1 steps 3–4, which the card absorbs). `plan.md` edited in the same
+change: the T11.2 record moves to `done.md`; T10.1 steps 2–4 are struck (step 5 stays open);
+§11b's v0 table drops `std/env.args`; T11.3's `std/fs` row drops what landed here.
+
+**What landed.**
+
+- `packages/std` (`@stator/std`): a pnpm workspace member and a moon project (`build`,
+  `typecheck`, `lint`). `src/<module>.ts` is the surface, `src/native/<module>.d.ts` its
+  `@statorExtern` bindings, `zig/<module>.zig` the backings, and `just std` builds
+  `build/libjsrt_std.a`. The modules are `std/env`, `std/path` (pure TS), `std/process`,
+  sync `std/fs` and `std/time`.
+- Compiler: `frontend/std.ts` owns the `std/` prefix. Resolution goes through a `paths` entry
+  on the program's own options. `std/sync` and `std/thread` are `STA1214` (Phase 10). Any other
+  `std/…` is the new `STA3002`, reported once: by the TS2307 mapping when nothing resolved, and
+  by the gate when the mapping reached a non-module file (`std/internal/error`). `cli/build.ts`
+  links the archive, before `-ljsrt`, only when the module graph holds a std source file;
+  `STA0011` now covers a missing std archive.
+- The plan-notes 284 fixtures are gone: no `declare` helper, no fixture C, no `node_shim.mjs`.
+
+**Decisions.**
+
+1. **Binding files are module-form `.d.ts`** (`export declare function`), imported by relative
+   path. A global `declare namespace` for `CString` was tried first; the qualified name is
+   `STA1214`. Module form keeps `CString` and every binding out of the user's global scope,
+   with no compiler change. docs/FFI.md §1 item 5 records it.
+2. **Errors carry the code in the message**: `std/<module>.<fn>(<arg>): <CODE>`, with codes from
+   one closed POSIX errno table (docs/STD.md §3). `class StdError extends Error` is `STA1214`
+   today (Phase 5). So there is no `code` property yet; it arrives with the same strings.
+   `std/env.set` names the variable, never the value.
+3. **The archive calls only libc.** It has its own panic handler, so it never depends on
+   `libjsrt`. One ReleaseSafe flavor therefore serves the plain, ASan and intl runtimes; the
+   ASan gate builds it and hashes its sources.
+4. **Strings out** go through one result slot. A backing parks an owned string and returns a
+   status, and `jsrtStdResult()` is the `CString` return the emitter copies at once. The next
+   park frees the previous value.
+5. **`std/fs.Stat` is a class.** An interface-typed object literal compiles dynamic; a class
+   instance is static. `std/env.get` stays `string | undefined`, so an importer of `std/env`
+   explains as `dynamic`. That is the honest verdict, and docs/SUBSET.md records it.
+6. **`std/path` is POSIX `basename(3)`/`dirname(3)`**, not `path.posix`, with no normalization
+   and a two-segment `join`. It answers STD.md's old open question 2.
+7. **The Node oracle is a TS resolve hook** (`golden/std-oracle.ts`, `module.registerHooks`). It
+   maps `std/<m>` to a Node-API twin, or, for `std/path`, to the real source. No `.mjs` file is
+   involved (§0.10).
+
+**Deviations from the card's wording.**
+
+- `std/env.args` (§11b v0 table) moves to T11.3 as `std/process.argv`. The table's note "argv
+  already exists for `main`" was wrong: the generated entry is `int main(void)`. Exposing argv
+  touches codegen and the runtime, so it belongs in T11.3, which already lists `argv`.
+- `std/fs.unlink` and `rmdir` landed early (T11.3 listed `unlink`), because `std_fs` must
+  remove what it creates.
+
+**Emitter bug found and fixed.** Two calls to a zero-argument extern wrapper in one scope
+(`nowMs()` twice) failed in clang with "redefinition of `_jsrt_exr_N`". Inlining emits the
+wrapper's single `ExternCall` node, so both sites get one slot base, and the temporaries were
+named by that base. They are now named by an emission-unique site counter
+(`codegen/index.ts` `externSiteCount`). Regression: `unit/extern.test.ts` "an inlined extern
+wrapper called twice declares each C temporary once" fails without the fix.
+
+**Found, not fixed (pre-existing; outside this card).**
+
+- **One namespace.** Importing a std module reserves its top-level names, exported or not, for
+  the whole program: a user `function get()` beside `import { has } from "std/env"` is
+  `STA1214`. Renamed imports and exports are also `STA1214`, so the library cannot hide its
+  names. `packages/node` (T11.6) will hit this on every module; module namespaces (Phase 5)
+  are a prerequisite worth a card before T11.6.
+- `catch (e) { if (e instanceof Error) e.message.lastIndexOf(":") }` is `STA4081`, an internal
+  error on a method call over a receiver typed `unknown`. The fixtures avoid it.
+- `Number.isInteger(x)` is "method calls not yet supported" in ts mode, and
+  `JSON.stringify(string | undefined)` is `STA1214`. The fixtures avoid both.
+
+**Dependency note.** `packages/std/package.json` lists `typescript` 6.0.3 as a devDependency
+(already pinned at the root and in both packages). pnpm writes no lockfile importer for a
+member with no dependencies, and `--frozen-lockfile` then refuses the workspace
+(`ERR_PNPM_PACKAGE_MANAGER_NO_IMPORTER`). The package also really is type-checked with `tsc`.
+No new package entered the tree.
+
+**Proof:** see done.md → Phase 11 T11.2.

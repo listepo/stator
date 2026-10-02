@@ -4,6 +4,7 @@ coverage/
 packages/runtime/build/
 packages/runtime/build-asan/
 packages/runtime/build-intl/
+packages/std/build/
 *.o
 *.a
 .DS_Store

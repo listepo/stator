@@ -34,7 +34,7 @@ Pinned in [`.node-version`](.node-version) and [`mise.toml`](mise.toml): Node 26
 ```
 mise install
 pnpm install --frozen-lockfile
-just -f packages/runtime/justfile -d packages/runtime runtime
+pnpm run runtime    # libjsrt.a, then libjsrt_std.a (the std/* backings)
 ```
 
 Boehm GC is optional (`pkg-config bdw-gc`); without it the runtime still builds, with a bump allocator. ICU is a separate `just -f packages/runtime/justfile -d packages/runtime runtime-intl` feature build.
@@ -51,6 +51,7 @@ pnpm run test262         # Test262 slice (CI heartbeat; corpus fetched separatel
 pnpm run differential    # fuzzer vs Node
 just -f packages/runtime/justfile -d packages/runtime runtime             # libjsrt.a (clang -O2 -Werror; thin LTO where the linker can read it)
 just -f packages/runtime/justfile -d packages/runtime runtime-asan        # ASan/UBSan archive
+just -f packages/std/justfile -d packages/std std                         # libjsrt_std.a, the std/* backings (Zig)
 ```
 
 Dev runs TypeScript directly on the pinned Node — no `pnpm run build` step for the CLI. GitHub Actions runs `pnpm run ci` plus a Test262 heartbeat on every push; nightly fuzz and weekly benches are `.github/workflows/nightly.yml`.

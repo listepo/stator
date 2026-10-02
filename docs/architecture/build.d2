@@ -29,4 +29,4 @@ each pass: {
 
 pa -> cg: final HIR
 cg -> cc: "C source (#line maps, JSRT_FRAME discipline)"
-cc -> cli: "object code, linked with libjsrt.a → native binary"
+cc -> cli: "object code, linked with libjsrt.a (+ libjsrt_std.a for std/* importers) → native binary"

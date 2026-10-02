@@ -40,7 +40,7 @@ middle: {
 
 emit: "C emitter (src/codegen/)\n#line source maps · JSRT_FRAME rooting"
 clang: "clang -O2"
-ld: "link runtime/build/libjsrt.a"
+ld: "link runtime/build/libjsrt.a\n(+ std/build/libjsrt_std.a for std/* importers)"
 bin: {
   label: "native binary"
   shape: cylinder

@@ -35,7 +35,7 @@ typescript API (parse + type-check, in-process)
   → passes (monomorphize, boundary-insert, const-fold, DCE, inline, …)
   → C emitter
   → clang
-  → link libjsrt.a
+  → link libjsrt.a (+ libjsrt_std.a when the program imports std/*)
   → native binary
 ```
 
@@ -43,6 +43,7 @@ Package layout:
 
 - `packages/compiler` (`statorc`) — CLI, frontend, HIR, passes, C emitter
 - `packages/runtime` — C11 + Zig memory core → `libjsrt.a` (not an npm package)
+- `packages/std` (`@stator/std`) — the `std/*` modules: strict TS surface + Zig backings → `libjsrt_std.a` (docs/STD.md)
 - `packages/tests` — unit, subset, golden, differential, Test262, leak, …
 
 Invariants that matter when reading code or docs:

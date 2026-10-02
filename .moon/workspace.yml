@@ -7,6 +7,7 @@
 projects:
   compiler: 'packages/compiler'
   runtime: 'packages/runtime'
+  std: 'packages/std'
   tests: 'packages/tests'
 
 vcs:

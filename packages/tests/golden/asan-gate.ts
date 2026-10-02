@@ -1,7 +1,8 @@
 /* The ASan golden gate (plan.md §9 Task 6.8, option (a): content-hash skip).
  *
- * `test:asan` is three stages: (1) `just runtime-asan`, (2) `just runtime-test-asan`,
- * (3) the golden suite linked against the sanitized archive. Stages 1-2 are seconds
+ * `test:asan` is three stages: (1) `just runtime-asan` plus the std archive (`just std`, the
+ * one flavor every runtime flavor links), (2) `just runtime-test-asan`, (3) the golden suite
+ * linked against the sanitized archive. Stages 1-2 are seconds
  * (incremental objects behind the justfile's `stale()` walk); stage 3 re-runs every
  * fixture's generated C under ASan and is >85% of the cost (plan-notes 244), a
  * duplicate PASS no runtime-cache work can move. This gate runs stages 1-2
@@ -11,7 +12,8 @@
  * - the sanitized archive, by member content (see below);
  * - `build-asan/link-flags.txt` + `build-asan/cflags.txt` (toolchain/flag key);
  * - the working-tree bytes of every tracked file under the compiler, the golden and
- *   support harnesses, and the runtime sources/headers/tests/justfile (sorted, no
+ *   support harnesses, the runtime sources/headers/tests/justfile and the std sources/Zig
+ *   backings/justfile (sorted, no
  *   mtimes — `git ls-files` names, bytes off disk, so uncommitted edits count);
  * - the resolved CC's `--version` (same fallback as the justfile and `build.ts`);
  * - the resolved oracle's `node --version` (the same `nodePath()` the golden runner
@@ -56,6 +58,11 @@ const TRACKED_SCOPES: readonly string[] = [
   'packages/runtime/include',
   'packages/runtime/tests',
   'packages/runtime/justfile',
+  // The std archive is one ReleaseSafe flavor for every runtime flavor (packages/std/justfile),
+  // so its bytes follow from its sources and recipe alone.
+  'packages/std/src',
+  'packages/std/zig',
+  'packages/std/justfile',
 ];
 
 export interface ArchiveMember {
@@ -293,9 +300,12 @@ export function collectGateInputs(): GateInputs {
   };
 }
 
-function runJust(recipe: 'runtime-asan' | 'runtime-test-asan'): void {
-  const justfile = join(REPO, 'packages', 'runtime', 'justfile');
-  const dir = join(REPO, 'packages', 'runtime');
+function runJust(
+  pkg: 'runtime' | 'std',
+  recipe: 'runtime-asan' | 'runtime-test-asan' | 'std',
+): void {
+  const dir = join(REPO, 'packages', pkg);
+  const justfile = join(dir, 'justfile');
   const result = spawnSync('just', ['-f', justfile, '-d', dir, recipe], {
     stdio: 'inherit',
     env: { ...process.env, ASAN_OPTIONS: 'detect_leaks=0' },
@@ -343,8 +353,9 @@ function main(): void {
   const forced = isForceRequested();
   // Stages 1-2 run on EVERY invocation: they are the seconds-long incremental half,
   // and the hash below is only meaningful against the archive they just produced.
-  runJust('runtime-asan');
-  runJust('runtime-test-asan');
+  runJust('runtime', 'runtime-asan');
+  runJust('std', 'std');
+  runJust('runtime', 'runtime-test-asan');
   const hash = hashGateInputs(collectGateInputs());
   const path = recordPath();
   const record = readGreenRecord(path);

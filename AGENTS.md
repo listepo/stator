@@ -57,6 +57,8 @@ packages/compiler/ the compiler package "statorc" — holds src/ + the locked ts
 packages/runtime/  C11 + Zig memory core (plan-notes 238 / T9.1; NOT an npm package) → packages/runtime/build/libjsrt.a (justfile)
   include/jsrt_value.h   mirrors docs/VALUE.md — the codegen↔runtime contract
   vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
+packages/std/      "@stator/std" — the std/* modules (docs/STD.md): src/<module>.ts surface (strict TS,
+                   Stator's own subset) + zig/<module>.zig backings → packages/std/build/libjsrt_std.a (justfile)
 packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
   unit/            vitest unit tests (*.test.ts; config: packages/tests/vitest.config.ts)
   subset/          decision tests (feature × mode matrix)
@@ -115,10 +117,11 @@ pnpm run test:leak              # 10M-object loop; RSS must plateau (skips witho
 pnpm run test262                # Test262 slice against packages/tests/test262/pin.json (not part of `ci`)
 pnpm run differential           # fuzzer vs Node (failures land in packages/tests/differential/failures/)
 pnpm run bench:record           # refresh packages/tests/bench/baseline.json (valid for this machine only)
-pnpm run runtime                # build libjsrt.a (clang, -Wall -Wextra -Werror; wraps the just recipe)
+pnpm run runtime                # build libjsrt.a (clang, -Wall -Wextra -Werror; wraps the just recipe), then libjsrt_std.a
 just -f packages/runtime/justfile -d packages/runtime runtime       # the recipe directly
 just -f packages/runtime/justfile -d packages/runtime runtime-asan  # ASan/UBSan runtime build
 just -f packages/runtime/justfile -d packages/runtime runtime-intl  # ICU feature build (off by default)
+just -f packages/std/justfile -d packages/std std                  # the std/* backings → libjsrt_std.a (Zig, ReleaseSafe)
 pnpm run test:intl              # the intl_* golden fixtures against that build (not part of `ci`)
 pnpm run ci                     # all of the above, in order — run before claiming any task done
 moon run tests:ci               # same gate through moon (dependency graph + caching); wraps the above
@@ -126,7 +129,7 @@ node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--em
 node packages/compiler/src/cli/main.ts explain file.ts --json   # per-construct verdicts (decision tests use this)
 ```
 
-The monorepo (plan-notes 204): `packages/{compiler,runtime,tests}` under a pnpm workspace,
+The monorepo (plan-notes 204): `packages/{compiler,runtime,std,tests}` under a pnpm workspace,
 orchestrated by moon. `pnpm run ci` stays the serial gate; `moon run tests:ci` runs the same
 commands as a cached dependency graph. moon tasks call the underlying tools directly (not `pnpm`),
 because mise's `pnpm` is unusable from a raw child process on this machine — plan-notes 204.

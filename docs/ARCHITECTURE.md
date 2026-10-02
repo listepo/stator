@@ -49,6 +49,9 @@ Invariants:
 - **Mode stops at the gate** — a pass or the emitter needing the mode means the design is wrong (plan §0.8).
 - Generated C touches values only through `jsrt_value.h` accessors; every generated function opens
   `JSRT_FRAME(n)` and pops it on every exit path, including landing pads.
+- **`std` is resolved and linked, never imported** — `frontend` maps `std/*` to `packages/std`'s
+  sources and `cli` adds `libjsrt_std.a` only for a program that imports one (docs/STD.md §6).
+  Nothing in `packages/compiler` imports `packages/std`.
 
 ## 4. Value flow at a type boundary (activity view)
 

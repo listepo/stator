@@ -2862,3 +2862,72 @@ The three questions in BUNDLER.md §9 were answered by the creator on 2026-10-02
 - the order deviation is documented only.
 
 The T12.1, T12.2, T12.3 and T11.5 cards were edited to match.
+
+## Phase 11 — T11.2 std package ✅ (2026-10-02)
+
+### T11.2. `packages/std`: the real `std/*` package — **[D4]**
+
+Today `std/env` and `std/path` are golden fixtures over `declare` externs (plan-notes 284), not an
+importable package. Steps: create `packages/std` (workspace member + moon project; `src/<module>.ts`
+surface, `zig/<module>.zig` backings building `libjsrt_std.a`); the compiler resolves `std/*` to
+it and links the library only when a program imports `std/*`; unknown `std/foo` stays a hard
+error (STD.md §1); move `std/env` + `std/path` in; land T10.1 steps 3–4 (`std/process`, sync
+`std/fs`, `std/time`) here. Update `docs/STD.md` (no longer a skeleton) and `packages.d2`.
+
+**Check:** `std_env` / `std_path` goldens pass through `import … from 'std/…'` with no
+`declare` fixture; T10.1's Check; a program without `std/*` imports links no `libjsrt_std.a`.
+
+**Execution plan** (Claude Code / opus-5-5, branch `t11-2-std-package`):
+
+1. `packages/std`: `package.json` (private workspace member), `moon.yml` (`build`, `typecheck`),
+   `tsconfig.json` (Stator's own subset: es2025 lib, no Node types), `justfile` (`just std` →
+   `build/libjsrt_std.a`, one Zig root `zig/jsrt_std.zig` importing one file per module,
+   `zig fmt --check`, the runtime's Zig flags and macOS target rule). Surfaces in
+   `src/<module>.ts`, their extern declarations in `src/native/<module>.d.ts`. `std/path` is pure
+   TS (no backing, no leak — the 284 C shims leaked every result); `env`, `process`, `fs`, `time`
+   are Zig over libc, returning C strings through one reused result buffer the emitter copies.
+2. Compiler: `src/frontend/std.ts` owns the `std/` prefix — the package root (sibling package,
+   `STATOR_STD_ROOT` override), the module list (the files in `src/`), and one classifier
+   shared by the gate and the checker-diagnostic mapping: a known module resolves through a
+   `paths` entry on the program's options; `std/sync` / `std/thread` are not-yet naming Phase 10
+   (`STA1214`); any other `std/foo` is a hard error with a new `STA3002`. `cli/build.ts` links
+   the archive (before `-ljsrt`; it calls only libc and has its own panic handler) only when the module graph holds a
+   `std` file; a missing archive is `STA0011` naming the std recipe.
+3. Tests: `std_env` / `std_path` goldens rewritten as `import … from 'std/…'` (their `declare`
+   fixtures, C shims and `.mjs` shims deleted), new `std_process` / `std_fs` / `std_time` goldens
+   and one js-mode golden. The Node oracle loads one TS resolve hook mapping `std/<m>` to a
+   Node-backed oracle module, or to the real `packages/std/src/<m>.ts` when the module has no
+   backing (path). Decision fixtures in both modes per module plus unknown / thread refusals;
+   a unit test proves the link line carries `libjsrt_std.a` only for a `std` importer.
+4. Wiring: pnpm workspace + lockfile importer, moon project + `std:build` edges, `pnpm run
+   runtime` / `test:intl` / `test:asan` build the std archive too, root `typecheck` covers
+   `packages/std`.
+5. Docs: `docs/STD.md` (implemented, §8 questions answered), `SUBSET.md` std rows,
+   `DIAGNOSTICS.md` (`STA3002`, `STA0011` scope), `packages.d2` + SVG, `TOOLCHAIN.md`,
+   `AGENTS.md` repo map + commands, `README`s; plan-notes 294.
+6. Verify with the full gate (tsc ×3, oxlint, oxfmt, cpd, vitest, subset, golden, builtins,
+   node-coverage, `zig fmt --check`, runtime `-Werror` build, ASan gate), then move the record to
+   `done.md` and leave the stub.
+
+**Check — PASSED** (2026-10-02, darwin/arm64, Node per `.node-version`, on main `fde70c0`):
+
+- `std_env` / `std_path` goldens pass through `import … from 'std/…'` with no `declare`
+  fixture: the 284 fixtures (`env.d.ts`, `path.d.ts`, `path.c`, both `node_shim.mjs`,
+  `helper_std_*.d.ts`) are deleted, and `node packages/tests/golden/run.ts` →
+  `golden: 402 fixtures — 402 passed, 0 failed` (std goldens: `std_env`, `std_path`,
+  `std_process`, `std_fs`, `std_time`, js `std_js`).
+- T10.1's Check (`std/process`, sync `std/fs`, `std/time` with goldens against Node): the same
+  run; `node packages/tests/subset/run.ts` → 761 fixtures, 724 passed, 37 expected-fail,
+  0 failed (std fixtures in both modes per module, plus `STA3002` unknown and `STA1214`
+  thread refusals).
+- A program without `std/*` imports links no `libjsrt_std.a`: `unit/std.test.ts` proves the
+  link line carries the archive only for a std importer (before `-ljsrt`, the only difference)
+  and that the module-graph test is false for a plain program. Vitest → `Tests 607 passed (607)`.
+- Rest of the gate: `tsc --noEmit` for compiler, tests and std clean; `oxlint --deny-warnings`
+  0 warnings; `oxfmt --check` clean; `cpd .` passes against the baseline (no new clones);
+  `golden/builtins.ts` → 223/238 members (94%), exit 0; `node-coverage.ts --check` →
+  `docs/NODE.md is current`; `zig fmt --check` clean; runtime `-Werror` build and `just std`
+  green; `STATOR_ASAN_FORCE=1 node packages/tests/golden/asan-gate.ts` → print corpus matches Node
+  under ASan/UBSan, golden-asan 402 passed, 0 failed.
+
+Design decisions, deviations, the emitter fix and the pre-existing gaps it found: plan-notes 294.

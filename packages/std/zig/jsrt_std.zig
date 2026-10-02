@@ -1,0 +1,109 @@
+//! The Zig backings of Stator's `std/*` modules (plan.md §11c T11.2, docs/STD.md §6). The
+//! justfile builds this root into one object and archives it as `libjsrt_std.a`; the compiler
+//! links that archive only into programs whose module graph holds a `std` file. Every symbol
+//! exported here is a C-ABI function named `jsrt_std_*` that a `src/native/*.d.ts` declaration
+//! file binds through the extern surface (docs/FFI.md), so the ABI is the FFI table's: `f64` for
+//! `number`, NUL-terminated UTF-8 for `CString`, nothing else.
+//!
+//! Two shared channels carry what one scalar return cannot:
+//! - a failing call returns 1 and records a stable error code (docs/STD.md §3), which the TS
+//!   wrapper reads back through `jsrt_std_last_error` and throws;
+//! - a string answer is parked in one result buffer and read back through `jsrt_std_result`.
+//!   The emitter copies a `CString` return into a runtime string at the call site
+//!   (docs/FFI.md §3), so the buffer only has to outlive that copy: the next call that parks a
+//!   result frees the previous one. Nothing here is thread-safe; v0 std is single-threaded like
+//!   v0 FFI (T10.2 owns threads).
+//!
+//! This archive depends on libc and nothing else — not on libjsrt.a — so it links in any
+//! position on the line.
+
+const std = @import("std");
+
+/// Zig's own I/O implementation behind every file-system and clock call: cross-platform where
+/// Zig's std is (§0.5), single-threaded, and needing no setup from the C `main` that hosts it.
+pub fn io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+/// A safety-check failure (bounds, overflow) in a std backing is a bug in this library, never a
+/// user error: say so on stderr and abort, the way a runtime panic ends the process.
+pub const panic = std.debug.FullPanic(onPanic);
+
+fn onPanic(msg: []const u8, _: ?usize) noreturn {
+    @branchHint(.cold);
+    const prefix = "stator std: internal error: ";
+    _ = std.c.write(2, prefix, prefix.len);
+    _ = std.c.write(2, msg.ptr, msg.len);
+    _ = std.c.write(2, "\n", 1);
+    std.c.abort();
+}
+
+pub const allocator = std.heap.c_allocator;
+
+var result: ?[:0]u8 = null;
+
+/// Parks `owned` (allocated with `allocator`) as the answer `jsrt_std_result` returns, freeing
+/// the previous answer: its only reader, the emitter's copy, has already run.
+pub fn setResult(owned: [:0]u8) void {
+    if (result) |old| allocator.free(old);
+    result = owned;
+}
+
+export fn jsrt_std_result() [*:0]const u8 {
+    return if (result) |r| r.ptr else "";
+}
+
+var last_error: [:0]const u8 = "";
+
+/// Records `code` for `jsrt_std_last_error` and answers the failure status every backing returns.
+pub fn fail(code: [:0]const u8) f64 {
+    last_error = code;
+    return 1;
+}
+
+/// The code of a Zig I/O error, from the closed vocabulary docs/STD.md §3 lists. The names are
+/// POSIX's errno names because those are the stable, documented spelling of each condition; an
+/// error outside the table is `EIO`, never a guess at a closer one.
+pub fn failWith(err: anyerror) f64 {
+    return fail(switch (err) {
+        error.FileNotFound => "ENOENT",
+        error.AccessDenied, error.PermissionDenied => "EACCES",
+        error.PathAlreadyExists => "EEXIST",
+        error.NotDir => "ENOTDIR",
+        error.IsDir => "EISDIR",
+        error.DirNotEmpty => "ENOTEMPTY",
+        error.NameTooLong => "ENAMETOOLONG",
+        error.SymLinkLoop => "ELOOP",
+        error.NoSpaceLeft => "ENOSPC",
+        error.ReadOnlyFileSystem => "EROFS",
+        error.FileBusy, error.DeviceBusy => "EBUSY",
+        error.OutOfMemory, error.SystemResources => "ENOMEM",
+        error.BadPathName => "EINVAL",
+        error.FileTooBig, error.StreamTooLong => "EFBIG",
+        else => "EIO",
+    });
+}
+
+/// The status a backing returns for a call that answers nothing but success or failure.
+pub fn status(outcome: anyerror!void) f64 {
+    outcome catch |err| return failWith(err);
+    return 0;
+}
+
+export fn jsrt_std_last_error() [*:0]const u8 {
+    return last_error.ptr;
+}
+
+/// A JS number as a C `int` argument, or null when it is not an integer in `[lo, hi]`.
+pub fn intIn(value: f64, lo: c_int, hi: c_int) ?c_int {
+    if (!(value >= @as(f64, @floatFromInt(lo)) and value <= @as(f64, @floatFromInt(hi)))) return null;
+    if (@trunc(value) != value) return null;
+    return @intFromFloat(value);
+}
+
+comptime {
+    _ = @import("env.zig");
+    _ = @import("process.zig");
+    _ = @import("fs.zig");
+    _ = @import("time.zig");
+}

@@ -76,6 +76,7 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
+import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -313,7 +314,7 @@ function gateConstruct(
     // resolution, which is why every renaming shape (`x as y`) is refused: it would make a name
     // resolve to a binding that does not carry it.
     case ts.SyntaxKind.ImportDeclaration:
-      return gateImport(node as ts.ImportDeclaration);
+      return gateImport(node as ts.ImportDeclaration, typeChecker);
     case ts.SyntaxKind.ImportClause:
     case ts.SyntaxKind.NamedImports:
     case ts.SyntaxKind.NamedExports:
@@ -672,11 +673,27 @@ function gateImportCall(call: ts.CallExpression): GateResult {
   return { kind: 'accept' };
 }
 
-function gateImport(node: ts.ImportDeclaration): GateResult {
+function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): GateResult {
   const spec = node.moduleSpecifier;
   if (ts.isStringLiteral(spec) && node.importClause?.isTypeOnly !== true) {
+    // `std/…` is a reserved prefix, not a package (docs/STD.md §1): a known module is an ordinary
+    // edge into the std sources, judged by the clause rules below like any relative import. A
+    // refused specifier that resolved to no file was already refused, with this same code, where
+    // the checker's "cannot find module" is mapped (program.ts `stdImportRefusal`); the gate
+    // answers only the ones the `paths` mapping did reach (`std/internal/error`), so each
+    // refusal is reported once.
+    const std = classifyStdSpecifier(spec.text);
+    if (
+      std !== undefined &&
+      std.kind !== 'module' &&
+      typeChecker.getSymbolAtLocation(spec) !== undefined
+    ) {
+      return std.kind === 'unknown'
+        ? { kind: 'never', code: std.code, message: std.message }
+        : { kind: 'not-yet', code: std.code, message: std.message, phase: std.phase };
+    }
     // Bare specifier: a package. Compiling one means compiling someone else's whole module graph.
-    if (!spec.text.startsWith('./') && !spec.text.startsWith('../')) {
+    if (std === undefined && !spec.text.startsWith('./') && !spec.text.startsWith('../')) {
       // No `phase`: compiling a package means compiling someone else's whole module graph
       // (npm-ecosystem compatibility, a v1 non-goal in plan.md §0), and no open phase owns
       // it — a phase number here would tell the user to wait for a release that has no card
@@ -692,7 +709,7 @@ function gateImport(node: ts.ImportDeclaration): GateResult {
     // Node ESM never resolves an extensionless relative specifier, and Node is the ground truth
     // the golden tests hold this compiler to. The Bundler-style resolution the checker runs
     // WOULD resolve it, which is exactly why the gate has to say no here.
-    if (!/\.[cm]?[tj]s$/.test(spec.text)) {
+    if (std === undefined && !/\.[cm]?[tj]s$/.test(spec.text)) {
       return {
         kind: 'never',
         code: 'STA1113',
