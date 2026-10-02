@@ -1332,7 +1332,7 @@ byte-identical emitted C for the fixture; CI green.
 
 ---
 
-## 11c. Phase 11 — `--node`: the Node platform — **[D5]**
+## 11c. Phase 11 — `--node`: the Node platform — **[D5 · P1]**
 
 Creator's direction (2026-10-02, plan-notes 286, decided in 289). A program may use the Node
 platform: CommonJS `require` / `module.exports`, `process`, `Buffer`, timers and the `node:*`
@@ -1501,6 +1501,40 @@ the same change.
 **Check:** `tsc --version` and `tsc -p` on a small fixture project, compiled by Stator, print
 byte-for-byte what `node _tsc.js` prints on Node 26.7.0; `docs/NODE.md` slice N1 at 100%.
 
+### T11.7. Node's own test suite, synced and run through vitest — **[D3 · P1]**
+
+Creator's direction (2026-10-02, plan-notes 305). The `node:*` wrappers are proven by Node's own
+tests, synced at the pinned version, not by hand-written copies.
+
+1. **Sync, don't copy.** `packages/tests/node-suite/pin.json` pins the tag matching
+   `.node-version` (v26.7.0). A strict-TS fetch script downloads the selected
+   `test/parallel/test-*.js` files and the `test/fixtures` they read. The corpus is fetched, not
+   vendored (gitignored), the same way Test262 is (Task 6.1). A Node bump re-pins it, and the diff
+   of results is the review.
+2. **Selection.** A checked-in expectations file lists each selected test as `pass`, `fail` or
+   `skip` with a reason. At v26.7.0, `test/parallel` has 4 641 `test-*` files, and 615 of them
+   have a name starting with an N1 module (`fs`, `path`, `os`, `buffer`, `process`,
+   `crypto-hash`, `timers`, `perf-hooks`). Start with `path`, then follow T11.6's order. Tests that
+   need `// Flags: --expose-internals`, child processes or the network are `skip` until N2.
+3. **The harness, in strict TS.** `require('../common')` resolves to
+   `packages/tests/node-suite/common.ts`, a strict-TS implementation of the `common` helpers the
+   selected tests use (`mustCall`, `mustNotCall`, `expectsError`, `tmpdir`, platform flags). It
+   grows with the selection. `node:assert` (`ok`, `strictEqual`, `deepStrictEqual`, `throws`,
+   `rejects`) lands in `packages/node` as part of this card.
+4. **vitest drives it.** The runner generates one vitest test per selected file. Each test builds
+   the file with `--mode=js --node`, runs the binary, and passes on exit 0. The same file must also
+   pass under the pinned Node, so a test that fails on the host is `skip`, never `fail`.
+5. **Ratchet and coverage.** A `pass` that starts failing fails the run. A `fail` that starts
+   passing must be flipped in the same change, as Test262's ratchet does. `docs/NODE.md` gains a
+   "node tests" column with passes over the selected count per module.
+
+Depends on T11.5 (`--node`, CommonJS through the T12 bundler) and T11.6. The harness and `path`
+can land as soon as `node:path` exists.
+
+**Check:** `pnpm run test:node-suite` runs the selection through vitest against the pinned corpus,
+and its pass count is recorded in plan-notes; `docs/NODE.md` shows the column; a hand-flipped
+expectation fails the run.
+
 **Deferred — N2 (not a card yet).** `std/loop` written in Zig (the creator chose an own loop
 over libuv: kqueue/epoll first, Windows when the runtime builds there), real timers and
 immediates, `std/child`, `fs.promises`, `fs.watch`, `node:events`, `node:stream`, `node:util`,
@@ -1668,7 +1702,11 @@ golden here reads them.
 
 ---
 
-## 11e. Phase 13 — Web API with a pluggable render API — **[D5]**
+## 11e. Phase 13 — Web API with a pluggable render API — **[D5 · P3]**
+
+**Priority (creator, 2026-10-02, plan-notes 305):** Phase 11 (`--node`) comes before this phase.
+When an agent picks its next card, a Phase 11 card wins over any Phase 13 card, `webapi` and
+`renderer-clay` alike.
 
 Creator's direction (2026-10-02, plan-notes 298). Stator programs get the Web platform's DOM and
 CSS as a **separate package**. That package knows nothing about pixels: it talks to a renderer
@@ -1807,6 +1845,30 @@ checked in `ci`.
 **Check:** `pnpm run test:webapi-coverage` passes on a fresh tree and fails after a hand edit of
 `docs/WEBAPI.md`; before T13.1 the doc shows 0% over the full denominator; a claim naming a
 missing fixture fails with the claim's path.
+
+### T13.6. Web-platform-tests for `webapi`, synced and run through vitest — **[D3 · P3]**
+
+Creator's direction (2026-10-02, plan-notes 305). This is T13.0 §8's DOM oracle, made concrete.
+It follows T11.7's design, so the two suites share one fetch, expectation and ratchet mechanism
+(Task 6.16: one helper, not two).
+
+1. **Sync.** `packages/tests/wpt/pin.json` pins a web-platform-tests commit, fetched and not
+   vendored. Scope is `dom/` (937 files: 651 `.html`, 66 `.any.js`/`.window.js`) and `css/cssom/`
+   (352 files: 295 `.html`, 1 `.any.js`), counted at `c5e80ef1dca9`.
+2. **Script tests first.** `.any.js` and `.window.js` need no markup and run first. `.html` tests
+   need their markup turned into a document. T13.0 decides between an HTML parser in `webapi`
+   (which `innerHTML` would also need) and a dev-only pre-pass at fetch time that turns markup into
+   DOM-building calls. Until then `.html` tests are `skip`.
+3. **The harness, in strict TS.** A strict-TS `testharness` subset (`test`, `promise_test`,
+   `async_test`, `assert_*`, `done`) replaces `testharness.js` for the selected tests.
+4. **vitest drives it,** with the same per-file ratchet as T11.7. `docs/WEBAPI.md` (T13.5) gains a
+   "WPT" column.
+
+Depends on T13.1 and T13.5. Lower priority than T11.7 (Phase 11 first).
+
+**Check:** `pnpm run test:wpt` runs the selection through vitest against the pinned commit, and
+its pass count is recorded in plan-notes; `docs/WEBAPI.md` shows the column; a hand-flipped
+expectation fails the run.
 
 **Low priority — the other Web APIs (not cards yet).** `URL`, `TextEncoder`/`TextDecoder`, timers,
 `fetch`, `WebSocket`, storage, `Canvas`, `structuredClone` and the rest. They land in
@@ -2287,3 +2349,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.18** (2026-10-02): **T11.2 lands: `packages/std` is the real `std/*` package** (plan-notes 294). `std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` resolve through `paths` and link `libjsrt_std.a` only into programs that import them; unknown `std/foo` is the new `STA3002`. T10.1 steps 2–4 are struck (step 5 stays open); §11b's v0 table moves `std/env.args` to T11.3 as `std/process.argv`; T11.3's `std/fs` row drops `unlink`, `rmdir` and text reads. Record in `done.md`.
 - **v4.20** (2026-10-02): **T11.5a — per-module namespaces before T11.6** (plan-notes 302). Each module gets its own top-level namespace (module-qualified C names), and every aliasing shape lands: renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *`. This removes the one-namespace `STA1214` collisions that T11.2 found (plan-notes 294). T11.6 depends on it; T12.1 step 3 shares `export { a as b }` with it.
 - **v4.21** (2026-10-02): **Task 6.19 — self-compilation test** (plan-notes 304). Stator compiles itself and its own packages (`std`, later `node`, `webapi`, `renderer-clay`, `interpreter`) as a ratcheted test. Per-target diagnostic counts may only shrink. A target at zero builds and runs its smoke check, and for the compiler that check is a byte-identical stage-2 bootstrap. Baseline: compiler 2 522 `STA1214` in `ts` mode; `std` already compiles.
+- **v4.22** (2026-10-02): **Upstream test suites for `node` and `webapi`; Phase 11 outranks Phase 13** (plan-notes 305). New T11.7: Node's own `test/parallel` slice, pinned to `.node-version` and fetched rather than vendored, runs through vitest with a strict-TS `common` and `node:assert`, ratcheted, and adds a column to `docs/NODE.md`. New T13.6 does the same for web-platform-tests `dom/` and `css/cssom/`. Phase 11 is now `P1` and Phase 13 is `P3`.
