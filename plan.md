@@ -986,6 +986,10 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 Gate: real users blocked on untyped npm dependencies or `eval`. Do not build speculatively.
 
+**See also Phase 14 (§11f):** an interpreter in strict TypeScript is the creator-directed first
+fallback for `eval` and `new Function`. T14.0 §7 decides whether this phase is still needed
+after it.
+
 - Embed **QuickJS-NG** in the runtime (scriptc `--dynamic` / Perry-eval model): `eval`, `new Function`, `Proxy`, and stubborn untyped modules run interpreted; a marshaling layer converts `jsrt_value` ↔ `JSValue` at the boundary (objects proxied by handle, not deep-copied).
 - justfile feature flag so pure-static builds are unchanged. **`ts` mode is untouched: `eval` stays `STA1101`, permanently.**
 
@@ -1625,6 +1629,116 @@ already provides the primitive, the Web API wraps it rather than duplicating it.
 
 ---
 
+## 11f. Phase 14 — A JavaScript interpreter in strict TypeScript: `js` mode's second fallback — **[D5]**
+
+Creator's direction (2026-10-02, plan-notes 300). Write a QuickJS-class JavaScript interpreter as
+a **separate package in strict TypeScript**, compiled by Stator, and use it as an additional
+fallback in `js` mode. It runs what compiled code cannot: `eval`, `new Function`, and later the
+constructs that are `not-yet` today (`STA1206` and the rest of `STA12xx` that T14.0 assigns to
+it).
+
+**Where it sits.** Fallbacks are tried in this order: compiled static code, then compiled dynamic
+code (NaN-boxed values, shapes, ICs), then this interpreter. Phase 8's vendored QuickJS-NG stays
+the other option behind its own gate. T14.0 measures whether it is still needed once this
+interpreter runs Test262, and records the answer in plan-notes. The phase is not sequenced after
+the Phase 8 gate (§15.1 exception, as Phases 9–13), because the creator directed it.
+
+**What does not change.** `ts` mode is untouched: `eval` stays `STA1101` and `new Function` stays
+`STA1103`, permanently. A binary that never reaches the interpreter must not link it: size is
+byte-identical to before, and every `ts`-mode binary too (Phase 8's Check, kept). The mode stays
+above the gate (§0.8). The frontend marks a construct "interpret", the HIR carries an
+`Interpret` node, and the emitter links the package only when such a node exists.
+
+**Why our own interpreter, not only QuickJS-NG.** It runs on the runtime's own `jsrt_value`, so
+interpreted and compiled code share objects, shapes and the GC, with no `jsrt_value` ↔ `JSValue`
+marshaling layer (the largest item in Phase 8, step 2). It is strict TS, so §0.9 and §0.10 hold and
+one toolchain builds it. Its speed is what Stator's `ts`-mode codegen makes of it, so it doubles as
+a large benchmark of the compiler.
+
+| Package | Holds | Must not |
+| --- | --- | --- |
+| `packages/interpreter` (new) | the parser front (T14.1), the evaluator over runtime values, and the entry points the runtime calls (`eval`, `Function` constructor), in **strict TypeScript** compiled by Stator in `ts` mode | hold its own value model, object model or GC — values are `jsrt_value`, objects are runtime objects, memory is the Zig core (§11a) |
+| `packages/compiler` | the `Interpret` HIR node, scope materialization for direct `eval`, and linking the package on demand | interpret anything at compile time |
+| `packages/runtime` | the C ABI the interpreter calls (property access, calls, allocation, exceptions, promise jobs) — mostly what compiled dynamic code already calls | grow a second dispatch path: the interpreter goes through the same ICs and helpers |
+
+### T14.0. Design: the interpreter — **[D4]**
+
+Docs first (§15.6): `docs/INTERPRETER.md`, settled with a measured spike. The spike `eval`s one
+expression and one function body from a compiled `js` program through a minimal evaluator, and
+prints what Node prints. Questions it must answer:
+
+1. **The parser, and §0.3.** §0.3 forbids the *compiler* from writing a parser. The interpreter
+   needs one at run time for `eval` strings. Options:
+   - (a) The `typescript` package's own scanner and parser, compiled into the binary by Stator in
+     `js` mode, tree-shaken to `createSourceFile`. This keeps §0.3 literally, but depends on T11.4
+     (`tsc` compiles) and Phase 12 (tree-shaking).
+   - (b) An existing ECMAScript parser written in TypeScript, vendored, if one builds under the
+     locked `tsconfig` and is maintained.
+   - (c) A parser written here, which needs a plan-notes entry, and §0.3 is edited if this is the
+     choice.
+
+   Measure binary size and parse speed for each option that builds.
+2. **Execution model.** Tree-walking over the AST, or compiling to bytecode first. QuickJS uses
+   bytecode. Measure both on the spike before choosing.
+3. **Direct `eval` and scopes.** A direct `eval` sees its caller's locals. Which compiled functions
+   must keep their scope as an environment record (only those that contain a direct `eval`), what
+   indirect `eval` sees (global only), and how `var` declarations inside `eval` behave in sloppy
+   mode and in strict mode.
+4. **Boundary with compiled code.** Calls in both directions, exceptions crossing it (landing pads,
+   `JSRT_FRAME` pops — AGENTS.md rooting rules), GC roots held by interpreter frames, and
+   `this`/`new.target`/`arguments` inside interpreted functions.
+5. **Async and generators.** Interpreted `async`/`await`, generators and `for await` drive the
+   same promise/microtask machinery as compiled code (Task 4.6), with no second event loop.
+6. **Which `not-yet` codes it takes over.** `STA1206` first. List the other `STA12xx` codes the
+   interpreter can serve (e.g. `with`, sloppy-mode-only forms) and which stay with Phase 8 or stay
+   `not-yet`. Any new diagnostic codes are allocated in `docs/DIAGNOSTICS.md`.
+7. **QuickJS-NG after this.** Keep Phase 8 as an alternative behind `--interpreter=stator|quickjs`,
+   or retire it. The answer comes from Test262 numbers and binary size, not taste.
+8. **Oracle.** Test262 (Task 6.1) run through `eval`, so every test executes in the interpreter,
+   plus differential fuzzing against the pinned Node (Task 6.2).
+
+**Check:** `docs/INTERPRETER.md` answers 1–8 with the spike's numbers; plan-notes records the
+choices; T14.1–T14.4 are edited to match; `docs/README.md` lists the new doc.
+
+### T14.1. `packages/interpreter`: the parser front — **[D4]**
+
+Depends on T14.0 (§1's choice). Turns source text into the tree T14.2 runs. Early errors are
+`SyntaxError`s thrown at run time, the same errors Node throws for the same `eval` string.
+
+**Check:** the Test262 `language/` parse-only tests (negative syntax tests included) pass through
+`eval` at a recorded rate; parse speed and the binary-size delta are recorded in plan-notes.
+
+### T14.2. `packages/interpreter`: the core evaluator — **[D5]**
+
+Depends on T14.1. Expressions, statements, functions, closures, objects, arrays, classes,
+destructuring, exceptions. Values come from the runtime, and property access goes through the same
+ICs and helpers compiled dynamic code uses.
+
+**Check:** the T14.0 §8 Test262 slice runs through `eval` with its pass rate tracked in the
+dashboard (Task 6.3) under its own column; golden fixtures for `eval` match Node byte-for-byte.
+
+### T14.3. Wiring: `eval`, `new Function`, and the `Interpret` node — **[D5]**
+
+Depends on T14.2. The frontend gate stops emitting `STA1206` in `js` mode and marks the construct
+"interpret". Lowering materializes the scopes of functions that contain a direct `eval` (T14.0 §3).
+The emitter links the package only when an `Interpret` node exists. Decision tests flip
+`not-yet` → `dynamic` in the same commit (AGENTS.md).
+
+**Check:** a `js` program that mixes compiled modules, a direct `eval` reading a caller's local,
+an indirect `eval` and a `new Function` runs exactly as under Node. Binaries without an `Interpret`
+node, and every `ts`-mode binary, are byte-identical in size to before. `test:asan` is clean.
+
+### T14.4. Async, generators, and the remaining constructs — **[D4]**
+
+Depends on T14.3. Interpreted `async`/`await`, generators and async iteration on the shared
+promise machinery (T14.0 §5), plus every other `STA12xx` code T14.0 §6 assigned to the interpreter.
+
+**Check:** the Test262 slice for these features passes at a recorded rate. Each code taken over
+flips its decision tests in the same commit, and `explain` no longer lists it for those
+constructs.
+
+---
+
 ## 12. Make it better — the optimization ladder (post-MVP, in this order)
 
 Ordering rule (from the Boa deep-dive): **memory first, codegen last**. Each step: measure on the Phase-6 harness before/after; keep the change only if the geomean moves.
@@ -1801,6 +1915,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | `--node` (Phase 11) | typed arrays, `packages/std` + `packages/node`, CommonJS, sync `tsc` (N1) | T11.1–T11.6; the largest item is T11.4 (js-mode coverage, not Node). N2 deferred, N3 not planned (plan-notes 289) |
 | Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`, one-file `js` builds | T12.0 design first; T12.1–T12.2 (plan-notes 290) |
 | Web API (Phase 13) | `packages/webapi` (DOM + CSS, strict TS, render API) + `packages/renderer-clay` (default renderer) | T13.0 design first; T13.1–T13.5 (coverage in generated `docs/WEBAPI.md`); other Web APIs low priority (plan-notes 298, 299) |
+| JS interpreter (Phase 14) | `packages/interpreter` in strict TS: `eval`, `new Function` and other `not-yet` constructs in `js` mode, on the runtime's own values | T14.0 design first; T14.1–T14.4 (plan-notes 300) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
 | Conformance long tail | Porffor is at ~61% Test262 after years with a funded lead | years — the moat, budget honestly |
 
@@ -1969,3 +2084,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.12** (2026-10-02): **`explain` reports every deciding diagnostic** (plan-notes 291). §1's "per top-level construct" promise was never what shipped; the tree reports a file verdict plus per-function rows. `explain` now also lists every diagnostic of the deciding stage, which is what T11.4's Check needs to count `STA1214`; §1, `docs/MODES.md` §6 and T11.4/T11.5 rewritten to match, including how `--node` will surface platform gaps.
 - **v4.14** (2026-10-02): **Phase 13 — Web API with a pluggable render API** (plan-notes 298). New §11e: `packages/webapi` holds DOM + CSS in strict TS and owns the `Renderer` interface; `packages/renderer-clay` is the default renderer (vendored `clay.h` v0.14, Zig glue, TS adapter over FFI). Cards T13.0 (design, `docs/WEBAPI.md`), T13.1 DOM, T13.2 CSS, T13.3 render API + recording renderer, T13.4 Clay renderer; other Web APIs low priority, no cards yet.
 - **v4.15** (2026-10-02): **Web API coverage is a generated doc, like `docs/NODE.md`** (plan-notes 299). New card T13.5: `docs/WEBAPI.md` is the coverage table (denominator from the pinned `typescript`'s `lib.dom.d.ts`, claims in `webapi_coverage.json`, stale check in `ci`); T13.0's design doc moves to `docs/WEBAPI-DESIGN.md`; T13.1 depends on T13.5.
+- **v4.17** (2026-10-02): **Phase 14: a JavaScript interpreter in strict TypeScript, `js` mode's second fallback** (plan-notes 300). New §11f: `packages/interpreter`, compiled by Stator, runs `eval`, `new Function` and the `not-yet` constructs it takes over, directly on `jsrt_value` (no marshaling layer). Order: compiled static, then compiled dynamic, then the interpreter. Phase 8's QuickJS-NG stays as an option behind its gate until T14.0 measures whether it is still needed. Cards T14.0 (design, `docs/INTERPRETER.md`, including §0.3's parser question), T14.1 parser front, T14.2 evaluator, T14.3 wiring, T14.4 async and the rest. `ts` mode is unchanged.
