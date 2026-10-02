@@ -38,8 +38,11 @@ export interface VendorPlan {
   readonly entry: VendorEntry;
   /** Absolute, forward-slash path of the virtual module the bundle becomes. */
   readonly modulePath: string;
-  /** Project files whose package imports now name the vendor module: path → rewritten text. */
-  readonly rewrites: ReadonlyMap<string, string>;
+  /** Project files whose package imports now name the vendor module: path → rewritten text.
+   * `bundle` is the vendor bundle's code: an `export * from 'p'` re-exports the names the bundle
+   * exports for it, so without the bundle such a declaration stays as written (the gate refuses
+   * it). Every other rewrite is the same either way. */
+  rewrites(bundle: string | undefined): ReadonlyMap<string, string>;
 }
 
 const BUILTINS: ReadonlySet<string> = new Set(builtinModules);
@@ -220,7 +223,7 @@ export function isProjectFile(program: ts.Program, file: ts.SourceFile): boolean
   );
 }
 
-type RequestKind = 'side-effect' | 'named' | 'default' | 'namespace';
+type RequestKind = 'side-effect' | 'named' | 'default' | 'namespace' | 'star';
 
 /** One thing the vendor entry must export (or import, for a side effect). `source` is the
  * specifier as the vendor entry spells it: the package, or a CommonJS file relative to the
@@ -230,10 +233,31 @@ interface Request {
   readonly kind: RequestKind;
   /** The exported name asked for; `named` only. */
   readonly name: string;
+  /** The import attributes as the entry spells them (` with { type: "json" }`), or `''`. The
+   * same specifier under other attributes is another module (ECMA-262 §16.2.1.3), so they are
+   * part of the request's identity. */
+  readonly attributes: string;
 }
 
 function requestId(request: Request): string {
-  return `${request.kind}\0${request.source}\0${request.name}`;
+  return `${request.kind}\0${request.source}\0${request.name}\0${request.attributes}`;
+}
+
+/** A declaration's import attributes spelled for the entry, `''` without any, or `undefined` when
+ * they cannot be: the deprecated `assert` form, or a value that is not a string literal (an early
+ * error the checker reports anyway). */
+function attributesText(
+  statement: ts.ImportDeclaration | ts.ExportDeclaration,
+): string | undefined {
+  const attributes = statement.attributes;
+  if (attributes === undefined) return '';
+  if (attributes.token !== ts.SyntaxKind.WithKeyword) return undefined;
+  const pairs: string[] = [];
+  for (const element of attributes.elements) {
+    if (!ts.isStringLiteral(element.value)) return undefined;
+    pairs.push(`${spellName(element.name.text)}: ${JSON.stringify(element.value.text)}`);
+  }
+  return pairs.length === 0 ? '' : ` with { ${pairs.join(', ')} }`;
 }
 
 /** One binding a rewritten declaration makes: the request it reads and the name it binds. */
@@ -252,6 +276,10 @@ interface Site {
   readonly source: string;
   readonly bindings: readonly Binding[];
   readonly typeOnly: readonly string[];
+  /** `export * from 'p'` only: names the file exports itself, or through another `export *`, which
+   * the star re-export must not (an own export shadows it; two stars make a name ambiguous,
+   * ECMA-262 §16.2.1.6.3 GetExportedNames/ResolveExport). */
+  readonly shadowed?: ReadonlySet<string>;
 }
 
 function moduleNameText(name: ts.ModuleExportName): string {
@@ -300,6 +328,7 @@ function importSite(
   file: ts.SourceFile,
   statement: ts.ImportDeclaration,
   source: string,
+  attributes: string,
 ): Site | undefined {
   const clause = statement.importClause;
   if (clause === undefined) {
@@ -308,7 +337,7 @@ function importSite(
       statement,
       kind: 'import',
       source,
-      bindings: [{ request: { source, kind: 'side-effect', name: '' }, as: '' }],
+      bindings: [{ request: { source, kind: 'side-effect', name: '', attributes }, as: '' }],
       typeOnly: [],
     };
   }
@@ -316,11 +345,17 @@ function importSite(
   const bindings: Binding[] = [];
   const typeOnly: string[] = [];
   if (clause.name !== undefined) {
-    bindings.push({ request: { source, kind: 'default', name: '' }, as: clause.name.text });
+    bindings.push({
+      request: { source, kind: 'default', name: '', attributes },
+      as: clause.name.text,
+    });
   }
   const named = clause.namedBindings;
   if (named !== undefined && ts.isNamespaceImport(named)) {
-    bindings.push({ request: { source, kind: 'namespace', name: '' }, as: named.name.text });
+    bindings.push({
+      request: { source, kind: 'namespace', name: '', attributes },
+      as: named.name.text,
+    });
   } else if (named !== undefined) {
     for (const element of named.elements) {
       const imported = moduleNameText(element.propertyName ?? element.name);
@@ -335,29 +370,69 @@ function importSite(
       bindings.push({
         request:
           imported === 'default'
-            ? { source, kind: 'default', name: '' }
-            : { source, kind: 'named', name: imported },
+            ? { source, kind: 'default', name: '', attributes }
+            : { source, kind: 'named', name: imported, attributes },
         as: element.name.text,
       });
     }
   }
   if (bindings.length === 0) {
     // `import { type A } from 'p'` alone binds no value and runs the module: a side effect.
-    bindings.push({ request: { source, kind: 'side-effect', name: '' }, as: '' });
+    bindings.push({ request: { source, kind: 'side-effect', name: '', attributes }, as: '' });
   }
   return { file, statement, kind: 'import', source, bindings, typeOnly };
+}
+
+/** The names a star re-export in `file` must leave alone: the file's own exports, and every name
+ * another `export *` of the file (a project module the checker can see) also offers. */
+function shadowedNames(
+  file: ts.SourceFile,
+  star: ts.ExportDeclaration,
+  checker: ts.TypeChecker,
+): Set<string> {
+  const names = new Set<string>();
+  const own = checker.getSymbolAtLocation(file)?.exports;
+  own?.forEach((_symbol, name) => {
+    if (name !== ts.InternalSymbolName.ExportStar) names.add(String(name));
+  });
+  for (const statement of file.statements) {
+    if (
+      statement === star ||
+      !ts.isExportDeclaration(statement) ||
+      statement.exportClause !== undefined ||
+      statement.moduleSpecifier === undefined
+    ) {
+      continue;
+    }
+    const target = checker.getSymbolAtLocation(statement.moduleSpecifier);
+    if (target === undefined) continue;
+    for (const symbol of checker.getExportsOfModule(target)) names.add(symbol.name);
+  }
+  return names;
 }
 
 function exportSite(
   file: ts.SourceFile,
   statement: ts.ExportDeclaration,
   source: string,
+  attributes: string,
+  checker: ts.TypeChecker,
 ): Site | undefined {
   if (statement.isTypeOnly) return undefined;
   const clause = statement.exportClause;
-  // `export * from 'p'` needs every name `p` exports, which only the bundler knows; it stays
-  // unrewritten and the gate refuses it.
-  if (clause === undefined) return undefined;
+  // `export * from 'p'` needs every name `p` exports, which only the bundle knows: the entry
+  // re-exports `p` whole and the rewrite reads the names back from the bundle.
+  if (clause === undefined) {
+    return {
+      file,
+      statement,
+      kind: 'export',
+      source,
+      bindings: [{ request: { source, kind: 'star', name: '', attributes }, as: '' }],
+      typeOnly: [],
+      shadowed: shadowedNames(file, statement, checker),
+    };
+  }
   if (ts.isNamespaceExport(clause)) {
     return {
       file,
@@ -365,7 +440,10 @@ function exportSite(
       kind: 'export',
       source,
       bindings: [
-        { request: { source, kind: 'namespace', name: '' }, as: moduleNameText(clause.name) },
+        {
+          request: { source, kind: 'namespace', name: '', attributes },
+          as: moduleNameText(clause.name),
+        },
       ],
       typeOnly: [],
     };
@@ -386,8 +464,8 @@ function exportSite(
     bindings.push({
       request:
         imported === 'default'
-          ? { source, kind: 'default', name: '' }
-          : { source, kind: 'named', name: imported },
+          ? { source, kind: 'default', name: '', attributes }
+          : { source, kind: 'named', name: imported, attributes },
       as: exported,
     });
   }
@@ -405,19 +483,23 @@ function stem(source: string): string {
  * (Rolldown then emits `export { a as b }`, which lowers since T11.5a), or it cannot be a binding
  * name. Default and namespace imports are always mangled: `p$default`, `p$ns`. */
 function assignNames(requests: readonly Request[]): Map<string, string> {
+  // With a star in the entry, the bundle's plain export names must be exactly the stars' names,
+  // so every named request is mangled too (`export { a } from 'q'` would shadow a star's `a`).
+  const star = requests.some((request) => request.kind === 'star');
   const owners = new Map<string, Set<string>>();
   for (const request of requests) {
     if (request.kind !== 'named') continue;
     const sources = owners.get(request.name) ?? new Set<string>();
-    sources.add(request.source);
+    sources.add(request.source + request.attributes);
     owners.set(request.name, sources);
   }
   const names = new Map<string, string>();
   const taken = new Set<string>();
   const mangled: Request[] = [];
   for (const request of requests) {
-    if (request.kind === 'side-effect') continue;
+    if (request.kind === 'side-effect' || request.kind === 'star') continue;
     const plain =
+      !star &&
       request.kind === 'named' &&
       owners.get(request.name)?.size === 1 &&
       isIdentifierName(request.name);
@@ -445,7 +527,7 @@ function assignNames(requests: readonly Request[]): Map<string, string> {
 }
 
 function entryLine(request: Request, exportName: string | undefined): string {
-  const from = JSON.stringify(request.source);
+  const from = JSON.stringify(request.source) + request.attributes;
   switch (request.kind) {
     case 'side-effect':
       return `import ${from};`;
@@ -453,6 +535,8 @@ function entryLine(request: Request, exportName: string | undefined): string {
       return `export { default as ${exportName ?? ''} } from ${from};`;
     case 'namespace':
       return `export * as ${exportName ?? ''} from ${from};`;
+    case 'star':
+      return `export * from ${from};`;
     case 'named':
       return exportName === request.name
         ? `export { ${exportName} } from ${from};`
@@ -461,8 +545,18 @@ function entryLine(request: Request, exportName: string | undefined): string {
 }
 
 /** The replacement for one declaration. */
-function rewriteSite(site: Site, names: ReadonlyMap<string, string>, vendorSpec: string): string {
+function rewriteSite(
+  site: Site,
+  names: ReadonlyMap<string, string>,
+  vendorSpec: string,
+  starNames: readonly string[],
+): string {
   const from = JSON.stringify(vendorSpec);
+  if (site.shadowed !== undefined) {
+    const shadowed = site.shadowed;
+    const list = starNames.filter((name) => !shadowed.has(name)).map(spellName);
+    return `export { ${list.join(', ')} } from ${from};`;
+  }
   const original = JSON.stringify(site.source);
   const values = site.bindings.filter((b) => b.request.kind !== 'side-effect');
   const pairs = values.map((binding) => {
@@ -495,6 +589,7 @@ function rewriteFile(
   sites: readonly Site[],
   names: ReadonlyMap<string, string>,
   modulePath: string,
+  starNames: readonly string[],
 ): string {
   const vendorSpec = relativeSpecifier(dirname(file.fileName), modulePath);
   let out = '';
@@ -504,7 +599,7 @@ function rewriteFile(
     const end = site.statement.getEnd();
     out +=
       file.text.slice(at, start) +
-      sameLines(file.text.slice(start, end), rewriteSite(site, names, vendorSpec));
+      sameLines(file.text.slice(start, end), rewriteSite(site, names, vendorSpec, starNames));
     at = end;
   }
   return out + file.text.slice(at);
@@ -544,6 +639,7 @@ export function planVendor(
       source: relativeSpecifier(resolveDir, entryFile.fileName),
       kind: 'side-effect',
       name: '',
+      attributes: '',
     });
   }
 
@@ -553,14 +649,15 @@ export function planVendor(
       if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) continue;
       const literal = statement.moduleSpecifier;
       if (literal === undefined || !ts.isStringLiteral(literal)) continue;
-      // An import attribute (`with { type: 'json' }`) has no spelling in the generated entry
-      // yet; the declaration stays as written and the gate answers it.
-      if (statement.attributes !== undefined) continue;
+      // Import attributes (`with { type: 'json' }`) travel to the entry, where the bundler reads
+      // them; the rewritten import of the vendor module drops them, because that module is JS.
+      const attributes = attributesText(statement);
+      if (attributes === undefined) continue;
       const source = vendorSource(literal, checker, commonJs, resolveDir);
       if (source === undefined) continue;
       const site = ts.isImportDeclaration(statement)
-        ? importSite(file, statement, source)
-        : exportSite(file, statement, source);
+        ? importSite(file, statement, source, attributes)
+        : exportSite(file, statement, source, attributes, checker);
       if (site === undefined) continue;
       sites.push(site);
       for (const binding of site.bindings) want(binding.request);
@@ -571,25 +668,81 @@ export function planVendor(
 
   const names = assignNames(requests);
   const lines = requests.map((request) => entryLine(request, names.get(requestId(request))));
-  const rewrites = new Map<string, string>();
-  const byFile = new Map<ts.SourceFile, Site[]>();
-  for (const site of sites) {
-    const list = byFile.get(site.file) ?? [];
-    list.push(site);
-    byFile.set(site.file, list);
-  }
-  for (const [file, fileSites] of byFile) {
-    rewrites.set(file.fileName, rewriteFile(file, fileSites, names, modulePath));
-  }
-  if (entryIsCommonJs) {
-    rewrites.set(
-      entryFile.fileName,
-      `import ${JSON.stringify(relativeSpecifier(resolveDir, modulePath))};\n`,
+  const assigned = new Set(names.values());
+  const rewrites = (bundle: string | undefined): ReadonlyMap<string, string> => {
+    const starNames = bundle === undefined ? undefined : bundleExportNames(bundle);
+    // One star source can be read back from the bundle; two cannot, because the bundle does not
+    // say which star a name came from. Such declarations stay as written and the gate refuses
+    // them, as it does before there is a bundle.
+    const stars = new Set(
+      requests.filter((r) => r.kind === 'star').map((r) => r.source + r.attributes),
     );
-  }
+    const starsKnown = starNames !== undefined && stars.size <= 1;
+    const theirs = starsKnown ? starNames.filter((name) => !assigned.has(name)) : [];
+    const out = new Map<string, string>();
+    const byFile = new Map<ts.SourceFile, Site[]>();
+    for (const site of sites) {
+      if (site.shadowed !== undefined && !starsKnown) continue;
+      const list = byFile.get(site.file) ?? [];
+      list.push(site);
+      byFile.set(site.file, list);
+    }
+    for (const [file, fileSites] of byFile) {
+      out.set(file.fileName, rewriteFile(file, fileSites, names, modulePath, theirs));
+    }
+    if (entryIsCommonJs) {
+      out.set(
+        entryFile.fileName,
+        `import ${JSON.stringify(relativeSpecifier(resolveDir, modulePath))};\n`,
+      );
+    }
+    return out;
+  };
   return {
     entry: { code: `${lines.join('\n')}\n`, resolveDir },
     modulePath,
     rewrites,
   };
+}
+
+/** The names an ES-module bundle exports, from its own export declarations, or `undefined` when
+ * one of them is an `export * from` (an external's names, which nothing here can list). */
+export function bundleExportNames(code: string): string[] | undefined {
+  const file = ts.createSourceFile(
+    'bundle.js',
+    code,
+    ts.ScriptTarget.ESNext,
+    false,
+    ts.ScriptKind.JS,
+  );
+  const names: string[] = [];
+  for (const statement of file.statements) {
+    if (ts.isExportDeclaration(statement)) {
+      const clause = statement.exportClause;
+      if (clause === undefined) return undefined;
+      if (ts.isNamespaceExport(clause)) names.push(moduleNameText(clause.name));
+      else for (const element of clause.elements) names.push(moduleNameText(element.name));
+    } else if (ts.isExportAssignment(statement)) {
+      names.push('default');
+    } else if (
+      ts.canHaveModifiers(statement) &&
+      (ts.getModifiers(statement) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+    ) {
+      const isDefault = (ts.getModifiers(statement) ?? []).some(
+        (m) => m.kind === ts.SyntaxKind.DefaultKeyword,
+      );
+      if (isDefault) names.push('default');
+      else if (ts.isVariableStatement(statement)) {
+        for (const decl of statement.declarationList.declarations) {
+          if (ts.isIdentifier(decl.name)) names.push(decl.name.text);
+        }
+      } else if (
+        (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+        statement.name !== undefined
+      ) {
+        names.push(statement.name.text);
+      }
+    }
+  }
+  return names;
 }

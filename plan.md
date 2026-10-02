@@ -1573,7 +1573,7 @@ compiles from.
 [done.md](done.md) → Phase 12 T12.1 (plan-notes 320; `docs/BUNDLER.md`). Still open from the card,
 each `STA1214`: `export * from 'p'` (only the bundler knows the names), `import('p')` and a package
 import with import attributes are not rewritten to the vendor module. T12.3 owns them (plan-notes
-320 Q3).
+320 Q3); its first slice landed `export *` from one package and the attributes (plan-notes 323).
 
 ~~**T12.2. `packages/vite-stator`: the default integration.**~~ ✅ **landed 2026-10-02** — evidence
 in [done.md](done.md) → Phase 12 T12.2 (plan-notes 321; `docs/BUNDLER.md` §2). Its namespace-import
@@ -1585,21 +1585,23 @@ Depends on T12.1, and overlaps T11.4's `Object.*` and method-call families. Do t
 where they are the same constructs. Each item below is measured in T12.0 (`docs/BUNDLER.md`
 §2, §4, §8), and each lands with decision tests in both modes plus a golden:
 
-- **`var X = class {}` / `let X = class {}`.** Rolldown emits every top-level class this way;
-  only `const` lowers today.
+- ~~**`var X = class {}` / `let X = class {}`.**~~ Landed (plan-notes 323): a formation nothing in
+  its file writes lowers like `const`.
 - **The CJS interop helpers.** `__commonJSMin`, `__toESM` and `__copyProps` need
   `Object.create`, `Object.defineProperty` with getter descriptors,
   `Object.getOwnPropertyDescriptor`, `Object.getOwnPropertyNames`, `Object.getPrototypeOf`,
-  `Object.prototype.hasOwnProperty.call` and `Function.prototype.bind`. `__commonJSMin` is an
-  internal error today: `STA4013` "comma operator result must match" (plan-notes 321).
+  `Object.prototype.hasOwnProperty.call` and `Function.prototype.bind`. `__commonJSMin` landed
+  (plan-notes 323): its comma operator was an internal `STA4013`.
 - **The dynamic-import namespace helpers.** `__esmMin` and `__exportAll` need
   `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
 - ~~**`import.meta.url`.**~~ Landed under `--node` by T11.5 (plan-notes 316).
-- **A computed `export default`.**
+- ~~**A computed `export default`.**~~ Lowers since T11.5a (`subset_export_default_expression_*`,
+  plan-notes 323).
 - **The package imports T12.1 leaves refused** (plan-notes 320 Q3), each `STA1214` today:
-  `export * from 'p'`, whose names come from the bundle's own exports once it is built;
-  `import('p')`, which lands on the dynamic-import namespace helpers above; and a package import
-  with import attributes.
+  ~~`export * from 'p'`~~, whose names come from the bundle's own exports once it is built (landed
+  for one such package per build, plan-notes 323); `import('p')`, which lands on the
+  dynamic-import namespace helpers above (a clean `STA1214` now, not the internal `STA4031`); and
+  ~~a package import with import attributes~~ (landed, plan-notes 323).
 
 `__filename`/`__dirname`: T11.5 injects them in the vendor module under `--node` (plan-notes
 316, proved with a ready bundle in `unit/bundler.test.ts`); a golden here may read them, printing
@@ -1622,15 +1624,16 @@ no path.
 
 **Check:** CommonJS goldens through the default adapter, byte-for-byte vs Node:
 
-- `exports.x`;
+- `exports.x` (by name: `js/node_pkg_location`, plan-notes 323; a default import goes through
+  `__toESM`);
 - `module.exports` replacement;
-- a nested `require`;
-- a CJS cycle that exposes partial `exports`;
-- a `.cjs` project entry;
+- a nested `require` (`js/pkg_cjs_nested_require`);
+- a CJS cycle that exposes partial `exports` (`js/pkg_cjs_cycle`);
+- a `.cjs` project entry (`js/node_cjs_entry`);
 - a package with an inlined dynamic `import()`;
-- a package with a top-level class.
-- a project file with `export * from 'p'`, one with `import('p')`, and one with an attributed
-  package import (`with { type: 'json' }`).
+- a package with a top-level class (`js/pkg_class`).
+- a project file with `export * from 'p'` (`js/pkg_export_star`), one with `import('p')`, and one
+  with an attributed package import (`with { type: 'json' }`; `js/pkg_import_json`).
 - a namespace import of a package (`import * as p from 'p'`), which Rolldown answers with
   `__exportAll`; moved here from T12.2 (plan-notes 321).
 
@@ -2305,6 +2308,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.40** (2026-10-02): **T12.1 lands: the bundler API** (plan-notes 320). In `js` mode, package imports and CommonJS project files go to one bundler call; the answer joins the program as the virtual `__stator_vendor__.js`, and project imports are rewritten to it, every line kept. `--bundler=vite|none|<module>` and the `bundler` config key choose the adapter (`STA0014` when it cannot load, `STA0015` when the bundle step fails); `statorc/api` exposes `compile` and `vendorEntry`. Diagnostics and `#line` inside the bundle map to the package's files, or `<package bundle>`. A free `__filename`/`__dirname` is the new not-yet `STA1218`. CommonJS routing is narrowed to files that read `require`, `module` or `exports`. `export *`, `import()` and attributed imports of packages stay `STA1214`. The card moves to done.md.
 - **v4.41** (2026-10-02): **The creator's answers to plan-notes 320; checker errors in the vendor module are skipped** (plan-notes 320). Q1: the narrowed CommonJS marker rule stays. Q2: `--node` gates CommonJS routing of project files (T11.5 implements it). Q3: `export * from 'p'`, `import('p')` and attributed package imports become a T12.3 line item with a Check line. Q4 lands: a type-checker complaint (code ≥ 2000) inside the vendor module no longer fails the build; the binding it names goes dynamic, so the binary does what Node does. TDZ reads and `const` assignments stay `STA0012`, because Node throws there. docs/BUNDLER.md §6, MODES.md §3, DIAGNOSTICS.md (`STA0012`).
 - **v4.42** (2026-10-02): **T12.2 lands: `packages/vite-stator`** (plan-notes 321). The default adapter (one Vite 8.3.1 SSR build of the in-memory vendor entry, BUNDLER.md §2) and the `stator()` plugin, so `vite build` writes the native binary; `examples/vite` is the worked example. `vite` is a peer dependency. Package goldens (`pkg_imports`, `pkg_shared_dependency`) commit their `node_modules`, and `golden/run.ts --bundler=none` skips them. `require` of a built-in becomes an import. Importing 1 of 40 functions from a package bundles that one function, and the binary is the same size as with the function in the project. A namespace import of a package moves to T12.3's Check (Rolldown's `__exportAll`). The card moves to done.md.
+- **v4.43** (2026-10-02): **T12.3, first slice: `__commonJSMin`, `var X = class {}`, `export *` and attributed package imports** (plan-notes 323). A comma expression types as its right operand; the checker typed `__commonJSMin`'s from the declared binding, an internal `STA4013`. A package that writes `exports.x` and is imported by name, a nested `require`, a CommonJS cycle and a `.cjs` entry now compile. A `var`/`let X = class {}` that nothing in its file writes lowers like the `const` formation. `export * from` one package re-exports the names the built bundle exports for it; import attributes travel to the vendor entry. `import('p')` is `STA1214`, not the internal `STA4031`. The golden runner takes a `main.cjs` entry. Blocked: `__toESM` needs T11.4 step 8's `Object.*`, and `__exportAll` also needs `Symbol.toStringTag` (Phase 5).
 - **v4.50** (2026-10-02): **T11.5, the steps that do not need the bundler** (plan-notes 312). `--node` on `build` and `explain`, and the config key `node`. Under it `node:*` and bare built-ins resolve to `packages/node` through `paths` entries, the mechanism `std/` uses. An unlanded module or member is `STA1214` naming Phase 11 (T11.6); without the flag a built-in is `STA1214` naming the flag. `STA1110` is implemented and narrowed: `ts` mode always, `js` mode without `--node`; with it, `STA1214` naming T11.5's `createRequire` step. `__filename`/`__dirname` are relative to the executable (docs/MODES.md §6); `STA1218` stays under the flag until the CommonJS wrapper injects them. One package-root rule for runtime, `std` and `node`. The card stays open for the CommonJS run-time steps, which T12.1 unblocked.
 - **v4.51** (2026-10-02): **T11.6, first slice: `packages/node` and `node:path`** (plan-notes 313). `packages/node` is created: strict TypeScript over `std`, a workspace package and moon project, a selfhost target (`node-goldens` smoke) and its own `stator.config.json` (`"node": true`). `node:path` and `node:path/posix` are POSIX-complete (14 of 16 members; `win32` and `matchesGlob` not-yet), proved by the `node_path*` goldens against Node 26.7.0, claimed in `node_coverage.json`, and `docs/NODE.md` is regenerated. Fixtures named `node_*` build with `--node`. A named import the module lacks is not-yet even when the checker answers TS2614 (the module has a default export).
 - **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.
