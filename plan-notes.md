@@ -9966,6 +9966,12 @@ Deviations from the card, each one a soundness fix found while building it:
   it with the runtime, as `pnpm run runtime` does; its link is not traced, so a change under
   `packages/std/zig` or its justfile selects everything, and a change to `packages/std/src/*.ts`
   selects the tests whose compile read it.
+- **Absent files are dependencies too** (after Task 6.18 landed on `main`). The CLI looks for
+  `stator.config.json` beside its working directory; a test that found none depends on there being
+  none. Reads and `existsSync` probes are noted before the call, so a failed read is recorded and
+  adding that file selects the test (8 unit tests, leak and ffi probe it today). The generated
+  `packages/<pkg>/schema/*.json` are data: their drift test reads them, and the read rule selects
+  it — a schema edit no longer reruns everything.
 - **Not a moon task.** Its result depends on the working-tree diff and a machine-local map, which
   moon's cache cannot key on.
 

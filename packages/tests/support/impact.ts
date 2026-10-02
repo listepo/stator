@@ -418,7 +418,15 @@ export function classifyPath(path: string): PathClass {
   // `test:asan`'s own driver: its stage-3 restriction is decided here, not by coverage.
   if (path === 'packages/tests/golden/asan-gate.ts') return { kind: 'harness', harness: 'asan' };
   if (isScriptPath(path)) return { kind: 'script' };
-  if (path.startsWith('packages/tests/') || path.startsWith('examples/')) return { kind: 'data' };
+  // Generated config schemas (`packages/compiler/schema/*.json`, Task 6.18) are checked by their
+  // drift test, which reads them: the read rule selects it, and anything else reading one.
+  if (
+    path.startsWith('packages/tests/') ||
+    path.startsWith('examples/') ||
+    /^packages\/[^/]+\/schema\/[^/]+\.json$/.test(path)
+  ) {
+    return { kind: 'data' };
+  }
   return { kind: 'everything' };
 }
 

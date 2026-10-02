@@ -275,6 +275,20 @@ describe('impact selector: runtime and whole-run triggers', () => {
     }
   });
 
+  test('a generated config schema selects only the tests that read it', () => {
+    const schema = 'packages/compiler/schema/stator.config.schema.json';
+    const map: ImpactMap = {
+      ...MAP,
+      harnesses: {
+        ...MAP.harnesses,
+        unit: { ...UNIT, tests: { ...UNIT.tests, [T3]: unitTest([], [C], [schema]) } },
+      },
+    };
+    const selection = select({ map, changes: [native(schema)], current: CURRENT });
+    assert.deepEqual(picked(selection, 'unit'), [T3]);
+    assert.deepEqual(picked(selection, 'golden'), []);
+  });
+
   test('docs select nothing', () => {
     assert.equal(selectedCount(run(native('docs/SUBSET.md'))), 0);
   });
