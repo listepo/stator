@@ -9731,7 +9731,7 @@ check cannot fail.
 is suppressed, and the `number` parameter holds a string). `function g(): number { return
 label(2); }` prints `2` (TS2322 on a return). Both should be `STA2001`. Neither is in the spike's
 repro, and the call edge must leave a `.js` callee alone: `golden/js/argument_mismatch.js` needs
-`increment("2")` to coerce the way Node does. Follow-up work, not this change.
+`increment("2")` to coerce the way Node does. Follow-up work, not this change. Closed by plan-notes 308.
 
 ## 302. Per-module namespaces get a card, T11.5a, before `packages/node` (2026-10-02)
 
@@ -10062,3 +10062,85 @@ The tool does not decide this. `--update` rewrites the baseline either way.
 the same change, and the growth is reviewed in `baseline.json`'s diff. A shrink must still be
 recorded too. `.jscpd-baseline.json` keeps its shrink-only rule; the two baselines answer
 different questions. The rule is in plan.md's Task 6.19 stub.
+
+## 308. js mode checks the call and return edges a `.ts` annotation claims (2026-10-02)
+
+**Trigger.** Plan-notes 301's "Not covered" paragraph. With `lib.js` exporting
+``label(x) { return `${x}`; }`` (checker: `string`), two more `.js`→`.ts` edges ran a string as a
+`number` with no check, against golden rule 4:
+- Call edge: `function inc(x: number): number { return x + 1; }` called as `inc(label(1))` printed
+  `11`. js mode suppresses TS2345, and `checkCallArgs` only checked an Unknown argument. Method
+  calls (`box.add(label(1))` printed `11`) and constructor calls had no argument check at all, not
+  even for an Unknown one: `lowerClassMethodCall` and the `new` lowering never called
+  `checkCallArgs`.
+- Return edge: `function g(): number { return label(2); }` printed `2`. The `return` lowering only
+  checked an Unknown value. An arrow's concise body (`(): number => label(4)`) had no check of any
+  kind.
+
+**A second bug under the return edge.** The 2322 suppression in `frontend/program.ts` widens the
+identifier the diagnostic starts at (`identifierAt`). For a `return` statement, typescript 6.0.3
+starts the diagnostic at the `return` keyword, so nothing is found and nothing widens. For a concise
+body it starts at the body (`main.ts(3,25): TS2322 "label(4)"`, measured with `tsc --strict
+--allowJs --checkJs`), so the CALLEE was widened: `const lbl = (x: number): string => ...;
+const h = (): number => lbl(4)` turned `lbl` itself into a dynamic binding, and `explain --json`
+graded the file `dynamic`.
+
+**Decision.** One predicate decides which annotations are claims the program keeps:
+`hasTypeScriptAnnotation` in a new `frontend/annotation.ts`, shared by the frontend and the lowering. The declaration has a type annotation, and its
+file is neither JavaScript (`.js`/`.mjs`/`.cjs`/`.jsx`) nor a `.d.ts`. A `.d.ts` describes code
+Stator does not compile, usually JavaScript that coerces. 301's `keepsCheckedAnnotation` now uses
+it. Where it holds, the edge uses 301's `edgeBoundary`, which also checks a concrete value of
+another type. Elsewhere the edge keeps `maybeBoundary`, which checks only an Unknown one.
+- Call edge: `checkCallArgs` takes the callee's signature (or a method's, from its class layout) and
+  resolves the parameter declarations with `calleeParameters`. Ordinary calls, method calls
+  (private and `super` included) and `new` all go through it. A constructor has no HIR signature,
+  so its parameters answer from their annotations. A rest parameter, or a call with a spread
+  argument, keeps the Unknown-only check, because the slots no longer line up. So does a callee
+  that resolves to a declaration with no body. `calleeParameters` answers an overloaded function's
+  FIRST signature, not the one the call selected, so the first CI run aborted golden
+  `ts/class_overloads` (`f(1)` checked against `f(a: string)`) and `ts/overload_fallback`.
+- Return edge: `returnBoundary` serves the `return` statement and an annotated arrow's concise
+  body. It uses `edgeBoundary` when a TypeScript file annotated the enclosing function's return,
+  except in async functions and generators: there the annotation is a `Promise` or a generator,
+  not the returned value's type. The concise body was unchecked before, and it is now checked
+  only when annotated. An unannotated arrow keeps its contextual type unchecked, as before.
+- Widening: a 2322 whose leading identifier starts a concise arrow body spanning the whole
+  diagnostic (`isConciseReturnAt`) widens nothing. The span test matters: an assignment body
+  (`() => x = v`) starts at the same identifier, but its own 2322 spans only `x`.
+
+A `.js` callee is left alone. `golden/js/argument_mismatch.js` still prints `21` for
+`increment("2")` against `/** @param {number} value */`, as Node does.
+
+**Evidence** (this branch, Node 26.7.0):
+- The three repros now print `PANIC: STA2001: boundary check failed at …/main.ts:<line>:<col> —
+  expected number, got string` and exit 134: the call at the argument (`3:17`), the return at the
+  returned expression (`2:31`), the concise body at the body (`2:25`). `box.add(label(1))` and
+  `new Box(label(3))` abort the same way. A two-parameter method checks only the mismatched slot
+  (`join(label(1), 2)` with `tag: string` passes and prints `17`).
+- `unit/cli.test.ts`: the call, method-call, constructor-call, return and concise-return edges each
+  abort with `STA2001` at the right line, and the concise-body program grades `static`. With the
+  compiler change reverted, all four new tests at the time failed (`Tests 4 failed | 3 passed`);
+  the method and constructor rows were added after.
+- Golden `js/boundary_call_return` (`main.ts` + `lib.js`) pins the passing half against Node.
+  `jsrt_check_number` sits at the function, constructor and method arguments (`25:17`, `24:21`,
+  `25:40`) and the function and method returns (`29:10`, `21:12`), and `jsrt_check_boolean` at the
+  concise body (`31:32`). The fixture prints `2 1 / 2 4 true / 21`; the last line is a `.js` callee
+  coercing.
+- Decision fixtures `subset_call_return_boundary_js.ts` (dynamic) and `_ts.ts` (error STA0012).
+  301's row in docs/SUBSET.md now covers bindings, parameters and returns; its two fixtures name
+  the renamed row.
+
+- `pnpm run dupes`: 216 clones, one fewer than the baseline (the concise-body block in
+  `lowerFunctionBody` stopped matching), so `.jscpd-baseline.json` shrinks by that fingerprint.
+  The predicate lives in its own module rather than in `frontend/narrowing.ts` because a fifth name
+  wrapped `lower/index.ts`'s one-line `narrowing.ts` import, and that changed the text, and so the
+  fingerprint, of an existing import-list clone against `frontend/gate.ts`.
+
+- `pnpm run test:selfhost`: `packages/compiler` grows from `STA1214` 2549 to 2568. Each new
+  reference into the bare `typescript` import counts (the `ts.is*` guards and `ts.*` types in
+  `isConciseReturnAt`, `checkCallArgs` and `returnBoundary`). The growth is recorded with
+  `--update` in this change, per plan.md v4.25 (plan-notes 306).
+
+**Not covered.** A setter's parameter (`o.x = label(1)` against `set x(v: number)`) goes through
+`accessorCall`, which still checks no argument. An async function's or a generator's returned
+value is not checked against the awaited or yielded type.
