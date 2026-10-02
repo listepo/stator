@@ -31,6 +31,22 @@ function identifierAt(source: ts.SourceFile, position: number): ts.Identifier | 
   return found;
 }
 
+/** The checker codes for an undeclared name — plain, with the `@types/node` hint (two spellings),
+ * and as a shorthand property — when the name is one of Node's two CommonJS path globals. */
+const UNDECLARED_NAME_CODES: ReadonlySet<number> = new Set([2304, 2580, 2591, 18004]);
+
+function isNodePathGlobalRead(diag: ts.Diagnostic): boolean {
+  if (
+    !UNDECLARED_NAME_CODES.has(diag.code) ||
+    diag.file === undefined ||
+    diag.start === undefined
+  ) {
+    return false;
+  }
+  const name = identifierAt(diag.file, diag.start)?.text;
+  return name === '__filename' || name === '__dirname';
+}
+
 /** A TS1117 duplicate-key diagnostic that must NOT be swallowed by the js-mode carve-out:
  * two or more `__proto__` DATA properties (`PropertyName : AssignmentExpression`) in one
  * object literal — an early SyntaxError per spec B.3.1 that Node rejects, so js mode refuses it
@@ -677,6 +693,12 @@ function createProgramUncached(
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = preEmitDiagnostics(program);
   for (const diag of tsDiagnostics) {
+    // A free `__filename` or `__dirname` is the gate's STA1218 (plan.md §11d T12.1 step 7), in
+    // both modes: the checker's "cannot find name" would make it an STA0012 type error in ts mode
+    // and silent in js mode, where Node either defines it (CommonJS) or throws.
+    if (isNodePathGlobalRead(diag)) {
+      continue;
+    }
     // Duplicate `__proto__` data properties are the one 1117 js mode keeps: an early
     // SyntaxError (spec B.3.1), not last-wins JavaScript — see isDuplicateProtoDataProperty.
     const keepProtoRefusal =
