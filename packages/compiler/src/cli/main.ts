@@ -4,6 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { config as dotenvConfig } from 'dotenv';
 import { telemetryInit, telemetryShutdown, withSpanAsync } from '../support/telemetry.ts';
 import { BuildError, build, internalErrorMessage, type OptLevel } from './build.ts';
+import {
+  type CliOptions,
+  type ConfigChoice,
+  loadConfig,
+  resolveOptions,
+  splitFlags,
+} from './config.ts';
 import { explain } from './explain.ts';
 import { INK_COLORS, print } from './render.ts';
 
@@ -39,6 +46,11 @@ Usage:
 Modes:
   ts  (default)  strict static TypeScript; .ts only; explicit any is an error
   js             JavaScript, or JS + TS mixed; untyped code goes dynamic
+
+Config:
+  Every option can also come from ./stator.config.json (docs/CONFIG.md);
+  the command line wins. --config=<path> reads another file, --no-config
+  reads none.
 `;
 
 /** Per-command help, after oclif's convention: `<command> --help` documents that command's flags,
@@ -60,6 +72,10 @@ Flags:
   --emit-header <h> write a C header for the unit's exports (docs/FFI.md);
                    -o names a relocatable object, not an executable
   --unit-name <unit> prefix for stator_<unit>_<name> (default: entry basename)
+  --emit=binary    build a binary (default; overrides "emit": "c")
+  --config <path>  read options from this JSON file (default:
+                   ./stator.config.json when it exists; docs/CONFIG.md)
+  --no-config      ignore stator.config.json
 `,
   explain: `Usage:
   stator explain <entry> [--mode=ts|js] [--json]
@@ -71,7 +87,11 @@ the answer, so a refusal is a result, not a crash.
 
 Flags:
   --mode ts|js     strict ts (default) or dynamic js
-  --json           machine-readable report (used by the decision tests)
+  --json           machine-readable report (used by the decision tests);
+                   --diagnostics=text|json spells the same choice
+  --config <path>  read options from this JSON file (default:
+                   ./stator.config.json when it exists; docs/CONFIG.md)
+  --no-config      ignore stator.config.json
 `,
 } as const;
 
@@ -114,11 +134,11 @@ function parseOpt(raw: string): OptLevel {
   throw new StatorError('STA0002', `unknown opt "${raw}" (expected 0, 1, 2, or 3)`);
 }
 
-/** CLI `--opt` wins; else `STATOR_OPT`; else 2. */
-function defaultOpt(): OptLevel {
+/** `STATOR_OPT`, below `--opt` and above the config file (Task 6.18 step 3). */
+function envOpt(): OptLevel | undefined {
   const env = process.env['STATOR_OPT'];
   if (env === undefined || env === '') {
-    return 2;
+    return undefined;
   }
   return parseOpt(env);
 }
@@ -127,7 +147,7 @@ function defaultOpt(): OptLevel {
  * and two `--link` occurrences spell the same line. Empty is a user error, not an empty flag:
  * it almost always means an unexpanded `$VAR`, and an invisible no-op would hide that. */
 function splitLinkFlags(raw: string): string[] {
-  const flags = raw.split(/\s+/).filter((flag) => flag !== '');
+  const flags = splitFlags(raw);
   if (flags.length === 0) {
     throw new StatorError('STA0004', '--link requires a value (clang link flags)');
   }
@@ -146,16 +166,20 @@ function parse(argv: readonly string[]): Command {
     throw new StatorError('STA0003', `unknown command "${head}" (expected "build" or "explain")`);
   }
 
-  let entry: string | undefined;
-  let out: string | undefined;
-  let mode: Mode = 'ts';
-  let json = false;
-  let emitC = false;
-  let keepC = false;
-  let opt: OptLevel | undefined;
+  const cli: CliOptions = {
+    entry: undefined,
+    out: undefined,
+    mode: undefined,
+    opt: undefined,
+    link: [],
+    emit: undefined,
+    keepC: undefined,
+    emitHeader: undefined,
+    unitName: undefined,
+    diagnostics: undefined,
+  };
   const linkFlags: string[] = [];
-  let emitHeader: string | undefined;
-  let unitName: string | undefined;
+  let configChoice: ConfigChoice = { kind: 'discover' };
 
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -170,31 +194,50 @@ function parse(argv: readonly string[]): Command {
       if (next === undefined) {
         throw new StatorError('STA0004', `${arg} requires an output path`);
       }
-      out = next;
+      cli.out = next;
       i += 1;
     } else if (arg.startsWith('--mode=')) {
-      mode = parseMode(arg.slice('--mode='.length));
+      cli.mode = parseMode(arg.slice('--mode='.length));
     } else if (arg === '--mode') {
       const next = argv[i + 1];
       if (next === undefined) {
         throw new StatorError('STA0004', '--mode requires a value (ts or js)');
       }
-      mode = parseMode(next);
+      cli.mode = parseMode(next);
       i += 1;
     } else if (arg === '--json' || arg === '--diagnostics=json') {
-      json = true;
+      cli.diagnostics = 'json';
+    } else if (arg === '--diagnostics=text') {
+      cli.diagnostics = 'text';
     } else if (arg === '--emit=c') {
-      emitC = true;
+      cli.emit = 'c';
+    } else if (arg === '--emit=binary') {
+      cli.emit = 'binary';
     } else if (arg === '--keep-c') {
-      keepC = true;
+      cli.keepC = true;
+    } else if (arg.startsWith('--config=')) {
+      const value = arg.slice('--config='.length);
+      if (value === '') {
+        throw new StatorError('STA0004', '--config requires a value (config file path)');
+      }
+      configChoice = { kind: 'path', path: value };
+    } else if (arg === '--config') {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        throw new StatorError('STA0004', '--config requires a value (config file path)');
+      }
+      configChoice = { kind: 'path', path: next };
+      i += 1;
+    } else if (arg === '--no-config') {
+      configChoice = { kind: 'none' };
     } else if (arg.startsWith('--opt=')) {
-      opt = parseOpt(arg.slice('--opt='.length));
+      cli.opt = parseOpt(arg.slice('--opt='.length));
     } else if (arg === '--opt') {
       const next = argv[i + 1];
       if (next === undefined) {
         throw new StatorError('STA0004', '--opt requires a value (0, 1, 2, or 3)');
       }
-      opt = parseOpt(next);
+      cli.opt = parseOpt(next);
       i += 1;
     } else if (arg.startsWith('--link=')) {
       linkFlags.push(...splitLinkFlags(arg.slice('--link='.length)));
@@ -210,36 +253,43 @@ function parse(argv: readonly string[]): Command {
       if (value === '') {
         throw new StatorError('STA0004', '--emit-header requires a value (output header path)');
       }
-      emitHeader = value;
+      cli.emitHeader = value;
     } else if (arg === '--emit-header') {
       const next = argv[i + 1];
       if (next === undefined) {
         throw new StatorError('STA0004', '--emit-header requires a value (output header path)');
       }
-      emitHeader = next;
+      cli.emitHeader = next;
       i += 1;
     } else if (arg.startsWith('--unit-name=')) {
       const value = arg.slice('--unit-name='.length);
       if (value === '') {
         throw new StatorError('STA0004', '--unit-name requires a value (C identifier prefix)');
       }
-      unitName = value;
+      cli.unitName = value;
     } else if (arg === '--unit-name') {
       const next = argv[i + 1];
       if (next === undefined) {
         throw new StatorError('STA0004', '--unit-name requires a value (C identifier prefix)');
       }
-      unitName = next;
+      cli.unitName = next;
       i += 1;
     } else if (arg.startsWith('-')) {
       throw new StatorError('STA0005', `unknown flag "${arg}"`);
-    } else if (entry === undefined) {
-      entry = arg;
+    } else if (cli.entry === undefined) {
+      cli.entry = arg;
     } else {
       throw new StatorError('STA0006', `unexpected argument "${arg}"`);
     }
   }
 
+  // Read after the scan, so `--help` and an unknown flag never touch the file.
+  const options = resolveOptions(
+    { ...cli, link: linkFlags },
+    { opt: envOpt() },
+    loadConfig(configChoice, process.cwd()),
+  );
+  const { entry, out, mode } = options;
   if (entry === undefined) {
     throw new StatorError('STA0004', `"${head}" requires an entry file`);
   }
@@ -252,15 +302,15 @@ function parse(argv: readonly string[]): Command {
       entry,
       out,
       mode,
-      emitC,
-      keepC,
-      opt: opt ?? defaultOpt(),
-      linkFlags,
-      emitHeader,
-      unitName,
+      emitC: options.emit === 'c',
+      keepC: options.keepC,
+      opt: options.opt,
+      linkFlags: options.link,
+      emitHeader: options.emitHeader,
+      unitName: options.unitName,
     };
   }
-  return { kind: 'explain', entry, mode, json };
+  return { kind: 'explain', entry, mode, json: options.diagnostics === 'json' };
 }
 
 async function run(command: Command): Promise<void> {
