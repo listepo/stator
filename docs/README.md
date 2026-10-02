@@ -7,6 +7,7 @@ How stator is specified. [`plan.md`](../plan.md) is the authority for what is st
 | File | What it is |
 |---|---|
 | [HOW-IT-WORKS.md](HOW-IT-WORKS.md) | Pipeline narrative + CLI and example walkthroughs (todo, FFI) |
+| [CONFIG.md](CONFIG.md) | `stator.config.json`: every CLI option in one validated file — keys, precedence, discovery |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | D2 gallery: pipeline, `stator build`, packages, value boxing |
 | [MODES.md](MODES.md) | `--mode=ts` vs `--mode=js`: file acceptance, diagnostics, mixed-graph boundaries |
 | [BUNDLER.md](BUNDLER.md) | Phase 12 design: js-mode dependency bundling contract, adapter API, measured spike |

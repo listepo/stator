@@ -2394,6 +2394,81 @@ reopen has the full picture.
 Check evidence: `pnpm run dupes` exits 0 (`68 clones · 0.7%`); scan output names
 `differential/run.ts` among analyzed files.
 
+### Task 6.18 — `stator.config.json`: every CLI option in one validated file ✅ (landed 2026-10-02)
+
+(creator's direction 2026-10-02, plan-notes 303). Stator works both with a config file and without
+one. Every option a command takes can come from the file, from the command line, or from both.
+
+1. **The file.** It is `stator.config.json`, JSON only: no code runs to read it, and §0.10 holds.
+   Without `--config`, Stator reads `./stator.config.json` from the current directory if it
+   exists. `--config=<path>` reads that file instead, and a missing file is an error.
+   `--no-config` skips the file. `--config`, `--no-config`, `--help` and `--version` are the only
+   flags with **no** key in the file: a config cannot name a config.
+2. **Keys.** One key per flag: `entry`, `out`, `mode`, `opt`, `link` (array), `emit`, `keepC`,
+   `emitHeader`, `unitName`, `diagnostics`, plus `$schema`. Planned flags get their keys in the
+   same change as the flag: `node` (T11.5), `bundler` (T12.1), `renderer` (T13), `interpreter`
+   (T14). Unknown keys are errors (`additionalProperties: false`), so a typo cannot pass silently.
+   Paths are resolved against the config file's directory; command-line paths against the current
+   directory.
+3. **Precedence.** Command line, then environment (`STATOR_OPT`, …), then the config file, then
+   the built-in default. `link` from the file and from the command line are concatenated, file
+   first.
+4. **Schema and validation from one source.** The JSON Schema is generated from the config's type,
+   committed at `packages/compiler/schema/stator.config.schema.json`, and checked by a drift test
+   in `pnpm run test`. One module (`src/cli/config.ts`) owns finding, loading and validating the
+   file (AGENTS.md, Config files). Pick the best ready solution before writing a validator (for
+   example zod 4 with `toJSONSchema`, TypeBox, or `ts-json-schema-generator` with ajv). Record the
+   choice and why in the plan-notes entry. Any runtime dependency stays inside `src/cli/` (§0.9).
+5. **Diagnostics.** Errors are reported as `STA0xxx` codes from the free range, allocated in
+   `docs/DIAGNOSTICS.md`. There are three cases: the file cannot be read or is not valid JSON
+   (message includes line and column), the file does not match the schema (message includes the
+   JSON pointer and the expected type), and `--config` names a missing file. None of them is a
+   stack trace.
+6. **Docs.** A new `docs/CONFIG.md` covers the keys, precedence, discovery and an example, and
+   `docs/README.md` lists it. `--help` mentions `--config` and `--no-config`. AGENTS.md gets a rule:
+   every new CLI flag lands with its config key and a regenerated schema in the same change.
+
+**Check:**
+- Unit tests cover every key from the file alone, every key overridden from the command line,
+  `--no-config`, a missing `--config` path, invalid JSON, a schema violation and an unknown key.
+  Each error case asserts its `STA` code.
+- The drift test fails after a hand edit of the schema.
+- `build` and `explain` with no config file behave byte-for-byte as before: all subset and golden
+  runs pass unchanged.
+
+**Check — PASSED** (2026-10-02, `pnpm run ci` exit 0 on Node 26.7.0, after merging main at
+ce66355):
+
+- **Unit tests** (`packages/tests/unit/config.test.ts`, 14 tests; the whole suite is 621/621 in
+  47 files). They cover:
+  - every key read from the file alone, with paths resolved against the file's directory;
+  - every key overridden from the command line, including `--emit=binary` and
+    `--diagnostics=text`, with `link` concatenated file-first;
+  - `STATOR_OPT` between the command line and the file;
+  - the built-in defaults when there is no file;
+  - `--no-config` over a broken file;
+  - `--config` with a relative path;
+  - a missing `--config` path → `STA0018`;
+  - invalid JSON, trailing commas and a directory → `STA0016`, with `path:line:column`;
+  - schema violations → `STA0017`, with JSON pointers and the expected types;
+  - unknown keys, including `config`, `noConfig`, `help` and `version` → `STA0017`;
+  - an end-to-end `explain` spawn proving the `parse()` wiring.
+- **Drift test.** It fails after a hand edit of the schema. Measured: adding `"py"` to
+  `/properties/mode/enum` in the committed file gave `× drift: the committed schema equals the
+  one config.ts generates`, and restoring the file made it pass again.
+- **No config file, unchanged behaviour.**
+  - subset: 761 fixtures, 724 passed, 37 expected-fail, 0 failed;
+  - golden: 402/402 (2 `intl_*` skipped as designed);
+  - runtime print corpus matches Node, plain and ASan;
+  - builtins 223/238;
+  - `docs/NODE.md` is current;
+  - leak plateaus: 3632 KB and 3664 KB of a 65536 KB cap;
+  - golden-asan 402/402.
+- **Gate.** `typecheck`, `lint` and `dupes` are clean, with no new clones.
+
+Libraries: `typebox` 1.3.34 and `jsonc-parser` 3.3.1. Why each was chosen is recorded in
+plan-notes 303.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

@@ -142,6 +142,9 @@ importers:
       ink:
         specifier: 7.1.1
         version: 7.1.1(@types/react@19.3.0)(react@19.3.0)
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
       memfs:
         specifier: 4.78.1
         version: 4.78.1
@@ -157,6 +160,9 @@ importers:
       react:
         specifier: 19.3.0
         version: 19.3.0
+      typebox:
+        specifier: 1.3.34
+        version: 1.3.34
       typescript:
         specifier: 6.0.3
         version: 6.0.3
@@ -184,9 +190,15 @@ importers:
       ink:
         specifier: 7.1.1
         version: 7.1.1(@types/react@19.3.0)(react@19.3.0)
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
       react:
         specifier: 19.3.0
         version: 19.3.0
+      typebox:
+        specifier: 1.3.34
+        version: 1.3.34
       typescript:
         specifier: 6.0.3
         version: 6.0.3
@@ -1135,6 +1147,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  jsonc-parser@3.3.1:
+    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
+
   lightningcss-android-arm64@1.33.0:
     resolution: {integrity: sha512-gEpRTalKdosp4Bb8qWtc2iOgE5SeIHlpS1up9bFq2wAyYhl1UdTObYiHe98zEM9SQvSoqQZ1IQD0JNpg3Ml5pg==}
     engines: {node: '>= 12.0.0'}
@@ -1456,6 +1471,9 @@ packages:
   type-fest@5.9.0:
     resolution: {integrity: sha512-yANm3Jr3GiJ1qgJlxGAVxTOIcEOk1rhQHamlXtnrCK7EHP4HeM9OGxtMg/W7HFdrVzw/ZWJKGVIJusVH85sLtw==}
     engines: {node: '>=20'}
+
+  typebox@1.3.34:
+    resolution: {integrity: sha512-wbnzrXXDW8xEFHDZZs2jo1MkhaYlKAY4FRhpBc1+2LF1fZVBGCXGdLEhA/Z/NBbgzJMFfeM8m7elKPa/+KxaUQ==}
 
   typescript@6.0.3:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
@@ -2320,6 +2338,8 @@ snapshots:
   jscpd-windows-x64-msvc@5.3.0:
     optional: true
 
+  jsonc-parser@3.3.1: {}
+
   lightningcss-android-arm64@1.33.0:
     optional: true
 
@@ -2629,6 +2649,8 @@ snapshots:
   type-fest@5.9.0:
     dependencies:
       tagged-tag: 1.0.0
+
+  typebox@1.3.34: {}
 
   typescript@6.0.3: {}
 
