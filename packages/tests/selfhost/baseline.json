@@ -1,0 +1,28 @@
+{
+  "packages/compiler": {
+    "verdict": "not-yet",
+    "codes": {
+      "STA1214": 2549
+    }
+  },
+  "packages/std/src/env.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/std/src/fs.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/path.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/process.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/time.ts": {
+    "verdict": "static",
+    "codes": {}
+  }
+}

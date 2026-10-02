@@ -61,6 +61,7 @@ pnpm run test:impact:record      # record that map: a full instrumented run at a
 pnpm run test:coverage           # unit tests + src/ coverage table; writes coverage/lcov.info (only when the table is the question — ~4x wall time)
 pnpm run test:subset             # feature × mode decision matrix
 pnpm run test:golden             # compile + run vs the pinned Node, byte-for-byte
+pnpm run test:selfhost           # Stator explains (and builds) its own packages; per-code counts may only shrink
 pnpm run test262                 # Test262 slice against the pin in tests/test262/pin.json
 pnpm run differential            # fuzzer vs Node (failures land in packages/tests/differential/failures/)
 pnpm run bench:record            # refresh packages/tests/bench/baseline.json (this machine only)

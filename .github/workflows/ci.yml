@@ -32,6 +32,7 @@ concurrency:
 #   test:runtime-> runtime
 #   test:subset -> frontend
 #   test:golden -> runtime
+#   test:selfhost -> runtime
 #   test:builtins-> runtime
 #   test:leak   -> runtime
 #   test:asan   -> asan (STATOR_ASAN_FORCE=1 in CI: always the full pass, never the hash skip)
@@ -259,6 +260,7 @@ jobs:
       - run: pnpm run runtime
       - run: pnpm run test:runtime
       - run: pnpm run test:golden
+      - run: pnpm run test:selfhost
       - run: pnpm run test:builtins
       - run: pnpm run test:leak
 

@@ -2567,6 +2567,119 @@ ce66355):
 Libraries: `typebox` 1.3.34 and `jsonc-parser` 3.3.1. Why each was chosen is recorded in
 plan-notes 303.
 
+### Task 6.19 — Stator compiles itself and its own packages: a self-compilation test ✅ (landed 2026-10-02)
+
+Creator's direction 2026-10-02 (plan-notes 304). The record of the landing is plan-notes 306. The
+card's standing rules (targets, ratchet) and the stage-2 check, which is not built yet, stay in
+plan.md.
+
+**What landed:**
+- `pnpm run test:selfhost` (`packages/tests/selfhost/run.ts`) runs `stator explain --json` for
+  each target, in parallel, from the target package's own directory. That package's
+  `stator.config.json` supplies the mode, and for the compiler the entry: the command a user would
+  run (card point 5).
+- **Targets** are listed in `packages/tests/selfhost/targets.json`:
+  - `packages/compiler`;
+  - each `packages/std/src/*.ts`;
+  - `notTargets`: `packages/runtime` (C and Zig) and `packages/tests` (Node harnesses), each with
+    its reason.
+
+  Every directory under `packages/` must be one or the other.
+- **Ratchet.** `packages/tests/selfhost/baseline.json` holds each target's verdict and its count
+  per code. The logic is in `ratchet.ts`. The test fails on a raised count, a new code, a worse
+  verdict, a target missing from the baseline, or a shrink that `--update` has not recorded.
+- **Smoke.** Targets whose verdict is `static` or `dynamic` build: each `std` module is built with
+  `stator build` and its binary runs. Then the `std_*` goldens run. A `stage2` target that reaches
+  `static` or `dynamic` fails until its stage-2 check exists.
+- **Wiring.** `test:selfhost` is in `pnpm run ci` after `test:golden`, in the GitHub `runtime`
+  jobs and in `moon run tests:ci` (`tests:selfhost`, which depends on `runtime:build` and
+  `std:build`). The README, AGENTS.md, `docs/HOW-IT-WORKS.md` and `docs/TOOLCHAIN.md` list the
+  command.
+- **Fixes:**
+  - `FirstNode` → `syntaxKindName` in `src/support/diagnostics.ts`. It is used by the gate's
+    catch-all, by `lower/index.ts` and by `frontend/export.ts`.
+  - The two implicit `any[]` callbacks in `src/cli/config.ts` were turned into `unknown[]`. They
+    made the compiler's verdict `error` (2 × STA1003).
+
+**Baseline** (main `31e7b52` + this change; unchanged on `5e53d26`):
+- `packages/compiler`: `not-yet`, 2 549 × `STA1214`.
+- `std/env.ts`: `dynamic`.
+- `std/{fs,path,process,time}.ts`: `static`.
+
+**Check:**
+- **`pnpm run test:selfhost` passes against the committed baseline.** It took 38.0 s, 47.1 s and
+  53.1 s on darwin/arm64, at a load average of about 70.
+  - It fails on a hand-raised count (`a hand-raised count fails`) and on an unlisted workspace
+    package (`an unlisted package fails`).
+  - `packages/tests/unit/selfhost.test.ts` has 13 tests.
+- **`std` builds and its smoke check runs:** 5 modules built and run, then `golden: 6 fixtures — 6
+  passed, 0 failed`.
+- **The `FirstNode` message names the real syntax kind.** The 1 134 diagnostics now read
+  `this construct (QualifiedName)`, and the baseline was re-recorded.
+  - Unit tests: `syntax kinds are named by the kind, not by a range marker` and `the not-yet
+    message for a qualified type name says QualifiedName`.
+- **`pnpm run ci`** exit 0 on main `5e53d26` + this change:
+  - unit 665/665 in 50 files;
+  - subset 769 fixtures: 732 passed, 37 expected-fail, 0 failed;
+  - golden 405/405 (2 intl skipped);
+  - selfhost 6 targets match (39.0 s: explain 29.1 s, smoke 9.9 s);
+  - builtins 234/294;
+  - NODE.md current;
+  - leak 3632 KB and 3696 KB of a 65536 KB cap;
+  - golden-asan 405/405.
+- **Gate.** `typecheck`, `lint` and `dupes` are clean, with no new clones.
+
+The card as it stood before landing:
+
+> **Task 6.19 — Stator compiles itself and its own packages: a self-compilation test — [D3]**
+> (creator's direction 2026-10-02, plan-notes 304). The compiler must compile itself, and the
+> packages written for programs to import (`std`, `node`, `webapi`, `interpreter`) must compile too.
+> For now this is a **test**, not a shipped feature. It tracks progress and never lets it slip back.
+>
+> 1. **Targets.** Every workspace package written for Stator to compile. Today those are
+>    `packages/compiler` (entry `src/cli/main.ts`, `ts` mode) and `packages/std` (each `src/*.ts`).
+>    `packages/node` (T11.6), `packages/webapi` (T13.1), `packages/renderer-clay` (T13.4) and
+>    `packages/interpreter` (T14.1) join when they are created. The cards that create them add the
+>    package to this test in the same change. The target list is checked in next to the baseline,
+>    and a workspace package that is neither listed nor marked "not a target" fails the test.
+> 2. **What a run does.** `stator explain <entry> --json` per target, tallying the deciding
+>    stage's diagnostics by code (plan-notes 291). A target whose verdict is `static` or `dynamic`
+>    then goes through `stator build`, and the binary runs that package's own smoke check. For
+>    `std`, that check is its goldens. For the compiler, the binary compiles a hello-world fixture
+>    and its C output must be **byte-identical** to the C the Node-hosted compiler emits: the
+>    stage-2 bootstrap check.
+> 3. **Ratchet.** `packages/tests/selfhost/baseline.json` holds, per target, the verdict and the
+>    count per diagnostic code. The test fails when any count grows, a new code appears, or a
+>    verdict gets worse. When a count shrinks, `--update` rewrites the baseline in the same change,
+>    as `.jscpd-baseline.json` does (Task 6.16). Reaching zero for a target is that target's
+>    milestone. From then on, its build and smoke check are part of the gate.
+> 4. **Cost.** One `explain` of the compiler takes about 35 s on the dev host (below). The test runs
+>    in `ci` if the whole run stays under 60 s on that host; otherwise it runs nightly and on PRs
+>    that Task 6.17's impact selection says reach `packages/compiler` or the target packages. The
+>    choice and the timing go in plan-notes.
+> 5. **Config.** Each target's mode and entry come from its own `stator.config.json` (Task 6.18)
+>    once that lands, so the test runs the same command a user would.
+>
+> **Baseline measured 2026-10-02** (main `f8db9eb`, darwin/arm64, `explain --json`):
+> - **Compiler, `ts` mode:** `not-yet`, 2 522 × `STA1214`, 34.8 s. The top families are:
+>   - 1 127 — an unsupported construct whose message prints the syntax kind as `FirstNode`. That is
+>     an enum alias, so the message names the wrong kind: a diagnostics bug to fix with this task.
+>   - 915 — method calls.
+>   - 158 — unsupported globals.
+>   - 52 — index access on a non-array.
+>   - 52 — `for-of` over a user iterable.
+>   - 47 — object spread without a fixed shape.
+>   - 32 — package imports (`typescript`).
+> - **Compiler, `js` mode:** `not-yet`, 2 586 × `STA1214`, 41.8 s.
+> - **`packages/std`:** `env.ts` is `dynamic`; `fs.ts`, `path.ts`, `process.ts` and `time.ts` are
+>   `static`.
+>
+> **Check:**
+> - `pnpm run test:selfhost` passes against the committed baseline. It fails on a hand-raised count
+>   and on an unlisted workspace package.
+> - `std` builds and its smoke check runs.
+> - The `FirstNode` message names the real syntax kind, and the baseline is re-recorded.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

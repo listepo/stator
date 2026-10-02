@@ -196,7 +196,7 @@ import {
   objectFieldsPrefix,
 } from '../hir/types.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
-import { diagnosticFromNode } from '../support/diagnostics.ts';
+import { diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, isFunctionLike, RECEIVER_NAME } from './captures.ts';
 import { Scope, resetShadowCounter, shadowSource } from './scope.ts';
@@ -975,7 +975,7 @@ function lowerStatement(
       sourceFile,
       'STA4031',
       'internal',
-      `unexpected statement kind: ${ts.SyntaxKind[node.kind]}`,
+      `unexpected statement kind: ${syntaxKindName(node.kind)}`,
     ),
   );
   return null;
@@ -6008,7 +6008,7 @@ function lowerExpression(
           sourceFile,
           'STA4036',
           'internal',
-          `unsupported binary operator: ${ts.SyntaxKind[opKind]}`,
+          `unsupported binary operator: ${syntaxKindName(opKind)}`,
         ),
       );
       return null;
@@ -6055,7 +6055,7 @@ function lowerExpression(
           sourceFile,
           'STA4036',
           'internal',
-          `unsupported unary operator: ${ts.SyntaxKind[node.operator]}`,
+          `unsupported unary operator: ${syntaxKindName(node.operator)}`,
         ),
       );
       return null;
@@ -6809,7 +6809,7 @@ function lowerExpression(
       sourceFile,
       'STA4031',
       'internal',
-      `unexpected expression kind: ${ts.SyntaxKind[node.kind]}`,
+      `unexpected expression kind: ${syntaxKindName(node.kind)}`,
     ),
   );
   return null;

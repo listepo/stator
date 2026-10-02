@@ -1,0 +1,5 @@
+{
+  "$schema": "./schema/stator.config.schema.json",
+  "entry": "src/cli/main.ts",
+  "mode": "ts"
+}

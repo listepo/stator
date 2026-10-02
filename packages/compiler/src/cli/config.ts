@@ -140,9 +140,12 @@ function describeError(error: {
 }): string {
   const at = error.instancePath === '' ? '/' : error.instancePath;
   if (error.keyword === 'additionalProperties' && 'additionalProperties' in error.params) {
-    const keys: unknown = error.params.additionalProperties;
+    const raw: unknown = error.params.additionalProperties;
+    // `unknown[]`, not the `any[]` `Array.isArray` narrows to: Stator compiles this file in `ts`
+    // mode (Task 6.19), where an implicit `any` is STA1003.
+    const keys: readonly unknown[] = Array.isArray(raw) ? raw : [];
     // One JSON pointer per key (RFC 6901: `~` and `/` escape as `~0` and `~1`).
-    return (Array.isArray(keys) ? keys : [])
+    return keys
       .map(
         (key) =>
           `${error.instancePath}/${String(key).replaceAll('~', '~0').replaceAll('/', '~1')}: unknown key`,
@@ -150,10 +153,9 @@ function describeError(error: {
       .join('; ');
   }
   if (error.keyword === 'enum' && 'allowedValues' in error.params) {
-    const allowed = error.params.allowedValues;
-    const list = Array.isArray(allowed)
-      ? allowed.map((value) => JSON.stringify(value)).join(', ')
-      : '';
+    const raw: unknown = error.params.allowedValues;
+    const allowed: readonly unknown[] = Array.isArray(raw) ? raw : [];
+    const list = allowed.map((value) => JSON.stringify(value)).join(', ');
     return `${at}: expected one of ${list}`;
   }
   if (error.keyword === 'pattern') {

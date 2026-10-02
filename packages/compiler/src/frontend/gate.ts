@@ -25,7 +25,7 @@ import {
   typedMember,
 } from '../hir/nodes.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
-import { diagnosticFromFile, diagnosticFromNode } from '../support/diagnostics.ts';
+import { diagnosticFromFile, diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import { intlEnabled } from '../support/features.ts';
 import {
   capturesEnclosingScope,
@@ -898,7 +898,7 @@ function describeKind(kind: ts.SyntaxKind): string {
     case ts.SyntaxKind.ExportAssignment:
       return 'modules';
     default:
-      return `this construct (${ts.SyntaxKind[kind]})`;
+      return `this construct (${syntaxKindName(kind)})`;
   }
 }
 
