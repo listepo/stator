@@ -10322,3 +10322,65 @@ no codes, recorded with `--update` (plan-notes 306).
 - `node packages/tests/subset/run.ts --filter subset_std`: 18 passed, including
   `subset_std_os_ts`/`_js` and `subset_std_io_ts`/`_js` (static).
 - `unit/std.test.ts`: 7 passed, including console ordering, stdin and pseudo-terminal.
+
+## 311. An empty `[]` and a `CString` value no longer make typed code dynamic (2026-10-02)
+
+**Trigger.** T11.3 step 3 (plan-notes 309, branch `t11-3c-std-process-fs`) adds
+`packages/std/src/internal/strings.ts` (`__stdStrings`) with two workarounds: the list starts as
+`[''].slice(1)` instead of `[]`, and every callback is spelled `(i: number): string => …`. Without
+them the module, and every module importing it, explained `dynamic` although each function was
+`static`.
+
+**Gap 1: `[]` under an array context.** `lowerArrayLiteralExpression` typed the literal with
+`typeAt`, the checker's own type, and for `[]` that is `never[]`: an Unknown element. Measured:
+`export function f(): string[] { const out: string[] = []; out.push('x'); return out; }` →
+`{"verdict":"dynamic","functions":[{"name":"f",…,"verdict":"static"}]}`; `[] as string[]` the same.
+The step-45 return marks had the same blind spot: `effectiveValueType` saw `return []` under
+`number[]` as `never[]` against a `number[]` target, so `function mk(): number[] { return []; }`
+marked every call `mk()` Unknown (`export const k = mk()` → `dynamic`).
+Fix: `arrayLiteralType` / `emptyArrayContextType` in `lower/index.ts`. An empty literal whose
+contextual type (`checker.getContextualType`) maps to an HType array takes that array; both the
+lowering and `effectiveValueType` ask the one helper. A context still naming a type parameter after
+this scope's substitution is a generic callee's and keeps the old answer.
+
+**Gap 2 was not the arrow's parameter.** The report read "an arrow typed only by its context
+explains dynamic". Measured on HEAD `d30600a`, it does not: with `g(i: number): string`,
+`h(3, (i) => g(i))` explains `static`, the arrow `inferred`. What fails is the arrow's RETURN when
+the body is an extern call: `h(3, (i) => jsrtStdEnvGet(name as CString))` → the arrow
+`provenance: dynamic`, while `(i): string => …` is `static`. The return is inferred as `CString`,
+`string & { readonly __statorCstr: 'CString' }`, and `tsTypeToHType` had no rule for an
+intersection, so it answered Unknown. The arrow was only the visible case:
+`const v = jsrtStdEnvGet(name as CString)` made a module `dynamic` the same way.
+Fix: `tsTypeToHType` maps the `CString`/`CStringOwned` alias (the same alias test `Out<CString>`
+already used, renamed `isCStringType`) to `string`. docs/FFI.md §3 already says a returned
+`CString` is copied into a runtime string at the boundary, and an argument is a string until the
+call copies it out; the brand is a phantom only the extern signature reads, and extern signatures
+are classified from the `ts.Type` (`frontend/extern.ts`), not from this HType.
+
+**Deliberately not done.**
+- *General branded primitives* (`type Id = string & { readonly __brand: 'Id' }`) still map to
+  Unknown and explain `dynamic` (measured: `mk(s: string): Id` → `provenance: dynamic`). Reading
+  every `primitive & {…}` as the primitive would also accept a READ of the brand field, which has
+  no slot on a string. `CString` is ours and documented; user brands are a subset decision of
+  their own.
+- *The string surface of a `CString` value* (`cEcho(s).length`) stays not-yet(STA1214, Phase 5):
+  the gate tests string-ness by the checker's `StringLike` flag in a dozen places, and the brand
+  intersection lacks it. Binding the value to a `string` first is static.
+- *The `__stdStrings` workaround* lives only in the `stator-t11-3c` worktree (uncommitted, locked by
+  its owner), so this change does not touch it. With this change it simplifies to
+  `const out: string[] = [];` and `(i) => jsrtProcessArgv(i)` / `(i) => jsrtStdFsReaddirName(i)`;
+  that edit belongs to T11.3 step 3.
+
+**Tests.** `subset_array_empty_contextual_ts`/`_js` and `subset_extern_cstr_value_ts`/`_js`
+(static; all four explain `dynamic` on HEAD), golden `ts/array_empty_contextual` (annotation, `as`,
+return type, parameter, assignment target, nested `number[][]`, and contextually typed arrows
+filling a `string[]`). docs/SUBSET.md gains a row for each gap; docs/FFI.md §3 says what a `CString`
+value is away from the call.
+
+**Self-compilation.** `packages/compiler` STA1214 1771 → 1775, recorded with `--update`
+(plan-notes 306). The four are this change's own new source, not a behavior change: the two new
+`lower/index.ts` helpers spell `ts.ArrayLiteralExpression` and `ts.TypeChecker` in their signatures,
+and a qualified type name is STA1214 (`this construct (QualifiedName)`) like its 464 siblings in that
+file. Measured by diffing `explain --json` diagnostics per file and message, line numbers stripped,
+with and without the change: that one row is the only difference. The `std` targets are unchanged
+(`env.ts` was and stays `dynamic`; the rest `static`).

@@ -87,18 +87,18 @@ export function outSlotInner(type: ts.Type, checker: ts.TypeChecker): ts.Type | 
     return undefined;
   }
   const inner = args[0];
-  if (inner === undefined || (!isBrandedPointer(inner, checker) && !isCStringInner(inner))) {
+  if (inner === undefined || (!isBrandedPointer(inner, checker) && !isCStringType(inner))) {
     return undefined;
   }
   return inner;
 }
 
-/** The `CString` half of an `Out<CString>` inner (`const char**`, docs/FFI.md §2): the
- * documented wrapper spelling only — a bare `string` inner is not an out-slot (the same
- * discipline that refuses bare `string` in signatures with STA1118), so the alias is
- * required here exactly as `cstringKindOf` in `extern.ts` requires it there. Kept
+/** `CString` / `CStringOwned` (docs/FFI.md §2): the documented wrapper spelling only — a bare
+ * `string` is not one (the same discipline that refuses bare `string` in signatures with
+ * STA1118), so the alias is required here exactly as `cstringKindOf` in `extern.ts` requires
+ * it there. It is an `Out<CString>` inner (`const char**`) and, as a value, a string. Kept
  * diagnostic-free for `tsTypeToHType`; that module owns the surface's diagnostics. */
-function isCStringInner(type: ts.Type): boolean {
+function isCStringType(type: ts.Type): boolean {
   const alias = type.aliasSymbol?.getName();
   if (alias !== 'CString' && alias !== 'CStringOwned') {
     return false;
@@ -125,6 +125,14 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
     return H_NUMBER;
   }
   if (f & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) {
+    return H_STRING;
+  }
+  // A `CString` VALUE is a runtime string on this side of the extern edge: an argument is copied
+  // out by the call and a return was copied in at it (docs/FFI.md §3), so the brand is a phantom
+  // that only the extern signature reads. Without this, `const v = native()` and an arrow whose
+  // return is inferred from an extern call are Unknown, and the module explains dynamic
+  // (plan-notes 311).
+  if (isCStringType(type)) {
     return H_STRING;
   }
   if (f & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral)) {
