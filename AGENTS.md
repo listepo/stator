@@ -61,6 +61,8 @@ packages/std/      "@stator/std" — the std/* modules (docs/STD.md): src/<modul
                    Stator's own subset) + zig/<module>.zig backings → packages/std/build/libjsrt_std.a (justfile)
 packages/node/     "@stator/node" — the --node platform (docs/MODES.md §6): src/<id>.ts is node:<id>, strict TS
                    over std/*; resolved by the compiler only under --node, compiled into the importer
+packages/vite-stator/ "vite-stator" — the default bundler adapter (`--bundler=vite`) and the stator() Vite
+                   plugin (docs/BUNDLER.md); calls statorc/api only, never compiler internals
 packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
   unit/            vitest unit tests (*.test.ts; config: packages/tests/vitest.config.ts)
   subset/          decision tests (feature × mode matrix)
@@ -71,6 +73,7 @@ packages/tests/    the test package "@stator/tests" — every harness + a tsconf
   leak/            GC hygiene: a 10M-object loop whose RSS must plateau
   impact/          test impact: map recorder, selector driver (`test:impact`), mutation check
   selfhost/        self-compilation ratchet: targets.json, baseline.json (plan §9 Task 6.19)
+examples/vite/     `vite build` → native binary through vite-stator (a workspace package)
 ```
 
 Paths in prose below are written relative to their package (`src/frontend/` = `packages/compiler/src/frontend/`, `runtime/vendor/` = `packages/runtime/vendor/`, `tests/subset/` = `packages/tests/subset/`).

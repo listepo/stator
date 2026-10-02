@@ -166,9 +166,25 @@ importers:
       typescript:
         specifier: 6.0.3
         version: 6.0.3
+      vite-stator:
+        specifier: workspace:*
+        version: link:packages/vite-stator
       vitest:
         specifier: 5.0.3
         version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@26.6.2)(vite@8.3.1(@types/node@26.6.2))
+
+  examples/vite:
+    dependencies:
+      greeting:
+        specifier: link:./greeting
+        version: link:greeting
+    devDependencies:
+      vite:
+        specifier: 8.3.1
+        version: 8.3.1(@types/node@26.6.2)
+      vite-stator:
+        specifier: workspace:*
+        version: link:../../packages/vite-stator
 
   packages/compiler:
     dependencies:
@@ -228,7 +244,20 @@ importers:
         version: 6.0.3
       vitest:
         specifier: 5.0.3
-        version: 5.0.3
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@26.6.2)(vite@8.3.1(@types/node@26.6.2))
+
+  packages/vite-stator:
+    dependencies:
+      statorc:
+        specifier: workspace:*
+        version: link:../compiler
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vite:
+        specifier: 8.3.1
+        version: 8.3.1(@types/node@26.6.2)
 
 packages:
 

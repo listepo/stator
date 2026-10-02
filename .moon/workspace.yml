@@ -10,6 +10,7 @@ projects:
   runtime: 'packages/runtime'
   std: 'packages/std'
   tests: 'packages/tests'
+  vite-stator: 'packages/vite-stator'
 
 vcs:
   client: 'git'

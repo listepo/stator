@@ -3,51 +3,51 @@
   "tests": {
     "test-path-basename.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
     },
     "test-path-dirname.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
     },
     "test-path-extname.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6), __filename (T11.5 CommonJS wrapper)"
     },
     "test-path-glob.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), path.matchesGlob (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6), path.matchesGlob (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
     },
     "test-path-isabsolute.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6)"
     },
     "test-path-join.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6)"
     },
     "test-path-makelong.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6)"
     },
     "test-path-normalize.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6)"
     },
     "test-path-parse-format.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
     },
     "test-path-posix-exists.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015"
     },
     "test-path-posix-relative-on-windows.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015"
     },
     "test-path-relative.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6)"
     },
     "test-path-resolve.js": {
       "expect": "skip",
@@ -55,7 +55,7 @@
     },
     "test-path-win32-exists.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6)"
     },
     "test-path-win32-normalize-device-names.js": {
       "expect": "skip",
@@ -63,11 +63,11 @@
     },
     "test-path-zero-length-strings.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6)"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6)"
     },
     "test-path.js": {
       "expect": "fail",
-      "reason": "CommonJS: the file goes to the T12 bundler, STA0014 until vite-stator lands (T12.2); then needs path.win32 (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
+      "reason": "CommonJS: the file goes to the T12 bundler, where `../common` does not resolve (it is this harness's host hook only), STA0015; then needs path.win32 (T11.6), ERR_INVALID_ARG_TYPE argument checks in node:path"
     }
   }
 }

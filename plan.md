@@ -1611,33 +1611,9 @@ each `STA1214`: `export * from 'p'` (only the bundler knows the names), `import(
 import with import attributes are not rewritten to the vendor module. T12.3 owns them (plan-notes
 320 Q3).
 
-### T12.2. `packages/vite-stator`: the default integration — **[D3]**
-
-Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDependency`
-(plan-notes entry: the integration *is* Vite, no few lines replace it). It ships:
-
-- the adapter `stator build --mode=js` uses by default, configured per BUNDLER.md §2:
-  - an SSR build with `ssr.noExternal: true` and `ssr.target: 'node'`. Library mode is wrong:
-    it stubs `node:*` out;
-  - Rolldown output `format: 'es'`, `codeSplitting: false` and `topLevelVar: false`;
-  - `minify: false`, `sourcemap: true`, `std/*` external;
-  - Vite's `esmExternalRequirePlugin` for built-ins;
-  - no `__filename`/`__dirname` transform. They stay free, and T12.1 reports them as
-    `not-yet` (BUNDLER.md §9);
-- the `stator()` Vite plugin (`vite build` produces the native binary);
-- an example under `examples/vite/` with its README.
-
-**Check:**
-
-- New goldens with a `node_modules` package pass through the default adapter, byte-for-byte
-  vs Node: named, default and namespace imports, and two packages sharing a dependency (one
-  instance).
-- `examples/vite` builds a binary with `vite build`.
-- Tree-shaking, measured on a package, because project code is already tree-shaken by
-  Stator's DCE (BUNDLER.md §1, 93 976 B both ways). Import 1 of 40 functions from a package:
-  - the vendor module holds only that function;
-  - the binary is within 1% of the same function written in the project.
-  The numbers go in plan-notes.
+~~**T12.2. `packages/vite-stator`: the default integration.**~~ ✅ **landed 2026-10-02** — evidence
+in [done.md](done.md) → Phase 12 T12.2 (plan-notes 321; `docs/BUNDLER.md` §2). Its namespace-import
+golden moved to T12.3's Check: Rolldown's `__exportAll` is T12.3's helper item.
 
 ### T12.3. `packages/compiler`: Rolldown's output compiles — **[D4]**
 
@@ -1650,7 +1626,8 @@ where they are the same constructs. Each item below is measured in T12.0 (`docs/
 - **The CJS interop helpers.** `__commonJSMin`, `__toESM` and `__copyProps` need
   `Object.create`, `Object.defineProperty` with getter descriptors,
   `Object.getOwnPropertyDescriptor`, `Object.getOwnPropertyNames`, `Object.getPrototypeOf`,
-  `Object.prototype.hasOwnProperty.call` and `Function.prototype.bind`.
+  `Object.prototype.hasOwnProperty.call` and `Function.prototype.bind`. `__commonJSMin` is an
+  internal error today: `STA4013` "comma operator result must match" (plan-notes 321).
 - **The dynamic-import namespace helpers.** `__esmMin` and `__exportAll` need
   `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
 - **`import.meta.url`.**
@@ -1674,6 +1651,8 @@ golden here reads them.
 - a package with a top-level class.
 - a project file with `export * from 'p'`, one with `import('p')`, and one with an attributed
   package import (`with { type: 'json' }`).
+- a namespace import of a package (`import * as p from 'p'`), which Rolldown answers with
+  `__exportAll`; moved here from T12.2 (plan-notes 321).
 
 `explain` on T12.0's `cjs` spike bundle lists no `STA1214`.
 
@@ -2138,7 +2117,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | landed (`done.md` §11a) |
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
 | `--node` (Phase 11) | typed arrays, `packages/std` + `packages/node`, CommonJS, sync `tsc` (N1) | T11.1–T11.6; the largest item is T11.4 (js-mode coverage, not Node). N2 deferred, N3 not planned (plan-notes 289) |
-| Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`; packages + CommonJS bundled into one vendor module, project stays Stator's graph | T12.0 landed (plan-notes 296, `docs/BUNDLER.md`); T12.1–T12.3 |
+| Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`; packages + CommonJS bundled into one vendor module, project stays Stator's graph | T12.0–T12.2 landed (plan-notes 296, 320, 321, `docs/BUNDLER.md`); T12.3 |
 | Web API (Phase 13) | `packages/webapi` (DOM + CSS, strict TS, render API) + `packages/renderer-clay` (default renderer) | T13.0 design first; T13.1–T13.5 (coverage in generated `docs/WEBAPI.md`); other Web APIs low priority (plan-notes 298, 299) |
 | JS interpreter (Phase 14) | `packages/interpreter` in strict TS: `eval`, `new Function` and other `not-yet` constructs in `js` mode, on the runtime's own values | T14.0 design first; T14.1–T14.4 (plan-notes 300) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
@@ -2344,6 +2323,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.39** (2026-10-02): **T11.3a lands: `Uint8Array` across the extern boundary** (plan-notes 311). A new card, placed after T11.3 and done in the same change. A `Uint8Array` is a parameter row of the FFI table (docs/FFI.md §2): one TS parameter, two C arguments (`uint8_t *`, `size_t`), the view's own storage for the call and no copy. The pointer is stable because the view sits in a rooted argument slot, neither collector moves memory, a buffer never resizes, and the C call runs no Stator code. Every call guards the layout read with `jsrt_check_uint8array` (STA2001). A return stays STA1119, because a returned buffer has no owner and no length. `std/io.writeBytes`/`read` move to the row, and the byte channel (`internal/bytes.ts`, `jsrt_std_bytes_*`) is deleted. 10 MiB write: 87.1 → 3.9 ms; 10 MiB read: 247.5 → 5.3 ms. A new fixture shim may be `node_shim.ts`.
 - **v4.40** (2026-10-02): **T12.1 lands: the bundler API** (plan-notes 320). In `js` mode, package imports and CommonJS project files go to one bundler call; the answer joins the program as the virtual `__stator_vendor__.js`, and project imports are rewritten to it, every line kept. `--bundler=vite|none|<module>` and the `bundler` config key choose the adapter (`STA0014` when it cannot load, `STA0015` when the bundle step fails); `statorc/api` exposes `compile` and `vendorEntry`. Diagnostics and `#line` inside the bundle map to the package's files, or `<package bundle>`. A free `__filename`/`__dirname` is the new not-yet `STA1218`. CommonJS routing is narrowed to files that read `require`, `module` or `exports`. `export *`, `import()` and attributed imports of packages stay `STA1214`. The card moves to done.md.
 - **v4.41** (2026-10-02): **The creator's answers to plan-notes 320; checker errors in the vendor module are skipped** (plan-notes 320). Q1: the narrowed CommonJS marker rule stays. Q2: `--node` gates CommonJS routing of project files (T11.5 implements it). Q3: `export * from 'p'`, `import('p')` and attributed package imports become a T12.3 line item with a Check line. Q4 lands: a type-checker complaint (code ≥ 2000) inside the vendor module no longer fails the build; the binding it names goes dynamic, so the binary does what Node does. TDZ reads and `const` assignments stay `STA0012`, because Node throws there. docs/BUNDLER.md §6, MODES.md §3, DIAGNOSTICS.md (`STA0012`).
+- **v4.42** (2026-10-02): **T12.2 lands: `packages/vite-stator`** (plan-notes 321). The default adapter (one Vite 8.3.1 SSR build of the in-memory vendor entry, BUNDLER.md §2) and the `stator()` plugin, so `vite build` writes the native binary; `examples/vite` is the worked example. `vite` is a peer dependency. Package goldens (`pkg_imports`, `pkg_shared_dependency`) commit their `node_modules`, and `golden/run.ts --bundler=none` skips them. `require` of a built-in becomes an import. Importing 1 of 40 functions from a package bundles that one function, and the binary is the same size as with the function in the project. A namespace import of a package moves to T12.3's Check (Rolldown's `__exportAll`). The card moves to done.md.
 - **v4.50** (2026-10-02): **T11.5, the steps that do not need the bundler** (plan-notes 312). `--node` on `build` and `explain`, and the config key `node`. Under it `node:*` and bare built-ins resolve to `packages/node` through `paths` entries, the mechanism `std/` uses. An unlanded module or member is `STA1214` naming Phase 11 (T11.6); without the flag a built-in is `STA1214` naming the flag. `STA1110` is implemented and narrowed: `ts` mode always, `js` mode without `--node`; with it, `STA1214` naming T11.5's `createRequire` step. `__filename`/`__dirname` are relative to the executable (docs/MODES.md §6); `STA1218` stays under the flag until the CommonJS wrapper injects them. One package-root rule for runtime, `std` and `node`. The card stays open for the CommonJS run-time steps, which T12.1 unblocked.
 - **v4.51** (2026-10-02): **T11.6, first slice: `packages/node` and `node:path`** (plan-notes 313). `packages/node` is created: strict TypeScript over `std`, a workspace package and moon project, a selfhost target (`node-goldens` smoke) and its own `stator.config.json` (`"node": true`). `node:path` and `node:path/posix` are POSIX-complete (14 of 16 members; `win32` and `matchesGlob` not-yet), proved by the `node_path*` goldens against Node 26.7.0, claimed in `node_coverage.json`, and `docs/NODE.md` is regenerated. Fixtures named `node_*` build with `--node`. A named import the module lacks is not-yet even when the checker answers TS2614 (the module has a default export).
 - **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.

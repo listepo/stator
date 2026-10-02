@@ -399,13 +399,18 @@ test('compile: a ready bundle needs no adapter', async () => {
   assert.equal(result.ok, true, result.stderr);
 });
 
-test('STA0014: the default adapter is not installed; a module path that does not exist', async () => {
+test('STA0014: an adapter package that is not installed; a module path that does not exist', async () => {
   const root = leftpadProject("import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n");
-  const absent = await compile({ entry: join(root, 'main.js'), mode: 'js' });
+  // The default, `vite-stator`, is a workspace package since T12.2 (unit/vite-stator.test.ts).
+  const absent = await compile({
+    entry: join(root, 'main.js'),
+    mode: 'js',
+    bundler: 'stator-adapter-not-installed',
+  });
   assert.equal(absent.error?.code, 'STA0014');
   assert.match(
     absent.error?.message ?? '',
-    /bundler adapter 'vite' could not be loaded — install vite-stator/,
+    /bundler adapter 'stator-adapter-not-installed' could not be loaded — install stator-adapter-not-installed/,
   );
   const missing = await compile({
     entry: join(root, 'main.js'),

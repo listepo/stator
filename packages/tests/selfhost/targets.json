@@ -7,6 +7,7 @@
   ],
   "notTargets": {
     "packages/runtime": "C and Zig, built by clang and zig; Stator links it, it does not compile it",
-    "packages/tests": "test harnesses for the pinned Node, not code written for Stator to compile"
+    "packages/tests": "test harnesses for the pinned Node, not code written for Stator to compile",
+    "packages/vite-stator": "a Vite plugin and the bundler adapter: they run inside Vite on Node at build time, and the compiler loads them by name, never compiles them"
   }
 }

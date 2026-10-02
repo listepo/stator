@@ -109,6 +109,17 @@ function skippedIntlCount(): number {
   return skipped;
 }
 
+/** `--bundler=none` (plan.md §11d T12.1 Check): every fixture builds with the bundle step off,
+ * except the ones that import a package from their own `node_modules` (T12.2's `pkg_*`), which
+ * need the bundler and are skipped. The default leaves the compiler's own default, `vite`, which
+ * loads `vite-stator` only for those. */
+const BUNDLER_NONE = process.argv.includes('--bundler=none');
+
+/** A fixture that ships packages: only the bundler can build it. */
+function needsBundler(dir: string, name: string): boolean {
+  return existsSync(join(dir, name, 'node_modules'));
+}
+
 interface Fixture {
   readonly mode: 'ts' | 'js';
   readonly path: string;
@@ -130,6 +141,7 @@ function fixtures(mode: 'ts' | 'js'): Fixture[] {
     .filter(
       (name) =>
         (INTL || !name.startsWith('intl_')) &&
+        !(BUNDLER_NONE && needsBundler(dir, name)) &&
         (name.endsWith(`.${mode}`) ||
           statSync(join(dir, name), { throwIfNoEntry: false })?.isDirectory()),
     )
@@ -167,10 +179,6 @@ function decodeFailure(value: unknown): string | undefined {
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
  * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
  * compile into each other's `app`. */
-/** `--bundler=none` (plan.md §11d T12.1 Check): every fixture builds with the bundle step off.
- * The default leaves the compiler's own default, `vite`, which must never load here: no fixture
- * imports a package or holds a CommonJS file. */
-const BUNDLER_NONE = process.argv.includes('--bundler=none');
 
 /** Fixtures named `node_*` build on the `--node` platform (plan.md §11c T11.6, docs/MODES.md
  * §6): their `node:*` imports resolve to `packages/node`, and Node runs them like any fixture. */
@@ -256,6 +264,13 @@ function printReport(
   if (skippedIntl > 0) {
     process.stdout.write(
       `golden: SKIPPED ${String(skippedIntl)} intl_* fixtures (STATOR_RUNTIME is not intl; run \`pnpm run test:intl\` to include them)\n`,
+    );
+  }
+  if (BUNDLER_NONE) {
+    const dir = join(HERE, 'js');
+    const packaged = readdirSync(dir).filter((name) => needsBundler(dir, name)).length;
+    process.stdout.write(
+      `golden: SKIPPED ${String(packaged)} fixtures that import packages (--bundler=none)\n`,
     );
   }
   if (failed.length > 0) {

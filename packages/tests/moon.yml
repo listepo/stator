@@ -118,6 +118,7 @@ tasks:
       - 'tests:typecheck'
       - 'std:typecheck'
       - 'node:typecheck'
+      - 'vite-stator:typecheck'
       - 'runtime:build'
       - 'std:build'
       - 'tests:unit'
