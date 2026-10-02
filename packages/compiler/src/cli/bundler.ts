@@ -244,7 +244,13 @@ async function loadFrontendInner(
   // The bundle's code is what the card keys on (T12.1 step 6); the rewrites follow from the
   // entry's bytes and the bundle, but hashing them too costs nothing and keys on every byte read.
   const key = sha256(JSON.stringify([...files]));
-  const loaded = createProgram(entry, mode, undefined, { files, key }, node);
+  const loaded = createProgram(
+    entry,
+    mode,
+    undefined,
+    { files, key, unchecked: plan.modulePath },
+    node,
+  );
   return {
     ...loaded,
     vendor: { path: plan.modulePath, map: sourceMapper(bundle.map, plan.entry.resolveDir) },

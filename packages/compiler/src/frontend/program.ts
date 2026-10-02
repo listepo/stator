@@ -503,6 +503,11 @@ export const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
 export interface ProgramOverlay {
   readonly files: ReadonlyMap<string, string>;
   readonly key: string;
+  /** A file whose type-checker errors are not reported: the vendor module (plan-notes 320 Q4).
+   * It is package code, untyped JavaScript on the dynamic path that the user cannot edit, so a
+   * checker complaint there must not fail the build (`isUncheckedVendorError`). Every Stator
+   * verdict -- the gate, the edges, the lowering -- still applies to it. */
+  readonly unchecked?: string;
 }
 
 /** The sha256 the cache keys on: entry bytes, and a vendor bundle's code. */
@@ -882,6 +887,13 @@ function createProgramUncached(
           ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
         ),
       );
+    } else if (isUncheckedVendorError(diag, file, overlay)) {
+      // The binding the complaint is about stops trusting its inferred type, the 2322 widening
+      // above: skipping the error alone would hand the lowering a type the code breaks (STA4004).
+      const token = identifierAt(file, diag.start ?? 0);
+      const symbol =
+        token === undefined ? undefined : program.getTypeChecker().getSymbolAtLocation(token);
+      if (symbol !== undefined) runtimeDynamicSymbols.add(symbol);
     } else {
       // Diagnostic has a location
       const { line, character } = file.getLineAndCharacterOfPosition(diag.start ?? 0);
@@ -904,6 +916,30 @@ function createProgramUncached(
   }
 
   return { program, diagnostics, runtimeDynamicSymbols };
+}
+
+/** Checker codes in the vendor module that stay reported: where the checker sees one, Node
+ * throws at run time (a binding read in its temporal dead zone, an assignment to a `const`), and
+ * the compiled program would not -- the lowering refuses the first and would silently perform the
+ * second. Measured on the pinned Node (plan-notes 320 Q4). */
+const VENDOR_THROW_CODES: ReadonlySet<number> = new Set([
+  2448, // Block-scoped variable 'x' used before its declaration.
+  2449, // Class 'X' used before its declaration.
+  2450, // Enum 'X' used before its declaration.
+  2588, // Cannot assign to 'x' because it is a constant.
+]);
+
+/** A type-checker complaint about the vendor module that is not reported (plan-notes 320 Q4,
+ * docs/BUNDLER.md §6): package code is untyped JavaScript on the dynamic path. Codes below 2000
+ * are syntax and grammar errors, which Node raises too. */
+function isUncheckedVendorError(
+  diag: ts.Diagnostic,
+  file: ts.SourceFile,
+  overlay: ProgramOverlay | undefined,
+): boolean {
+  return (
+    file.fileName === overlay?.unchecked && diag.code >= 2000 && !VENDOR_THROW_CODES.has(diag.code)
+  );
 }
 
 /** Checker codes for a name or module nothing declares. TypeScript answers a Node built-in
