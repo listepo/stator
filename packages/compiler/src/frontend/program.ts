@@ -59,6 +59,25 @@ function isDuplicateProtoDataProperty(source: ts.SourceFile, position: number): 
   return count >= 2;
 }
 
+/** Whether a TS2630 diagnostic writes a function DECLARATION's binding -- mutable, like a `var`
+ * (§10.2.11) -- rather than a named function expression's own name, which is immutable. The
+ * declaration must have a body: an ambient one is a library global (`eval = 1` is an early
+ * SyntaxError in strict code, Test262 `id-eval-strict.js`), not a binding this program owns. */
+function assignsFunctionDeclaration(
+  source: ts.SourceFile,
+  position: number,
+  checker: ts.TypeChecker,
+): boolean {
+  const token = identifierAt(source, position);
+  const symbol = token === undefined ? undefined : checker.getSymbolAtLocation(token);
+  const declaration = symbol?.valueDeclaration;
+  return (
+    declaration !== undefined &&
+    ts.isFunctionDeclaration(declaration) &&
+    declaration.body !== undefined
+  );
+}
+
 /** A TS2416 override-incompatibility diagnostic js mode may drop (plan.md §8 step 12(d),
  * plan-notes 68/272): both members are bodied METHODS neither side annotated, so the
  * disagreement comes from inference over unannotated code rather than from a type the user
@@ -218,8 +237,17 @@ function compoundAssignTarget(token: ts.Identifier): ts.Identifier | undefined {
  * run time, which is where a dynamic value's check belongs.
  *
  * Nothing in here is a free pass for a REAL refusal — an operation no runtime could settle stays a
- * hard error in both modes, and that is why the list is enumerated rather than ranged. */
-const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
+ * hard error in both modes, and that is why the list is enumerated rather than ranged.
+ *
+ * Which refusals stay fatal in js mode (plan-notes 297): every syntactic diagnostic and every
+ * JavaScript EARLY error -- the binder and grammar groups of TypeScript's own `plainJSErrors`,
+ * which no code here may name (tests/unit/js-early-errors.test.ts reads that list out of the
+ * pinned `typescript` and holds this set clear of it). A type-level refusal degrades to the
+ * dynamic path only by being listed here, with its run-time answer and a test. Ranging the rule
+ * over every semantic code was measured and refused: the lowering trusts JSDoc types and the
+ * checker's control flow, so an unlisted refusal compiles to an internal error at best and to a
+ * silent miscompile at worst (`const c = 1; c = 2` printed 2 where Node throws a TypeError). */
+export const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // JSDoc's optional-parameter spelling is checker metadata; JavaScript has no corresponding
   // function-signature restriction, so a required parameter may follow it at runtime.
   1016, // A required parameter cannot follow an optional parameter.
@@ -347,6 +375,20 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // statically-known non-iterable (a number, `undefined`) compiles to that same runtime throw
   // rather than a compile error. ts mode keeps the refusal (STA0012).
   2488, // Type 'X' must have a '[Symbol.iterator]()' method that returns an iterator.
+  // A function declaration's binding is as writable as a `var` (§10.2.11 step 36 instantiates it
+  // with a mutable binding), and assigning it is how compiled namespace IIFEs publish their
+  // object: `function log() {}` then `(function (log2) { ... })(log = Debug.log || (Debug.log =
+  // {}))`, the shape TypeScript's own `_tsc.js` emits (plan-notes 297). The binding is widened
+  // below like a 2322 target, so its slot holds the function and then whatever replaces it. ts
+  // mode keeps the refusal (STA0012).
+  2630, // Cannot assign to 'X' because it is a function.
+  // `{ ...v }` where `v` is not an object type: §13.2.5.5 CopyDataProperties skips `undefined`
+  // and `null` and copies a primitive's own enumerable keys (a string's indices, nothing for a
+  // number or boolean), so every operand has an answer. The checker refuses it, and the literal
+  // then types as `any`; a dynamic literal folds such an operand through the shape-table
+  // `assign` that already copies an array spread (plan.md §8 step 12(c)). ts mode keeps the
+  // refusal (STA0012).
+  2698, // Spread types may only be created from object types.
 ]);
 
 /** Checker refusals Stator answers with exact runtime semantics in BOTH modes, unlike the
@@ -357,7 +399,7 @@ const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
  * resurface as a runtime abort, and a statically-unknown receiver is dynamic rather than
  * refused (§1.2). The ts-mode contract tension (tsc rejects what Stator compiles) is recorded
  * in plan-notes 257. */
-const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
+export const BOTH_MODES_RUNTIME_CODES: ReadonlySet<number> = new Set([
   2407, // The right-hand side of a 'for...in' statement must be of type 'any', an object type...
 ]);
 
@@ -552,6 +594,17 @@ function createProgramUncached(
       diag.file !== undefined &&
       diag.start !== undefined &&
       isDuplicateProtoDataProperty(diag.file, diag.start);
+    // TS2630 also names a named function EXPRESSION's own name (`function imm() { imm = 1; }`),
+    // whose binding is immutable (§15.2.5): the write is a TypeError in strict code and is
+    // ignored in sloppy code, so widening it would compile a write JavaScript never performs.
+    // Only a function DECLARATION's binding is writable, so only that one drops (plan-notes 297).
+    const keepFunctionNameRefusal =
+      diag.code === 2630 &&
+      !(
+        diag.file !== undefined &&
+        diag.start !== undefined &&
+        assignsFunctionDeclaration(diag.file, diag.start, program.getTypeChecker())
+      );
     // TS2416 override widening (plan.md §8 step 12(d), plan-notes 272): an inferred
     // method-method disagreement is legal JavaScript with per-class vtable entries, so js mode
     // drops the refusal — but both declarations' CALLS must stop trusting one side's return,
@@ -579,6 +632,7 @@ function createProgramUncached(
     }
     if (
       !keepProtoRefusal &&
+      !keepFunctionNameRefusal &&
       (overrideWidened ||
         BOTH_MODES_RUNTIME_CODES.has(diag.code) ||
         (mode === 'js' && JS_MODE_RUNTIME_CODES.has(diag.code)))
@@ -589,9 +643,11 @@ function createProgramUncached(
       // disagreement spelled as a redeclaration (`var x = 1; var x = 'a'`) rather than as an
       // assignment, and it needs the same widening -- without it the suppression turns a checker
       // refusal into an STA4004 internal error (plan-notes 194).
+      // 2630 is the same widening for a function declaration's binding (plan-notes 297).
       if (
         (diag.code === 2322 ||
           diag.code === 2403 ||
+          diag.code === 2630 ||
           diag.code === 2362 ||
           diag.code === 2363 ||
           diag.code === 2454) &&
@@ -609,7 +665,7 @@ function createProgramUncached(
         // (JSRT_FRAME fills every slot with it), so every use must go dynamic rather than trust
         // the annotation (the 2403 rule: the admitted program must still compile).
         const target =
-          diag.code === 2322 || diag.code === 2403 || diag.code === 2454
+          diag.code === 2322 || diag.code === 2403 || diag.code === 2454 || diag.code === 2630
             ? token
             : token === undefined
               ? undefined

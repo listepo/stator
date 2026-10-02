@@ -3470,6 +3470,20 @@ function gateObjectLiteral(
       if (spread.kind === 'array' && objectLiteralIsDynamic(literal, checker)) {
         continue;
       }
+      // `{ ...v }` over an Unknown value folds the same way, through the same shape-table
+      // `assign`: CopyDataProperties copies whatever own enumerable keys the run-time value has,
+      // and skips `undefined`, `null` and the primitives that have none (plan-notes 297). The
+      // dynamic-literal requirement holds here by construction whenever the operand is `any`
+      // (the literal types `any` with it); a narrowed-to-`never` operand rides on the checker's
+      // TS2698, which js mode drops and which leaves the literal `any` too. A dropped `as`
+      // assertion keeps its own refusal below: the shape it names is not the value's.
+      if (
+        spread.kind === 'unknown' &&
+        asserted.kind !== 'object' &&
+        objectLiteralIsDynamic(literal, checker)
+      ) {
+        continue;
+      }
       if (spread.kind !== 'object') {
         // A dropped `as` assertion to a fixed shape (`...(u as { x: number })` with `u: unknown`)
         // passes the shape test on the asserted type but lowers to Unknown, which the lowering

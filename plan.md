@@ -496,9 +496,12 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     methods).
     **Computed keys landed 2026-09-12** (plan-notes 229; evidence in [done.md](done.md) → Phase 5
     step 12c computed keys).
-    **Residue:** a spread of an unknown value (`gate.ts:3221,3446`), of a value with no fixed
-    shape (`gate.ts:3225,3448`), and the methods-order shapes (`gate.ts` spread-prefix arms)
-    stay `STA1214` — all need the dynamic tier (step 39), not this slice. Spread of any
+    **A spread of an untyped value into a literal the checker types `any` landed** (plan-notes
+    297: the operand folds through the shape-table `assign`, beside the array spread).
+    **Residue:** a dropped `as` assertion's unknown operand, a value with no fixed shape in a
+    fixed-typed literal (`{ ...null }`, an array beside an own key), and the methods-order
+    shapes (`gate.ts` spread-prefix arms) stay `STA1214` — all need the dynamic tier (step 39),
+    not this slice. Spread of any
     fixed-shape EXPRESSION compiles — variable, call, or member access, evaluated once via
     a scratch slot (`tests/golden/ts|js/spread_call_result.*`, `gate.test.ts` spread-call
     acceptance) — so the old "anything but a variable" line is retired here.
