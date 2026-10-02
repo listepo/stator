@@ -9690,3 +9690,38 @@ mechanism: resolving an imported name to its defining module's binding. Splittin
 build that resolution twice. `export { a as b }` is also T12.1 step 3. Whichever card lands first
 owns it, so it is written once.
 
+## 304. Stator must compile itself and its own packages: a ratcheted self-compilation test (2026-10-02)
+
+**Plan:** new §9 Task 6.19; changelog v4.21.
+
+**Creator's direction:** the compiler must compile itself and packages like `node` and `webapi`.
+For now that has to work at the level of a test.
+
+**Measured** on main `f8db9eb` (darwin/arm64, Node per `.node-version`) by
+`node packages/compiler/src/cli/main.ts explain packages/compiler/src/cli/main.ts --mode=<m> --json`:
+
+| Target | Mode | Verdict | Diagnostics | Wall |
+| --- | --- | --- | --- | --- |
+| `packages/compiler` | ts | not-yet | 2 522 × STA1214 | 34.8 s |
+| `packages/compiler` | js | not-yet | 2 586 × STA1214 | 41.8 s |
+| `packages/std/src/env.ts` | ts | dynamic | none | — |
+| `packages/std/src/{fs,path,process,time}.ts` | ts | static | none | — |
+
+Top `ts`-mode families:
+- 1 127 unsupported constructs reported as `FirstNode`, a `ts.SyntaxKind` alias, so the message
+  prints the wrong kind name;
+- 915 method calls;
+- 158 globals;
+- 52 index access on a non-array;
+- 52 `for-of` over a user iterable;
+- 47 object spread without a fixed shape;
+- 32 package imports.
+
+**Why a ratchet and not a pass/fail test:** the compiler is far from compiling itself, so a
+pass/fail test would be red for a long time and get ignored. A per-code count that may only
+shrink makes every subset card's progress visible, and blocks regressions today.
+
+**Why the stage-2 check is byte-identical C:** a self-compiled compiler that emits different C
+for the same input is a miscompilation of the compiler. That is the strongest end-to-end
+correctness test the project can run on itself.
+
