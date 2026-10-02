@@ -1612,6 +1612,21 @@ import with import attributes are not rewritten to the vendor module.
 
 ### T12.2. `packages/vite-stator`: the default integration — **[D3]**
 
+**In progress** — Claude Code / sonnet-5-5. Execution plan, one PR:
+1. `packages/vite-stator` (workspace package, strict TS): `src/adapter.ts`, the default adapter,
+   with §2's configuration as one Vite SSR build of an in-memory vendor entry; `src/plugin.ts`,
+   `stator()`; `src/index.ts` (default export = the adapter). `vite` is a peer and a dev
+   dependency at the version the lockfile already holds; root `devDependencies` gains
+   `vite-stator` so the compiler resolves it. tsconfig, `typecheck`, moon project, TOOLCHAIN.md.
+2. Goldens `packages/tests/golden/js/pkg_*` with a committed `node_modules` (`.gitignore`
+   exception): named, default and namespace imports, and two packages sharing one dependency.
+   `golden/run.ts --bundler=none` skips fixtures that hold a `node_modules`.
+3. `examples/vite`: a workspace example whose `vite build` writes a native binary; a unit test
+   runs it.
+4. Tree-shaking: a 40-function package, one imported; the vendor module and the binary size
+   against the same function in the project, in plan-notes.
+5. Docs (BUNDLER.md, README, AGENTS.md repo map, TOOLCHAIN.md), plan-notes, changelog, done.md.
+
 Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDependency`
 (plan-notes entry: the integration *is* Vite, no few lines replace it). It ships:
 
