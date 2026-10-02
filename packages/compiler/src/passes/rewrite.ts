@@ -437,7 +437,8 @@ function rebuildExpression(expr: Expression, rewriter: Rewriter): Expression {
     case 'date-static':
     case 'math-call':
     case 'object-static':
-    case 'string-static': {
+    case 'string-static':
+    case 'typed-op': {
       const args = rewriteEach(expr.args, sub);
       return args === expr.args ? expr : { ...expr, args };
     }

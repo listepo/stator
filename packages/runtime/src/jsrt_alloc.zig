@@ -36,7 +36,7 @@ export fn jsrt_object_new(cls: *const c.JSRTClass) Value {
     return c.JSRT_BOX(c.JSRT_TAG_OBJECT, @intFromPtr(object));
 }
 
-export fn jsrt_array_new(count: u32, items: [*c]const Value) Value {
+pub export fn jsrt_array_new(count: u32, items: [*c]const Value) Value {
     const array = create(c.JSRTArray, @sizeOf(c.JSRTArray), "array");
     // An empty literal still gets a one-element buffer, so `elements` is never NULL and every path
     // can index it without a null test.
@@ -72,7 +72,7 @@ export fn jsrt_array_grow(a: *c.JSRTArray, index: u32) void {
     a.capacity = grown;
 }
 
-export fn jsrt_env_new(parent: ?*c.JSRTEnv, count: u32) *c.JSRTEnv {
+pub export fn jsrt_env_new(parent: ?*c.JSRTEnv, count: u32) *c.JSRTEnv {
     const bytes = @sizeOf(c.JSRTEnv) + @as(usize, count) * @sizeOf(Value);
     const env = create(c.JSRTEnv, bytes, "closure environment");
     env.parent = parent;
@@ -96,7 +96,7 @@ export fn jsrt_env_copy_slots(dst: ?*c.JSRTEnv, src: ?*const c.JSRTEnv) void {
     std.mem.copyForwards(Value, to.slots()[0..n], from.slots()[0..n]);
 }
 
-export fn jsrt_closure_new(
+pub export fn jsrt_closure_new(
     func: @FieldType(c.JSRTClosure, "fn"),
     arity: u32,
     name: [*c]const u8,

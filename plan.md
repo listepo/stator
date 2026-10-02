@@ -1322,16 +1322,10 @@ gains each package in the change that creates it.
 ~~**T11.0. Research: what `--node` means and what it costs.**~~ ✅ **landed 2026-10-02** —
 evidence in [done.md](done.md) → Phase 11 T11.0 (plan-notes 288, decision 289).
 
-### T11.1. `packages/runtime`: typed arrays — **[D4]**
-
-`Buffer` is a `Uint8Array` subclass, and every byte-level API (file reads, hashes, codecs) needs
-a byte container; the tree has none. Steps: `ArrayBuffer` + `Uint8Array` first (constructor
-forms, indexing, `length`, `subarray`, `set`, `slice`, iteration), storage in Zig (§0.5), then the
-rest of the `TypedArray` family only as the corpus needs it. Docs: `docs/SUBSET.md` rows,
-`builtins_coverage.json` namespaces.
-
-**Check:** decision tests (both modes) + goldens for every landed member; `test:builtins` lists
-the new namespaces; ASan clean.
+~~**T11.1. `packages/runtime`: typed arrays.**~~ ✅ **landed 2026-10-02** — `ArrayBuffer` +
+`Uint8Array`; evidence in [done.md](done.md) → Phase 11 T11.1. Still open from the card: the rest
+of the `TypedArray` family lands with the card whose corpus first needs it (docs/SUBSET.md lists
+the refused surface, `builtins_coverage.json` counts it as missing).
 
 ~~**T11.2. `packages/std`: the real `std/*` package.**~~ ✅ **landed 2026-10-02** — evidence in
 [done.md](done.md) → Phase 11 T11.2 (plan-notes 294).

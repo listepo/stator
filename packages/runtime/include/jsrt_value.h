@@ -891,6 +891,9 @@ bool jsrt_map_iter_step(jsrt_value map, uint32_t *index, jsrt_value *key, jsrt_v
 /* The string code-point walk, boxed. Never a stored member result -- only the suspendable-unit
  * for-of boxes it, because a cursor on the C frame would not survive a yield/await. */
 #define JSRT_ITER_STRING 10
+/* A Uint8Array's element walk (`for (const b of bytes)`): `index` is the element cursor, and each
+ * step re-reads the view's length, so the walk sees the bytes as they are when it reaches them. */
+#define JSRT_ITER_UINT8ARRAY 11
 
 typedef struct JSRTIterator {
   const JSRTClass *cls; /* &jsrt_class_iterator -- prefix-shared with JSRTObject */
@@ -1088,6 +1091,79 @@ jsrt_value jsrt_date_to_string(jsrt_value v);
 jsrt_value jsrt_date_utc(jsrt_value year, jsrt_value month, jsrt_value day, jsrt_value hours,
                         jsrt_value minutes, jsrt_value seconds, jsrt_value ms);
 jsrt_value jsrt_date_parse(jsrt_value text);
+
+/* --------------------------------------------------------------- typed arrays (plan.md T11.1) */
+
+/* `ArrayBuffer` and `Uint8Array` (docs/VALUE.md §4.19). Both are Object-tagged pointers whose first
+ * word is the class descriptor, the prefix every builtin shares, so the tests below are pointer
+ * comparisons. The storage is Zig (runtime/src/jsrt_typed.zig): `data` is a separate POINTER-FREE
+ * collected block, so the collector never scans a byte as a reference, and it is never NULL -- an
+ * empty buffer still owns a one-granule block.
+ *
+ * A view does not cache `buffer->data + byte_offset`: the collector would see an interior pointer,
+ * and a view's bytes are reached through its buffer so a slice of a slice cannot outlive it. */
+typedef struct JSRTArrayBuffer {
+  const JSRTClass *cls; /* &jsrt_class_arraybuffer */
+  uint8_t *data;
+  size_t byte_length;
+} JSRTArrayBuffer;
+
+typedef struct JSRTTypedArray {
+  const JSRTClass *cls;     /* &jsrt_class_uint8array */
+  JSRTArrayBuffer *buffer;  /* the bytes this view reads and writes; shared by every subarray */
+  size_t byte_offset;
+  size_t length;            /* elements; equal to the byte length while Uint8Array is the only kind */
+} JSRTTypedArray;
+
+extern const JSRTClass jsrt_class_arraybuffer;
+extern const JSRTClass jsrt_class_uint8array;
+
+static inline bool jsrt_is_arraybuffer(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_arraybuffer;
+}
+
+static inline bool jsrt_is_uint8array(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_uint8array;
+}
+
+/* `new ArrayBuffer(n)`: n zeroed bytes. A length ToIndex refuses is Node's RangeError. */
+jsrt_value jsrt_arraybuffer_new(jsrt_value length);
+jsrt_value jsrt_arraybuffer_byte_length(jsrt_value buffer);
+/* `buf.slice(start, end)`: a COPY of the clamped range, as a new buffer. Absent bounds arrive as
+ * `undefined`, which reads as 0 and the byte length, the spec's own defaults. */
+jsrt_value jsrt_arraybuffer_slice(jsrt_value buffer, jsrt_value start, jsrt_value end);
+
+/* `new Uint8Array(x, offset, length)` in every form §23.2.5.1 dispatches on the FIRST argument: a
+ * non-object is a length (ToIndex), an ArrayBuffer is a view at `offset` for `length` bytes, a
+ * typed array or an array is copied element by element (ToNumber, then ToUint8), any other
+ * iterable is drained first, and anything else is read as an array-like. `offset`/`length` are
+ * ignored unless `x` is a buffer. Absent arguments arrive as `undefined`. */
+jsrt_value jsrt_uint8array_new(jsrt_value source, jsrt_value offset, jsrt_value length);
+jsrt_value jsrt_uint8array_length(jsrt_value array);
+jsrt_value jsrt_uint8array_byte_length(jsrt_value array);
+jsrt_value jsrt_uint8array_byte_offset(jsrt_value array);
+jsrt_value jsrt_uint8array_buffer(jsrt_value array);
+/* `a[i]` and `a[i] = v`. An index that is not an integer in range reads `undefined` and drops the
+ * write -- a typed array never grows and has no holes -- but the value is still converted first,
+ * because §10.4.5.16 runs ToNumber before it asks whether the index is valid. A receiver that is
+ * not a Uint8Array degrades to the dynamic access, the way `jsrt_array_get` does. */
+jsrt_value jsrt_uint8array_get(jsrt_value array, jsrt_value index);
+void jsrt_uint8array_put(jsrt_value array, jsrt_value index, jsrt_value value);
+/* `subarray` shares the buffer; `slice` copies it. Both clamp relative bounds the way
+ * `Array.prototype.slice` does. */
+jsrt_value jsrt_uint8array_subarray(jsrt_value array, jsrt_value begin, jsrt_value end);
+jsrt_value jsrt_uint8array_slice(jsrt_value array, jsrt_value start, jsrt_value end);
+/* `a.set(source, offset)`: copies an array, a typed array or an array-like in at `offset`. An
+ * overlapping typed source (a subarray of the same buffer) copies as if through a temporary, as
+ * §23.2.3.26.1 requires. Answers `undefined`. */
+jsrt_value jsrt_uint8array_set(jsrt_value array, jsrt_value source, jsrt_value offset);
+/* The dynamic tier's view of both classes (`jsrt_get_prop` on an Unknown receiver): the data
+ * properties, the index keys, and the methods as closures over the receiver -- the same contract
+ * as `jsrt_array_method`. Answers false for a key neither class has, which reads `undefined`. */
+bool jsrt_typed_get_prop(jsrt_value obj, const char *key, jsrt_value *out);
+/* ToString of a view: the elements joined by "," (what `String(a)` and a template hole answer).
+ * Not `join` itself -- that member, with its separator argument, has not landed. */
+jsrt_value jsrt_uint8array_text(jsrt_value array);
 
 extern const JSRTClass jsrt_class_regexp;
 
@@ -1440,6 +1516,12 @@ static inline bool jsrt_instanceof_builtin(jsrt_value v, const char *name) {
   }
   if (strcmp(name, "Promise") == 0) {
     return jsrt_is_promise(v);
+  }
+  if (strcmp(name, "Uint8Array") == 0) {
+    return jsrt_is_uint8array(v);
+  }
+  if (strcmp(name, "ArrayBuffer") == 0) {
+    return jsrt_is_arraybuffer(v);
   }
   if (strcmp(name, "Map") == 0 || strcmp(name, "Set") == 0) {
     if (!jsrt_is(v, JSRT_TAG_OBJECT)) {

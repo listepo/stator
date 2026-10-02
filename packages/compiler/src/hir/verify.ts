@@ -49,6 +49,8 @@ import {
   SET_OPS,
   STRING_OPS,
   STRING_STATICS,
+  TYPED_OPS,
+  typedResultType,
 } from './nodes.ts';
 import type { HType } from './types.ts';
 import {
@@ -187,7 +189,11 @@ function checkIndexable(
   code: 'STA4044',
   problems: VerifyProblem[],
 ): void {
-  if (target.type.kind !== 'array' && target.type.kind !== 'unknown') {
+  if (
+    target.type.kind !== 'array' &&
+    target.type.kind !== 'unknown' &&
+    target.type.kind !== 'uint8array'
+  ) {
     if (
       target.type.kind === 'object' &&
       (index.type.kind === 'object' || index.type.kind === 'unknown')
@@ -1962,6 +1968,31 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
+    // An ArrayBuffer / Uint8Array member (plan.md T11.1). The runtime entry points test the
+    // receiver's class and throw on a lie, so a wrong kind here is not memory corruption -- but it
+    // IS a lowering that disagrees with the table it was built from: the receiver kind, the padded
+    // arity and the result type are all the row's, and none of them is a source property.
+    case 'typed-op': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const want = TYPED_OPS[expr.op];
+      const receiver = want.receiver === null ? undefined : expr.args[0];
+      const count = want.arity + (want.receiver === null ? 0 : 1);
+      const problem =
+        want.receiver !== null && receiver?.type.kind !== want.receiver
+          ? `${expr.op} on a receiver of type '${receiver === undefined ? 'nothing' : hTypeName(receiver.type)}'`
+          : expr.args.length !== count
+            ? `${expr.op} takes ${String(count)} operands, not ${String(expr.args.length)}`
+            : !hTypeEquals(expr.type, typedResultType(want.result))
+              ? `${expr.op} results in '${hTypeName(expr.type)}', not '${hTypeName(typedResultType(want.result))}'`
+              : undefined;
+      if (problem !== undefined) {
+        problems.push({ kind: 'typed-op', span: expr.span, code: 'STA4101', message: problem });
+      }
+      break;
+    }
+
     // A `Date.prototype` call, pinned where a regexp op's receiver is and for the same reason: the
     // C accessors read a `JSRTDate` without a tag test, so a wrong receiver kind here is memory
     // corruption rather than a wrong answer. Arity is EXACT because the lowering pads omitted
@@ -2205,12 +2236,15 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // element would type the binding against values the runtime never promised -- the for-of
       // case below copies this type onto the binding with no further check, so the lie would be
       // silent rather than a failed verification.
-      if (expr.type.kind !== 'iterator' || expr.type.element.kind !== 'unknown') {
+      // The one exception is a Uint8Array, whose walk answers a byte by construction (the
+      // runtime's JSRT_ITER_UINT8ARRAY kind): its element is `number`, and only for that target.
+      const element = expr.target.type.kind === 'uint8array' ? 'number' : 'unknown';
+      if (expr.type.kind !== 'iterator' || expr.type.element.kind !== element) {
         problems.push({
           kind: 'get-iterator',
           span: expr.span,
           code: 'STA4045',
-          message: `get-iterator has type '${hTypeName(expr.type)}', not an iterator with an Unknown element`,
+          message: `get-iterator has type '${hTypeName(expr.type)}', not an iterator with a(n) ${element} element`,
         });
       }
       break;

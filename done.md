@@ -2931,3 +2931,67 @@ error (STD.md §1); move `std/env` + `std/path` in; land T10.1 steps 3–4 (`std
   under ASan/UBSan, golden-asan 402 passed, 0 failed.
 
 Design decisions, deviations, the emitter fix and the pre-existing gaps it found: plan-notes 294.
+
+## Phase 11 — T11.1 typed arrays ✅ (2026-10-02)
+
+### T11.1. `packages/runtime`: typed arrays — **[D4]**
+
+`Buffer` is a `Uint8Array` subclass, and every byte-level API (file reads, hashes, codecs) needs
+a byte container; the tree has none. Steps: `ArrayBuffer` + `Uint8Array` first (constructor
+forms, indexing, `length`, `subarray`, `set`, `slice`, iteration), storage in Zig (§0.5), then the
+rest of the `TypedArray` family only as the corpus needs it. Docs: `docs/SUBSET.md` rows,
+`builtins_coverage.json` namespaces.
+
+**Check:** decision tests (both modes) + goldens for every landed member; `test:builtins` lists
+the new namespaces; ASan clean.
+
+**Execution plan (Claude Code / opus-5-5, branch `t11-1-typed-arrays`):**
+1. Runtime: `JSRTArrayBuffer` / `JSRTTypedArray` layouts + entry points in `jsrt_value.h`; storage,
+   construction, element get/set (ToUint8), `subarray`/`slice`/`set`, `ArrayBuffer.slice` and the
+   dynamic-method closures in a new `src/jsrt_typed.zig` (byte storage is pointer-free memory).
+   C hooks only where the existing C dispatches: `jsrt_get_prop` / `jsrt_dyn_index_*` (dynamic
+   tier), `jsrt_get_iterator` (a typed-array walk kind), `console.log` (Node's `Uint8Array(n) [ … ]`
+   / `ArrayBuffer { [Uint8Contents]: <…>, [byteLength]: n }`), `String()` / `JSON.stringify`,
+   `instanceof`.
+2. Compiler: HTypes `uint8array` and `arraybuffer` (leaves -- the next element type is a new leaf
+   and new rows, not a generic); one HIR node `typed-op`
+   driven by one table (`TYPED_OPS`, hir/nodes.ts) that the gate, lowering, verifier (new
+   STA4101) and emitter all read; `u[i]` / `u[i] = v` reuse the index nodes; `for-of` goes through
+   `get-iterator` with a `number` element.
+3. Tests: decision tests (ts + js, static + a dynamic js case + not-yet for unlanded members),
+   goldens `ts/typed_arrays.ts` + `js/typed_arrays.js` (+ dynamic js), ASan gate.
+4. Docs: `docs/SUBSET.md` row, `docs/VALUE.md` §4.19, `docs/DIAGNOSTICS.md` STA4101,
+   `builtins_coverage.json` namespaces; then the record moves to `done.md`.
+
+**Landed.** Runtime: `packages/runtime/src/jsrt_typed.zig` (new) holds the two classes, the
+storage (an atomic, zero-filled byte block per buffer; `jsrt_gc.zig` gained `allocAtomic`), every
+entry point and the method closures the dynamic tier hands out; `jsrt_value.h` declares the
+layouts and the C ABI. C hooks: `jsrt_get_prop` → `jsrt_typed_get_prop`, `jsrt_dyn_index_get`/`_set`,
+`jsrt_get_iterator` (`JSRT_ITER_UINT8ARRAY`), `console.log` (`inspect_list` now prints arrays and
+views from one layout; `inspect_heap` is the shared builtin dispatch), `String()` /
+`JSON.stringify`, `instanceof`, and `is_fixed_shape_object`. Compiler: `TYPED_OPS` rows for
+`new ArrayBuffer`, `new Uint8Array`, `ArrayBuffer.prototype.byteLength`/`slice`,
+`Uint8Array.prototype.length`/`byteLength`/`byteOffset`/`buffer`/`subarray`/`slice`/`set`; the gate
+refuses everything else by its qualified name (`STA1214`, phase 11); verifier `STA4101`;
+codegen's `indexGetCall`/`indexSetCall` pick `jsrt_uint8array_get`/`_put` for a `uint8array`
+target. Tests: decision tests `subset_typed_arrays_{ts,js,dynamic_ts,dynamic_js,not_yet_ts,not_yet_js}`,
+goldens `ts/typed_arrays.ts` + `js/typed_arrays.js` (the js one also drives the dynamic tier),
+`unit/typed-arrays.test.ts`. Docs: `docs/SUBSET.md` (two rows, plus `for-of` and `instanceof`),
+`docs/VALUE.md` §4.19, `docs/DIAGNOSTICS.md` STA4101, `builtins_coverage.json` (globals
+`Uint8Array`/`ArrayBuffer`; namespaces `Uint8Array`, `Uint8Array.prototype`, `ArrayBuffer`,
+`ArrayBuffer.prototype`).
+
+**Known ceilings** (documented in docs/SUBSET.md): an expando write on an untyped view panics with
+`STA2004`, like every statically shaped builtin; a dynamic call of an unlanded method reads
+`undefined` and throws the missing-method TypeError; `Object.keys` on a view is refused by the
+existing argument gate; a constructor of another element type falls under the generic `new`
+refusal. No runtime print corpus was added: the corpora are `.mjs` scripts, the no-JS rule (plan.md §0
+item 10, plan-notes 289) stops a new one until Task 6.15 migrates them, and the goldens prove the
+same printer against Node.
+
+**Check — PASSED** (2026-10-02, rebased on T11.2 `ce66355`):
+- decision tests: `node packages/tests/subset/run.ts` → `subset: 767 fixtures — 730 passed, 37 expected-fail, 0 failed` (six new typed-array fixtures, both modes, static / dynamic / not-yet);
+- goldens: `node packages/tests/golden/run.ts` → `golden: 404 fixtures — 404 passed, 0 failed`;
+- `node packages/tests/golden/builtins.ts` → `builtins: 234/294 surface members landed (80%)`, listing `Uint8Array: 0/5`, `Uint8Array.prototype: 7/40`, `ArrayBuffer: 0/1`, `ArrayBuffer.prototype: 2/8`;
+- ASan: `node packages/tests/golden/asan-gate.ts` → `golden: 404 fixtures — 404 passed, 0 failed` under ASan/UBSan, `golden-asan green`;
+- also clean: `tsc` (compiler, tests, std), `oxlint --deny-warnings`, `oxfmt --check`, `cpd` (217 clones, no new ones against the baseline), `vitest` (47 files, 613 tests), `node-coverage --check`, `just runtime-test`, `zig fmt --check`.

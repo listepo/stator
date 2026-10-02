@@ -130,11 +130,22 @@ const impl = if (boehm) struct {
     fn alloc(bytes: usize) ?*anyopaque {
         return gc.GC_generic_malloc(bytes, kind);
     }
+
+    /// Boehm's pointer-free kind: never scanned, and NOT cleared on allocation.
+    fn allocAtomic(bytes: usize) ?*anyopaque {
+        const p = gc.GC_malloc_atomic(bytes) orelse return null;
+        @memset(@as([*]u8, @ptrCast(p))[0..bytes], 0);
+        return p;
+    }
 } else struct {
     fn init() void {}
 
     fn alloc(bytes: usize) ?*anyopaque {
         return std.c.malloc(bytes);
+    }
+
+    fn allocAtomic(bytes: usize) ?*anyopaque {
+        return std.c.calloc(bytes, 1);
     }
 };
 
@@ -148,6 +159,14 @@ export fn jsrt_gc_init() void {
 /// indistinguishable from failure, so it asks for one granule instead. Never returns NULL.
 pub fn alloc(bytes: usize, what: [*:0]const u8) *anyopaque {
     return impl.alloc(if (bytes == 0) 1 else bytes) orelse oom(what);
+}
+
+/// A collected block the collector never scans, zero-filled: raw bytes (an ArrayBuffer's
+/// contents), where a byte pattern that happens to look like an address must not retain anything.
+/// Unlike `alloc` it answers NULL on failure, because a buffer's size is the program's choice and
+/// a refusal is a RangeError the program can catch, not an internal panic.
+pub fn allocAtomic(bytes: usize) ?*anyopaque {
+    return impl.allocAtomic(if (bytes == 0) 1 else bytes);
 }
 
 export fn jsrt_gc_alloc(bytes: usize, what: [*c]const u8) *anyopaque {
