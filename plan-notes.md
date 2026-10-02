@@ -9678,6 +9678,61 @@ package and an additional fallback for `js` mode.
   are unchanged in size.
 
 
+## 301. js mode keeps a `.ts` annotation the checker's TS2322 disagrees with, and checks it (2026-10-02)
+
+**Trigger.** The T12.0 bundler spike's `boundary_inferred` case (plan-notes 296, docs/BUNDLER.md
+§1). A `.js` module exports ``label(x) { return `${x}`; }``, so the checker infers `string`. A `.ts`
+module writes `const n: number = label(10)`. `tsc --strict --allowJs --checkJs` (typescript 6.0.3)
+reports `main.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'`.
+`stator build main.ts --mode=js` built it without a diagnostic, and the binary printed `10` and
+exited 0. AGENTS.md golden rule 4 says a `.js`→`.ts` edge gets a runtime check at the narrowing
+point. This one got none.
+
+**Cause.** No pass in `passes/` decides which edges get a check. The lowering does it at each
+edge (`maybeBoundary` in `lower/index.ts`), and only when the value is Unknown. Here the value is
+a concrete `string`. That is legal only because js mode suppresses TS2322 (`JS_MODE_RUNTIME_CODES`
+in `frontend/program.ts`; plan-notes 184 and 194, for `.js` programs). The suppression
+then widens the TARGET binding to Unknown (`runtimeDynamicSymbols`), whatever file declares it.
+So `n` became a dynamic binding, its `number` annotation was discarded, and no edge was left to
+check. The same rule made docs/MODES.md Example 2 false: it said
+`const retries: string = MAX_RETRIES` is `STA0012`. Measured: it built and printed `3`, and
+`const k: number = "x" as string` in a `.ts` file printed `x`.
+
+**Decision.** In js mode, a TS2322 whose target is a variable declared in a TypeScript file with a
+type annotation that `isCheckable` (`number`, `string`, `boolean`) no longer widens that binding
+(`keepsCheckedAnnotation` in `frontend/program.ts`). The declaration and assignment edges then
+check a concrete value of another type the same way they check an Unknown one (`edgeBoundary` in
+`lower/index.ts`). The result is `STA2001` at run time, not `STA0012`, for two reasons. Golden
+rule 3 says js mode does not refuse a program on the strength of the checker's reading of untyped
+JavaScript. And the inferred type need not be the run-time one: `pick(true)` with
+`pick = (w) => w ? 1 : "one"` is `1 | "one"` to the checker, and the check passes. A `.js`
+binding keeps the widening, because there the disagreement is ordinary JavaScript
+(`let x = 1; x = 'a'`). An annotation no tag settles (an object, a union) keeps it too, because
+only the shape-table path can honor it. The verifier's STA4056 used to refuse every check on a
+concrete value. It now refuses only one whose value already has the checked type, because that
+check cannot fail.
+
+**Evidence** (this branch, Node 26.7.0):
+- The repro now prints `PANIC: STA2001: boundary check failed at …/main.ts:2:19 — expected
+  number, got string` and exits 134. `const retries: string = MAX_RETRIES` fails as `expected
+  string, got number`.
+- `unit/cli.test.ts`: the declaration edge and the assignment edge both abort with `STA2001` at
+  the right line. With the compiler change reverted, both fail (`Tests 2 failed | 1 passed`).
+- Golden `js/boundary_inferred` (`main.ts` + `lib.js`) pins the passing half against Node:
+  `jsrt_check_number` at `main.ts:9:19` and `14:1`, and `jsrt_check_boolean` at `17:20`, print
+  `2 / 2 / true`. It cannot pin the abort, because Node prints `10`.
+- Decision fixtures `subset_annotated_binding_boundary_js.ts` (dynamic) and `_ts.ts`
+  (error STA0012).
+- `unit/verify.test.ts`: STA4056 still fires on a check whose value already has the checked type,
+  and is clean on a `string` checked as `number`.
+
+**Not covered: the same bug on two more edges.** Measured on this branch with the same `lib.js`:
+`function inc(x: number): number { return x + 1; }` called as `inc(label(1))` prints `11` (TS2345
+is suppressed, and the `number` parameter holds a string). `function g(): number { return
+label(2); }` prints `2` (TS2322 on a return). Both should be `STA2001`. Neither is in the spike's
+repro, and the call edge must leave a `.js` callee alone: `golden/js/argument_mismatch.js` needs
+`increment("2")` to coerce the way Node does. Follow-up work, not this change.
+
 ## 302. Per-module namespaces get a card, T11.5a, before `packages/node` (2026-10-02)
 
 **Plan:** new §11c T11.5a; T11.6 depends on it; T12.1 step 3 cross-reference; changelog v4.20.

@@ -187,6 +187,7 @@ import {
   hFunction,
   hIterator,
   hPromise,
+  hTypeAssignable,
   hTypeCanBeNullish,
   hTypeEquals,
   hTypeHasUnknown,
@@ -1014,6 +1015,36 @@ function maybeBoundary(
   if (value.type.kind !== 'unknown' || !isCheckable(expected)) {
     return value;
   }
+  return boundaryCheck(value, expected, node, sourceFile);
+}
+
+/** `maybeBoundary` for the declaration and assignment edges, which also check a CONCRETE value
+ * of another type reaching a checkable binding. Only js mode gets here: the checker's 2322 is
+ * suppressed, and the frontend keeps an annotated `.ts` binding's type rather than widening it
+ * (`keepsCheckedAnnotation`, plan-notes 301). `const n: number = jsLabel(10)` then fails with
+ * `STA2001` at run time instead of binding a string as a `number`. */
+function edgeBoundary(
+  value: Expression,
+  expected: HType,
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+): Expression {
+  if (
+    value.type.kind !== 'unknown' &&
+    isCheckable(expected) &&
+    !hTypeAssignable(value.type, expected)
+  ) {
+    return boundaryCheck(value, expected, node, sourceFile);
+  }
+  return maybeBoundary(value, expected, node, sourceFile);
+}
+
+function boundaryCheck(
+  value: Expression,
+  expected: HType,
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+): Expression {
   return {
     kind: 'boundary-check',
     type: expected,
@@ -1902,7 +1933,7 @@ function lowerDeclarationList(
     // prints `[Function: f]` even when this `f` shadows an outer one, following the rule function
     // declarations already keep (`fn.name` holds the source spelling).
     const named = withDisplayName(lowered, name);
-    value = maybeBoundary(named, type, decl.initializer, sourceFile);
+    value = edgeBoundary(named, type, decl.initializer, sourceFile);
   }
 
   const stmt: Declaration = {
@@ -2702,7 +2733,7 @@ function assignmentParts(
     const value = ts.isIdentifier(targetNode) ? withDisplayName(raw, targetNode.text) : raw;
     return {
       target: bindings.hirName(target),
-      value: maybeBoundary(value, binding, targetNode, sourceFile),
+      value: edgeBoundary(value, binding, targetNode, sourceFile),
     };
   };
 

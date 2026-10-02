@@ -52,6 +52,25 @@ test('a statement with no HType at all is STA4020, caught before anything reads 
   assert.equal(problems[0]?.code, 'STA4020');
 });
 
+/* STA4056: a boundary check that cannot fail is a lowering bug. A concrete value of ANOTHER type
+ * is the js-mode edge where the checker's 2322 was suppressed against an annotated `.ts` binding
+ * (plan-notes 301): that check is the one thing standing between a string and a `number` slot. */
+
+function boundaryCheck(value: Expression, type: HType): Expression {
+  return { kind: 'boundary-check', type, span: span(1), value, where: 'main.ts:1:1' };
+}
+
+test('a boundary check on a value that already has the checked type is STA4056', () => {
+  const problems = verifyHir(makeModule([decl('x', boundaryCheck(num(1), H_NUMBER))]));
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0]?.code, 'STA4056');
+});
+
+test('a boundary check on a concrete value of another type verifies clean', () => {
+  const problems = verifyHir(makeModule([decl('x', boundaryCheck(str('10'), H_NUMBER))]));
+  assert.deepEqual(problems, []);
+});
+
 /* Task 4.1's match reads (STA4089). Both halves of the node's contract are checkable and neither
  * is reachable from source: the gate proves the receiver with the CHECKER before the lowering ever
  * builds one, so a bad node here means the lowering built it from something that is not a match. */

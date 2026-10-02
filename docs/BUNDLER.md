@@ -109,8 +109,9 @@ T12.1 ships package imports. No card closes it. *Synthesis.*
 
 **Found by the spike, out of this card's scope.** In `boundary_inferred` (`.js` returns
 `` `${x}` ``; the `.ts` declares `number`), `tsc --strict` reports `TS2322` on `main.ts`. Stator
-`--mode=js` neither reports it nor checks the boundary, and it prints `10`. Under golden
-rule 4 this is a soundness bug. It is reported separately, not fixed here.
+`--mode=js` neither reported it nor checked the boundary, and it printed `10`. Under golden
+rule 4 this was a soundness bug. Fixed by plan-notes 301: the edge now gets a boundary check, and
+that program aborts with `STA2001` (golden `js/boundary_inferred` pins the passing half).
 
 ## 2. Output contract
 

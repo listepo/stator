@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
+import { isCheckable } from './narrowing.ts';
 import { classifyStdSpecifier, stdPathMapping } from './std.ts';
+import { tsTypeToHType } from './types.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -193,6 +195,24 @@ function isCoercingCompound(kind: ts.SyntaxKind): boolean {
     kind === ts.SyntaxKind.SlashEqualsToken ||
     kind === ts.SyntaxKind.PercentEqualsToken ||
     kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken
+  );
+}
+
+/** Whether a js-mode 2322 against `symbol` keeps the binding's annotation, so the lowering checks
+ * the value at the edge (`STA2001`) instead of widening the binding to Unknown (golden rule 4,
+ * plan-notes 301). Only a variable a TypeScript file annotated with a type a tag settles: the
+ * annotation is the author's claim, and widening silently discards it, so `const n: number =
+ * jsLabel(10)` printed `"10"` from a `number` binding. A `.js` binding keeps the widening -- there
+ * the disagreement is ordinary JavaScript (`let x = 1; x = 'a'`) -- and so does an annotation no
+ * tag can settle (an object, a union), which only the shape-table path can honor. */
+function keepsCheckedAnnotation(symbol: ts.Symbol, checker: ts.TypeChecker): boolean {
+  const declaration = symbol.valueDeclaration;
+  return (
+    declaration !== undefined &&
+    ts.isVariableDeclaration(declaration) &&
+    declaration.type !== undefined &&
+    !declaration.getSourceFile().fileName.endsWith('.js') &&
+    isCheckable(tsTypeToHType(checker.getTypeFromTypeNode(declaration.type), checker))
   );
 }
 
@@ -699,9 +719,14 @@ function createProgramUncached(
             : token === undefined
               ? undefined
               : compoundAssignTarget(token);
-        const symbol =
-          target === undefined ? undefined : program.getTypeChecker().getSymbolAtLocation(target);
-        if (symbol !== undefined) runtimeDynamicSymbols.add(symbol);
+        const checker = program.getTypeChecker();
+        const symbol = target === undefined ? undefined : checker.getSymbolAtLocation(target);
+        if (
+          symbol !== undefined &&
+          !(diag.code === 2322 && keepsCheckedAnnotation(symbol, checker))
+        ) {
+          runtimeDynamicSymbols.add(symbol);
+        }
       }
       continue;
     }
