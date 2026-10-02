@@ -63,6 +63,9 @@ entry.ts / entry.js (+ module graph)
         │
         ▼
   ts.createProgram  (typescript npm package, in-process; Stator owns compilerOptions)
+        │   js mode, graph imports a package or holds a CommonJS file (T12.1, docs/BUNDLER.md):
+        │   vendor entry ──► bundler adapter (--bundler) ──► one virtual ESM module + source map;
+        │   project imports rewritten in place, program reloaded over the overlay
         │
         ├─► ts.SourceFile ASTs
         └─► TypeChecker
@@ -1550,56 +1553,10 @@ compiles from.
 ~~**T12.0. Design: the bundler contract.**~~ ✅ **landed 2026-10-02** — evidence in
 [done.md](done.md) → Phase 12 T12.0 (plan-notes 296; `docs/BUNDLER.md`).
 
-### T12.1. `packages/compiler`: the bundler API — **[D4]**
-
-Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
-
-1. **The API.** `statorc/api`: a programmatic `compile` that takes an optional vendor bundle
-   (`{ code, map, inputs }`), and the adapter interface
-   `BundlerAdapter = { name, bundle(entry: { code, resolveDir }, { external }) → Promise<{ code, map, inputs }> }`.
-2. **The vendor entry.** After the program loads, collect the package imports and route the
-   CommonJS project files. Generate the vendor entry:
-   - named imports become `export { a } from 'p'`;
-   - default and namespace imports get mangled names;
-   - a name is mangled only on collision.
-3. **The vendor module.** Add the bundle as one virtual `js`-mode module and rebind the
-   imports to its exports. `export { a as b }`, the form Rolldown emits for renamed exports, is
-   lowered already: it landed with §11c T11.5a step 3 (`subset_export_renamed_*`).
-4. **The CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
-   - the default in `js` mode is `vite`, loading `vite-stator`;
-   - in `ts` mode the flag is `STA0004`;
-   - the adapter loads only when step 2 found something;
-   - `STA0014` means the adapter cannot be loaded, and its message names the package;
-   - `STA0015` means the bundle step failed, with the bundler's message passed through.
-5. **Source maps.** Diagnostics, `#line` and runtime call-site strings in the vendor module
-   map through the source map (`node:module` `SourceMap`, wrapped once in `src/support/`;
-   stability 1.1). A position with no mapping says it sits in a bundler runtime helper, never
-   a user file.
-6. **The cache.** The program-cache key (Task 6.9) adds the sha256 of the vendor `code`.
-7. **`__filename`/`__dirname`.** Without `--node`, a free read of either in a project file
-   or in the vendor module is a `not-yet` diagnostic naming T11.5 (BUNDLER.md §4, §9). Inside
-   the vendor module it is reported at the mapped position. The code is allocated in
-   `docs/DIAGNOSTICS.md` when this lands.
-
-   Today such a read compiles as `dynamic`, and the binary throws `ReferenceError` where Node
-   prints the path. No path is ever baked into the binary.
-
-Docs: `HOW-IT-WORKS.md`; `MODES.md`, covering packages, the vendor module and the
-package-evaluation-order deviation (BUNDLER.md §1, documented only, no card closes it), the
-latter next to top-level-await interleaving in §5; `DIAGNOSTICS.md` (STA0014/STA0015 move from
-planned to emitted, plus step 7's code); `pipeline.d2` (a dependency-bundling stage before the frontend in
-`js` mode).
-
-**Check:**
-
-- Unit tests drive `compile` and the vendor-entry generator through a stub adapter.
-- Every existing `js` golden passes byte-for-byte under `--bundler=none` **and** under the
-  default, with Vite not installed. None of them imports a package, so the adapter must not
-  load.
-- A diagnostic inside a vendored module reports the original file and line. One inside a
-  runtime helper says "no source mapping".
-- `STA0014` is raised for a package import when the adapter is absent.
-- Decision tests: `__filename`/`__dirname` are `not-yet` in a project `.js` without `--node`.
+~~**T12.1. `packages/compiler`: the bundler API.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 12 T12.1 (plan-notes 320; `docs/BUNDLER.md`). Still open from the card,
+each `STA1214`: `export * from 'p'` (only the bundler knows the names), `import('p')` and a package
+import with import attributes are not rewritten to the vendor module.
 
 ### T12.2. `packages/vite-stator`: the default integration — **[D3]**
 
@@ -2322,3 +2279,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.30** (2026-10-02): **T11.3 step 3 lands and the card closes: `std/process` + `std/fs`** (plan-notes 309). `std/process` gains `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode`/`setExitCode`; the emitter's `main` becomes `int main(int argc, char **argv)` and returns the runtime's exit-code slot (`jsrt_process.c`). `std/fs` gains descriptors (`open`/`read`/`write`/`close`, positional or sequential), `readBytes`, `readdir`, `realpath`, `utimes` and `exists`; bytes take T11.3a's `Uint8Array` row, and `readBytes` parks the file and copies it into a view of its size. `utimes` is libc `utimensat`, because Zig 0.16 reports a missing path as `Unexpected`. T11.3 moves to done.md.
 - **v4.31** (2026-10-02): **T11.4 claimed; family 1, the global functions, lands** (plan-notes 310). The card now carries the family order, a re-measured baseline (1 560 diagnostics on 68c8d57), and a corrected test262 clause: the Test262 harness needs families 1–4, not just `String` and `JSON` as values. Landed: `String`/`Number`/`Boolean` lower to the operations they are. `parseInt`/`parseFloat`/`isNaN`/`isFinite` lower to a new `global-call` node (verifier `STA4102`, C entry points `jsrt_global_*`). `Array.isArray` lowers to the builtin `instanceof Array`, and `typeof` of a language global folds. An object binding pattern's property name is no longer refused as a global. `_tsc.js`: 1 514 → 1 456 `STA1214`. Self-compilation: 1771 → 1648.
 - **v4.39** (2026-10-02): **T11.3a lands: `Uint8Array` across the extern boundary** (plan-notes 311). A new card, placed after T11.3 and done in the same change. A `Uint8Array` is a parameter row of the FFI table (docs/FFI.md §2): one TS parameter, two C arguments (`uint8_t *`, `size_t`), the view's own storage for the call and no copy. The pointer is stable because the view sits in a rooted argument slot, neither collector moves memory, a buffer never resizes, and the C call runs no Stator code. Every call guards the layout read with `jsrt_check_uint8array` (STA2001). A return stays STA1119, because a returned buffer has no owner and no length. `std/io.writeBytes`/`read` move to the row, and the byte channel (`internal/bytes.ts`, `jsrt_std_bytes_*`) is deleted. 10 MiB write: 87.1 → 3.9 ms; 10 MiB read: 247.5 → 5.3 ms. A new fixture shim may be `node_shim.ts`.
+- **v4.40** (2026-10-02): **T12.1 lands: the bundler API** (plan-notes 320). In `js` mode, package imports and CommonJS project files go to one bundler call; the answer joins the program as the virtual `__stator_vendor__.js`, and project imports are rewritten to it, every line kept. `--bundler=vite|none|<module>` and the `bundler` config key choose the adapter (`STA0014` when it cannot load, `STA0015` when the bundle step fails); `statorc/api` exposes `compile` and `vendorEntry`. Diagnostics and `#line` inside the bundle map to the package's files, or `<package bundle>`. A free `__filename`/`__dirname` is the new not-yet `STA1218`. CommonJS routing is narrowed to files that read `require`, `module` or `exports`. `export *`, `import()` and attributed imports of packages stay `STA1214`. The card moves to done.md.

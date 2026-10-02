@@ -13,19 +13,23 @@
  * not-yet is a fact about the compiler's current progress.
  */
 
-import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { gateProgram } from '../frontend/gate.ts';
 import { moduleOrder } from '../frontend/graph.ts';
-import { createProgram } from '../frontend/program.ts';
 import type { Expression, FunctionExpr, Module, Provenance, Statement } from '../hir/nodes.ts';
 import type { ExternCall } from '../hir/nodes.ts';
 import { hTypeHasUnknown } from '../hir/types.ts';
-import { lowerProgram } from '../lower/index.ts';
 import { rewriteModule } from '../passes/rewrite.ts';
 import { type Diagnostic, type DiagnosticSite, renderDiagnostic } from '../support/diagnostics.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { BuildError } from './build.ts';
+import {
+  type BundlerChoice,
+  DEFAULT_BUNDLER,
+  loadFrontend,
+  lowerFrontend,
+  mapVendorDiagnostics,
+} from './bundler.ts';
 import { diagnosticLines, INK_COLORS, type InkColor, type Line, print } from './render.ts';
 
 type Mode = 'ts' | 'js';
@@ -89,8 +93,13 @@ const VERDICT_COLOR: Record<Verdict, InkColor> = {
   'not-yet': INK_COLORS.notYet,
 };
 
-export async function explain(entry: string, mode: Mode, json: boolean): Promise<number> {
-  const result = await explainFile(entry, mode);
+export async function explain(
+  entry: string,
+  mode: Mode,
+  json: boolean,
+  bundler: BundlerChoice = DEFAULT_BUNDLER,
+): Promise<number> {
+  const result = await explainFile(entry, mode, bundler);
 
   if (json) {
     // The machine path NEVER goes through ink (decision tests parse this verbatim).
@@ -131,18 +140,18 @@ export async function explain(entry: string, mode: Mode, json: boolean): Promise
   return 0;
 }
 
-export async function explainFile(entry: string, mode: Mode): Promise<Explanation> {
-  if (!existsSync(entry)) {
-    throw new BuildError('STA0007', `entry file "${entry}" does not exist`);
-  }
-
-  const {
-    program,
-    diagnostics: programDiagnostics,
-    runtimeDynamicSymbols,
-  } = withSpan('frontend/program', {}, () => createProgram(entry, mode));
+export async function explainFile(
+  entry: string,
+  mode: Mode,
+  bundler: BundlerChoice = DEFAULT_BUNDLER,
+): Promise<Explanation> {
+  const frontend = await loadFrontend(entry, mode, bundler);
+  const { program } = frontend;
+  // The same mapping `build` applies (T12.1 step 5): a vendor diagnostic names the package file.
+  const classify = (diagnostics: readonly Diagnostic[]): Explanation | null =>
+    classifyDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
   const verdictFromDiagnostics = classify([
-    ...programDiagnostics,
+    ...frontend.diagnostics,
     ...withSpan('frontend/gate', {}, () => gateProgram(program, mode)),
   ]);
   if (verdictFromDiagnostics !== null) {
@@ -168,9 +177,7 @@ export async function explainFile(entry: string, mode: Mode): Promise<Explanatio
     return graphVerdict;
   }
 
-  const { module, diagnostics } = withSpan('lower', {}, () =>
-    lowerProgram(order, program.getTypeChecker(), runtimeDynamicSymbols, mode),
-  );
+  const { module, diagnostics } = withSpan('lower', {}, () => lowerFrontend(frontend, order, mode));
   const verdictFromLowering = classify(diagnostics);
   if (verdictFromLowering !== null) {
     return verdictFromLowering;
@@ -259,7 +266,7 @@ function functionReports(module: Module): readonly FunctionReport[] {
 }
 
 /** null means "nothing here decides the verdict" — carry on to the typed answer. */
-function classify(diagnostics: readonly Diagnostic[]): Explanation | null {
+function classifyDiagnostics(diagnostics: readonly Diagnostic[]): Explanation | null {
   const decided = (verdict: 'error' | 'not-yet', code: string): Explanation => ({
     verdict,
     code,
