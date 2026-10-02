@@ -6,6 +6,10 @@
       "STA1214": 1748
     }
   },
+  "packages/node/src/assert.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
   "packages/node/src/path.ts": {
     "verdict": "dynamic",
     "codes": {}

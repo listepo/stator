@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { builtinModules, createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadExpectations, moduleOf } from '../node-suite/suite.ts';
 import {
   loadClaims,
   mentionsAccess,
@@ -204,13 +205,38 @@ function anchor(id: string): string {
   return `node:${id}`.toLowerCase().replace(/[^a-z0-9_-]/g, '');
 }
 
+/** Node's own tests per module (T11.7): the selected files and those expected to pass. */
+interface SuiteCount {
+  passed: number;
+  selected: number;
+}
+
+function suiteCounts(ids: readonly string[]): Map<string, SuiteCount> {
+  const counts = new Map<string, SuiteCount>();
+  for (const entry of loadExpectations()) {
+    const id = moduleOf(entry.test, ids);
+    if (id === undefined) continue;
+    const count = counts.get(id) ?? { passed: 0, selected: 0 };
+    count.selected++;
+    if (entry.expect === 'pass') count.passed++;
+    counts.set(id, count);
+  }
+  return counts;
+}
+
 function render(version: string, modules: readonly { id: string; rows: readonly Row[] }[]): string {
+  const suite = suiteCounts(modules.map((m) => m.id));
   const stats = modules.map(({ id, rows }) => {
     const landed = rows.filter((r) => r.verdict === 'landed').length;
     const surface = rows.filter((r) => r.verdict !== 'carved').length;
     const corpus = rows.reduce((n, r) => n + r.corpus, 0);
-    return { id, rows, landed, surface, corpus, tsc: rows.filter((r) => r.tsc).length };
+    const tests = suite.get(id);
+    const nodeTests =
+      tests === undefined ? '' : `${String(tests.passed)} / ${String(tests.selected)}`;
+    return { id, rows, landed, surface, corpus, tsc: rows.filter((r) => r.tsc).length, nodeTests };
   });
+  const suitePassed = [...suite.values()].reduce((n, c) => n + c.passed, 0);
+  const suiteSelected = [...suite.values()].reduce((n, c) => n + c.selected, 0);
   const landed = stats.reduce((n, m) => n + m.landed, 0);
   const surface = stats.reduce((n, m) => n + m.surface, 0);
   const tscRows = stats.flatMap((m) => m.rows.filter((r) => r.tsc));
@@ -228,16 +254,20 @@ function render(version: string, modules: readonly { id: string; rows: readonly 
     "every built-in module, plus each exported class's static and prototype members (`_`-prefixed",
     'names are private and left out). **Corpus** counts uses in the T11.0 corpus',
     "(`docs/research/node-mode/scan.json`); **tsc** marks members TypeScript 6.0.3's `tsc` needs",
-    '(plan.md §11c, slice N1).',
+    "(plan.md §11c, slice N1). **Node tests** counts files of Node's own `test/parallel` selected",
+    'for the module and expected to pass under Stator, from',
+    '`packages/tests/node-suite/expectations.json`, which `pnpm run test:node-suite` holds to the',
+    'truth (plan.md §11c T11.7).',
     '',
     `**Total: ${String(landed)} / ${String(surface)} members covered (${String(percent(landed, surface))}%) across ${String(stats.length)} modules.**`,
     `**Slice N1 (\`tsc\`): ${String(tscLanded)} / ${String(tscRows.length)} (${String(percent(tscLanded, tscRows.length))}%).**`,
+    `**Node tests: ${String(suitePassed)} / ${String(suiteSelected)} selected files pass.**`,
     '',
-    '| Module | Covered | Members | % | Corpus uses | tsc members |',
-    '| --- | --- | --- | --- | --- | --- |',
+    '| Module | Covered | Members | % | Corpus uses | tsc members | Node tests |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
     ...stats.map(
       (m) =>
-        `| [\`node:${m.id}\`](#${anchor(m.id)}) | ${String(m.landed)} | ${String(m.surface)} | ${String(percent(m.landed, m.surface))}% | ${String(m.corpus)} | ${String(m.tsc)} |`,
+        `| [\`node:${m.id}\`](#${anchor(m.id)}) | ${String(m.landed)} | ${String(m.surface)} | ${String(percent(m.landed, m.surface))}% | ${String(m.corpus)} | ${String(m.tsc)} | ${m.nodeTests} |`,
     ),
     '',
     '## Members by module',

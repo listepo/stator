@@ -67,6 +67,7 @@ packages/tests/    the test package "@stator/tests" — every harness + a tsconf
   golden/ts|js     machine-checked vs Node, byte-for-byte
   differential/    fuzzer corpus       bench/  baselines + results
   test262/         runner + pin (corpus fetched, not vendored)
+  node-suite/      Node's own test/parallel slice: pin, expectations, strict-TS common/, vitest driver (corpus fetched)
   leak/            GC hygiene: a 10M-object loop whose RSS must plateau
   impact/          test impact: map recorder, selector driver (`test:impact`), mutation check
   selfhost/        self-compilation ratchet: targets.json, baseline.json (plan §9 Task 6.19)
@@ -122,6 +123,7 @@ pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-f
 pnpm run test:asan              # golden fixtures with runtime + generated C under ASan/UBSan
 pnpm run test:leak              # 10M-object loop; RSS must plateau (skips without Boehm)
 pnpm run test262                # Test262 slice against packages/tests/test262/pin.json (not part of `ci`)
+pnpm run test:node-suite        # Node's own tests (packages/tests/node-suite/pin.json) through vitest, ratcheted (not part of `ci`)
 pnpm run differential           # fuzzer vs Node (failures land in packages/tests/differential/failures/)
 pnpm run bench:record           # refresh packages/tests/bench/baseline.json (valid for this machine only)
 pnpm run runtime                # build libjsrt.a (clang, -Wall -Wextra -Werror; wraps the just recipe), then libjsrt_std.a

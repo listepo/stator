@@ -10960,6 +10960,97 @@ selfhost target and the package's `stator.config.json`. Built on T11.5's resolut
   whose `get` answers a union, and `basename`'s optional suffix is one) and
   `subset_node_path_win32_node_ts` (not-yet).
 
+## 314. T11.7, first slice: Node's own tests through vitest, and `node:assert` (2026-10-02)
+
+**Trigger.** The creator's Node-track order, step 3: the pin, the fetch script, a strict-TS
+`common`, a minimal `node:assert` and the vitest driver, with the `test-path*` files from Node's
+`test/parallel` as the first selection, their expectations and the ratchet, and the "node tests"
+column in `docs/NODE.md`. Built on T11.6's first slice (plan-notes 313), so the branch starts
+from that one.
+
+**What landed.**
+
+- **Pin and fetch.** `packages/tests/node-suite/pin.json` names `https://github.com/nodejs/node`
+  at tag `v26.7.0`; `suite.ts` refuses a tag other than `.node-version`'s. `fetch.ts` downloads
+  each selected `test/parallel/<file>` (and any `test/fixtures` files an entry lists) from
+  `raw.githubusercontent.com` at that tag into `node-suite/corpus/` (gitignored, or
+  `$STATOR_NODE_SUITE`). It stamps the tag, and a different tag re-fetches everything. It also
+  writes `corpus/package.json` as `{ "type": "commonjs" }`: Node's tree has no `"type"` above
+  `test/`, and without the file the corpus would inherit `@stator/tests`'s `"type": "module"`.
+- **`common`, in strict TS.** `node-suite/common/index.ts` ports the helpers the selection uses
+  from Node's `test/common/index.js`
+  (https://github.com/nodejs/node/blob/v26.7.0/test/common/index.js, read 2026-10-02): the
+  platform flags, `mustCall`, `mustCallAtLeast`, `mustNotCall`, `expectsError`, `skip`,
+  `printSkipMessage` and `invalidArgTypeHelper`. `common/fixtures.ts` ports `path` and
+  `fixturesDir` from `test/common/fixtures.js` (same tag). `invalidArgTypeHelper` keeps
+  upstream's behavior for long input: it calls `inspected.slice(inspected, 0, 25)`, which keeps
+  nothing, so a long value prints `...`. A unit test checks the helper against the pinned Node's
+  own `ERR_INVALID_ARG_TYPE` messages. `host-hook.ts` (`module.registerHooks`, loaded with
+  `--import`) points `../common` and `../common/fixtures` at these files, for requests from
+  inside the corpus only.
+- **The driver.** `node-suite.test.ts`, under its own `vitest.config.ts`, makes one vitest test
+  per selected file. A `skip` is reported and not run. Every other file first runs under the
+  pinned Node with the hook. If it fails there, the run fails and says to mark it `skip`. Then
+  it is built in-process with `--mode=js --node` (`buildFixture`) and its binary run; it passes
+  on exit 0. The ratchet works both ways: a `pass` that fails, or a `fail` that passes, fails
+  the run with what to change. `pnpm run test:node-suite` runs the fetch, then the driver. Like
+  `test262`, it is not part of `pnpm run ci`, because it needs the network.
+- **`node:assert`** (`packages/node/src/assert.ts`), after `lib/assert.js` and
+  `lib/internal/assert/assertion_error.js` (https://github.com/nodejs/node/blob/v26.7.0/lib/assert.js,
+  read 2026-10-02). It provides `ok`, `strictEqual`, `notStrictEqual`, `deepStrictEqual`, `match`,
+  `fail`, `throws` and `rejects`, and an `AssertionError` with Node's `name`, `code`
+  (`ERR_ASSERTION`), `operator`, `actual`, `expected`, `generatedMessage` and `toString`. The
+  missing-exception and missing-rejection messages are Node's. Three subset limits show:
+  - Extending a built-in is `STA1214`, so `AssertionError` does not extend `Error`.
+  - A function with properties is `STA1214`, so the default export is an object (the `PathModule`
+    pattern) and `assert(value)` is not callable yet. One selected file calls it.
+  - `instanceof` needs a class name, so `throws` takes a RegExp, a validation object or a
+    validation function, but not a class.
+
+  `Object.is` is not-yet either, so `sameValue` spells it out. A generated message prints
+  primitives only, and Node v26 appends a diff of the values even after a custom message, so the
+  goldens print a message's first line. A `RegExp` reached through a union narrowing must be
+  bound to a `RegExp`-typed local before `.test()` or `.toString()`. Called straight off the
+  narrowed union, the binary panics with `STA2006` ("calling a non-function"). That is a
+  compiler gap worth its own card.
+- **Proof.**
+  - Goldens: `ts/node_assert` (every member, each failure's code, operator, message and
+    `generatedMessage`, `toString`, `rejects` with a promise and with an async function) and
+    `js/node_assert` (the default export from `js` mode). Both match Node 26.7.0 byte for byte.
+  - `node_coverage.json` claims 10 members.
+  - Decision tests: `subset_node_assert_node_ts` / `_js` (dynamic).
+  - Selfhost: `packages/node/src/assert.ts` is a new target, `dynamic` with no codes, recorded
+    with `--update`. The compiler's own counts do not move.
+- **`docs/NODE.md`.** `node-coverage.ts` reads `expectations.json` and maps each test to the
+  longest built-in id whose dashed spelling starts its name (`test-path-posix-exists.js` →
+  `path/posix`). It adds a "Node tests" column (files expected to pass over files selected) and a
+  total line. The ratchet keeps the expectations honest, so the column needs no network in `ci`.
+
+**The selection and its result.** The 17 `test-path*` files. On the pinned Node all 17 pass with
+our `common`. Under Stator:
+
+| Result | Count | Files |
+| --- | --- | --- |
+| pass | 0 | — |
+| fail | 15 | every `fail` |
+| skip | 2 | `test-path-resolve.js` (it spawns a child process, N2); `test-path-win32-normalize-device-names.js` (Windows-only: `common.skip` on POSIX proves nothing) |
+
+Every `fail` is a CommonJS file. With `--node` in js mode a CommonJS project file goes to the T12
+bundler, so the build stops at `STA0014` until `vite-stator` lands (T12.2). Each reason also names
+what comes next: `path.win32` for 13 files, `path.matchesGlob` for one, `ERR_INVALID_ARG_TYPE`
+argument checks for three, and `__filename` for three. `docs/NODE.md` reads `node:path` 0 / 13 and
+`node:path/posix` 0 / 2 and `node:path/win32` 0 / 2.
+
+**Check.**
+- `pnpm run test:node-suite`: "node-suite: 17 selected at v26.7.0 — 0 passed, 15 expected-fail,
+  2 skipped"; vitest "Tests 15 passed | 2 skipped (17)"; exit 0.
+- Hand-flipping `test-path-posix-exists.js` to `pass` fails the run: "Tests 1 failed | 14 passed
+  | 2 skipped (17)", "expected to pass, failed: stator build failed: stator: STA0014 …", exit 1.
+- `pnpm run ci` is green.
+
+**Open.** No CI job runs the suite yet. A Linux job like `test262`'s, caching the corpus on the
+`pin.json` hash, is the natural next step, once a file passes.
+
 ## 320. T12.1 lands: the bundler API, and the decisions the card left open (2026-10-02)
 
 **What landed.** `js` mode sends package imports and CommonJS project files to one bundler

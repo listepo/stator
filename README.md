@@ -53,6 +53,7 @@ pnpm run test:subset     # feature × mode decision matrix
 pnpm run test:golden     # compile + run vs the pinned Node, byte-for-byte
 pnpm run test:selfhost   # Stator explains (and builds) its own packages; per-code counts may only shrink
 pnpm run test262         # Test262 slice (CI heartbeat; corpus fetched separately)
+pnpm run test:node-suite # Node's own test/parallel slice through vitest (fetches its pinned corpus)
 pnpm run differential    # fuzzer vs Node
 just -f packages/runtime/justfile -d packages/runtime runtime             # libjsrt.a (clang -O2 -Werror; thin LTO where the linker can read it)
 just -f packages/runtime/justfile -d packages/runtime runtime-asan        # ASan/UBSan archive
