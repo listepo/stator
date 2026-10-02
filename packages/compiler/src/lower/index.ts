@@ -1873,6 +1873,30 @@ function bindPatternElement(
   return true;
 }
 
+/** What a pattern reads its parts from: `rhs` itself when it is a variable, a temporary holding it
+ * otherwise, so the right side runs once however many targets read it. */
+function patternSource(
+  rhs: Expression,
+  span: Span,
+  bindings: Scope,
+  statements: Statement[],
+): Expression {
+  if (rhs.kind === 'identifier') {
+    return rhs;
+  }
+  const tmp = nextBindTemp();
+  bindings.set(tmp, rhs.type);
+  statements.push({
+    kind: 'declaration',
+    type: rhs.type,
+    span,
+    name: tmp,
+    declKind: 'const',
+    value: rhs,
+  });
+  return { kind: 'identifier', type: rhs.type, span, name: tmp };
+}
+
 function lowerBindingPattern(
   name: ts.BindingName,
   rhs: Expression,
@@ -1885,20 +1909,7 @@ function lowerBindingPattern(
 ): Statement[] | null {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
   const statements: Statement[] = [];
-  let source = rhs;
-  if (rhs.kind !== 'identifier') {
-    const tmp = nextBindTemp();
-    bindings.set(tmp, rhs.type);
-    statements.push({
-      kind: 'declaration',
-      type: rhs.type,
-      span,
-      name: tmp,
-      declKind: 'const',
-      value: rhs,
-    });
-    source = { kind: 'identifier', type: rhs.type, span, name: tmp };
-  }
+  const source = patternSource(rhs, span, bindings, statements);
   if (ts.isIdentifier(name)) {
     diagnostics.push(
       lowerDiagnostic(name, sourceFile, 'STA4031', 'internal', 'expected a binding pattern'),
@@ -1989,15 +2000,45 @@ function lowerDeclarationList(
     return lowerVarList(list, at, sourceFile, checker, bindings, diagnostics, fail);
   }
 
-  // One binding per Declaration node, so `let a = 1, b = 2;` has nowhere to go yet.
-  if (list.declarations.length > 1) {
-    return fail(at, 'multiple declarations in one statement not supported');
-  }
-  const decl = list.declarations[0];
-  if (decl === undefined) {
-    return fail(at, 'empty variable declaration list');
-  }
   const declKind: 'let' | 'const' = list.flags & ts.NodeFlags.Const ? 'const' : 'let';
+  const only = list.declarations.length === 1 ? list.declarations[0] : undefined;
+  if (only !== undefined) {
+    return lowerDeclarator(only, declKind, at, sourceFile, checker, bindings, diagnostics, fail);
+  }
+  // `let a = 1, b;` is its declarators in order, one Declaration each, in a sequence that binds
+  // into the enclosing statement list (plan-notes 310). Each spans its own declarator.
+  const statements: Statement[] = [];
+  for (const decl of list.declarations) {
+    const lowered = lowerDeclarator(
+      decl,
+      declKind,
+      decl,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+      fail,
+    );
+    if (lowered === null) {
+      return null;
+    }
+    statements.push(lowered);
+  }
+  const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
+  return { kind: 'block', type: H_UNDEFINED, span, statements, flatten: true };
+}
+
+/** One declarator of a `let`/`const` list; `at` is what its spans cover. */
+function lowerDeclarator(
+  decl: ts.VariableDeclaration,
+  declKind: 'let' | 'const',
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+  fail: (target: ts.Node, message: string) => null,
+): Statement | null {
   if (!ts.isIdentifier(decl.name)) {
     if (!isSimpleBindingPattern(decl.name) || decl.initializer === undefined) {
       return fail(decl, 'destructuring declaration without initializer');
@@ -2509,6 +2550,26 @@ function lowerExpressionAsStatement(
 ): Statement | null {
   const span = makeSpan(at.getStart(sourceFile), at.getWidth(sourceFile), sourceFile);
 
+  let bare = expr;
+  while (ts.isParenthesizedExpression(bare)) {
+    bare = bare.expression;
+  }
+  if (
+    ts.isBinaryExpression(bare) &&
+    bare.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    (ts.isObjectLiteralExpression(bare.left) || ts.isArrayLiteralExpression(bare.left))
+  ) {
+    return lowerDestructuringAssignment(
+      bare.left,
+      bare.right,
+      span,
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
+  }
+
   // A member target is a different statement shape, so it is tried first: assignmentParts would
   // otherwise report `a[i] = v` as an internal "target must be an identifier" error.
   const member = memberAssignment(expr, at, sourceFile, checker, bindings, diagnostics);
@@ -2562,20 +2623,7 @@ function lowerExpressionAsStatement(
     return null;
   }
   if (assignment !== undefined) {
-    if (immutableSelfBindings.has(assignment.target)) {
-      return {
-        kind: 'expression-statement',
-        type: H_UNDEFINED,
-        span,
-        expression: {
-          kind: 'type-error',
-          type: H_UNDEFINED,
-          span,
-          message: 'Assignment to constant variable.',
-        },
-      };
-    }
-    return { kind: 'assignment', type: assignment.value.type, span, ...assignment };
+    return assignmentStatement(assignment, span);
   }
 
   const exp = lowerExpression(expr, sourceFile, checker, bindings, diagnostics);
@@ -2875,6 +2923,151 @@ function slotOf(
   return slot;
 }
 
+/** The statement writing `assignment`: a TypeError for a named function expression's own name,
+ * which is immutable inside its body, and the assignment otherwise. */
+function assignmentStatement(
+  assignment: { target: string; value: Expression },
+  span: Span,
+): Statement {
+  if (immutableSelfBindings.has(assignment.target)) {
+    return {
+      kind: 'expression-statement',
+      type: H_UNDEFINED,
+      span,
+      expression: {
+        kind: 'type-error',
+        type: H_UNDEFINED,
+        span,
+        message: 'Assignment to constant variable.',
+      },
+    };
+  }
+  return { kind: 'assignment', type: assignment.value.type, span, ...assignment };
+}
+
+/** `({ a, b: c } = rhs)` / `[a, , b] = rhs` as a statement: the right side once, then one
+ * assignment per target, each reading what the declaration form `const { a, b: c } = rhs` reads
+ * (plan-notes 310). The gate admitted only variable targets with no default, rest or nesting. */
+function lowerDestructuringAssignment(
+  pattern: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
+  rhsNode: ts.Expression,
+  span: Span,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Statement | null {
+  const rhs = lowerExpression(rhsNode, sourceFile, checker, bindings, diagnostics);
+  if (rhs === null) {
+    return null;
+  }
+  const statements: Statement[] = [];
+  const source = patternSource(rhs, span, bindings, statements);
+  const targets: { key: string | number; name: ts.Expression; at: ts.Node }[] = [];
+  if (ts.isObjectLiteralExpression(pattern)) {
+    for (const p of pattern.properties) {
+      if (ts.isShorthandPropertyAssignment(p)) {
+        targets.push({ key: p.name.text, name: p.name, at: p });
+      } else if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name)) {
+        targets.push({ key: p.name.text, name: p.initializer, at: p });
+      }
+    }
+  } else {
+    pattern.elements.forEach((el, index) => {
+      if (!ts.isOmittedExpression(el)) {
+        targets.push({ key: index, name: el, at: el });
+      }
+    });
+  }
+  for (const { key, name, at } of targets) {
+    if (!ts.isIdentifier(name)) {
+      diagnostics.push(
+        lowerDiagnostic(
+          name,
+          sourceFile,
+          'STA4033',
+          'internal',
+          'assignment target must be an identifier',
+        ),
+      );
+      return null;
+    }
+    const parts = identifierAssignment(
+      name,
+      () => lowerPatternRead(source, key, name, at, sourceFile, checker, bindings, diagnostics),
+      sourceFile,
+      checker,
+      bindings,
+      diagnostics,
+    );
+    if (parts === null) {
+      return null;
+    }
+    statements.push(assignmentStatement(parts, span));
+  }
+  return { kind: 'block', type: H_UNDEFINED, span, flatten: true, statements };
+}
+
+/** The `{ target, value }` of an assignment to the variable `targetNode` names, `make` building the
+ * value from the variable's current reading. Shared by `x = e` and its folds (assignmentParts) and
+ * by each target of a destructuring assignment (plan-notes 310). */
+function identifierAssignment(
+  targetNode: ts.Expression,
+  make: (current: Identifier) => Expression | null,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): { target: string; value: Expression } | null {
+  const target = placeName(targetNode, sourceFile, checker);
+  if (target === undefined) {
+    diagnostics.push(
+      lowerDiagnostic(
+        targetNode,
+        sourceFile,
+        'STA4033',
+        'internal',
+        'assignment target must be an identifier',
+      ),
+    );
+    return null;
+  }
+  const binding = bindings.get(target);
+  if (!binding) {
+    diagnostics.push(
+      lowerDiagnostic(
+        targetNode,
+        sourceFile,
+        'STA4034',
+        'internal',
+        `identifier '${target}' assigned before declaration`,
+      ),
+    );
+    return null;
+  }
+  const current: Identifier = {
+    kind: 'identifier',
+    type: binding,
+    span: makeSpan(targetNode.getStart(sourceFile), targetNode.getWidth(sourceFile), sourceFile),
+    // The HIR name: a shadowing binding writes to its own slot, not the outer one it shadows
+    // (plan.md §8 step 14).
+    name: bindings.hirName(target),
+  };
+  const raw = make(current);
+  if (raw === null) {
+    return null;
+  }
+  // Step 17's rule, extended to assignment: `h = () => ...` prints `[Function: h]`. Only a
+  // simple identifier target names its value -- a static member write (`C.f = ...`) keeps
+  // today's output, matching Node, which prints those anonymous. The display spelling is the
+  // target's SOURCE text, never the HIR name a shadowed binding writes under.
+  const value = ts.isIdentifier(targetNode) ? withDisplayName(raw, targetNode.text) : raw;
+  return {
+    target: bindings.hirName(target),
+    value: edgeBoundary(value, binding, targetNode, sourceFile),
+  };
+}
+
 /** The target and value of `x = e`, `x += e`, `x++` and `--x`, or `undefined` if `expr` is none of
  * those. `null` means it was one and lowering it failed.
  *
@@ -2894,55 +3087,8 @@ function assignmentParts(
   const build = (
     targetNode: ts.Expression,
     make: (current: Identifier) => Expression | null,
-  ): { target: string; value: Expression } | null => {
-    const target = placeName(targetNode, sourceFile, checker);
-    if (target === undefined) {
-      diagnostics.push(
-        lowerDiagnostic(
-          targetNode,
-          sourceFile,
-          'STA4033',
-          'internal',
-          'assignment target must be an identifier',
-        ),
-      );
-      return null;
-    }
-    const binding = bindings.get(target);
-    if (!binding) {
-      diagnostics.push(
-        lowerDiagnostic(
-          targetNode,
-          sourceFile,
-          'STA4034',
-          'internal',
-          `identifier '${target}' assigned before declaration`,
-        ),
-      );
-      return null;
-    }
-    const current: Identifier = {
-      kind: 'identifier',
-      type: binding,
-      span: makeSpan(targetNode.getStart(sourceFile), targetNode.getWidth(sourceFile), sourceFile),
-      // The HIR name: a shadowing binding writes to its own slot, not the outer one it shadows
-      // (plan.md §8 step 14).
-      name: bindings.hirName(target),
-    };
-    const raw = make(current);
-    if (raw === null) {
-      return null;
-    }
-    // Step 17's rule, extended to assignment: `h = () => ...` prints `[Function: h]`. Only a
-    // simple identifier target names its value -- a static member write (`C.f = ...`) keeps
-    // today's output, matching Node, which prints those anonymous. The display spelling is the
-    // target's SOURCE text, never the HIR name a shadowed binding writes under.
-    const value = ts.isIdentifier(targetNode) ? withDisplayName(raw, targetNode.text) : raw;
-    return {
-      target: bindings.hirName(target),
-      value: edgeBoundary(value, binding, targetNode, sourceFile),
-    };
-  };
+  ): { target: string; value: Expression } | null =>
+    identifierAssignment(targetNode, make, sourceFile, checker, bindings, diagnostics);
 
   if (ts.isBinaryExpression(expr)) {
     if (expr.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
@@ -3251,52 +3397,22 @@ function memberAssignment(
         ? accessorOwner(targetNode.expression, literalKey, checker, bindings, sourceFile)
         : undefined;
     if (placeOwner !== undefined && literalKey !== null) {
-      const read = hasAccessorHalf(
-        targetNode.expression,
+      const place = accessorPlace(
+        placeOwner,
+        target,
         literalKey,
-        'get',
-        checker,
-        bindings,
+        hasAccessorHalf(targetNode.expression, literalKey, 'get', checker, bindings, sourceFile),
+        placeType,
+        span,
+        targetNode,
         sourceFile,
-      )
-        ? accessorCall(
-            'get',
-            placeOwner,
-            target,
-            literalKey,
-            [],
-            placeType,
-            span,
-            targetNode,
-            sourceFile,
-            checker,
-            diagnostics,
-          )
-        : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
-      if (read === null) {
+        checker,
+        diagnostics,
+      );
+      if (place === null) {
         return null;
       }
-      current = read;
-      write = (value) => {
-        const call = accessorCall(
-          'set',
-          placeOwner,
-          target,
-          literalKey,
-          [value],
-          H_UNDEFINED,
-          span,
-          targetNode,
-          sourceFile,
-          checker,
-          diagnostics,
-        );
-        // `accessorCall` already reported; a null here would be the same miss the read
-        // survived.
-        return call === null
-          ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
-          : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
-      };
+      ({ current, write } = place);
     } else if (literalKey !== null && target.type.kind === 'object') {
       const slot = slotOf(target, literalKey, targetNode, sourceFile, diagnostics);
       if (slot === null) {
@@ -3384,50 +3500,36 @@ function memberAssignment(
       writePriv !== undefined
         ? privateAccessorHalves(writePriv.owner, writeRaw).get
         : hasAccessorHalf(targetNode.expression, field, 'get', checker, bindings, sourceFile);
-    const read = writeHasGet
-      ? accessorCall(
-          'get',
-          owner,
-          target,
-          field,
-          [],
-          placeType,
-          span,
-          targetNode,
-          sourceFile,
-          checker,
-          diagnostics,
-        )
-      : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
-    if (read === null) {
+    const place = accessorPlace(
+      owner,
+      target,
+      field,
+      writeHasGet,
+      placeType,
+      span,
+      targetNode,
+      sourceFile,
+      checker,
+      diagnostics,
+    );
+    if (place === null) {
       return null;
     }
-    current = read;
-    write = (value) => {
-      const call = accessorCall(
-        'set',
-        owner,
-        target,
-        field,
-        [value],
-        H_UNDEFINED,
-        span,
-        targetNode,
-        sourceFile,
-        checker,
-        diagnostics,
-      );
-      // `accessorCall` already reported; a null here would be the same miss the read survived.
-      return call === null
-        ? { kind: 'expression-statement', type: H_UNDEFINED, span, expression: value }
-        : { kind: 'expression-statement', type: H_UNDEFINED, span, expression: call };
-    };
-  } else if (targetIsDynamic(targetNode.expression, checker, bindings)) {
-    // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). Only plain `=`
-    // reaches here -- the gate refused the compound and update forms -- so `current` is never
-    // read; it is built anyway so the two halves of a place stay one shape.
+    ({ current, write } = place);
+  } else if (
+    targetIsDynamic(targetNode.expression, checker, bindings) ||
+    (target.type.kind === 'array' && targetNode.name.text === 'length')
+  ) {
+    // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). The compound and
+    // update forms read `current` through the same receiver, which `hoisted` evaluated once, so
+    // `f().n += 1` calls `f` a single time (plan-notes 310). An array's `length` is written by the
+    // same runtime entry, which resizes the array instead of touching a table (ECMA-262
+    // §10.4.2.4), and read as any `xs.length` is.
     const field = targetNode.name.text;
-    current = { kind: 'dyn-field-access', type: hUnknown(false), span, target, field };
+    current =
+      target.type.kind === 'array'
+        ? lengthRead(target, span)
+        : { kind: 'dyn-field-access', type: hUnknown(false), span, target, field };
     write = (value) => ({
       kind: 'dyn-field-assignment',
       type: value.type,
@@ -3632,6 +3734,18 @@ function lowerUpdatePlace(
     expr.kind === 'dyn-field-access'
   ) {
     return expr;
+  }
+  // `(xs.length = n)` in value position: the place is the array's `length`, which the runtime's
+  // property entries read and resize (plan-notes 310) -- the dynamic place over a typed array.
+  if (expr.kind === 'array-length') {
+    const place: DynFieldAccess = {
+      kind: 'dyn-field-access',
+      type: hUnknown(false),
+      span: expr.span,
+      target: expr.operand,
+      field: 'length',
+    };
+    return place;
   }
   diagnostics.push(
     lowerDiagnostic(
@@ -8287,6 +8401,37 @@ function isOverridden(name: string, method: string, checker: ts.TypeChecker): bo
     }
   }
   return false;
+}
+
+/** An accessor property as an assignment place: the read calls `get <key>` (or is `undefined`
+ * when the property has only a setter, which only the compound forms ever read), the write calls
+ * `set <key>`. One helper for the dot and the literal-key spellings, which name the same place. */
+function accessorPlace(
+  owner: string,
+  target: Expression,
+  key: string,
+  hasGet: boolean,
+  placeType: HType,
+  span: Span,
+  at: ts.Node,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  diagnostics: Diagnostic[],
+): { current: Expression; write: (value: Expression) => Statement } | null {
+  const call = (kind: 'get' | 'set', args: readonly Expression[], type: HType): MethodCall | null =>
+    accessorCall(kind, owner, target, key, args, type, span, at, sourceFile, checker, diagnostics);
+  const current = hasGet
+    ? call('get', [], placeType)
+    : { kind: 'undefined-literal' as const, type: H_UNDEFINED, span };
+  if (current === null) {
+    return null;
+  }
+  const write = (value: Expression): Statement => {
+    const set = call('set', [value], H_UNDEFINED);
+    // `accessorCall` already reported; a null here would be the same miss the read survived.
+    return { kind: 'expression-statement', type: H_UNDEFINED, span, expression: set ?? value };
+  };
+  return { current, write };
 }
 
 /** `o.x` and `o.x = v` on an accessor: a call to the member function the mangled name holds.

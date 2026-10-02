@@ -660,7 +660,10 @@ function verifyStatement(
     case 'dyn-field-assignment': {
       verifyExpression(stmt.target, problems, bindings);
       verifyExpression(stmt.value, problems, bindings);
-      if (stmt.target.type.kind !== 'unknown') {
+      // The one typed target is an array's `length`, which the runtime entry resizes (plan-notes
+      // 310): the array has no other property this node may write.
+      const arrayLength = stmt.target.type.kind === 'array' && stmt.field === 'length';
+      if (stmt.target.type.kind !== 'unknown' && !arrayLength) {
         problems.push({
           kind: 'dyn-field-assignment',
           span: stmt.span,
@@ -1568,9 +1571,13 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // field answers through the receiver's own descriptor (so a subclass value's added field
       // still resolves), a miss answers `undefined` — and the per-site cache is untouched on that
       // path. What is still rejected is a concrete NON-object target, which has no descriptor for
-      // any name.
+      // any name -- except an array's `length`, the place an assignment in value position resizes
+      // through (plan-notes 310).
+      const arrayLength = expr.target.type.kind === 'array' && expr.field === 'length';
       if (
-        (expr.target.type.kind !== 'unknown' && expr.target.type.kind !== 'object') ||
+        (expr.target.type.kind !== 'unknown' &&
+          expr.target.type.kind !== 'object' &&
+          !arrayLength) ||
         expr.type.kind !== 'unknown'
       ) {
         problems.push({

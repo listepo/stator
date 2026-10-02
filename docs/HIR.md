@@ -200,7 +200,10 @@ the property is a NAME resolved through the shape table at run time, with a per-
 - **Everything dynamic types `Unknown`, and the verifier enforces it (`STA4059`).** A
   `DynFieldAccess` result and its target are Unknown by definition — an absent optional property
   reads as `undefined`, so any concrete type on the node is a narrowing nothing proved. The
-  consumer narrows the value back the way it narrows a `Map.get`.
+  consumer narrows the value back the way it narrows a `Map.get`. One typed target is admitted:
+  an array's `length`, which `DynFieldAssignment` writes (and, in value position, `DynFieldAccess`
+  reads) through the same runtime entries, because writing it resizes the array rather than
+  touching a slot (ECMA-262 §10.4.2.4, plan-notes 310).
 - **No pending check follows a dynamic access.** `jsrt_get_prop` allocates nothing and runs no
   user code; `jsrt_set_prop` can grow slot storage — which is why its operands sit in rooted
   frame slots. A nullish receiver is a TypeError; a primitive read answers `undefined`; a

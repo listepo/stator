@@ -10555,8 +10555,8 @@ changed:
   `global-call`. The eight `Number.*` constants fold to literals, like `Math.PI`. Every other
   `Number` static and number method is refused by name.
 - A shared gate helper, `calleeOnlyMember`, replaced twelve copies of the "using … as a value"
-  refusal. With the moves above, `jscpd` shrank by 7 fingerprints against main 3b3be09
-  (206 → 199), and `.jscpd-baseline.json` shrinks with it.
+  refusal. With the moves above, `jscpd` shrank by 6 fingerprints against main 0d23526
+  (204 → 198), and `.jscpd-baseline.json` shrinks with it.
 
 **Evidence** (this branch, Node 26.7.0):
 - Goldens `ts/field_calls`, `js/field_calls` (argument order, `this` through a function field,
@@ -10568,7 +10568,7 @@ changed:
 - `_tsc.js` (same command): 1 112 diagnostics — 1 066 `STA1214`, 45 `STA0012`, 1 `STA1210`
   (−390). Method-call refusals fell from 403 to 19. The spread refusals rose from 92 to 95: three
   calls that had been refused as method calls now reach their spread argument.
-- Self-compilation, on main c2a033b: `STA1214` 1722 → 1718, recorded with `--update`. The new
+- Self-compilation, on main 0d23526: `STA1214` 1723 → 1719, recorded with `--update`. The new
   constructs remove 6. `receiverTypeAt` (below) adds two references into the bare `typescript`
   import, which count as they did in plan-notes 308.
 - The Test262 harness is still at 17 refusals. Its 4 method calls (`assert._toString(…)`,
@@ -10600,6 +10600,67 @@ changed:
   Goldens `js/primitive_methods` (every op, untyped string and number receivers, method values,
   RangeErrors) and `ts/primitive_methods` match Node. The fixtures are
   `subset_primitive_method_dynamic_js` and `subset_this_field_string_op_*`.
+
+**Family 3 landed: assignment to non-variables** (same day). Re-measured on 25f4cbd (family 2's
+head): 1 116 diagnostics, 1 066 `STA1214`, of which 525 were assignments. What changed:
+- **Compound, logical and update forms on a dynamic receiver** (411 of the 525). The gate accepted
+  plain `=` on a dynamic-shape or Unknown member and refused every other form, because "the
+  read-once machinery hoists slots, which a shape-table entry is not". That was the gate's rule,
+  not the lowering's: the place lowering already hoists the RECEIVER into a temporary, and the key
+  of `o.n` is static, so the fold reads `jsrt_get_prop(t, "n")` and writes `jsrt_set_prop(t, "n")`
+  through one receiver. `isAssignableTarget` now admits an Unknown receiver, and the `=` arm is that
+  one predicate. `f().n += 1` calls `f` once; `o.absent += 1` stores `NaN`, as Node does.
+- **`xs.length = n`** (6). ECMA-262 §10.4.2.4 ArraySetLength in `store_prop`
+  (`runtime/src/jsrt_shape.c`), so a typed and an untyped array share one entry: a value ToUint32
+  changes is `RangeError: Invalid array length`, a smaller length clears and drops the tail, and a
+  larger one aborts `STA2002` like a write past the end, because the new indices would be holes.
+  Before this an untyped `o.length = 0` on an array silently added a NAMED property `length` to the
+  array's property table. A typed array writes through `dyn-field-assignment`, which the verifier
+  now admits on an array target for `length` only; in value position (`return (r.length = r.length
+  - 1)`, which `_tsc.js` has) the place is a `dyn-field-access` over the array. The value is coerced
+  once where the spec coerces it twice; only a `valueOf` with side effects can tell.
+- **Destructuring assignment as a statement** (11, all `({ a, b: c } = f(x))` or `[a, b] = …`).
+  The right side lowers once into a temporary (`patternSource`, now shared with the declaration
+  form), then each target variable takes an `assignment` whose value is what
+  `const { a, b: c } = rhs` would bind (`lowerPatternRead`). The identifier half of
+  `assignmentParts` is now `identifierAssignment`, so each target gets the same binding lookup,
+  display-name rule and boundary edge as `x = e`. A default, rest, nesting, a member target or a
+  used value stays not-yet with a message saying so; the array form is `dynamic`, as
+  `const [a, b] = rhs` already was.
+- **The remaining 92 plain assignments write a property the receiver's object shape does not
+  declare** (`host.trace = …` on an inferred literal). That is growth of a fixed layout, Phase 8's
+  dictionary mode, and the write twin of family 7's 55 absent-property reads, so family 7 takes
+  both. They now say so (`assigning a property the object's shape does not declare`) instead of
+  "assignment to anything but a variable". The 5 left under the old message add properties to a
+  `Map` (`map2.add = multiMapAdd`, family 6) or an array (`queue.pollIndex = 0`, family 7).
+
+**A defect found on the way, fixed here.** `let a = 1, b = 2;` was the internal `STA4032`
+("multiple declarations in one statement") in both modes: the gate accepted the list and the
+lowering refused it. `explain` never ran the lowering, so the `_tsc.js` count could not show it
+(14 statement lists and 4 `for` headers). Each declarator now lowers to its own declaration in a
+flattened sequence; in a `for` header they bind into the loop's scope with per-iteration copies,
+as a single declarator does.
+
+**Evidence** (this branch, Node 26.7.0):
+- Goldens `ts/assignment_forms`, `js/assignment_forms` (every compound form on untyped and
+  dynamic-shape receivers with evaluate-once counters, length writes in both positions with each
+  RangeError, both destructuring forms from typed and untyped right sides, declarator lists in a
+  statement and a `for` header) match Node byte for byte.
+- Decision fixtures in both modes: `subset_dynamic_compound_assign_*`,
+  `subset_array_length_assign_*`, `subset_destructuring_assign_*`,
+  `subset_array_destructuring_assign_*`, `subset_destructuring_assign_default_*`,
+  `subset_multi_declarator_*`, `subset_object_grow_assign_*`.
+- `_tsc.js` (`--stack-size=8000`, `--bundler=none`): 688 diagnostics — 638 `STA1214`, 45
+  `STA0012`, 4 `STA1218`, 1 `STA1210` (−428 `STA1214`). Assignment refusals: 525 → 97, all growth.
+  The 4 `STA1218` are T12.1's, which landed between the two measurements.
+- Self-compilation: `STA1214` 1719 → 1738, recorded with `--update`. The new constructs remove 6
+  refusals from the compiler's own source; the new code adds 22 `ts.*` type references
+  (QualifiedName, as plan-notes 308 counts them) and 3 `for-of` loops over a `NodeArray`.
+- jscpd: the place lowering's two accessor arms were one clone; `accessorPlace` is now the one
+  copy, and the baseline shrank 198 → 196.
+
+**Not covered.** The 92 growth writes and the 5 builtin-receiver writes, assigned above.
+Destructuring with defaults, rest or nesting, in either form, stays with step 8.
 
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
 

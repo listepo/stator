@@ -505,6 +505,33 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   return answer;
 }
 
+/* `a.length = v` (ECMA-262 §10.4.2.4 ArraySetLength): the length is ToUint32 of the value, and a
+ * value that ToUint32 changes is a RangeError. Shrinking drops the tail; growing would leave the new
+ * indices ABSENT, which a dense array cannot spell, so it refuses loudly exactly as a write past the
+ * end does (STA2002) rather than print `undefined` where Node prints `<n empty items>`. The value is
+ * coerced once, where the spec coerces it twice -- observable only through a `valueOf` with side
+ * effects (plan-notes 310). */
+static void array_set_length(jsrt_value array, jsrt_value value) {
+  const double number = jsrt_to_number(value);
+  if (jsrt_pending()) {
+    return;
+  }
+  const uint32_t length = jsrt_to_uint32(number);
+  if ((double)length != number) {
+    jsrt_throw_error(&jsrt_class_range_error, "Invalid array length");
+    return;
+  }
+  JSRTArray *a = jsrt_as_array(array);
+  if (length > a->length) {
+    jsrt_panic("STA2002: sparse arrays are not yet supported: an array length grown by assignment");
+  }
+  /* The dropped tail is cleared so the collector does not keep its elements alive. */
+  for (uint32_t i = length; i < a->length; i++) {
+    a->elements[i] = JSRT_UNDEFINED;
+  }
+  a->length = length;
+}
+
 /* `honor_accessor` is false for exactly one caller: jsrt_define_accessor, which is INSTALLING the
  * cell and must overwrite whatever the key held rather than invoke it. Every other write honors it,
  * which is what makes `o.x = v` on an accessor a call. */
@@ -549,6 +576,10 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
       return;
     }
     jsrt_panic("STA2004: a class object cannot grow a new static; planned for Phase 8");
+  }
+  if (jsrt_is(obj, JSRT_TAG_ARRAY) && strcmp(key, "length") == 0) {
+    array_set_length(obj, value);
+    return;
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
