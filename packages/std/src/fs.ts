@@ -1,6 +1,7 @@
 // `std/fs` — sync, path-only file-system calls (docs/STD.md §5). Paths resolve against the
-// working directory exactly as the OS resolves them. Promise twins arrive with T10.2's thread
-// pool (docs/STD.md §2); until then there are none, rather than sync calls wearing `async`.
+// working directory exactly as the OS resolves them. The Promise twins (`readTextAsync`, …) arrive
+// with T10.2's thread pool (docs/STD.md §2); until then importing one is not-yet (the compiler's
+// frontend/std.ts names them), rather than a sync call wearing `async`.
 
 import { jsrtStdResult, type CString } from './native/core.js';
 import {

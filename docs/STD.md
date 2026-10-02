@@ -40,6 +40,13 @@ v0 ships **sync only**. Promise-flavored `std/fs` arrives with T10.2 as thin `as
 that `await` a thread-pool job (Design B). Until then there is no sync-under-`async` lie that
 blocks main by accident (T10.1 step 5).
 
+The twins are named now, so a program that reaches for one hears when it lands rather than that
+it does not exist. Each sync call's twin is its name plus `Async`, answering a `Promise`:
+`readTextAsync`, `writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync`, `rmdirAsync`.
+Importing one is **not-yet** (`STA1214`, Phase 10, T10.2), in both modes. Any other name `std/fs`
+does not export is the checker's ordinary error (`STA0012`). The list lives beside the module
+list in `packages/compiler/src/frontend/std.ts`.
+
 ## 3. Error model
 
 `std` never answers failure silently: no `-1` returns, no `null` where an error belongs. A
@@ -92,7 +99,7 @@ differ, `std` answers one way and says so (§5).
 | `std/env` | `has(name): boolean`, `get(name): string \| undefined`, `set(name, value)`, `unset(name)`, `cwd(): string` | `setenv`/`unsetenv` semantics: an empty name or one containing `=` is `EINVAL`; unsetting an unset name succeeds. `args` moved to T11.3 as `std/process.argv` (plan-notes 294) |
 | `std/process` | `exit(code)`, `pid(): number`, `abort()` | `exit` takes an integer `0..255` (else `EINVAL`, and nothing exits) and runs libc `exit`, so buffered output is flushed. `abort` raises `SIGABRT`. No signals yet |
 | `std/path` | `isAbsolute`, `basename`, `dirname`, `join(a, b)` | pure TypeScript, no backing (see below) |
-| `std/fs` | `readText(path)`, `writeText(path, text)`, `stat(path): Stat`, `mkdir(path)`, `unlink(path)`, `rmdir(path)` | sync and path-only (see below) |
+| `std/fs` | `readText(path)`, `writeText(path, text)`, `stat(path): Stat`, `mkdir(path)`, `unlink(path)`, `rmdir(path)` | sync and path-only (see below); the `…Async` Promise twins are not-yet, T10.2 (§2) |
 | `std/time` | `nowMs(): number`, `sleepMs(ms)` | `nowMs` is whole milliseconds since the Unix epoch (`Date.now()`); `sleepMs` blocks the only thread on the monotonic clock, fractions truncated |
 | `std/sync` | — | not-yet, T10.2 |
 | `std/thread` | — | not-yet, T10.2 |
@@ -168,7 +175,7 @@ test task depends on it.
   `packages/std/src/<name>.ts`, so the golden proves Stator compiles that source the way Node
   runs it.
 - **Decision tests** (`packages/tests/subset/subset_std_*`) cover each module in both modes,
-  plus the unknown (`STA3002`) and threads (`STA1214`) refusals.
+  plus the unknown (`STA3002`), threads (`STA1214`) and Promise-twin (`STA1214`) refusals.
 - **Unit tests** (`packages/tests/unit/std.test.ts`) prove the conditional link and the two
   exits a golden cannot run: a non-zero `exit` and `abort`.
 

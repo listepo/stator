@@ -6,7 +6,12 @@ import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
 import { isCheckable } from './narrowing.ts';
-import { classifyStdSpecifier, stdPathMapping } from './std.ts';
+import {
+  classifyStdMember,
+  classifyStdSpecifier,
+  type StdSpecifier,
+  stdPathMapping,
+} from './std.ts';
 import { tsTypeToHType } from './types.ts';
 
 type Mode = 'ts' | 'js';
@@ -777,19 +782,21 @@ function createProgramUncached(
  * error: `std/foo` resolves to no file because no such module exists (STA3002), or because it is
  * a threads module that has not landed (STA1214, Phase 10) — the same answer the gate gives a
  * specifier that did resolve (gate.ts `gateImport`), so the code never depends on whether a
- * stray file happens to sit where the mapping looked. */
+ * stray file happens to sit where the mapping looked. TS2305/TS2724 ("has no exported member")
+ * on a std module's Promise twin (`readTextAsync` from `std/fs`) is the same kind of refusal:
+ * the member waits for T10.2 (T10.1 step 5). */
 function stdImportRefusal(diag: ts.Diagnostic, mode: Mode): Diagnostic | undefined {
   const file = diag.file;
-  if (diag.code !== 2307 || file === undefined || diag.start === undefined) {
+  if (file === undefined || diag.start === undefined) {
     return undefined;
   }
-  const literal = file.text.slice(diag.start, diag.start + (diag.length ?? 0));
-  const std = classifyStdSpecifier(literal.slice(1, -1));
+  const start = diag.start;
+  const std = stdRefusalFor(diag.code, file, start, diag.length ?? 0);
   if (std === undefined || std.kind === 'module') {
     return undefined;
   }
-  const { line, character } = file.getLineAndCharacterOfPosition(diag.start);
-  const span = { start: diag.start, length: diag.length ?? 1 };
+  const { line, character } = file.getLineAndCharacterOfPosition(start);
+  const span = { start, length: diag.length ?? 1 };
   const notYet = std.kind === 'not-yet';
   return diagnosticFromFile(
     file.fileName,
@@ -802,6 +809,41 @@ function stdImportRefusal(diag: ts.Diagnostic, mode: Mode): Diagnostic | undefin
     span,
     notYet ? std.phase : undefined,
   );
+}
+
+/** What the std edge says about a checker diagnostic at `start`: TS2307 names a specifier,
+ * TS2305/TS2724 a member of one. */
+function stdRefusalFor(
+  code: number,
+  file: ts.SourceFile,
+  start: number,
+  length: number,
+): StdSpecifier | undefined {
+  const literal = file.text.slice(start, start + length);
+  if (code === 2307) {
+    return classifyStdSpecifier(literal.slice(1, -1));
+  }
+  if (code === 2305 || code === 2724) {
+    const specifier = moduleSpecifierAt(file, start);
+    return specifier === undefined ? undefined : classifyStdMember(specifier, literal);
+  }
+  return undefined;
+}
+
+/** The module specifier of the top-level import or re-export whose text holds `position`. */
+function moduleSpecifierAt(file: ts.SourceFile, position: number): string | undefined {
+  for (const statement of file.statements) {
+    if (position < statement.pos || position >= statement.end) continue;
+    if (
+      (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
+      statement.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(statement.moduleSpecifier)
+    ) {
+      return statement.moduleSpecifier.text;
+    }
+    return undefined;
+  }
+  return undefined;
 }
 
 /** Format and print diagnostics for user output. */

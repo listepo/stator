@@ -47,6 +47,23 @@ const STD_SOURCE_DIR = sourceDir();
 /** Modules whose surface needs T10.2's OS threads (docs/STD.md §5). */
 const THREAD_MODULES: ReadonlySet<string> = new Set(['sync', 'thread']);
 
+/** Members a std module will export once T10.2's thread pool exists: the Promise twins of the
+ * sync `std/fs` calls (docs/STD.md §2, T10.1 step 5). They are refused as not-yet rather than
+ * shipped as sync calls under `async`, which would block main inside an async program. */
+const THREAD_POOL_MEMBERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  [
+    'fs',
+    new Set([
+      'readTextAsync',
+      'writeTextAsync',
+      'statAsync',
+      'mkdirAsync',
+      'unlinkAsync',
+      'rmdirAsync',
+    ]),
+  ],
+]);
+
 let moduleNames: readonly string[] | undefined;
 
 /** The std modules: one per lower-case top-level `src/<name>.ts`. Subdirectories (`native/`,
@@ -75,14 +92,16 @@ export function stdPathMapping(): Record<string, string[]> {
 
 /** What an import specifier means at the std edge, or `undefined` when it does not start with
  * `std/` (an ordinary relative import or a package, which the gate rules on as before). */
+export interface StdNotYet {
+  readonly kind: 'not-yet';
+  readonly code: 'STA1214';
+  readonly message: string;
+  readonly phase: 10;
+}
+
 export type StdSpecifier =
   | { readonly kind: 'module'; readonly name: string }
-  | {
-      readonly kind: 'not-yet';
-      readonly code: 'STA1214';
-      readonly message: string;
-      readonly phase: 10;
-    }
+  | StdNotYet
   | { readonly kind: 'unknown'; readonly code: 'STA3002'; readonly message: string };
 
 export function classifyStdSpecifier(specifier: string): StdSpecifier | undefined {
@@ -108,6 +127,25 @@ export function classifyStdSpecifier(specifier: string): StdSpecifier | undefine
     kind: 'unknown',
     code: 'STA3002',
     message: `unknown std module '${specifier}' — the std modules are ${known === '' ? '(none found)' : known}`,
+  };
+}
+
+/** A named import of a std member that waits for T10.2, or `undefined` for any other name (which
+ * the checker answers as before: a member no module exports is a plain error). */
+export function classifyStdMember(specifier: string, member: string): StdNotYet | undefined {
+  if (!specifier.startsWith(PREFIX)) {
+    return undefined;
+  }
+  if (THREAD_POOL_MEMBERS.get(specifier.slice(PREFIX.length))?.has(member) !== true) {
+    return undefined;
+  }
+  return {
+    kind: 'not-yet',
+    code: 'STA1214',
+    message:
+      `'${member}' from '${specifier}' is not yet supported; planned for Phase 10 ` +
+      '(T10.2: Promise-flavored std/fs runs on the thread pool)',
+    phase: 10,
   };
 }
 

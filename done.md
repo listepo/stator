@@ -3281,3 +3281,48 @@ same printer against Node.
 - `node packages/tests/golden/builtins.ts` → `builtins: 234/294 surface members landed (80%)`, listing `Uint8Array: 0/5`, `Uint8Array.prototype: 7/40`, `ArrayBuffer: 0/1`, `ArrayBuffer.prototype: 2/8`;
 - ASan: `node packages/tests/golden/asan-gate.ts` → `golden: 404 fixtures — 404 passed, 0 failed` under ASan/UBSan, `golden-asan green`;
 - also clean: `tsc` (compiler, tests, std), `oxlint --deny-warnings`, `oxfmt --check`, `cpd` (217 clones, no new ones against the baseline), `vitest` (47 files, 613 tests), `node-coverage --check`, `just runtime-test`, `zig fmt --check`.
+
+## Phase 10 — T10.1 std low-level API ✅ (2026-10-02)
+
+**Landed 2026-10-02** (plan-notes 284, 294, 307). Steps 1–4 landed with T11.2 (`std/env`,
+`std/path`, `std/process`, sync `std/fs`, `std/time` in `packages/std`, docs/STD.md). Step 5
+closes the card: the Promise twins of the sync `std/fs` calls (`readTextAsync`,
+`writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync`, `rmdirAsync`) are `STA1214` naming
+Phase 10 (T10.2's thread pool) in both modes, where before they were the checker's plain
+"no exported member" (`STA0012`). The twin list is `THREAD_POOL_MEMBERS` in
+`frontend/std.ts`; `stdImportRefusal` in `frontend/program.ts` maps TS2305/TS2724 on a twin to
+it. Every other missing member keeps `STA0012`. No new diagnostic code.
+
+**Check evidence:**
+
+- goldens: `node packages/tests/golden/run.ts --filter std_` → 6 passed (`std_env`, `std_path`,
+  `std_process`, `std_fs`, `std_time`, `std_js`), each against its `std-oracle` Node twin;
+- subset rows match docs/SUBSET.md: `node packages/tests/subset/run.ts --filter subset_std` →
+  17 passed, including `subset_std_fs_async_ts`/`_js` (not-yet `STA1214`) and
+  `subset_std_fs_missing_ts` (error `STA0012`);
+- no Node polyfill dependency: `packages/std/package.json` declares only a `typescript`
+  devDependency;
+- self-compilation: compiler `STA1214` 2549 → 2553, recorded with `--update` (plan-notes 306).
+
+The card as it stood in plan.md:
+
+### T10.1. `std` low-level API (sans threads) — **[D4]**
+
+Steps:
+
+1. Write `docs/STD.md` (module path, error model, v0 table above). Add stub `SUBSET.md` rows /
+   diagnostics that name Phase 10.
+2. ~~Wire `std/env` and `std/path` end-to-end (types → runtime → golden).~~ Landed (plan-notes
+   284), then moved into `packages/std` by T11.2.
+3. ~~Add `std/process` (`exit`/`pid`).~~ Landed in `packages/std` by T11.2 (plan-notes 294).
+4. ~~Add sync `std/fs` + `std/time` (`nowMs`; sync `sleepMs` only).~~ Landed in `packages/std`
+   by T11.2 (plan-notes 294).
+5. Promise-flavored `std/fs` APIs: either `not-yet` until T10.2, or implemented as sync under a
+   documented lie — **prefer not-yet** so async programs do not block main by accident.
+
+Steps 2–4 live in `packages/std` since T11.2 (plan-notes 294); step 5 is what remains — today
+`std/fs` simply has no Promise members, and the card closes when that refusal is a `not-yet`
+naming Phase 10.
+
+**Check:** goldens for env/path/process/fs sync; subset rows match; no Node polyfill dependency.
+
