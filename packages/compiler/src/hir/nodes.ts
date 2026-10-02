@@ -443,6 +443,11 @@ export interface DynMethodCall extends Node {
   readonly target: Expression;
   readonly method: string;
   readonly args: readonly Expression[];
+  /** `o.m(a, ...xs)` (plan.md §11c T11.4 step 5): `args` is ONE array holding every argument,
+   * spreads expanded, and the receiver is passed by name rather than by count
+   * (`jsrt_call_spread_at`). A spread call takes this node whatever the receiver's type: the
+   * shape-table read answers a layout's methods and a builtin's bound ones as well. */
+  readonly spread?: true;
 }
 
 /** `o.f(a)` where `o` has a layout and `f` is one of its FIELDS holding a closure -- an object
@@ -778,7 +783,12 @@ export interface StringStaticCall extends Node {
  * exception pending (a SyntaxError for a bad pattern, a RangeError for a bad length), which the
  * emitter checks as a statement. `String(x)`, `Number(x)` and `Boolean(x)` are not here: each IS
  * an existing operation (a template hole, unary `+`, `!!`) and lowers to that node instead of to a
- * second spelling of it. `Array()` and `Array(a, b)` are array literals for the same reason. */
+ * second spelling of it. `Array()` and `Array(a, b)` are array literals for the same reason.
+ *
+ * Two rows are not identifiers, so no global name reaches them: `Array.from(items)` with one
+ * argument (§23.1.2.1), and `...`, the operand of a spread that is not statically an array
+ * (`[...map.keys()]`, `f(...args)` with `args` Unknown), which the lowering wraps so the array
+ * concat that builds the list receives an array (step 5; docs/VALUE.md §4.23). */
 export const GLOBAL_CALLS = {
   parseInt: { arity: 2, fn: 'jsrt_global_parse_int', result: 'number', throws: false },
   parseFloat: { arity: 1, fn: 'jsrt_global_parse_float', result: 'number', throws: false },
@@ -786,6 +796,8 @@ export const GLOBAL_CALLS = {
   isFinite: { arity: 1, fn: 'jsrt_global_is_finite', result: 'boolean', throws: false },
   RegExp: { arity: 2, fn: 'jsrt_regexp_construct', result: 'regexp', throws: true },
   Array: { arity: 1, fn: 'jsrt_array_construct', result: 'array', throws: true },
+  'Array.from': { arity: 1, fn: 'jsrt_array_from', result: 'array', throws: true },
+  '...': { arity: 1, fn: 'jsrt_spread_operand', result: 'array', throws: true },
 } as const satisfies Record<
   string,
   {
@@ -1205,6 +1217,9 @@ export interface CallExpr extends Node {
   readonly kind: 'call';
   readonly callee: Expression;
   readonly args: readonly Expression[];
+  /** `f(a, ...xs)` (plan.md §11c T11.4 step 5): `args` is ONE array holding every argument,
+   * spreads expanded, and the call passes its elements (`jsrt_call_spread_at`). */
+  readonly spread?: true;
 }
 
 /** One C-ABI slot of an extern signature (docs/FFI.md §2): the TS type a parameter or return

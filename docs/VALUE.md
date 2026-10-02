@@ -1446,6 +1446,44 @@ answers `[object WeakMap]`, `JSON.stringify` answers `{}`, and `instanceof` tell
 which no program can observe except through memory use; true weakness needs ephemeron support in
 the collector.
 
+## 4.23 Spreads of any iterable, `Array.from`, and call-side spreads (plan.md §11c T11.4 step 5)
+
+**Array literals.** `[a, ...b, c]` folds into nested `concat` calls over literal runs and spread
+operands (`foldSpreadList` in the lowering). An array operand is spread as it is; any other operand
+-- Unknown, a string, a Map or Set, an iterator, a tuple (which has no HType of its own) -- first
+goes through the `...` row of `GLOBAL_CALLS`, `jsrt_spread_operand`, which drains it into a fresh
+array through the iterator protocol (`jsrt_typed.zig`'s `drain`, the loop `for-of` runs). The
+`concat` alone would APPEND a non-array whole. The chain's receiver is always an array of the
+list's own type, so the result is typed by the literal, never by its first operand; a leading array
+of that type is copied by the next piece's `concat`, and alone by a `concat` with `[]`. Holes in a
+spread source read as `undefined` (§4.4).
+
+**`Array.from(x)`** is a `GLOBAL_CALLS` row too, `jsrt_array_from`: `null`/`undefined` throw
+Node's `TypeError`; an array, a string or an iterable drains like a spread; another primitive
+answers `[]`; and any other object is read as an array-like, `length` then each index. The mapping
+function and `thisArg` forms stay refused (an argument past the last parameter, plan.md §11c T11.4).
+
+**Calls.** `f(...xs)`, `o.m(a, ...xs)` and `arr.push(...xs)` build their whole argument list as ONE
+array the same way and pass it to `jsrt_call_spread_at(callee, receiver, list, loc)`, which calls
+with the list's own count (`CallExpr.spread`, `DynMethodCall.spread`; the verifier's `STA4104`
+holds the list to one array). A method is read through the shape table and called with its object
+as `this` -- for an array that read answers the bound method (`jsrt_array_method`), which reads
+`push`, `unshift`, `splice` and `concat` by count. A static method or a module namespace's member
+is called without a receiver. The list is typed by the one element type its pieces share
+(`f(...nums, 1)` over `number[]` stays typed), else Unknown. A spread call is never inlined.
+
+Still refused (`STA1214`): a spread into `new` or `super(...)` (the construct path takes no built
+list), inside an optional chain, into a builtin namespace or a fixed-arity builtin op (`console`,
+`Math`, string methods, a collection's ops, the array callback ops and `toSpliced`), and -- in js
+mode only -- into a function with an annotated TypeScript parameter, whose claim the call edge
+checks (`STA2001`, plan-notes 308) at a position a spread knows only at run time.
+
+**Known divergence:** a value that is not iterable throws `TypeError: X is not iterable` with
+`X` the value's own string (`undefined`, `5`, `object`). V8 names the SOURCE text (`v is not
+iterable`), adds `(cannot read property undefined)` for a nullish call-side operand, and words a
+non-nullish one as `Spread syntax requires ...iterable[Symbol.iterator] to be a function`. The
+class is the same, so a `catch` that tests it behaves the same.
+
 ## 5. What Phase 2 actually implements
 
 The layout above is complete, but the walking skeleton uses only part of it. Recorded so the gap

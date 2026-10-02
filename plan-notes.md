@@ -10815,6 +10815,76 @@ unchanged; it still lowers to the regexp ops.
   clone the Map/Set pair. Ten fingerprints re-hashed inside existing clones; per file pair, no
   count grew.
 
+### Step 5: spreads
+
+**One list, one entry point.** A spread's count is not its arity, so every spread call now builds
+its whole argument list as ONE array, folded exactly as an array literal is (`foldSpreadList`),
+and calls `jsrt_call_spread_at(callee, receiver, list, loc)`. That entry point exists because
+`jsrt_call_at` guesses whether a receiver was passed from `argc == arity + 1`, and a spread's
+count makes the guess meaningless; it passes the receiver to a `has_receiver` closure explicitly
+(`call_with_receiver`) and calls anything else with the list's own count. `CallExpr` and
+`DynMethodCall` gain a `spread` flag rather than new node kinds: the emitter, the rewrite pass and
+the explain walk already handle both, and the verifier's `STA4104` pins the one-array claim. A
+method is read through the shape table, so `o.m(...xs)` is one `DynMethodCall` whatever `o` is:
+a plain object, a class instance (`fixed_method_get`), a function's own property, or an array,
+whose read answers the bound method `jsrt_array_method` and reads `push`/`unshift`/`splice`/
+`concat` by count. That makes a method spread `dynamic` even over typed operands, which is what
+the code does. A function call's list keeps the one element type its pieces share, so
+`f(...nums, 1)` over `number[]` stays `static`.
+
+**Any iterable in an array literal.** A non-array operand used to be refused, because `concat`
+APPENDS a non-array argument whole. It now goes through a `...` row of `GLOBAL_CALLS`,
+`jsrt_spread_operand`, which passes an array through and drains anything else with the iterator
+loop `for-of` runs (`drain` in `jsrt_typed.zig`, shared with `fromIterable`). `Array.from` is the
+same drain behind `jsrt_array_from`, plus the array-like read for an object with no iterator.
+
+**What stays refused, and why.** A spread into `new` or `super(...)`: the construct path takes no
+built list. Inside an optional chain: the spread lowering builds no short-circuit. Into a builtin
+namespace or fixed-arity op, the callback array ops and `toSpliced`: each is one fixed-arity node,
+and the callback rule cannot see an argument a spread carries. And, in js mode only, into a
+function with an annotated TypeScript parameter: plan-notes 308 checks that claim at the call edge
+(`STA2001`), and a spread's elements reach a position only at run time, where no check stands.
+ts mode's checker proves the spread itself (TS2556), so the rule needs no mode below the gate.
+TS2556 joins `JS_MODE_RUNTIME_CODES`: JavaScript calls with whatever count the list holds.
+
+**Known divergence.** A non-iterable throws `TypeError: X is not iterable` with `X` the value's
+own string. V8 names the source text (`v is not iterable`) and words call-side operands
+differently (docs/VALUE.md §4.23). Matching it would mean passing source text into the runtime for
+a message no corpus program reads; the class is the same.
+
+**Defects fixed with it.**
+- A spread call with one argument met an inline candidate of one parameter in `passes/inline.ts`,
+  which would have bound the whole list to that parameter. Spread calls are never inlined.
+- An array literal's `concat` chain took its FIRST operand's type, so `[...nums, 'a']` was
+  `number[]` in the HIR. The receiver is now always an array of the literal's own type.
+- `m.get(...keys)` passed the gate (its count matched the op's arity) and was an internal
+  `STA4031` on 9a26b03. A spread into a collection op is now `STA1214`.
+
+**Owner named.** A `[Symbol.iterator]()` method in an object literal is an internal `STA4068`
+("object literal method with a key that is not a name") in both modes, found while testing user
+iterables here. It is not a spread defect; step 9 owns it (plan.md §11c T11.4).
+
+**Evidence** (this branch, Node 26.7.0):
+- Goldens `js/iterable_spreads` and `ts/iterable_spreads` match Node byte for byte: spreads of
+  holes, strings, Maps, Sets, iterators, generators and a user iterable, `Array.from` over all of
+  them and over array-likes, call spreads into functions, rest parameters, methods with `this`,
+  static methods, a function's own property, the variadic array methods, and the error classes.
+  `builtins_coverage.json` claims `Array.from` with them.
+- Decision fixtures: `subset_spread_call_ts` (static), `subset_spread_call_tuple_ts`,
+  `subset_spread_call_js`, `subset_spread_method_call_ts`/`_js`, `subset_array_from_js`
+  (dynamic), `subset_array_from_ts` (static); refusals `subset_spread_super_call_*`,
+  `subset_spread_optional_call_*`, `subset_spread_collection_*`, `subset_spread_array_callback_*`,
+  `subset_spread_annotated_callee_js`. `subset_spread_unknown_js` and
+  `subset_spread_direct_unknown_js` move from not-yet to dynamic.
+- `_tsc.js` (`--stack-size=8000`, `--bundler=none`), re-measured on 9a26b03: 633 diagnostics,
+  581 `STA1214`. Now 439, of which 387 `STA1214`, 37 `STA0012`, 10 `STA1110`, 4 `STA1218` and 1
+  `STA1210`. Spread refusals 196 → 3: 2 object spreads of a value with no fixed shape (step 8)
+  and 1 spread into `String.fromCharCode` (step 9). One `index access on a non-array` appeared
+  that a spread refusal used to mask (step 7). Map/Set from an iterable (73) is step 6, which can
+  drain through `drain` too.
+- Self-compilation: `STA1214` 1763 → 1742 on f752d15, recorded with `--update`.
+- jscpd: 188 → 187.
+
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
 
 **Trigger.** The creator's priority change: the T11.3 byte channel (plan-notes 309 step 1) cost

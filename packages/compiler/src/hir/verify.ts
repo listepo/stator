@@ -16,8 +16,10 @@ import type {
   Assignment,
   BinaryOp,
   Block,
+  CallExpr,
   ConsoleLogCall,
   Declaration,
+  DynMethodCall,
   Expression,
   ExpressionStatement,
   FunctionExpr,
@@ -251,6 +253,20 @@ function checkField(
  * the class DECLARING the method, which for an inherited method is an ancestor rather than
  * the receiver's own class -- so the test is ancestry, not equality. It must still be an
  * ancestry the receiver has, or the emitted call reads a body belonging to another class. */
+/** A spread call passes ONE array holding every argument (`jsrt_call_spread_at` reads it as a
+ * `JSRTArray` without a tag test), and the lowering folds the spread list into exactly that. */
+function checkSpreadArguments(expr: CallExpr | DynMethodCall, problems: VerifyProblem[]): void {
+  const [list] = expr.args;
+  if (expr.spread === true && (expr.args.length !== 1 || list?.type.kind !== 'array')) {
+    problems.push({
+      kind: expr.kind,
+      span: expr.span,
+      code: 'STA4104',
+      message: `spread ${expr.kind} with ${String(expr.args.length)} arguments, first typed '${list === undefined ? 'none' : hTypeName(list.type)}', not one array`,
+    });
+  }
+}
+
 function checkMethodReceiver(expr: MethodCall | MethodValue, problems: VerifyProblem[]): void {
   if (
     expr.target.type.kind !== 'object' ||
@@ -1133,6 +1149,7 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           message: `callee has type '${hTypeName(expr.callee.type)}', which is not callable`,
         });
       }
+      checkSpreadArguments(expr, problems);
       break;
     }
 
@@ -1365,7 +1382,15 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // The lowering routes only Unknown receivers here, and functions, whose own properties the
       // closure holds (plan-notes 310); anything else is a call the typed arms own, and building
       // this node for one would aim a shape-table read at a layout.
-      if (expr.target.type.kind !== 'unknown' && expr.target.type.kind !== 'fn') {
+      checkSpreadArguments(expr, problems);
+      // A spread call reads its method through the same shape-table entry for any receiver the
+      // gate admitted (arrays, class instances, plain objects; plan.md §11c T11.4 step 5): there
+      // is no typed arm for it to bypass, because no typed arm takes a spread.
+      if (
+        expr.spread !== true &&
+        expr.target.type.kind !== 'unknown' &&
+        expr.target.type.kind !== 'fn'
+      ) {
         problems.push({
           kind: 'dyn-method-call',
           span: expr.span,

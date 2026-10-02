@@ -16,7 +16,7 @@
   },
   "Array": {
     "isArray": ["ts/global_functions.ts", "js/global_functions.js"],
-    "from": [],
+    "from": ["ts/iterable_spreads.ts", "js/iterable_spreads.js"],
     "of": []
   },
   "Math": {

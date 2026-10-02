@@ -146,6 +146,22 @@ static jsrt_value call_with_receiver(const JSRTClosure *c, jsrt_value receiver, 
   return c->fn(argc + 1U, call_argv, c->env);
 }
 
+/* `f(...xs)` and `o.m(a, ...xs)` (plan.md §11c T11.4 step 5): `args` is every argument, spreads
+ * expanded, as one array the caller keeps rooted. jsrt_call_at's receiver test reads argc against
+ * the arity, which a spread's count cannot answer, so a method call names its receiver here
+ * instead: a closure that declares one gets `*receiver` (or `undefined` when there is none) and
+ * every argument after it; anything else is jsrt_call_at's call, panic and TypeError included. */
+jsrt_value jsrt_call_spread_at(jsrt_value callee, const jsrt_value *receiver, jsrt_value args,
+                               const char *loc) {
+  const JSRTArray *list = jsrt_as_array(args);
+  if (!jsrt_is(callee, JSRT_TAG_CLOSURE) || jsrt_as_closure(callee)->klass != NULL ||
+      !jsrt_as_closure(callee)->has_receiver) {
+    return jsrt_call_at(callee, list->length, list->elements, loc);
+  }
+  return call_with_receiver(jsrt_as_closure(callee), receiver != NULL ? *receiver : JSRT_UNDEFINED,
+                            list->length, list->elements);
+}
+
 /* `new F(...)` for an ordinary function (§10.2.2 [[Construct]], plan-notes 310). JavaScript
  * splits its answer: a `function` constructs, an arrow, a method, an async function or a generator
  * raises `X is not a constructor` -- the split the closure's `constructible` records. The object

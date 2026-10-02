@@ -3991,41 +3991,57 @@ function emptyArrayLiteral(type: HType, span: Span): ArrayLiteral {
   return { kind: 'array-literal', type, span, elements: [] };
 }
 
-/** Whether `expression` is a union every arm of which is an array at run time.
- *
- * Each arm answers the same array-or-tuple test the gate applies to whole operands, so a value
- * of this type is always spreadable even though the HType model calls the union Unknown (its
- * arms map to different element types, and the union rule keeps only what every arm agrees on).
- * Parentheses unwrap; an `as` assertion unwraps too, because the lowering drops every assertion
- * to a type no tag check settles (an array never is one) and keeps only checkable assertions
- * (number, string, boolean), which can never spell a union of arrays. */
-/** One union arm that is always an array at run time: a checker array or tuple, or a match
- * array (plan.md §8 step 44a) — the same declaration-file interface test `isMatchReceiver`
- * applies to an expression, spelled here for a type because arms have no syntax. */
-function spreadArmIsAlwaysArray(arm: ts.Type, checker: ts.TypeChecker): boolean {
-  if (checker.isArrayType(arm) || checker.isTupleType(arm)) {
-    return true;
-  }
-  const symbol = arm.getSymbol();
-  const name = symbol?.getName();
-  if (name !== 'RegExpExecArray' && name !== 'RegExpMatchArray') {
-    return false;
-  }
-  const declarations = symbol?.getDeclarations() ?? [];
-  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+/** One run of a spread list: literal elements, or a spread's operand. */
+type SpreadSegment = { readonly elems: Expression[] } | { readonly spread: Expression };
+
+/** A spread operand as the array the building concat spreads (plan.md §11c T11.4 step 5): an
+ * array as it is, and anything else -- Unknown, a string, a Map, an iterator, a union of arrays --
+ * through the `...` row, which drains it at run time and throws `X is not iterable` for a value
+ * that is not (docs/VALUE.md §4.23). The concat alone would APPEND a non-array whole. */
+function spreadOperand(operand: Expression, span: Span): Expression {
+  return operand.type.kind === 'array'
+    ? operand
+    : globalCallNode('...', [operand], hArray(hUnknown(false)), span);
 }
 
-function spreadUnionIsAlwaysArray(expression: ts.Expression, checker: ts.TypeChecker): boolean {
-  let current = expression;
-  while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current)) {
-    current = current.expression;
+/** Fold literal runs and spread operands into nested `concat` calls: `[a, ...b, c]`, and a spread
+ * call's argument list. The first piece is the receiver when it is a literal run or an array of
+ * `listType`; any other operand rides as the argument of an empty literal of `listType` instead,
+ * so the result keeps the list's own type. */
+function foldSpreadList(
+  segments: readonly SpreadSegment[],
+  listType: HType,
+  span: Span,
+): Expression {
+  const emptyType = listType.kind === 'array' ? listType : hArray(hUnknown(false));
+  let result: Expression | null = null;
+  for (const [index, segment] of segments.entries()) {
+    if ('elems' in segment) {
+      const run: Expression = {
+        kind: 'array-literal',
+        type: listType,
+        span,
+        elements: segment.elems,
+      };
+      result = result === null ? run : arrayConcatExpr(result, run, span);
+      continue;
+    }
+    const piece = spreadOperand(segment.spread, span);
+    if (result !== null) {
+      result = arrayConcatExpr(result, piece, span);
+    } else if (hTypeEquals(piece.type, emptyType)) {
+      // A leading array of the list's own type is copied by the concat the NEXT piece builds;
+      // alone, it copies here. One of another element type rides an empty literal instead, so
+      // the concat chain (typed by its receiver) answers the list's type, never the operand's.
+      result =
+        index < segments.length - 1
+          ? piece
+          : arrayConcatExpr(piece, emptyArrayLiteral(emptyType, span), span);
+    } else {
+      result = arrayConcatExpr(emptyArrayLiteral(emptyType, span), piece, span);
+    }
   }
-  const type = checker.getTypeAtLocation(current);
-  return (
-    type.isUnion() &&
-    type.types.length > 0 &&
-    type.types.every((arm) => spreadArmIsAlwaysArray(arm, checker))
-  );
+  return result ?? emptyArrayLiteral(emptyType, span);
 }
 
 /** Fold `[a, ...b, c]` into nested `concat` calls over literal runs and spread operands. */
@@ -4050,26 +4066,27 @@ function lowerArrayLiteralExpression(
     }
     return { kind: 'array-literal', type: literalType, span, elements };
   }
+  const segments = lowerSpreadSegments(node.elements, (element) =>
+    lowerExpression(element, sourceFile, checker, bindings, diagnostics),
+  );
+  return segments === null ? null : foldSpreadList(segments, literalType, span);
+}
 
-  const segments: Array<{ elems: Expression[] } | { spread: Expression; from: ts.Expression }> = [];
-  for (const element of node.elements) {
-    if (ts.isSpreadElement(element)) {
-      const spread = lowerExpression(
-        element.expression,
-        sourceFile,
-        checker,
-        bindings,
-        diagnostics,
-      );
-      if (spread === null) {
-        return null;
-      }
-      segments.push({ spread, from: element.expression });
-      continue;
-    }
-    const lowered = lowerExpression(element, sourceFile, checker, bindings, diagnostics);
+/** A list with spreads, lowered left to right into its segments: each spread's operand on its
+ * own, every other element through `lower`. `null` when an element pushed a diagnostic. */
+function lowerSpreadSegments(
+  elements: readonly ts.Expression[],
+  lower: (element: ts.Expression) => Expression | null,
+): SpreadSegment[] | null {
+  const segments: Array<{ elems: Expression[] } | { spread: Expression }> = [];
+  for (const element of elements) {
+    const lowered = lower(ts.isSpreadElement(element) ? element.expression : element);
     if (lowered === null) {
       return null;
+    }
+    if (ts.isSpreadElement(element)) {
+      segments.push({ spread: lowered });
+      continue;
     }
     const last = segments[segments.length - 1];
     if (last !== undefined && 'elems' in last) {
@@ -4078,58 +4095,7 @@ function lowerArrayLiteralExpression(
       segments.push({ elems: [lowered] });
     }
   }
-
-  let result: Expression | null = null;
-  for (const segment of segments) {
-    const piece: Expression =
-      'elems' in segment
-        ? { kind: 'array-literal', type: literalType, span, elements: segment.elems }
-        : segment.spread;
-    if (result === null) {
-      if ('elems' in segment) {
-        result = piece;
-      } else if (
-        spreadUnionIsAlwaysArray(segment.from, checker) ||
-        isMatchReceiver(segment.from, checker)
-      ) {
-        // `[...u]` over a union of arrays: the operand lowers to Unknown (its arms disagree on
-        // the element type), so reading it as the concat RECEIVER fails the verifier (STA4082).
-        // The empty literal receives instead and the operand rides as the spread-or-append
-        // argument `jsrt_array_concat` already implements -- the same shape every non-first
-        // spread takes (`[0, ...u]` compiles today). Sound exactly when the union is always an
-        // array: each arm spreads element-wise, so `[]` plus `u` is a copy of `u`. A union with
-        // a non-array arm keeps the receiver shape, whose tag check throws a catchable TypeError
-        // where appending would silently wrap the value.
-        // A narrowed match array (`RegExpExecArray`/`RegExpMatchArray`, plan.md §8 step 44a)
-        // rides the same arm: the checker calls it an interface, so the HType model calls it
-        // Unknown, but at run time it IS a dense jsrt array (elements plus a property table),
-        // which the argument-position concat already spreads today (`[0, ...m]` compiles).
-        result = arrayConcatExpr(emptyArrayLiteral(literalType, span), piece, span);
-      } else if (piece.type.kind === 'unknown') {
-        // A spread operand the checker promised an array for but the lowering typed dynamic —
-        // a call to a step-45-marked function (its declared return is the contract, not the
-        // value). Reading it as the concat receiver fails the verifier (STA4082), and riding
-        // as the argument would silently append a non-array; spreading an unknown value needs
-        // the GetIterator dispatch the gate already names for the checker-unknown twin, so
-        // this names it too (an honest not-yet, never an internal error).
-        diagnostics.push(
-          lowerDiagnostic(
-            segment.from,
-            sourceFile,
-            'STA1214',
-            'not-yet',
-            'spread of an unknown value in an array literal is not yet supported',
-          ),
-        );
-        return null;
-      } else {
-        result = arrayConcatExpr(piece, emptyArrayLiteral(literalType, span), span);
-      }
-      continue;
-    }
-    result = arrayConcatExpr(result, piece, span);
-  }
-  return result ?? emptyArrayLiteral(literalType, span);
+  return segments;
 }
 
 /** Whether `name` is the prototype-setter spelling: a non-computed `__proto__` written as an
@@ -6487,6 +6453,9 @@ function lowerExpression(
     if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       return lowerImportCall(node, sourceFile, checker, bindings, diagnostics);
     }
+    if (node.arguments.some((argument) => ts.isSpreadElement(argument))) {
+      return lowerSpreadCall(node, sourceFile, checker, bindings, diagnostics);
+    }
     const expr = node.expression;
 
     // A global function called by name (plan.md §11c T11.4). The gate proved the name, the
@@ -7313,6 +7282,99 @@ function lowerDynMethodCall(
   return slot === undefined
     ? { kind: 'dyn-method-call', type, span, target, method: field, args }
     : { kind: 'field-call', type, span, target, field, slot, args };
+}
+
+/** A call with a spread argument (plan.md §11c T11.4 step 5): the arguments fold into ONE array
+ * (`foldSpreadList`, the array literal's own building) and the call passes it whole through
+ * `jsrt_call_spread_at`. `o.m(...xs)` reads `m` through the shape table and passes `o` as the
+ * receiver; a static method, a module namespace's member and any other callee are values called
+ * without one. The gate refused the forms this does not build (optional chains, `super`, the
+ * builtin namespaces, js-mode calls into annotated TypeScript parameters). */
+function lowerSpreadCall(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+  diagnostics: Diagnostic[],
+): Expression | null {
+  const expr = node.expression;
+  const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
+  const lowerArgs = (): Expression[] | null => {
+    const segments = lowerSpreadSegments(node.arguments, (argument) => {
+      const specialized = specializedArgument(
+        argument,
+        node,
+        sourceFile,
+        checker,
+        bindings,
+        diagnostics,
+      );
+      return specialized !== undefined
+        ? specialized
+        : lowerExpression(argument, sourceFile, checker, bindings, diagnostics);
+    });
+    return segments === null ? null : [foldSpreadList(segments, spreadListType(segments), span)];
+  };
+  if (
+    ts.isPropertyAccessExpression(expr) &&
+    staticMemberOf(expr, checker, true) === undefined &&
+    !isNamespaceReceiver(expr.expression, checker)
+  ) {
+    const target = lowerExpression(expr.expression, sourceFile, checker, bindings, diagnostics);
+    const args = target === null ? null : lowerArgs();
+    if (target === null || args === null) {
+      return null;
+    }
+    const functionMember = isFunctionValueMember(expr.expression, expr.name.text, checker);
+    const type = functionMember ? hUnknown(false) : typeAt(node, checker, bindings);
+    return {
+      kind: 'dyn-method-call',
+      type,
+      span,
+      target,
+      method: expr.name.text,
+      args,
+      spread: true,
+    };
+  }
+  const specialized = specializedCallee(node, sourceFile, checker, bindings, diagnostics);
+  const callee =
+    specialized === null
+      ? null
+      : (specialized ?? lowerExpression(expr, sourceFile, checker, bindings, diagnostics));
+  const args = callee === null ? null : lowerArgs();
+  if (callee === null || args === null) {
+    return null;
+  }
+  if (callee.type.kind !== 'fn' && callee.type.kind !== 'unknown') {
+    return nonFunctionCall(node, expr, callee, args, sourceFile);
+  }
+  return { kind: 'call', type: typeAt(node, checker, bindings), span, callee, args, spread: true };
+}
+
+/** A spread call's argument list type: the one element type every piece shares (`f(...xs, 1)` over
+ * `number[]` is a `number[]`, which keeps a typed call typed), and Unknown elements otherwise. */
+function spreadListType(segments: readonly SpreadSegment[]): HType {
+  const elements = segments.flatMap((segment) =>
+    'elems' in segment
+      ? segment.elems.map((elem) => elem.type)
+      : [segment.spread.type.kind === 'array' ? segment.spread.type.element : hUnknown(false)],
+  );
+  const [first] = elements;
+  return first !== undefined && elements.every((element) => hTypeEquals(element, first))
+    ? hArray(first)
+    : hArray(hUnknown(false));
+}
+
+/** Whether `o` in `o.m(...)` is a module namespace (`import * as ns`, plan-notes 302) rather than a
+ * value: its member is a binding, called without a receiver. */
+function isNamespaceReceiver(receiver: ts.Expression, checker: ts.TypeChecker): boolean {
+  const symbol = ts.isIdentifier(receiver) ? checker.getSymbolAtLocation(receiver) : undefined;
+  if (symbol === undefined) {
+    return false;
+  }
+  const resolved = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  return (resolved.flags & ts.SymbolFlags.ValueModule) !== 0;
 }
 
 /** A call's arguments, lowered left to right: spread elements as expressions, generic arguments
@@ -10892,6 +10954,14 @@ function globalFunctionNode(
         return { kind: 'array-literal', type: created, span, elements: args };
       }
       return globalCallNode(name, args, created, span);
+    case 'Array.from':
+    case '...':
+      return globalCallNode(
+        name,
+        args,
+        created.kind === 'array' ? created : hArray(hUnknown(false)),
+        span,
+      );
     case 'RegExp':
       return globalCallNode(name, args, H_REGEXP, span);
     case 'parseInt':

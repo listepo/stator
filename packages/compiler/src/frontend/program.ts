@@ -330,6 +330,10 @@ export const JS_MODE_RUNTIME_CODES: ReadonlySet<number> = new Set([
   // function-signature restriction, so a required parameter may follow it at runtime.
   1016, // A required parameter cannot follow an optional parameter.
   2554, // Expected N arguments, but got M.
+  // A spread into fixed parameters: the call passes whatever count the list holds at run time
+  // (`jsrt_call_spread_at`), and a parameter past its end reads `undefined`. A TypeScript callee's
+  // annotated parameters keep the refusal in the gate instead (plan.md §11c T11.4 step 5).
+  2556, // A spread argument must either have a tuple type or be passed to a rest parameter.
   2322, // Type 'X' is not assignable to type 'Y'.
   2345, // Argument of type 'X' is not assignable to parameter of type 'Y'.
   // No overload matches: JavaScript runs the implementation with the runtime value, so in
