@@ -11,7 +11,6 @@ import {
   jsrtStdIoWrite,
   jsrtStdIoWriteBytes,
 } from './native/io.js';
-import { __stdBytesIn, __stdBytesOut } from './internal/bytes.ts';
 import { __stdFailure } from './internal/error.ts';
 
 export const stdin: number = 0;
@@ -40,19 +39,25 @@ export function write(fd: number, text: string): void {
 
 /** Writes all of `bytes` to `fd`. */
 export function writeBytes(fd: number, bytes: Uint8Array): void {
-  __stdBytesIn(bytes);
-  if (jsrtStdIoWriteBytes(fd) !== 0) {
+  if (jsrtStdIoWriteBytes(fd, bytes) !== 0) {
     throw __stdFailure('std/io.writeBytes', `${fd}`);
   }
 }
 
+/** The most one `read` asks for, whatever `max` says: the buffer is allocated before the call,
+ * and a pipe or terminal answers far less than this anyway. */
+const READ_CAP: number = 1048576;
+
 /** One read of at most `max` bytes (and at most 1 MiB) from `fd`; an empty answer is end of
- * file. Blocks until the descriptor has something to give. `max` outside `0..2^31-1` is EINVAL. */
+ * file. Blocks until the descriptor has something to give. `max` outside `0..2^31-1` is EINVAL.
+ * The backing reads straight into the answer's storage; only a short read copies, once. */
 export function read(fd: number, max: number): Uint8Array {
-  if (jsrtStdIoRead(fd, max) !== 0) {
+  const into = new Uint8Array(max > 0 ? Math.min(Math.trunc(max), READ_CAP) : 0);
+  const count = jsrtStdIoRead(fd, max, into);
+  if (count < 0) {
     throw __stdFailure('std/io.read', `${fd}`);
   }
-  return __stdBytesOut();
+  return count === into.length ? into : into.slice(0, count);
 }
 
 /** Whether `fd` is a terminal; false (never an error) for anything that is not. */

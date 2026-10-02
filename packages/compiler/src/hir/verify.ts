@@ -59,6 +59,7 @@ import {
   H_BOOLEAN,
   H_NUMBER,
   H_STRING,
+  H_UINT8ARRAY,
   H_UNDEFINED,
   hasTypeParam,
   hTypeAssignable,
@@ -1199,7 +1200,9 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
               ? H_BOOLEAN
               : kind === 'cstring' || kind === 'cstring-owned'
                 ? H_STRING
-                : undefined;
+                : kind === 'bytes'
+                  ? H_UINT8ARRAY
+                  : undefined;
         if (want !== undefined && !hTypeEquals(arg.type, want)) {
           problems.push({
             kind: 'extern-call',

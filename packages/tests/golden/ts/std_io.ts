@@ -20,6 +20,8 @@ write(stdout, `fds ${stdin} ${stdout} ${stderr}\n`);
 write(stdout, "héllo, wörld ✓ 😀\n");
 write(stdout, "");
 writeBytes(stdout, new Uint8Array([98, 121, 116, 101, 115, 10]));
+// A view at an offset passes its own window (docs/FFI.md §2 `Uint8Array` row, T11.3a).
+writeBytes(stdout, new Uint8Array([33, 115, 117, 98, 10, 33]).subarray(1, 5));
 write(stderr, "to stderr\n");
 writeBytes(stderr, new Uint8Array([226, 156, 147, 10]));
 

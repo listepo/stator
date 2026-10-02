@@ -10667,7 +10667,14 @@ function lowerExternCall(
     } else {
       argTags.push(undefined);
     }
-    args.push(maybeBoundary(arg, externKindHType(kind), site, sourceFile));
+    // A `bytes` argument is checked whenever it is not PROVEN a view: the emitter reads the
+    // view's layout straight after the check, so a dynamic value or a js-mode value of another
+    // type must fail as STA2001 here, never reach C as a misread struct (docs/FFI.md §2).
+    args.push(
+      kind === 'bytes' && arg.type.kind !== 'uint8array'
+        ? boundaryCheck(arg, externKindHType(kind), site, sourceFile)
+        : maybeBoundary(arg, externKindHType(kind), site, sourceFile),
+    );
   }
   // The declaration file's header, if it names one: the prologue includes it and skips the
   // forward declaration, so the header's real prototype governs the call (docs/FFI.md §9).

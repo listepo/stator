@@ -513,7 +513,8 @@ function expressionHasUnknown(expr: Expression): boolean {
   // not a dynamic value, and pointer arguments cross unboxed with no check to fail — so the
   // call is static unless a CHECKABLE argument is dynamic (docs/FFI.md §§5, 9). The kind, not
   // the HType, decides: every handle-typed value reads `unknown`, which would otherwise paint
-  // every honest round-trip dynamic.
+  // every honest round-trip dynamic. A `bytes` argument is checkable (`jsrt_check_uint8array`),
+  // so it reads like a number: static when proven, dynamic when the call checks it.
   if (expr.kind === 'extern-call') {
     return expr.args.some(
       (arg, index) =>

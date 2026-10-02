@@ -81,3 +81,10 @@ jsrt_value jsrt_check_boolean(jsrt_value v, const char *where) {
   }
   return v;
 }
+
+jsrt_value jsrt_check_uint8array(jsrt_value v, const char *where) {
+  if (!jsrt_is_uint8array(v)) {
+    check_failed(v, "Uint8Array", where);
+  }
+  return v;
+}

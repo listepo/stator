@@ -86,6 +86,7 @@ step 2):
 | `Out<T>` out-slot           | `T**`         | Parameter-only; the caller allocates the cell, the callee writes it (see below)                    |
 | `Out<CString>` out-slot     | `const char**`| Parameter-only; copy-on-read through `.value` (see below)                                          |
 | `CString` / `CStringOwned`  | `const char*` | Allocates; see §3. `CStringOwned` is parameter-only                                                |
+| `Uint8Array`                | `uint8_t *`, `size_t` | Parameter-only; the view's own bytes and length for the call, no copy (see below)          |
 | anything else               | —             | Compile error (STA1119 catch-all; specific kinds below)                                            |
 
 **Branded pointer.** An opaque handle the TS side names but never inspects:
@@ -153,6 +154,42 @@ The rules, each enforced where it can be checked (the contract is STA1125 everyw
 - A slot read before any call wrote answers the zero-handle (`+0.0`), the same rule §8
   states for NULL handles.
 
+**`Uint8Array` views** (plan.md §11c T11.3a). One TS parameter becomes two C arguments: the
+view's bytes in place and its element count.
+
+```ts
+/** @statorExtern bytes_sum */
+declare function bytesSum(buf: Uint8Array): number;
+```
+
+```c
+double bytes_sum(uint8_t *data, size_t length);   /* the emitted forward declaration */
+bytes_sum((void *)jsrt_uint8array_bytes(slot), jsrt_uint8array_count(slot));
+```
+
+- **No copy.** The pointer is the buffer's data block plus the view's `byteOffset`, so a
+  `subarray` passes its own window and a C write shows through every view of that buffer. A
+  megabyte is one call (golden `extern_bytes` counts the crossings). The `void *` cast lets a
+  binding header spell the pointee its own way (`char *`, `unsigned char *`, `void *`).
+- **Never NULL.** A zero-length view still points at a live block (docs/VALUE.md §4.19), so a
+  callee may take `data` unconditionally; it must read only `length` bytes.
+- **Stable for the call, and only for the call.** Four facts make the pointer valid until the
+  callee returns. The view stays in its rooted argument slot, and its `buffer` edge keeps the data
+  block alive. Neither collector moves memory: Boehm is non-moving, and the no-GC build is plain
+  malloc. A buffer never resizes, transfers or detaches (no such API exists). And the C call runs
+  no Stator code, so nothing can collect or mutate the buffer mid-call. A callee that keeps the
+  pointer past its return is out of contract: nothing roots the bytes after the call.
+- **Checked on every call.** The emitter guards the layout read with `jsrt_check_uint8array`
+  (STA2001 on a non-view), even for a statically proven view. A js-mode caller can reach a
+  `.ts` parameter annotated `Uint8Array` with any value (only the number/string/boolean call
+  edges are checked, plan-notes 308), and here a lie would be a wild pointer, not a wrong value.
+  A dynamic argument carries the lowering's own check instead, so it is checked once.
+- **Parameter-only.** A `Uint8Array` return is STA1119: a returned buffer has no owner and no
+  length in a C signature. A callee that produces bytes fills a view the caller passes (the
+  caller sizes it, as `std/io.read` does; docs/STD.md §6). An exported function keeps the
+  `jsrt_value` form for a `Uint8Array` position (Task 7.2 direction).
+- Only `Uint8Array`: `ArrayBuffer`, the other element types and `DataView` have no row.
+
 **`string` deliberately maps to nothing.** UTF-16 in, bytes out is a real
 conversion with a real allocation, so it is spelled at the declaration and
 never inferred. A bare `string` in an extern signature is error(STA1118); the
@@ -166,10 +203,10 @@ table splits a kind out with a NEW code, never by reusing one):
 | ---------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `unknown` in an extern signature                                                                                             | error(STA1114) | Narrow first, or pick an ABI type. Explicit or implicit `any` counts as `unknown` here, in both modes — dynamic is inexpressible across the boundary |
 | object type in an extern signature                                                                                           | error(STA1115) | Branded pointer, or `CString` for text                                                                                                               |
-| array type in an extern signature                                                                                            | error(STA1116) | Pass a pointer + length as ABI types                                                                                                                 |
+| array type in an extern signature                                                                                            | error(STA1116) | A `Uint8Array` for bytes (the row above); otherwise a pointer + length as ABI types                                                                  |
 | function/closure type in an extern signature                                                                                 | error(STA1117) | v0 has no trampoline; C calls in via Task 7.2 exports instead                                                                                        |
 | bare `string` in an extern signature                                                                                         | error(STA1118) | `CString` (borrow) or `CStringOwned` (transfer)                                                                                                      |
-| anything else outside the table — incl. struct by value, `Out` misuses (STA1125), `void` as a parameter, `CStringOwned` as a return | error(STA1119) | No mapping exists in v0                                                                                                                              |
+| anything else outside the table — incl. struct by value, `Out` misuses (STA1125), `void` as a parameter, `CStringOwned` or `Uint8Array` as a return | error(STA1119) | No mapping exists in v0                                                                                                                              |
 | variadic (`printf`-style) extern declaration                                                                                 | error(STA1120) | No sound signature; each call site is a different function type (permanent — plan §10 out-of-scope table)                                            |
 | extern declaration outside a `.d.ts`                                                                                         | error(STA1121) | Move it into a `.d.ts` (§1.3)                                                                                                                        |
 

@@ -163,7 +163,6 @@ packages/std/
   src/native/<module>.d.ts its `@statorExtern` declarations (module-form: they export)
   src/native/core.d.ts     `CString` and the shared result/error slots
   src/internal/error.ts    the §3 message builder
-  src/internal/bytes.ts    the byte channel's TypeScript end (§6)
   zig/jsrt_std.zig         the root: panic handler, allocator, result + error slots
   zig/<module>.zig         one backing file per module, exporting `jsrt_std_<module>_*`
   justfile                 `just std` → build/libjsrt_std.a
@@ -176,13 +175,13 @@ packages/std/
   status; the surface reads it with `jsrtStdResult()`, whose `CString` return the emitter
   copies into a JS string at once (`jsrt_string_from_cstr`). The slot frees the previous answer
   when the next one is parked, so nothing leaks and nothing is read after it is freed.
-- **Bytes.** The extern table has no `Uint8Array` row (docs/FFI.md §2), so bytes cross one
-  scalar call at a time through the **byte channel** in `jsrt_std.zig`. Going in,
-  `src/internal/bytes.ts` clears it and pushes each byte, then calls the backing, which reads
-  them. Coming out, the backing parks an owned slice, and the surface reads its length and each
-  byte into a fresh `Uint8Array`. A parked answer lives until the next one replaces it, like the
-  string slot. It costs one direct call per byte. A `Uint8Array` row in the FFI table would
-  replace it without changing any `std` signature.
+- **Bytes.** A `Uint8Array` is a row of the extern table (docs/FFI.md §2, plan.md §11c
+  T11.3a): the backing receives the view's own bytes and its length (`[*]u8`, `usize`) for the
+  call, one call whatever the length, with no copy. Going in, the backing reads the caller's
+  view. Coming out, the surface allocates the answer first and the backing fills it in place:
+  `std/io.read` sizes a view (at most 1 MiB), the backing `read(2)`s straight into it and
+  returns the count, and only a short read copies, once, into a view of the right length. The
+  row is parameter-only, so no backing returns bytes.
 - **Status and errors.** A backing returns `0` for success and `1` for failure, after storing
   the §3 code where `jsrtStdLastError()` reads it; the surface throws.
 - **Panics.** A safety trap in a backing (ReleaseSafe) prints `stator std: internal error:`
@@ -219,8 +218,8 @@ test task depends on it.
 ## 8. v0 limitations
 
 - **C-string boundary.** `std/fs` text and `std/io.write` stop at a NUL byte, and every string
-  argument is passed as UTF-8 (§5). Bytes (`std/io.writeBytes`, `read`) do not: they take the
-  byte channel (§6), which costs one call per byte.
+  argument is passed as UTF-8 (§5). Bytes (`std/io.writeBytes`, `read`) do not: a
+  `Uint8Array` crosses as its own storage (§6), so any byte, NUL included, survives.
 - **No `code` property** on thrown errors yet (§3).
 
 ## 9. Decisions that were open

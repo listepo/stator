@@ -1308,6 +1308,13 @@ generic. `u[i]` / `u[i] = v` reuse the ordinary index nodes and emit `jsrt_uint8
 fixed-shape object for `Object.*` (`is_fixed_shape_object` excludes both classes), and an expando
 write on one panics with `STA2004` like every other statically shaped builtin.
 
+**Across the extern boundary** (docs/FFI.md §2, plan.md §11c T11.3a). A `Uint8Array` extern
+parameter passes `jsrt_uint8array_bytes(view)` (`buffer->data + byte_offset`) and
+`jsrt_uint8array_count(view)` (`length`), the two inline accessors in `jsrt_value.h`, after
+`jsrt_check_uint8array` has proven the value a view. The layout above is what makes that pointer
+safe for the call: the block never moves, never resizes, and stays reachable through the view's
+rooted argument slot.
+
 **Printing and strings.** `console.log` uses the array printer with a label
 (`Uint8Array(3) [ 1, 2, 3 ]`, grouped and capped at 100 entries like an array) and prints a
 buffer as `ArrayBuffer { [Uint8Contents]: <01 02>, [byteLength]: 2 }`, the hex capped at 100

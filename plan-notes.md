@@ -10289,6 +10289,7 @@ encoding + hash, then process + fs. Each PR adds its own step section to this en
   `src/internal/bytes.ts` is its only TypeScript caller. It costs one direct C call per byte.
   A future FFI `Uint8Array` row would replace the channel without changing a `std` signature
   (docs/STD.md §6).
+  **Superseded by plan-notes 311:** T11.3a added that row and deleted the channel.
 - **`std/io` calls libc, not Zig's `std.Io`.** Zig treats `EBADF` on a descriptor as a
   programmer bug (`unreachable`, a panic under ReleaseSafe), but here a bad descriptor is the
   caller's input. `jsrt_std.zig` gains `failErrno`, which maps errno into the same closed
@@ -10406,3 +10407,92 @@ The card is edited to say so and to carry the new baseline and the family order.
 - Self-compilation: `STA1214` 1771 → 1648.
 - The Test262 harness went from 21 refusals to 17, with no globals left. The module-code pass
   count does not move until families 2–4 land.
+
+## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
+
+**Trigger.** The creator's priority change: the T11.3 byte channel (plan-notes 309 step 1) cost
+one FFI call per byte, and `std/hash`/`std/encoding` (step 2) and `std/fs` bytes (step 3) were
+about to build on it. A new card, T11.3a, replaces the channel with a real row of the extern
+table before those steps merge. It is placed in plan.md §11c right after T11.3 and closed in
+the same change.
+
+**Decisions.**
+
+- **A parameter row, not a return row.** `Uint8Array` maps to a new ABI kind, `bytes`. One TS
+  parameter becomes two C arguments, `uint8_t *` (the buffer's data plus the view's
+  `byteOffset`) and `size_t` (the view's `length`). A return was not cheap: a C function
+  returning bytes needs an owner (who frees?) and a length (a second out-value), and neither fits
+  a C return. So a `Uint8Array` return is STA1119 with a message that names the fix: the caller
+  passes a view and the callee fills it. `std/io.read` is that shape. The surface allocates
+  `min(max, 1 MiB)` bytes, the backing `read(2)`s straight into them and returns the count, and
+  only a short read copies, once (`slice(0, count)`). `exportAbiKindOf` never answers `bytes`, so
+  an exported function keeps the `jsrt_value` form for that position.
+- **No copy on the way in.** The emitter passes `(void *)jsrt_uint8array_bytes(slot)` and
+  `jsrt_uint8array_count(slot)`, two new inline accessors in `jsrt_value.h`. The cast lets a
+  binding header spell the pointee its own way. The fallback forward declaration is
+  `uint8_t *, size_t`.
+- **Why the pointer is stable for the call.** T11.1's storage needed no design change
+  (docs/VALUE.md §4.19):
+  1. The view is in its rooted argument slot for the whole call. The slot is written before
+     the call and the frame pops only at return or a landing pad, neither of which a direct C
+     call reaches. The view's `buffer` field keeps the data block alive.
+  2. Neither collector moves memory. Boehm is non-moving, and without Boehm the build is plain
+     malloc with no collection.
+  3. A buffer never resizes, transfers or detaches; no such API exists.
+  4. The C call runs no Stator code (there is no callback trampoline), so no collection and no
+     mutation of the view can happen mid-call.
+  A callee that keeps the pointer past its return is out of contract (docs/FFI.md §2).
+  `data` is never NULL: a zero-length buffer still owns a 1-byte block.
+- **Every call is guarded.** Implementing the row exposed a hole. A js-mode caller can hand
+  `std/io.writeBytes` anything, because its parameter is an annotated `.ts` parameter, and
+  plan-notes 308 checks only the number/string/boolean call edges. With the channel, a string
+  there degraded through `for…of`. With the row it was a wild pointer: the probe
+  `writeBytes(1, identity("nope"))` exited with SIGSEGV (status 139). So the emitter now emits
+  `(void)jsrt_check_uint8array(slot, "file:line")` before every `bytes` argument, even a
+  statically proven one. The cost is one tag compare and one class compare per call. A
+  dynamic argument already carries the lowering's own `boundary-check` (which is what makes
+  `explain` say dynamic), and it is not checked twice. The failure is STA2001, the existing
+  boundary trap. `jsrt_check_uint8array` is new in `jsrt_check.c`. The same probe now aborts
+  with `STA2001: … expected Uint8Array, got string`.
+- **The channel is gone.** `packages/std/src/internal/bytes.ts`, `jsrt_std_bytes_*` and their
+  bindings are deleted, and `std/io.writeBytes`/`read` take the row. No `std` signature
+  changed.
+- **A new fixture shim may be TypeScript.** The `extern_bytes` golden needs a Node twin.
+  Golden rule 9 bars a new `.mjs`, so `runNodeOracle` (packages/tests/support/fixture-build.ts)
+  now loads `node_shim.ts` first and still accepts the older fixtures' `node_shim.mjs`. The
+  pinned Node strips the types on `--import`.
+- **STA1115's wording did not change.** A `Uint8Array` never reached STA1115: before this
+  change it was the catch-all STA1119 (`uint8array` fell to `classifyPosition`'s default). Only
+  docs/DIAGNOSTICS.md's explanations moved: STA1116 points bytes at the row, STA1119 lists the
+  return, and STA2001 names the new raiser.
+
+**Measurement.** The Check asks to show that 1 MB crosses in one call, not 1M.
+
+- **Calls.** Golden `extern_bytes` counts crossings in its fixture C and in its Node twin.
+  `bytesFill` over a 1 MiB view prints `calls for 1 MiB: 1` on both sides, byte for byte.
+  `unit/std.test.ts` asserts that `std/io`'s emitted C has exactly one
+  `jsrt_std_io_write_bytes(` and one `jsrt_std_io_read(` call site, each passing
+  `(void *)jsrt_uint8array_bytes(…), jsrt_uint8array_count(…)`, and no `jsrt_std_bytes_`
+  symbol. The channel needed 1 048 576 `push` calls plus one to write a MiB, and one `at` call
+  per byte to read it back.
+- **Time.** hyperfine 1.20.0, `-N --warmup 3 --runs 20`, on an Apple M3 Max (arm64, Darwin
+  27.0.0), default `stator build` flags, Boehm runtime. Stdin was a 10 MiB file of zeros and
+  stdout was `/dev/null`. "Channel" is the `t11-3b` branch (d30600a's `std/io`); "row" is this
+  change.
+
+  | Program | Channel | Row |
+  | --- | --- | --- |
+  | `z`: one empty `writeBytes` (startup floor) | 3.6 ± 0.1 ms | 4.4 ± 1.2 ms |
+  | `w`: `writeBytes` of a 1 MiB view, 10 times | 87.1 ± 1.6 ms | 3.9 ± 0.6 ms |
+  | `r`: `read(stdin, 1 MiB)` to EOF, 10 MiB | 247.5 ± 13.9 ms | 5.3 ± 0.5 ms |
+
+  Above the startup floor, a MiB written costs about 8.4 ms through the channel and under
+  0.1 ms through the row. A MiB read costs about 24 ms through the channel and about 0.2 ms
+  through the row.
+
+**Check evidence.** `pnpm run ci` exit 0. The subset suite ran 813 fixtures: 778 passed, 35
+expected-fail, and the five new `subset_extern_bytes*` fixtures were among the passes. Goldens
+passed 413/413, including `extern_bytes` and the extended `std_io`. The ASan gate was green.
+vitest passed 51 files and 683 tests, including `unit/extern-bytes.test.ts` and two new
+`unit/std.test.ts` tests. selfhost matched its baseline, so no `--update` was needed. The full
+record is in done.md, Phase 11 T11.3a.

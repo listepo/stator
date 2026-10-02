@@ -1368,15 +1368,13 @@ Depends on T11.1, T11.2. Zig backings, POSIX first (STD.md §4). Errors throw wi
 **In progress** — Claude Code / opus-5-5. Execution plan, three PRs in this order, each with its
 own Check evidence (a golden per module it lands). Step 1 lands with plan-notes 309:
 
-1. `std/os` + `std/io`, plus the byte channel every byte-level backing shares: bytes cross the
-   FFI edge one scalar call at a time (`jsrt_std_bytes_*` in `zig/jsrt_std.zig`, helpers in
-   `src/internal/bytes.ts`), because the extern table (docs/FFI.md §2) has no `Uint8Array` row
-   and widening it is the compiler's work, not this package's. `io` writes flush C stdio first so
-   `console.log` and `io.write` keep program order. New §3 codes `EBADF` and `ENOTTY`.
+1. `std/os` + `std/io`. `io` writes flush C stdio first so `console.log` and `io.write` keep
+   program order. New §3 codes `EBADF` and `ENOTTY`. Bytes first crossed through a byte channel
+   (one FFI call per byte); T11.3a replaced it with the extern table's `Uint8Array` row.
 2. `std/encoding` + `std/hash`: encoding is strict TypeScript over `Uint8Array` (no OS edge;
    a string never crosses the C-string boundary, so a NUL survives); hash is Zig's
-   `std.crypto` (`Sha256`, `Sha1`, `Md5`) over the byte channel, `randomBytes` is `std.Io`'s
-   secure random.
+   `std.crypto` (`Sha256`, `Sha1`, `Md5`) over the `Uint8Array` row (T11.3a), `randomBytes` is
+   `std.Io`'s secure random filling a caller-sized view.
 3. `std/process` + `std/fs` extensions: `argv` needs `int main(int argc, char **argv)` from the
    emitter and a runtime slot (plan-notes 294); fd calls own a second lifetime (STD.md §9.3).
 
@@ -1386,6 +1384,9 @@ nondeterministic values, docs/STD.md §3/§5 and docs/SUBSET.md rows.
 
 **Check:** a golden per module against Node's equivalent (nondeterministic results — `hostname`,
 `pid`, `randomBytes` — proved by unit-test ranges, as `test:builtins` carves them out).
+
+~~**T11.3a. `Uint8Array` across the extern boundary.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 11 T11.3a (plan-notes 311).
 
 ### T11.4. `packages/compiler`: js-mode coverage for the `tsc` bundle — **[D5]**
 
@@ -2349,3 +2350,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.27** (2026-10-02): **T10.1 lands: the `std/fs` Promise twins are not-yet** (plan-notes 307). `readTextAsync`, `writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync` and `rmdirAsync` — each sync call's name plus `Async` — are `STA1214` naming Phase 10 (T10.2's thread pool) in both modes, instead of the checker's "no exported member" (`STA0012`, which every other missing name keeps). No new code. Subset rows `subset_std_fs_async_ts`/`_js`, `subset_std_fs_missing_ts`; docs/STD.md §2, SUBSET.md, DIAGNOSTICS.md (STA0012 row). T10.1 moves to `done.md`.
 - **v4.28** (2026-10-02): **T11.3 step 1: `std/os`, `std/io` and the byte channel** (plan-notes 309). `std/os` (`platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol`) answers what the pinned Node's `node:os` answers. `std/io` does raw descriptor I/O through libc; writes flush C stdio first. Bytes cross the FFI edge through a byte channel in `jsrt_std.zig`. STD.md §3 gains `EBADF`, `ENOTTY`, `EAGAIN` and `EPIPE`. The T11.3 card is claimed with its three-PR execution plan; it stays open until process + fs land.
 - **v4.31** (2026-10-02): **T11.4 claimed; family 1, the global functions, lands** (plan-notes 310). The card now carries the family order, a re-measured baseline (1 560 diagnostics on 68c8d57), and a corrected test262 clause: the Test262 harness needs families 1–4, not just `String` and `JSON` as values. Landed: `String`/`Number`/`Boolean` lower to the operations they are. `parseInt`/`parseFloat`/`isNaN`/`isFinite` lower to a new `global-call` node (verifier `STA4102`, C entry points `jsrt_global_*`). `Array.isArray` lowers to the builtin `instanceof Array`, and `typeof` of a language global folds. An object binding pattern's property name is no longer refused as a global. `_tsc.js`: 1 514 → 1 456 `STA1214`. Self-compilation: 1771 → 1648.
+- **v4.39** (2026-10-02): **T11.3a lands: `Uint8Array` across the extern boundary** (plan-notes 311). A new card, placed after T11.3 and done in the same change. A `Uint8Array` is a parameter row of the FFI table (docs/FFI.md §2): one TS parameter, two C arguments (`uint8_t *`, `size_t`), the view's own storage for the call and no copy. The pointer is stable because the view sits in a rooted argument slot, neither collector moves memory, a buffer never resizes, and the C call runs no Stator code. Every call guards the layout read with `jsrt_check_uint8array` (STA2001). A return stays STA1119, because a returned buffer has no owner and no length. `std/io.writeBytes`/`read` move to the row, and the byte channel (`internal/bytes.ts`, `jsrt_std_bytes_*`) is deleted. 10 MiB write: 87.1 → 3.9 ms; 10 MiB read: 247.5 → 5.3 ms. A new fixture shim may be `node_shim.ts`.

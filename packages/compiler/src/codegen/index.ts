@@ -150,6 +150,7 @@ const CHECK_FUNCTIONS: Readonly<Record<string, string | undefined>> = {
   number: 'jsrt_check_number',
   string: 'jsrt_check_string',
   boolean: 'jsrt_check_boolean',
+  uint8array: 'jsrt_check_uint8array',
 };
 
 const UNARY_EMITTERS: Readonly<Record<UnaryOp['operator'], (operand: string) => string>> = {
@@ -3424,6 +3425,25 @@ class Emitter {
         // dispatch, neither of which this direct call can reach), so the collector sees the
         // handle for exactly as long as C may.
         cArgs.push(`jsrt_ptr(${slot})`);
+      } else if (kind === 'bytes') {
+        // Two C arguments for one TS parameter (docs/FFI.md §2): the view's bytes in place and
+        // its length. No copy -- the callee reads or writes the buffer's own block. Stable for
+        // the call: the view stays in its rooted slot (the buffer edge keeps the block alive),
+        // neither collector moves memory, a buffer never resizes, and the C call runs no Stator
+        // code, so nothing can collect or detach it mid-call (docs/VALUE.md §4.19). The `void *`
+        // cast lets a binding header spell the pointee its own way (`char *`, `unsigned char *`).
+        // The layout read is guarded EVEN for a statically proven view: a `.ts` parameter
+        // annotated `Uint8Array` is reachable from js-mode code with anything in it (only the
+        // number/string/boolean call edges are checked, plan-notes 308), and here a lie would
+        // be a wild pointer in C, not a wrong value. One tag and class compare per call; a
+        // dynamic argument already carries the lowering's check, so it is not checked twice.
+        if (expr.args[index]?.kind !== 'boundary-check') {
+          this.appendLine(
+            `(void)jsrt_check_uint8array(${slot}, ${this.callLocation(expr.span)});`,
+            expr.span,
+          );
+        }
+        cArgs.push(`(void *)jsrt_uint8array_bytes(${slot})`, `jsrt_uint8array_count(${slot})`);
       } else if (kind === 'out-pointer') {
         // A slot address, not a value (docs/FFI.md §2): the callee writes the `T*` through it
         // into the argument's own frame slot, which stays rooted across the call exactly like
@@ -5295,6 +5315,10 @@ class Emitter {
         // name the pointee (that spelling lives in the binding header, when one governs),
         // so it takes `void **` and every argument arrives with an explicit cast to match.
         return 'void **';
+      case 'bytes':
+        // One TS parameter, two C parameters: the parameter list is joined from these, so
+        // the pair lands in place (docs/FFI.md §2).
+        return 'uint8_t *, size_t';
       case 'void':
         return 'void';
     }
