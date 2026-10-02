@@ -9,6 +9,7 @@ How stator is specified. [`plan.md`](../plan.md) is the authority for what is st
 | [HOW-IT-WORKS.md](HOW-IT-WORKS.md) | Pipeline narrative + CLI and example walkthroughs (todo, FFI) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | D2 gallery: pipeline, `stator build`, packages, value boxing |
 | [MODES.md](MODES.md) | `--mode=ts` vs `--mode=js`: file acceptance, diagnostics, mixed-graph boundaries |
+| [BUNDLER.md](BUNDLER.md) | Phase 12 design: js-mode dependency bundling contract, adapter API, measured spike |
 | [SUBSET.md](SUBSET.md) | Feature × mode matrix (`static` / `dynamic` / `error` / `not-yet`) |
 | [DIAGNOSTICS.md](DIAGNOSTICS.md) | Sole allocator of `STA` codes — never allocate a code anywhere else |
 | [VALUE.md](VALUE.md) | Codegen↔runtime contract: NaN-boxing, shapes, ICs, GC frames |

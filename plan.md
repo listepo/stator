@@ -1378,20 +1378,39 @@ construct has decision tests in both modes + a golden (Testing rules).
 
 ### T11.5. `packages/compiler`: the `--node` flag and CommonJS — **[D4]**
 
-Depends on T11.2 and on T12.0's answer to question 4 (if the bundler converts CommonJS, this card
-shrinks to the flag, the globals and external resolution). Steps: the flag (CLI + `explain`; under `--node` an unlanded `node:*`/global member is a `not-yet`
-diagnostic naming T11.6, so `explain`'s `diagnostics` lists platform gaps — `docs/MODES.md` §6); resolution of `node:*` and bare built-ins
-to `packages/node`; CommonJS per modules.md "All together": each CJS module lowers to one
-function over a module record `(exports, require, module, __filename, __dirname)`; static
-`require('literal')` resolves at compile time; computed `require` is a runtime lookup over the
-bundled records that throws Node's `MODULE_NOT_FOUND`; `package.json` `"type"` decides `.js`;
-CJS-to-CJS cycles are exempt from `STA3001` (partial `exports`, as Node), ESM cycles are not.
-`STA1110` narrows to "without `--node`" (and stays in `ts` mode); new not-yet codes are
-allocated in `docs/DIAGNOSTICS.md`. Docs: `MODES.md` (platform section), `SUBSET.md`,
-`DIAGNOSTICS.md`, `HOW-IT-WORKS.md`.
+Depends on T11.2. **Re-scoped by T12.0** (question 4, plan-notes 296; `docs/BUNDLER.md` §4):
+the bundler converts CommonJS. Rolldown wraps each module as a function over
+`(exports, module)`, and it already turns static `require` into graph edges, decides `"type"`
+and gives CJS cycles Node's partial `exports`. Stator writes none of that. A CommonJS project
+file (Node's rule: `.cjs`, `"type": "commonjs"`, or `.js` without ES-module syntax) is routed
+to the bundler by T12.1.
 
-**Check:** decision tests for `require` in all four mode × platform cells; goldens for a CJS
-cycle, `module.exports` replacement, computed `require` hit and miss — byte-for-byte vs Node.
+Steps:
+
+- **The flag.** `--node` on the CLI and `explain`. Under `--node` an unlanded `node:*` or
+  global member is a `not-yet` diagnostic naming T11.6, so `explain`'s `diagnostics` lists
+  platform gaps (`docs/MODES.md` §6).
+- **The Node globals.** These include `__filename` and `__dirname`, which lift T12.1's
+  `not-yet` under `--node`. They apply both in CommonJS project files and in the vendor
+  module. Their value must not bake a build-machine path into the binary (creator, 2026-10-02,
+  BUNDLER.md §9). Decide whether the value is relative to the executable or comes from
+  `import.meta.url`, then record it in `MODES.md`.
+- **Resolution.** `node:*` and bare built-ins resolve to `packages/node`, both as ESM imports
+  in project files and in the vendor bundle. The bundle reaches them as
+  `import * as m from "path"` plus `m.default` (`esmExternalRequirePlugin`), so built-ins need
+  a default export.
+- **`require` at run time.** `import.meta.url` + `node:module.createRequire` give a `require`
+  over built-ins only. It serves Rolldown's `__require` for computed `require(expr)`, and
+  anything that is not a built-in throws Node's `MODULE_NOT_FOUND`. A computed require of a
+  bundled file cannot resolve: Node itself fails on the bundle, as measured in T12.0.
+- **`STA1110`** narrows to "without `--node`". In `ts` mode, and under `--bundler=none`, it
+  stays. New not-yet codes are allocated in `docs/DIAGNOSTICS.md`.
+
+Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORKS.md`.
+
+**Check:** decision tests for `require` in all four mode × platform cells. Goldens, byte-for-byte
+vs Node: `createRequire` of a built-in, a computed `require` hit (a built-in) and miss
+(`MODULE_NOT_FOUND`). The CJS cycle and `module.exports` replacement goldens moved to T12.3.
 
 ### T11.6. `packages/node`: the N1 wrappers — **[D4]**
 
@@ -1418,10 +1437,36 @@ pool + MPSC completion queue versus the loop's own I/O pool — one must own the
 
 ## 11d. Phase 12 — `js` mode builds through a bundler — **[D4]**
 
-Creator's direction (2026-10-02, plan-notes 290). In `js` mode the module graph is first bundled
-into **one file** — tree-shaken, CommonJS converted, `node_modules` resolved — and Stator compiles
-that file. Any bundler can plug in through a Stator API; the default integration is a new
-**`packages/vite-stator`** package.
+Creator's direction (2026-10-02, plan-notes 290): in `js` mode a bundler produces **one file**,
+tree-shaken, CommonJS converted, `node_modules` resolved, and Stator compiles it. Any bundler
+can plug in through a Stator API. The default integration is a new **`packages/vite-stator`**
+package.
+
+**Design (T12.0, plan-notes 296, `docs/BUNDLER.md`): bundle the dependencies, not the project.**
+Stator keeps compiling the project's `.ts` and ESM `.js` as its own graph. The bundler gets two
+kinds of input:
+
+- every **package** import, meaning a bare specifier that is not `node:*`, a built-in or
+  `std/*`;
+- every **CommonJS** project file.
+
+Both go into one generated vendor entry. The adapter bundles it into one ESM module plus a
+source map, and that module joins the graph as one `js`-mode module. A graph with neither kind
+never calls the bundler.
+
+The reasons are measured (BUNDLER.md §1):
+
+- Bundling the whole graph strips project `.ts` (`fib` static → dynamic).
+- It drops `STA2001` boundary checks.
+- It breaks existing goldens through Rolldown's helpers.
+- It saves nothing, since Stator's DCE already tree-shakes project code.
+
+Decided by the creator (2026-10-02, BUNDLER.md §9, plan-notes 296):
+
+- "one file" means the dependencies only, so this design stands;
+- `__filename`/`__dirname` are a `not-yet` diagnostic until `--node` (T11.5), and no path is
+  baked into a binary;
+- the package evaluation-order deviation is documented only, with no card to close it.
 
 The phase is not sequenced after Phase 8 (§15.1 exception, as Phases 9–11). It touches only
 `js` mode: `ts` mode keeps its own module graph, because a bundler strips the types `ts` mode
@@ -1429,56 +1474,122 @@ compiles from.
 
 | Package | Holds | Must not |
 | --- | --- | --- |
-| `packages/compiler` | the bundler API (`statorc/api`), the `BundlerAdapter` interface, `--bundler`, source-map-driven `#line` mapping | import any bundler — adapters are loaded by name at run time, so the §0.9 budget stays `typescript` only |
+| `packages/compiler` | the bundler API (`statorc/api`), the `BundlerAdapter` interface, `--bundler`, the vendor entry, source-map-driven diagnostics and `#line` | import any bundler — adapters are loaded by name at run time, so the §0.9 budget stays `typescript` only |
 | `packages/vite-stator` (new) | a Vite plugin (`vite build` → native binary) and the default `BundlerAdapter` | contain compiler logic — it calls `statorc/api` and nothing else |
 
-### T12.0. Design: the bundler contract — **[D3]**
-
-Docs first (§15.6): `docs/BUNDLER.md`, settled with a measured spike — one `js` golden fixture
-bundled by Vite, compiled by Stator, output byte-for-byte equal to Node. Questions it must answer:
-
-1. **Typed code in a mixed graph.** A bundler strips TS types, which would turn typed `.ts` in a
-   `js`-mode graph dynamic. Options: bundle everything (all dynamic), or keep project `.ts` out of
-   the bundle as typed modules and bundle only JS (`node_modules`, `.js`). Measure both.
-2. **Output contract.** One ESM chunk, no code splitting (dynamic `import()` inlined), no
-   minification by default (names show up in diagnostics and stack traces), a source map always.
-3. **Externals.** `std/*`, `node:*` and bare built-ins stay external and are resolved by Stator
-   (§11c packages).
-4. **CommonJS.** If the bundler converts CJS, §11c T11.5 shrinks to the flag, the globals and
-   external resolution — record the re-scope in T11.5 in the same change.
-5. **The API.** `statorc/api` takes the bundle plus its source map; `BundlerAdapter` is
-   `{ name, bundle(entry, options) → { code, map, inputs } }`; `--bundler=vite|none|<module>`; the
-   default is `vite` in `js` mode. What happens when the default adapter is not installed — a
-   `STA0xxx` naming the package, allocated in `docs/DIAGNOSTICS.md`.
-6. **Diagnostics.** Every span in a bundled file maps back to its original file through the
-   source map; a span with no mapping says so rather than pointing into the bundle.
-7. **Caching.** How the bundle step participates in the program cache (Task 6.9) and in moon.
-
-**Check:** `docs/BUNDLER.md` answers 1–7 with the spike's numbers; plan-notes records the choice;
-T12.1–T12.2 are edited to match.
+~~**T12.0. Design: the bundler contract.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 12 T12.0 (plan-notes 296; `docs/BUNDLER.md`).
 
 ### T12.1. `packages/compiler`: the bundler API — **[D4]**
 
-Depends on T12.0. `statorc/api` (programmatic `compile` over an in-memory bundle + source map),
-the `BundlerAdapter` interface, `--bundler` on `build` and `explain`, adapter loading by name,
-`#line` and diagnostics mapped through the source map. Docs: `HOW-IT-WORKS.md`, `MODES.md`,
-`pipeline.d2` (a bundling stage before the frontend in `js` mode).
+Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
 
-**Check:** unit tests drive `compile` through a stub adapter; `--bundler=none` keeps today's
-behavior byte-for-byte (every existing `js` golden passes unchanged); a diagnostic inside a
-bundled module reports the original file and line.
+1. **The API.** `statorc/api`: a programmatic `compile` that takes an optional vendor bundle
+   (`{ code, map, inputs }`), and the adapter interface
+   `BundlerAdapter = { name, bundle(entry: { code, resolveDir }, { external }) → Promise<{ code, map, inputs }> }`.
+2. **The vendor entry.** After the program loads, collect the package imports and route the
+   CommonJS project files. Generate the vendor entry:
+   - named imports become `export { a } from 'p'`;
+   - default and namespace imports get mangled names;
+   - a name is mangled only on collision.
+3. **The vendor module.** Add the bundle as one virtual `js`-mode module and rebind the
+   imports to its exports. Lower `export { a as b }`, which is STA1214 today and is the form
+   Rolldown emits for renamed exports.
+4. **The CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
+   - the default in `js` mode is `vite`, loading `vite-stator`;
+   - in `ts` mode the flag is `STA0004`;
+   - the adapter loads only when step 2 found something;
+   - `STA0014` means the adapter cannot be loaded, and its message names the package;
+   - `STA0015` means the bundle step failed, with the bundler's message passed through.
+5. **Source maps.** Diagnostics, `#line` and runtime call-site strings in the vendor module
+   map through the source map (`node:module` `SourceMap`, wrapped once in `src/support/`;
+   stability 1.1). A position with no mapping says it sits in a bundler runtime helper, never
+   a user file.
+6. **The cache.** The program-cache key (Task 6.9) adds the sha256 of the vendor `code`.
+7. **`__filename`/`__dirname`.** Without `--node`, a free read of either in a project file
+   or in the vendor module is a `not-yet` diagnostic naming T11.5 (BUNDLER.md §4, §9). Inside
+   the vendor module it is reported at the mapped position. The code is allocated in
+   `docs/DIAGNOSTICS.md` when this lands.
+
+   Today such a read compiles as `dynamic`, and the binary throws `ReferenceError` where Node
+   prints the path. No path is ever baked into the binary.
+
+Docs: `HOW-IT-WORKS.md`; `MODES.md`, covering packages, the vendor module and the
+package-evaluation-order deviation (BUNDLER.md §1, documented only, no card closes it), the
+latter next to top-level-await interleaving in §5; `DIAGNOSTICS.md` (STA0014/STA0015 move from
+planned to emitted, plus step 7's code); `pipeline.d2` (a dependency-bundling stage before the frontend in
+`js` mode).
+
+**Check:**
+
+- Unit tests drive `compile` and the vendor-entry generator through a stub adapter.
+- Every existing `js` golden passes byte-for-byte under `--bundler=none` **and** under the
+  default, with Vite not installed. None of them imports a package, so the adapter must not
+  load.
+- A diagnostic inside a vendored module reports the original file and line. One inside a
+  runtime helper says "no source mapping".
+- `STA0014` is raised for a package import when the adapter is absent.
+- Decision tests: `__filename`/`__dirname` are `not-yet` in a project `.js` without `--node`.
 
 ### T12.2. `packages/vite-stator`: the default integration — **[D3]**
 
-Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDependency` (plan-notes
-entry: the integration *is* Vite, no few lines replace it). Ships the `stator()` Vite plugin
-(`vite build` produces the native binary) and the adapter `stator build --mode=js` uses by default.
-An example under `examples/vite/` with its README.
+Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDependency`
+(plan-notes entry: the integration *is* Vite, no few lines replace it). It ships:
 
-**Check:** every `js` golden passes through the default adapter, byte-for-byte vs Node;
-`examples/vite` builds a binary with `vite build`; tree-shaking measured — the binary of a fixture
-that imports one function from a large module is smaller than with `--bundler=none` (numbers in
-plan-notes).
+- the adapter `stator build --mode=js` uses by default, configured per BUNDLER.md §2:
+  - an SSR build with `ssr.noExternal: true` and `ssr.target: 'node'`. Library mode is wrong:
+    it stubs `node:*` out;
+  - Rolldown output `format: 'es'`, `codeSplitting: false` and `topLevelVar: false`;
+  - `minify: false`, `sourcemap: true`, `std/*` external;
+  - Vite's `esmExternalRequirePlugin` for built-ins;
+  - no `__filename`/`__dirname` transform. They stay free, and T12.1 reports them as
+    `not-yet` (BUNDLER.md §9);
+- the `stator()` Vite plugin (`vite build` produces the native binary);
+- an example under `examples/vite/` with its README.
+
+**Check:**
+
+- New goldens with a `node_modules` package pass through the default adapter, byte-for-byte
+  vs Node: named, default and namespace imports, and two packages sharing a dependency (one
+  instance).
+- `examples/vite` builds a binary with `vite build`.
+- Tree-shaking, measured on a package, because project code is already tree-shaken by
+  Stator's DCE (BUNDLER.md §1, 93 976 B both ways). Import 1 of 40 functions from a package:
+  - the vendor module holds only that function;
+  - the binary is within 1% of the same function written in the project.
+  The numbers go in plan-notes.
+
+### T12.3. `packages/compiler`: Rolldown's output compiles — **[D4]**
+
+Depends on T12.1, and overlaps T11.4's `Object.*` and method-call families. Do those first,
+where they are the same constructs. Each item below is measured in T12.0 (`docs/BUNDLER.md`
+§2, §4, §8), and each lands with decision tests in both modes plus a golden:
+
+- **`var X = class {}` / `let X = class {}`.** Rolldown emits every top-level class this way;
+  only `const` lowers today.
+- **The CJS interop helpers.** `__commonJSMin`, `__toESM` and `__copyProps` need
+  `Object.create`, `Object.defineProperty` with getter descriptors,
+  `Object.getOwnPropertyDescriptor`, `Object.getOwnPropertyNames`, `Object.getPrototypeOf`,
+  `Object.prototype.hasOwnProperty.call` and `Function.prototype.bind`.
+- **The dynamic-import namespace helpers.** `__esmMin` and `__exportAll` need
+  `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
+- **`import.meta.url`.**
+- **A computed `export default`.**
+
+Out of scope: `__filename`/`__dirname`. They stay `not-yet` until T11.5 (BUNDLER.md §9), so no
+golden here reads them.
+
+**Check:** CommonJS goldens through the default adapter, byte-for-byte vs Node:
+
+- `exports.x`;
+- `module.exports` replacement;
+- a nested `require`;
+- a CJS cycle that exposes partial `exports`;
+- a `.cjs` project entry;
+- a package with an inlined dynamic `import()`;
+- a package with a top-level class.
+
+`explain` on T12.0's `cjs` spike bundle lists no `STA1214`.
 
 ---
 
@@ -1913,7 +2024,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | landed (`done.md` §11a) |
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
 | `--node` (Phase 11) | typed arrays, `packages/std` + `packages/node`, CommonJS, sync `tsc` (N1) | T11.1–T11.6; the largest item is T11.4 (js-mode coverage, not Node). N2 deferred, N3 not planned (plan-notes 289) |
-| Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`, one-file `js` builds | T12.0 design first; T12.1–T12.2 (plan-notes 290) |
+| Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`; packages + CommonJS bundled into one vendor module, project stays Stator's graph | T12.0 landed (plan-notes 296, `docs/BUNDLER.md`); T12.1–T12.3 |
 | Web API (Phase 13) | `packages/webapi` (DOM + CSS, strict TS, render API) + `packages/renderer-clay` (default renderer) | T13.0 design first; T13.1–T13.5 (coverage in generated `docs/WEBAPI.md`); other Web APIs low priority (plan-notes 298, 299) |
 | JS interpreter (Phase 14) | `packages/interpreter` in strict TS: `eval`, `new Function` and other `not-yet` constructs in `js` mode, on the runtime's own values | T14.0 design first; T14.1–T14.4 (plan-notes 300) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
@@ -2084,4 +2195,17 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.12** (2026-10-02): **`explain` reports every deciding diagnostic** (plan-notes 291). §1's "per top-level construct" promise was never what shipped; the tree reports a file verdict plus per-function rows. `explain` now also lists every diagnostic of the deciding stage, which is what T11.4's Check needs to count `STA1214`; §1, `docs/MODES.md` §6 and T11.4/T11.5 rewritten to match, including how `--node` will surface platform gaps.
 - **v4.14** (2026-10-02): **Phase 13 — Web API with a pluggable render API** (plan-notes 298). New §11e: `packages/webapi` holds DOM + CSS in strict TS and owns the `Renderer` interface; `packages/renderer-clay` is the default renderer (vendored `clay.h` v0.14, Zig glue, TS adapter over FFI). Cards T13.0 (design, `docs/WEBAPI.md`), T13.1 DOM, T13.2 CSS, T13.3 render API + recording renderer, T13.4 Clay renderer; other Web APIs low priority, no cards yet.
 - **v4.15** (2026-10-02): **Web API coverage is a generated doc, like `docs/NODE.md`** (plan-notes 299). New card T13.5: `docs/WEBAPI.md` is the coverage table (denominator from the pinned `typescript`'s `lib.dom.d.ts`, claims in `webapi_coverage.json`, stale check in `ci`); T13.0's design doc moves to `docs/WEBAPI-DESIGN.md`; T13.1 depends on T13.5.
+- **v4.16** (2026-10-02): **T12.0 landed — the bundler contract** (plan-notes 296, `docs/BUNDLER.md`).
+
+  - **Design.** Measured on Vite 8.3.1 / Rolldown 1.2.12: `js` mode bundles the
+    dependencies, not the project. Package imports and CommonJS files go into one vendor ESM
+    module. Project `.ts`/`.js` stay in Stator's graph, which keeps static verdicts, boundary
+    checks and every golden.
+  - **Re-scopes.** T12.1–T12.2 were rewritten, and a new T12.3 compiles Rolldown's output.
+    T11.5 drops its CommonJS lowering, because the bundler converts CJS.
+  - **Diagnostics.** `STA0014`/`STA0015` are allocated as planned codes.
+  - **Creator's answers (BUNDLER.md §9).**
+    - "One file" means the dependencies.
+    - `__filename`/`__dirname` are not-yet until `--node`, with no baked paths.
+    - The order deviation is documented only.
 - **v4.17** (2026-10-02): **Phase 14: a JavaScript interpreter in strict TypeScript, `js` mode's second fallback** (plan-notes 300). New §11f: `packages/interpreter`, compiled by Stator, runs `eval`, `new Function` and the `not-yet` constructs it takes over, directly on `jsrt_value` (no marshaling layer). Order: compiled static, then compiled dynamic, then the interpreter. Phase 8's QuickJS-NG stays as an option behind its gate until T14.0 measures whether it is still needed. Cards T14.0 (design, `docs/INTERPRETER.md`, including §0.3's parser question), T14.1 parser front, T14.2 evaluator, T14.3 wiring, T14.4 async and the rest. `ts` mode is unchanged.
