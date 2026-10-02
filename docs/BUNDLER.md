@@ -330,6 +330,22 @@ wraps it behind one function in `src/support/`.
 - Under B only the vendor module needs mapping. Project diagnostics point at real files, as
   today.
 
+**Checker errors in package code (plan-notes 320 Q4, decided 2026-10-02).** The vendor module
+is package code: untyped JavaScript on the dynamic path, which the user cannot edit. A
+type-checker complaint there (TypeScript code 2000 and up) is not reported, so it never fails the
+build. The binding the complaint names stops trusting its inferred type and goes dynamic, the way
+`js` mode already widens an incompatible assignment, so the program does at run time what Node
+does (`[1] < {}` prints `true`, `o++` on an object makes it `NaN`). Three things are still
+reported:
+
+- syntax and grammar errors (codes below 2000), which are early errors Node raises too;
+- a checker error where Node throws at run time and the compiled program would not: a binding
+  read in its temporal dead zone (TS2448, TS2449, TS2450) and an assignment to a `const`
+  (TS2588). They stay `STA0012` at the mapped position (`VENDOR_THROW_CODES`);
+- every Stator verdict: the gate, the module edges and the lowering (`STA1214`, `STA1218`, …).
+
+The same complaint in a project file is still `STA0012`.
+
 ## 7. Caching
 
 **Measured cost.** Importing Vite takes 68–256 ms, cold to warm process. One vendor or graph

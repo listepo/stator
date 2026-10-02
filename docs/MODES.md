@@ -104,6 +104,12 @@ Inside checked `ts` code, types are trusted fully. At boundaries where typed and
   the checker's control flow, so dropping a refusal it has no answer for compiles to an internal
   error at best and to a silent miscompile at worst (`const c = 1; c = 2` printed `2` where Node
   throws a `TypeError`). A code moves to the degraded list with its answer and a test.
+- **The bundler's vendor module is the exception** (plan-notes 320 Q4, `docs/BUNDLER.md` §6):
+  package code is not the user's to fix, so there a type-level refusal is never fatal. The
+  binding it names is widened to dynamic instead, and the four codes where Node throws and the
+  compiled program would not (TDZ reads TS2448/2449/2450, `const` assignment TS2588) stay fatal.
+  A construct the lowering still has no answer for surfaces as an internal error (`STA4xxx`) at
+  the package file's position: a compiler bug to report, never a user error.
 
 ### JS-only constructs that compile
 
