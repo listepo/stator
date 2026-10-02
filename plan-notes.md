@@ -9566,3 +9566,28 @@ depends on T13.5; §14 row; changelog v4.15.
   by a checked-in map.
 - **The generator is shared with `node-coverage.ts`.** Two copies of a table renderer and a claim
   validator would fail `dupes` (Task 6.16), and they would drift apart.
+
+## 300. Phase 14: a JavaScript interpreter in strict TypeScript as `js` mode's second fallback (2026-10-02)
+
+**Plan:** new §11f Phase 14 (T14.0 design, T14.1 parser front, T14.2 evaluator, T14.3 wiring,
+T14.4 async and the rest); a pointer from Phase 8 (§11); §14 effort row; changelog v4.17.
+
+**Creator's direction:** build an analog of QuickJS written in strict TypeScript, as a separate
+package and an additional fallback for `js` mode.
+
+**What the card fixes in place, and why:**
+
+- **An additional fallback, not a replacement.** The order is compiled static, then compiled
+  dynamic, then the interpreter. Phase 8's QuickJS-NG keeps its gate. Whether it is still needed is
+  T14.0 §7's measured question, not a decision taken here.
+- **No second value model.** The interpreter runs on `jsrt_value`, runtime objects and the Zig
+  memory core. Phase 8's hardest step is marshaling `jsrt_value` ↔ `JSValue`, and an interpreter
+  sharing the runtime's model does not have that step.
+- **§0.3 is not silently broken.** §0.3 bans the *compiler* from writing a parser. A run-time
+  parser for `eval` strings is a different need. T14.0 §1 weighs `typescript`'s own parser compiled
+  into the binary (keeps §0.3 literally), a vendored TS parser, and an in-house one (which would
+  edit §0.3 in the same change).
+- **The mode stays above the gate (§0.8).** The frontend marks the construct, and the HIR carries
+  an `Interpret` node. The emitter links the package on demand, so binaries that never interpret
+  are unchanged in size.
+
