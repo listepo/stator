@@ -1611,6 +1611,13 @@ function isLibInterface(type: ts.Type, name: string): boolean {
   return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
 }
 
+/** Whether `node` is typed as the lib's WeakMap or WeakSet, which the HType model folds into Map
+ * and Set (see collectionTypeToHType): the one bit a `collection-new` records. */
+export function isWeakCollection(node: ts.Node, checker: ts.TypeChecker): boolean {
+  const type = checker.getTypeAtLocation(node);
+  return isLibInterface(type, 'WeakMap') || isLibInterface(type, 'WeakSet');
+}
+
 function iteratorTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number): HType | null {
   const name = type.getSymbol()?.getName();
   if (
@@ -1640,7 +1647,13 @@ function collectionTypeToHType(
     return null;
   }
   const name = type.getSymbol()?.getName();
-  if (name !== 'Map' && name !== 'Set' && name !== 'Promise') {
+  if (
+    name !== 'Map' &&
+    name !== 'Set' &&
+    name !== 'WeakMap' &&
+    name !== 'WeakSet' &&
+    name !== 'Promise'
+  ) {
     return null;
   }
   if (!isLibInterface(type, name)) {
@@ -1653,7 +1666,8 @@ function collectionTypeToHType(
     const [value] = args;
     return value === undefined ? null : hPromise(tsTypeToHType(value, checker, depth + 1));
   }
-  if (name === 'Set') {
+  // A WeakMap/WeakSet is a Map/Set the checker keeps every walk off (docs/VALUE.md §4.22).
+  if (name === 'Set' || name === 'WeakSet') {
     const [element] = args;
     return element === undefined ? null : hSet(tsTypeToHType(element, checker, depth + 1));
   }

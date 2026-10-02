@@ -2888,7 +2888,8 @@ class Emitter {
       this.appendLine(`${bind} = jsrt_number((double)${cursor});`, stmt.span);
       return;
     }
-    const element = `jsrt_as_array(${iterable})->elements[${cursor}]`;
+    // A hole reads as undefined (an array of an Unknown element may be sparse; docs/VALUE.md §4.4).
+    const element = `jsrt_unhole(jsrt_as_array(${iterable})->elements[${cursor}])`;
     if (stmt.view === 'entries') {
       const pair = `_jsrt_pair_${cursor}`;
       this.appendLine(
@@ -3300,13 +3301,14 @@ class Emitter {
       );
     }
     if (expr.op === 'concat') {
-      if (expr.args.length === 1 && expr.args[0]?.type.kind === 'array') {
-        return `jsrt_array_concat(${target}, ${arg(0)})`;
-      }
       const items = rest(0);
-      return items === ''
-        ? `jsrt_array_concat_many(${target}, 0)`
-        : `jsrt_array_concat_many(${target}, ${String(expr.args.length)}, ${items})`;
+      const call =
+        expr.args.length === 1 && expr.args[0]?.type.kind === 'array'
+          ? `jsrt_array_concat(${target}, ${arg(0)})`
+          : items === ''
+            ? `jsrt_array_concat_many(${target}, 0)`
+            : `jsrt_array_concat_many(${target}, ${String(expr.args.length)}, ${items})`;
+      return expr.spread === true ? `jsrt_array_fill_holes(${call})` : call;
     }
     if (expr.op === 'lastIndexOf' && expr.args.length === 2) {
       return `jsrt_array_last_index_of_from(${target}, ${arg(0)}, ${arg(1)})`;
@@ -4702,7 +4704,9 @@ class Emitter {
       }
 
       case 'collection-new':
-        return expr.collection === 'map' ? 'jsrt_map_new()' : 'jsrt_set_new()';
+        return expr.weak
+          ? `jsrt_weak_collection_new(${expr.collection === 'map' ? 'true' : 'false'})`
+          : `jsrt_${expr.collection}_new()`;
 
       // Compiled at EVERY evaluation, never hoisted: §22.2.4.1 makes each evaluation a fresh
       // object, and it has to be, because `lastIndex` is mutable state on it. The pattern rides in
@@ -4875,6 +4879,7 @@ class Emitter {
         const canThrow =
           expr.kind === 'array-op' ||
           (expr.kind === 'collection-op' && expr.op === 'forEach') ||
+          (expr.kind === 'collection-op' && mayRefuseWeakKey(expr)) ||
           (expr.kind === 'date-op' && expr.op === 'toISOString') ||
           expr.kind === 'number-op' ||
           (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
@@ -4924,7 +4929,9 @@ class Emitter {
           opCall,
           expr.span,
           flushed,
-          expr.kind === 'object-static' || expr.kind === 'typed-op',
+          expr.kind === 'object-static' ||
+            expr.kind === 'typed-op' ||
+            (expr.kind === 'global-call' && GLOBAL_CALLS[expr.name].throws),
         );
       }
 
@@ -6016,9 +6023,27 @@ function indexSetCall(target: HType, object: string, index: string, value: strin
       return `jsrt_dyn_index_set(${object}, ${index}, ${value}, NULL)`;
     case 'uint8array':
       return `jsrt_uint8array_put(${object}, ${index}, ${value})`;
+    case 'array':
+      // Only an array whose element is Unknown may be made sparse: a typed element has no value
+      // that could stand for a hole, so its write past the end stays STA2002 (docs/VALUE.md §4.4).
+      return target.element.kind === 'unknown'
+        ? `jsrt_array_set_sparse(${object}, ${index}, ${value})`
+        : `jsrt_array_set(${object}, ${index}, ${value})`;
     default:
       return `jsrt_array_set(${object}, ${index}, ${value})`;
   }
+}
+
+/** Whether a `set`/`add` may meet a weak collection and a key it refuses (docs/VALUE.md §4.22).
+ * A WeakMap is typed as a Map, so the KEY type decides: a primitive key means a non-weak Map,
+ * and an object-typed key is always accepted, which leaves the open ones. */
+function mayRefuseWeakKey(expr: CollectionOp): boolean {
+  if (expr.op !== 'set' && expr.op !== 'add') {
+    return false;
+  }
+  const type = expr.target.type;
+  const key = type.kind === 'map' ? type.key : type.kind === 'set' ? type.element : undefined;
+  return key === undefined || key.kind === 'unknown' || key.kind === 'type-param';
 }
 
 function iteratorBoxCall(expr: ArrayOp | CollectionOp, operands: string): string | undefined {

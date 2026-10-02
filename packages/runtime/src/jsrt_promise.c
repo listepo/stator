@@ -251,7 +251,7 @@ jsrt_value jsrt_promise_all(jsrt_value array) {
     AllElement *e = (AllElement *)jsrt_gc_alloc(sizeof(AllElement), "Promise.all element");
     e->all = all;
     e->index = i;
-    jsrt_promise_subscribe(jsrt_promise_resolve(jsrt_as_array(array)->elements[i]), all_element, e);
+    jsrt_promise_subscribe(jsrt_promise_resolve(jsrt_unhole(jsrt_as_array(array)->elements[i])), all_element, e);
   }
   return all->promise;
 }

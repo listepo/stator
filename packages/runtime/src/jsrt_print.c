@@ -551,40 +551,70 @@ static void inspect_list(JSRTBuf *out, jsrt_value v, uint32_t length,
                          const char *abbrev, int recurse, size_t indent) {
   const JSRTArray *a = jsrt_is(v, JSRT_TAG_ARRAY) ? jsrt_as_array(v) : NULL;
   const size_t shown = length > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : length;
-  const bool truncated = length > shown;
   /* A RegExp match is an array with NAMED properties, and Node prints them after the elements:
    * `[ 'a', index: 0, input: 'a', groups: undefined ]`. Every other array has none, so this is
    * zero and nothing below it changes. */
   const size_t props = a != NULL ? jsrt_shape_property_count(a->shape) : 0;
-  const size_t count = shown + (truncated ? 1 : 0) + props;
 
   /* Emptiness first: Node prints an empty container in full past the depth cap
    * (`[[[[]]]]` is `[ [ [ [] ] ] ]`), abbreviating only the non-empty ones. */
-  if (count == 0 || recurse > INSPECT_MAX_DEPTH) {
-    jsrt_buf_puts(out, count == 0 ? label : abbrev);
-    if (count == 0) {
+  if (length + props == 0 || recurse > INSPECT_MAX_DEPTH) {
+    jsrt_buf_puts(out, length + props == 0 ? label : abbrev);
+    if (length + props == 0) {
       jsrt_buf_puts(out, "[]");
     }
     return;
   }
 
-  JSRTBuf *entries = alloc_entries(count);
-  bool all_numbers = true;
-  for (size_t i = 0; i < shown; i++) {
-    jsrt_buf_init(&entries[i]);
+  /* Node's formatArray, and formatSpecialArray once a hole is met: at most `shown` entries, where
+   * a run of holes between two elements is ONE entry (`<2 empty items>`), a trailing run is one
+   * more when there is room, and whatever the budget did not reach is "... n more items". */
+  JSRTBuf *entries = alloc_entries(shown + 1 + props);
+  size_t count = 0;
+  uint32_t index = 0;
+  char hole_text[64];
+  while (index < length && count < shown) {
+    if (a != NULL && a->elements[index] == JSRT_HOLE) {
+      uint32_t next = index;
+      while (next < length && a->elements[next] == JSRT_HOLE) {
+        next++;
+      }
+      if (next == length) {
+        break;
+      }
+      snprintf(hole_text, sizeof hole_text, "<%u empty item%s>", next - index,
+               next - index > 1 ? "s" : "");
+      jsrt_buf_init(&entries[count]);
+      jsrt_buf_puts(&entries[count++], hole_text);
+      index = next;
+      if (count == shown) {
+        break;
+      }
+    }
+    jsrt_buf_init(&entries[count]);
     /* Elements are rendered two columns deeper: that indent is what a multi-line layout uses,
      * and it also shortens the budget a nested array has before it breaks. */
-    const jsrt_value item = element(v, (uint32_t)i);
-    inspect_value(&entries[i], item, recurse + 1, indent + 2);
-    all_numbers = all_numbers && jsrt_is_number(item);
+    inspect_value(&entries[count++], element(v, index), recurse + 1, indent + 2);
+    index++;
   }
-  if (truncated) {
-    init_more_entry(&entries[shown], length - (uint32_t)shown);
+  const uint32_t remaining = length - index;
+  bool truncated = false;
+  if (count != shown) {
+    if (remaining > 0) {
+      snprintf(hole_text, sizeof hole_text, "<%u empty item%s>", remaining,
+               remaining > 1 ? "s" : "");
+      jsrt_buf_init(&entries[count]);
+      jsrt_buf_puts(&entries[count++], hole_text);
+    }
+  } else if (remaining > 0) {
+    init_more_entry(&entries[count++], remaining);
+    truncated = true;
   }
+  const size_t listed = truncated ? count - 1 : count;
   if (props > 0) {
     const JSRTShape **links = jsrt_shape_property_order(a->shape, (uint32_t)props);
     for (size_t i = 0; i < props; i++) {
-      JSRTBuf *entry = &entries[shown + (truncated ? 1 : 0) + i];
+      JSRTBuf *entry = &entries[count++];
       jsrt_buf_init(entry);
       append_key(entry, links[i]->key);
       jsrt_buf_puts(entry, ": ");
@@ -594,15 +624,22 @@ static void inspect_list(JSRTBuf *out, jsrt_value v, uint32_t length,
   }
 
   /* Grouping is attempted first, because whether it fired decides the layout below: if it changed
-   * the number of lines, the single-line form is not even considered. */
+   * the number of lines, the single-line form is not even considered. Node right-aligns only when
+   * `value[i]` is a number for every i below the entry count -- read by INDEX, so a hole (or an
+   * index past the end) is not a number and left-aligns the whole block. */
   JSRTBuf *rows = NULL;
   size_t row_count = 0;
   if (count > 6 && props == 0) {
+    bool all_numbers = true;
+    for (size_t i = 0; i < count && all_numbers; i++) {
+      all_numbers = i < length && (a == NULL || a->elements[i] != JSRT_HOLE) &&
+                    jsrt_is_number(element(v, (uint32_t)i));
+    }
     rows = alloc_entries(count);
-    row_count = group_entries(entries, shown, count, indent, all_numbers, rows);
+    row_count = group_entries(entries, listed, count, indent, all_numbers, rows);
     if (row_count > 0 && truncated) {
       jsrt_buf_init(&rows[row_count]);
-      jsrt_buf_append(&rows[row_count], entries[shown].data, entries[shown].len);
+      jsrt_buf_append(&rows[row_count], entries[listed].data, entries[listed].len);
       row_count++;
     }
   }
@@ -926,6 +963,14 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
  * deletion left behind are skipped here exactly as they are skipped by a lookup. */
 static void inspect_map(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTMap *m = jsrt_as_map(v);
+  /* Node's formatWeakCollection: a weak collection's entries are never shown, so neither is a
+   * count -- `WeakMap { <items unknown> }`, or `[WeakMap]` past the depth cap. */
+  if (m->cls == &jsrt_class_weakmap || m->cls == &jsrt_class_weakset) {
+    jsrt_buf_puts(out, recurse > INSPECT_MAX_DEPTH ? "[" : "");
+    jsrt_buf_puts(out, m->cls->name);
+    jsrt_buf_puts(out, recurse > INSPECT_MAX_DEPTH ? "]" : " { <items unknown> }");
+    return;
+  }
   const bool is_map = m->cls == &jsrt_class_map;
 
   char base[32];
@@ -1657,7 +1702,7 @@ void jsrt_console_table(jsrt_value v) {
       jsrt_buf_init(&label);
       inspect_scalar(&label, jsrt_number((double)i), false);
       jsrt_strvec_push(&labels, jsrt_buf_take(&label));
-      value = row_list->elements[i];
+      value = jsrt_unhole(row_list->elements[i]);
     } else {
       const jsrt_value key = row_list->elements[i];
       value = jsrt_get_prop(v, jsrt_shape_key(key), NULL);
@@ -1684,7 +1729,7 @@ void jsrt_console_table(jsrt_value v) {
         jsrt_buf_init(&name);
         inspect_scalar(&name, jsrt_number((double)k), false);
         jsrt_strvec_push(&keys_flat, jsrt_buf_take(&name));
-        jsrt_strvec_push(&vals_flat, cell_of(inner->elements[k]));
+        jsrt_strvec_push(&vals_flat, cell_of(jsrt_unhole(inner->elements[k])));
         key_counts[i]++;
       }
       continue;
@@ -1814,7 +1859,8 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
         append_string(&joined, (const JSString *)jsrt_ptr(separator));
       }
     }
-    const jsrt_value element = a->elements[i];
+    /* A hole joins as the empty string, as undefined does (§23.1.3.18 step 7.c). */
+    const jsrt_value element = jsrt_unhole(a->elements[i]);
     if (jsrt_is(element, JSRT_TAG_NULL) || jsrt_is(element, JSRT_TAG_UNDEFINED)) {
       continue;
     }
@@ -1940,10 +1986,12 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
         jsrt_buf_putc(out, ',');
       }
       /* An unserializable ELEMENT is null, not skipped -- indices must keep their meaning. */
-      if (json_unserializable(a->elements[i])) {
+      /* A hole serializes as `undefined` does: Get answers undefined (§25.5.2.6 step 8.a). */
+      const jsrt_value element = jsrt_unhole(a->elements[i]);
+      if (json_unserializable(element)) {
         jsrt_buf_puts(out, "null");
       } else {
-        json_value(out, a->elements[i], &here);
+        json_value(out, element, &here);
         if (jsrt_pending()) {
           return;
         }
@@ -2053,10 +2101,10 @@ jsrt_value jsrt_to_string(jsrt_value v) {
      * function rather than "[object Object]", and differs from Node. */
     snprintf(buf, sizeof buf, "function %s() { [native code] }", jsrt_as_closure(v)->name);
   } else if (jsrt_is_map_or_set(v)) {
-    /* `Symbol.toStringTag` is "Map"/"Set", so `Object.prototype.toString` -- which is what
-     * ToString reaches through ToPrimitive here -- answers `[object Map]` (plan.md §8 step 29). */
-    snprintf(buf, sizeof buf, "[object %s]",
-             jsrt_as_object(v)->cls == &jsrt_class_map ? "Map" : "Set");
+    /* `Symbol.toStringTag` is the class name ("Map", "WeakSet", ...), so
+     * `Object.prototype.toString` -- which is what ToString reaches through ToPrimitive here --
+     * answers `[object Map]` (plan.md §8 step 29). */
+    snprintf(buf, sizeof buf, "[object %s]", jsrt_as_object(v)->cls->name);
   } else if (jsrt_is_regexp(v)) {
     /* `RegExp.prototype.toString`: `/source/flags` off the normalized strings (§22.2.6.13). */
     return jsrt_regexp_to_string(v);

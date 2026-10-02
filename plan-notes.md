@@ -10741,6 +10741,80 @@ where today's literal path aborts `STA2005`. `WeakMap`/`WeakSet` need their own 
 printing (`WeakMap { <items unknown> }`). `Uint16Array` is T11.1's typed-array surface. A spread
 argument to `new` on a function stays not-yet with the other spreads (step 5).
 
+### Step 4b: the builtin constructors (`Array(n)` and holes, `new RegExp`, `WeakMap`/`WeakSet`)
+
+**Holes, and why only in an Unknown-element array.** `Array(n)` is n absent elements, and Node
+prints them (`[ <3 empty items> ]`), so filling with `undefined` would print a different program.
+An absent element is now `JSRT_HOLE`, `JSRT_BOX(TAG_UNDEFINED, 1)`: `undefined` has one value, so
+payload 1 is a box no program can make, and the dense layout stays as it is. Every reader that
+gives an element to a program passes it through `jsrt_unhole`; the operations the spec makes skip
+a hole test for it (`index_present`, `in`, `Object.keys`, `flat`, `sort`). The element READ path
+of typed code (`jsrt_array_get`, the for-of inline, the iterators) unholes too, so a hole that
+reaches typed code through a `.js` boundary reads as `undefined`, never as the marker. Producing a
+hole is the part that is gated: `Array(n)` with a typed element and `delete` of a typed element
+are `STA1214`, a typed write past the end still aborts `STA2002` (`jsrt_array_set`), and only the
+Unknown-element write (`jsrt_array_set_sparse`) and the untyped one (`jsrt_dyn_index_set`) fill
+the gap. A `number[]` has no value that stands for "absent", and typing a hole as `undefined`
+would break the HType the checker gave. `a.length = n` growth stays `STA2002` on both paths: the
+property write cannot tell which element type it serves. A literal hole (`[1, , 3]`) stays with
+`gateArrayLiteral`. `Array(x)` reads `x` as a length only when its type may be a number, so
+`new Array('a')` is `['a']` with any element type; `Array()` and `Array(a, b)` lower to the array
+literal. The printer ports Node's `formatSpecialArray`: a run of holes is one entry against the
+100-entry cap, and the grouping's right-alignment test reads `value[i]` by index, so a hole
+left-aligns the block, as in Node.
+
+**A defect found on the way, fixed here.** An array-literal spread lowered to `concat`, which
+copies holes (§23.1.3.1), but a spread iterates, so `[...a]` must read them as `undefined`. The
+spread's `concat` now carries `ArrayOp.spread`, and the emitter wraps it in
+`jsrt_array_fill_holes`. No hole existed before this step, so nothing on main could observe it.
+
+**`new RegExp`.** `RegExp` joins `GLOBAL_CALLS` (with a `throws` column, so the emitter adds the
+pending check only where a row can throw); `new RegExp(…)` goes through the same row. The runtime
+entry, `jsrt_regexp_construct`, follows §22.2.4.1: a RegExp argument lends its source and flags,
+other values go through ToString, and the source is escaped as V8's `EscapeRegExpPattern` does,
+which `source` and `toString` show. Errors throw `SyntaxError` with V8's head. libregexp's
+reasons map to V8's words where the mapping is one-to-one (8 reasons, checked against Node
+26.7.0); the rest keep libregexp's wording, a documented divergence (docs/VALUE.md §4.21). The
+literal path still aborts `STA2005` on a bad pattern, because a literal's error is a compile-time
+fact in Node (an early `SyntaxError`), which no runtime throw can reproduce.
+
+**`WeakMap`/`WeakSet`.** They are `JSRTMap`s under two new descriptors, and the HType model folds
+them into Map/Set. The checker already keeps `size`, `forEach`, `clear` and the iterators off them,
+so the only difference below the frontend is `CollectionNew.weak`, which picks
+`jsrt_weak_collection_new`. `set`/`add` throw Node's `TypeError` on a primitive key. The emitter
+adds the pending check only when the key type is open (Unknown or a type parameter), so typed
+Maps pay nothing. Keys are held strongly, a divergence only memory use can observe. True
+weakness needs ephemerons in the collector, and nothing in `_tsc.js` depends on collection.
+
+**A narrowed RegExp (the node track's plan-notes 314).** Narrowing an `unknown` with
+`instanceof RegExp`, or a `string | RegExp` with `typeof`, leaves the compiler an Unknown receiver,
+and a regexp has no shape table. So `x.test(s)` read `undefined` and the call aborted `STA2006`.
+This is family 2's primitive-method case, and it is fixed the same way. On a miss for a regexp,
+`jsrt_get_prop` asks `jsrt_regexp_property`. It answers `test`, `exec` and `toString` as closures
+bound to the receiver, with the spec's `name` and `length`. It also answers the derived data
+properties: `source`, `flags`, `lastIndex` and the eight flag predicates. A typed receiver is
+unchanged; it still lowers to the regexp ops.
+
+**Evidence** (this branch, Node 26.7.0):
+- Goldens `js/builtin_constructors` and `ts/builtin_constructors` match Node byte for byte. They
+  cover holes from all three sources, every hole-aware reader and skipper, 100-entry truncation,
+  grouping with holes, nested sparse arrays, `RangeError`s, RegExp copying, escaping and seven
+  error reasons, and WeakMap/WeakSet semantics, printing, `String`, `JSON` and `instanceof`.
+  Their tail is the narrowed RegExp: an `instanceof` and a `typeof` narrowing in `ts`, and an
+  untyped receiver in `js` that reads `test` as a value.
+- Decision fixtures: `subset_array_ctor_js` (dynamic), `subset_array_ctor_unknown_ts` (dynamic),
+  `subset_array_ctor_typed_ts` and `subset_array_delete_typed_js` (`STA1214`),
+  `subset_regexp_ctor_ts`/`_js` (static), `subset_weak_collections_ts` (static) and `_js`
+  (dynamic).
+- `_tsc.js` (`--stack-size=8000`, `--bundler=none`): 633 diagnostics, of which 583 `STA1214`
+  (−32), 45 `STA0012`, 4 `STA1218` and 1 `STA1210`. Left from step 4b: `Array.from` (1), which
+  is `[...x]` over a Map iterator and therefore step 5's, and `new Uint16Array` (1), T11.1's.
+- Self-compilation: `STA1214` 1748 → 1758, recorded with `--update`, from the new frontend
+  code's `ts.*` references.
+- jscpd: 193 → 188. The weak allocators are one `jsrt_weak_collection_new(bool)`, so they do not
+  clone the Map/Set pair. Ten fingerprints re-hashed inside existing clones; per file pair, no
+  count grew.
+
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
 
 **Trigger.** The creator's priority change: the T11.3 byte channel (plan-notes 309 step 1) cost
