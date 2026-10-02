@@ -11238,7 +11238,12 @@ did not settle it.
 4. **Still refused, each `STA1214`:** `export * from 'p'` (only the bundler knows the names, and
    the vendor entry is built before the bundle), `import('p')` (the vendor module is static) and
    a package import with import attributes (the attribute changes what the import means). The
-   T12.1 stub in plan.md lists them; no card owns them yet.
+   T12.1 stub in plan.md lists them. **Owner (Q3): T12.3.** The creator asked for T12.2 or
+   T12.3, whichever fits. T12.3 is the compiler's work on what the bundler emits: the names behind
+   `export *` can only come from the bundle's own exports, and `import('p')` needs the
+   dynamic-import namespace helpers (`__esmMin`, `__exportAll`) T12.3 already lists. T12.2 is
+   the adapter package, which changes nothing in the rewrite. A line item and a Check line in the
+   T12.3 card.
 5. **The program cache keys on the overlay.** Two slots, keyed by (entry, mode, entry sha256,
    overlay key). The overlay key is the sha256 of every overlay file, rewrites included, not only
    the bundle's code the card named: the rewrites follow from the entry and the bundle, so the
@@ -11268,7 +11273,36 @@ did not settle it.
     specifier, which a native binary cannot do — T12.2 or `--node` decides how a compiled
     compiler loads one) and 63 × `STA1214` (1648 → 1711), recorded with `--update` per v4.25.
 
-**Open question for the creator.** A checker error (`STA0012`) inside the vendor module is
-package code the user cannot fix; today it is reported at the mapped position like any other.
-Whether `checkJs` should skip the vendor module (and leave its errors to the lowering's
-verdicts) is not decided.
+**Checker errors in the vendor module (Q4).** A checker error (`STA0012`) inside the vendor
+module is package code the user cannot fix; T12.1 reported it at the mapped position like any
+other. **Decided (creator, 2026-10-02): skip checker diagnostics inside the vendor module.**
+Package code is untyped JavaScript on the dynamic path, so a checker error there must not fail
+the build, and runtime errors still behave as in Node.
+
+How it landed (`src/frontend/program.ts` `isUncheckedVendorError`, `ProgramOverlay.unchecked`;
+docs/BUNDLER.md §6, docs/MODES.md §3):
+
+- Skipping alone was measured wrong. `o++` on `let o = { n: 1 }` (TS2356) then died as
+  `STA4004` "assignment target type {n: number} does not match value type number": the lowering
+  trusts the type the checker complained about. So the identifier at the complaint is widened to
+  dynamic, the same widening js mode gives an incompatible assignment (TS2322). After it,
+  `[1] < {}` (TS2365) prints `true` and `o++` prints `NaN`, as Node does.
+- Four codes stay reported, because there Node throws and the compiled program would not. A TDZ
+  read (TS2448, TS2449, TS2450) skipped became `STA4035` "used before declaration", an internal
+  error. A `const` assignment (TS2588) skipped compiled and silently assigned, where Node throws
+  a `TypeError`. They stay `STA0012` at the mapped position (`VENDOR_THROW_CODES`).
+- Codes below 2000, which are syntax and grammar errors and early errors in Node too, stay
+  reported, and so does every Stator verdict.
+- A construct the lowering still cannot answer surfaces as an internal error at the package
+  file's position. That is a compiler bug, never a user error.
+
+Tests, in `packages/tests/unit/bundler.test.ts`:
+
+- A vendor `leftpad` with TS2365 and TS2356 builds through a stub adapter, and its binary
+  prints Node's `true\nNaN\nx!` byte for byte.
+- The same `[1] < {}` in the project file is still `STA0012`.
+- A vendor TDZ read stays `STA0012` at `node_modules/leftpad/index.js:2`.
+
+Self-compilation grows by 3 × `STA1214` (1719 → 1722), recorded with `--update` per v4.25: the
+`new Set([...])` of `VENDOR_THROW_CODES` and the two `ts.`-qualified parameter types of
+`isUncheckedVendorError`, the shapes the neighbouring code already uses.

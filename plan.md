@@ -1608,7 +1608,8 @@ compiles from.
 ~~**T12.1. `packages/compiler`: the bundler API.**~~ ✅ **landed 2026-10-02** — evidence in
 [done.md](done.md) → Phase 12 T12.1 (plan-notes 320; `docs/BUNDLER.md`). Still open from the card,
 each `STA1214`: `export * from 'p'` (only the bundler knows the names), `import('p')` and a package
-import with import attributes are not rewritten to the vendor module.
+import with import attributes are not rewritten to the vendor module. T12.3 owns them (plan-notes
+320 Q3).
 
 ### T12.2. `packages/vite-stator`: the default integration — **[D3]**
 
@@ -1654,6 +1655,10 @@ where they are the same constructs. Each item below is measured in T12.0 (`docs/
   `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
 - **`import.meta.url`.**
 - **A computed `export default`.**
+- **The package imports T12.1 leaves refused** (plan-notes 320 Q3), each `STA1214` today:
+  `export * from 'p'`, whose names come from the bundle's own exports once it is built;
+  `import('p')`, which lands on the dynamic-import namespace helpers above; and a package import
+  with import attributes.
 
 Out of scope: `__filename`/`__dirname`. They stay `not-yet` until T11.5 (BUNDLER.md §9), so no
 golden here reads them.
@@ -1667,6 +1672,8 @@ golden here reads them.
 - a `.cjs` project entry;
 - a package with an inlined dynamic `import()`;
 - a package with a top-level class.
+- a project file with `export * from 'p'`, one with `import('p')`, and one with an attributed
+  package import (`with { type: 'json' }`).
 
 `explain` on T12.0's `cjs` spike bundle lists no `STA1214`.
 
@@ -2336,6 +2343,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.35** (2026-10-02): **T11.4 step 4b, the builtin constructors, lands** (plan-notes 310). An array of an Unknown element can hold holes: `new Array(n)`, a write past the end and `delete a[i]` leave a `JSRT_HOLE` box that every read hands out as `undefined`, that `in`, the callback methods, `flat` and `sort` skip, and that `console.log` prints as `<n empty items>` (docs/VALUE.md §4.4). A typed element still refuses them (`STA1214` at the gate, `STA2002` at run time), and `STA2007` no longer covers arrays. `Array(...)` and `RegExp(...)`, with or without `new`, are `global-call` rows; a bad pattern or flag string throws Node's `SyntaxError`, its reason in V8's words where libregexp's maps to one (§4.21). `WeakMap`/`WeakSet` are Maps and Sets under their own descriptors that refuse primitive keys and hold keys strongly (§4.22). Two defects are fixed with it. `[...a]` lowered to `concat`, which keeps holes, so a spread now fills them. A RegExp reached by narrowing is an Unknown receiver, and `x.test(s)` on it aborted `STA2006` (plan-notes 314); `jsrt_get_prop` now answers its methods and data properties. `Array.from` moves to step 5. `_tsc.js`: 615 → 583 `STA1214`. Self-compilation: 1748 → 1758.
 - **v4.39** (2026-10-02): **T11.3a lands: `Uint8Array` across the extern boundary** (plan-notes 311). A new card, placed after T11.3 and done in the same change. A `Uint8Array` is a parameter row of the FFI table (docs/FFI.md §2): one TS parameter, two C arguments (`uint8_t *`, `size_t`), the view's own storage for the call and no copy. The pointer is stable because the view sits in a rooted argument slot, neither collector moves memory, a buffer never resizes, and the C call runs no Stator code. Every call guards the layout read with `jsrt_check_uint8array` (STA2001). A return stays STA1119, because a returned buffer has no owner and no length. `std/io.writeBytes`/`read` move to the row, and the byte channel (`internal/bytes.ts`, `jsrt_std_bytes_*`) is deleted. 10 MiB write: 87.1 → 3.9 ms; 10 MiB read: 247.5 → 5.3 ms. A new fixture shim may be `node_shim.ts`.
 - **v4.40** (2026-10-02): **T12.1 lands: the bundler API** (plan-notes 320). In `js` mode, package imports and CommonJS project files go to one bundler call; the answer joins the program as the virtual `__stator_vendor__.js`, and project imports are rewritten to it, every line kept. `--bundler=vite|none|<module>` and the `bundler` config key choose the adapter (`STA0014` when it cannot load, `STA0015` when the bundle step fails); `statorc/api` exposes `compile` and `vendorEntry`. Diagnostics and `#line` inside the bundle map to the package's files, or `<package bundle>`. A free `__filename`/`__dirname` is the new not-yet `STA1218`. CommonJS routing is narrowed to files that read `require`, `module` or `exports`. `export *`, `import()` and attributed imports of packages stay `STA1214`. The card moves to done.md.
+- **v4.41** (2026-10-02): **The creator's answers to plan-notes 320; checker errors in the vendor module are skipped** (plan-notes 320). Q1: the narrowed CommonJS marker rule stays. Q2: `--node` gates CommonJS routing of project files (T11.5 implements it). Q3: `export * from 'p'`, `import('p')` and attributed package imports become a T12.3 line item with a Check line. Q4 lands: a type-checker complaint (code ≥ 2000) inside the vendor module no longer fails the build; the binding it names goes dynamic, so the binary does what Node does. TDZ reads and `const` assignments stay `STA0012`, because Node throws there. docs/BUNDLER.md §6, MODES.md §3, DIAGNOSTICS.md (`STA0012`).
 - **v4.50** (2026-10-02): **T11.5, the steps that do not need the bundler** (plan-notes 312). `--node` on `build` and `explain`, and the config key `node`. Under it `node:*` and bare built-ins resolve to `packages/node` through `paths` entries, the mechanism `std/` uses. An unlanded module or member is `STA1214` naming Phase 11 (T11.6); without the flag a built-in is `STA1214` naming the flag. `STA1110` is implemented and narrowed: `ts` mode always, `js` mode without `--node`; with it, `STA1214` naming T11.5's `createRequire` step. `__filename`/`__dirname` are relative to the executable (docs/MODES.md §6); `STA1218` stays under the flag until the CommonJS wrapper injects them. One package-root rule for runtime, `std` and `node`. The card stays open for the CommonJS run-time steps, which T12.1 unblocked.
 - **v4.51** (2026-10-02): **T11.6, first slice: `packages/node` and `node:path`** (plan-notes 313). `packages/node` is created: strict TypeScript over `std`, a workspace package and moon project, a selfhost target (`node-goldens` smoke) and its own `stator.config.json` (`"node": true`). `node:path` and `node:path/posix` are POSIX-complete (14 of 16 members; `win32` and `matchesGlob` not-yet), proved by the `node_path*` goldens against Node 26.7.0, claimed in `node_coverage.json`, and `docs/NODE.md` is regenerated. Fixtures named `node_*` build with `--node`. A named import the module lacks is not-yet even when the checker answers TS2614 (the module has a default export).
 - **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.

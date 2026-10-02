@@ -315,6 +315,73 @@ test('compile: a diagnostic in a runtime helper says it has no source mapping', 
   assert.match(diagnostic.message, /\(bundler runtime helper, no source mapping\)$/);
 });
 
+/** A leftpad whose `pad` trips the checker twice: a relational `<` across types and `++` on an
+ * object. Both are plain JavaScript (Node compares as strings and answers `NaN`), and
+ * neither is an error a package's user could fix. */
+const ODD_LEFTPAD = [
+  'export function pad(s, n) {',
+  '  console.log([1] < {});',
+  '  let o = { n: 1 };',
+  '  o++;',
+  '  console.log(o);',
+  "  return s + '!';",
+  '}',
+  '',
+].join('\n');
+
+test('a checker error in the vendor module does not fail the build; the binary prints what Node prints', async () => {
+  const main = "import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n";
+  const root = leftpadProject(main);
+  writeFileSync(join(root, 'node_modules/leftpad/index.js'), ODD_LEFTPAD);
+  const out = join(root, 'app');
+  const result = await compile({
+    entry: join(root, 'main.js'),
+    mode: 'js',
+    bundler: stubAdapter(),
+    out,
+  });
+  assert.equal(result.ok, true, result.stderr);
+  assert.deepEqual(result.diagnostics, []);
+  const node = spawnSync(process.execPath, [join(root, 'main.js')], { encoding: 'utf8' });
+  assert.equal(node.stdout, 'true\nNaN\nx!\n');
+  const binary = spawnSync(out, { encoding: 'utf8' });
+  assert.equal(binary.stdout, node.stdout, binary.stderr);
+});
+
+test('the same checker error in a project file is still STA0012', async () => {
+  const root = leftpadProject(
+    "import { pad } from 'leftpad';\nconsole.log(pad('x', 3), [1] < {});\n",
+  );
+  writeFileSync(join(root, 'node_modules/leftpad/index.js'), ODD_LEFTPAD);
+  const result = await compile({
+    entry: join(root, 'main.js'),
+    mode: 'js',
+    bundler: stubAdapter(),
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.diagnostics.map((d) => [d.code, d.file, d.line]),
+    [['STA0012', `${root}/main.js`, 2]],
+  );
+});
+
+test('a vendor read in the temporal dead zone stays reported: Node throws there', async () => {
+  const root = leftpadProject("import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n");
+  writeFileSync(
+    join(root, 'node_modules/leftpad/index.js'),
+    'export function pad(s, n) {\n  const w = n + late;\n  const late = 0;\n  return s.padStart(w);\n}\n',
+  );
+  const result = await compile({
+    entry: join(root, 'main.js'),
+    mode: 'js',
+    bundler: stubAdapter(),
+  });
+  assert.deepEqual(
+    result.diagnostics.map((d) => [d.code, d.file, d.line]),
+    [['STA0012', `${root}/node_modules/leftpad/index.js`, 2]],
+  );
+});
+
 test('compile: a ready bundle needs no adapter', async () => {
   const root = leftpadProject("import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n");
   const code = 'export function pad(s, n) { return s; }\n';
