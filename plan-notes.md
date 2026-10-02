@@ -10057,3 +10057,8 @@ record the growth with `--update`.
   work is limited to the subset Stator already compiles.
 
 The tool does not decide this. `--update` rewrites the baseline either way.
+
+**Answered by the creator (2026-10-02): yes.** A change that grows a count runs `--update` in
+the same change, and the growth is reviewed in `baseline.json`'s diff. A shrink must still be
+recorded too. `.jscpd-baseline.json` keeps its shrink-only rule; the two baselines answer
+different questions. The rule is in plan.md's Task 6.19 stub.
