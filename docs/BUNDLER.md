@@ -1,8 +1,10 @@
 # BUNDLER.md — the bundler contract for `js` mode (Phase 12)
 
-> **Status: design, nothing implemented.** This is T12.0's docs-first output (§15.6). It fixes
-> what T12.1 (`packages/compiler`: `statorc/api`) and T12.2 (`packages/vite-stator`) build, and
-> it records the measured spike the decisions rest on. The choice is plan-notes 296; the
+> **Status: T12.1 implemented (plan-notes 320); T12.2 and T12.3 open.** This is T12.0's
+> docs-first output (§15.6). It fixes what T12.1 (`packages/compiler`: `statorc/api`) and T12.2
+> (`packages/vite-stator`) build, and it records the measured spike the decisions rest on. Where
+> T12.1 had to decide something this document left open, the section says so and names
+> plan-notes 320. The choice is plan-notes 296; the
 > creator settled §9's three questions on 2026-10-02. On any disagreement with `plan.md` §11d,
 > the plan wins.
 
@@ -183,6 +185,17 @@ file is CommonJS by Node's rule (https://nodejs.org/api/packages.html, docs v26.
 - `.js` under `"type": "commonjs"`;
 - `.js` with no `"type"` and no ES-module syntax. Syntax detection is unflagged since v22.7.0.
 
+**As implemented (T12.1, plan-notes 320).** The third case is narrowed: a `.js` with no `"type"`
+and no ES-module syntax is routed only when it reads a free `require(…)`, `module.exports` or
+`exports`. A script that touches none of them means the same thing as a module or a CommonJS
+file, and routing it would make every plain script — Test262's harness, a tmpdir-staged test
+fixture — need a bundler. ES-module syntax is an import or export statement, `import.meta`, or a
+top-level `await`. `src/frontend/vendor.ts` `isCommonJsFile`. A CommonJS entry becomes one
+side-effect import of itself in the vendor entry (`import "./main.cjs";`), and the program's
+entry is a one-line import of the vendor module. T12.1 routes these files in `js` mode with or
+without `--node`, which does not exist yet (plan.md §11d T12.1 step 2; the last paragraph below
+is T11.5's to reconcile, plan-notes 320).
+
 The bundle runs on Node unchanged (= Node). With `esmExternalRequirePlugin`, Stator then
 reports four things:
 
@@ -241,6 +254,28 @@ A name is mangled only when two packages export it, because Rolldown then emits
 T12.1 lowers that form. Only the named imports enter the vendor entry, so a package's unused
 exports never reach Stator.
 
+**As implemented (T12.1, `src/frontend/vendor.ts`).** A mangled name is `<stem>$<tail>`: the
+stem is the source spelled as an identifier (`@scope/util` → `_scope_util`), the tail `default`,
+`ns`, or the export name; a clash takes `$2`, `$3`. A named export that is not an identifier
+(`'a-b'`) is mangled too. A CommonJS project file is a source like a package, spelled relative to
+`resolveDir`. Each project declaration is rewritten in place to name the vendor module, every
+line kept (`import { pad } from "./__stator_vendor__.js";`); a mixed clause keeps its type-only
+names on an `import type` of the original specifier. Named re-exports and `export * as ns from
+'p'` are rewritten the same way. `export * from 'p'` (only the bundler knows the names),
+`import('p')` and a declaration with import attributes are not, and stay STA1214.
+
+**Loading the adapter.** `vite` loads the `vite-stator` package; any other value is a module: a
+path (starting with `.` or absolute; relative to the current directory, or to the config file
+for the config key) or a package name, resolved from the entry's directory first and then from
+the compiler's own. The adapter is the module's default export, or a named `adapter`. Everything
+it answers is checked before use (golden rule 4): `code` a string, `map` a version-3 map, `inputs`
+a string array, else STA0015.
+
+**The library entry.** `statorc/api` (`packages/compiler/package.json` `exports`) has
+`compile({ entry, mode, bundle?, bundler?, out? })`, which answers `{ ok, diagnostics, stderr,
+error?, c? }` and never throws for a user error, and `vendorEntry(entry, mode)`, which answers
+what the bundler would be asked to bundle, or `undefined`.
+
 **CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
 
 - The default in `js` mode is `vite`, which loads `vite-stator`.
@@ -268,7 +303,10 @@ wraps it behind one function in `src/support/`.
 **Rules for T12.1:**
 
 - `sources` are relative to the map file (`../src/dep.js` measured). Resolve them against the
-  map's location and `sourceRoot`.
+  map's location and `sourceRoot`. The adapter hands back a map with no file of its own, so
+  T12.1 resolves `sources` against the vendor entry's `resolveDir`, then `sourceRoot`
+  (plan-notes 320); an absolute source or a `file:` URL stands as is, and a source with a
+  `\0` prefix or another URL scheme counts as unmapped.
 - A position with no mapping must say so. All 9 `cjs` diagnostics sit in Rolldown's
   `\0rolldown/runtime.js` region and map to nothing (measured). Report them as
   `<package bundle>:line:col (bundler runtime helper, no source mapping)`, never as a

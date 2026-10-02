@@ -207,6 +207,7 @@ import {
   objectFieldsPrefix,
 } from '../hir/types.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
+import { UNMAPPED_FILE, type PositionMapper } from '../support/sourcemap.ts';
 import { diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import type { CaptureMap, FunctionLike } from './captures.ts';
 import { analyzeCaptures, enclosingFunction, isFunctionLike, RECEIVER_NAME } from './captures.ts';
@@ -293,6 +294,46 @@ function lowerDiagnostic(
   message: string,
 ): Diagnostic {
   return diagnosticFromNode(node, sourceFile, code, diagClass, lowerDiagMode, message);
+}
+
+/** The vendor module and its source map (plan.md §11d T12.1 step 5, docs/BUNDLER.md §6): spans
+ * in that one file name the original package file and line, so `#line` and the runtime's
+ * call-site strings point where the code was written. Set once per `lowerProgram` call. */
+export interface SpanRemap {
+  /** The vendor module's fileName, as the program holds it. */
+  readonly file: string;
+  readonly map: PositionMapper;
+}
+
+let spanRemap: SpanRemap | undefined;
+
+/** Where `start` in `sourceFile` came from: itself, or through the vendor map. A position the
+ * bundler mapped to nothing (a runtime helper it wrote) answers `<package bundle>` and the
+ * bundle's own line, never a user file. */
+function remapPosition(
+  start: number,
+  sourceFile: ts.SourceFile,
+): { readonly file: string; readonly line: number; readonly column: number } {
+  const { line, character } = sourceFile.getLineAndCharacterOfPosition(start);
+  if (spanRemap === undefined || sourceFile.fileName !== spanRemap.file) {
+    return { file: sourceFile.fileName, line: line + 1, column: character + 1 };
+  }
+  return (
+    spanRemap.map(line + 1, character + 1) ?? {
+      file: UNMAPPED_FILE,
+      line: line + 1,
+      column: character + 1,
+    }
+  );
+}
+
+/** `sourceLocation`, through the vendor map: the `file:line:col` a failed check reports. */
+function checkLocation(node: ts.Node, sourceFile: ts.SourceFile): string {
+  if (spanRemap === undefined || sourceFile.fileName !== spanRemap.file) {
+    return sourceLocation(node, sourceFile);
+  }
+  const at = remapPosition(node.getStart(sourceFile), sourceFile);
+  return `${at.file}:${String(at.line)}:${String(at.column)}`;
 }
 
 export function lowerSourceFile(
@@ -409,9 +450,11 @@ export function lowerProgram(
   checker: ts.TypeChecker,
   runtimeDynamicSymbols: ReadonlySet<ts.Symbol> = new Set(),
   mode: Mode = 'ts',
+  remap?: SpanRemap,
 ): { readonly module: Module | null; readonly diagnostics: readonly Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
   lowerDiagMode = mode;
+  spanRemap = remap;
   const bindings = Scope.root();
   // Steps 44c/45/46 run before anything is lowered: an Unknown (or mismatched) value reaching
   // a fixed-shape slot widens the receiving binding, and the widening must be visible to the
@@ -1159,7 +1202,7 @@ function boundaryCheck(
     type: expected,
     span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
     value,
-    where: sourceLocation(node, sourceFile),
+    where: checkLocation(node, sourceFile),
   };
 }
 
@@ -5929,7 +5972,7 @@ function lowerExpression(
         type: narrowing.narrowed,
         span: ident.span,
         value: ident,
-        where: sourceLocation(node, sourceFile),
+        where: checkLocation(node, sourceFile),
       };
     }
     return ident;
@@ -6050,7 +6093,7 @@ function lowerExpression(
       type: assertion.asserted,
       span: makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile),
       value: operand,
-      where: sourceLocation(node, sourceFile),
+      where: checkLocation(node, sourceFile),
     };
   }
 
@@ -9611,14 +9654,14 @@ function lowerFunctionBody(
 }
 
 function makeSpan(start: number, width: number, sourceFile: ts.SourceFile): Span {
-  const line = sourceFile.getLineAndCharacterOfPosition(start).line + 1; // 1-indexed
+  const { file, line } = remapPosition(start, sourceFile); // 1-indexed
   return {
     start,
     length: width,
     line,
     // The file, per span rather than per module: a merged program's statements come from many
     // files, and a #line directive naming the wrong one would point every debugger at it.
-    file: sourceFile.fileName,
+    file,
   };
 }
 

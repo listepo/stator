@@ -11,6 +11,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BuildError, build, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
+import type { BundlerChoice } from '../../compiler/src/cli/bundler.ts';
 import { nodePath } from './node-path.ts';
 import { runProcess } from './parallel.ts';
 
@@ -31,6 +32,8 @@ export interface BuildFixtureArgs {
   readonly linkFlags?: readonly string[];
   readonly emitHeader?: string;
   readonly unitName?: string;
+  /** `js` mode's bundler; the compiler's default (`vite`) when absent. */
+  readonly bundler?: BundlerChoice;
 }
 
 /* In-process compile (plan.md §9 Task 6.6): `build()` under `withDiagnosticCapture` — the
@@ -51,6 +54,7 @@ export async function buildFixture(args: BuildFixtureArgs): Promise<void> {
         linkFlags: args.linkFlags ?? [],
         ...(args.emitHeader !== undefined ? { emitHeader: args.emitHeader } : {}),
         ...(args.unitName !== undefined ? { unitName: args.unitName } : {}),
+        ...(args.bundler !== undefined ? { bundler: args.bundler } : {}),
       }),
     ));
   } catch (error) {

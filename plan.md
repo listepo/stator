@@ -63,6 +63,9 @@ entry.ts / entry.js (+ module graph)
         │
         ▼
   ts.createProgram  (typescript npm package, in-process; Stator owns compilerOptions)
+        │   js mode, graph imports a package or holds a CommonJS file (T12.1, docs/BUNDLER.md):
+        │   vendor entry ──► bundler adapter (--bundler) ──► one virtual ESM module + source map;
+        │   project imports rewritten in place, program reloaded over the overlay
         │
         ├─► ts.SourceFile ASTs
         └─► TypeChecker
