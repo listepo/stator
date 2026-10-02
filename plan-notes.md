@@ -9932,6 +9932,7 @@ actually ran.
 | (c) `jsrt_date.c` function edit | golden 397/397 (every binary links `jsrt_date.o` through `jsrt_print`); `jsrt_json.c`: 10/397 |
 | (e) one compiler function, `test:impact` | 14.8 s (unit 2, subset 5, golden 5, asan 5) |
 | (e) full suite through the same driver | 223.4 s |
+| After rebasing onto `main` eb27394: re-record / mutations (seed 293) / (e) | 217 s / 10 of 10 killed, 0 unsound, 538 s / 22.7 s |
 
 Deviations from the card, each one a soundness fix found while building it:
 
@@ -9961,6 +9962,10 @@ Deviations from the card, each one a soundness fix found while building it:
   `module`, `path`, `url` (and `inspector` in-process).
 - **Maps recorded on a dirty tree are refused**, and a red recording writes no map: coverage stops
   where a test failed, so it would under-select exactly the broken code.
+- **The std archive.** `main` added `packages/std` (`libjsrt_std.a`, Zig). The impact tools build
+  it with the runtime, as `pnpm run runtime` does; its link is not traced, so a change under
+  `packages/std/zig` or its justfile selects everything, and a change to `packages/std/src/*.ts`
+  selects the tests whose compile read it.
 - **Not a moon task.** Its result depends on the working-tree diff and a machine-local map, which
   moon's cache cannot key on.
 

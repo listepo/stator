@@ -2482,8 +2482,15 @@ Check evidence (Node 26.7.0, darwin-arm64, 16 cores; map recorded at 7a992cc in 
   the full run through the same driver (`--map=/nonexistent.json`): **223.4 s** (unit 23.3,
   runtime 9.7, subset 6.9, golden 37.5, ffi 4.3, leak 24.7, asan 116.0).
 
-Gate: `tsc` (compiler + tests), `oxlint --deny-warnings`, `oxfmt --check`, `cpd` clean; vitest 45
-files / 620 tests, subset 744 (707 passed, 37 expected-fail), golden 397 passed.
+Re-checked after rebasing onto `main` at eb27394 (the std package; the suite is now unit 47
+files, subset 761, golden 402), with the map re-recorded there (217 s): a second mutation run
+`mutate.ts --seed=293 --count=8 --native=2` → `10 mutations (seed 293), 10 broke at least one
+test, 0 unsound, 538 s`; (b) still 0 selected in every harness; (e) the same one-function change
+ran unit 2/47, subset 5/761, golden 5/402, asan 5/402 in 22.7 s (now also building
+`libjsrt_std.a`).
+
+Gate: `tsc` (compiler, tests, std), `oxlint --deny-warnings`, `oxfmt --check`, `cpd` clean; vitest
+47 files / 627 tests, subset 761 (724 passed, 37 expected-fail), golden 402 passed.
 
 ### Task 6.18 — `stator.config.json`: every CLI option in one validated file ✅ (landed 2026-10-02)
 
