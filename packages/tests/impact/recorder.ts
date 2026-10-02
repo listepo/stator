@@ -102,12 +102,14 @@ function wrap(
   target: object,
   key: string,
   observe: (args: readonly unknown[], result: unknown) => void,
+  when: 'before' | 'after' = 'after',
 ): void {
   const original: unknown = Reflect.get(target, key);
   if (typeof original !== 'function') return;
   const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+    if (when === 'before') observe(args, undefined);
     const result: unknown = Reflect.apply(original, this, args);
-    observe(args, result);
+    if (when === 'after') observe(args, result);
     return result;
   };
   for (const symbol of Object.getOwnPropertySymbols(original)) {
@@ -136,20 +138,16 @@ function onExit(child: unknown, argv: readonly unknown[]): void {
 }
 
 function installHooks(): void {
+  // Reads are noted BEFORE the call: a read of a file that does not exist yet (a
+  // `stator.config.json` looked up beside the input) is a dependency on its absence, so adding
+  // that file later must select the test.
   for (const target of [fs, fsPromises]) {
-    wrap(target, 'readFile', (args) => {
-      noteRead(args[0], false);
-    });
-    wrap(target, 'readdir', (args) => {
-      noteRead(args[0], true);
-    });
+    wrap(target, 'readFile', (args) => noteRead(args[0], false), 'before');
+    wrap(target, 'readdir', (args) => noteRead(args[0], true), 'before');
   }
-  wrap(fs, 'readFileSync', (args) => {
-    noteRead(args[0], false);
-  });
-  wrap(fs, 'readdirSync', (args) => {
-    noteRead(args[0], true);
-  });
+  wrap(fs, 'readFileSync', (args) => noteRead(args[0], false), 'before');
+  wrap(fs, 'readdirSync', (args) => noteRead(args[0], true), 'before');
+  wrap(fs, 'existsSync', (args) => noteRead(args[0], false), 'before');
   wrap(childProcess, 'spawnSync', (args, result) => {
     const status: unknown =
       typeof result === 'object' && result !== null && 'status' in result ? result.status : null;
