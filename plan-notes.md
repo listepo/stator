@@ -12404,6 +12404,16 @@ always answers.
   the absolute target with `/`. `relativeSpecifier` checks `isAbsolute` on what `relative`
   answers.
 
+**The cross-drive fix needed a second step**, found by the first CI run of this change: the
+location rewrite's absolute `D:/…/internal/location.ts` was then answered by the checker with
+TS2877 ("uses a '.ts' extension … not a relative path"), because `rewriteRelativeImportExtensions`
+is on. With the extension dropped, the gate refused it as a package (STA1214), since every
+non-relative specifier is a package to it. So the helper's absolute specifier is the checker's
+path without `.ts` (`nodeLocationModule`), which Bundler resolution finds, and the gate accepts
+exactly that string. It names the compiler's own file, the one a relative import of the helper
+already reaches. Forcing that branch on macOS passes both `--node` bundler tests, including the
+run of the binary.
+
 The tests now say which form they expect: `join(root, …)` for what comes out, and a
 `checkerName` helper (`/` for `\`) for `modulePath`, the `rewrites` keys and `#line`. No
 assertion became looser: the `#line` regexes, which matched any character at each `.` of the

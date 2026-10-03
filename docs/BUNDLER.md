@@ -322,9 +322,11 @@ plan-notes 352):
   re-created with), and the file names in the C: `#line` and the locations the binary prints at
   run time. clang and debuggers accept forward slashes on Windows.
 - **Specifiers the compiler writes** (the vendor entry's `from` for a CommonJS project file, the
-  rewritten imports, the `--node` location helper's import) are relative with forward slashes,
-  or the absolute target with forward slashes when no relative path exists (a file on another
-  Windows drive).
+  rewritten imports, the `--node` location helper's import) are relative with forward slashes.
+  When no relative path exists (a file on another Windows drive) they are the absolute target
+  with forward slashes, and the location helper's import also drops `.ts`, since the checker
+  flags a non-relative `.ts` import as one emit cannot rewrite (TS2877). The gate accepts that
+  one absolute spelling, which names the compiler's own file.
 - **In**, either form: `entry` and a map's `sources` are resolved before use, and
   `BundleResult.inputs` may list absolute paths in either spelling.
 
