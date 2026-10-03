@@ -12031,6 +12031,54 @@ write would replace either one in place.
 - `test:selfhost`: 14 targets match.
 - typecheck, lint and dupes clean.
 
+## 336. Task 6.26 lands: self-hosted fonts, a meta CSP and a browser check for the landing page (2026-10-04)
+
+**Findings (F14, F15, F16, plan-notes 330).** The theme toggle derived its state from storage
+alone, so a throwing `localStorage` pinned it to `light`. The header had no wrap, so it ran 10 px
+past a 360 px screen and 50 px past a 320 px one. IBM Plex came from Google, and nothing
+restricted where the page could load from.
+
+**Decisions the card left open.**
+
+- **Fonts from `@fontsource/ibm-plex-sans` and `@fontsource/ibm-plex-mono` (5.3.0, exact).**
+  They are the maintained npm packaging of IBM's OFL-1.1 release (https://fontsource.org,
+  https://github.com/fontsource/font-files, checked 2026-10-04). Astro bundles their woff2 files
+  into `dist/_astro/`, split by `unicode-range`, so a page fetches only the subsets it renders.
+  Copying files into `site/public/fonts/` by hand would have meant writing the `@font-face`
+  rules ourselves and re-copying them on every update; the packages do both.
+- **The CSP is Astro's `security.csp`, not a hand-written meta.** Astro 7.3.3 hashes the scripts
+  and styles it bundles into `script-src`/`style-src`, so a hand-written policy would go stale
+  with every build. It does not hash an `is:inline` script, and the theme boot script must stay
+  inline: it sets `data-theme` before first paint. Its source is therefore one exported string,
+  `site/src/scripts/theme-boot.ts`, that the layout renders with `set:html` and the config hashes
+  into `scriptDirective.hashes`; the two cannot disagree.
+- **The scripts open `<body>`.** Astro emits the CSP meta last in `<head>`, and a meta CSP only
+  governs elements after it. In `<head>` the boot script ran unchecked and `theme.js` was never
+  covered. At the top of `<body>` the boot script still runs before anything paints.
+- **`playwright-core` 1.63.0 is a site devDependency.** The Check needs a real browser: the
+  scroll width at 320 px, a `securitypolicyviolation`, and storage that throws are layout and
+  browser behavior, and no DOM emulation answers them. `playwright-core` is the maintained driver
+  without a browser download (https://playwright.dev/docs/library, checked 2026-10-04). It drives
+  the installed Chrome (`channel: 'chrome'`, or `CHROME_PATH`), which GitHub's `ubuntu-latest`
+  image ships. It stays out of the compiler's dependency budget: `site/` has its own lockfile,
+  and the check runs only in `.github/workflows/pages.yml`.
+- **The check is strict TypeScript run by Node's type stripping** (`site/scripts/check.ts`), per
+  AGENTS.md golden rule 9. `site/public/js/theme.js` stays JS: it is a browser-loaded asset under
+  `site/public/`, the rule's named exception.
+
+**Evidence (macOS arm64, Node 26.7.0, Astro 7.3.3, Chrome 154.0.8037.93).**
+
+| Probe (`pnpm run check:browser`) | Before | After |
+|---|---|---|
+| requests to another origin | 2 (`fonts.googleapis.com`) | 0 |
+| IBM Plex Sans and Mono loaded | no (the Google requests are aborted) | yes, from `dist/` |
+| CSP `default-src 'self'` | absent | present, 0 violations |
+| `scrollWidth` at 320 / 360 px | 370 / 370 | 320 / 360 |
+| theme cycle, storage blocked | `light,light,light` | `light,dark,system` |
+| toggle visible without JS | yes | no |
+
+Before: 7 checks failed. After: `site check: all passed`.
+
 ## 340. Task 7.4: a static library for C consumers (2026-10-04)
 
 **Asked by the creator (2026-10-04):** can the compiler build code into a static library and ship

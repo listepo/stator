@@ -1,5 +1,13 @@
 ---
+// Self-hosted IBM Plex (OFL-1.1, via Fontsource): no request leaves the site's origin.
+import '@fontsource/ibm-plex-sans/400.css';
+import '@fontsource/ibm-plex-sans/500.css';
+import '@fontsource/ibm-plex-sans/600.css';
+import '@fontsource/ibm-plex-mono/400.css';
+import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource/ibm-plex-mono/600.css';
 import '../styles/global.css';
+import { THEME_BOOT } from '../scripts/theme-boot.ts';
 
 interface Props {
   title?: string;
@@ -19,33 +27,17 @@ const base = import.meta.env.BASE_URL;
     <meta name="color-scheme" content="light dark" />
     <meta name="generator" content={Astro.generator} />
     <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
-    {/* Apply stored theme before first paint to avoid FOUC */}
-    <script is:inline>
-      (function () {
-        try {
-          var KEY = 'stator-theme';
-          var pref = localStorage.getItem(KEY) || 'system';
-          if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = 'system';
-          var dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-          var resolved = pref === 'system' ? (dark ? 'dark' : 'light') : pref;
-          document.documentElement.setAttribute('data-theme', pref);
-          document.documentElement.setAttribute('data-theme-resolved', resolved);
-          document.documentElement.style.colorScheme = resolved;
-        } catch (e) {
-          /* private mode / blocked storage */
-        }
-      })();
-    </script>
-    <script defer src={`${base}js/theme.js`}></script>
     <title>{title}</title>
   </head>
   <body>
+    {/* Apply the stored theme before first paint to avoid FOUC (src/scripts/theme-boot.ts).
+       These scripts open <body>
+       rather than sit in <head> because Astro injects its CSP <meta> at the end of <head>, and
+       a meta policy governs only the elements after it: in <head> the boot script would run
+       before the policy that hashes it exists. A parser-blocking script here still runs
+       before anything below it paints. */}
+    <script is:inline set:html={THEME_BOOT} />
+    <script defer src={`${base}js/theme.js`}></script>
     <slot />
   </body>
 </html>

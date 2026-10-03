@@ -2825,6 +2825,59 @@ Check evidence:
 > **Check:** the audit's F7 and F8 tests pass, plus a decision test refusing `-fplugin=` in a
 > pragma; `docs/FFI.md` updated; `pnpm run ci` green.
 
+### Task 6.26 — The landing page works without storage, at 320 px and without third parties (F14, F15, F16) ✅ (landed 2026-10-04)
+
+Audit findings F14, F15 and F16 (plan-notes 330). With `localStorage` blocked the theme toggle
+cycled `light, light, light`, and it showed without JS. At 320 and 360 px the header overflowed
+(`scrollWidth 370`). Every visit asked `fonts.googleapis.com` for IBM Plex, and the page had no CSP.
+
+What landed (plan-notes 336):
+
+- **F14.** `site/public/js/theme.js` keeps the preference in a closure variable that `apply()`
+  sets, and `cycle()` steps from it; storage only persists it. The button renders `hidden` and the
+  script unhides it when it wires the click.
+- **F15.** `.top-inner`, `.header-actions` and `.nav` wrap (`flex-wrap`, `min-width: 0`), and the
+  theme label hides under 400 px, leaving the icon button.
+- **F16.** IBM Plex Sans and Mono (400/500/600, OFL-1.1) come from `@fontsource/ibm-plex-sans` and
+  `@fontsource/ibm-plex-mono` 5.3.0, imported by `BaseLayout.astro`; the Google Fonts links are
+  gone. `security.csp` in `astro.config.mjs` puts a `<meta>` CSP on every page: `default-src
+  'self'`, `base-uri 'self'`, `object-src 'none'`, `form-action 'none'`, Astro's own script and
+  style hashes, and the inline boot script's hash, computed from `src/scripts/theme-boot.ts`, the
+  one source both the layout and the config read. The layout's scripts open `<body>`, because
+  Astro puts the meta at the end of `<head>`.
+- **Check script.** `site/scripts/check.ts` (strict TS; `pnpm run check:browser`) serves `dist/`
+  under the base path and drives the installed Chrome through `playwright-core` 1.63.0. It
+  aborts and records every request to another origin, collects `securitypolicyviolation` events,
+  and checks the fonts, the CSP meta, the scroll width at 320 and 360 px, the theme cycle with
+  storage blocked and with it, and the toggle without JS. `.github/workflows/pages.yml` runs it
+  after the build.
+- Docs: `site/README.md` (the check, fonts and CSP), `docs/TOOLCHAIN.md` (a Site table).
+
+Check evidence (macOS arm64, Node 26.7.0, Astro 7.3.3, Chrome 154.0.8037.93): `pnpm build` →
+`1 page(s) built`; `pnpm run check:browser` → 9 checks `ok`, `site check: all passed`
+(`no request to another origin ()`, `no CSP violation ()`, `IBM Plex Sans and Mono load from
+the site`, `scrollWidth 320, clientWidth 320`, `scrollWidth 360, clientWidth 360`,
+`blocked-storage cycle is light,dark,system`, `the toggle is hidden without JS`). The same script
+over the pre-fix site fails 7 checks: the Google Fonts requests, the fonts (those requests are
+aborted), the missing CSP meta, `scrollWidth 370` at both widths, `light,light,light`, and a
+visible toggle without JS. Root `pnpm run lint` clean.
+
+> **Task 6.26 — The landing page works without storage, at 320 px and without third parties
+> (F14, F15, F16).**
+>
+> - **F14.** `site/public/js/theme.js` cycles from an in-memory state that `apply()` updates, so a
+>   blocked `localStorage` still cycles `light → dark → system`. The toggle is hidden until the
+>   script runs.
+> - **F15.** The header wraps (`flex-wrap`, `min-width: 0` on `.nav`) and drops the theme label
+>   text under ~400 px, so nothing overflows at 320 and 360 px.
+> - **F16.** IBM Plex is self-hosted under `site/` (OFL), the `fonts.googleapis.com` links go,
+>   and the layout carries a restrictive CSP meta (`default-src 'self'`, the inline boot script by
+>   hash).
+>
+> **Check:** the site builds; a check (in the site's own build or a script under `site/`) shows
+> no request to another origin, no horizontal scroll at 320 px, and the blocked-storage cycle
+> `light,dark,system`.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is
