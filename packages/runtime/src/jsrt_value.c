@@ -61,6 +61,9 @@ bool jsrt_strict_equals(jsrt_value a, jsrt_value b) {
  * Initialization — assert 48-bit pointer assumption and set up GC
  * ============================================================================ */
 
+/* Weak so that several private runtime copies in one process share one definition (jsrt_mem.h). */
+__attribute__((weak)) unsigned jsrt_gc_shared_kind_p48 = 0;
+
 void jsrt_init(void) {
   /* Verify the 48-bit pointer assumption against a real heap allocation.
    * This check must fail loudly at startup, never silently. */

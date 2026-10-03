@@ -122,7 +122,17 @@ const impl = if (boehm) struct {
         // on the platforms this runtime builds for (GC_INIT_CONF_ROOTS is non-empty only on
         // Cygwin/MinGW, AIX and dynamic-loading-less Android).
         gc.GC_init();
-        kind = @intCast(gc.GC_new_kind(gc.GC_new_free_list(), gc.GC_MAKE_PROC(gc.GC_new_proc(mark), 0), 0, 1));
+        // The kind is registered once per PROCESS, not once per runtime copy. A `--emit=lib` archive
+        // carries a private runtime (plan-notes 342), so one process can hold several copies of this
+        // file, and Boehm aborts with "Too many kinds" once MAXOBJKINDS (16 in 8.2) are taken -- the
+        // 13th library's init died there. `jsrt_gc_shared_kind_p48` (jsrt_mem.h) is a weak global the
+        // library build keeps exported, so the copies coalesce on one definition and the first to
+        // initialize registers the kind for all of them. Sharing is sound because every copy's `mark`
+        // masks the same 48-bit payload; a runtime that marks differently must rename the symbol.
+        if (c.jsrt_gc_shared_kind_p48 == 0) {
+            c.jsrt_gc_shared_kind_p48 = gc.GC_new_kind(gc.GC_new_free_list(), gc.GC_MAKE_PROC(gc.GC_new_proc(mark), 0), 0, 1) + 1;
+        }
+        kind = @intCast(c.jsrt_gc_shared_kind_p48 - 1);
         default_push_other_roots = gc.GC_get_push_other_roots();
         gc.GC_set_push_other_roots(pushRoots);
     }
