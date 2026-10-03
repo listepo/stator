@@ -117,6 +117,7 @@ node packages/compiler/src/cli/main.ts explain app.ts --json
 
 # Useful flags (see CLI help / AGENTS.md Commands)
 #   --emit=c --keep-c     keep generated C for inspection
+#   --emit=lib --emit-header=u.h -o libu.a  a static library, header and .pc for C (docs/FFI.md §8)
 #   --mode=ts|js          frontend policy
 #   --node                the Node platform: node:* resolves to packages/node
 #   --bundler=vite|none|<module>  js mode: the bundler for packages and (--node) CommonJS files

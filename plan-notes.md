@@ -12289,6 +12289,148 @@ design point is whether each library carries a private runtime (prelink and loca
 one external runtime. Step 3 of the card leaves it to measurement, because the deciding factor
 (two collectors in one process) cannot be settled on paper.
 
+## 341. Two units sharing one runtime crashed at the first collection (2026-10-04)
+
+**Found while measuring Task 7.4 step 3.** Two `--emit-header` objects (Task 7.2) linked with
+one `libjsrt.a` into one C program segfaulted (exit 139) at the first collection. Each unit's
+`stator_<unit>_init` calls `jsrt_init()`, and `jsrt_init` called `jsrt_gc_init` every time.
+The second call saved the current push-other-roots hook, which was already the runtime's own
+`pushRoots`, as its predecessor. `pushRoots` then called itself until the stack ran out. lldb
+stopped in `pushRoots` at `jsrt_gc.zig:102` with `EXC_BAD_ACCESS` (macOS 27.0.1 arm64,
+Boehm 8.2.12 from Homebrew).
+
+The unit-level guard in the generated init (Task 7.2 step 3) only stopped one unit from
+initializing twice. It could not see the other unit. The Task 7.2 comment said "a second
+`jsrt_init()` would chain the Boehm roots hook into itself". That described the failure,
+but nothing prevented it across units.
+
+**Fix:** `jsrt_gc_init` is now idempotent through a module-level flag in `jsrt_gc.zig`. The
+flag is single-threaded, like every v0 runtime entry. `GC_init` itself was already safe to
+call twice. bdwgc v8.2.12 `misc.c` starts `GC_init` with
+`if (EXPECT(GC_is_initialized, TRUE)) return;`
+(https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04). The bug was ours:
+we registered a second kind and installed the hook a second time.
+
+**Regression test:** `packages/tests/unit/export-stubs.test.ts`, "two --emit-header units share
+one libjsrt.a across forced collections". Two units each keep 5,000 strings, and the C `main`
+calls `GC_gcollect()` after every call when the archive links Boehm. Before the fix the test
+fails with `SIGSEGV`. After it, the test prints `a=5000 b=5000`.
+
+## 342. Task 7.4 step 3: each library carries a private runtime (2026-10-04)
+
+**Question.** Two Stator libraries in one C program each need the runtime. Either (a) every
+library prelinks a private copy and hides it, or (b) `--runtime=external` leaves the runtime out
+and the consumer links one shared `libjsrt.a`. Both were measured before choosing.
+
+**Host.** macOS 27.0.1 arm64; `clang version 21.1.8` (conda, the `mise.toml` pin) and Apple
+clang 21.0.0 (clang-2100.3.34.2); `ld-27037.1` (Xcode 27.0); Apple `ar` (cctools); bdw-gc 8.2.12
+(Homebrew); pkg-config 3.0.7.
+
+**(b), one shared runtime.** Two `--emit-header` objects linked against one `libjsrt.a` crashed
+at the first forced collection. That was a Task 7.2 bug, not a property of (b), and it is fixed
+separately (plan-notes 341). With the fix, (b) works, but it leaves the consumer to find and
+link a `libjsrt.a` built from the same commit, and the runtime's ~900 global symbols land in the
+consumer's namespace. Neither is visible in the library's own files.
+
+**(a), a private runtime per library.** `cc -r unit.o libjsrt.a` with
+`-Wl,-exported_symbols_list` on Mach-O: the list marks every other global private extern, and
+`ld -r` makes private externs static unless `-keep_private_externs` is given (local `man ld`,
+ld-27037.1). On ELF, `objcopy --keep-global-symbols=<file>` makes every other global local
+(https://sourceware.org/binutils/docs/binutils/objcopy.html, checked 2026-10-04). Measured:
+
+| What | Result |
+|---|---|
+| globals left in `libconsumer.a` | 7: the unit's 6 `stator_consumer_*` symbols and `jsrt_gc_shared_kind_p48` |
+| runtime symbols made non-external | 894 at first measurement (1,313 local symbols in the stripped member) |
+| two libraries in one program, forced Boehm collections | works, default and ASan runtime |
+| app through the library vs object + `libjsrt.a` (`-dead_strip`) | 240 KB vs 245 KB |
+| cost of each extra library in one program | about 200 KB (its own runtime) |
+| member before the final link | about 390 KB |
+
+**Decision: (a).** The coordinator approved it on this evidence. (b) is not offered: there is no
+`--runtime=external` flag, and docs/FFI.md §8 says why.
+
+**Three things (a) needed:**
+
+1. *A shared Boehm object kind.* Each runtime copy registered its own kind, and bdw-gc allows
+   `MAXOBJKINDS` = 16 (https://github.com/ivmai/bdwgc/blob/v8.2.12/include/private/gc_priv.h).
+   `GC_new_kind` aborts with "Too many kinds" past it
+   (https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04), so the 13th
+   library's init killed the process. A clean `last_error` before the abort was considered and
+   not needed: the copies now share one kind through a weak global, `jsrt_gc_shared_kind_p48`
+   (`packages/runtime/src/jsrt_mem.h`), which the library keeps exported so the copies coalesce.
+   The first copy to initialize registers the kind, and the rest reuse it. Measured: 15 units in
+   one process initialize and collect. Sharing is sound because every copy's mark procedure
+   masks the same 48-bit payload; a runtime that marks differently must rename the symbol.
+   The weak definition is in C (`jsrt_value.c`): Zig 0.16.0 emits a weak data `@export` as a
+   non-external symbol on Mach-O, which does not coalesce.
+2. *`--no-default-config` on the prelink.* The pinned conda clang's configuration file adds
+   `-Wl,-rpath`, and `ld -r` refuses it ("-rpath can only be used when creating a dynamic final
+   linked image"). Without the config file, conda clang's output is byte-identical to Apple
+   clang's.
+3. *No debug information.* The runtime's Zig object carries debug stabs even in a release build,
+   naming `packages/runtime/src/` and the archive path on the build machine. The prelink passes
+   `-Wl,-S` (ld(1): do not put debug information in the output; GNU ld documents the same
+   flag). The sanitized flavor keeps it for line numbers in reports, and so its archive is not
+   byte-reproducible (the debug map also names the scratch directory).
+
+**The stack guard (Task 6.23, rebased onto `2efaabb`).** Each copy's `jsrt_stack_init` sets
+its own thread-local `jsrt_stack_limit` from the same thread bounds, and installs its own
+SIGSEGV/SIGBUS handler, saving the previous one; a fault outside its guard region restores the
+previous handler and returns, so the copies chain. Proof: `keeper.ts` exports `deep()`, which
+recurses without bound; in `two.c` it answers the sentinel with "Maximum call stack size
+exceeded" in `stator_keeper_last_error()`, and the consumer library answers correctly right
+after. Default and ASan runtime, macOS.
+
+**Source paths.** The archive holds the unit's own source path where a call site records its
+`file:line` for error stacks, as a binary does. That is program data, not a build input, and the
+static-lib check exempts exactly those strings; every other path into the repository is refused.
+
+**Determinism.** Two builds into different directories give byte-identical `.a`, `.h` and
+`.pc`. Apple's `ar` refuses the `D` modifier; it zeroes the member date, uid and gid when
+`ZERO_AR_DATE` is set
+(https://raw.githubusercontent.com/apple-oss-distributions/cctools/main/misc/libtool.c, checked
+2026-10-04). GNU `ar` takes `D` (https://sourceware.org/binutils/docs/binutils/ar-cmdline.html,
+checked 2026-10-04). Plain Apple `ar rcs` gave different bytes on every build.
+
+**The `.pc`.** `prefix=${pcfiledir}` makes it relocatable. `Libs` is the binary link's own list
+(`build.ts` `systemLinkFlags`, shared with `linkArguments`), so the two cannot drift.
+
+**Proof.** `packages/tests/ffi/example-c-consumer/static-lib.ts`, run by the ffi CI jobs (Linux
+and macOS) and by the ASan gate.
+
+**Linux evidence (PR #105, CI run 37148352874 on `3d87e50`, 2026-10-03).** ubuntu-24.04 x64 and
+arm64; Ubuntu clang 18.1.3 (1ubuntu1); GNU ld, objcopy and ar from GNU Binutils for Ubuntu 2.42.
+`ffi (linux/x64)` and `ffi (linux/arm64)` print `ffi static-lib: ok (two libraries, forced Boehm
+collections)`, and `asan (linux/x64)` and `asan (linux/arm64)` print `ffi static-lib: ok (asan,
+two libraries, forced Boehm collections)`. So the ELF path (`cc -r`, then
+`objcopy --keep-global-symbols`, then `ar rcsD`) holds two private runtimes in one program. Both
+runtimes' collections and both stack guards are confirmed, and the archive is byte-identical
+across two builds.
+
+**The sanitized runtime on ELF.** The first asan run (linux/x64, on `fdeb612`) failed at the
+consumer link of `two.c` with "`jsrt_class_range_error` ... defined in discarded section
+`.data.rel.ro.jsrt_class_range_error[jsrt_class_range_error]`". Clang's ASan dead-strips globals
+by default (`-fsanitize-address-globals-dead-stripping`, on by default in
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/clang/lib/Driver/SanitizerArgs.cpp).
+On ELF it puts each instrumented global in a COMDAT group named after the symbol
+(`instrumentGlobalsELF`,
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp,
+checked 2026-10-03). Two prelinked copies carry same-named groups. The final link keeps one copy
+and discards the other, whose code still refers to it. The sanitized flavor now builds with
+`-fno-sanitize-address-globals-dead-stripping` (`packages/runtime/justfile`), so ASan registers
+globals through a metadata array instead. The release flavor is not instrumented and has no such
+groups.
+
+## 343. Task 7.4 lands (2026-10-03)
+
+The Check passes. The step 3 evidence and the decision are in 342, and the GC-init fix is in 341.
+The Linux proof is CI run 37148352874: both `ffi (linux/*)` and both `asan (linux/*)` jobs print
+`ffi static-lib: ok`. The macOS proof is a local run (default and ASan), and the macOS ffi and
+asan CI jobs passed the same step in CI run 37153833737 (Apple clang 15.0.0, ld-1053.12). The card moves to done.md, and plan.md keeps the stub.
+Changelog: v4.79. Left out of this task and not planned: a Windows library (STA1219) and a
+`jsrt_value` surface under `--emit=lib` (STA1220). Both are refusals, so neither fails at run time.
+
 ## 344. Two bugs found while landing 6.24 become Tasks 6.27–6.28 (2026-10-04)
 
 **Source.** The agent landing Task 6.24 reported two pre-existing bugs outside its scope

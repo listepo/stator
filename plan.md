@@ -1079,46 +1079,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 **Check:** ✅ **met 2026-09-15** — `examples/ffi/sqlite/` (generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node; the CI proof is the ffi job's own run (plan-notes 271): an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
-**[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
-Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
-The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
-libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
-This task makes `stator build` produce one static library plus its header, which a C build can
-use with no Stator checkout.
-
-Steps:
-
-1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
-   `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
-   member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
-   written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
-   same input are byte-identical, as the header already is (Task 7.2 step 8).
-2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
-   it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
-   writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
-   the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
-3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
-   program would each carry `jsrt_*` and collide. Measure both options and record the result in
-   plan-notes before choosing:
-   (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
-   `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
-   on ELF), so each library carries a private runtime; this must prove two such libraries work
-   in one process, including two collectors' init and roots;
-   (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
-   shared `libjsrt.a` installed once.
-   Whichever is chosen, the other combination is refused or documented. It never fails at run
-   time.
-4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
-   (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
-   Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
-5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
-   refused with a not-yet diagnostic until then.
-
-**Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
-`<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
-runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
-linked into one C program and both called, under the option step 3 chose. The ffi CI job and
-the ASan job run it. `pnpm run ci` is green.
+~~**Task 7.4 — A self-contained static library for C consumers.**~~ ✅ **landed 2026-10-03** — evidence in [done.md](done.md) → Phase 7 Task 7.4 (plan-notes 341, 342, 343).
 
 ---
 
@@ -2450,3 +2411,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.74** (2026-10-04): **Task 6.27 landed: a user `toString`/`valueOf` is honored by ToPrimitive** (plan-notes 345). A template hole, `String(x)`, `concat`, `join`, `'' + x`, `Number(x)`, the comparisons, `==` and util.format's `%s`/`%d`/`%i`/`%f` call the method the object has, in ECMA-262's hint order. A throwing method is catchable, and an object answer is Node's `TypeError`. The three 6.24 refusals that shared this path are lifted. The card moved to done.md.
 - **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
 - **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.
+- **v4.79** (2026-10-03): **Task 7.4 lands: a self-contained static library for C consumers** (plan-notes 341–343). `stator build --emit=lib -o lib<name>.a --emit-header=<h>` prelinks the unit with a private runtime (`cc -r`; Mach-O `-exported_symbols_list`, ELF `objcopy --keep-global-symbols`), archives it deterministically and writes a relocatable `lib<name>.pc` from the binary link's own flag list, so `cc main.c $(pkg-config --cflags --libs lib<name>)` builds with no Stator checkout. Two libraries share one Boehm through a weak shared object kind and chained roots hooks; `jsrt_gc_init` is idempotent, which also fixes two `--emit-header` objects sharing one `libjsrt.a`. New codes STA0020, STA1219 (Windows) and STA1220 (`jsrt_value` surface). About 200 KB of runtime per extra library.

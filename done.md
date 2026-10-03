@@ -3305,6 +3305,77 @@ checker-owns-ts splits), 5/5 `extern-out` classifier unit tests, 17/17 generator
 tests, golden 386/386 (serial, sharded, ASan), `test:ffi` 5/5, differential smoke 10/10
 with 0 divergences. Net `cpd` unchanged at 0.9%.
 
+### Task 7.4 — A self-contained static library for C consumers ✅ (landed 2026-10-03)
+
+Asked by the creator (plan-notes 340). Step 3 chose (a), a private runtime per library, on measured
+evidence (plan-notes 342); two runtime bugs found on the way are plan-notes 341 and 342.
+
+> **[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
+> Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
+> The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
+> libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
+> This task makes `stator build` produce one static library plus its header, which a C build can
+> use with no Stator checkout.
+>
+> Steps:
+>
+> 1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
+>    `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
+>    member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
+>    written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
+>    same input are byte-identical, as the header already is (Task 7.2 step 8).
+> 2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
+>    it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
+>    writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
+>    the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
+> 3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
+>    program would each carry `jsrt_*` and collide. Measure both options and record the result in
+>    plan-notes before choosing:
+>    (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
+>    `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
+>    on ELF), so each library carries a private runtime; this must prove two such libraries work
+>    in one process, including two collectors' init and roots;
+>    (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
+>    shared `libjsrt.a` installed once.
+>    Whichever is chosen, the other combination is refused or documented. It never fails at run
+>    time.
+> 4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
+>    (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
+>    Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
+> 5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
+>    refused with a not-yet diagnostic until then.
+>
+> **Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
+> `<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
+> runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
+> linked into one C program and both called, under the option step 3 chose. The ffi CI job and
+> the ASan job run it. `pnpm run ci` is green.
+
+**What landed.** `src/cli/library.ts` (prelink, localization, deterministic `ar`, the `.pc`),
+the `--emit=lib` branch and `systemLinkFlags` in `src/cli/build.ts`, the config key and schema,
+STA0020/STA1219/STA1220 and two STA0004 forms in `docs/DIAGNOSTICS.md`, the shared Boehm kind
+(`jsrt_gc_shared_kind_p48`) and idempotent `jsrt_gc_init` in the runtime, and
+`-fno-sanitize-address-globals-dead-stripping` for the sanitized runtime (ELF COMDAT groups broke
+two sanitized libraries in one link). Docs: `docs/FFI.md` §8 "Static library", TOOLCHAIN, CONFIG,
+HOW-IT-WORKS. Option (b), `--runtime=external`, is documented as not offered.
+
+**Check — PASSED:**
+
+- `packages/tests/ffi/example-c-consumer/static-lib.ts`: builds `libconsumer.a` twice and compares
+  the `.a`, `.h` and `.pc` bytes; copies them with `main.c` to a fresh temp dir, refuses any repo
+  path (the unit's own error-stack `file:line` strings excepted), links through `pkg-config` alone
+  and matches `expected.txt`; links `libconsumer` and `libkeeper` into `two.c` with forced Boehm
+  collections (`GC_get_gc_no() >= 10`) and a stack overflow in one library.
+- Linux CI (run 37148352874, ubuntu-24.04, clang 18.1.3, GNU binutils 2.42): `ffi (linux/x64)`,
+  `ffi (linux/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (linux/x64)`, `asan (linux/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm
+  collections)`.
+- macOS 27.0.1 arm64 locally: default and ASan both ok. CI run 37153833737 (Apple clang 15.0.0,
+  ld-1053.12): `ffi (macos/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (macos/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm collections)`.
+- `pnpm run ci` exit 0 locally (unit 772 passed, subset 0 failed, golden 459/459, selfhost matches
+  baseline); `pnpm run test:ffi` exit 0; `unit/static-lib.test.ts` 10 passed.
+
 ### Test-infra track: Darwin link retry, `test:ffi` real checks, C-consumer example ✅ (landed 2026-09-15)
 
 Three pieces, one unblock: the pinned conda clang ships ld64-956, which cannot parse an
