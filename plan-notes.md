@@ -11948,6 +11948,36 @@ objection on review):
   `Stats` fields `dev` and `ino`): a `number` inode loses precision past 2^53, so the bigint read
   stays and the two refusals are recorded with `--update` (growth may be recorded, plan-notes 306).
 
+## 332. Task 6.21 lands: one runtime per build, and a `.env` that cannot pick programs (2026-10-04)
+
+**Decisions made while implementing** (QA audit F3, F4; plan.md §9 Task 6.21):
+
+- **How the gate gets the link's flavor.** The gate reads `intlEnabled()` deep inside one string
+  op, many calls below `gateProgram`. Threading a parameter there would touch the gate's whole
+  call tree, so `build()` pins the flavor instead: `withRuntimeFlavor` (an `AsyncLocalStorage` in
+  `support/features.ts`) makes `runtimeFlavor()` answer the resolved value for the whole compile,
+  whatever the environment does meanwhile. `explain` and direct `compileToC` callers still read
+  the environment at call time, as before.
+- **The link's assertion** is a plain `Error` (so `STA4072` at the CLI). A mismatch is a broken
+  invariant, not a user error, and a new internal code would name a path that cannot be reached.
+- **The `.env` notice** names the applied keys and, in the same line, refused keys that look like
+  Stator's (`CC`, `STATOR_*`, `OTEL_*`). Without that, a project that relied on `.env` for `CC`
+  would build differently with no word about it. Unrelated keys (`DATABASE_URL`) are not
+  mentioned, so a Node project's `.env` stays quiet.
+- **`dotenv` stays**, now through `parse` only: the file format is dotenv's, and the allowlist
+  needs the parsed pairs before anything reaches `process.env`.
+- **No output after a zero exit** reuses `STA0009` with a second template: it is a C compiler
+  failure, and the message points at `CC` rather than at Stator.
+- **`STATOR_STD_ROOT` and `STATOR_NODE_ROOT`** are still read at module load (`frontend/std.ts`,
+  `frontend/node.ts`). The card scopes F3 to the runtime. Since `.env` can no longer set either,
+  both come from the real environment, which is set before the process starts.
+- **Bigint inode stays.** Plan-notes 331's decision keeps `statSync(..., { bigint: true })`;
+  this task does not touch it.
+- **Lint needs the site's packages.** Since Task 6.26 (`f126a49`), `pnpm run lint` type-checks
+  `site/**/*.ts` against `site/tsconfig.json`, which extends `astro/tsconfigs/strict`. A fresh
+  worktree therefore needs `pnpm --dir site install --frozen-lockfile` before `pnpm run ci`, or
+  lint fails with `File 'astro/tsconfigs/strict' not found`.
+
 ## 334. Task 6.25 lands: what "an expression whose type is BigIntLike" means (2026-10-04)
 
 **Finding (F5, plan-notes 330).** `const b = 1n;` answered `STA4031` in both modes. A BigInt

@@ -804,19 +804,7 @@ change as the fix, and updates the matching docs (golden rule 8). Order: 6.20 an
 
 ~~**Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug (F1, F2, F10, F11).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.20 (plan-notes 331).
 
-**Task 6.21 — The runtime selection and the toolchain come from the real environment (F3, F4).**
-
-- **F3.** The runtime flavor, root and archive are resolved once per `build()` call, inside it,
-  and the same value feeds the gate (`intlEnabled`) and the link. No module-level `const` reads
-  `STATOR_RUNTIME*` at import time. `link()` asserts the gate's flavor equals the archive's.
-- **F4.** A project `.env` (loaded from the working directory) may set only an allowlist:
-  `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`. It never sets `CC`, `STATOR_RUNTIME_ROOT`
-  or any `OTEL_*` exporter variable; those come from the real environment only. When `.env`
-  applies keys, one stderr line names them. After clang exits 0, `compileObject` and `link`
-  check that the output file exists.
-
-**Check:** the audit's F3 and F4 tests pass; `docs/TOOLCHAIN.md` and `docs/CONFIG.md` describe the
-allowlist; `pnpm run ci` green.
+~~**Task 6.21 — The runtime selection and the toolchain come from the real environment (F3, F4).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.21 (plan-notes 332).
 
 ~~**Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.22 (plan-notes 335).
 
@@ -2425,6 +2413,7 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.56** (2026-10-02): **T11.7, second slice: `require('../common')` resolves in the Stator build** (plan-notes 318). `fetch.ts` links the corpus's `test/common` to the strict-TS harness (a junction on Windows), so the bundler resolves it like any relative require. The harness drops `node:util`, an N2 module, for `common/inspect.ts`, and `common/fixtures.ts` drops `suite.ts`. Every `fail` now stops at `node:process` (T11.6), then at T12.3's `__commonJSMin` (STA4013). Pass count unchanged: 0 of 17.
 - **v4.60** (2026-10-04): **Tasks 6.20–6.26: the 2026-10-01 QA audit (PR #57) becomes plan work** (plan-notes 330). All 16 findings still reproduce on `338a3c2`. They are grouped one task per layer: CLI outputs and flags (6.20), environment trust (6.21), FFI inputs (6.22), runtime errors (6.23), `console.log` format (6.24), the BigInt verdict (6.25) and the landing page (6.26).
 - **v4.61** (2026-10-04): **Task 6.20 lands: `build` never destroys an input and never calls a user's mistake a compiler bug** (plan-notes 331; QA audit F1, F2, F10, F11). `build()` refuses (`STA0004`) any two of the entry, the program's source files, `-o`, `--emit-header` and the `--keep-c` file that name one file, before anything is written. An output the file system refuses is the new `STA0019`, never `STA4072`, and `-o`'s directory is checked before clang runs. An explicit `--unit-name` must match `^[A-Za-z0-9_]+$`. The CLI parser is one table: a value flag refuses a dash-led next argument, a flag outside its command is `STA0005`, and a bad `STATOR_OPT` names the environment.
+- **v4.62** (2026-10-04): **Task 6.21 lands: the runtime selection and the toolchain come from the real environment** (plan-notes 332; QA audit F3, F4). `build()` resolves the runtime flavor, root and archive once per call (`resolveRuntime`) and pins the flavor around the compile, so the gate's `intlEnabled` and the link read one value; `link()` asserts they agree. A project `.env` may set only `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`; `CC`, `STATOR_RUNTIME_ROOT` and `OTEL_*` come from the real environment, and one stderr line names what the file applied or was refused. A C compiler that exits 0 without writing its output is `STA0009`.
 - **v4.63** (2026-10-04): **Task 6.25 lands: a BigInt is not-yet `STA1213`, never internal `STA4031`** (plan-notes 334). The gate refuses a BigInt literal before its token skip, and every read of a value whose declared type may be a bigint, in both modes and in `build` and `explain`. A `typeof u === 'bigint'` narrowing of an `unknown` stays accepted. Both `subset_bigint_primitive_*` fixtures lose `@expected-fail`.
 - **v4.64** (2026-10-04): **Task 6.22 lands: FFI inputs are validated before they reach C or clang** (plan-notes 335). `ffi-gen` refuses an `--out` that names its header or `--diff` file and a `--lib` that is not one library name, and `--help` exits 0 on stdout. A `@statorLink` header path holding a `"`, a line break or NUL is `STA1119`; every other path is emitted as written, because `#include` reads no escapes. Pragma flags are limited to `-l<name>`, `-L<dir>`, `-framework <name>` and `-Wl,-rpath,<dir>`; anything else is `STA1119` naming the flag, and `--link=` stays the escape hatch.
 - **v4.65** (2026-10-04): **Task 6.26 lands: the landing page works without storage, at 320 px and without third parties** (plan-notes 336; QA audit F14, F15, F16). The theme toggle cycles from in-memory state, so blocked storage still cycles `light → dark → system`, and it stays hidden until its script runs. The header wraps and drops the theme label under 400 px. IBM Plex is self-hosted from `@fontsource/ibm-plex-*`, and every page carries a `default-src 'self'` CSP meta with the inline boot script by hash. `site/scripts/check.ts` (`pnpm run check:browser`, `playwright-core` over the installed Chrome) proves all of it in the site workflow.

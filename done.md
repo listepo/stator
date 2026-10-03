@@ -2739,6 +2739,61 @@ selfhost baseline grew by 4 `STA1214` in `packages/compiler` (1791 → 1795), re
   expected-fail, 0 failed`), golden (`453 fixtures — 453 passed, 0 failed`), selfhost (14 targets
   match the baseline), builtins 255/324, node-coverage, leak (plateau), ASan (453/453).
 
+### Task 6.21 — The runtime selection and the toolchain come from the real environment ✅ (landed 2026-10-04)
+
+From the 2026-10-01 QA audit (draft PR #57, findings F3, F4; plan-notes 330). The landing is
+plan-notes 332.
+
+> **Task 6.21 — The runtime selection and the toolchain come from the real environment (F3, F4).**
+>
+> - **F3.** The runtime flavor, root and archive are resolved once per `build()` call, inside it,
+>   and the same value feeds the gate (`intlEnabled`) and the link. No module-level `const` reads
+>   `STATOR_RUNTIME*` at import time. `link()` asserts the gate's flavor equals the archive's.
+> - **F4.** A project `.env` (loaded from the working directory) may set only an allowlist:
+>   `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`. It never sets `CC`, `STATOR_RUNTIME_ROOT`
+>   or any `OTEL_*` exporter variable; those come from the real environment only. When `.env`
+>   applies keys, one stderr line names them. After clang exits 0, `compileObject` and `link`
+>   check that the output file exists.
+>
+> **Check:** the audit's F3 and F4 tests pass; `docs/TOOLCHAIN.md` and `docs/CONFIG.md` describe the
+> allowlist; `pnpm run ci` green.
+
+**What landed.**
+
+- **F3.** `build.ts` has no module-level runtime `const` any more. `resolveRuntime()` (flavor, root,
+  include, lib dir, archive) runs once per `build()` call, after the CLI applied `.env`.
+  `support/features.ts` gains `withRuntimeFlavor`: `build()` pins the resolved flavor
+  (AsyncLocalStorage, so concurrent in-process builds keep their own) around `compileToC`, so the
+  gate's `intlEnabled()` reads the same value the link uses. `compileToC` records the flavor it
+  gated with (`CompiledC.flavor`), and `link()` throws (an internal error, `STA4072`) when it
+  differs from the archive's. `linkArguments` takes the runtime as an optional last argument.
+- **F4.** `src/cli/env-file.ts` replaces `dotenv.config()`: it parses `./.env` and copies only
+  `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`, never over a real variable. One stderr line
+  names what it applied, and the `CC`/`STATOR_*`/`OTEL_*` keys it refused (`stator: .env: applied
+  STATOR_OTEL; ignored OTEL_EXPORTER_OTLP_ENDPOINT (only STATOR_OPT, STATOR_RUNTIME, STATOR_OTEL may
+  come from .env)`). Other keys are not read. An unreadable `.env` is a warning, not a failure.
+  After clang exits 0, `compileObject` and both link attempts check that the output exists
+  (`STA0009 C compiler "…" exited 0 but wrote no "…"`).
+- The telemetry test that took the OTLP endpoint from `.env` now proves the opposite: `.env`
+  switches tracing on, and the spans reach the real environment's endpoint, not the file's.
+
+Docs: `TOOLCHAIN.md` (new section "Environment variables and `.env`"), `CONFIG.md` (precedence),
+`DIAGNOSTICS.md` (`STA0009`'s second template). The selfhost baseline grew from 1804 to 1813
+`STA1214` in `packages/compiler`, recorded with `--update` (plan-notes 306).
+
+**Check — PASSED** (2026-10-04, branch `t6-21-env-trust` on `5f8e7e6`):
+
+- The audit's F3 and F4 tests, adapted, in `packages/tests/unit/cli.test.ts`: `.env`
+  `STATOR_RUNTIME=intl` reaches the link (`STA0011 … build-intl` without the ICU archive, a working
+  binary with it); an in-process `build()` honours a `STATOR_RUNTIME_ROOT` set after `build.ts` was
+  imported; a `.env` `CC` is never run and `STATOR_RUNTIME_ROOT`/`OTEL_*` in it are ignored and
+  named; `.env` `STATOR_OPT` applies and the real environment wins; a `CC` that exits 0 without
+  output fails both the link and the object compile. Plus `unit/telemetry.test.ts`.
+- `pnpm run ci` → exit 0: typecheck and lint clean; `dupes` 186 clones (none new);
+  unit 758/758; subset 929 fixtures (898 passed, 31 expected-fail, 0 failed); golden 455/455;
+  selfhost 14 targets match the baseline; builtins 255/324; `docs/NODE.md` current; leak plateau
+  (objects peak RSS 3728 KB, FFI strings 3776 KB).
+
 ### Task 6.25 — A BigInt is not-yet, never an internal error (F5) ✅ (landed 2026-10-04)
 
 Audit finding F5 (plan-notes 330): `const b = 1n;` answered `STA4031` "unexpected expression kind:

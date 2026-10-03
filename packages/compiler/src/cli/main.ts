@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config as dotenvConfig } from 'dotenv';
 import { telemetryInit, telemetryShutdown, withSpanAsync } from '../support/telemetry.ts';
 import { BuildError, build, internalErrorMessage, type OptLevel } from './build.ts';
 import { type BundlerChoice, bundlerChoice, DEFAULT_BUNDLER } from './bundler.ts';
@@ -12,6 +11,7 @@ import {
   resolveOptions,
   splitFlags,
 } from './config.ts';
+import { applyEnvFile, envFileNotice } from './env-file.ts';
 import { explain } from './explain.ts';
 import { INK_COLORS, print } from './render.ts';
 
@@ -508,10 +508,14 @@ async function runCommand(command: Command): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  // .env before anything reads the environment (STATOR_OTEL, OTEL_EXPORTER_OTLP_*). dotenv never
-  // overrides real environment variables, and `quiet` keeps its banner out of the byte-exact
-  // stdout contract (dotenv 17 logs by default).
-  dotenvConfig({ quiet: true });
+  // .env before anything reads the environment (STATOR_OTEL, STATOR_OPT, STATOR_RUNTIME), and
+  // only those keys: the file belongs to the project being compiled, not to the user running
+  // Stator (src/cli/env-file.ts). A real variable is never overridden. The notice goes to
+  // stderr, outside the byte-exact stdout contract.
+  const notice = envFileNotice(applyEnvFile(process.cwd(), process.env));
+  if (notice !== undefined) {
+    process.stderr.write(`${notice}\n`);
+  }
   await telemetryInit();
   try {
     await run(parse(process.argv.slice(2)));

@@ -70,7 +70,9 @@ its key and a regenerated schema
 Highest first:
 
 1. the command line;
-2. the environment (`STATOR_OPT` for `opt`);
+2. the environment (`STATOR_OPT` for `opt`), which a project `.env` may fill in for
+   `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL` only; never `CC`, `STATOR_RUNTIME_ROOT` or
+   `OTEL_*` (docs/TOOLCHAIN.md, "Environment variables and `.env`");
 3. the config file;
 4. the built-in default.
 
