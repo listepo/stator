@@ -11918,3 +11918,43 @@ objection on review):
   (`-fplugin=`). `--link=` on the command line stays the user's escape hatch.
 - F12: the `RangeError` cap is required; the speed bar (within 3× Node at 200 000 appends) is the
   Check, and the mechanism (append buffer or rope) is the implementer's.
+
+## 334. Task 6.25 lands: what "an expression whose type is BigIntLike" means (2026-10-04)
+
+**Finding (F5, plan-notes 330).** `const b = 1n;` answered `STA4031` in both modes. A BigInt
+literal is a token, and `gateConstruct` accepted every token before its switch, so the literal
+reached the lowering, which has no node for it.
+
+**Decisions the card left open.**
+
+- **Declared type, not narrowed type.** The first draft asked `getTypeAtLocation` of every
+  expression. That refuses `packages/node/src/assert.ts`: its `inspect(value: unknown)` has
+  ``if (typeof value === 'bigint') return `${String(value)}n`;``, where the narrowed `value` is
+  `bigint`. No compiled program can enter that branch, because every way to make a bigint is
+  refused. A name or a property access is therefore judged by its symbol's declared type
+  (`getTypeOfSymbol`), and every other expression by `getTypeAtLocation`.
+- **A union counts.** `number | bigint` is refused too: a value that may be a bigint has no
+  representation below the gate.
+- **Read, not named.** A declaration's own name (`ts.getNameOfDeclaration`) is skipped, so
+  `function f(a: bigint) { return a; }` is one `STA1213`, at the read, and `export { big }`
+  adds none.
+- **`BigInt(5)` moves from `STA1214` to `STA1213`.** The call is a bigint-typed expression and
+  the gate asks before the global-function rule. `typeof BigInt` is unchanged: the constructor
+  is not a bigint.
+
+**Evidence (macOS arm64, Node 26.7.0).**
+
+| Probe | Before | After |
+|---|---|---|
+| `explain` `const b = 1n;` (ts) | `error (STA4031)` | `not-yet (STA1213)` |
+| `build` `console.log(1n === 1n);` (js) | `STA4031` | `STA1213` |
+| `const b = BigInt(5);` | `STA1214` | `STA1213` |
+| `function f(a: bigint)` read | `dynamic` | `not-yet (STA1213)` |
+| `typeof u === 'bigint'` over `unknown` | `dynamic` | `dynamic` |
+
+`pnpm run test:subset`: 921 fixtures, 890 passed, 31 expected-fail (was 33), 0 failed.
+`pnpm run test`: 57 files, 736 tests passed. `pnpm run test:golden`: 453 passed, 0 failed.
+`pnpm run test:selfhost`: `packages/compiler` `STA1214` 1791 → 1794, re-recorded with
+`--update`. The three are the new function's `ts.Node`, `ts.TypeChecker` and `ts.Declaration`
+qualified type names (`QualifiedName`, STA1214), which every gate function carries; no
+behavior of the compiled packages changed.

@@ -285,6 +285,17 @@ function gateConstruct(
 ): GateResult {
   const kind = node.kind;
 
+  // Before the token skip below: a BigInt literal IS a token, and skipping it handed `1n` to the
+  // lowering, which can only answer STA4031 (plan.md §9 Task 6.25).
+  if (isBigIntUse(node, typeChecker)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1213',
+      message: 'BigInt is not yet supported; planned for Phase 5',
+      phase: 5,
+    };
+  }
+
   // Tokens carry no independent meaning: an operator token, keyword, or punctuation is only ever
   // reached as a child of a construct this function already ruled on. Gating them separately
   // would reject `1 + 2` for containing a PlusToken.
@@ -866,6 +877,31 @@ function notYet(message: string, phase: number): GateResult {
     message: `${message}; planned for Phase ${phase}`,
     phase,
   };
+}
+
+/** A BigInt literal, or a value whose type may be a bigint (plan.md §9 Task 6.25).
+ *
+ * A name is judged by its DECLARED type, not the narrowed one: `typeof u === 'bigint'` narrows an
+ * `unknown` to bigint in a branch no compiled program can enter, because every way to make a
+ * bigint is refused here (node:assert's `inspect` has exactly that branch). A declaration's own
+ * name is not a value read; its uses are. */
+function isBigIntUse(node: ts.Node, checker: ts.TypeChecker): boolean {
+  if (ts.isBigIntLiteral(node)) {
+    return true;
+  }
+  if (!ts.isExpression(node) || ts.getNameOfDeclaration(node.parent as ts.Declaration) === node) {
+    return false;
+  }
+  const named = ts.isIdentifier(node)
+    ? node
+    : ts.isPropertyAccessExpression(node)
+      ? node.name
+      : undefined;
+  const symbol = named === undefined ? undefined : checker.getSymbolAtLocation(named);
+  const type =
+    symbol === undefined ? checker.getTypeAtLocation(node) : checker.getTypeOfSymbol(symbol);
+  const parts = type.isUnion() ? type.types : [type];
+  return parts.some((part) => (part.flags & ts.TypeFlags.BigIntLike) !== 0);
 }
 
 function symbolNotYet(): GateResult {
