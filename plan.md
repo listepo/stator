@@ -816,6 +816,49 @@ change as the fix, and updates the matching docs (golden rule 8). Order: 6.20 an
 
 ~~**Task 6.26 — The landing page works without storage, at 320 px and without third parties (F14, F15, F16).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.26 (plan-notes 336).
 
+**Tasks 6.27–6.28 — Two bugs found while landing 6.24 (plan-notes 344).** Both reproduce on
+`2efaabb`. Neither is from the audit, so neither carries an `F` number. 6.28 is a crash, but 6.27
+prints different bytes while `explain` says `static`, so 6.27 comes first.
+
+**Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**
+Today ToString of an ordinary object ignores the user's method and prints `[object Object]`
+(`jsrt_print.c`, the fallback branch at the end of `jsrt_to_string`), while `explain` answers
+`static`. Wherever ECMA-262 runs ToPrimitive, call the method the object actually has: a template
+literal, `String(x)` and `.concat` (hint `string`: `toString` first, then `valueOf`), `'' + x`
+(hint `default`: `valueOf` first, then `toString`), and `Array.prototype.join`. That includes a
+class method, an object-literal method and an inherited one, with `Symbol.toPrimitive` not-yet
+until symbols exist (Phase 5). A method that throws propagates as a catchable exception. A method
+that returns an object is a `TypeError`, as in Node.
+1. In `ts` mode the receiver's type says whether the method is the user's, so lowering emits a
+   direct call and the runtime fallback is never reached.
+2. In `js` mode, and for a `ts` receiver whose type cannot say (a union, an interface), the
+   runtime looks the method up with `jsrt_get_prop` and calls it with `jsrt_call`. The emitter
+   follows every such conversion with the pending-exception check, as it does after
+   `JSON.stringify` (`consoleMayThrow` is the precedent).
+3. Lift the 6.24 refusals that share this path: `%s` of an object with its own `toString`, and
+   `%d`/`%i`/`%f` through a user `toString`/`valueOf`. They are `STA1214` at the gate today and
+   `PANIC: STA2005` at run time (plan-notes 337). A refusal this card cannot lift stays as it is.
+4. Where a case still cannot match Node, refuse it with a not-yet code and never print other bytes.
+
+`v + 1` with a user `valueOf` in `js` mode is `STA0012` today, because TS2365 is not in
+`JS_MODE_RUNTIME_CODES`. That is a mode-policy question, not this card's (plan-notes 344).
+**Check:** goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` cover every site
+above, inheritance, a throwing method caught by `try`, and the object-returning `TypeError`, and
+match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
+of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
+
+**Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
+a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+`const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
+defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
+`static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
+scope (and boxed, if captures box) before its initializer is lowered. A call made before
+initialization stays Node's TDZ `ReferenceError`.
+Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
+**Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
+prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
+HIR verifier is clean on all of them; `pnpm run ci` is green.
+
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
@@ -2406,3 +2449,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.66** (2026-10-04): **Task 6.24 lands: `console.log` formats like Node** (plan-notes 337). One runtime function applies `%s %d %i %f %j %O %c %%` with `util.format` semantics for `log`/`info`/`debug`/`error`/`warn`, including missing and extra arguments. Cases whose Node output the binary cannot reproduce yet (`%o` of an object, `%s` of a function or of an object with its own `toString`, `%d`/`%i`/`%f` through a user `toString`/`valueOf`, `%d` of a `Date`) are not-yet `STA1214` at compile time and a named `STA2005` panic when the format string is only known at run time.
 - **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
+- **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.
