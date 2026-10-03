@@ -12435,3 +12435,26 @@ checked 2026-10-04). Plain Apple `ar rcs` gave different bytes on every build.
 
 **Proof.** `packages/tests/ffi/example-c-consumer/static-lib.ts`, run by the ffi CI jobs (Linux
 and macOS) and by the ASan gate.
+
+**Linux evidence (PR #105, CI run 37148352874 on `3d87e50`, 2026-10-03).** ubuntu-24.04 x64 and
+arm64; Ubuntu clang 18.1.3 (1ubuntu1); GNU ld, objcopy and ar from GNU Binutils for Ubuntu 2.42.
+`ffi (linux/x64)` and `ffi (linux/arm64)` print `ffi static-lib: ok (two libraries, forced Boehm
+collections)`, and `asan (linux/x64)` and `asan (linux/arm64)` print `ffi static-lib: ok (asan,
+two libraries, forced Boehm collections)`. So the ELF path (`cc -r`, then
+`objcopy --keep-global-symbols`, then `ar rcsD`) holds two private runtimes in one program. Both
+runtimes' collections and both stack guards are confirmed, and the archive is byte-identical
+across two builds.
+
+**The sanitized runtime on ELF.** The first asan run (linux/x64, on `fdeb612`) failed at the
+consumer link of `two.c` with "`jsrt_class_range_error` ... defined in discarded section
+`.data.rel.ro.jsrt_class_range_error[jsrt_class_range_error]`". Clang's ASan dead-strips globals
+by default (`-fsanitize-address-globals-dead-stripping`, on by default in
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/clang/lib/Driver/SanitizerArgs.cpp).
+On ELF it puts each instrumented global in a COMDAT group named after the symbol
+(`instrumentGlobalsELF`,
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp,
+checked 2026-10-03). Two prelinked copies carry same-named groups. The final link keeps one copy
+and discards the other, whose code still refers to it. The sanitized flavor now builds with
+`-fno-sanitize-address-globals-dead-stripping` (`packages/runtime/justfile`), so ASan registers
+globals through a metadata array instead. The release flavor is not instrumented and has no such
+groups.
