@@ -523,7 +523,9 @@ plus a manual link proof (fresh pair links and runs; version-skewed pair fails w
   `--flag value` forms) — LANDED. With the flag, `-o` names a relocatable object
   (`clang -c`), no `main()` required and nothing linked; `--emit=c` alongside writes the C
   and the header and skips clang. `--unit-name` overrides the default unit (the entry's
-  file basename); either spelling is sanitized to a C identifier. `--link` and
+  file basename, sanitized to a C identifier). An explicit name must already be one
+  (`^[A-Za-z0-9_]+$`, else `STA0004`, plan.md §9 Task 6.20): sanitizing is not injective, so
+  `my-lib` and `my_lib` would export the same symbols. `--link` and
   `@statorLink` flags are accepted but inert with the flag — linking is the consumer's
   job, and the consumer link line arrives with step 9. An exported function whose WHOLE
   signature is in §2's table spells plain C types; any other position spells `jsrt_value`.

@@ -2680,6 +2680,65 @@ The card as it stood before landing:
 > - `std` builds and its smoke check runs.
 > - The `FirstNode` message names the real syntax kind, and the baseline is re-recorded.
 
+### Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug ✅ (landed 2026-10-04)
+
+From the 2026-10-01 QA audit (draft PR #57, findings F1, F2, F10, F11; plan-notes 330). The
+landing is plan-notes 331.
+
+> **Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug
+> (F1, F2, F10, F11).**
+>
+> - **F1.** `build()` (not only `main.ts`, so in-process callers are covered) resolves `entry`, every
+>   program source file, `out`, `emitHeader`, and `<out>.c` under `--keep-c`. It refuses any two
+>   that name the same file with `STA0004` before compiling.
+> - **F2.** One `writeOutput(path, text)` helper turns `ENOENT`/`EACCES`/`EROFS`/`ENOSPC`/`EISDIR`
+>   into a user error with a new code (the next free `STA00xx`, allocated in `docs/DIAGNOSTICS.md`).
+>   The link step checks `dirname(out)` before it blames the compiler (`linkFailure`).
+> - **F10.** An explicit `--unit-name` (and its config key) must match `^[A-Za-z0-9_]+$`, else
+>   `STA0004`. A derived default is still sanitized.
+> - **F11.** A value flag refuses a next argument that starts with `-` (`-o --emit=c` is `STA0004`).
+>   Each command accepts only its own flags (`explain --emit=c` is refused). A bad `STATOR_OPT`
+>   names the environment as its origin.
+>
+> **Check:** the audit's F1, F2, F10 and F11 tests pass in `packages/tests/unit/cli.test.ts`;
+> `docs/CLI.md`/`docs/DIAGNOSTICS.md` list the new refusals; `pnpm run ci` green.
+
+**What landed.**
+
+- **F1.** `src/cli/outputs.ts` `refuseAliasedOutputs`: `build()` compares `-o`, `--emit-header` and
+  the `--keep-c` file (`<out>.c`, only when clang runs) with each other and with the entry before
+  compiling, then with every source file of the program (`CompiledC.inputs`) before the first
+  write. An existing file is compared by inode (`dev:ino`, bigint), so a symlink, a hard link or a
+  case-folding file system cannot hide an alias; a new file by its canonical directory plus name.
+- **F2.** `writeOutput` and `requireWritable` turn `ENOENT`, `ENOTDIR`, `EISDIR`, `EACCES`,
+  `EPERM`, `EROFS` and `ENOSPC` into the new `STA0019` (`cannot write -o "missing/out.c": ENOENT
+  (the directory does not exist)`). `-o`'s directory is checked before clang runs, so the link
+  never blames the compiler for it. Any other write error is still `STA4072`.
+- **F10.** An explicit unit name outside `^[A-Za-z0-9_]+$` is `STA0004`, from the flag, the config
+  key or an in-process caller. The default (the entry basename) is still sanitized. The
+  `export-header` collision test now gets its unsanitized unit from the entry name `my-lib.ts`.
+- **F11.** The parser in `src/cli/main.ts` is one flag table with the commands each flag belongs
+  to. A value flag refuses a next argument that starts with `-` and suggests `--flag=value`
+  (`--link -lm` → `--link=-lm`); a flag on the wrong command is `STA0005 flag "--emit=c" does not
+  apply to explain`; `STATOR_OPT=fast` reports `unknown opt "fast" in the environment variable
+  STATOR_OPT`. An empty `--mode=`/`--opt=` is now `STA0004` (requires a value), like the others.
+
+Docs: `DIAGNOSTICS.md` (`STA0002`, `STA0004`, `STA0005`, new `STA0019`), `CONFIG.md` (flags per
+command, the Outputs section, the `unitName` row), `FFI.md` (unit name), `TOOLCHAIN.md`
+(`STATOR_OPT`). There is no `docs/CLI.md`; the CLI surface is documented in `CONFIG.md`. The
+selfhost baseline grew by 4 `STA1214` in `packages/compiler` (1791 → 1795), recorded with
+`--update` (plan-notes 306).
+
+**Check — PASSED** (2026-10-04, branch `t6-20-cli-outputs` on `3aeb9dd`):
+
+- The audit's tests, adapted, in `packages/tests/unit/cli.test.ts` (F1: entry, header, imported
+  module, `--keep-c`, in-process `build()`; F2: `--emit=c`, binary, header, directory; F10; F11:
+  value flags, per-command flags, `STATOR_OPT`): 9 passed.
+- `pnpm run ci` → exit 0: typecheck, lint, dupes (186 clones, none new), runtime, unit
+  (`Tests  743 passed (743)`), runtime corpus, subset (`921 fixtures — 888 passed, 33
+  expected-fail, 0 failed`), golden (`453 fixtures — 453 passed, 0 failed`), selfhost (14 targets
+  match the baseline), builtins 255/324, node-coverage, leak (plateau), ASan (453/453).
+
 ### Task 6.25 — A BigInt is not-yet, never an internal error (F5) ✅ (landed 2026-10-04)
 
 Audit finding F5 (plan-notes 330): `const b = 1n;` answered `STA4031` "unexpected expression kind:
