@@ -98,7 +98,8 @@ test('a shrink is reported until --update records it', () => {
 });
 
 test('the committed baseline is in --update form', () => {
-  const text = readFileSync(join(SELFHOST, 'baseline.json'), 'utf8');
+  // A Windows checkout (core.autocrlf) turns the committed LF into CRLF; the form is about content.
+  const text = readFileSync(join(SELFHOST, 'baseline.json'), 'utf8').replace(/\r\n/g, '\n');
   assert.equal(formatBaseline(committedBaseline()), text);
 });
 
