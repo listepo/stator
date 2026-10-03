@@ -279,7 +279,7 @@ export fn jsrt_arraybuffer_slice(buffer: Value, start: Value, end: Value) Value 
 fn elementOf(source: Value, i: usize) Value {
     if (c.jsrt_is(source, c.JSRT_TAG_ARRAY)) {
         const a = c.jsrt_as_array(source);
-        return if (i < a.*.length) a.*.elements[i] else undefined_value;
+        return if (i < a.*.length) c.jsrt_unhole(a.*.elements[i]) else undefined_value;
     }
     if (c.jsrt_is(source, c.JSRT_TAG_STRING)) {
         const unit = c.jsrt_string_char(source, @intCast(i));
@@ -323,7 +323,10 @@ fn isIterable(source: Value) bool {
     return false;
 }
 
-fn fromIterable(source: Value) Value {
+/// Drains `source` through its iterator into a fresh array, or answers `undefined` with the
+/// exception pending: a non-iterable throws `X is not iterable` in `jsrt_get_iterator`, and a step
+/// that throws stops the walk. Shared by `new Uint8Array(iterable)`, `Array.from` and spread.
+fn drain(source: Value) Value {
     // slots: 0 the iterator, 1 the collected values, 2 the value in flight between the step that
     // produced it and the push that keeps it.
     var f: Frame(3) = .{};
@@ -336,10 +339,54 @@ fn fromIterable(source: Value) Value {
         _ = c.jsrt_array_push(f.slots[1], f.slots[2]);
     }
     if (c.jsrt_pending()) return undefined_value;
-    const count: usize = c.jsrt_as_array(f.slots[1]).*.length;
+    return f.slots[1];
+}
+
+fn fromIterable(source: Value) Value {
+    var f: Frame(1) = .{};
+    f.push();
+    defer f.pop();
+    f.slots[0] = drain(source);
+    if (c.jsrt_pending()) return undefined_value;
+    const count: usize = c.jsrt_as_array(f.slots[0]).*.length;
     const out = freshView(count) orelse return undefined_value;
-    if (!copyElements(out, f.slots[1], count)) return undefined_value;
+    if (!copyElements(out, f.slots[0], count)) return undefined_value;
     return box(out);
+}
+
+/// The operand of a spread, `[...x]` or `f(...x)` (§13.2.4.1, §13.3.8.1): an array answers itself,
+/// because the caller's concat copies it and fills its holes, and anything else is drained. A
+/// non-iterable throws `X is not iterable`; V8 names the operand's source text there, which a
+/// value cannot (docs/VALUE.md §4.23).
+export fn jsrt_spread_operand(source: Value) Value {
+    if (c.jsrt_is(source, c.JSRT_TAG_ARRAY)) return source;
+    return drain(source);
+}
+
+/// `Array.from(items)` with one argument (§23.1.2.1): nullish throws V8's TypeError, an iterable
+/// (an array and a string included) is drained, any other object is read as an array-like
+/// through `length`, and any other primitive is an array-like of length 0.
+export fn jsrt_array_from(source: Value) Value {
+    if (c.jsrt_is_nullish(source)) {
+        throwFmt(&c.jsrt_class_type_error, "{s} is not iterable (cannot read property Symbol(Symbol.iterator))", .{if (c.jsrt_is(source, c.JSRT_TAG_NULL)) "object null" else "undefined"});
+        return undefined_value;
+    }
+    if (c.jsrt_is(source, c.JSRT_TAG_ARRAY) or c.jsrt_is(source, c.JSRT_TAG_STRING) or isIterable(source)) {
+        return drain(source);
+    }
+    if (c.jsrt_pending()) return undefined_value;
+    var f: Frame(2) = .{};
+    f.push();
+    defer f.pop();
+    f.slots[0] = alloc.jsrt_array_new(0, null);
+    if (!c.jsrt_is(source, c.JSRT_TAG_OBJECT) and !c.jsrt_is(source, c.JSRT_TAG_CLOSURE)) return f.slots[0];
+    const count = lengthOf(source) orelse return undefined_value;
+    for (0..count) |i| {
+        f.slots[1] = elementOf(source, i);
+        if (c.jsrt_pending()) return undefined_value;
+        _ = c.jsrt_array_push(f.slots[0], f.slots[1]);
+    }
+    return f.slots[0];
 }
 
 fn overBuffer(buffer: *Buffer, offset: Value, length: Value) Value {

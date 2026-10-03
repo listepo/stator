@@ -8,6 +8,7 @@ language: 'typescript'
 # why moon calls tools directly rather than through pnpm). All tasks run from the workspace root.
 dependsOn:
   - 'compiler'
+  - 'node'
   - 'runtime'
   - 'std'
 
@@ -52,6 +53,15 @@ tasks:
     toolchain: 'system'
     options:
       runFromWorkspaceRoot: true
+    deps:
+      - 'runtime:build'
+      - 'std:build'
+  selfhost:
+    script: 'node packages/tests/selfhost/run.ts'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+    # The std smoke check builds and runs binaries (plan.md §9 Task 6.19).
     deps:
       - 'runtime:build'
       - 'std:build'
@@ -107,12 +117,15 @@ tasks:
       - 'compiler:dupes'
       - 'tests:typecheck'
       - 'std:typecheck'
+      - 'node:typecheck'
+      - 'vite-stator:typecheck'
       - 'runtime:build'
       - 'std:build'
       - 'tests:unit'
       - 'tests:runtime-corpus'
       - 'tests:subset'
       - 'tests:golden'
+      - 'tests:selfhost'
       - 'tests:builtins'
       - 'tests:node-coverage'
       - 'tests:leak'

@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'vitest';
@@ -168,7 +168,7 @@ test('a fixed-shape object answers an aliased read of an existing field', NATIVE
 });
 
 test(
-  'adding a new key to a fixed-shape object still aborts with STA2004',
+  'adding a new key to a fixed-shape object grows its overflow table (docs/VALUE.md §4.24)',
   NATIVE_ONLY,
   async () => {
     const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
@@ -180,9 +180,8 @@ test(
       );
       const binary = join(work, 'grow');
       const run = await buildAndRun(entry, binary);
-      assert.notEqual(run.status, 0, 'growing a fixed layout must abort, never invent a slot');
-      assert.match(run.stderr, /STA2004/);
-      assert.equal(run.stdout, '', 'nothing may print before the abort');
+      assert.equal(run.status, 0, run.stderr);
+      assert.equal(run.stdout, '2\n');
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
@@ -232,6 +231,79 @@ test(
     }
   },
 );
+
+/* The same edge when the checker has an opinion: `label` infers `string`, so `const n: number =
+ * label(10)` is TS2322. js mode suppresses it, and used to widen `n` to Unknown, which printed
+ * `10` out of a `number` binding (plan-notes 301). The annotation now stays and the declaration
+ * and assignment edges are checked. The passing half is golden `js/boundary_inferred`.
+ * The call edge (TS2345) and the return edge (TS2322 on a `return` or an arrow's concise body) had
+ * the same hole with no widening at all: `inc(label(1))` printed `11` and a `number` function
+ * returned `"2"` (plan-notes 308). Their passing half is golden `js/boundary_call_return`. */
+for (const [edge, body, line] of [
+  ['declaration', 'const n: number = label(10);\nconsole.log(n);\n', 2],
+  ['assignment', 'let n: number = 0;\nn = label(10);\nconsole.log(n);\n', 3],
+  [
+    'call',
+    'function inc(x: number): number {\n  return x + 1;\n}\nconsole.log(inc(label(1)));\n',
+    5,
+  ],
+  [
+    'method-call',
+    'class Box {\n  add(by: number): number {\n    return by + 1;\n  }\n}\n' +
+      'console.log(new Box().add(label(1)));\n',
+    7,
+  ],
+  [
+    'constructor-call',
+    'class Box {\n  n: number;\n  constructor(n: number) {\n    this.n = n;\n  }\n}\n' +
+      'console.log(new Box(label(1)).n);\n',
+    8,
+  ],
+  ['return', 'function g(): number {\n  return label(2);\n}\nconsole.log(g());\n', 3],
+  ['concise-return', 'const h = (): number => label(4);\nconsole.log(h());\n', 2],
+] as const) {
+  test(
+    `a .js value the checker types differently aborts the ${edge} edge with STA2001`,
+    NATIVE_ONLY,
+    async () => {
+      const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
+      try {
+        writeFileSync(join(work, 'lib.js'), 'export function label(x) {\n  return `${x}`;\n}\n');
+        const entry = join(work, 'main.ts');
+        writeFileSync(entry, `import { label } from "./lib.js";\n${body}`);
+        const run = await buildAndRun(entry, join(work, 'main'), '--mode=js');
+        assert.notEqual(run.status, 0, 'a string in a number slot must abort, never print');
+        assert.match(run.stderr, /STA2001/);
+        assert.match(run.stderr, new RegExp(`main\\.ts:${String(line)}:`));
+        assert.match(run.stderr, /expected number, got string/);
+        assert.equal(run.stdout, '', 'nothing may print before the abort');
+      } finally {
+        rmSync(work, { recursive: true, force: true });
+      }
+    },
+  );
+}
+
+/* A concise arrow body's TS2322 starts at the body's first identifier -- here the CALLEE `lbl`.
+ * The suppression used to widen whatever identifier the diagnostic started at, so `lbl` itself
+ * turned dynamic and the file graded `dynamic` (plan-notes 308). The return edge is a check, not a
+ * widening: the file stays `static`. */
+test('a concise-body return mismatch widens nothing in js mode', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-concise-'));
+  try {
+    const entry = join(work, 'main.ts');
+    writeFileSync(
+      entry,
+      'const lbl = (x: number): string => `${x}`;\nconst h = (): number => lbl(4);\n' +
+        'console.log(lbl(3), h());\n',
+    );
+    const explained = await stator('explain', entry, '--mode=js', '--json');
+    assert.equal(explained.status, 0, explained.stderr);
+    assert.equal((JSON.parse(explained.stdout) as { verdict: unknown }).verdict, 'static');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
 
 /* Provenance has to survive the trip to stdout (plan.md §8 step 1). `lower.test.ts` proves the HIR
  * fact; this proves the report carries it, because a grade that is right in the HIR and lost on the
@@ -345,6 +417,30 @@ test('explain lists every diagnostic of the deciding stage, in source order', as
     );
     assert.equal(human.status, 0, human.stderr);
     assert.match(human.stdout, /STA1001 x2/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('a BigInt literal is not-yet STA1213, never internal STA4031', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-bigint-'));
+  try {
+    writeFileSync(join(work, 'b.ts'), 'const b = 1n;\n');
+    writeFileSync(join(work, 'b.js'), 'console.log(1n === 1n);\n');
+    const [ts, js] = await Promise.all([
+      stator('explain', join(work, 'b.ts'), '--json'),
+      stator('build', join(work, 'b.js'), '-o', join(work, 'b'), '--mode=js'),
+    ]);
+    assert.equal(ts.status, 0, ts.stderr);
+    const report: unknown = JSON.parse(ts.stdout);
+    assert.ok(typeof report === 'object' && report !== null);
+    assert.deepEqual(
+      { ...report, diagnostics: undefined },
+      { verdict: 'not-yet', code: 'STA1213', diagnostics: undefined },
+    );
+    assert.notEqual(js.status, 0);
+    assert.match(js.stderr, /STA1213/);
+    assert.doesNotMatch(js.stderr, /STA4031/);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -476,4 +572,329 @@ test('an in-process build whose checker overflows is BuildError STA0013, not a t
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+/* Task 6.20 (QA audit F1, F2, F10, F11): `build` never destroys an input, and a user's mistake is
+ * a user error with a stable code, never STA4072 "compiler bug". Every refusal below happens
+ * before clang runs, so none of these needs the native toolchain. */
+
+/** A scratch directory with `files` written into it, removed after `body`. */
+async function inScratch(
+  files: Readonly<Record<string, string>>,
+  body: (dir: string) => Promise<void>,
+): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'stator-cli-outputs-'));
+  try {
+    for (const [name, text] of Object.entries(files)) {
+      writeFileSync(join(dir, name), text);
+    }
+    await body(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** `stator` in `dir`, with stderr on one line: ink wraps a diagnostic at the terminal width, and
+ * these tests read the message, not its layout. Paths stay relative so a wrap cannot split one. */
+async function statorIn(dir: string, ...args: string[]): Promise<Run> {
+  const run = await spawn(process.execPath, [CLI, ...args], dir);
+  return { ...run, stderr: run.stderr.replace(/\s+/g, ' ') };
+}
+
+const ADD = 'export function add(a: number, b: number): number { return a + b; }\n';
+
+test('build refuses an -o that is the entry file (F1: the source must survive)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const r = await statorIn(dir, 'build', 'app.ts', '-o', 'app.ts', '--emit=c');
+    const entry = join(dir, 'app.ts');
+    assert.equal(readFileSync(entry, 'utf8'), 'console.log(1);\n', 'entry overwritten with C');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^stator: STA0004 -o "app\.ts" is the entry file "app\.ts"/);
+  });
+});
+
+test('--emit-header refuses to alias -o or the entry (F1)', async () => {
+  await inScratch({ 'lib.ts': ADD }, async (dir) => {
+    const [aliasOut, aliasEntry] = await Promise.all([
+      statorIn(dir, 'build', 'lib.ts', '-o', 'lib.h', '--emit=c', '--emit-header=lib.h'),
+      statorIn(dir, 'build', 'lib.ts', '-o', 'lib.c', '--emit=c', '--emit-header=lib.ts'),
+    ]);
+    const entry = join(dir, 'lib.ts');
+    assert.equal(aliasOut.status, 1, 'the header silently replaced the C output');
+    assert.match(
+      aliasOut.stderr,
+      /STA0004 -o ".*lib\.h" and --emit-header ".*lib\.h" name the same file/,
+    );
+    assert.equal(aliasEntry.status, 1);
+    assert.match(aliasEntry.stderr, /STA0004 --emit-header ".*lib\.ts" is the entry file/);
+    assert.equal(readFileSync(entry, 'utf8'), ADD);
+    assert.equal(existsSync(join(dir, 'lib.h')), false);
+  });
+});
+
+test('-o naming an imported module, or the --keep-c file naming the header, is refused (F1)', async () => {
+  await inScratch(
+    { 'main.ts': "import { add } from './dep.ts';\nconsole.log(add(1, 2));\n", 'dep.ts': ADD },
+    async (dir) => {
+      const [imported, keptC] = await Promise.all([
+        statorIn(dir, 'build', 'main.ts', '-o', 'dep.ts', '--emit=c'),
+        statorIn(dir, 'build', 'main.ts', '-o', 'x', '--keep-c', '--emit-header=x.c'),
+      ]);
+      assert.equal(imported.status, 1);
+      assert.match(
+        imported.stderr,
+        /STA0004 -o "dep\.ts" is a source file of the program ".*dep\.ts"/,
+      );
+      assert.equal(readFileSync(join(dir, 'dep.ts'), 'utf8'), ADD);
+      assert.equal(keptC.status, 1);
+      assert.match(
+        keptC.stderr,
+        /STA0004 --emit-header "x\.c" and the --keep-c file "x\.c" name the same file/,
+      );
+    },
+  );
+});
+
+test('an in-process build() refuses an aliased output too (F1: statorc/api callers)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const entry = join(dir, 'app.ts');
+    await assert.rejects(
+      build({ entry, out: entry, mode: 'ts', emitCOnly: true, keepC: false }),
+      (error: unknown) => error instanceof BuildError && error.code === 'STA0004',
+    );
+    assert.equal(readFileSync(entry, 'utf8'), 'console.log(1);\n');
+  });
+});
+
+test('an unwritable output is STA0019, not STA4072 "compiler bug" (F2)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n', 'lib.ts': ADD }, async (dir) => {
+    const [cOut, binary, header, isDir] = await Promise.all([
+      statorIn(dir, 'build', 'app.ts', '-o', 'missing/out.c', '--emit=c'),
+      statorIn(dir, 'build', 'app.ts', '-o', 'missing/app'),
+      statorIn(dir, 'build', 'lib.ts', '-o', 'lib.c', '--emit=c', '--emit-header=missing/lib.h'),
+      statorIn(dir, 'build', 'app.ts', '-o', '.'),
+    ]);
+    for (const r of [cOut, binary, header, isDir]) {
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /^stator: STA0019 cannot write /);
+      assert.doesNotMatch(r.stderr, /STA4072|compiler bug/);
+    }
+    assert.match(
+      cOut.stderr,
+      /cannot write -o "missing\/out\.c": ENOENT \(the directory does not exist\)/,
+    );
+    assert.match(binary.stderr, /ENOENT/);
+    assert.match(header.stderr, /cannot write --emit-header /);
+    assert.match(isDir.stderr, /EISDIR \(it is a directory\)/);
+  });
+});
+
+test('an explicit --unit-name must already be a C identifier part (F10)', async () => {
+  await inScratch({ 'lib.ts': ADD }, async (dir) => {
+    const header = (name: string) =>
+      statorIn(
+        dir,
+        'build',
+        'lib.ts',
+        '-o',
+        `${name}.c`,
+        '--emit=c',
+        `--emit-header=${name}.h`,
+        `--unit-name=${name}`,
+      );
+    const [dashed, dotted, plain] = await Promise.all([
+      header('my-lib'),
+      header('my.lib'),
+      header('my_lib'),
+    ]);
+    for (const refused of [dashed, dotted]) {
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /^stator: STA0004 unit name "my[-.]lib"/);
+    }
+    assert.equal(existsSync(join(dir, 'my-lib.h')), false);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.match(readFileSync(join(dir, 'my_lib.h'), 'utf8'), /stator_my_lib_add/);
+  });
+});
+
+test('a value flag refuses a flag as its value (F11)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const [out, link, linkEq] = await Promise.all([
+      statorIn(dir, 'build', 'app.ts', '-o', '--emit=c'),
+      statorIn(dir, 'build', 'app.ts', '-o', 'app', '--link', '-lm'),
+      statorIn(dir, 'build', 'none.ts', '-o', 'app', '--link=-lm'),
+    ]);
+    assert.equal(out.status, 1);
+    assert.match(
+      out.stderr,
+      /^stator: STA0004 -o requires an output path, not the flag "--emit=c"/,
+    );
+    assert.equal(existsSync(join(dir, '--emit=c')), false);
+    assert.match(link.stderr, /^stator: STA0004 --link requires .*write --link=-lm/);
+    // The `=` spelling carries a dash-led value: the parse passes, and the missing entry is next.
+    assert.match(linkEq.stderr, /^stator: STA0007 /);
+  });
+});
+
+test('each command accepts only its own flags (F11)', async () => {
+  const runs = await Promise.all(
+    [
+      ['explain', 'lib.ts', '--emit=c'],
+      ['explain', 'lib.ts', '--opt=3'],
+      ['explain', 'lib.ts', '-o', 'x'],
+      ['explain', 'lib.ts', '--keep-c'],
+      ['explain', 'lib.ts', '--link=-lm'],
+      ['build', 'lib.ts', '-o', 'x', '--json'],
+    ].map(async (argv) => ({ argv, run: await stator(...argv) })),
+  );
+  for (const { argv, run } of runs) {
+    assert.equal(run.status, 1, argv.join(' '));
+    assert.match(
+      run.stderr,
+      new RegExp(`^stator: STA0005 flag "[^"]+" does not apply to ${argv[0] ?? ''}`),
+      argv.join(' '),
+    );
+  }
+});
+
+test('a bad STATOR_OPT names the environment as its origin (F11)', async () => {
+  const run = await execa(process.execPath, [CLI, 'build', 'x.ts', '-o', 'x.c', '--emit=c'], {
+    reject: false,
+    env: { STATOR_OPT: 'fast' },
+  });
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stderr, /STA0002 unknown opt "fast" in the environment variable STATOR_OPT/);
+});
+
+/* Task 6.21 (QA audit F3, F4): the runtime is resolved per build, and a project `.env` may choose
+ * only STATOR_OPT, STATOR_RUNTIME and STATOR_OTEL — never the C compiler, the runtime root or the
+ * telemetry exporter. */
+
+/** `stator` in `dir` with `env` merged over the real environment (`undefined` unsets a key). */
+async function statorEnv(
+  dir: string,
+  env: Readonly<Record<string, string | undefined>>,
+  ...args: string[]
+): Promise<Run> {
+  const merged: Record<string, string | undefined> = { ...process.env, ...env };
+  const result = await execa(process.execPath, [CLI, ...args], {
+    cwd: dir,
+    env: merged,
+    extendEnv: false,
+    reject: false,
+  });
+  return {
+    status: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr.replace(/\s+/g, ' '),
+  };
+}
+
+const LOCALE_COMPARE = "console.log('a'.localeCompare('b', 'en'));\n";
+
+test('STATOR_RUNTIME from .env reaches the link, not only the gate (F3)', NATIVE_ONLY, async () => {
+  await inScratch({ '.env': 'STATOR_RUNTIME=intl\n', 'lc.ts': LOCALE_COMPARE }, async (dir) => {
+    const b = await statorEnv(dir, { STATOR_RUNTIME: undefined }, 'build', 'lc.ts', '-o', 'lc');
+    assert.match(b.stderr, /stator: \.env: applied STATOR_RUNTIME/);
+    if (b.status === 0) {
+      const r = await spawn(join(dir, 'lc'), [], dir);
+      assert.equal(r.status, 0, `linked against the default archive and panicked:\n${r.stderr}`);
+    } else {
+      // Without the ICU build the answer is the same as with the variable set for real.
+      assert.match(b.stderr, /STA0011 runtime archive not found at .*build-intl/);
+    }
+  });
+});
+
+test('an in-process build reads the runtime when it runs, not when build.ts was imported (F3)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const saved = process.env['STATOR_RUNTIME_ROOT'];
+    process.env['STATOR_RUNTIME_ROOT'] = join(dir, 'no-runtime');
+    try {
+      await assert.rejects(
+        build({
+          entry: join(dir, 'app.ts'),
+          out: join(dir, 'app'),
+          mode: 'ts',
+          emitCOnly: false,
+          keepC: false,
+        }),
+        (error: unknown) =>
+          error instanceof BuildError &&
+          error.code === 'STA0011' &&
+          error.message.includes('no-runtime'),
+      );
+    } finally {
+      if (saved === undefined) {
+        delete process.env['STATOR_RUNTIME_ROOT'];
+      } else {
+        process.env['STATOR_RUNTIME_ROOT'] = saved;
+      }
+    }
+  });
+});
+
+test('a project .env must not choose the C compiler (F4)', NATIVE_ONLY, async () => {
+  await inScratch({ 'lib.ts': ADD }, async (dir) => {
+    const marker = join(dir, 'ran.txt');
+    const fake = join(dir, 'fakecc.sh');
+    writeFileSync(fake, `#!/bin/sh\necho ran > "${marker}"\n`);
+    chmodSync(fake, 0o755);
+    writeFileSync(
+      join(dir, '.env'),
+      `CC=${fake}\nSTATOR_RUNTIME_ROOT=/nonexistent\nOTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:9\n`,
+    );
+    const r = await statorEnv(
+      dir,
+      { CC: undefined, STATOR_RUNTIME_ROOT: undefined, OTEL_EXPORTER_OTLP_ENDPOINT: undefined },
+      'build',
+      'lib.ts',
+      '-o',
+      'lib.o',
+      '--emit-header=lib.h',
+    );
+    assert.equal(existsSync(marker), false, 'CC from the project .env was executed');
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(existsSync(join(dir, 'lib.o')), 'the real clang wrote the object');
+    assert.match(
+      r.stderr,
+      /stator: \.env: ignored CC, STATOR_RUNTIME_ROOT, OTEL_EXPORTER_OTLP_ENDPOINT \(only STATOR_OPT, STATOR_RUNTIME, STATOR_OTEL may come from \.env\)/,
+    );
+  });
+});
+
+test('.env may set STATOR_OPT, and the real environment wins over it (F4)', async () => {
+  await inScratch({ '.env': 'STATOR_OPT=fast\n', 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const [fromFile, fromEnv] = await Promise.all([
+      statorEnv(dir, { STATOR_OPT: undefined }, 'build', 'app.ts', '-o', 'a.c', '--emit=c'),
+      statorEnv(dir, { STATOR_OPT: '1' }, 'build', 'app.ts', '-o', 'b.c', '--emit=c'),
+    ]);
+    assert.equal(fromFile.status, 1);
+    assert.match(fromFile.stderr, /^stator: \.env: applied STATOR_OPT /);
+    assert.match(
+      fromFile.stderr,
+      /STA0002 unknown opt "fast" in the environment variable STATOR_OPT/,
+    );
+    assert.equal(fromEnv.status, 0, fromEnv.stderr);
+    assert.doesNotMatch(fromEnv.stderr, /\.env/, 'nothing applied, so nothing to say');
+  });
+});
+
+test('a C compiler that exits 0 but writes nothing fails the build (F4)', NATIVE_ONLY, async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n', 'lib.ts': ADD }, async (dir) => {
+    const fake = join(dir, 'silentcc.sh');
+    writeFileSync(fake, '#!/bin/sh\nexit 0\n');
+    chmodSync(fake, 0o755);
+    const [binary, object] = await Promise.all([
+      statorEnv(dir, { CC: fake }, 'build', 'app.ts', '-o', 'app'),
+      statorEnv(dir, { CC: fake }, 'build', 'lib.ts', '-o', 'lib.o', '--emit-header=lib.h'),
+    ]);
+    for (const r of [binary, object]) {
+      assert.equal(r.status, 1, 'a build that produced nothing reported success');
+      assert.match(
+        r.stderr,
+        /STA0009 C compiler ".*silentcc\.sh" exited 0 but wrote no "(app|lib\.o)"/,
+      );
+    }
+  });
 });

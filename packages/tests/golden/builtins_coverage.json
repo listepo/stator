@@ -5,7 +5,19 @@
     "Infinity": ["ts/math_builtins.ts", "js/math_builtins.js"],
     "undefined": ["ts/arrays.ts"],
     "Uint8Array": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
-    "ArrayBuffer": ["ts/typed_arrays.ts", "js/typed_arrays.js"]
+    "ArrayBuffer": ["ts/typed_arrays.ts", "js/typed_arrays.js"],
+    "String": ["ts/global_functions.ts", "js/global_functions.js"],
+    "Number": ["ts/global_functions.ts", "js/global_functions.js"],
+    "Boolean": ["ts/global_functions.ts", "js/global_functions.js"],
+    "parseInt": ["ts/global_functions.ts", "js/global_functions.js"],
+    "parseFloat": ["ts/global_functions.ts", "js/global_functions.js"],
+    "isNaN": ["ts/global_functions.ts", "js/global_functions.js"],
+    "isFinite": ["ts/global_functions.ts", "js/global_functions.js"]
+  },
+  "Array": {
+    "isArray": ["ts/global_functions.ts", "js/global_functions.js"],
+    "from": ["ts/iterable_spreads.ts", "js/iterable_spreads.js"],
+    "of": []
   },
   "Math": {
     "abs": ["ts/math_builtins.ts"],
@@ -53,6 +65,30 @@
     "PI": ["ts/math_builtins.ts", "js/math_builtins.js"],
     "SQRT1_2": ["ts/math_builtins.ts"],
     "SQRT2": ["ts/math_builtins.ts"]
+  },
+  "Number": {
+    "EPSILON": ["ts/number_methods.ts", "js/number_methods.js"],
+    "MAX_SAFE_INTEGER": ["ts/number_methods.ts", "js/number_methods.js"],
+    "MAX_VALUE": ["ts/number_methods.ts", "js/number_methods.js"],
+    "MIN_SAFE_INTEGER": ["js/number_methods.js"],
+    "MIN_VALUE": ["js/number_methods.js"],
+    "NaN": ["js/number_methods.js"],
+    "NEGATIVE_INFINITY": ["ts/number_methods.ts", "js/number_methods.js"],
+    "POSITIVE_INFINITY": ["js/number_methods.js"],
+    "isFinite": [],
+    "isInteger": [],
+    "isNaN": [],
+    "isSafeInteger": [],
+    "parseFloat": ["ts/number_methods.ts", "js/number_methods.js"],
+    "parseInt": ["ts/number_methods.ts", "js/number_methods.js"]
+  },
+  "Number.prototype": {
+    "toExponential": [],
+    "toFixed": ["ts/number_methods.ts", "js/number_methods.js"],
+    "toLocaleString": [],
+    "toPrecision": [],
+    "toString": ["ts/number_methods.ts", "js/number_methods.js"],
+    "valueOf": []
   },
   "String.prototype": {
     "at": ["ts/string_at_concat.ts", "js/string_at_concat.js"],

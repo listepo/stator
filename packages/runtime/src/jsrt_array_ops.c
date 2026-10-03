@@ -17,14 +17,44 @@
 
 #include "jsrt.h"
 #include "jsrt_index_util.h"
+#include "jsrt_mem.h"
 #include "jsrt_value.h"
 
 static JSRTArray *arr(jsrt_value v) { return jsrt_as_array(v); }
 
-/* Append one element through the public write path, which owns growth and the sparse-write
- * refusal; `length` is the one index a write may extend through. */
+/* Append one element through the public write path, which owns growth; `length` is the one index
+ * a write may extend through, so no hole can appear. */
 static void append(jsrt_value array, jsrt_value element) {
   jsrt_array_set(array, jsrt_number((double)arr(array)->length), element);
+}
+
+/* `len` holes: what `Array(n)` builds and what `map` writes its answers into (§23.1.3.21 step 5's
+ * ArraySpeciesCreate). */
+static jsrt_value holes(uint32_t len) {
+  jsrt_value out = jsrt_array_new(0, NULL);
+  if (len > 0) {
+    JSRTArray *a = arr(out);
+    jsrt_array_grow(a, len - 1);
+    for (uint32_t i = 0; i < len; i++) {
+      a->elements[i] = JSRT_HOLE;
+    }
+    a->length = len;
+  }
+  return out;
+}
+
+jsrt_value jsrt_array_construct(jsrt_value arg) {
+  if (!jsrt_is_number(arg)) {
+    return jsrt_array_new(1, &arg);
+  }
+  /* §23.1.1.1 step 6: the length must survive ToUint32 unchanged. */
+  const double requested = jsrt_number_value(arg);
+  const uint32_t len = jsrt_to_uint32(requested);
+  if ((double)len != requested) {
+    jsrt_throw_error(&jsrt_class_range_error, "Invalid array length");
+    return JSRT_UNDEFINED;
+  }
+  return holes(len);
 }
 
 jsrt_value jsrt_array_push(jsrt_value array, jsrt_value element) {
@@ -88,7 +118,7 @@ jsrt_value jsrt_array_pop(jsrt_value array) {
   if (!array_take(arr(array), false, &out)) {
     return JSRT_UNDEFINED;
   }
-  return out;
+  return jsrt_unhole(out);
 }
 
 jsrt_value jsrt_array_shift(jsrt_value array) {
@@ -99,7 +129,7 @@ jsrt_value jsrt_array_shift(jsrt_value array) {
   if (!array_take(arr(array), true, &out)) {
     return JSRT_UNDEFINED;
   }
-  return out;
+  return jsrt_unhole(out);
 }
 
 jsrt_value jsrt_array_unshift(jsrt_value array, jsrt_value element) {
@@ -162,7 +192,7 @@ jsrt_value jsrt_array_at(jsrt_value array, jsrt_value index) {
   if (k < 0.0 || k >= (double)a->length) {
     return JSRT_UNDEFINED;
   }
-  return a->elements[(uint32_t)k];
+  return jsrt_unhole(a->elements[(uint32_t)k]);
 }
 
 /* SameValueZero: strict equality plus NaN finding NaN (§7.2.9). `includes` searches with it;
@@ -241,7 +271,7 @@ jsrt_value jsrt_array_includes(jsrt_value array, jsrt_value search, jsrt_value f
     return JSRT_UNDEFINED;
   }
   for (uint32_t i = search_start(from, a->length); i < a->length; i++) {
-    if (same_value_zero(a->elements[i], search)) {
+    if (same_value_zero(jsrt_unhole(a->elements[i]), search)) {
       return JSRT_TRUE;
     }
   }
@@ -461,6 +491,9 @@ static void flatten_into(jsrt_value out, jsrt_value v, double depth) {
   const uint32_t len = a->length;
   for (uint32_t i = 0; i < len && i < arr(v)->length; i++) {
     jsrt_value elem = arr(v)->elements[i];
+    if (elem == JSRT_HOLE) {
+      continue; /* §7.3.35 FlattenIntoArray step 3.c: an absent index is skipped */
+    }
     if (depth >= 1.0 && jsrt_is(elem, JSRT_TAG_ARRAY)) {
       flatten_into(out, elem, depth - 1.0);
     } else {
@@ -484,7 +517,7 @@ jsrt_value jsrt_array_flat(jsrt_value array, jsrt_value depth) {
  * compiled callee declared with fewer parameters reads the missing ones as `undefined` through
  * jsrt_arg, so passing all three is always right. */
 static jsrt_value call_cb(jsrt_value cb, jsrt_value array, uint32_t i) {
-  jsrt_value args[3] = {arr(array)->elements[i], jsrt_number((double)i), array};
+  jsrt_value args[3] = {jsrt_unhole(arr(array)->elements[i]), jsrt_number((double)i), array};
   return jsrt_call(cb, 3, args);
 }
 
@@ -497,12 +530,12 @@ static bool walking(jsrt_value array, uint32_t i, uint32_t len) {
   return i < len && i < arr(array)->length && !jsrt_pending();
 }
 
-/* Downward-visit existence check, walking()'s counterpart for the downward loops: an index the
- * array no longer has is SKIPPED, never terminal -- the spec's HasProperty step, checked at
- * visit time. array_find_downward and reduce_right share it the way every upward loop shares
- * walking(), which is why the rule is stated here and not in either loop. */
+/* The spec's HasProperty step, checked at visit time: an index the array no longer has, or a
+ * HOLE, is SKIPPED, never terminal. Every walk that skips absent indices asks it -- forEach, map,
+ * filter, some, every, flatMap and both reduces -- while find and its siblings visit a hole as
+ * `undefined` (§23.1.3.9 reads with Get), so they ask only the length half. */
 static bool index_present(jsrt_value array, uint32_t i) {
-  return i < arr(array)->length;
+  return i < arr(array)->length && arr(array)->elements[i] != JSRT_HOLE;
 }
 
 /* One predicate step shared by the upward and downward find walks: snapshot the element BEFORE
@@ -510,7 +543,7 @@ static bool index_present(jsrt_value array, uint32_t i) {
  * hit with the snapshot and/or the index. */
 static bool find_test(jsrt_value array, jsrt_value cb, uint32_t i, uint32_t *index_out,
                        jsrt_value *elem_out) {
-  jsrt_value elem = arr(array)->elements[i];
+  jsrt_value elem = jsrt_unhole(arr(array)->elements[i]);
   if (!jsrt_truthy(call_cb(cb, array, i))) {
     return false;
   }
@@ -541,7 +574,7 @@ static bool array_find_downward(jsrt_value array, jsrt_value cb, uint32_t *index
                                 jsrt_value *elem_out) {
   const uint32_t len = arr(array)->length;
   for (uint32_t i = len; i-- > 0 && !jsrt_pending();) {
-    if (!index_present(array, i)) {
+    if (i >= arr(array)->length) {
       continue;
     }
     if (find_test(array, cb, i, index_out, elem_out)) {
@@ -557,7 +590,9 @@ jsrt_value jsrt_array_for_each(jsrt_value array, jsrt_value cb) {
   }
   const uint32_t len = arr(array)->length;
   for (uint32_t i = 0; walking(array, i, len); i++) {
-    call_cb(cb, array, i);
+    if (index_present(array, i)) {
+      call_cb(cb, array, i);
+    }
   }
   return JSRT_UNDEFINED;
 }
@@ -566,10 +601,15 @@ jsrt_value jsrt_array_map(jsrt_value array, jsrt_value cb) {
   if (jsrt_require_array(array, "map") == NULL) {
     return JSRT_UNDEFINED;
   }
+  /* §23.1.3.21: the answer has the receiver's length at entry, and an index the walk skips -- a
+   * hole, or one the callback cut off -- stays a hole in it. */
   const uint32_t len = arr(array)->length;
-  jsrt_value out = jsrt_array_new(0, NULL);
+  jsrt_value out = holes(len);
   for (uint32_t i = 0; walking(array, i, len); i++) {
-    append(out, call_cb(cb, array, i));
+    if (index_present(array, i)) {
+      const jsrt_value mapped = call_cb(cb, array, i);
+      arr(out)->elements[i] = mapped;
+    }
   }
   return out;
 }
@@ -584,6 +624,9 @@ jsrt_value jsrt_array_filter(jsrt_value array, jsrt_value cb) {
     /* Capture kValue before the callback. The callback receives this snapshot, and the selected
      * value pushed into the result is that same snapshot even when the callback mutates the
      * receiver's slot (ECMA-262 §23.1.3.8 steps 6.a–6.c). */
+    if (!index_present(array, i)) {
+      continue;
+    }
     const jsrt_value element = arr(array)->elements[i];
     if (jsrt_truthy(call_cb(cb, array, i))) {
       append(out, element);
@@ -598,7 +641,7 @@ jsrt_value jsrt_array_some(jsrt_value array, jsrt_value cb) {
   }
   const uint32_t len = arr(array)->length;
   for (uint32_t i = 0; walking(array, i, len); i++) {
-    if (jsrt_truthy(call_cb(cb, array, i))) {
+    if (index_present(array, i) && jsrt_truthy(call_cb(cb, array, i))) {
       return JSRT_TRUE;
     }
   }
@@ -611,7 +654,7 @@ jsrt_value jsrt_array_every(jsrt_value array, jsrt_value cb) {
   }
   const uint32_t len = arr(array)->length;
   for (uint32_t i = 0; walking(array, i, len); i++) {
-    if (!jsrt_truthy(call_cb(cb, array, i))) {
+    if (index_present(array, i) && !jsrt_truthy(call_cb(cb, array, i))) {
       return JSRT_FALSE;
     }
   }
@@ -637,6 +680,9 @@ jsrt_value jsrt_array_flat_map(jsrt_value array, jsrt_value cb) {
   const uint32_t len = arr(array)->length;
   jsrt_value out = jsrt_array_new(0, NULL);
   for (uint32_t i = 0; walking(array, i, len); i++) {
+    if (!index_present(array, i)) {
+      continue;
+    }
     jsrt_value mapped = call_cb(cb, array, i);
     if (jsrt_is(mapped, JSRT_TAG_ARRAY)) {
       flatten_into(out, mapped, 0.0);
@@ -676,7 +722,9 @@ jsrt_value jsrt_array_reduce(jsrt_value array, jsrt_value cb, jsrt_value initial
   const uint32_t len = arr(array)->length;
   jsrt_value acc = initial;
   for (uint32_t i = 0; walking(array, i, len); i++) {
-    acc = reduce_call(cb, acc, array, i);
+    if (index_present(array, i)) {
+      acc = reduce_call(cb, acc, array, i);
+    }
   }
   return acc;
 }
@@ -751,9 +799,20 @@ jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp) {
   if (a == NULL) {
     return JSRT_UNDEFINED;
   }
-  if (a->length >= 2) {
-    jsrt_value scratch_owner = jsrt_array_new(a->length, a->elements);
-    sort_range(a->elements, arr(scratch_owner)->elements, 0, a->length, cmp);
+  /* §23.1.3.30 SortIndexedProperties collects only the indices the array HAS: the present
+   * elements sort (undefined among them sinking, by sort_compare), and the holes follow them. */
+  uint32_t present = 0;
+  for (uint32_t i = 0; i < a->length; i++) {
+    if (a->elements[i] != JSRT_HOLE) {
+      a->elements[present++] = a->elements[i];
+    }
+  }
+  for (uint32_t i = present; i < a->length; i++) {
+    a->elements[i] = JSRT_HOLE;
+  }
+  if (present >= 2) {
+    jsrt_value scratch_owner = jsrt_array_new(present, a->elements);
+    sort_range(a->elements, arr(scratch_owner)->elements, 0, present, cmp);
   }
   return array;
 }
@@ -781,14 +840,26 @@ jsrt_value jsrt_array_find_last_index(jsrt_value array, jsrt_value cb) {
   return jsrt_number(-1.0);
 }
 
-/* The ES2023 immutable variants: a fresh copy, then the mutating op's own machinery. */
+/* The ES2023 immutable variants: a fresh copy, then the mutating op's own machinery. Each reads
+ * the receiver with Get (§23.1.3.33-36), so the copy has no holes: a hole is `undefined` in it. */
+static jsrt_value dense_copy(const JSRTArray *a) {
+  return jsrt_array_fill_holes(jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL));
+}
+
+jsrt_value jsrt_array_fill_holes(jsrt_value array) {
+  JSRTArray *c = arr(array);
+  for (uint32_t i = 0; i < c->length; i++) {
+    c->elements[i] = jsrt_unhole(c->elements[i]);
+  }
+  return array;
+}
+
 jsrt_value jsrt_array_to_reversed(jsrt_value array) {
   JSRTArray *a = jsrt_require_array(array, "toReversed");
   if (a == NULL) {
     return JSRT_UNDEFINED;
   }
-  jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
-  return jsrt_array_reverse(out);
+  return jsrt_array_reverse(dense_copy(a));
 }
 
 jsrt_value jsrt_array_to_sorted(jsrt_value array, jsrt_value cmp) {
@@ -796,8 +867,7 @@ jsrt_value jsrt_array_to_sorted(jsrt_value array, jsrt_value cmp) {
   if (a == NULL) {
     return JSRT_UNDEFINED;
   }
-  jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
-  return jsrt_array_sort(out, cmp);
+  return jsrt_array_sort(dense_copy(a), cmp);
 }
 
 /* Two-argument form, same rule as splice: skipCount's padding trap is inherited. */
@@ -806,7 +876,7 @@ jsrt_value jsrt_array_to_spliced(jsrt_value array, jsrt_value start, jsrt_value 
   if (a == NULL) {
     return JSRT_UNDEFINED;
   }
-  jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
+  jsrt_value out = dense_copy(a);
   jsrt_array_splice(out, start, skip_count);
   return out;
 }
@@ -836,7 +906,7 @@ jsrt_value jsrt_array_with(jsrt_value array, jsrt_value index, jsrt_value value)
         "Array.prototype.with index out of range is not yet supported; the spec throws "
         "RangeError, which builtins cannot raise yet");
   }
-  jsrt_value out = jsrt_array_new(a->length, a->length > 0 ? a->elements : NULL);
+  jsrt_value out = dense_copy(a);
   arr(out)->elements[(uint32_t)rel] = value;
   return out;
 }
@@ -1042,17 +1112,23 @@ static jsrt_value array_method_call(uint32_t argc, const jsrt_value *argv, JSRTE
   jsrt_panic("array method dispatch fell through its own table");
 }
 
+jsrt_value jsrt_bound_method(jsrt_value receiver, uint32_t row,
+                             jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
+                             uint32_t length, const char *name) {
+  JSRTEnv *env = jsrt_env_new(NULL, 2);
+  env->slots[0] = receiver;
+  env->slots[1] = jsrt_number((double)row);
+  return jsrt_closure_new(fn, length, name, env, false);
+}
+
 bool jsrt_array_method(jsrt_value array, const char *key, jsrt_value *out) {
   if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
     return false;
   }
   for (size_t i = 0; i < sizeof ARRAY_METHOD_TABLE / sizeof ARRAY_METHOD_TABLE[0]; i++) {
     if (strcmp(ARRAY_METHOD_TABLE[i].name, key) == 0) {
-      JSRTEnv *env = jsrt_env_new(NULL, 2);
-      env->slots[0] = array;
-      env->slots[1] = jsrt_number((double)ARRAY_METHOD_TABLE[i].op);
-      *out = jsrt_closure_new(array_method_call, ARRAY_METHOD_TABLE[i].arity,
-                              ARRAY_METHOD_TABLE[i].name, env, false);
+      *out = jsrt_bound_method(array, (uint32_t)ARRAY_METHOD_TABLE[i].op, array_method_call,
+                               ARRAY_METHOD_TABLE[i].arity, ARRAY_METHOD_TABLE[i].name);
       return true;
     }
   }

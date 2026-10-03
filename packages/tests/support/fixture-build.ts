@@ -11,6 +11,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BuildError, build, withDiagnosticCapture } from '../../compiler/src/cli/build.ts';
+import type { BundlerChoice } from '../../compiler/src/cli/bundler.ts';
 import { nodePath } from './node-path.ts';
 import { runProcess } from './parallel.ts';
 
@@ -31,6 +32,10 @@ export interface BuildFixtureArgs {
   readonly linkFlags?: readonly string[];
   readonly emitHeader?: string;
   readonly unitName?: string;
+  /** `js` mode's bundler; the compiler's default (`vite`) when absent. */
+  readonly bundler?: BundlerChoice;
+  /** `--node`: the Node platform (docs/MODES.md §6). */
+  readonly node?: boolean;
 }
 
 /* In-process compile (plan.md §9 Task 6.6): `build()` under `withDiagnosticCapture` — the
@@ -51,6 +56,8 @@ export async function buildFixture(args: BuildFixtureArgs): Promise<void> {
         linkFlags: args.linkFlags ?? [],
         ...(args.emitHeader !== undefined ? { emitHeader: args.emitHeader } : {}),
         ...(args.unitName !== undefined ? { unitName: args.unitName } : {}),
+        ...(args.bundler !== undefined ? { bundler: args.bundler } : {}),
+        ...(args.node !== undefined ? { node: args.node } : {}),
       }),
     ));
   } catch (error) {
@@ -103,16 +110,20 @@ export async function compileFixtureC(entry: string, work: string): Promise<stri
   return objects;
 }
 
+/* A new shim is TypeScript (golden rule 9: no JS in our source); the `.mjs` spelling is the older
+ * fixtures', still loaded so they need no churn. The pinned Node strips the types on `--import`. */
+const NODE_SHIMS = ['node_shim.ts', 'node_shim.mjs'];
+
 /* The oracle, never the host: the compiler runs in-process on this host while ground truth
  * comes from the pinned Node (or `STATOR_NODE`). A fixture directory may carry a
- * `node_shim.mjs` preloading native bindings Node-side (FFI fixtures cannot run under Node
- * as written — an ambient `declare function` erases to nothing), loaded via `--import`
+ * `node_shim.ts` (or an older `node_shim.mjs`) preloading native bindings Node-side (FFI
+ * fixtures cannot run under Node as written — an ambient `declare function` erases to nothing), loaded via `--import`
  * before the entry and invisible to Stator, which never imports it. Every run also loads
  * `golden/std-oracle.ts`, the resolve hook that answers `std/*` imports Node-side. `env` is the caller's
  * pinned environment (TZ=UTC on both sides), kept per-caller so this helper owns no clock. */
 export async function runNodeOracle(path: string, env: NodeJS.ProcessEnv): Promise<FixtureStreams> {
-  const shim = join(dirname(path), 'node_shim.mjs');
-  const args = ['--import', STD_ORACLE, ...(existsSync(shim) ? ['--import', shim] : []), path];
+  const shim = NODE_SHIMS.map((name) => join(dirname(path), name)).find((file) => existsSync(file));
+  const args = ['--import', STD_ORACLE, ...(shim !== undefined ? ['--import', shim] : []), path];
   const result = await runProcess(nodePath(), args, { env });
   if (result.status !== 0) {
     throw new Error(`node exited ${String(result.status)}: ${result.stderr.trim()}`);

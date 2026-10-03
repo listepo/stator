@@ -1,0 +1,21 @@
+{
+  "name": "vite-stator",
+  "version": "0.0.0",
+  "description": "Stator's default bundler integration: the vendor-bundle adapter and the stator() Vite plugin",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "statorc": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vite": "8.3.2"
+  },
+  "peerDependencies": {
+    "vite": "^8.3.2"
+  }
+}

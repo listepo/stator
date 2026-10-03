@@ -1,0 +1,62 @@
+{
+  "packages/compiler": {
+    "verdict": "not-yet",
+    "codes": {
+      "STA1207": 1,
+      "STA1213": 2,
+      "STA1214": 1813
+    }
+  },
+  "packages/node/src/assert.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/node/src/fs.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/node/src/module.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/node/src/path.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/std/src/encoding.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/env.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/std/src/fs.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/hash.ts": {
+    "verdict": "dynamic",
+    "codes": {}
+  },
+  "packages/std/src/io.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/os.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/path.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/process.ts": {
+    "verdict": "static",
+    "codes": {}
+  },
+  "packages/std/src/time.ts": {
+    "verdict": "static",
+    "codes": {}
+  }
+}

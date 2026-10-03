@@ -29,6 +29,7 @@ const pipeline = [
           data-theme="system"
           aria-label="Theme: system (follows OS)"
           title="Cycle theme: system → light → dark"
+          hidden
         >
           <svg class="theme-toggle-icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
             <circle cx="12" cy="12" r="4"></circle>
@@ -110,6 +111,7 @@ const pipeline = [
 
   .top-inner {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
@@ -140,12 +142,16 @@ const pipeline = [
 
   .header-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    min-width: 0;
     gap: 0.85rem;
   }
 
   .nav {
     display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
     gap: 1.25rem;
     font-size: 0.8125rem;
   }

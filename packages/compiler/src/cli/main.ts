@@ -1,9 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config as dotenvConfig } from 'dotenv';
 import { telemetryInit, telemetryShutdown, withSpanAsync } from '../support/telemetry.ts';
 import { BuildError, build, internalErrorMessage, type OptLevel } from './build.ts';
+import { type BundlerChoice, bundlerChoice, DEFAULT_BUNDLER } from './bundler.ts';
+import {
+  type CliOptions,
+  type ConfigChoice,
+  loadConfig,
+  resolveOptions,
+  splitFlags,
+} from './config.ts';
+import { applyEnvFile, envFileNotice } from './env-file.ts';
 import { explain } from './explain.ts';
 import { INK_COLORS, print } from './render.ts';
 
@@ -23,15 +31,25 @@ type Command =
       linkFlags: readonly string[];
       emitHeader: string | undefined;
       unitName: string | undefined;
+      bundler: BundlerChoice;
+      node: boolean;
     }
-  | { kind: 'explain'; entry: string; mode: Mode; json: boolean };
+  | {
+      kind: 'explain';
+      entry: string;
+      mode: Mode;
+      json: boolean;
+      bundler: BundlerChoice;
+      node: boolean;
+    };
 
 const USAGE = `stator — ahead-of-time compiler for TypeScript/JavaScript
 
 Usage:
-  stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
+  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
-  stator explain <entry> [--mode=ts|js] [--json]
+    [--bundler=vite|none|<module>]
+  stator explain <entry> [--mode=ts|js] [--node] [--json] [--bundler=vite|none|<module>]
   stator <command> --help
   stator --version
   stator --help
@@ -39,6 +57,14 @@ Usage:
 Modes:
   ts  (default)  strict static TypeScript; .ts only; explicit any is an error
   js             JavaScript, or JS + TS mixed; untyped code goes dynamic
+
+Platform:
+  --node         node:* and bare built-ins resolve to packages/node
+
+Config:
+  Every option can also come from ./stator.config.json (docs/CONFIG.md);
+  the command line wins. --config=<path> reads another file, --no-config
+  reads none.
 `;
 
 /** Per-command help, after oclif's convention: `<command> --help` documents that command's flags,
@@ -46,12 +72,15 @@ Modes:
  * that fits the fallback width reads the same on a TTY and on a pipe (plan-notes 187). */
 const COMMAND_USAGE = {
   build: `Usage:
-  stator build <entry> -o <out> [--mode=ts|js] [--emit=c] [--keep-c]
+  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
+    [--bundler=vite|none|<module>]
 
 Flags:
   -o, --out <out>  output path: native binary, or C with --emit=c
   --mode ts|js     strict ts (default) or dynamic js; diagnostics only
+  --node           the Node platform: node:* and bare built-ins resolve
+                   to packages/node (docs/MODES.md §6)
   --emit=c         stop after writing C to <out>; skip the C compiler
   --keep-c         keep the intermediate .c next to the binary
   --opt 0|1|2|3    clang -O level (default 2; or STATOR_OPT)
@@ -60,9 +89,15 @@ Flags:
   --emit-header <h> write a C header for the unit's exports (docs/FFI.md);
                    -o names a relocatable object, not an executable
   --unit-name <unit> prefix for stator_<unit>_<name> (default: entry basename)
+  --bundler <b>    js mode: bundles package imports and CommonJS files;
+                   vite (default), none, or an adapter module (BUNDLER.md)
+  --emit=binary    build a binary (default; overrides "emit": "c")
+  --config <path>  read options from this JSON file (default:
+                   ./stator.config.json when it exists; docs/CONFIG.md)
+  --no-config      ignore stator.config.json
 `,
   explain: `Usage:
-  stator explain <entry> [--mode=ts|js] [--json]
+  stator explain <entry> [--mode=ts|js] [--node] [--json] [--bundler=<b>]
 
 Reports the file verdict: static | dynamic | error | not-yet, with the
 STA code and every diagnostic that decided it, then the static/dynamic
@@ -71,7 +106,14 @@ the answer, so a refusal is a result, not a crash.
 
 Flags:
   --mode ts|js     strict ts (default) or dynamic js
-  --json           machine-readable report (used by the decision tests)
+  --node           the Node platform; a built-in packages/node has not
+                   landed is not-yet, naming T11.6
+  --json           machine-readable report (used by the decision tests);
+                   --diagnostics=text|json spells the same choice
+  --bundler <b>    js mode: vite (default), none, or an adapter module
+  --config <path>  read options from this JSON file (default:
+                   ./stator.config.json when it exists; docs/CONFIG.md)
+  --no-config      ignore stator.config.json
 `,
 } as const;
 
@@ -107,31 +149,198 @@ function parseMode(raw: string): Mode {
   throw new StatorError('STA0002', `unknown mode "${raw}" (expected "ts" or "js")`);
 }
 
-function parseOpt(raw: string): OptLevel {
+/** `origin` names where the value came from when it is not the flag itself, so a bad
+ * `STATOR_OPT` points at the environment rather than at a command line that has no `--opt`. */
+function parseOpt(raw: string, origin = ''): OptLevel {
   if (raw === '0' || raw === '1' || raw === '2' || raw === '3') {
     return Number(raw) as OptLevel;
   }
-  throw new StatorError('STA0002', `unknown opt "${raw}" (expected 0, 1, 2, or 3)`);
+  throw new StatorError('STA0002', `unknown opt "${raw}"${origin} (expected 0, 1, 2, or 3)`);
 }
 
-/** CLI `--opt` wins; else `STATOR_OPT`; else 2. */
-function defaultOpt(): OptLevel {
+/** `STATOR_OPT`, below `--opt` and above the config file (Task 6.18 step 3). */
+function envOpt(): OptLevel | undefined {
   const env = process.env['STATOR_OPT'];
   if (env === undefined || env === '') {
-    return 2;
+    return undefined;
   }
-  return parseOpt(env);
+  return parseOpt(env, ' in the environment variable STATOR_OPT');
 }
 
 /** One `--link` value into clang flags: whitespace-separated, so `--link="-lsqlite3 -L/x"`
  * and two `--link` occurrences spell the same line. Empty is a user error, not an empty flag:
  * it almost always means an unexpanded `$VAR`, and an invisible no-op would hide that. */
 function splitLinkFlags(raw: string): string[] {
-  const flags = raw.split(/\s+/).filter((flag) => flag !== '');
+  const flags = splitFlags(raw);
   if (flags.length === 0) {
     throw new StatorError('STA0004', '--link requires a value (clang link flags)');
   }
   return flags;
+}
+
+type CommandName = 'build' | 'explain';
+
+interface ParseState {
+  readonly cli: CliOptions;
+  readonly linkFlags: string[];
+  configChoice: ConfigChoice;
+}
+
+/** One flag: the commands it belongs to, and for a value flag what the value is (the tail of
+ * its "requires" message) and whether `--flag=value` spells it too. A flag outside its command
+ * is refused, not ignored: an inert flag hides a typo in a script (plan.md §9 Task 6.20). */
+interface FlagSpec {
+  readonly commands: readonly CommandName[];
+  readonly value?: { readonly what: string; readonly equals: boolean };
+  readonly apply: (state: ParseState, value: string) => void;
+}
+
+const BOTH: readonly CommandName[] = ['build', 'explain'];
+const BUILD: readonly CommandName[] = ['build'];
+const EXPLAIN: readonly CommandName[] = ['explain'];
+
+const OUT: FlagSpec = {
+  commands: BUILD,
+  value: { what: 'an output path', equals: false },
+  apply: (s, v) => {
+    s.cli.out = v;
+  },
+};
+const JSON_REPORT: FlagSpec = {
+  commands: EXPLAIN,
+  apply: (s) => {
+    s.cli.diagnostics = 'json';
+  },
+};
+
+const FLAGS: Readonly<Record<string, FlagSpec>> = {
+  '-o': OUT,
+  '--out': OUT,
+  '--mode': {
+    commands: BOTH,
+    value: { what: 'a value (ts or js)', equals: true },
+    apply: (s, v) => {
+      s.cli.mode = parseMode(v);
+    },
+  },
+  '--opt': {
+    commands: BUILD,
+    value: { what: 'a value (0, 1, 2, or 3)', equals: true },
+    apply: (s, v) => {
+      s.cli.opt = parseOpt(v);
+    },
+  },
+  '--link': {
+    commands: BUILD,
+    value: { what: 'a value (clang link flags)', equals: true },
+    apply: (s, v) => {
+      s.linkFlags.push(...splitLinkFlags(v));
+    },
+  },
+  '--emit-header': {
+    commands: BUILD,
+    value: { what: 'a value (output header path)', equals: true },
+    apply: (s, v) => {
+      s.cli.emitHeader = v;
+    },
+  },
+  '--unit-name': {
+    commands: BUILD,
+    value: { what: 'a value (C identifier prefix)', equals: true },
+    apply: (s, v) => {
+      s.cli.unitName = v;
+    },
+  },
+  '--bundler': {
+    commands: BOTH,
+    value: { what: 'a value (vite, none or a module)', equals: true },
+    apply: (s, v) => {
+      s.cli.bundler = v;
+    },
+  },
+  '--config': {
+    commands: BOTH,
+    value: { what: 'a value (config file path)', equals: true },
+    apply: (s, v) => {
+      s.configChoice = { kind: 'path', path: v };
+    },
+  },
+  '--no-config': {
+    commands: BOTH,
+    apply: (s) => {
+      s.configChoice = { kind: 'none' };
+    },
+  },
+  '--json': JSON_REPORT,
+  '--diagnostics=json': JSON_REPORT,
+  '--diagnostics=text': {
+    commands: EXPLAIN,
+    apply: (s) => {
+      s.cli.diagnostics = 'text';
+    },
+  },
+  '--emit=c': {
+    commands: BUILD,
+    apply: (s) => {
+      s.cli.emit = 'c';
+    },
+  },
+  '--emit=binary': {
+    commands: BUILD,
+    apply: (s) => {
+      s.cli.emit = 'binary';
+    },
+  },
+  '--keep-c': {
+    commands: BUILD,
+    apply: (s) => {
+      s.cli.keepC = true;
+    },
+  },
+  '--node': {
+    commands: BOTH,
+    apply: (s) => {
+      s.cli.node = true;
+    },
+  },
+};
+
+/** The flag `arg` spells, and its inline `=value` when it has one. */
+function lookupFlag(arg: string): { name: string; spec: FlagSpec; inline?: string } | undefined {
+  const exact = FLAGS[arg];
+  if (exact !== undefined) {
+    return { name: arg, spec: exact };
+  }
+  const eq = arg.indexOf('=');
+  if (!arg.startsWith('--') || eq < 0) {
+    return undefined;
+  }
+  const name = arg.slice(0, eq);
+  const spec = FLAGS[name];
+  return spec?.value?.equals === true ? { name, spec, inline: arg.slice(eq + 1) } : undefined;
+}
+
+/** A value flag's value. The next argument is refused when it looks like a flag: `-o --emit=c`
+ * is a forgotten path, not a file named `--emit=c`. A value that really starts with `-` (a
+ * clang flag for `--link`) has the `--flag=value` spelling. */
+function flagValue(
+  name: string,
+  value: { what: string; equals: boolean },
+  inline: string | undefined,
+  next: string | undefined,
+): string {
+  const given = inline ?? next;
+  if (given === undefined || given === '') {
+    throw new StatorError('STA0004', `${name} requires ${value.what}`);
+  }
+  if (inline === undefined && given.startsWith('-')) {
+    const hint = value.equals ? ` (write ${name}=${given} if that is the value)` : '';
+    throw new StatorError(
+      'STA0004',
+      `${name} requires ${value.what}, not the flag "${given}"${hint}`,
+    );
+  }
+  return given;
 }
 
 function parse(argv: readonly string[]): Command {
@@ -146,16 +355,25 @@ function parse(argv: readonly string[]): Command {
     throw new StatorError('STA0003', `unknown command "${head}" (expected "build" or "explain")`);
   }
 
-  let entry: string | undefined;
-  let out: string | undefined;
-  let mode: Mode = 'ts';
-  let json = false;
-  let emitC = false;
-  let keepC = false;
-  let opt: OptLevel | undefined;
-  const linkFlags: string[] = [];
-  let emitHeader: string | undefined;
-  let unitName: string | undefined;
+  const state: ParseState = {
+    cli: {
+      entry: undefined,
+      out: undefined,
+      mode: undefined,
+      opt: undefined,
+      link: [],
+      emit: undefined,
+      keepC: undefined,
+      emitHeader: undefined,
+      unitName: undefined,
+      bundler: undefined,
+      diagnostics: undefined,
+      node: undefined,
+    },
+    linkFlags: [],
+    configChoice: { kind: 'discover' },
+  };
+  const { cli, linkFlags } = state;
 
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -165,84 +383,46 @@ function parse(argv: readonly string[]): Command {
     if (arg === '--help' || arg === '-h') {
       return { kind: 'help', command: head };
     }
-    if (arg === '-o' || arg === '--out') {
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new StatorError('STA0004', `${arg} requires an output path`);
+    const flag = lookupFlag(arg);
+    if (flag === undefined) {
+      if (arg.startsWith('-')) {
+        throw new StatorError('STA0005', `unknown flag "${arg}"`);
       }
-      out = next;
-      i += 1;
-    } else if (arg.startsWith('--mode=')) {
-      mode = parseMode(arg.slice('--mode='.length));
-    } else if (arg === '--mode') {
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new StatorError('STA0004', '--mode requires a value (ts or js)');
+      if (cli.entry !== undefined) {
+        throw new StatorError('STA0006', `unexpected argument "${arg}"`);
       }
-      mode = parseMode(next);
-      i += 1;
-    } else if (arg === '--json' || arg === '--diagnostics=json') {
-      json = true;
-    } else if (arg === '--emit=c') {
-      emitC = true;
-    } else if (arg === '--keep-c') {
-      keepC = true;
-    } else if (arg.startsWith('--opt=')) {
-      opt = parseOpt(arg.slice('--opt='.length));
-    } else if (arg === '--opt') {
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new StatorError('STA0004', '--opt requires a value (0, 1, 2, or 3)');
-      }
-      opt = parseOpt(next);
-      i += 1;
-    } else if (arg.startsWith('--link=')) {
-      linkFlags.push(...splitLinkFlags(arg.slice('--link='.length)));
-    } else if (arg === '--link') {
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new StatorError('STA0004', '--link requires a value (clang link flags)');
-      }
-      linkFlags.push(...splitLinkFlags(next));
-      i += 1;
-    } else if (arg.startsWith('--emit-header=')) {
-      const value = arg.slice('--emit-header='.length);
-      if (value === '') {
-        throw new StatorError('STA0004', '--emit-header requires a value (output header path)');
-      }
-      emitHeader = value;
-    } else if (arg === '--emit-header') {
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new StatorError('STA0004', '--emit-header requires a value (output header path)');
-      }
-      emitHeader = next;
-      i += 1;
-    } else if (arg.startsWith('--unit-name=')) {
-      const value = arg.slice('--unit-name='.length);
-      if (value === '') {
-        throw new StatorError('STA0004', '--unit-name requires a value (C identifier prefix)');
-      }
-      unitName = value;
-    } else if (arg === '--unit-name') {
-      const next = argv[i + 1];
-      if (next === undefined) {
-        throw new StatorError('STA0004', '--unit-name requires a value (C identifier prefix)');
-      }
-      unitName = next;
-      i += 1;
-    } else if (arg.startsWith('-')) {
-      throw new StatorError('STA0005', `unknown flag "${arg}"`);
-    } else if (entry === undefined) {
-      entry = arg;
-    } else {
-      throw new StatorError('STA0006', `unexpected argument "${arg}"`);
+      cli.entry = arg;
+      continue;
     }
+    if (!flag.spec.commands.includes(head)) {
+      throw new StatorError('STA0005', `flag "${arg}" does not apply to ${head}`);
+    }
+    let value = '';
+    if (flag.spec.value !== undefined) {
+      value = flagValue(flag.name, flag.spec.value, flag.inline, argv[i + 1]);
+      if (flag.inline === undefined) {
+        i += 1;
+      }
+    }
+    flag.spec.apply(state, value);
   }
 
+  // Read after the scan, so `--help` and an unknown flag never touch the file.
+  const options = resolveOptions(
+    { ...cli, link: linkFlags },
+    { opt: envOpt() },
+    loadConfig(state.configChoice, process.cwd()),
+  );
+  const { entry, out, mode } = options;
   if (entry === undefined) {
     throw new StatorError('STA0004', `"${head}" requires an entry file`);
   }
+  // A ts-mode graph never bundles (docs/BUNDLER.md §5): a package import there is refused at the
+  // gate, so a bundler choice is a mistake worth naming, not an inert flag.
+  if (mode === 'ts' && options.bundler !== undefined) {
+    throw new StatorError('STA0004', '--bundler requires --mode=js');
+  }
+  const bundler = options.bundler === undefined ? DEFAULT_BUNDLER : bundlerChoice(options.bundler);
   if (head === 'build') {
     if (out === undefined) {
       throw new StatorError('STA0004', 'build requires -o <out>');
@@ -252,15 +432,24 @@ function parse(argv: readonly string[]): Command {
       entry,
       out,
       mode,
-      emitC,
-      keepC,
-      opt: opt ?? defaultOpt(),
-      linkFlags,
-      emitHeader,
-      unitName,
+      emitC: options.emit === 'c',
+      keepC: options.keepC,
+      opt: options.opt,
+      linkFlags: options.link,
+      emitHeader: options.emitHeader,
+      unitName: options.unitName,
+      bundler,
+      node: options.node,
     };
   }
-  return { kind: 'explain', entry, mode, json };
+  return {
+    kind: 'explain',
+    entry,
+    mode,
+    json: options.diagnostics === 'json',
+    bundler,
+    node: options.node,
+  };
 }
 
 async function run(command: Command): Promise<void> {
@@ -270,7 +459,11 @@ async function run(command: Command): Promise<void> {
       : `stator ${command.kind}`;
   const attrs =
     command.kind === 'build' || command.kind === 'explain'
-      ? { 'stator.mode': command.mode, 'stator.entry': command.entry }
+      ? {
+          'stator.mode': command.mode,
+          'stator.entry': command.entry,
+          'stator.node': String(command.node),
+        }
       : {};
   await withSpanAsync(spanName, attrs, () => runCommand(command));
 }
@@ -296,21 +489,33 @@ async function runCommand(command: Command): Promise<void> {
         keepC: command.keepC,
         opt: command.opt,
         linkFlags: command.linkFlags,
+        bundler: command.bundler,
         ...(command.emitHeader !== undefined && { emitHeader: command.emitHeader }),
         ...(command.unitName !== undefined && { unitName: command.unitName }),
+        node: command.node,
       });
       return;
     case 'explain':
-      process.exitCode = await explain(command.entry, command.mode, command.json);
+      process.exitCode = await explain(
+        command.entry,
+        command.mode,
+        command.json,
+        command.bundler,
+        command.node,
+      );
       return;
   }
 }
 
 async function main(): Promise<void> {
-  // .env before anything reads the environment (STATOR_OTEL, OTEL_EXPORTER_OTLP_*). dotenv never
-  // overrides real environment variables, and `quiet` keeps its banner out of the byte-exact
-  // stdout contract (dotenv 17 logs by default).
-  dotenvConfig({ quiet: true });
+  // .env before anything reads the environment (STATOR_OTEL, STATOR_OPT, STATOR_RUNTIME), and
+  // only those keys: the file belongs to the project being compiled, not to the user running
+  // Stator (src/cli/env-file.ts). A real variable is never overridden. The notice goes to
+  // stderr, outside the byte-exact stdout contract.
+  const notice = envFileNotice(applyEnvFile(process.cwd(), process.env));
+  if (notice !== undefined) {
+    process.stderr.write(`${notice}\n`);
+  }
   await telemetryInit();
   try {
     await run(parse(process.argv.slice(2)));

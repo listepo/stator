@@ -100,10 +100,30 @@ static inline bool jsrt_fits_int32(double d) {
 
 /* --------------------------------------------------------------- strings */
 
+/* A string is a header and a view of its code units (docs/VALUE.md §2). `data` points either just
+ * past the header, where a flat string keeps its own units, or into an append buffer that several
+ * strings share: each of those is a prefix of the buffer, so appending past every prefix's end
+ * changes none of them, and `s += x` in a loop extends the buffer instead of copying the whole
+ * string again (plan.md §9 Task 6.23, F12). Contents never change once a string is visible.
+ * Construction goes through jsrt_string_alloc and jsrt_string_concat (jsrt_string_mem.zig). */
 typedef struct JSString {
-  uint32_t length;  /* UTF-16 code units -- not bytes, not code points */
-  uint16_t data[];  /* flexible array member; NOT NUL-terminated */
+  uint32_t length;   /* UTF-16 code units -- not bytes, not code points */
+  uint32_t flags;    /* JSRT_STRING_* */
+  uint16_t *data;    /* NOT NUL-terminated */
+  void *buffer;      /* the append buffer `data` points into, or NULL for a flat string */
 } JSString;
+
+/* The string came out of a concatenation: the next concatenation onto it reserves room to grow. */
+#define JSRT_STRING_GROWN 1u
+
+/* Maximum string length in code units: 2^29 - 24 = 536870888, matching V8's `String::kMaxLength`
+ * on 64-bit (the pinned Node's limit; plan-notes 251 A12). An earlier cap of 2^31-1 (plan-notes
+ * 203) disagreed with Node: lengths between the two caps must throw
+ * `RangeError: Invalid string length`. */
+#define JSRT_MAX_STRING_LENGTH 536870888u
+
+/* A flat string of `len` code units for the caller to fill before it is visible anywhere. */
+JSString *jsrt_string_alloc(uint32_t len);
 
 /* Generated C touches string contents only through these two, never ->data[i] directly, so that
  * rope/small-string representations stay a runtime-only change (docs/VALUE.md §2). */
@@ -207,6 +227,26 @@ double jsrt_to_number(jsrt_value v);
  * Not strtod: rejects trailing garbage, handles hex (0x10 = 16), trims whitespace.
  * Non-ASCII code units -> NaN. */
 double jsrt_string_to_number(jsrt_value s);
+
+/* The global number functions (§19.2): `parseInt(string, radix)`, `parseFloat(string)`,
+ * `isNaN(x)`, `isFinite(x)`. Every argument is any value -- the string ones run ToString, the
+ * other two ToNumber -- and an omitted one arrives as JSRT_UNDEFINED (plan.md §11c T11.4). */
+jsrt_value jsrt_global_parse_int(jsrt_value string, jsrt_value radix);
+jsrt_value jsrt_global_parse_float(jsrt_value string);
+jsrt_value jsrt_global_is_nan(jsrt_value v);
+jsrt_value jsrt_global_is_finite(jsrt_value v);
+
+/* `n.toString(radix)` and `n.toFixed(digits)` (§21.1.3): `number` is the receiver, a number; the
+ * argument is any value, JSRT_UNDEFINED when omitted. An out-of-range argument leaves Node's
+ * RangeError pending and answers undefined. */
+jsrt_value jsrt_number_to_string_radix(jsrt_value number, jsrt_value radix);
+jsrt_value jsrt_number_to_fixed(jsrt_value number, jsrt_value digits);
+/* Number.prototype and String.prototype as VALUES for an Unknown receiver (plan.md §11c T11.4,
+ * plan-notes 310), on the `jsrt_array_method` contract: true when `key` names a landed method of
+ * the receiver's primitive type, with `*out` a closure bound to the receiver. `jsrt_get_prop`
+ * asks them, since a primitive has no shape table to walk. */
+bool jsrt_number_method(jsrt_value number, const char *key, jsrt_value *out);
+bool jsrt_string_method(jsrt_value string, const char *key, jsrt_value *out);
 
 /* ToBoolean: convert a jsrt_value to a boolean.
  * Falsy: false, +0, -0, NaN, undefined, null, empty string.
@@ -330,16 +370,31 @@ static inline uint32_t jsrt_class_key_slot(const JSRTClass *cls, uint32_t i) {
 
 struct JSRTClosure;
 
+struct JSRTDynObject;
+
 /* Unlike JSRTArray, the elements ARE a flexible member here, and that is safe for the reason it is
- * unsafe there: an object's slot count is fixed by its class at construction and the subset has no
- * way to add a property, so this allocation never grows and therefore never moves. If dynamic
- * property addition ever lands, it does NOT get to grow this -- it gets an overflow table, or the
- * header's address stops being stable and every boxed reference to it becomes wrong. */
+ * unsafe there: an object's slot count is fixed by its class at construction, so this allocation
+ * never grows and therefore never moves. A property the class never declared does NOT grow it: it
+ * lands in `extras`, a dynamic object created on the first such write (docs/VALUE.md §4.24), the
+ * way a function's own properties land in JSRTClosure::props. Growing `fields` instead would move
+ * the header and make every boxed reference to it wrong. */
 typedef struct JSRTObject {
   const JSRTClass *cls;
   bool frozen; /* Object.freeze: writes throw TypeError (Phase 5 step 11) */
+  /* The undeclared properties, in insertion order after every declared one; NULL until the first
+   * write of a name the class does not declare. */
+  struct JSRTDynObject *extras;
   jsrt_value fields[];
 } JSRTObject;
+
+/* True exactly for a value laid out as a JSRTObject: a JSRT_TAG_OBJECT that is neither a dynamic
+ * object nor one of the runtime's own layouts (Map, Date, RegExp, ...) that only share its `cls`
+ * prefix. Only such a value has `frozen`, `extras` and `fields`. */
+bool jsrt_is_fixed_object(jsrt_value v);
+
+/* A fixed object's undeclared properties as a dynamic object, or NULL when it has none -- and for
+ * any value that is not a fixed object, so a caller need not ask jsrt_is_fixed_object first. */
+struct JSRTDynObject *jsrt_fixed_extras(jsrt_value v);
 
 /* Every slot starts as `undefined`, which is what a declared-but-unassigned field reads as in
  * JavaScript. The constructor body then assigns the ones it assigns. */
@@ -397,6 +452,15 @@ typedef struct JSRTDynObject {
   uint32_t capacity;    /* slots allocated; the shape says how many are live */
   jsrt_value *slots;
   bool frozen; /* Object.freeze: writes throw TypeError (Phase 5 step 11) */
+  /* [[Prototype]] of an object `new F()` built: `F.prototype` when that was an object, else 0 --
+   * the default %Object.prototype%, which has no representation here and holds nothing a lookup
+   * can find (plan-notes 310). A read that misses the own shape walks this chain; only
+   * `jsrt_construct` sets it. */
+  jsrt_value proto;
+  /* The hidden `constructor` of the object `F.prototype` creates on first observation: the
+   * function F, or 0. JavaScript makes that property non-enumerable, so it is a field rather than
+   * a shape key -- printing and key enumeration never see it, and a read of `constructor` does. */
+  jsrt_value ctor;
 } JSRTDynObject;
 
 /* One per property-access SITE, emitted `static` in generated C so it persists across executions
@@ -605,6 +669,15 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator);
 jsrt_value jsrt_array_slice(jsrt_value array, jsrt_value start, jsrt_value end);
 jsrt_value jsrt_array_concat(jsrt_value array, jsrt_value other);
 jsrt_value jsrt_array_concat_many(jsrt_value array, uint32_t n, ...);
+/* Replace every hole of `array` with `undefined`, in place, and answer it: an array-literal
+ * spread iterates its operand, so `[...xs]` has no holes where `xs.concat()` keeps them. */
+jsrt_value jsrt_array_fill_holes(jsrt_value array);
+/* `[...x]`'s operand as an array: an array itself, anything else drained through its iterator, a
+ * non-iterable a pending TypeError (jsrt_typed.zig, docs/VALUE.md §4.23). */
+jsrt_value jsrt_spread_operand(jsrt_value source);
+/* `Array.from(items)` with one argument (§23.1.2.1): iterables drained, array-likes read by
+ * `length`, nullish a pending TypeError. */
+jsrt_value jsrt_array_from(jsrt_value source);
 jsrt_value jsrt_array_reverse(jsrt_value array);
 jsrt_value jsrt_array_fill(jsrt_value array, jsrt_value value, jsrt_value start, jsrt_value end);
 
@@ -736,14 +809,14 @@ static inline bool jsrt_instanceof(jsrt_value v, const JSRTClass *cls) {
   return false;
 }
 
-/* `o instanceof v` where `v` is a VALUE (a class object reached at run time), not a name the
- * emitter resolved (docs/VALUE.md §4.17). A class object walks the same chain `jsrt_instanceof`
- * walks, against the descriptor the value carries. The right operand of `instanceof` must be
- * callable with a prototype in JavaScript; a non-callable answers Node's catchable TypeError
- * (`Right-hand side of 'instanceof' is not an object` -- or `not callable` for an object that is
- * not a function), and an ordinary function answers `false` here. That last answer is the one
- * case Node's prototype surface can make `true` (`new f() instanceof f`): `f.prototype` is
- * Phase 8's descriptor/prototype surface, recorded as residue. */
+/* `o instanceof v` where `v` is a VALUE (a class object or a function reached at run time), not a
+ * name the emitter resolved (docs/VALUE.md §4.20). A class object walks the same chain
+ * `jsrt_instanceof` walks, against the descriptor the value carries. An ordinary function answers
+ * through `v.prototype` (§7.3.22 OrdinaryHasInstance): true when it is on `o`'s prototype chain,
+ * which only an object `new` built through a function has (plan-notes 310), and Node's TypeError
+ * when the prototype is not an object (an arrow's). The right operand of `instanceof` must be
+ * callable in JavaScript; a non-callable answers Node's catchable TypeError (`Right-hand side of
+ * 'instanceof' is not an object` -- or `not callable` for an object that is not a function). */
 bool jsrt_instanceof_ctor(jsrt_value obj, jsrt_value ctor);
 
 /* ---------------------------------------------------------------- errors */
@@ -837,20 +910,26 @@ typedef struct JSRTMap {
 
 extern const JSRTClass jsrt_class_map;
 extern const JSRTClass jsrt_class_set;
+extern const JSRTClass jsrt_class_weakmap;
+extern const JSRTClass jsrt_class_weakset;
 
 jsrt_value jsrt_map_new(void);
 jsrt_value jsrt_set_new(void);
+/* `new WeakMap()` (map) or `new WeakSet()`: a JSRTMap whose `set`/`add` throws a TypeError on a
+ * non-object key (docs/VALUE.md §4.22). */
+jsrt_value jsrt_weak_collection_new(bool map);
 
 static inline JSRTMap *jsrt_as_map(jsrt_value v) { return (JSRTMap *)jsrt_ptr(v); }
 
-/* True for a Map or a Set -- the test the printer runs before treating an object as a class
- * instance, since both carry the object tag. */
+/* True for a Map or a Set, weak or not -- the test the printer runs before treating an object as
+ * a class instance, since all four carry the object tag and the JSRTMap layout. */
 static inline bool jsrt_is_map_or_set(jsrt_value v) {
   if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
     return false;
   }
   const JSRTClass *cls = jsrt_as_object(v)->cls;
-  return cls == &jsrt_class_map || cls == &jsrt_class_set;
+  return cls == &jsrt_class_map || cls == &jsrt_class_set || cls == &jsrt_class_weakmap ||
+         cls == &jsrt_class_weakset;
 }
 
 /* `m.get(k)` -- `undefined` for an absent key, which is what JavaScript returns and why the static
@@ -1126,6 +1205,20 @@ static inline bool jsrt_is_uint8array(jsrt_value v) {
   return jsrt_is(v, JSRT_TAG_OBJECT) && ((const JSRTObject *)jsrt_ptr(v))->cls == &jsrt_class_uint8array;
 }
 
+/* A view's bytes and length, as an extern `Uint8Array` parameter passes them (docs/FFI.md §2):
+ * the pointer is the buffer's data block plus the view's offset, never a copy. Valid only while
+ * the view stays rooted -- the generated call holds it in its argument slot, the buffer edge keeps
+ * the block alive, and neither collector moves memory (docs/VALUE.md §4.19). The caller has
+ * already proven the value a view (statically, or through jsrt_check_uint8array). */
+static inline uint8_t *jsrt_uint8array_bytes(jsrt_value v) {
+  const JSRTTypedArray *view = (const JSRTTypedArray *)jsrt_ptr(v);
+  return view->buffer->data + view->byte_offset;
+}
+
+static inline size_t jsrt_uint8array_count(jsrt_value v) {
+  return ((const JSRTTypedArray *)jsrt_ptr(v))->length;
+}
+
 /* `new ArrayBuffer(n)`: n zeroed bytes. A length ToIndex refuses is Node's RangeError. */
 jsrt_value jsrt_arraybuffer_new(jsrt_value length);
 jsrt_value jsrt_arraybuffer_byte_length(jsrt_value buffer);
@@ -1178,6 +1271,13 @@ static inline bool jsrt_is_regexp(jsrt_value v) {
  * answering with something that is not a regexp. */
 jsrt_value jsrt_regexp_new(jsrt_value source, jsrt_value flags);
 
+/* `new RegExp(pattern, flags)` and `RegExp(pattern, flags)` (§22.2.4.1), whose operands are data:
+ * a RegExp pattern lends its source (and its flags when `flags` is undefined), anything else is
+ * ToString'd, and undefined is the empty string. The source is escaped as Node prints it
+ * (§22.2.6.13.1). A flag string or a pattern the engine refuses is a catchable SyntaxError with
+ * V8's head; the reason after it is libregexp's wording (docs/VALUE.md §4.21). */
+jsrt_value jsrt_regexp_construct(jsrt_value pattern, jsrt_value flags);
+
 /* `re.test(s)` -- and the one operation that also WRITES `lastIndex`, for a /g or /y pattern. */
 bool jsrt_regexp_test(jsrt_value re, jsrt_value str);
 
@@ -1219,26 +1319,32 @@ bool jsrt_regexp_flag(jsrt_value re, int letter);
  * is always a spelling that parses back to an equal pattern. */
 jsrt_value jsrt_regexp_to_string(jsrt_value re);
 
+/* A regexp's data property or bound method by name, for a receiver the compiler only knows as
+ * Unknown (`jsrt_get_prop`); false for a non-regexp or a name RegExp.prototype does not have here. */
+bool jsrt_regexp_property(jsrt_value re, const char *key, jsrt_value *out);
+
 jsrt_value jsrt_regexp_search(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_split(jsrt_value re, jsrt_value str);
 jsrt_value jsrt_regexp_replace(jsrt_value re, jsrt_value str, jsrt_value replacement, bool all);
 
 /* ---------------------------------------------------------------- arrays */
 
-/* A dense array: `length` contiguous elements and no holes, plus the named-property table below
- * (empty for every array but a RegExp match).
+/* An array: `length` contiguous element slots, plus the named-property table below (empty for
+ * every array but a RegExp match).
  *
  * `elements` is a separate allocation rather than a flexible array member, because `length` grows
  * (a write past the end extends the array) and a flexible member cannot move without invalidating
  * every `jsrt_value` that boxes this header. The header's address is therefore stable for the
  * array's whole life, which is what lets the emitter hold an array in a frame slot across a push.
  *
- * KNOWN CEILING: no holes. ECMA-262 leaves the indices skipped by `a[5] = v` on a shorter array
- * genuinely ABSENT -- `console.log` prints `<4 empty items>`, not `undefined` -- and a dense buffer
- * has no way to be absent. Rather than fill the gap and print a different program's output,
- * `jsrt_array_set` refuses a write more than one past the end (STA2002). Replacing an element and
- * appending at `length` -- the cases real programs use -- are unaffected. Sparse storage arrives
- * with the object model, and the refusal lifts with it. */
+ * HOLES. ECMA-262 leaves an index below `length` genuinely ABSENT after `new Array(3)`, `a[5] = v`
+ * on a shorter array, or `delete a[1]` -- `console.log` prints `<3 empty items>`, `1 in a` is false,
+ * `forEach` skips it -- and a slot holding JSRT_HOLE is that absence (docs/VALUE.md §4.4). Storage
+ * stays dense: a hole costs its slot. Only an array whose static element type is Unknown may gain
+ * one, because a hole READS as `undefined` and a typed element would hand typed code a value its
+ * type excludes: the emitter writes such an array through `jsrt_array_set_sparse` and every other
+ * one through `jsrt_array_set`, which keeps refusing a write more than one past the end
+ * (STA2002). */
 typedef struct JSRTArray {
   uint32_t length;
   uint32_t capacity;
@@ -1260,6 +1366,22 @@ typedef struct JSRTArray {
 /* Build an array from `count` initial elements; `items` may be NULL when `count` is 0. Returns an
  * already-boxed value because the header is reachable only through it. */
 jsrt_value jsrt_array_new(uint32_t count, const jsrt_value *items);
+
+/* The element-slot state of an absent index: undefined's tag with a payload no `undefined` VALUE
+ * ever carries, so a collector scans it as an immediate and bit equality never mistakes it for
+ * `undefined` (`indexOf(undefined)` skips a hole, as §23.1.3.17 requires). It is never a value:
+ * every path that hands an element out answers `undefined` for it (`jsrt_unhole`) or skips it as
+ * its spec step's HasProperty does. */
+#define JSRT_HOLE JSRT_BOX(JSRT_TAG_UNDEFINED, 1)
+
+static inline jsrt_value jsrt_unhole(jsrt_value element) {
+  return element == JSRT_HOLE ? JSRT_UNDEFINED : element;
+}
+
+/* `Array(n)` / `new Array(n)` with its one argument (§23.1.1.1): a Number is a LENGTH -- that many
+ * holes, or a catchable `RangeError: Invalid array length` when it is not a uint32 -- and anything
+ * else is the sole element. */
+jsrt_value jsrt_array_construct(jsrt_value arg);
 
 static inline JSRTArray *jsrt_as_array(jsrt_value v) {
   return (JSRTArray *)jsrt_ptr(v);
@@ -1297,6 +1419,12 @@ jsrt_value jsrt_array_length(jsrt_value array);
  * the array is `undefined` (ECMA-262, not an error); a write outside it extends the array. */
 jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index);
 void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element);
+/* The write an Unknown-element array takes (and every dynamic index write): past the end, the
+ * skipped indices become holes instead of STA2002. */
+void jsrt_array_set_sparse(jsrt_value array, jsrt_value index, jsrt_value element);
+/* `delete a[i]` on an array: an index below `length` becomes a hole. Answers true, as the
+ * operator does for an element (they are configurable). */
+bool jsrt_array_delete(jsrt_value array, uint32_t index);
 
 /* ------------------------------------------------------------- closures */
 
@@ -1375,6 +1503,18 @@ typedef struct JSRTClosure {
   JSRTEnv *env;     /* NULL when the function captures nothing */
   bool has_receiver; /* parameter zero is `this`; `jsrt_call` shifts when the caller omits it */
   const struct JSRTClass *klass;      /* NULL unless this is a class object */
+  /* A `function` declaration or expression -- not an arrow, a method, an async function or a
+   * generator, none of which JavaScript constructs. `new` builds through it (`jsrt_construct`),
+   * and it has a `prototype`. False for a class object, whose construction is `klass`'s. */
+  bool constructible;
+  /* `F.prototype` once something read or wrote it: an ordinary function's prototype is created on
+   * first observation (`jsrt_function_prototype`), so a function never constructed pays nothing. */
+  bool has_prototype;
+  jsrt_value prototype;
+  /* The function's own enumerable properties (`f.count = 0`, `assert.sameValue = ...`), as a
+   * dynamic object; NULL until the first write. A class object never has one: its statics are
+   * its descriptor's (plan-notes 310). */
+  struct JSRTDynObject *props;
 } JSRTClosure;
 
 static inline jsrt_value jsrt_closure(const JSRTClosure *c) {
@@ -1392,6 +1532,23 @@ static inline jsrt_value jsrt_method(jsrt_value obj, uint32_t slot) {
  * the closure is reachable only through it. */
 jsrt_value jsrt_closure_new(jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
                             uint32_t arity, const char *name, JSRTEnv *env, bool has_receiver);
+
+/* Marks a fresh heap closure as a `function` that captures -- one `new` can build through
+ * (`constructible`) -- and answers it. Nothing allocates between the two calls. */
+jsrt_value jsrt_closure_constructible(jsrt_value closure);
+
+/* `F.prototype` of an ordinary function: what was assigned, or -- for a constructible function
+ * never asked before -- a fresh object whose hidden `constructor` is F, created now and kept.
+ * `undefined` for a function that is not constructible and was never assigned one. */
+jsrt_value jsrt_function_prototype(jsrt_value fn);
+
+/* The closure every `jsrt_*_method` answers: environment slot 0 holds the receiver (kept alive by
+ * the trace) and slot 1 the table row as a number, so `jsrt_call` needs no new protocol.
+ * `has_receiver` is false: the receiver is already bound, and a second one in argv would shift
+ * every user argument. `length` is the method's `length`, and `name` must outlive the program. */
+jsrt_value jsrt_bound_method(jsrt_value receiver, uint32_t row,
+                             jsrt_value (*fn)(uint32_t argc, const jsrt_value *argv, JSRTEnv *env),
+                             uint32_t length, const char *name);
 
 static inline const JSRTClosure *jsrt_as_closure(jsrt_value v) {
   return (const JSRTClosure *)jsrt_ptr(v);
@@ -1423,14 +1580,20 @@ jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv);
 /* Same as jsrt_call, with a `file:line` baked in so a non-function callee names the site
  * (STA2006). `loc` may be NULL, which keeps the unlocated TypeError for builtin-internal calls. */
 jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv, const char *loc);
+/* A call whose arguments include a spread: `args` is the array of all of them. `receiver` is the
+ * method call's receiver, passed to a closure that declares one, or NULL for a plain call. */
+jsrt_value jsrt_call_spread_at(jsrt_value callee, const jsrt_value *receiver, jsrt_value args,
+                               const char *loc);
 
 /* `new v(...)`: the one caller of a class object's constructor (docs/VALUE.md §4.17).
  *
  * A class object allocates its instance (`jsrt_object_new`), then runs `fn` with the instance as
  * receiver and the arguments after it; the constructor's return is ignored, because the gate
- * admits no explicit object return in a constructor. A value that is not a class object leaves
- * Node's catchable `X is not a constructor` TypeError pending -- including an ordinary function,
- * whose legacy-construct answer would need `f.prototype` to be right (Phase 8's surface). */
+ * admits no explicit object return in a constructor. A constructible function (`function F`)
+ * builds a dynamic object whose prototype is `F.prototype`, runs F with it as `this`, and answers
+ * F's return when that is an object, the new object otherwise (§10.2.2 [[Construct]], plan-notes
+ * 310). Anything else -- an arrow, a method, a non-function -- leaves Node's catchable
+ * `X is not a constructor` TypeError pending. */
 jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv);
 
 /* ------------------------------------------------------------ promises */
@@ -1523,12 +1686,10 @@ static inline bool jsrt_instanceof_builtin(jsrt_value v, const char *name) {
   if (strcmp(name, "ArrayBuffer") == 0) {
     return jsrt_is_arraybuffer(v);
   }
-  if (strcmp(name, "Map") == 0 || strcmp(name, "Set") == 0) {
-    if (!jsrt_is(v, JSRT_TAG_OBJECT)) {
-      return false;
-    }
-    const JSRTClass *cls = jsrt_as_object(v)->cls;
-    return strcmp(name, "Map") == 0 ? cls == &jsrt_class_map : cls == &jsrt_class_set;
+  if (strcmp(name, "Map") == 0 || strcmp(name, "Set") == 0 || strcmp(name, "WeakMap") == 0 ||
+      strcmp(name, "WeakSet") == 0) {
+    /* The class descriptor's name IS the constructor's: a WeakMap is not `instanceof Map`. */
+    return jsrt_is_map_or_set(v) && strcmp(jsrt_as_object(v)->cls->name, name) == 0;
   }
   return false;
 }
@@ -1666,6 +1827,9 @@ jsrt_value jsrt_typeof(jsrt_value v);
 jsrt_value jsrt_check_number(jsrt_value v, const char *where);
 jsrt_value jsrt_check_string(jsrt_value v, const char *where);
 jsrt_value jsrt_check_boolean(jsrt_value v, const char *where);
+/* A `Uint8Array` extern argument (docs/FFI.md §2): the one non-primitive check, because the
+ * emitter reads the view's layout straight after it. */
+jsrt_value jsrt_check_uint8array(jsrt_value v, const char *where);
 
 /* --------------------------------------------------------------- output */
 
@@ -1763,6 +1927,22 @@ extern _Thread_local JSRTFrame *jsrt_frame_top;
 
 void jsrt_frame_init(JSRTFrame *frame);
 
+/* The native stack guard (plan.md §9 Task 6.23, docs/VALUE.md §4.25). Every generated function opens
+ * with JSRT_STACK_CHECK() BEFORE its JSRT_FRAME, so the early return has no frame to pop: it leaves
+ * Node's catchable `RangeError: Maximum call stack size exceeded` pending and returns undefined,
+ * and the caller's pending check unwinds as for any throw. `jsrt_stack_limit` is the lowest frame
+ * address a generated function may open at on this thread; jsrt_init sets it from the thread's real
+ * stack bounds, leaving headroom for the runtime code the deepest frame still calls. It is 0 on a
+ * thread jsrt_init never ran on, which disables the check rather than failing every call. */
+extern _Thread_local uintptr_t jsrt_stack_limit;
+jsrt_value jsrt_stack_overflow(void);
+#define JSRT_STACK_CHECK()                                                               \
+  do {                                                                                   \
+    if (__builtin_expect((uintptr_t)__builtin_frame_address(0) < jsrt_stack_limit, 0)) { \
+      return jsrt_stack_overflow();                                                      \
+    }                                                                                    \
+  } while (0)
+
 /* Slots are filled with JSRT_UNDEFINED and only THEN is the frame published to jsrt_frame_top,
  * so a collection triggered mid-prologue can never scan an uninitialized slot. */
 #define JSRT_FRAME(n)                                                          \
@@ -1826,5 +2006,16 @@ static inline JSRTEnv *jsrt_env_up(JSRTEnv *env, uint32_t levels) {
 /* Asserts the 48-bit pointer assumption against a real allocation, then initializes the GC.
  * Fails loudly at startup rather than corrupting values on a platform where it does not hold. */
 void jsrt_init(void);
+
+/* The process slots (src/jsrt_process.c): the generated `main` hands its argument vector to
+ * `jsrt_process_args` right after `jsrt_init` and returns `jsrt_process_exit_code()`.
+ * `std/process` binds the other four as `@statorExtern` functions, so their spellings are the
+ * emitter's extern ones (`double` for a number, `char *` for a returned string) — a generated unit
+ * that declares one again must match this declaration exactly. */
+void jsrt_process_args(int argc, char **argv);
+double jsrt_process_argc(void);
+char *jsrt_process_argv(double index);
+double jsrt_process_exit_code(void);
+void jsrt_process_set_exit_code(double code);
 
 #endif /* JSRT_VALUE_H */

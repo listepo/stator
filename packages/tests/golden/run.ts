@@ -1,7 +1,10 @@
 /* Golden-test runner (plan.md §5 Task 2.6).
  *
  * Usage: node packages/tests/golden/run.ts [--filter <substring> | --filter=<substring>]
- *          [--shard=N/M] [--shards=N]
+ *          [--only=<file>] [--shard=N/M] [--shards=N]
+ *
+ * `--only=<file>` runs just the fixtures (`ts/name.ts`, one per line) named in the file — the
+ * selection `pnpm run test:impact` hands over (plan.md §9 Task 6.17). It composes with `--filter`.
  *
  * `--shard=N/M` runs one round-robin slice of the (filtered) fixtures; `--shards=N` fans out to
  * N worker processes of this same runner and merges their per-item records back by index, so the
@@ -20,13 +23,17 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { InProcessRecorder } from '../impact/recorder.ts';
+import { impactRecorder } from '../support/impact-hook.ts';
 import {
   fanOutWorkers,
   mergeShardFiles,
   parseShardArgs,
   pool,
+  readOnlyList,
   runProcess,
   shardSlice,
+  workerBaseArgs,
   writeShardFile,
   type Shard,
 } from '../support/parallel.ts';
@@ -62,10 +69,12 @@ process.env['TZ'] = 'UTC';
  * `pnpm run ci` stays green without ICU and `pnpm run test:intl` is what turns them on. */
 const INTL = process.env['STATOR_RUNTIME'] === 'intl';
 
-/** A directory's entry is `main.<mode>`, except a js-mode mixed graph may enter at `main.ts`.
+/** A directory's entry is `main.<mode>`, except a js-mode graph may enter at `main.cjs` or
+ * `main.ts`.
  *
  * js mode compiles TypeScript (plan.md §8 step 5): the point of that fixture is a `.ts` file
- * importing an untyped `.js` module, and looking only for `main.js` would skip it. */
+ * importing an untyped `.js` module, and looking only for `main.js` would skip it. A `.cjs`
+ * entry is CommonJS the bundler takes whole under `--node` (plan.md §11d T12.3). */
 function fixtureEntry(dir: string, name: string, mode: 'ts' | 'js'): string {
   if (name.endsWith(`.${mode}`)) {
     return join(dir, name);
@@ -73,9 +82,11 @@ function fixtureEntry(dir: string, name: string, mode: 'ts' | 'js'): string {
   const folder = join(dir, name);
   const preferred = join(folder, `main.${mode}`);
   if (mode === 'js' && !existsSync(preferred)) {
-    const tsEntry = join(folder, 'main.ts');
-    if (existsSync(tsEntry)) {
-      return tsEntry;
+    for (const other of ['main.cjs', 'main.ts']) {
+      const entry = join(folder, other);
+      if (existsSync(entry)) {
+        return entry;
+      }
     }
   }
   return preferred;
@@ -102,6 +113,17 @@ function skippedIntlCount(): number {
   return skipped;
 }
 
+/** `--bundler=none` (plan.md §11d T12.1 Check): every fixture builds with the bundle step off,
+ * except the ones that import a package from their own `node_modules` (T12.2's `pkg_*`) or enter
+ * at a `.cjs` file, which need the bundler and are skipped. The default leaves the compiler's own default, `vite`, which
+ * loads `vite-stator` only for those. */
+const BUNDLER_NONE = process.argv.includes('--bundler=none');
+
+/** A fixture that ships packages, or enters at a CommonJS file: only the bundler can build it. */
+function needsBundler(dir: string, name: string): boolean {
+  return existsSync(join(dir, name, 'node_modules')) || existsSync(join(dir, name, 'main.cjs'));
+}
+
 interface Fixture {
   readonly mode: 'ts' | 'js';
   readonly path: string;
@@ -116,13 +138,14 @@ function fixtures(mode: 'ts' | 'js'): Fixture[] {
   } catch {
     return [];
   }
-  // A DIRECTORY is a multi-file fixture: its entry point is `main.<mode>` (or `main.ts` in js mode) and the other
+  // A DIRECTORY is a multi-file fixture: its entry point is `main.<mode>` (`fixtureEntry`) and the other
   // files in it are modules the entry imports. Stator compiles the whole graph from the
   // entry; Node likewise runs just the entry — both resolve the imports themselves.
   return names
     .filter(
       (name) =>
         (INTL || !name.startsWith('intl_')) &&
+        !(BUNDLER_NONE && needsBundler(dir, name)) &&
         (name.endsWith(`.${mode}`) ||
           statSync(join(dir, name), { throwIfNoEntry: false })?.isDirectory()),
     )
@@ -160,12 +183,27 @@ function decodeFailure(value: unknown): string | undefined {
 /* `mkdtemp` — not a slot-keyed name — is what makes this safe to run on the pool: the output
  * binary and its intermediates live in a directory unique to THIS CALL, so two workers can never
  * compile into each other's `app`. */
-async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStreams> {
+
+/** Fixtures named `node_*` build on the `--node` platform (plan.md §11c T11.6, docs/MODES.md
+ * §6): their `node:*` imports resolve to `packages/node`, and Node runs them like any fixture. */
+function onNodePlatform(fixture: Fixture): boolean {
+  return fixture.name.startsWith('node_');
+}
+
+async function runCompiled(fixture: Fixture): Promise<FixtureStreams> {
+  const { path, mode } = fixture;
   const work = mkdtempSync(join(tmpdir(), 'stator-golden-'));
   try {
     const out = join(work, 'app');
     const objects = await compileFixtureC(path, dirname(out));
-    await buildFixture({ entry: path, out, mode, linkFlags: objects });
+    await buildFixture({
+      entry: path,
+      out,
+      mode,
+      linkFlags: objects,
+      node: onNodePlatform(fixture),
+      ...(BUNDLER_NONE ? { bundler: { kind: 'none' } } : {}),
+    });
     const exec = await runProcess(out, [], { env: PINNED_ENV });
     if (exec.status !== 0) {
       throw new Error(`compiled binary exited ${String(exec.status)}: ${exec.stderr.trim()}`);
@@ -177,23 +215,34 @@ async function runCompiled(path: string, mode: 'ts' | 'js'): Promise<FixtureStre
 }
 
 /* One result per fixture, indexed by fixture: the pool completes out of order, and a golden
- * report whose failure order shifted run to run would be unreadable as a diff. */
-async function collect(all: readonly Fixture[]): Promise<(string | undefined)[]> {
+ * report whose failure order shifted run to run would be unreadable as a diff. With an impact
+ * recorder the pool is one wide (the recorder insists), so the take after each fixture holds
+ * exactly what that fixture ran — its binary's runtime members included. */
+async function collect(
+  all: readonly Fixture[],
+  impact: InProcessRecorder | undefined,
+): Promise<(string | undefined)[]> {
   return pool(all, async (fixture): Promise<string | undefined> => {
-    try {
-      const [actual, expected] = await Promise.all([
-        runCompiled(fixture.path, fixture.mode),
-        runNodeOracle(fixture.path, PINNED_ENV),
-      ]);
-      if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
-        return undefined;
-      }
-      const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
-      return `${fixture.mode}/${fixture.name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`;
-    } catch (error) {
-      return `${fixture.mode}/${fixture.name}: ${error instanceof Error ? error.message : String(error)}`;
-    }
+    const result = await check(fixture);
+    await impact?.take(fixtureKey(fixture));
+    return result;
   });
+}
+
+async function check(fixture: Fixture): Promise<string | undefined> {
+  try {
+    const [actual, expected] = await Promise.all([
+      runCompiled(fixture),
+      runNodeOracle(fixture.path, PINNED_ENV),
+    ]);
+    if (actual.stdout === expected.stdout && actual.stderr === expected.stderr) {
+      return undefined;
+    }
+    const stream = actual.stdout === expected.stdout ? 'stderr' : 'stdout';
+    return `${fixture.mode}/${fixture.name}: ${stream} differs\n  stator: ${JSON.stringify(actual[stream])}\n  node:   ${JSON.stringify(expected[stream])}`;
+  } catch (error) {
+    return `${fixture.mode}/${fixture.name}: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 /* The one report, shared verbatim by the serial run, a direct `--shard` slice, and the merged
@@ -221,6 +270,13 @@ function printReport(
       `golden: SKIPPED ${String(skippedIntl)} intl_* fixtures (STATOR_RUNTIME is not intl; run \`pnpm run test:intl\` to include them)\n`,
     );
   }
+  if (BUNDLER_NONE) {
+    const dir = join(HERE, 'js');
+    const packaged = readdirSync(dir).filter((name) => needsBundler(dir, name)).length;
+    process.stdout.write(
+      `golden: SKIPPED ${String(packaged)} fixtures that import packages (--bundler=none)\n`,
+    );
+  }
   if (failed.length > 0) {
     process.exitCode = 1;
   }
@@ -233,8 +289,11 @@ async function main(): Promise<void> {
     missingFilterMessage: '--filter requires a value',
   });
   const filter = args.filter;
+  const only = args.only === undefined ? undefined : readOnlyList(args.only);
   const filtered = [...fixtures('ts'), ...fixtures('js')].filter(
-    (fixture) => filter === undefined || `${fixture.mode}/${fixture.name}`.includes(filter),
+    (fixture) =>
+      (filter === undefined || fixtureKey(fixture).includes(filter)) &&
+      (only === undefined || only.has(fixtureKey(fixture))),
   );
 
   // `--shards=N`: fan out to N workers of this same runner and merge by fixture index. The merge
@@ -248,7 +307,7 @@ async function main(): Promise<void> {
     try {
       await fanOutWorkers({
         script,
-        baseArgs: args.filter === undefined ? [] : [`--filter=${args.filter}`],
+        baseArgs: [...workerBaseArgs(args), ...(BUNDLER_NONE ? ['--bundler=none'] : [])],
         shards: args.shards,
         dir,
       });
@@ -273,7 +332,17 @@ async function main(): Promise<void> {
           fixture: entry.item,
           index: entry.index,
         }));
-  const results = await collect(slice.map((entry) => entry.fixture));
+  // The ASan stage of `test:asan` runs this same runner; its map record is its own harness.
+  const impact = await impactRecorder(
+    process.env['STATOR_RUNTIME'] === 'asan' ? 'asan' : 'golden',
+    ['packages/tests/golden/ts/', 'packages/tests/golden/js/'],
+  );
+  await impact?.loaded();
+  const results = await collect(
+    slice.map((entry) => entry.fixture),
+    impact,
+  );
+  impact?.finish();
   if (args.jsonOut !== undefined) {
     // Per-item failures are DATA for the driver: exit 0 on a completed slice, nonzero only when
     // the worker itself broke (which `fanOutWorkers` reports as the fatal error).

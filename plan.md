@@ -20,7 +20,7 @@
 6. **The runtime is the moat, not the codegen.** GC, builtins coverage, strings, RegExp, and ICU are where the years go. Budget accordingly; tree-shake builtins from day 1.
 7. **Allocation dominates, not dispatch.** Boa's Cranelift JIT experiment proved it: 10× on numeric loops, <5% on allocation-bound benchmarks; GC tracing 10–16% of time, dispatch only ~13%. This ordering drives the optimization ladder (§12).
 8. **One pipeline, two modes.** A mode is a *policy layer* (which files are accepted, which constructs are errors, how untyped code is typed) over one shared pipeline. If a feature seems to require forking the pipeline per mode, the design is wrong — stop and fix the design (usually: the feature belongs to the dynamic representation or the Phase-8 tier).
-9. **The compiler itself is strict TypeScript.** Locked `tsconfig` (§4 Task 1.0), no `any` in compiler source, vitest for unit tests (dev-only, run on Node's own type stripping — plan-notes 285), runtime dependency budget: the `typescript` package only — **owner-directed exception (2026-09-04, plan-notes 187):** `src/cli/` may use ink + react (human-facing rendering plus per-command help, long-form flags) and dotenv (environment loading), and OpenTelemetry tracing (`@opentelemetry/*`, opt-in via `STATOR_OTEL`, standard OTLP env config — works with Maple and any OTLP backend) is wired through `src/support/telemetry.ts`; execa is dev-only for `tests/unit/cli.test.ts`. The budget still rules everything else: no pass, lowering, or codegen code may depend on these. The compiler must always pass its own `ts` mode's *philosophy*: fully typed, no dynamic escape hatches.
+9. **The compiler itself is strict TypeScript.** Locked `tsconfig` (§4 Task 1.0), no `any` in compiler source, vitest for unit tests (dev-only, run on Node's own type stripping — plan-notes 285), runtime dependency budget: the `typescript` package only — **owner-directed exception (2026-09-04, plan-notes 187):** `src/cli/` may use ink + react (human-facing rendering plus per-command help, long-form flags) and dotenv (environment loading), and `typebox` + `jsonc-parser` for `stator.config.json` (`src/cli/config.ts` only, plan-notes 303), and OpenTelemetry tracing (`@opentelemetry/*`, opt-in via `STATOR_OTEL`, standard OTLP env config — works with Maple and any OTLP backend) is wired through `src/support/telemetry.ts`; execa is dev-only for `tests/unit/cli.test.ts`. The budget still rules everything else: no pass, lowering, or codegen code may depend on these. The compiler must always pass its own `ts` mode's *philosophy*: fully typed, no dynamic escape hatches.
 10. **No JavaScript in the project's own source** (creator's direction 2026-10-02, plan-notes 289). The compiler, runtime, `std`, the `node:*` wrappers, test harnesses, oracle shims and scripts are strict TypeScript, C or Zig. `.js` / `.mjs` / `.cjs` files exist only as: `js`-mode test inputs and examples (the thing under test), vendored upstream code, generated output, and assets a browser loads as-is (`site/public/`). The existing harness `.mjs` files migrate under §9 Task 6.15.
 
 **Non-goals (v1):** npm-ecosystem compatibility (Phase 11 targets Node *programs* such as `tsc`, not the npm ecosystem at large); `eval`/`new Function` (never in `ts` mode; `js` mode not before Phase 8); `Proxy`; `with`; prototype mutation after construction; decorators; full Intl; Node API emulation outside Phase 11's `--node` platform (§11c); Windows (POSIX + clang first); self-hosting the compiler.
@@ -63,6 +63,9 @@ entry.ts / entry.js (+ module graph)
         │
         ▼
   ts.createProgram  (typescript npm package, in-process; Stator owns compilerOptions)
+        │   js mode, graph imports a package or (--node) holds a CommonJS file (T12.1, BUNDLER.md):
+        │   vendor entry ──► bundler adapter (--bundler) ──► one virtual ESM module + source map;
+        │   project imports rewritten in place, program reloaded over the overlay
         │
         ├─► ts.SourceFile ASTs
         └─► TypeChecker
@@ -460,8 +463,9 @@ bundle — evidence: done.md → Phase 5).~~ ✅
    Task 3.11's topological order, **not** Node's sibling-subgraph interleaving (a documented
    divergence, docs/MODES.md). `STA1208` is no longer emitted.
 10. ~~Dynamic `import()` (`STA1207`).~~ ✅ **landed** (2026-09-02, plan-notes 156) — literal
-    specifiers only; **computed specifier stays `STA1207`, owned by Phase 8 step 7**, and
-    `import * as ns` stays `STA1214` (step 12).
+    specifiers only; **computed specifier stays `STA1207`, owned by Phase 8 step 7**.
+    `import * as ns` landed with §11c T11.5a (per-module namespaces), which shares this step's
+    namespace object.
 11. ~~`Promise.prototype.then`/`catch`/`finally` and `new Promise(executor)` (`STA1216`).~~
     ✅ **landed** (2026-09-02, plan-notes 157) — combinator residue
     (`allSettled`/`any`/`race`/`withResolvers`/`try`) and a non-arity-1 constructor stay not-yet
@@ -524,7 +528,8 @@ bundle — evidence: done.md → Phase 5).~~ ✅
     a `switch` stays `STA1214`), `super` in a static block (`gate.ts:3730`), `this` in a static
     member or block (`gate.ts:4711,4715`), bare `super` (`gate.ts:482,4984` — a JavaScript
     SyntaxError, stays refused), opaque class values (`gate.ts:904,919,940,5283` — need the
-    class object), and anonymous defaults (`gate.ts:3584` — blocked on default imports).
+    class object), and anonymous default classes (`export default class {}` — default imports
+    landed with §11c T11.5a; what is left is a descriptor for a declaration with no name).
     (e) **[D3] Values that need a closure or a class object**: ~~calling an arbitrary expression~~,
     ~~function declarations inside a block/loop/branch~~, ~~method values (`const f = o.m`)~~,
     ~~calling a class field~~, and ~~named function expressions~~ **landed** (evidence in
@@ -757,6 +762,103 @@ which 1.1% exact) as debt. Extract a shared helper per clone family at the respo
 `pnpm run dupes:baseline` in the same change. **Check:** the baseline is empty; `pnpm run dupes`
 then runs with no baseline at all.
 
+~~**Task 6.17 — Test impact: build and run only what a change reaches.**~~ ✅ **landed 2026-10-02**
+(steps 1–3 and 5; Check (a)–(e) passed) — evidence in [done.md](done.md) → Phase 6 Task 6.17
+(plan-notes 293). **Still open — step 4, CI:** after PR #45's staged pipeline, `main` and the
+nightly run `pnpm run test:impact:record` and upload `.cache/impact/impact-map.json` as an
+artifact; pull requests download the newest `main` map and run `pnpm run test:impact` (it falls
+back to the full run, saying why, when that map is missing or not an ancestor). Done when a pull
+request's CI log shows a selection made from a `main` map.
+
+~~**Task 6.18 — `stator.config.json`: every CLI option in one validated file.**~~ ✅ **landed 2026-10-02** — evidence in [done.md](done.md) → Phase 6 Task 6.18 (plan-notes 303; `docs/CONFIG.md`).
+
+~~**Task 6.19 — Stator compiles itself and its own packages: a self-compilation test.**~~ ✅
+**landed 2026-10-02**: evidence in [done.md](done.md) → Phase 6 Task 6.19 (plan-notes 306).
+`pnpm run test:selfhost` is in `ci`. Three parts stay here, because they are still rules or not
+built yet:
+
+- **Targets.** Every directory under `packages/` is a target in
+  `packages/tests/selfhost/targets.json`, or it is in that file's `notTargets` with a reason.
+  `packages/node` (T11.6), `packages/webapi` (T13.1), `packages/renderer-clay` (T13.4) and
+  `packages/interpreter` (T14.1) are added there by the card that creates them, in the same change.
+  Each one gets a `stator.config.json` for its mode and entry.
+- **Ratchet.** `packages/tests/selfhost/baseline.json` holds each target's verdict and its count per
+  diagnostic code. The test fails when a count grows, a new code appears or a verdict gets worse.
+  It also fails when a count shrinks, until `--update` records the shrink in the same change.
+  **Growth may be recorded** (creator, 2026-10-02, plan-notes 306): a change that grows a count
+  runs `--update` in the same change, so the increase shows in `baseline.json`'s diff for review.
+  This differs from `dupes:baseline`, which only ever shrinks.
+  Whether growth may be recorded is open for the creator (plan-notes 306). When a target reaches
+  zero, that is its milestone, and from then on its build and smoke check are part of the gate.
+- **Stage-2 check (not built).** When the compiler's verdict becomes `static` or `dynamic`, its
+  binary compiles a hello-world fixture. That C output must be **byte-identical** to the C the
+  Node-hosted compiler emits. Until this check exists, the runner fails when a `stage2` target
+  reaches either verdict.
+
+**Tasks 6.20–6.26 — The 2026-10-01 QA audit (PR #57, plan-notes 330).** The find-only audit in draft PR #57
+(`docs/qa/2026-10-01-audit.md` on branch `qa/stator-audit-2026-10-01`) lists 16 findings (F1–F16) against `d1ed3d1`. Every one still
+reproduces on `338a3c2` (plan-notes 330 has the probe output). Each task below is one pull
+request. It lands the audit's proposed regression test (adapted to the current tree) in the same
+change as the fix, and updates the matching docs (golden rule 8). Order: 6.20 and 6.21 first
+(user data and trust boundaries), then 6.22–6.25.
+
+~~**Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug (F1, F2, F10, F11).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.20 (plan-notes 331).
+
+~~**Task 6.21 — The runtime selection and the toolchain come from the real environment (F3, F4).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.21 (plan-notes 332).
+
+~~**Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.22 (plan-notes 335).
+
+~~**Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.23 (plan-notes 338, 339).
+
+~~**Task 6.24 — `console.log` formats like Node (F13).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.24 (plan-notes 337).
+
+~~**Task 6.25 — A BigInt is not-yet, never an internal error (F5).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.25 (plan-notes 334).
+
+~~**Task 6.26 — The landing page works without storage, at 320 px and without third parties (F14, F15, F16).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.26 (plan-notes 336).
+
+**Tasks 6.27–6.28 — Two bugs found while landing 6.24 (plan-notes 344).** Both reproduce on
+`2efaabb`. Neither is from the audit, so neither carries an `F` number. 6.28 is a crash, but 6.27
+prints different bytes while `explain` says `static`, so 6.27 comes first.
+
+**Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**
+Today ToString of an ordinary object ignores the user's method and prints `[object Object]`
+(`jsrt_print.c`, the fallback branch at the end of `jsrt_to_string`), while `explain` answers
+`static`. Wherever ECMA-262 runs ToPrimitive, call the method the object actually has: a template
+literal, `String(x)` and `.concat` (hint `string`: `toString` first, then `valueOf`), `'' + x`
+(hint `default`: `valueOf` first, then `toString`), and `Array.prototype.join`. That includes a
+class method, an object-literal method and an inherited one, with `Symbol.toPrimitive` not-yet
+until symbols exist (Phase 5). A method that throws propagates as a catchable exception. A method
+that returns an object is a `TypeError`, as in Node.
+1. In `ts` mode the receiver's type says whether the method is the user's, so lowering emits a
+   direct call and the runtime fallback is never reached.
+2. In `js` mode, and for a `ts` receiver whose type cannot say (a union, an interface), the
+   runtime looks the method up with `jsrt_get_prop` and calls it with `jsrt_call`. The emitter
+   follows every such conversion with the pending-exception check, as it does after
+   `JSON.stringify` (`consoleMayThrow` is the precedent).
+3. Lift the 6.24 refusals that share this path: `%s` of an object with its own `toString`, and
+   `%d`/`%i`/`%f` through a user `toString`/`valueOf`. They are `STA1214` at the gate today and
+   `PANIC: STA2005` at run time (plan-notes 337). A refusal this card cannot lift stays as it is.
+4. Where a case still cannot match Node, refuse it with a not-yet code and never print other bytes.
+
+`v + 1` with a user `valueOf` in `js` mode is `STA0012` today, because TS2365 is not in
+`JS_MODE_RUNTIME_CODES`. That is a mode-policy question, not this card's (plan-notes 344).
+**Check:** goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` cover every site
+above, inheritance, a throwing method caught by `try`, and the object-returning `TypeError`, and
+match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
+of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
+
+**Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
+a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+`const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
+defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
+`static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
+scope (and boxed, if captures box) before its initializer is lowered. A call made before
+initialization stays Node's TDZ `ReferenceError`.
+Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
+**Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
+prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
+HIR verifier is clean on all of them; `pnpm run ci` is green.
+
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
@@ -980,6 +1082,47 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 **Check:** ✅ **met 2026-09-15** — `examples/ffi/sqlite/` (generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node; the CI proof is the ffi job's own run (plan-notes 271): an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
+**[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
+Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
+The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
+libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
+This task makes `stator build` produce one static library plus its header, which a C build can
+use with no Stator checkout.
+
+Steps:
+
+1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
+   `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
+   member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
+   written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
+   same input are byte-identical, as the header already is (Task 7.2 step 8).
+2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
+   it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
+   writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
+   the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
+3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
+   program would each carry `jsrt_*` and collide. Measure both options and record the result in
+   plan-notes before choosing:
+   (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
+   `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
+   on ELF), so each library carries a private runtime; this must prove two such libraries work
+   in one process, including two collectors' init and roots;
+   (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
+   shared `libjsrt.a` installed once.
+   Whichever is chosen, the other combination is refused or documented. It never fails at run
+   time.
+4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
+   (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
+   Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
+5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
+   refused with a not-yet diagnostic until then.
+
+**Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
+`<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
+runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
+linked into one C program and both called, under the option step 3 chose. The ffi CI job and
+the ASan job run it. `pnpm run ci` is green.
+
 ---
 
 ## 11. Phase 8 — The dynamic tier (gated; `js` mode only) — **[D5]**
@@ -1146,14 +1289,14 @@ the existing pipeline (`node:worker_threads` / a process pool), not Zig/Rust/Go 
 
    | Module | v0 contents | Notes |
    |---|---|---|
-   | `std/env` | `get`/`set`/`has`/`unset`, `cwd` | `args` moved to T11.3 as `std/process.argv` (plan-notes 294): the generated `main` takes no `argv` yet |
-   | `std/process` | `exit`, `pid`, `abort` | no signals yet |
+   | `std/env` | `get`/`set`/`has`/`unset`, `cwd` | `args` moved to T11.3 as `std/process.argv` (plan-notes 294), which landed: the generated `main` takes `argc`/`argv` |
+   | `std/process` | `exit`, `pid`, `abort`; T11.3 added `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode`/`setExitCode` | no signals yet |
    | `std/path` | `join`/`dirname`/`basename`/`isAbsolute` | pure TS or tiny C; UTF-16 ↔ bytes at the FS edge only |
-   | `std/fs` | sync read/write/stat/mkdir/unlink/rmdir; Promise twins | Promise twins are thin `async` wrappers that `await` a thread-pool job (see B) once T10.2 exists; until then sync-only is honest |
+   | `std/fs` | sync read/write/stat/mkdir/unlink/rmdir; T11.3 added descriptors, `readBytes`, `readdir`, `realpath`, `utimes`, `exists`; Promise twins | Promise twins (`readTextAsync`, … — the sync name plus `Async`) are thin `async` wrappers that `await` a thread-pool job (see B) once T10.2 exists; until then importing one is not-yet naming Phase 10 (T10.1 step 5) |
    | `std/time` | `nowMs`, `sleepMs` (sync) | timers in the microtask sense stay out until a macrotask phase exists |
    | `std/sync` | `Mutex`, `CondVar`, `Channel` | with T10.2 |
    | `std/thread` | `spawn`, `join`, `availableParallelism` | with T10.2 |
-   | `std/os`, `std/io`, `std/hash`, `std/encoding` | see §11c T11.3 | Phase 11 N1 |
+   | `std/os`, `std/io`, `std/hash`, `std/encoding` | landed with §11c T11.3 (docs/STD.md §5) | Phase 11 N1 |
    | `std/loop`, `std/child`, `std/net` | see §11c "Deferred" | Phase 11 N2, deferred |
 
 3. **Implementation layers:** `packages/std/*.ts` (types + thin wrappers users import) →
@@ -1224,25 +1367,11 @@ step remains). `pnpm run ci` green.
 
 ---
 
-### T10.1. `std` low-level API (sans threads) — **[D4]**
-
-Steps:
-
-1. Write `docs/STD.md` (module path, error model, v0 table above). Add stub `SUBSET.md` rows /
-   diagnostics that name Phase 10.
-2. ~~Wire `std/env` and `std/path` end-to-end (types → runtime → golden).~~ Landed (plan-notes
-   284), then moved into `packages/std` by T11.2.
-3. ~~Add `std/process` (`exit`/`pid`).~~ Landed in `packages/std` by T11.2 (plan-notes 294).
-4. ~~Add sync `std/fs` + `std/time` (`nowMs`; sync `sleepMs` only).~~ Landed in `packages/std`
-   by T11.2 (plan-notes 294).
-5. Promise-flavored `std/fs` APIs: either `not-yet` until T10.2, or implemented as sync under a
-   documented lie — **prefer not-yet** so async programs do not block main by accident.
-
-Steps 2–4 live in `packages/std` since T11.2 (plan-notes 294); step 5 is what remains — today
-`std/fs` simply has no Promise members, and the card closes when that refusal is a `not-yet`
-naming Phase 10.
-
-**Check:** goldens for env/path/process/fs sync; subset rows match; no Node polyfill dependency.
+~~**T10.1. `std` low-level API (sans threads).**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 10 T10.1 (plan-notes 284, 294, 307).
+`std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` live in `packages/std`. The
+`std/fs` Promise twins (`readTextAsync`, …) are `STA1214` naming Phase 10 until T10.2 implements
+them as `async` wrappers over the thread pool (docs/STD.md §2).
 
 ### T10.2. OS threads + async bridge — **[D5]**
 
@@ -1283,7 +1412,7 @@ byte-identical emitted C for the fixture; CI green.
 
 ---
 
-## 11c. Phase 11 — `--node`: the Node platform — **[D5]**
+## 11c. Phase 11 — `--node`: the Node platform — **[D5 · P1]**
 
 Creator's direction (2026-10-02, plan-notes 286, decided in 289). A program may use the Node
 platform: CommonJS `require` / `module.exports`, `process`, `Buffer`, timers and the `node:*`
@@ -1312,7 +1441,7 @@ built-in modules. The first target is TypeScript 6.0.3's own `tsc` bundle.
 | `packages/runtime` | C11 + Zig | values, GC, builtins, **typed arrays** (T11.1) | know `std` or Node |
 | `packages/std` (new, T11.2) | strict TS surface + Zig backings → `libjsrt_std.a` | `std/env`, `path`, `process`, `fs`, `time`, `os`, `io`, `hash`, `encoding` | know Node; mimic Node option bags or error strings |
 | `packages/node` (new, T11.6) | strict TS only | `node:*` modules, Node globals (`process`, `Buffer`, timers), the CJS runtime helpers | contain C, Zig or JS; reach `runtime` except through `std` |
-| `packages/compiler` | strict TS | `--node` flag, `std/*` + `node:*` resolution, CommonJS lowering (T11.5), js-mode coverage (T11.4) | contain platform semantics (those live in `node`) |
+| `packages/compiler` | strict TS | `--node` flag, `std/*` + `node:*` resolution, CommonJS routing and `require` over built-ins (T11.5), js-mode coverage (T11.4) | contain platform semantics (those live in `node`) |
 | `packages/tests` | strict TS | goldens, `node_coverage.json` claims, the `docs/NODE.md` generator | — |
 
 Each new package is a pnpm workspace member and a moon project with its own `typecheck`,
@@ -1330,22 +1459,11 @@ the refused surface, `builtins_coverage.json` counts it as missing).
 ~~**T11.2. `packages/std`: the real `std/*` package.**~~ ✅ **landed 2026-10-02** — evidence in
 [done.md](done.md) → Phase 11 T11.2 (plan-notes 294).
 
-### T11.3. `packages/std`: the N1 modules — **[D3]**
+~~**T11.3. `packages/std`: the N1 modules.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 11 T11.3 (plan-notes 309).
 
-Depends on T11.1, T11.2. Zig backings, POSIX first (STD.md §4). Errors throw with a stable
-`code` (STD.md §3).
-
-| Module | Functions |
-| --- | --- |
-| `std/process` (extend) | `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode` |
-| `std/fs` (extend) | `open`/`read`/`write`/`close` on fds, `readdir`, `realpath`, `utimes`, `exists`, bytes reads (`unlink`, `rmdir` and UTF-8 text reads landed with T11.2) |
-| `std/os` | `platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol` |
-| `std/io` | `stdin`/`stdout`/`stderr` fds, `write`, `read`, `isatty`, `terminalSize` |
-| `std/hash` | `sha256`, `sha1`, `md5` over bytes or strings; `randomBytes` |
-| `std/encoding` | UTF-8 / latin1 / base64 / base64url / hex ↔ bytes |
-
-**Check:** a golden per module against Node's equivalent (nondeterministic results — `hostname`,
-`pid`, `randomBytes` — proved by unit-test ranges, as `test:builtins` carves them out).
+~~**T11.3a. `Uint8Array` across the extern boundary.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 11 T11.3a (plan-notes 311).
 
 ### T11.4. `packages/compiler`: js-mode coverage for the `tsc` bundle — **[D5]**
 
@@ -1358,85 +1476,89 @@ unsupported globals (111), spreads (~190), Map/Set from iterables (71), `new` on
 index access on non-array (33), `Object.*` (24), destructuring (31), class expressions (~8).
 Each family is its own sub-step with its own fixtures — none of it is Node-specific.
 
+**Status:** in progress — Claude Code / opus-5-5. One PR per family, each with decision tests in
+both modes and goldens, a full `pnpm run ci`, and the self-compilation baseline re-recorded with
+`--update` when its counts move.
+
+**Execution plan** (re-measured on 68c8d57, plan-notes 310; counts are `STA1214` messages):
+
+1. **Unsupported globals (78) — landed** (plan-notes 310; 78 → 20: `require`, `Array(n)`,
+   `Array.from`, `encodeURI`, `Error.captureStackTrace` and `arguments` remain, each assigned to a
+   later family). Exempt the property NAME of an object binding pattern, which is
+   not a reference (about 22 of the 78: `{ setTimeout: setTimeout2 } = host`). Lower the global
+   converters and number functions as callees through one table-driven node, the
+   `String.fromCharCode` pattern: `String(x)`, `Number(x)`, `Boolean(x)`, `parseInt`,
+   `parseFloat`, `isNaN`, `isFinite`, plus `Array.isArray`. `typeof` of a global the compiler
+   knows answers its constant. `require`, `arguments` and `Error.captureStackTrace` stay refused
+   (CommonJS is T11.5; the other two are not values Stator models).
+2. **Method calls on inferred shapes (403) — landed** (plan-notes 310; 403 → 19). A call of a
+   function-valued field of an object shape is a `field-call` node, and `n.toString(radix)` /
+   `n.toFixed(digits)` are a `number-op` node; `Number.parseInt`/`parseFloat` and the `Number`
+   constants land with them. Left for step 9: `.call`/`.apply` on a function (13), static calls on
+   a class expression (3) and receivers typed as possibly `undefined` (3).
+3. **Assignment and compound assignment to non-variables (525) — landed** (plan-notes 310; 525 →
+   97). Compound, logical and update forms on dynamic receivers, `xs.length = n`, and
+   destructuring assignment of variables as a statement. The 92 plain writes of a property the
+   object's shape does not declare are layout growth and move to step 7; the 5 on a `Map` or an
+   array go to steps 6 and 7.
+4. **`new` on non-class (50): function constructors — landed** (plan-notes 310; 50 → 28). `new`
+   and `instanceof` on an ordinary function or an Unknown callee, a function's own properties and
+   its `prototype`, and prototype-chain reads on what `new` built (docs/VALUE.md §4.20). The 28 left
+   are builtins, split off as step 4b.
+   4b. **The builtin constructors left by step 4 — landed** (plan-notes 310; 32 → 2). `new
+   Array(n)` (13) and `Array(n)` (4) with array holes in an Unknown-element array (docs/VALUE.md
+   §4.4), `new RegExp(pattern, flags)` (8, §4.21), `WeakMap` (4) and `WeakSet` (2, §4.22). Left:
+   `Array.from` (1), which is a spread over an iterator and moves to step 5, and `new Uint16Array`
+   (1), T11.1's typed-array surface, not this card's.
+5. **Spreads (196) — landed** (plan-notes 310; 196 → 3). Call, method-call and array-method
+   arguments build one list and call through `jsrt_call_spread_at`; an array-literal spread of
+   any iterable drains through the `...` row; `Array.from(iterable)` (from step 4b) is a
+   `global-call` row (docs/VALUE.md §4.23). Left: an object spread of a value with no fixed shape
+   (2), which is step 8's `Object.*` surface, and a spread into `String.fromCharCode` (1), step 9.
+   Map/Set from an iterable (73) is step 6, which can now drain through the same helper.
+6. **Map/Set from iterables (73)**, Map `add`/`remove` misuse included.
+7. **Layout growth — landed** (plan-notes 310; 55 reads + 92 writes + 33 index accesses → 0 + 5
+   + 6). A fixed object grows through an overflow table: `JSRTObject.extras`, a dynamic object
+   allocated by the first write of a name its layout does not declare (docs/VALUE.md §4.24). In
+   js mode, a read, write, compound write, call or `delete` of an undeclared member is a dynamic
+   node, and a string or number key on a fixed object is a by-name index access. Left: the 3
+   named writes on an array (`queue.pollIndex = 0`) and the 2 on a `Map` (`map2.add = …`), which
+   go through the builtins' member gate (the `Map` pair rides step 6; the array writes stay here),
+   and 6 index accesses whose receiver is a string or a union. Both residues stay with this step,
+   queued after step 11.
+8. **`Object.*` (21)** and destructuring (31, for-of, declarations, parameters).
+9. **Class expressions (~10)** and the remaining singletons (`encodeURI`, `Error.captureStackTrace`,
+   `Function.prototype.call`/`apply`, a spread into `String.fromCharCode`). Also a `[Symbol.iterator]`
+   method in an object literal, which is an internal `STA4068` in both modes today instead of a
+   refusal or a user iterable (plan-notes 310, step 5).
+10. ~~**A `RegExp` method called straight off a union narrowing** (`unknown` or a union narrowed by `instanceof RegExp`, then `.test()` / `.toString()`) panics at run time with `STA2006` "calling a non-function"; binding it to a `RegExp`-typed local first works (plan-notes 314). Primitive and built-in method dispatch, `jsrt_get_prop` included.~~ Fixed by step 4b (v4.35): `jsrt_get_prop` answers a RegExp's methods and data properties on an Unknown receiver.
+11. **A `Date` method called off a union narrowing** (plan-notes 317). On `t: number | Date`
+   narrowed by `typeof`, `instanceof Date` or `valueOf`, `t.getTime()` compiles but panics at run
+   time with `STA2006` "calling a non-function", and `Number(t)` gives `NaN`; passing the value to a
+   `Date`-typed parameter works. It is step 4b's RegExp gap for `Date`: `jsrt_get_prop` must answer
+   a Date's methods on an Unknown receiver, and ToNumber of a Date must be its time value. Lands
+   with a golden. Queued after step 6.
+
 **Check:** `stator explain _tsc.js --mode=js --json` lists no `STA1214` in `diagnostics` and ends
 with a verdict, not `STA0013`/`STA4072` (PR #44 names the checker's stack overflow `STA0013`).
-Baseline 2026-10-02 at `--stack-size=7600`: 1 589 diagnostics — 1 541 `STA1214`, 47 `STA0012`,
-1 `STA1210` (plan-notes 291). Every landed
-construct has decision tests in both modes + a golden (Testing rules).
+Baseline 2026-10-02 on 68c8d57 at `--stack-size=7600` (110 s): 1 560 diagnostics — 1 514
+`STA1214`, 45 `STA0012`, 1 `STA1210` (plan-notes 310; the first baseline, 1 589, is plan-notes
+291). Every landed construct has decision tests in both modes + a golden (Testing rules).
+Also, moved here from T11.5a (plan-notes 302): once the Test262 harness (`assert.js`, `sta.js`)
+compiles, the `test262` `language/module-code` pass count rises above T11.5a's baseline of 152
+passed (426 skipped, 21 failed; measured with T11.5a's runner fix, which compiles a module test
+beside its fixtures). `String` and `JSON` as values are not enough on their own (plan-notes 310):
+the harness also needs method calls on inferred shapes, assignment to a function's properties
+(`assert.sameValue = function …`, `Test262Error.prototype.toString = …`), `new` on a function
+constructor and `instanceof` against one, and `.call` on a builtin method
+(`Object.prototype.toString.call(v)`, `Array.prototype.map.call(xs, String)`; step 9), so this
+clause is met by families 1–4 and step 9 together. After family 4 those two `.call` sites are the
+harness's only refusals (plan-notes 310).
 
-### T11.5. `packages/compiler`: the `--node` flag and CommonJS — **[D4]**
-
-Depends on T11.2. **Re-scoped by T12.0** (question 4, plan-notes 296; `docs/BUNDLER.md` §4):
-the bundler converts CommonJS. Rolldown wraps each module as a function over
-`(exports, module)`, and it already turns static `require` into graph edges, decides `"type"`
-and gives CJS cycles Node's partial `exports`. Stator writes none of that. A CommonJS project
-file (Node's rule: `.cjs`, `"type": "commonjs"`, or `.js` without ES-module syntax) is routed
-to the bundler by T12.1.
-
-Steps:
-
-- **The flag.** `--node` on the CLI and `explain`. Under `--node` an unlanded `node:*` or
-  global member is a `not-yet` diagnostic naming T11.6, so `explain`'s `diagnostics` lists
-  platform gaps (`docs/MODES.md` §6).
-- **The Node globals.** These include `__filename` and `__dirname`, which lift T12.1's
-  `not-yet` under `--node`. They apply both in CommonJS project files and in the vendor
-  module. Their value must not bake a build-machine path into the binary (creator, 2026-10-02,
-  BUNDLER.md §9). Decide whether the value is relative to the executable or comes from
-  `import.meta.url`, then record it in `MODES.md`.
-- **Resolution.** `node:*` and bare built-ins resolve to `packages/node`, both as ESM imports
-  in project files and in the vendor bundle. The bundle reaches them as
-  `import * as m from "path"` plus `m.default` (`esmExternalRequirePlugin`), so built-ins need
-  a default export.
-- **`require` at run time.** `import.meta.url` + `node:module.createRequire` give a `require`
-  over built-ins only. It serves Rolldown's `__require` for computed `require(expr)`, and
-  anything that is not a built-in throws Node's `MODULE_NOT_FOUND`. A computed require of a
-  bundled file cannot resolve: Node itself fails on the bundle, as measured in T12.0.
-- **`STA1110`** narrows to "without `--node`". In `ts` mode, and under `--bundler=none`, it
-  stays. New not-yet codes are allocated in `docs/DIAGNOSTICS.md`.
-
-Docs: `MODES.md` (platform section), `SUBSET.md`, `DIAGNOSTICS.md`, `HOW-IT-WORKS.md`.
-
-**Check:** decision tests for `require` in all four mode × platform cells. Goldens, byte-for-byte
-vs Node: `createRequire` of a built-in, a computed `require` hit (a built-in) and miss
-(`MODULE_NOT_FOUND`). The CJS cycle and `module.exports` replacement goldens moved to T12.3.
-
-### T11.5a. `packages/compiler`: per-module namespaces — **[D4]**
-
-Creator's direction (2026-10-02, plan-notes 302). This is a prerequisite of T11.6. Today one
-program has **one** namespace, so three things go wrong:
-- Importing a module reserves all of its top-level names, exported or not, for the whole program.
-  A user `function get()` next to `import { has } from "std/env"` is `STA1214`.
-- Every aliasing shape is `STA1214` (docs/SUBSET.md, "Renamed/default/namespace imports" and
-  "Re-exports" rows), so a library cannot hide its helpers or rename what it exports.
-- `packages/node` would hit both on every module (plan-notes 294).
-
-Steps:
-1. **Per-module symbols.** Every module's top-level bindings get a module-qualified C name. Two
-   modules may then declare the same name, and a module's unexported names are invisible to
-   others. Diagnostics and `#line` mapping keep the source name.
-2. **Aliasing imports.** `import { x as y }`, default imports, and `import * as ns` as a static
-   namespace object. A static `ns.x` resolves at compile time, like the `import()` namespace from
-   Phase 5 step 10. A namespace that escapes as a value uses that same `HObject`
-   (`namespace: true`).
-3. **Aliasing exports.** `export { x as y }`, `export default`, and re-exports:
-   `export { x } from`, `export * from` (with ES ambiguity rules: a name exported twice by `*` is
-   dropped, not an error) and `export * as ns from`. This takes over T12.1 step 3's
-   `export { a as b }`. Whichever card lands first owns it, and the other cites it.
-4. **Both modes, both kinds of graph.** The same rules apply to `ts`-mode modules, `js`-mode
-   modules and mixed graphs. `std/*` and the T12.1 vendor module are ordinary modules here,
-   with no special case.
-5. **Docs.** Flip the SUBSET.md rows. The Phase 5 step 12 line that still owns `import * as ns`
-   cites this card. Update MODES.md if init order or live bindings show a Node difference.
-
-**Check:**
-- A user `function get()` beside `import { has } from "std/env"` builds.
-- Two modules with a same-named private helper build and run as under Node.
-- Decision tests flip `not-yet` → `static` for every aliasing shape in both modes, removing the
-  `// @expected-fail` markers in the same commit.
-- Goldens cover renamed imports and exports, default, `import * as ns`, `export *` with an
-  ambiguous name, and a re-export chain. Each matches Node byte for byte.
-- `STA1214` is no longer emitted for those shapes, and the `test262` `language/module-code`
-  pass count rises, recorded in plan-notes.
+~~**T11.5. `packages/compiler`: the `--node` flag and CommonJS.**~~ ✅ **landed 2026-10-02** —
+evidence in [done.md](done.md) → Phase 11 T11.5 (plan-notes 312, 315, 316). The `vite-stator`
+side of a bundled built-in (`esmExternalRequirePlugin`, which turns the bundle's `__require` of a
+built-in into an import) is T12.2's; the CommonJS goldens through the default adapter are T12.3's.
 
 ### T11.6. `packages/node`: the N1 wrappers — **[D4]**
 
@@ -1449,8 +1571,72 @@ functions `tsc` calls), `node:path` (posix), `node:os`, `node:perf_hooks.perform
 Every member lands with a golden and a `node_coverage.json` claim; `docs/NODE.md` regenerates in
 the same change.
 
+**Status:** in progress — Claude Code / opus-5-5. **First slice landed** (plan-notes 313):
+`packages/node` exists (workspace package, moon project, selfhost target with a `node-goldens`
+smoke, `stator.config.json` with `"node": true`), and `node:path` plus `node:path/posix` are
+POSIX-complete: 14 of 16 members each, every one with a golden and a claim. A golden fixture
+named `node_*` builds with `--node`. Not landed: `path.win32` and `node:path/win32` (Windows
+semantics, outside N1) and `path.matchesGlob` (Node's glob matcher; nothing in the corpus uses
+it). **Second slice landed** (plan-notes 317): the `node:fs` sync subset, 12 of the 15
+functions `tsc` calls (`closeSync`, `existsSync`, `mkdirSync`, `openSync`, `readFileSync`,
+`readdirSync`, `realpathSync`, `statSync`, `unlinkSync`, `utimesSync`, `writeFileSync`,
+`writeSync`) plus `rmdirSync`, with Node's `SystemError` shape. `watch`, `watchFile` and
+`unwatchFile` wait on the event loop (N2) and stay `STA1214`. **Next**, in the order `tsc` needs
+them: `process`, `node:os`, `Buffer.from`/`toString` (then `readFileSync` without an encoding
+answers a `Buffer`), `crypto.createHash`, `perf_hooks.performance`, timers; `path.win32` is its
+own slice (13 of T11.7's `path` tests need it).
+
 **Check:** `tsc --version` and `tsc -p` on a small fixture project, compiled by Stator, print
 byte-for-byte what `node _tsc.js` prints on Node 26.7.0; `docs/NODE.md` slice N1 at 100%.
+
+### T11.7. Node's own test suite, synced and run through vitest — **[D3 · P1]**
+
+Creator's direction (2026-10-02, plan-notes 305). The `node:*` wrappers are proven by Node's own
+tests, synced at the pinned version, not by hand-written copies.
+
+1. **Sync, don't copy.** `packages/tests/node-suite/pin.json` pins the tag matching
+   `.node-version` (v26.7.0). A strict-TS fetch script downloads the selected
+   `test/parallel/test-*.js` files and the `test/fixtures` they read. The corpus is fetched, not
+   vendored (gitignored), the same way Test262 is (Task 6.1). A Node bump re-pins it, and the diff
+   of results is the review.
+2. **Selection.** A checked-in expectations file lists each selected test as `pass`, `fail` or
+   `skip` with a reason. At v26.7.0, `test/parallel` has 4 641 `test-*` files, and 615 of them
+   have a name starting with an N1 module (`fs`, `path`, `os`, `buffer`, `process`,
+   `crypto-hash`, `timers`, `perf-hooks`). Start with `path`, then follow T11.6's order. Tests that
+   need `// Flags: --expose-internals`, child processes or the network are `skip` until N2.
+3. **The harness, in strict TS.** `require('../common')` resolves to
+   `packages/tests/node-suite/common/index.ts` (and `../common/fixtures` to
+   `common/fixtures.ts`), a strict-TS implementation of the `common` helpers the
+   selected tests use (`mustCall`, `mustNotCall`, `expectsError`, `tmpdir`, platform flags). It
+   grows with the selection. `node:assert` (`ok`, `strictEqual`, `deepStrictEqual`, `throws`,
+   `rejects`) lands in `packages/node` as part of this card.
+4. **vitest drives it.** The runner generates one vitest test per selected file. Each test builds
+   the file with `--mode=js --node`, runs the binary, and passes on exit 0. The same file must also
+   pass under the pinned Node, so a test that fails on the host is `skip`, never `fail`.
+5. **Ratchet and coverage.** A `pass` that starts failing fails the run. A `fail` that starts
+   passing must be flipped in the same change, as Test262's ratchet does. `docs/NODE.md` gains a
+   "node tests" column with passes over the selected count per module.
+
+Depends on T11.5 (`--node`, CommonJS through the T12 bundler) and T11.6. The harness and `path`
+can land as soon as `node:path` exists.
+
+**Check:** `pnpm run test:node-suite` runs the selection through vitest against the pinned corpus,
+and its pass count is recorded in plan-notes; `docs/NODE.md` shows the column; a hand-flipped
+expectation fails the run.
+
+**Status:** in progress — Claude Code / opus-5-5. **First slice landed** (plan-notes 314): the
+pin, `fetch.ts`, `expectations.json`, the strict-TS `common/` with its host resolve hook, the
+vitest driver with the ratchet, `node:assert` in `packages/node`, and the "Node tests" column in
+`docs/NODE.md`. The selection is the 17 `test-path*` files: on the pinned Node all 17 pass with
+our `common`; under Stator 0 pass, 15 are `fail` and 2 are `skip` (a child process; a
+Windows-only file). Every `fail` is a CommonJS file, which goes to the T12 bundler.
+**Second slice landed** (plan-notes 318): the Stator build resolves `require('../common')`, since
+`fetch.ts` links the corpus's `test/common` to the strict-TS `common/`. The harness no longer
+imports `node:util` (N2); `common/inspect.ts` prints what its messages compare. Every `fail` now
+stops at `node:process` (the harness's `process.platform`, `exit`, `on` and `cwd`), then
+at Rolldown's `__commonJSMin` (STA4013, T12.3), and 13 of them at `path.win32`. **Next:** flip
+the `path` files as T11.6's `process` and `path.win32` slices and T12.3's interop helpers land,
+then follow T11.6's module order.
 
 **Deferred — N2 (not a card yet).** `std/loop` written in Zig (the creator chose an own loop
 over libuv: kqueue/epoll first, Windows when the runtime builds there), real timers and
@@ -1474,7 +1660,7 @@ kinds of input:
 
 - every **package** import, meaning a bare specifier that is not `node:*`, a built-in or
   `std/*`;
-- every **CommonJS** project file.
+- every **CommonJS** project file, under `--node` (plan-notes 315).
 
 Both go into one generated vendor entry. The adapter bundles it into one ESM module plus a
 source map, and that module joins the graph as one `js`-mode module. A graph with neither kind
@@ -1491,7 +1677,7 @@ Decided by the creator (2026-10-02, BUNDLER.md §9, plan-notes 296):
 
 - "one file" means the dependencies only, so this design stands;
 - `__filename`/`__dirname` are a `not-yet` diagnostic until `--node` (T11.5), and no path is
-  baked into a binary;
+  baked into a binary (T11.5 landed the values, plan-notes 316; the diagnostic is `STA1110`);
 - the package evaluation-order deviation is documented only, with no card to close it.
 
 The phase is not sequenced after Phase 8 (§15.1 exception, as Phases 9–11). It touches only
@@ -1506,84 +1692,15 @@ compiles from.
 ~~**T12.0. Design: the bundler contract.**~~ ✅ **landed 2026-10-02** — evidence in
 [done.md](done.md) → Phase 12 T12.0 (plan-notes 296; `docs/BUNDLER.md`).
 
-### T12.1. `packages/compiler`: the bundler API — **[D4]**
+~~**T12.1. `packages/compiler`: the bundler API.**~~ ✅ **landed 2026-10-02** — evidence in
+[done.md](done.md) → Phase 12 T12.1 (plan-notes 320; `docs/BUNDLER.md`). Still open from the card,
+each `STA1214`: `export * from 'p'` (only the bundler knows the names), `import('p')` and a package
+import with import attributes are not rewritten to the vendor module. T12.3 owns them (plan-notes
+320 Q3); its first slice landed `export *` from one package and the attributes (plan-notes 323).
 
-Depends on T12.0. Contract: `docs/BUNDLER.md` §5–§7.
-
-1. **The API.** `statorc/api`: a programmatic `compile` that takes an optional vendor bundle
-   (`{ code, map, inputs }`), and the adapter interface
-   `BundlerAdapter = { name, bundle(entry: { code, resolveDir }, { external }) → Promise<{ code, map, inputs }> }`.
-2. **The vendor entry.** After the program loads, collect the package imports and route the
-   CommonJS project files. Generate the vendor entry:
-   - named imports become `export { a } from 'p'`;
-   - default and namespace imports get mangled names;
-   - a name is mangled only on collision.
-3. **The vendor module.** Add the bundle as one virtual `js`-mode module and rebind the
-   imports to its exports. Lower `export { a as b }`, which is STA1214 today and is the form
-   Rolldown emits for renamed exports (T11.5a step 3 delivers it too; whichever lands first owns it).
-4. **The CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
-   - the default in `js` mode is `vite`, loading `vite-stator`;
-   - in `ts` mode the flag is `STA0004`;
-   - the adapter loads only when step 2 found something;
-   - `STA0014` means the adapter cannot be loaded, and its message names the package;
-   - `STA0015` means the bundle step failed, with the bundler's message passed through.
-5. **Source maps.** Diagnostics, `#line` and runtime call-site strings in the vendor module
-   map through the source map (`node:module` `SourceMap`, wrapped once in `src/support/`;
-   stability 1.1). A position with no mapping says it sits in a bundler runtime helper, never
-   a user file.
-6. **The cache.** The program-cache key (Task 6.9) adds the sha256 of the vendor `code`.
-7. **`__filename`/`__dirname`.** Without `--node`, a free read of either in a project file
-   or in the vendor module is a `not-yet` diagnostic naming T11.5 (BUNDLER.md §4, §9). Inside
-   the vendor module it is reported at the mapped position. The code is allocated in
-   `docs/DIAGNOSTICS.md` when this lands.
-
-   Today such a read compiles as `dynamic`, and the binary throws `ReferenceError` where Node
-   prints the path. No path is ever baked into the binary.
-
-Docs: `HOW-IT-WORKS.md`; `MODES.md`, covering packages, the vendor module and the
-package-evaluation-order deviation (BUNDLER.md §1, documented only, no card closes it), the
-latter next to top-level-await interleaving in §5; `DIAGNOSTICS.md` (STA0014/STA0015 move from
-planned to emitted, plus step 7's code); `pipeline.d2` (a dependency-bundling stage before the frontend in
-`js` mode).
-
-**Check:**
-
-- Unit tests drive `compile` and the vendor-entry generator through a stub adapter.
-- Every existing `js` golden passes byte-for-byte under `--bundler=none` **and** under the
-  default, with Vite not installed. None of them imports a package, so the adapter must not
-  load.
-- A diagnostic inside a vendored module reports the original file and line. One inside a
-  runtime helper says "no source mapping".
-- `STA0014` is raised for a package import when the adapter is absent.
-- Decision tests: `__filename`/`__dirname` are `not-yet` in a project `.js` without `--node`.
-
-### T12.2. `packages/vite-stator`: the default integration — **[D3]**
-
-Depends on T12.1. New workspace package, strict TS (§0.10). `vite` is a `peerDependency`
-(plan-notes entry: the integration *is* Vite, no few lines replace it). It ships:
-
-- the adapter `stator build --mode=js` uses by default, configured per BUNDLER.md §2:
-  - an SSR build with `ssr.noExternal: true` and `ssr.target: 'node'`. Library mode is wrong:
-    it stubs `node:*` out;
-  - Rolldown output `format: 'es'`, `codeSplitting: false` and `topLevelVar: false`;
-  - `minify: false`, `sourcemap: true`, `std/*` external;
-  - Vite's `esmExternalRequirePlugin` for built-ins;
-  - no `__filename`/`__dirname` transform. They stay free, and T12.1 reports them as
-    `not-yet` (BUNDLER.md §9);
-- the `stator()` Vite plugin (`vite build` produces the native binary);
-- an example under `examples/vite/` with its README.
-
-**Check:**
-
-- New goldens with a `node_modules` package pass through the default adapter, byte-for-byte
-  vs Node: named, default and namespace imports, and two packages sharing a dependency (one
-  instance).
-- `examples/vite` builds a binary with `vite build`.
-- Tree-shaking, measured on a package, because project code is already tree-shaken by
-  Stator's DCE (BUNDLER.md §1, 93 976 B both ways). Import 1 of 40 functions from a package:
-  - the vendor module holds only that function;
-  - the binary is within 1% of the same function written in the project.
-  The numbers go in plan-notes.
+~~**T12.2. `packages/vite-stator`: the default integration.**~~ ✅ **landed 2026-10-02** — evidence
+in [done.md](done.md) → Phase 12 T12.2 (plan-notes 321; `docs/BUNDLER.md` §2). Its namespace-import
+golden moved to T12.3's Check: Rolldown's `__exportAll` is T12.3's helper item.
 
 ### T12.3. `packages/compiler`: Rolldown's output compiles — **[D4]**
 
@@ -1591,35 +1708,67 @@ Depends on T12.1, and overlaps T11.4's `Object.*` and method-call families. Do t
 where they are the same constructs. Each item below is measured in T12.0 (`docs/BUNDLER.md`
 §2, §4, §8), and each lands with decision tests in both modes plus a golden:
 
-- **`var X = class {}` / `let X = class {}`.** Rolldown emits every top-level class this way;
-  only `const` lowers today.
+- ~~**`var X = class {}` / `let X = class {}`.**~~ Landed (plan-notes 323): a formation nothing in
+  its file writes lowers like `const`.
 - **The CJS interop helpers.** `__commonJSMin`, `__toESM` and `__copyProps` need
   `Object.create`, `Object.defineProperty` with getter descriptors,
   `Object.getOwnPropertyDescriptor`, `Object.getOwnPropertyNames`, `Object.getPrototypeOf`,
-  `Object.prototype.hasOwnProperty.call` and `Function.prototype.bind`.
+  `Object.prototype.hasOwnProperty.call` and `Function.prototype.bind`. `__commonJSMin` landed
+  (plan-notes 323): its comma operator was an internal `STA4013`.
 - **The dynamic-import namespace helpers.** `__esmMin` and `__exportAll` need
   `Symbol.toStringTag` and a zero-argument `Promise.resolve()`.
-- **`import.meta.url`.**
-- **A computed `export default`.**
+- ~~**`import.meta.url`.**~~ Landed under `--node` by T11.5 (plan-notes 316).
+- ~~**A computed `export default`.**~~ Lowers since T11.5a (`subset_export_default_expression_*`,
+  plan-notes 323).
+- **The package imports T12.1 leaves refused** (plan-notes 320 Q3), each `STA1214` today:
+  ~~`export * from 'p'`~~, whose names come from the bundle's own exports once it is built (landed
+  for one such package per build, plan-notes 323); `import('p')`, which lands on the
+  dynamic-import namespace helpers above (a clean `STA1214` now, not the internal `STA4031`); and
+  ~~a package import with import attributes~~ (landed, plan-notes 323).
 
-Out of scope: `__filename`/`__dirname`. They stay `not-yet` until T11.5 (BUNDLER.md §9), so no
-golden here reads them.
+`__filename`/`__dirname`: T11.5 injects them in the vendor module under `--node` (plan-notes
+316, proved with a ready bundle in `unit/bundler.test.ts`); a golden here may read them, printing
+no path.
+
+**Status:** in progress — Claude Code / sonnet-5-5.
+
+**Execution plan** (measured on 0afd141 with 12 probe fixtures through the default adapter):
+
+1. **First slice, no overlap with T11.4:** the comma operator types as its right operand
+   (`__commonJSMin`'s `STA4013`); `var`/`let X = class {}` that nothing repoints lowers like
+   `const`; attributed package imports reach the entry; `export * from` one package re-exports
+   the names the built bundle exports for it; `import('p')` becomes a clean `STA1214` instead of
+   the internal `STA4031`. Goldens: nested `require`, CJS cycle, `.cjs` entry,
+   `node_pkg_location`, top-level class, `export *`, attributed JSON import, the comma itself.
+2. **Blocked, needs a decision:** `__toESM`/`__copyProps` (default import of a CJS package,
+   `module.exports` replacement) need T11.4 step 8's `Object.*`. `__exportAll` (namespace import,
+   `import('p')`, a package's inlined `import()`) also needs `Symbol.toStringTag`, which is
+   `STA1212` (Phase 5): the runtime has no symbol values.
 
 **Check:** CommonJS goldens through the default adapter, byte-for-byte vs Node:
 
-- `exports.x`;
+- `exports.x` (by name: `js/node_pkg_location`, plan-notes 323; a default import goes through
+  `__toESM`);
 - `module.exports` replacement;
-- a nested `require`;
-- a CJS cycle that exposes partial `exports`;
-- a `.cjs` project entry;
+- a nested `require` (`js/pkg_cjs_nested_require`);
+- a CJS cycle that exposes partial `exports` (`js/pkg_cjs_cycle`);
+- a `.cjs` project entry (`js/node_cjs_entry`);
 - a package with an inlined dynamic `import()`;
-- a package with a top-level class.
+- a package with a top-level class (`js/pkg_class`).
+- a project file with `export * from 'p'` (`js/pkg_export_star`), one with `import('p')`, and one
+  with an attributed package import (`with { type: 'json' }`; `js/pkg_import_json`).
+- a namespace import of a package (`import * as p from 'p'`), which Rolldown answers with
+  `__exportAll`; moved here from T12.2 (plan-notes 321).
 
 `explain` on T12.0's `cjs` spike bundle lists no `STA1214`.
 
 ---
 
-## 11e. Phase 13 — Web API with a pluggable render API — **[D5]**
+## 11e. Phase 13 — Web API with a pluggable render API — **[D5 · P3]**
+
+**Priority (creator, 2026-10-02, plan-notes 305):** Phase 11 (`--node`) comes before this phase.
+When an agent picks its next card, a Phase 11 card wins over any Phase 13 card, `webapi` and
+`renderer-clay` alike.
 
 Creator's direction (2026-10-02, plan-notes 298). Stator programs get the Web platform's DOM and
 CSS as a **separate package**. That package knows nothing about pixels: it talks to a renderer
@@ -1758,6 +1907,30 @@ checked in `ci`.
 **Check:** `pnpm run test:webapi-coverage` passes on a fresh tree and fails after a hand edit of
 `docs/WEBAPI.md`; before T13.1 the doc shows 0% over the full denominator; a claim naming a
 missing fixture fails with the claim's path.
+
+### T13.6. Web-platform-tests for `webapi`, synced and run through vitest — **[D3 · P3]**
+
+Creator's direction (2026-10-02, plan-notes 305). This is T13.0 §8's DOM oracle, made concrete.
+It follows T11.7's design, so the two suites share one fetch, expectation and ratchet mechanism
+(Task 6.16: one helper, not two).
+
+1. **Sync.** `packages/tests/wpt/pin.json` pins a web-platform-tests commit, fetched and not
+   vendored. Scope is `dom/` (937 files: 651 `.html`, 66 `.any.js`/`.window.js`) and `css/cssom/`
+   (352 files: 295 `.html`, 1 `.any.js`), counted at `c5e80ef1dca9`.
+2. **Script tests first.** `.any.js` and `.window.js` need no markup and run first. `.html` tests
+   need their markup turned into a document. T13.0 decides between an HTML parser in `webapi`
+   (which `innerHTML` would also need) and a dev-only pre-pass at fetch time that turns markup into
+   DOM-building calls. Until then `.html` tests are `skip`.
+3. **The harness, in strict TS.** A strict-TS `testharness` subset (`test`, `promise_test`,
+   `async_test`, `assert_*`, `done`) replaces `testharness.js` for the selected tests.
+4. **vitest drives it,** with the same per-file ratchet as T11.7. `docs/WEBAPI.md` (T13.5) gains a
+   "WPT" column.
+
+Depends on T13.1 and T13.5. Lower priority than T11.7 (Phase 11 first).
+
+**Check:** `pnpm run test:wpt` runs the selection through vitest against the pinned commit, and
+its pass count is recorded in plan-notes; `docs/WEBAPI.md` shows the column; a hand-flipped
+expectation fails the run.
 
 **Low priority — the other Web APIs (not cards yet).** `URL`, `TextEncoder`/`TextDecoder`, timers,
 `fetch`, `WebSocket`, storage, `Canvas`, `structuredClone` and the rest. They land in
@@ -2050,7 +2223,7 @@ ms/line flat, golden byte-for-byte, full gate green.
 | Zig memory core (Phase 9 / T9.1) | GC glue, alloc helpers, shapes, growable buffers | landed (`done.md` §11a) |
 | `std` + threads + parallel compile (Phase 10) | stdlib, OS threads↔async, `STATOR_COMPILE_JOBS` | +4–8 wk (T10.1/T10.3), +6–10 wk (T10.2) |
 | `--node` (Phase 11) | typed arrays, `packages/std` + `packages/node`, CommonJS, sync `tsc` (N1) | T11.1–T11.6; the largest item is T11.4 (js-mode coverage, not Node). N2 deferred, N3 not planned (plan-notes 289) |
-| Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`; packages + CommonJS bundled into one vendor module, project stays Stator's graph | T12.0 landed (plan-notes 296, `docs/BUNDLER.md`); T12.1–T12.3 |
+| Bundler front end (Phase 12) | `statorc/api`, `BundlerAdapter`, `packages/vite-stator`; packages + CommonJS bundled into one vendor module, project stays Stator's graph | T12.0–T12.2 landed (plan-notes 296, 320, 321, `docs/BUNDLER.md`); T12.3 |
 | Web API (Phase 13) | `packages/webapi` (DOM + CSS, strict TS, render API) + `packages/renderer-clay` (default renderer) | T13.0 design first; T13.1–T13.5 (coverage in generated `docs/WEBAPI.md`); other Web APIs low priority (plan-notes 298, 299) |
 | JS interpreter (Phase 14) | `packages/interpreter` in strict TS: `eval`, `new Function` and other `not-yet` constructs in `js` mode, on the runtime's own values | T14.0 design first; T14.1–T14.4 (plan-notes 300) |
 | Optimization ladder §12 rows 1–5 | competitive perf story | +3–5 months |
@@ -2236,4 +2409,44 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
     - The order deviation is documented only.
 - **v4.17** (2026-10-02): **Phase 14: a JavaScript interpreter in strict TypeScript, `js` mode's second fallback** (plan-notes 300). New §11f: `packages/interpreter`, compiled by Stator, runs `eval`, `new Function` and the `not-yet` constructs it takes over, directly on `jsrt_value` (no marshaling layer). Order: compiled static, then compiled dynamic, then the interpreter. Phase 8's QuickJS-NG stays as an option behind its gate until T14.0 measures whether it is still needed. Cards T14.0 (design, `docs/INTERPRETER.md`, including §0.3's parser question), T14.1 parser front, T14.2 evaluator, T14.3 wiring, T14.4 async and the rest. `ts` mode is unchanged.
 - **v4.18** (2026-10-02): **T11.2 lands: `packages/std` is the real `std/*` package** (plan-notes 294). `std/env`, `std/path`, `std/process`, sync `std/fs` and `std/time` resolve through `paths` and link `libjsrt_std.a` only into programs that import them; unknown `std/foo` is the new `STA3002`. T10.1 steps 2–4 are struck (step 5 stays open); §11b's v0 table moves `std/env.args` to T11.3 as `std/process.argv`; T11.3's `std/fs` row drops `unlink`, `rmdir` and text reads. Record in `done.md`.
+- **v4.19** (2026-10-02): **Task 6.18 — `stator.config.json`** (plan-notes 303). Every CLI option can come from a JSON config validated against a generated JSON Schema, or from the command line, or both. `--config`/`--no-config` pick the file and never appear in it. Precedence: CLI > env > file > default.
 - **v4.20** (2026-10-02): **T11.5a — per-module namespaces before T11.6** (plan-notes 302). Each module gets its own top-level namespace (module-qualified C names), and every aliasing shape lands: renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *`. This removes the one-namespace `STA1214` collisions that T11.2 found (plan-notes 294). T11.6 depends on it; T12.1 step 3 shares `export { a as b }` with it.
+- **v4.21** (2026-10-02): **Task 6.19 — self-compilation test** (plan-notes 304). Stator compiles itself and its own packages (`std`, later `node`, `webapi`, `renderer-clay`, `interpreter`) as a ratcheted test. Per-target diagnostic counts may only shrink. A target at zero builds and runs its smoke check, and for the compiler that check is a byte-identical stage-2 bootstrap. Baseline: compiler 2 522 `STA1214` in `ts` mode; `std` already compiles.
+- **v4.22** (2026-10-02): **Upstream test suites for `node` and `webapi`; Phase 11 outranks Phase 13** (plan-notes 305). New T11.7: Node's own `test/parallel` slice, pinned to `.node-version` and fetched rather than vendored, runs through vitest with a strict-TS `common` and `node:assert`, ratcheted, and adds a column to `docs/NODE.md`. New T13.6 does the same for web-platform-tests `dom/` and `css/cssom/`. Phase 11 is now `P1` and Phase 13 is `P3`.
+- **v4.23** (2026-10-02): **Task 6.17 — test impact selection** (plan-notes 293). Creator-directed: on pull requests and locally, build and run only the tests whose execution reaches a changed line, through TypeScript and on into the C/Zig runtime, using a per-test coverage map recorded by the full run on `main`. Falls back to the full run when the map cannot be trusted; `test:affected` is replaced.
+- **v4.24** (2026-10-02): **Task 6.19 lands: the self-compilation ratchet** (plan-notes 306). `pnpm run test:selfhost` runs `explain --json` over `packages/compiler` and each `packages/std` module, compares verdicts and per-code counts with `packages/tests/selfhost/baseline.json`, builds the `std` modules and runs the `std_*` goldens. It runs in `ci` (38–47 s). The `FirstNode` message now names `QualifiedName`. The Task 6.19 card shrinks to its standing rules and the unbuilt stage-2 check.
+- **v4.25** (2026-10-02): **Self-compilation counts may grow when recorded** (plan-notes 306). The creator answered 306's open question: a change that raises a `test:selfhost` count records it with `--update` in the same change, and review sees the diff.
+- **v4.26** (2026-10-02): **T11.5a lands: per-module namespaces** (plan-notes 302). Every module keeps its own top-level namespace, so a user `function get()` beside `import { has } from "std/env"` builds. Renamed, default and `* as ns` imports, renamed and default exports, `export … from`, `export *` (with ES's ambiguity rule, new `STA3003`) and `export * as ns from` are static in both modes. The test262 runner now compiles module tests beside their fixtures. The self-compilation baseline shrinks (`STA1214` 2572 → 1771). The card moves to done.md. The creator moved its test262 "pass count rises" clause to T11.4, with a baseline of 152 passed, because the corpus harness needs `String` and `JSON` as values (plan-notes 302).
+- **v4.27** (2026-10-02): **T10.1 lands: the `std/fs` Promise twins are not-yet** (plan-notes 307). `readTextAsync`, `writeTextAsync`, `statAsync`, `mkdirAsync`, `unlinkAsync` and `rmdirAsync` — each sync call's name plus `Async` — are `STA1214` naming Phase 10 (T10.2's thread pool) in both modes, instead of the checker's "no exported member" (`STA0012`, which every other missing name keeps). No new code. Subset rows `subset_std_fs_async_ts`/`_js`, `subset_std_fs_missing_ts`; docs/STD.md §2, SUBSET.md, DIAGNOSTICS.md (STA0012 row). T10.1 moves to `done.md`.
+- **v4.28** (2026-10-02): **T11.3 step 1: `std/os`, `std/io` and the byte channel** (plan-notes 309). `std/os` (`platform`, `arch`, `release`, `hostname`, `homedir`, `tmpdir`, `cpuCount`, `totalMemory`, `eol`) answers what the pinned Node's `node:os` answers. `std/io` does raw descriptor I/O through libc; writes flush C stdio first. Bytes cross the FFI edge through a byte channel in `jsrt_std.zig`. STD.md §3 gains `EBADF`, `ENOTTY`, `EAGAIN` and `EPIPE`. The T11.3 card is claimed with its three-PR execution plan; it stays open until process + fs land.
+- **v4.29** (2026-10-02): **T11.3 step 2: `std/encoding` and `std/hash`** (plan-notes 309). `std/encoding` converts UTF-8, Latin-1, base64, base64url and hex to and from bytes as Node's `Buffer` does. Text-to-bytes is TypeScript; bytes-to-text goes through the backing, because only the C-string edge can make a string. `std/hash` provides `sha256`/`sha1`/`md5` over `Uint8Array | string` with Zig's `std.crypto` (nothing vendored), and `randomBytes` from `std.Io`'s secure source. Bytes take T11.3a's `Uint8Array` row (plan-notes 311): one call per digest, fill or conversion, the answer's view passed in for the backing to fill.
+- **v4.30** (2026-10-02): **T11.3 step 3 lands and the card closes: `std/process` + `std/fs`** (plan-notes 309). `std/process` gains `argv`, `execPath`, `platform`, `arch`, `ppid`, `hrtimeNs`, `memoryUsage`, `exitCode`/`setExitCode`; the emitter's `main` becomes `int main(int argc, char **argv)` and returns the runtime's exit-code slot (`jsrt_process.c`). `std/fs` gains descriptors (`open`/`read`/`write`/`close`, positional or sequential), `readBytes`, `readdir`, `realpath`, `utimes` and `exists`; bytes take T11.3a's `Uint8Array` row, and `readBytes` parks the file and copies it into a view of its size. `utimes` is libc `utimensat`, because Zig 0.16 reports a missing path as `Unexpected`. T11.3 moves to done.md.
+- **v4.31** (2026-10-02): **T11.4 claimed; family 1, the global functions, lands** (plan-notes 310). The card now carries the family order, a re-measured baseline (1 560 diagnostics on 68c8d57), and a corrected test262 clause: the Test262 harness needs families 1–4, not just `String` and `JSON` as values. Landed: `String`/`Number`/`Boolean` lower to the operations they are. `parseInt`/`parseFloat`/`isNaN`/`isFinite` lower to a new `global-call` node (verifier `STA4102`, C entry points `jsrt_global_*`). `Array.isArray` lowers to the builtin `instanceof Array`, and `typeof` of a language global folds. An object binding pattern's property name is no longer refused as a global. `_tsc.js`: 1 514 → 1 456 `STA1214`. Self-compilation: 1771 → 1648.
+- **v4.32** (2026-10-02): **T11.4 family 2, method calls on inferred shapes, lands** (plan-notes 310). A call of a function-valued field of an object shape lowers to a new `field-call` node, which reads the callee from the field's slot and passes the receiver as `this`; most of the 403 refusals were this. `n.toString(radix)` and `n.toFixed(digits)` lower to a new `number-op` node (verifier `STA4103`) over `runtime/src/jsrt_number_methods.c`, which ports V8's radix printer and rounds `toFixed` half-up on the exact value. `Number.parseInt`/`parseFloat` are the global functions, and the `Number` constants fold. Step 9 takes the 19 calls left (`.call`/`.apply`, class-expression statics, possibly-`undefined` receivers). Two defects on main are fixed with it: a property read through a dynamic receiver now types Unknown for the method-call arms (`this.name.toUpperCase()` in an object literal's `function` was an internal `STA4081`), and `jsrt_get_prop` answers a string's or number's methods bound to it (`text.slice(1)` on an untyped string aborted `STA2006`). `_tsc.js`: 1 456 → 1 066 `STA1214`. Self-compilation: 1723 → 1719.
+- **v4.33** (2026-10-02): **T11.4 family 3, assignment to non-variables, lands** (plan-notes 310). Compound, logical and update forms now apply to a member of an Unknown or dynamic-shape receiver, reading and writing the shape-table entry through a receiver evaluated once; this was 411 of the 525 refusals. `xs.length = n` follows ECMA-262's ArraySetLength in the runtime's property write: it truncates, throws `RangeError` on a non-uint32, and aborts `STA2002` when it would grow (an untyped write used to add a named `length` property). Destructuring assignment of variables lands as a statement. The 92 writes of a property an object shape does not declare are layout growth and move to step 7. A defect is fixed with it: `let a = 1, b = 2;` was an internal `STA4032`. `_tsc.js`: 1 066 → 638 `STA1214`. Self-compilation: 1719 → 1738, from the new code's `ts.*` type references.
+- **v4.34** (2026-10-02): **T11.4 family 4, function constructors, lands** (plan-notes 310). `new F()` on an ordinary function builds a dynamic object whose prototype is `F.prototype`, and answers `F`'s return when that is an object. A function's own properties live in a table on its closure, so `P.prototype.m = …`, `P.count += 1` and `assert.same(a, b)` compile in js mode. A read that misses an object's own shape walks its prototype chain. `instanceof F`, `in` and the printer (`P { x: 3 }`, `[Function: f] { count: 1 }`) follow the chain as Node does (docs/VALUE.md §4.20). TS2350 and TS2565 become js-mode runtime codes. `instanceof v` on a value now checks for a pending throw right after the walk; before, a right side that was not a constructor raised its TypeError at the next check. The builtin constructors left (`Array(n)`, `RegExp`, `WeakMap`/`WeakSet`) are a new step 4b. `_tsc.js`: 638 → 615 `STA1214`. Self-compilation: 1738 → 1748.
+- **v4.35** (2026-10-02): **T11.4 step 4b, the builtin constructors, lands** (plan-notes 310). An array of an Unknown element can hold holes: `new Array(n)`, a write past the end and `delete a[i]` leave a `JSRT_HOLE` box that every read hands out as `undefined`, that `in`, the callback methods, `flat` and `sort` skip, and that `console.log` prints as `<n empty items>` (docs/VALUE.md §4.4). A typed element still refuses them (`STA1214` at the gate, `STA2002` at run time), and `STA2007` no longer covers arrays. `Array(...)` and `RegExp(...)`, with or without `new`, are `global-call` rows; a bad pattern or flag string throws Node's `SyntaxError`, its reason in V8's words where libregexp's maps to one (§4.21). `WeakMap`/`WeakSet` are Maps and Sets under their own descriptors that refuse primitive keys and hold keys strongly (§4.22). Two defects are fixed with it. `[...a]` lowered to `concat`, which keeps holes, so a spread now fills them. A RegExp reached by narrowing is an Unknown receiver, and `x.test(s)` on it aborted `STA2006` (plan-notes 314); `jsrt_get_prop` now answers its methods and data properties. `Array.from` moves to step 5. `_tsc.js`: 615 → 583 `STA1214`. Self-compilation: 1748 → 1758.
+- **v4.36** (2026-10-02): **T11.4 step 5, spreads, lands** (plan-notes 310). `f(...xs)`, `o.m(a, ...xs)` and `arr.push(...xs)` fold their arguments into one array and call through `jsrt_call_spread_at`, which passes the list's own count and the receiver (`CallExpr.spread`, `DynMethodCall.spread`, verifier `STA4104`). An array-literal spread of an Unknown, a string, a Map, a Set, an iterator or a tuple drains through a new `...` row (`jsrt_spread_operand`), and `Array.from` is a `global-call` row (`jsrt_array_from`; docs/VALUE.md §4.23). TS2556 is a js-mode runtime code. Still refused: a spread into `new` or `super(...)`, inside an optional chain, into a builtin namespace or fixed-arity op, and, in js mode, into an annotated TypeScript parameter, whose `STA2001` edge check has no position to sit at. Three defects are fixed with it. A spread call with one argument met an inline candidate of one parameter, which would have bound the whole list to it. An array literal's `concat` chain took its first operand's type, so `[...nums, 'a']` was `number[]` in the HIR. A spread into a Map or Set op whose count matched its arity passed the gate and was an internal `STA4031`. `_tsc.js`: 581 → 387 `STA1214`. Self-compilation: 1763 → 1742.
+- **v4.37** (2026-10-02): **T11.4 step 7, layout growth, lands** (plan-notes 310). A fixed object grows through an overflow table: `JSRTObject.extras` is a dynamic object allocated by the first write of a name the layout does not declare, and reads, `in`, `delete`, `Object.keys`, spreads, `freeze` and `console.log` see it after the declared names (docs/VALUE.md §4.24). In js mode a read, write, compound write, call or `delete` of an undeclared member lowers to the dynamic nodes, and a string or number key on a fixed object is a by-name index access. A call of an absent member throws Node's `TypeError: x.m is not a function` (`DynMethodCall.notFunction`) instead of the `STA2006` panic. A frozen object refuses a new name with `TypeError`. `STA2004` now covers only the runtime's own builtin layouts and a class object's statics; ts mode keeps refusing growth. Two known divergences: a fixed spread result lists grown names after all declared ones, and a static element key naming no member (`o["x"]`) is still refused. Step 11 is added: the `Date` method on a union narrowing (plan-notes 317). `_tsc.js`: 387 → 215 `STA1214`. Self-compilation: 1787 → 1791. jscpd: 187 → 186.
+- **v4.39** (2026-10-02): **T11.3a lands: `Uint8Array` across the extern boundary** (plan-notes 311). A new card, placed after T11.3 and done in the same change. A `Uint8Array` is a parameter row of the FFI table (docs/FFI.md §2): one TS parameter, two C arguments (`uint8_t *`, `size_t`), the view's own storage for the call and no copy. The pointer is stable because the view sits in a rooted argument slot, neither collector moves memory, a buffer never resizes, and the C call runs no Stator code. Every call guards the layout read with `jsrt_check_uint8array` (STA2001). A return stays STA1119, because a returned buffer has no owner and no length. `std/io.writeBytes`/`read` move to the row, and the byte channel (`internal/bytes.ts`, `jsrt_std_bytes_*`) is deleted. 10 MiB write: 87.1 → 3.9 ms; 10 MiB read: 247.5 → 5.3 ms. A new fixture shim may be `node_shim.ts`.
+- **v4.40** (2026-10-02): **T12.1 lands: the bundler API** (plan-notes 320). In `js` mode, package imports and CommonJS project files go to one bundler call; the answer joins the program as the virtual `__stator_vendor__.js`, and project imports are rewritten to it, every line kept. `--bundler=vite|none|<module>` and the `bundler` config key choose the adapter (`STA0014` when it cannot load, `STA0015` when the bundle step fails); `statorc/api` exposes `compile` and `vendorEntry`. Diagnostics and `#line` inside the bundle map to the package's files, or `<package bundle>`. A free `__filename`/`__dirname` is the new not-yet `STA1218`. CommonJS routing is narrowed to files that read `require`, `module` or `exports`. `export *`, `import()` and attributed imports of packages stay `STA1214`. The card moves to done.md.
+- **v4.41** (2026-10-02): **The creator's answers to plan-notes 320; checker errors in the vendor module are skipped** (plan-notes 320). Q1: the narrowed CommonJS marker rule stays. Q2: `--node` gates CommonJS routing of project files (T11.5 implements it). Q3: `export * from 'p'`, `import('p')` and attributed package imports become a T12.3 line item with a Check line. Q4 lands: a type-checker complaint (code ≥ 2000) inside the vendor module no longer fails the build; the binding it names goes dynamic, so the binary does what Node does. TDZ reads and `const` assignments stay `STA0012`, because Node throws there. docs/BUNDLER.md §6, MODES.md §3, DIAGNOSTICS.md (`STA0012`).
+- **v4.42** (2026-10-02): **T12.2 lands: `packages/vite-stator`** (plan-notes 321). The default adapter (one Vite 8.3.1 SSR build of the in-memory vendor entry, BUNDLER.md §2) and the `stator()` plugin, so `vite build` writes the native binary; `examples/vite` is the worked example. `vite` is a peer dependency. Package goldens (`pkg_imports`, `pkg_shared_dependency`) commit their `node_modules`, and `golden/run.ts --bundler=none` skips them. `require` of a built-in becomes an import. Importing 1 of 40 functions from a package bundles that one function, and the binary is the same size as with the function in the project. A namespace import of a package moves to T12.3's Check (Rolldown's `__exportAll`). The card moves to done.md.
+- **v4.43** (2026-10-02): **T12.3, first slice: `__commonJSMin`, `var X = class {}`, `export *` and attributed package imports** (plan-notes 323). A comma expression types as its right operand; the checker typed `__commonJSMin`'s from the declared binding, an internal `STA4013`. A package that writes `exports.x` and is imported by name, a nested `require`, a CommonJS cycle and a `.cjs` entry now compile. A `var`/`let X = class {}` that nothing in its file writes lowers like the `const` formation. `export * from` one package re-exports the names the built bundle exports for it; import attributes travel to the vendor entry. `import('p')` is `STA1214`, not the internal `STA4031`. The golden runner takes a `main.cjs` entry. Blocked: `__toESM` needs T11.4 step 8's `Object.*`, and `__exportAll` also needs `Symbol.toStringTag` (Phase 5).
+- **v4.50** (2026-10-02): **T11.5, the steps that do not need the bundler** (plan-notes 312). `--node` on `build` and `explain`, and the config key `node`. Under it `node:*` and bare built-ins resolve to `packages/node` through `paths` entries, the mechanism `std/` uses. An unlanded module or member is `STA1214` naming Phase 11 (T11.6); without the flag a built-in is `STA1214` naming the flag. `STA1110` is implemented and narrowed: `ts` mode always, `js` mode without `--node`; with it, `STA1214` naming T11.5's `createRequire` step. `__filename`/`__dirname` are relative to the executable (docs/MODES.md §6); `STA1218` stays under the flag until the CommonJS wrapper injects them. One package-root rule for runtime, `std` and `node`. The card stays open for the CommonJS run-time steps, which T12.1 unblocked.
+- **v4.51** (2026-10-02): **T11.6, first slice: `packages/node` and `node:path`** (plan-notes 313). `packages/node` is created: strict TypeScript over `std`, a workspace package and moon project, a selfhost target (`node-goldens` smoke) and its own `stator.config.json` (`"node": true`). `node:path` and `node:path/posix` are POSIX-complete (14 of 16 members; `win32` and `matchesGlob` not-yet), proved by the `node_path*` goldens against Node 26.7.0, claimed in `node_coverage.json`, and `docs/NODE.md` is regenerated. Fixtures named `node_*` build with `--node`. A named import the module lacks is not-yet even when the checker answers TS2614 (the module has a default export).
+- **v4.52** (2026-10-02): **T11.7, first slice: Node's own tests and `node:assert`** (plan-notes 314). `packages/tests/node-suite/` pins Node v26.7.0's `test/parallel`, fetches the selected files into an ignored corpus, and runs each through vitest (`pnpm run test:node-suite`): first under the pinned Node with a strict-TS `common`, then built with `--mode=js --node`, with a both-ways ratchet. `node:assert` lands in `packages/node` (goldens, claims, selfhost target). `docs/NODE.md` gains a "Node tests" column. The first selection is the 17 `test-path*` files: 0 pass, 15 `fail` (CommonJS, waiting on T12.2), 2 `skip`.
+- **v4.53** (2026-10-02): **T11.5: `--node` gates CommonJS routing of project files** (plan-notes 315). The creator's decisions on plan-notes 320: the narrowed CommonJS marker rule stays, and only under `--node` does a CommonJS project file go to the bundler; packages are bundled either way. Without the flag a free `require`, `module.exports` or `exports` is `STA1110`; `module.exports`/`exports` used to reach the lowering as `STA4035`, because TypeScript declares them by their own assignments and the free-binding test missed them. `statorc/api` gains `CompileRequest.node`. T11.4 gains item 10, the `STA2006` panic on a `RegExp` method called off a union narrowing.
+- **v4.54** (2026-10-02): **T11.5 closes: `require` over built-ins, `import.meta` and the injected `__filename`/`__dirname`** (plan-notes 316). `node:module` lands (`createRequire`, `isBuiltin`, `builtinModules`): its `require` answers every landed built-in and throws Node's `MODULE_NOT_FOUND` for anything else. Under `--node` the frontend rewrites `import.meta.url`/`.filename`/`.dirname` and the vendor module's free `__filename`/`__dirname` into run-time calls relative to the executable (`frontend/location.ts`). A free `require`, `__filename` or `__dirname` that reaches the gate is `STA1110` in every cell; `STA1218` is retired. Goldens `node_module` (ts, js).
+- **v4.55** (2026-10-02): **T11.6, second slice: the `node:fs` sync subset** (plan-notes 317). `packages/node/src/fs.ts` lands 12 of the 15 `fs` functions `tsc` calls, plus `rmdirSync`, over `std/fs`: Node's `SystemError` (`code`, `errno`, `syscall`, `path`, the `<CODE>: <description>, <syscall> '<path>'` message), the encodings `std/encoding` decodes, `{ recursive }`, `{ withFileTypes }` and `{ throwIfNoEntry }`. `require('fs')` answers it. The watch trio waits on N2. Goldens `node_fs` (ts, js); slice N1 at 15 / 37.
+- **v4.56** (2026-10-02): **T11.7, second slice: `require('../common')` resolves in the Stator build** (plan-notes 318). `fetch.ts` links the corpus's `test/common` to the strict-TS harness (a junction on Windows), so the bundler resolves it like any relative require. The harness drops `node:util`, an N2 module, for `common/inspect.ts`, and `common/fixtures.ts` drops `suite.ts`. Every `fail` now stops at `node:process` (T11.6), then at T12.3's `__commonJSMin` (STA4013). Pass count unchanged: 0 of 17.
+- **v4.60** (2026-10-04): **Tasks 6.20–6.26: the 2026-10-01 QA audit (PR #57) becomes plan work** (plan-notes 330). All 16 findings still reproduce on `338a3c2`. They are grouped one task per layer: CLI outputs and flags (6.20), environment trust (6.21), FFI inputs (6.22), runtime errors (6.23), `console.log` format (6.24), the BigInt verdict (6.25) and the landing page (6.26).
+- **v4.61** (2026-10-04): **Task 6.20 lands: `build` never destroys an input and never calls a user's mistake a compiler bug** (plan-notes 331; QA audit F1, F2, F10, F11). `build()` refuses (`STA0004`) any two of the entry, the program's source files, `-o`, `--emit-header` and the `--keep-c` file that name one file, before anything is written. An output the file system refuses is the new `STA0019`, never `STA4072`, and `-o`'s directory is checked before clang runs. An explicit `--unit-name` must match `^[A-Za-z0-9_]+$`. The CLI parser is one table: a value flag refuses a dash-led next argument, a flag outside its command is `STA0005`, and a bad `STATOR_OPT` names the environment.
+- **v4.62** (2026-10-04): **Task 6.21 lands: the runtime selection and the toolchain come from the real environment** (plan-notes 332; QA audit F3, F4). `build()` resolves the runtime flavor, root and archive once per call (`resolveRuntime`) and pins the flavor around the compile, so the gate's `intlEnabled` and the link read one value; `link()` asserts they agree. A project `.env` may set only `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`; `CC`, `STATOR_RUNTIME_ROOT` and `OTEL_*` come from the real environment, and one stderr line names what the file applied or was refused. A C compiler that exits 0 without writing its output is `STA0009`.
+- **v4.63** (2026-10-04): **Task 6.25 lands: a BigInt is not-yet `STA1213`, never internal `STA4031`** (plan-notes 334). The gate refuses a BigInt literal before its token skip, and every read of a value whose declared type may be a bigint, in both modes and in `build` and `explain`. A `typeof u === 'bigint'` narrowing of an `unknown` stays accepted. Both `subset_bigint_primitive_*` fixtures lose `@expected-fail`.
+- **v4.64** (2026-10-04): **Task 6.22 lands: FFI inputs are validated before they reach C or clang** (plan-notes 335). `ffi-gen` refuses an `--out` that names its header or `--diff` file and a `--lib` that is not one library name, and `--help` exits 0 on stdout. A `@statorLink` header path holding a `"`, a line break or NUL is `STA1119`; every other path is emitted as written, because `#include` reads no escapes. Pragma flags are limited to `-l<name>`, `-L<dir>`, `-framework <name>` and `-Wl,-rpath,<dir>`; anything else is `STA1119` naming the flag, and `--link=` stays the escape hatch.
+- **v4.65** (2026-10-04): **Task 6.26 lands: the landing page works without storage, at 320 px and without third parties** (plan-notes 336; QA audit F14, F15, F16). The theme toggle cycles from in-memory state, so blocked storage still cycles `light → dark → system`, and it stays hidden until its script runs. The header wraps and drops the theme label under 400 px. IBM Plex is self-hosted from `@fontsource/ibm-plex-*`, and every page carries a `default-src 'self'` CSP meta with the inline boot script by hash. `site/scripts/check.ts` (`pnpm run check:browser`, `playwright-core` over the installed Chrome) proves all of it in the site workflow.
+- **v4.66** (2026-10-04): **Task 6.24 lands: `console.log` formats like Node** (plan-notes 337). One runtime function applies `%s %d %i %f %j %O %c %%` with `util.format` semantics for `log`/`info`/`debug`/`error`/`warn`, including missing and extra arguments. Cases whose Node output the binary cannot reproduce yet (`%o` of an object, `%s` of a function or of an object with its own `toString`, `%d`/`%i`/`%f` through a user `toString`/`valueOf`, `%d` of a `Date`) are not-yet `STA1214` at compile time and a named `STA2005` panic when the format string is only known at run time.
+- **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
+- **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
+- **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.

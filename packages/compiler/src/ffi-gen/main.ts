@@ -11,12 +11,15 @@
  *
  *  No `--out` prints the `.d.ts` to stdout (diagnostics and the summary go to stderr, so the
  *  stdout stream stays a clean committable file). `--diff` prints the oracle report instead
- *  (plus writing `--out` when both are given). Exit codes: 0 success, 2 bad arguments,
+ *  (plus writing `--out` when both are given). `--out` may name neither input: writing it would
+ *  destroy the header or the handwritten file the run reads. `--help` prints the usage to stdout.
+ *  Exit codes: 0 success (and `--help`), 2 bad arguments,
  *  1/3/4 clang/parse/IO failures. Deliberately NOT wired into the build pipeline or CI —
  *  that is the follow-up's decision (oracle findings in the task report first).
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { runClangAstDump } from './ast.ts';
 import { diffBindings, readHandwritten, renderDiffReport } from './diff.ts';
 import { diagnosticLine, generate, renderDts, summaryLine } from './emit.ts';
@@ -31,6 +34,32 @@ interface Options {
   readonly extraArgs: readonly string[];
 }
 
+/** What `--lib` may hold: one library name. The value is pasted into `// @statorLink: -l<name>`
+ * in a committed file, so a newline would append arbitrary source to it and a space would make
+ * a second clang flag (plan.md §9 Task 6.22). */
+const LIB_NAME = /^[A-Za-z0-9_.+-]+$/;
+
+/** Whether two paths name one file: the same resolved spelling, or one inode reached through a
+ * symlink or a hard link, either of which `--out` would overwrite in place. */
+function sameFile(a: string, b: string): boolean {
+  if (resolve(a) === resolve(b)) {
+    return true;
+  }
+  const left = fileId(a);
+  return left !== undefined && left === fileId(b);
+}
+
+/** `dev:ino`, or undefined when the path cannot be stat'ed: then it is not an existing file the
+ * write could destroy, and the read or write that follows reports the real error. */
+function fileId(path: string): string | undefined {
+  try {
+    const stats = statSync(path);
+    return `${stats.dev}:${stats.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function usage(): string {
   return (
     'usage: ffi-gen/main.ts <header.h> [--out=<file.d.ts>] [--diff=<handwritten.d.ts>] ' +
@@ -38,7 +67,7 @@ function usage(): string {
   );
 }
 
-function parseArgs(argv: readonly string[]): Options {
+function parseArgs(argv: readonly string[]): Options | 'help' {
   let header: string | undefined;
   let out: string | undefined;
   let diff: string | undefined;
@@ -47,7 +76,7 @@ function parseArgs(argv: readonly string[]): Options {
   const extraArgs: string[] = [];
   for (const arg of argv) {
     if (arg === '--help' || arg === '-h') {
-      throw new Error(usage());
+      return 'help';
     } else if (arg.startsWith('--out=')) {
       out = arg.slice('--out='.length);
     } else if (arg.startsWith('--diff=')) {
@@ -72,13 +101,30 @@ function parseArgs(argv: readonly string[]): Options {
   if (out === '' || diff === '' || clang === '' || libs.some((lib) => lib === '')) {
     throw new Error(`ffi-gen: empty flag value\n${usage()}`);
   }
+  const badLib = libs.find((lib) => !LIB_NAME.test(lib));
+  if (badLib !== undefined) {
+    throw new Error(
+      `ffi-gen: --lib expects a library name (letters, digits, _ . + -), got ${JSON.stringify(badLib)}\n${usage()}`,
+    );
+  }
+  if (
+    out !== undefined &&
+    [header, diff].some((input) => input !== undefined && sameFile(input, out))
+  ) {
+    throw new Error(`ffi-gen: --out must differ from the input header and --diff file\n${usage()}`);
+  }
   return { header, out, diff, clang, libs, extraArgs };
 }
 
 function main(): number {
   let options: Options;
   try {
-    options = parseArgs(process.argv.slice(2));
+    const parsed = parseArgs(process.argv.slice(2));
+    if (parsed === 'help') {
+      process.stdout.write(`${usage()}\n`);
+      return 0;
+    }
+    options = parsed;
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 2;

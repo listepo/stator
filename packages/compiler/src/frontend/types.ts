@@ -1,6 +1,7 @@
 import * as ts from 'typescript';
 import { ERROR_CLASSES, errorHType } from '../hir/nodes.ts';
 import type { HField, HType } from '../hir/types.ts';
+import { ambiguousStarExports, namespaceModule } from './modules.ts';
 import {
   accessorName,
   accessorProperty,
@@ -86,18 +87,18 @@ export function outSlotInner(type: ts.Type, checker: ts.TypeChecker): ts.Type | 
     return undefined;
   }
   const inner = args[0];
-  if (inner === undefined || (!isBrandedPointer(inner, checker) && !isCStringInner(inner))) {
+  if (inner === undefined || (!isBrandedPointer(inner, checker) && !isCStringType(inner))) {
     return undefined;
   }
   return inner;
 }
 
-/** The `CString` half of an `Out<CString>` inner (`const char**`, docs/FFI.md §2): the
- * documented wrapper spelling only — a bare `string` inner is not an out-slot (the same
- * discipline that refuses bare `string` in signatures with STA1118), so the alias is
- * required here exactly as `cstringKindOf` in `extern.ts` requires it there. Kept
+/** `CString` / `CStringOwned` (docs/FFI.md §2): the documented wrapper spelling only — a bare
+ * `string` is not one (the same discipline that refuses bare `string` in signatures with
+ * STA1118), so the alias is required here exactly as `cstringKindOf` in `extern.ts` requires
+ * it there. It is an `Out<CString>` inner (`const char**`) and, as a value, a string. Kept
  * diagnostic-free for `tsTypeToHType`; that module owns the surface's diagnostics. */
-function isCStringInner(type: ts.Type): boolean {
+function isCStringType(type: ts.Type): boolean {
   const alias = type.aliasSymbol?.getName();
   if (alias !== 'CString' && alias !== 'CStringOwned') {
     return false;
@@ -124,6 +125,14 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
     return H_NUMBER;
   }
   if (f & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) {
+    return H_STRING;
+  }
+  // A `CString` VALUE is a runtime string on this side of the extern edge: an argument is copied
+  // out by the call and a return was copied in at it (docs/FFI.md §3), so the brand is a phantom
+  // that only the extern signature reads. Without this, `const v = native()` and an arrow whose
+  // return is inferred from an extern call are Unknown, and the module explains dynamic
+  // (plan-notes 322).
+  if (isCStringType(type)) {
     return H_STRING;
   }
   if (f & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral)) {
@@ -217,6 +226,13 @@ export function tsTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth = 0)
   // would invent a layout for bits. Like a brand it takes the opaque HType, while the nodes
   // that create, pass, and read it still carry the slot, which is what the emitter reads.
   if (outSlotInner(type, checker) !== undefined) {
+    return hUnknown(false);
+  }
+
+  // An instance of a JavaScript constructor function: the checker gives `new P()` a class-like
+  // type listing what P's body assigns to `this`, but the value is a dynamic object
+  // `jsrt_construct` built (plan-notes 310) -- no layout exists, so no slot may be read.
+  if (isFunctionConstructorInstance(type)) {
     return hUnknown(false);
   }
 
@@ -453,32 +469,33 @@ function moduleNamespaceToHType(
   if (depth >= MAX_SIGNATURE_DEPTH) {
     return null;
   }
-  const symbol = type.getSymbol();
   // TypeScript puts Module bits on a fresh `let o = {}` binding (ValueModule|NamespaceModule
-  // plus BlockScopedVariable). A namespace is a SourceFile / module declaration, never a value
-  // binding: matching those would mark `{ x: number }` as `namespace: true` and compile `o.x`
-  // to a global slot.
-  if (
-    symbol === undefined ||
-    (symbol.flags & ts.SymbolFlags.Module) === 0 ||
-    (symbol.flags & ts.SymbolFlags.Variable) !== 0
-  ) {
+  // plus BlockScopedVariable). A namespace is a SourceFile, never a value binding: matching
+  // those would mark `{ x: number }` as `namespace: true` (`namespaceModule` refuses them).
+  const file = namespaceModule(type);
+  if (file === undefined) {
     return null;
   }
-  const decl = symbol.valueDeclaration ?? symbol.declarations?.[0];
-  if (decl === undefined || !(ts.isSourceFile(decl) || ts.isModuleDeclaration(decl))) {
-    return null;
-  }
+  // A name two `export *` re-exports bind differently is no export at all (ES drops it from the
+  // namespace); the checker still lists it, under js mode's dropped TS2308 (plan-notes 302).
+  const ambiguous = ambiguousStarExports(file, checker);
   const fields: HField[] = [];
   for (const property of checker.getPropertiesOfType(type)) {
     const atDecl = property.valueDeclaration ?? property.declarations?.[0];
-    if (atDecl === undefined || (property.flags & ts.SymbolFlags.Method) !== 0) {
+    if (
+      atDecl === undefined ||
+      (property.flags & ts.SymbolFlags.Method) !== 0 ||
+      ambiguous.has(property.name)
+    ) {
       continue;
     }
-    fields.push({
-      name: property.name,
-      type: tsTypeToHType(checker.getTypeOfSymbolAtLocation(property, atDecl), checker, depth + 1),
-    });
+    const propertyType = checker.getTypeOfSymbolAtLocation(property, atDecl);
+    // A class has no value in this subset (a class object is rung 6b's), so an exported class is
+    // no namespace field: `ns.C` reads a class object and the gate holds it (plan.md §11c T11.5a).
+    if (propertyType.getConstructSignatures().length > 0) {
+      continue;
+    }
+    fields.push({ name: property.name, type: tsTypeToHType(propertyType, checker, depth + 1) });
   }
   if (fields.length === 0) {
     return null;
@@ -1148,6 +1165,97 @@ export function isSingleConstDeclarator(declaration: ts.VariableDeclaration): bo
   );
 }
 
+/** The identifiers an assignment target writes: a name, or every name a destructuring pattern
+ * spreads into (`[a, { b, c: d = 1 }, ...e] = …`). */
+function writtenIdentifiers(target: ts.Expression, out: ts.Identifier[]): void {
+  let inner = target;
+  while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+  if (ts.isIdentifier(inner)) {
+    out.push(inner);
+  } else if (ts.isArrayLiteralExpression(inner)) {
+    for (const element of inner.elements) writtenIdentifiers(element, out);
+  } else if (ts.isObjectLiteralExpression(inner)) {
+    for (const property of inner.properties) {
+      if (ts.isShorthandPropertyAssignment(property)) out.push(property.name);
+      else if (ts.isPropertyAssignment(property)) writtenIdentifiers(property.initializer, out);
+      else if (ts.isSpreadAssignment(property)) writtenIdentifiers(property.expression, out);
+    }
+  } else if (ts.isSpreadElement(inner)) {
+    writtenIdentifiers(inner.expression, out);
+  } else if (
+    ts.isBinaryExpression(inner) &&
+    inner.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  ) {
+    // A pattern element's default: `[a = 1] = xs` writes `a`.
+    writtenIdentifiers(inner.left, out);
+  }
+}
+
+const neverWritten = new WeakMap<ts.VariableDeclaration, boolean>();
+
+/** Whether nothing in the declaring file writes the binding after its initializer: no
+ * assignment, compound or logical assignment, `++`/`--`, destructuring target or `for-in`/`for-of`
+ * head names it. A module's bindings are read-only to every importer, so the file is the whole
+ * program as far as writes go. */
+function isNeverWritten(declaration: ts.VariableDeclaration, checker: ts.TypeChecker): boolean {
+  const cached = neverWritten.get(declaration);
+  if (cached !== undefined) return cached;
+  const symbol = checker.getSymbolAtLocation(declaration.name);
+  let written = symbol === undefined;
+  const visit = (node: ts.Node): void => {
+    if (written) return;
+    const targets: ts.Identifier[] = [];
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      writtenIdentifiers(node.left, targets);
+    } else if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken ||
+        node.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      writtenIdentifiers(node.operand, targets);
+    } else if (
+      (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
+      !ts.isVariableDeclarationList(node.initializer)
+    ) {
+      writtenIdentifiers(node.initializer, targets);
+    }
+    if (targets.some((id) => checker.getSymbolAtLocation(id) === symbol)) {
+      written = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(declaration.getSourceFile());
+  neverWritten.set(declaration, !written);
+  return !written;
+}
+
+/** Whether a declarator binds a class expression the way a single `const` does: the only
+ * declarator in its list, an identifier, and a binding that never changes — `const`, or a `let`
+ * or `var` nothing writes. Rolldown spells every top-level class `var X = class { … }` (plan.md
+ * §11d T12.3), and a binding nothing repoints erases exactly as a `const` one. One hazard stays,
+ * as with a class declaration under `var` semantics: a `var` read that RUNS before the
+ * declaration is `undefined` in Node, and a TypeError at `new`; here it names the class. */
+export function isClassFormationDeclarator(
+  declaration: ts.VariableDeclaration,
+  checker: ts.TypeChecker,
+): boolean {
+  const list = declaration.parent;
+  if (
+    list === undefined ||
+    !ts.isVariableDeclarationList(list) ||
+    list.declarations.length !== 1 ||
+    !ts.isIdentifier(declaration.name)
+  ) {
+    return false;
+  }
+  return (list.flags & ts.NodeFlags.Const) !== 0 || isNeverWritten(declaration, checker);
+}
+
 /** The class declaration an identifier names, directly or through `const K = C` aliases.
  *
  * A class used as a value is erased, not built (plan.md §8 step 12e): `const K = C` binds no
@@ -1227,7 +1335,7 @@ export function classExpressionTarget(
     declaration.name === node ||
     declaration.initializer === undefined ||
     !ts.isClassExpression(declaration.initializer) ||
-    !isSingleConstDeclarator(declaration)
+    !isClassFormationDeclarator(declaration, checker)
   ) {
     return undefined;
   }
@@ -1299,6 +1407,106 @@ export function classDisplayName(
   node: ts.ClassDeclaration | ts.ClassExpression,
 ): string | undefined {
   return ts.isClassExpression(node) ? expressionClassName(node) : node.name?.text;
+}
+
+/** The type of `new P()` for a JavaScript constructor function `P`: TypeScript gives the
+ * function's symbol the Class flag in a `.js` file whose body assigns to `this`, with no class
+ * declaration behind it. */
+function isFunctionConstructorInstance(type: ts.Type): boolean {
+  const symbol = type.getSymbol();
+  if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Class) === 0) {
+    return false;
+  }
+  const declarations = symbol.getDeclarations() ?? [];
+  return declarations.length > 0 && !declarations.some((d) => ts.isClassLike(d));
+}
+
+/** True for a symbol only declaration files declare: a builtin (`RegExp`, `Function.prototype.call`,
+ * `console.log`) rather than something the program wrote. */
+function declaredOnlyInDeclarationFiles(symbol: ts.Symbol | undefined): boolean {
+  const declarations = symbol?.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/** Whether `new callee(...)` and `x instanceof callee` dispatch through a function VALUE at run
+ * time (`jsrt_construct`, `jsrt_instanceof_ctor`; plan-notes 310): an ordinary function the
+ * program wrote, or a value of unknown type. A class keeps its descriptor path, and a builtin
+ * constructor (declared only in a declaration file) keeps its own rules. */
+export function isFunctionValueCallee(callee: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (declaredOnlyInDeclarationFiles(checker.getSymbolAtLocation(callee))) {
+    return false;
+  }
+  const type = checker.getTypeAtLocation(callee);
+  if (classLikeOf(type) !== undefined || declaredOnlyInDeclarationFiles(type.getSymbol())) {
+    return false;
+  }
+  const shape = tsTypeToHType(type, checker);
+  return shape.kind === 'fn' || shape.kind === 'unknown';
+}
+
+/** A member of an ordinary function value -- `f.count`, `F.prototype`, `assert.sameValue` -- which
+ * lives in the closure's own properties at run time (plan-notes 310), not in any layout. The
+ * receiver is a function the program wrote: a class object has its descriptor's statics, and a
+ * builtin function has no property table. `length` keeps its static arity read, and the other
+ * `Function.prototype` members (`call`, `apply`, `bind`, ...) are not own properties at all. */
+export function isFunctionValueMember(
+  receiver: ts.Expression,
+  name: string,
+  checker: ts.TypeChecker,
+): boolean {
+  if (name === 'length') {
+    return false;
+  }
+  const type = checker.getTypeAtLocation(receiver);
+  if (classLikeOf(type) !== undefined || tsTypeToHType(type, checker).kind !== 'fn') {
+    return false;
+  }
+  if (declaredOnlyInDeclarationFiles(checker.getSymbolAtLocation(receiver))) {
+    return false;
+  }
+  if (name === 'prototype' || name === 'name') {
+    return true;
+  }
+  return !declaredOnlyInDeclarationFiles(checker.getPropertyOfType(type, name));
+}
+
+/** A member the receiver's fixed layout does not declare -- `host.configFileName` on an object
+ * literal's type, `c.extra` on a class instance. Only a `js`-mode program reaches the lowering with
+ * one (in `ts` mode it is the checker's TS2339): the write grows the object's overflow table and
+ * the read answers from it, or `undefined`, through the shape-table entries (docs/VALUE.md §4.24).
+ * A module namespace is no object at run time, so its absent export is no such member. */
+export function isUndeclaredMember(
+  receiver: ts.Expression,
+  name: string,
+  checker: ts.TypeChecker,
+): boolean {
+  const type = checker.getTypeAtLocation(receiver);
+  const shape = tsTypeToHType(type, checker);
+  return (
+    shape.kind === 'object' &&
+    shape.namespace !== true &&
+    checker.getPropertyOfType(type, name) === undefined
+  );
+}
+
+/** Whether `expr` READS a member its receiver's layout does not declare (isUndeclaredMember). */
+export function isUndeclaredMemberRead(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    !ts.isPrivateIdentifier(expr.name) &&
+    isUndeclaredMember(expr.expression, expr.name.text, checker)
+  );
+}
+
+/** Whether `expr` READS a member of an ordinary function value (`F.prototype`, `f.cache`). The
+ * value is whatever the program last stored there, so the checker's type for it -- inferred from
+ * one assignment such as `F.prototype = { … }` -- is no layout, and every use of it goes through
+ * the shape table like an Unknown receiver (plan-notes 310). */
+export function isFunctionMemberRead(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    isFunctionValueMember(expr.expression, expr.name.text, checker)
+  );
 }
 
 /** The class-like (declaration or expression) a type came from, or `undefined` for anything
@@ -1530,6 +1738,13 @@ function isLibInterface(type: ts.Type, name: string): boolean {
   return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile);
 }
 
+/** Whether `node` is typed as the lib's WeakMap or WeakSet, which the HType model folds into Map
+ * and Set (see collectionTypeToHType): the one bit a `collection-new` records. */
+export function isWeakCollection(node: ts.Node, checker: ts.TypeChecker): boolean {
+  const type = checker.getTypeAtLocation(node);
+  return isLibInterface(type, 'WeakMap') || isLibInterface(type, 'WeakSet');
+}
+
 function iteratorTypeToHType(type: ts.Type, checker: ts.TypeChecker, depth: number): HType | null {
   const name = type.getSymbol()?.getName();
   if (
@@ -1559,7 +1774,13 @@ function collectionTypeToHType(
     return null;
   }
   const name = type.getSymbol()?.getName();
-  if (name !== 'Map' && name !== 'Set' && name !== 'Promise') {
+  if (
+    name !== 'Map' &&
+    name !== 'Set' &&
+    name !== 'WeakMap' &&
+    name !== 'WeakSet' &&
+    name !== 'Promise'
+  ) {
     return null;
   }
   if (!isLibInterface(type, name)) {
@@ -1572,7 +1793,8 @@ function collectionTypeToHType(
     const [value] = args;
     return value === undefined ? null : hPromise(tsTypeToHType(value, checker, depth + 1));
   }
-  if (name === 'Set') {
+  // A WeakMap/WeakSet is a Map/Set the checker keeps every walk off (docs/VALUE.md §4.22).
+  if (name === 'Set' || name === 'WeakSet') {
     const [element] = args;
     return element === undefined ? null : hSet(tsTypeToHType(element, checker, depth + 1));
   }

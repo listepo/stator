@@ -78,6 +78,26 @@ test('for-of and for-in report distinctly from the for loop they are not', () =>
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i++) { }'), []);
 });
 
+// A BigInt literal is a token, and the token skip used to accept it into a lowering that could
+// only answer STA4031 (audit F5, plan.md §9 Task 6.25).
+test('BigInt is not-yet STA1213 in both modes, never an internal error', () => {
+  for (const mode of ['ts', 'js'] as const) {
+    assert.deepEqual(codesFor('const b = 1n;', mode), ['STA1213']);
+    assert.deepEqual(codesFor('console.log(typeof 1n);', mode), ['STA1213']);
+    assert.deepEqual(codesFor('console.log(10n > 5);', mode), ['STA1213']);
+    assert.deepEqual(codesFor('const b = BigInt(5);', mode), ['STA1213']);
+  }
+  // A bigint that arrives without a literal is refused where it is read, not where it is named.
+  assert.deepEqual(codesFor('function f(a: bigint): bigint {\n  return a;\n}\nf;'), ['STA1213']);
+  // A narrowing of `unknown` to bigint is a branch no compiled program can enter.
+  assert.deepEqual(
+    codesFor(
+      'function g(u: unknown): string {\n  if (typeof u === "bigint") return String(u);\n  return "";\n}\ng(1);',
+    ),
+    [],
+  );
+});
+
 // Index access is admitted only where the target is genuinely an array. `s[0]` and `o['k']` are
 // the same syntax reaching a different runtime operation, and neither has an HIR node yet.
 test('index access is accepted on an array and not-yet on anything else', () => {
@@ -87,49 +107,39 @@ test('index access is accepted on an array and not-yet on anything else', () => 
   assert.deepEqual(codesFor('const a: number[] = [1, , 3];'), ['STA1214']);
   assert.deepEqual(codesFor('const a: number[] = [1];\nconst b: number[] = [...a];'), []);
   assert.deepEqual(codesFor('const a: number[] = [1, 2];\nconst b: number[] = [0, ...a, 3];'), []);
-  assert.deepEqual(codesFor('const s: string = "ab";\nconst c: string[] = [...s];'), ['STA1214']);
+  // A string is iterable: its spread drains through the `...` row (plan.md §11c T11.4 step 5).
+  assert.deepEqual(codesFor('const s: string = "ab";\nconst c: string[] = [...s];'), []);
 });
 
-// Spreading an unknown value is a gate-verifier gap (plan.md §8 step 39): the lowering folds
-// spread into `concat`, whose verifier case needs an array receiver, so an unknown operand must
-// be refused here rather than accepted into an STA4082 (and STA4068 for the object twin). The
-// refusal names Phase 5 — spreading needs the GetIterator dispatch step 8 owns for unknown
-// iterables — like every other refusal in the spread arms.
-test('spread of an unknown value is not-yet rather than an internal error', () => {
-  // An `any` operand is silent at the checker and fatal at the verifier: the gate speaks.
-  assert.deepEqual(codesFor('const u = JSON.parse("[1]");\nconst b = [...u];', 'js'), ['STA1214']);
+// An array-literal spread drains any operand that is not an array through the `...` row, the
+// iterator protocol at run time (plan.md §11c T11.4 step 5, docs/VALUE.md §4.23): the `concat`
+// the lowering folds into always receives an array, so the verifier's STA4082 cannot fire. The
+// object twin still needs a shape and stays refused.
+test('spread of an unknown value drains at run time; an object spread of one is not-yet', () => {
+  assert.deepEqual(codesFor('const u = JSON.parse("[1]");\nconst b = [...u];', 'js'), []);
   // An `as` assertion to an array type is never checkable, so the lowering drops it and spreads
-  // the unknown operand: the gate judges what the lowering reads, not what is asserted.
-  assert.deepEqual(codesFor('declare const u: unknown;\nconst b = [...(u as number[])];', 'js'), [
-    'STA1214',
-  ]);
-  // A tuple is a checker-level array the HType model calls Unknown — same uncompilable concat.
-  assert.deepEqual(codesFor('const t: [number, string] = [1, "a"];\nconst b = [...t];', 'js'), [
-    'STA1214',
-  ]);
+  // the unknown operand -- which the drain then checks for iterability.
+  assert.deepEqual(
+    codesFor('declare const u: unknown;\nconst b = [...(u as number[])];', 'js'),
+    [],
+  );
+  // A tuple is a checker-level array the HType model calls Unknown.
+  assert.deepEqual(codesFor('const t: [number, string] = [1, "a"];\nconst b = [...t];', 'js'), []);
   // The object twin: a dropped assertion to a fixed shape names the unknown value, not the
   // missing shape (which the assertion itself supplies).
   assert.deepEqual(
     codesFor('declare const u: unknown;\nconst b = { ...(u as { x: number }) };', 'js'),
     ['STA1214'],
   );
-  // A directly-`unknown` operand stays the checker's (TS2488): the gate stays silent rather than
-  // double-reporting one mistake.
+  // A directly-`unknown` operand stays the checker's (TS2488) in ts mode, and js mode suppresses
+  // that code: the gate is silent either way.
   assert.deepEqual(codesFor('declare const u: unknown;\nconst b = [...u];'), []);
   assert.deepEqual(codesFor('declare const u: unknown;\nconst b = [...u];', 'js'), []);
-  // Honest shapes still compile: a known array, including through an identity assertion, and an
-  // array of unknown element type.
   assert.deepEqual(codesFor('const a: number[] = [1];\nconst b = [...(a as number[])];', 'js'), []);
   assert.deepEqual(codesFor('const a: unknown[] = [1];\nconst b: unknown[] = [...a];', 'js'), []);
 });
 
-test('spread unknowns carry their own messages', () => {
-  const { program: arrayProgram } = createProgram(
-    'declare const u: unknown;\nconst b = [...(u as number[])];',
-    '/test.ts',
-  );
-  const arrayDiags = gateProgram(arrayProgram, 'js');
-  assert.match(arrayDiags[0]?.message ?? '', /spread of an unknown value in an array literal/);
+test('an object spread of an unknown carries its own message', () => {
   const { program: objectProgram } = createProgram(
     'declare const u: unknown;\nconst b = { ...(u as { x: number }) };',
     '/test.ts',
@@ -218,8 +228,9 @@ test('.length is accepted on a string type and deferred on anything else', () =>
 // raised by legal source. These tests are position tests, and every one of them once passed the
 // gate (plan-notes 61).
 test('a global the compiler does not model is a not-yet, never an internal error', () => {
-  assert.deepEqual(codesFor('const s: string = String(1);\nconsole.log(s);'), ['STA1214']);
-  assert.deepEqual(codesFor('console.log(parseInt("4"));'), ['STA1214']);
+  assert.deepEqual(codesFor('const s: string = escape("a b");\nconsole.log(s);'), ['STA1214']);
+  // A global function READ as a value has no node either (plan.md §11c T11.4 lands only the call).
+  assert.deepEqual(codesFor('const f = parseInt;\nconsole.log(f("4"));'), ['STA1214']);
   // Declared nowhere at all rather than in a lib file — the checker synthesizes it, and
   // `globalThis` slipped through a valueDeclaration-based test.
   assert.deepEqual(codesFor('const g = globalThis;\nconsole.log(1);'), ['STA1214']);
@@ -253,6 +264,58 @@ test('a user binding that shadows a global name is a user binding', () => {
     ),
     [],
   );
+});
+
+test('the global functions land as callees only, each refused by name otherwise', () => {
+  // plan.md §11c T11.4: calls, typeof and Array.isArray are accepted ...
+  assert.deepEqual(codesFor('console.log(Number("1"), Boolean(0), parseFloat("2"));'), []);
+  assert.deepEqual(codesFor('console.log(isNaN(1), isFinite(1), parseInt("8", 8));'), []);
+  assert.deepEqual(codesFor('console.log(typeof JSON, typeof Math, typeof parseInt);'), []);
+  assert.deepEqual(codesFor('console.log(Array.isArray([1]));'), []);
+  assert.deepEqual(codesFor('const { length: n } = [1, 2];\nconsole.log(n);'), []);
+  // ... and everything around them stays a named not-yet.
+  assert.deepEqual(codesFor('console.log(parseInt("1", 10, 3));'), ['STA1214']);
+  assert.deepEqual(codesFor('const a: [string] = ["1"];\nconsole.log(Number(...a));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(Array.from([1]));'), []);
+  assert.deepEqual(codesFor('console.log(Array.from([1], (x) => x));'), ['STA1214']);
+  assert.deepEqual(codesFor('const f = Array.from;\nconsole.log(f([]));'), ['STA1214']);
+  assert.deepEqual(codesFor('const f = Array.isArray;\nconsole.log(f([]));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(typeof Symbol);'), ['STA1212']);
+  // A user binding that shadows the name is an ordinary call.
+  assert.deepEqual(
+    codesFor(
+      'function parseInt(s: string): number {\n  return s.length;\n}\nconsole.log(parseInt("ab"));',
+    ),
+    [],
+  );
+});
+
+test('a function-valued field is callable through its object', () => {
+  // plan-notes 310: an arrow, a function expression and a shorthand function in a literal.
+  assert.deepEqual(
+    codesFor(
+      'function f(): number {\n  return 1;\n}\nconst o = { f, g: (x: number): number => x, h: function (): void {} };\nconsole.log(o.f(), o.g(2));\no.h();',
+    ),
+    [],
+  );
+  // A number-typed field is read, then its own method called: no field call involved.
+  assert.deepEqual(codesFor('const o = { n: 1 };\nconsole.log(o.n.toFixed(1));'), []);
+});
+
+test('Number methods, statics and constants land by name; the rest are refused by name', () => {
+  assert.deepEqual(
+    codesFor('const n: number = 255;\nconsole.log(n.toString(16), n.toFixed(2), n.toString());'),
+    [],
+  );
+  assert.deepEqual(
+    codesFor('console.log(Number.parseInt("8"), Number.parseFloat("1"), Number.MAX_VALUE);'),
+    [],
+  );
+  assert.deepEqual(codesFor('const n: number = 1;\nconsole.log(n.toPrecision(2));'), ['STA1214']);
+  assert.deepEqual(codesFor('console.log(Number.isInteger(1));'), ['STA1214']);
+  assert.deepEqual(codesFor('const n: number = 1;\nconst f = n.toFixed;\nconsole.log(f);'), [
+    'STA1214',
+  ]);
 });
 
 test('inheritance, overriding and super.m() are accepted; a re-declared FIELD is shared', () => {
@@ -467,8 +530,9 @@ test('a bound class expression is vetted like a declaration and compiles', () =>
     [],
   );
   // Still refused, each with the message that names it: an unbound expression has no identity,
-  // a `let` formation can be repointed, a generic one has nowhere to specialize, and an
-  // opaque use reads the class object (plan.md §8 step 12e).
+  // a `let` formation the file repoints names two classes (one nothing writes is a formation,
+  // plan.md §11d T12.3), a generic one has nowhere to specialize, and an opaque use reads the
+  // class object (plan.md §8 step 12e).
   assert.deepEqual(
     codesFor(
       'function take(x: unknown): void {}\ntake(class { m() { return 1; } });\nexport const x = 1;\n',
@@ -485,13 +549,14 @@ test('a bound class expression is vetted like a declaration and compiles', () =>
     unbound[0]?.message ?? '',
     /an anonymous class expression is not yet supported; planned for Phase 5/,
   );
-  assert.deepEqual(codesFor('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n'), [
-    'STA1214',
-  ]);
-  const letBound = gateProgram(
-    createProgram('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n').program,
-    'ts',
+  assert.deepEqual(
+    codesFor('let C = class D { m() { return 7; } }\nconsole.log(new C().m());\n'),
+    [],
   );
+  const repointed =
+    'let C = class D { m() { return 7; } }\nC = class D {};\nconsole.log(new C());\n';
+  assert.deepEqual(codesFor(repointed), ['STA1214', 'STA1214']);
+  const letBound = gateProgram(createProgram(repointed).program, 'ts');
   assert.match(letBound[0]?.message ?? '', /a class expression 'D' is not yet supported/);
   assert.deepEqual(codesFor('const C = class<T> { m(): T | undefined { return undefined; } }\n'), [
     'STA1214',
@@ -803,8 +868,10 @@ test('String.fromCharCode lands with any count; the rest of String is named', ()
   assert.deepEqual(codesFor('console.log(String.fromCodePoint(65));'), ['STA1214']);
   // A namespace method as a value: there is no function object to hand out.
   assert.deepEqual(codesFor('const f = String.fromCharCode;\nconsole.log(typeof f);'), ['STA1214']);
-  // `String(x)` the converter is a different surface and stays deferred.
-  assert.deepEqual(codesFor('console.log(String(42));'), ['STA1214']);
+  // `String(x)` the converter is a different surface: it landed with the global functions
+  // (plan.md §11c T11.4), and `String` read as a value stays deferred.
+  assert.deepEqual(codesFor('console.log(String(42));'), []);
+  assert.deepEqual(codesFor('const S = String;\nconsole.log(S(42));'), ['STA1214']);
 });
 
 test('Array.prototype ops in the landed set are accepted', () => {

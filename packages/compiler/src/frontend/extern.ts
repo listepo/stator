@@ -318,7 +318,9 @@ export function exportAbiKindOf(
   position: 'param' | 'return',
 ): ExternAbiKind | undefined {
   const kind = classifyPosition(type, checker, position);
-  return typeof kind === 'string' ? kind : undefined;
+  // A `Uint8Array` crosses INTO C only: an export taking one would need the runtime to wrap a
+  // foreign `uint8_t *` it does not own as a view, so that position keeps the `jsrt_value` form.
+  return typeof kind === 'string' && kind !== 'bytes' ? kind : undefined;
 }
 
 /** One signature position through the ABI table: the C kind, or the refusal that owns it.
@@ -403,6 +405,17 @@ function classifyPosition(
         'object type in an extern signature has no C representation; ' +
           'use a branded pointer or CString (docs/FFI.md)',
       );
+    case 'uint8array':
+      // The view's own storage, pointer + length, for the call (docs/FFI.md §2, plan.md §11c
+      // T11.3a). Parameter-only: a returned buffer would need an owner and a length the C
+      // signature cannot carry, so a callee that produces bytes fills a view the caller passes.
+      return position === 'param'
+        ? 'bytes'
+        : refused(
+            'STA1119',
+            'Uint8Array as a return is outside the ABI table (docs/FFI.md) — ' +
+              'pass a Uint8Array in and let the callee fill it',
+          );
     case 'array':
       return refused(
         'STA1116',
@@ -428,10 +441,10 @@ const C_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** One `@statorLink` line in a `.d.ts` (docs/FFI.md §9): the per-file half of step 7's link
  * plumbing. A `header` is the `#include` spelling the prologue emits verbatim (angle form as
  * written; quote form with a `/` resolved against this file, so a binding-local header works
- * wherever the checkout sits). A `flags` line carries verbatim clang link flags in file
- * order. `invalid` is a line no consumer acts on — the gate refuses it (STA1119) where it is
- * written, so the lowering and the link never meet one on a passing build. `line`/`col`
- * locate the `@statorLink` marker for that diagnostic. */
+ * wherever the checkout sits). A `flags` line carries link flags from the allowlist
+ * (`linkFlagRefused`) in file order. `invalid` is a line no consumer acts on — the gate refuses
+ * it (STA1119) where it is written, so the lowering and the link never meet one on a passing
+ * build. `line`/`col` locate the `@statorLink` marker for that diagnostic. */
 export type LinkPragma =
   | {
       readonly kind: 'header';
@@ -483,14 +496,20 @@ function parseLinkPragmaBody(body: string, line: number, col: number, fileDir: s
     // A bare name resolves through the link line's `-I` flags like any user header; a path
     // is anchored to the declaration file, because the generated C lives in a scratch
     // directory where a relative include would otherwise point nowhere.
-    const header = name.includes('/')
-      ? `"${resolve(fileDir, name).replace(/\\/g, '/')}"`
-      : `"${name}"`;
-    return { kind: 'header', header, line, col };
+    const path = name.includes('/') ? resolve(fileDir, name).replace(/\\/g, '/') : name;
+    return UNSPELLABLE_IN_INCLUDE.test(path)
+      ? invalid(
+          `the header path ${JSON.stringify(path)} holds a quote, a line break or NUL, ` +
+            'which no #include can spell (docs/FFI.md)',
+        )
+      : { kind: 'header', header: `"${path}"`, line, col };
   }
   const angled = /^\s*#include\s+(<[^<>]+>)\s*$/.exec(text);
   if (angled !== null) {
-    return { kind: 'header', header: angled[1] ?? '', line, col };
+    const header = angled[1] ?? '';
+    return UNSPELLABLE_IN_INCLUDE.test(header)
+      ? invalid(`the header ${JSON.stringify(header)} holds a line break or NUL (docs/FFI.md)`)
+      : { kind: 'header', header, line, col };
   }
   const words = splitPragmaWords(text);
   if (words === undefined) {
@@ -505,7 +524,41 @@ function parseLinkPragmaBody(body: string, line: number, col: number, fileDir: s
   if (first !== undefined && first.startsWith('#')) {
     return invalid(`unknown directive '${first}' — the only one is #include (docs/FFI.md)`);
   }
+  const refused = linkFlagRefused(words);
+  if (refused !== undefined) {
+    return invalid(
+      `'${refused}' is not a link flag a pragma may carry — only -l<name>, -L<dir>, ` +
+        '-framework <name> and -Wl,-rpath,<dir>; pass anything else with --link= (docs/FFI.md)',
+    );
+  }
   return { kind: 'flags', flags: words, line, col };
+}
+
+/** `#include` takes a header name literally: no escape sequence exists inside one, so `\"` names
+ * a different file instead of a quote. A `"` ends the quoted name early and a line break or NUL
+ * ends the directive, so a path holding one cannot be spelled at all and is refused. Anything
+ * else, non-ASCII included, is emitted as written, which is how clang reads it. */
+const UNSPELLABLE_IN_INCLUDE = /["\n\r\0]/;
+
+/** The first pragma word that is not a link flag, or undefined. Any `.d.ts` in the program can
+ * carry a pragma, a dependency's included, and its words reach clang's argv; an arbitrary flag
+ * (`-fplugin=`, `-Xclang -load`, `-o`) would run or redirect code at build time. So a pragma
+ * names libraries and where to find them, and the user's own `--link=` stays the escape hatch
+ * (plan.md §9 Task 6.22, plan-notes 330). */
+function linkFlagRefused(words: readonly string[]): string | undefined {
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index] ?? '';
+    if (word === '-framework') {
+      const name = words[index + 1];
+      if (name === undefined || name.startsWith('-')) {
+        return word;
+      }
+      index += 1;
+    } else if (!/^-[lL]./.test(word) && !/^-Wl,-rpath,[^,]+$/.test(word)) {
+      return word;
+    }
+  }
+  return undefined;
 }
 
 /** Every `@statorLink` line in a `.d.ts`, in file order. A line comment whose text opens with

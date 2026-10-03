@@ -86,6 +86,7 @@ step 2):
 | `Out<T>` out-slot           | `T**`         | Parameter-only; the caller allocates the cell, the callee writes it (see below)                    |
 | `Out<CString>` out-slot     | `const char**`| Parameter-only; copy-on-read through `.value` (see below)                                          |
 | `CString` / `CStringOwned`  | `const char*` | Allocates; see §3. `CStringOwned` is parameter-only                                                |
+| `Uint8Array`                | `uint8_t *`, `size_t` | Parameter-only; the view's own bytes and length for the call, no copy (see below)          |
 | anything else               | —             | Compile error (STA1119 catch-all; specific kinds below)                                            |
 
 **Branded pointer.** An opaque handle the TS side names but never inspects:
@@ -153,6 +154,42 @@ The rules, each enforced where it can be checked (the contract is STA1125 everyw
 - A slot read before any call wrote answers the zero-handle (`+0.0`), the same rule §8
   states for NULL handles.
 
+**`Uint8Array` views** (plan.md §11c T11.3a). One TS parameter becomes two C arguments: the
+view's bytes in place and its element count.
+
+```ts
+/** @statorExtern bytes_sum */
+declare function bytesSum(buf: Uint8Array): number;
+```
+
+```c
+double bytes_sum(uint8_t *data, size_t length);   /* the emitted forward declaration */
+bytes_sum((void *)jsrt_uint8array_bytes(slot), jsrt_uint8array_count(slot));
+```
+
+- **No copy.** The pointer is the buffer's data block plus the view's `byteOffset`, so a
+  `subarray` passes its own window and a C write shows through every view of that buffer. A
+  megabyte is one call (golden `extern_bytes` counts the crossings). The `void *` cast lets a
+  binding header spell the pointee its own way (`char *`, `unsigned char *`, `void *`).
+- **Never NULL.** A zero-length view still points at a live block (docs/VALUE.md §4.19), so a
+  callee may take `data` unconditionally; it must read only `length` bytes.
+- **Stable for the call, and only for the call.** Four facts make the pointer valid until the
+  callee returns. The view stays in its rooted argument slot, and its `buffer` edge keeps the data
+  block alive. Neither collector moves memory: Boehm is non-moving, and the no-GC build is plain
+  malloc. A buffer never resizes, transfers or detaches (no such API exists). And the C call runs
+  no Stator code, so nothing can collect or mutate the buffer mid-call. A callee that keeps the
+  pointer past its return is out of contract: nothing roots the bytes after the call.
+- **Checked on every call.** The emitter guards the layout read with `jsrt_check_uint8array`
+  (STA2001 on a non-view), even for a statically proven view. A js-mode caller can reach a
+  `.ts` parameter annotated `Uint8Array` with any value (only the number/string/boolean call
+  edges are checked, plan-notes 308), and here a lie would be a wild pointer, not a wrong value.
+  A dynamic argument carries the lowering's own check instead, so it is checked once.
+- **Parameter-only.** A `Uint8Array` return is STA1119: a returned buffer has no owner and no
+  length in a C signature. A callee that produces bytes fills a view the caller passes (the
+  caller sizes it, as `std/io.read` does; docs/STD.md §6). An exported function keeps the
+  `jsrt_value` form for a `Uint8Array` position (Task 7.2 direction).
+- Only `Uint8Array`: `ArrayBuffer`, the other element types and `DataView` have no row.
+
 **`string` deliberately maps to nothing.** UTF-16 in, bytes out is a real
 conversion with a real allocation, so it is spelled at the declaration and
 never inferred. A bare `string` in an extern signature is error(STA1118); the
@@ -166,10 +203,10 @@ table splits a kind out with a NEW code, never by reusing one):
 | ---------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `unknown` in an extern signature                                                                                             | error(STA1114) | Narrow first, or pick an ABI type. Explicit or implicit `any` counts as `unknown` here, in both modes — dynamic is inexpressible across the boundary |
 | object type in an extern signature                                                                                           | error(STA1115) | Branded pointer, or `CString` for text                                                                                                               |
-| array type in an extern signature                                                                                            | error(STA1116) | Pass a pointer + length as ABI types                                                                                                                 |
+| array type in an extern signature                                                                                            | error(STA1116) | A `Uint8Array` for bytes (the row above); otherwise a pointer + length as ABI types                                                                  |
 | function/closure type in an extern signature                                                                                 | error(STA1117) | v0 has no trampoline; C calls in via Task 7.2 exports instead                                                                                        |
 | bare `string` in an extern signature                                                                                         | error(STA1118) | `CString` (borrow) or `CStringOwned` (transfer)                                                                                                      |
-| anything else outside the table — incl. struct by value, `Out` misuses (STA1125), `void` as a parameter, `CStringOwned` as a return | error(STA1119) | No mapping exists in v0                                                                                                                              |
+| anything else outside the table — incl. struct by value, `Out` misuses (STA1125), `void` as a parameter, `CStringOwned` or `Uint8Array` as a return | error(STA1119) | No mapping exists in v0                                                                                                                              |
 | variadic (`printf`-style) extern declaration                                                                                 | error(STA1120) | No sound signature; each call site is a different function type (permanent — plan §10 out-of-scope table)                                            |
 | extern declaration outside a `.d.ts`                                                                                         | error(STA1121) | Move it into a `.d.ts` (§1.3)                                                                                                                        |
 
@@ -210,6 +247,13 @@ asymmetric on purpose:
   never freed by the runtime either: the allocator is the library's, not ours. A C function that `malloc`s its return needs an
   explicit free function in the same binding, declared as its own extern; the
   binding's documentation says so.
+
+Away from the call, a `CString` value is a string: the brand is a phantom only
+the extern signature reads, so `const v = cEcho(s as CString)` and an arrow
+whose return is inferred from an extern call are statically typed `string`
+(plan-notes 322). Its string surface (`.length`, methods) still wants a
+`string`-typed binding first: the gate reads string-ness from the checker,
+which does not see through the brand.
 
 Two stated answers, not accidents:
 
@@ -423,8 +467,10 @@ and generated uniformly:
   guard: a second `jsrt_init()` would chain the Boehm roots hook into itself, and a second
   `JSRT_GLOBALS_ENTER` would wipe every global. Calling an exported function before init
   is undefined behavior (the header says so). A top-level throw lands in the error cell
-  like any stub failure instead of `jsrt_uncaught`'s exit — the unit is then unusable. A
-  top-level-await module starts and drains like `main`'s async startup; a rejected body
+  like any stub failure instead of `jsrt_uncaught`'s exit — the unit is then unusable.
+  `jsrt_init` also installs the stack-overflow fault handler for SIGSEGV and SIGBUS
+  (docs/VALUE.md §4.25); a fault that is not a stack overflow is handed back to whatever
+  handler the host program had installed before. A top-level-await module starts and drains like `main`'s async startup; a rejected body
   parks its reason for the init to capture rather than exiting, while an unhandled
   rejection from a queued job still exits exactly as in `main`.
 - **Throws are `stator_<unit>_last_error()` (NULL = success) plus a zero-value sentinel**
@@ -479,7 +525,9 @@ plus a manual link proof (fresh pair links and runs; version-skewed pair fails w
   `--flag value` forms) — LANDED. With the flag, `-o` names a relocatable object
   (`clang -c`), no `main()` required and nothing linked; `--emit=c` alongside writes the C
   and the header and skips clang. `--unit-name` overrides the default unit (the entry's
-  file basename); either spelling is sanitized to a C identifier. `--link` and
+  file basename, sanitized to a C identifier). An explicit name must already be one
+  (`^[A-Za-z0-9_]+$`, else `STA0004`, plan.md §9 Task 6.20): sanitizing is not injective, so
+  `my-lib` and `my_lib` would export the same symbols. `--link` and
   `@statorLink` flags are accepted but inert with the flag — linking is the consumer's
   job, and the consumer link line arrives with step 9. An exported function whose WHOLE
   signature is in §2's table spells plain C types; any other position spells `jsrt_value`.
@@ -526,8 +574,15 @@ One marker, two forms, per declaration file:
 declare function sqliteOpenV2(filename: CString, flags: number): sqlite3;
 ```
 
-- **Flags form.** Everything after the marker is verbatim clang link flags in file
-  order (`-l`, `-L`, frameworks, archives). The colon is optional —
+- **Flags form.** Everything after the marker is link flags in file order, from
+  an allowlist: `-l<name>`, `-L<dir>`, `-framework <name>` and
+  `-Wl,-rpath,<dir>` (one directory, no further comma). Anything else — an
+  archive path, `-Wl,--start-group`, `-fplugin=`, `-Xclang`, `-o` — is STA1119
+  naming the flag. Any `.d.ts` in the program can carry a pragma, a dependency's
+  included, and its words reach clang's argv, so an arbitrary flag would let a
+  dependency run or redirect code at `stator build` time; the user's own
+  `--link=` stays the escape hatch for everything else (plan-notes 330, 335).
+  The colon is optional —
   `// @statorLink: -lfoo` and `// @statorLink -lfoo` are the same pragma, matching
   the `// @directive: value` shape every other file-level directive in this repo
   uses. Words split on whitespace; `"..."` groups across it (for paths with
@@ -538,10 +593,14 @@ declare function sqliteOpenV2(filename: CString, flags: number): sqlite3;
   declaring file — because the generated C lives in a scratch directory where a
   relative include would otherwise point nowhere. At most one `#include` per
   file: one binding file wraps one library, so a second header names a second
-  binding the file does not contain.
+  binding the file does not contain. `#include` reads a header name literally
+  (no escape sequence exists inside one), so the resolved path is emitted as
+  written, non-ASCII included, and a path holding a `"`, a line break or NUL —
+  which no `#include` can spell — is STA1119 at the pragma.
 - **Shape rules, all permanent (`never`, STA1119 at the pragma's own line):** a
   malformed line (bare marker, unterminated quote, unquoted or doubled `#include`,
-  any other `#directive`); a pragma in a file with no `@statorExtern`
+  any other `#directive`); a flag outside the allowlist; a header path no
+  `#include` can spell; a pragma in a file with no `@statorExtern`
   declaration — flags belong to the binding they link, so a stray is refused
   rather than linked or dropped silently; a second `#include` in one file.
   Only `//` line comments carry the pragma (block comments and JSDoc never do),
@@ -575,8 +634,8 @@ imports discover the bindings in — which is the order a static link reads
 them), then the CLI flags in command-line order. Duplicate `-l` libraries drop
 first-wins; everything else passes through verbatim in order — no sorting ever,
 because link order is load-bearing for static archives, and grouping flags
-(`-Wl,--start-group` … `--end-group`) cross untouched for the rare circular
-one. A link that fails with extern flags on the line reports STA0009 naming the
+(`-Wl,--start-group` … `--end-group`, `--link=` only) cross untouched for the
+rare circular one. A link that fails with extern flags on the line reports STA0009 naming the
 flags: a missing library is a configuration error, not a compiler bug, and the
 message says where to look first.
 

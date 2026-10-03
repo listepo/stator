@@ -1,4 +1,6 @@
 node_modules/
+# Golden fixtures that import packages ship them (plan.md §11d T12.2).
+!packages/tests/golden/js/*/node_modules/
 dist/
 coverage/
 packages/runtime/build/
@@ -12,12 +14,15 @@ packages/std/build/
 reasonix.toml
 # moon's local task cache and run artifacts.
 .moon/cache/
+# Test impact map (plan.md §9 Task 6.17): machine-local, keyed to a commit, never committed.
+.cache/
 packages/tests/differential/failures/
 # Live fuzzer scratch: repo-local (the CLI resolves relative to the input), so lint and git both
 # have to know it is transient -- otherwise `pnpm run ci` fails whenever a fuzzer run overlaps it.
 .differential-*/
 packages/tests/bench/results/
 packages/tests/test262/corpus/
+packages/tests/node-suite/corpus/
 packages/tests/test262/results.json
 # `--shard=N/M` writes one of these per shard; `--aggregate` merges them into results.json.
 packages/tests/test262/results-*-of-*.json

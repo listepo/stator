@@ -10,77 +10,81 @@ the `test:builtins` rule. The member list is read from Node itself: every enumer
 every built-in module, plus each exported class's static and prototype members (`_`-prefixed
 names are private and left out). **Corpus** counts uses in the T11.0 corpus
 (`docs/research/node-mode/scan.json`); **tsc** marks members TypeScript 6.0.3's `tsc` needs
-(plan.md §11c, slice N1).
+(plan.md §11c, slice N1). **Node tests** counts files of Node's own `test/parallel` selected
+for the module and expected to pass under Stator, from
+`packages/tests/node-suite/expectations.json`, which `pnpm run test:node-suite` holds to the
+truth (plan.md §11c T11.7).
 
-**Total: 0 / 2364 members covered (0%) across 58 modules.**
-**Slice N1 (`tsc`): 0 / 37 (0%).**
+**Total: 57 / 2364 members covered (2%) across 58 modules.**
+**Slice N1 (`tsc`): 15 / 37 (41%).**
+**Node tests: 0 / 17 selected files pass.**
 
-| Module | Covered | Members | % | Corpus uses | tsc members |
-| --- | --- | --- | --- | --- | --- |
-| [`node:assert`](#nodeassert) | 0 | 40 | 0% | 19 | 0 |
-| [`node:assert/strict`](#nodeassertstrict) | 0 | 40 | 0% | 0 | 0 |
-| [`node:async_hooks`](#nodeasync_hooks) | 0 | 13 | 0% | 2 | 0 |
-| [`node:buffer`](#nodebuffer) | 0 | 130 | 0% | 274 | 2 |
-| [`node:child_process`](#nodechild_process) | 0 | 12 | 0% | 17 | 0 |
-| [`node:cluster`](#nodecluster) | 0 | 19 | 0% | 0 | 0 |
-| [`node:console`](#nodeconsole) | 0 | 44 | 0% | 3 | 0 |
-| [`node:constants`](#nodeconstants) | 0 | 231 | 0% | 0 | 0 |
-| [`node:crypto`](#nodecrypto) | 0 | 148 | 0% | 17 | 1 |
-| [`node:dgram`](#nodedgram) | 0 | 29 | 0% | 0 | 0 |
-| [`node:diagnostics_channel`](#nodediagnostics_channel) | 0 | 21 | 0% | 0 | 0 |
-| [`node:dns`](#nodedns) | 0 | 65 | 0% | 1 | 0 |
-| [`node:dns/promises`](#nodednspromises) | 0 | 61 | 0% | 0 | 0 |
-| [`node:domain`](#nodedomain) | 0 | 12 | 0% | 0 | 0 |
-| [`node:events`](#nodeevents) | 0 | 47 | 0% | 19 | 0 |
-| [`node:fs`](#nodefs) | 0 | 124 | 0% | 182 | 15 |
-| [`node:fs/promises`](#nodefspromises) | 0 | 33 | 0% | 78 | 0 |
-| [`node:http`](#nodehttp) | 0 | 87 | 0% | 8 | 0 |
-| [`node:http2`](#nodehttp2) | 0 | 64 | 0% | 0 | 0 |
-| [`node:https`](#nodehttps) | 0 | 13 | 0% | 3 | 0 |
-| [`node:inspector`](#nodeinspector) | 0 | 13 | 0% | 2 | 1 |
-| [`node:inspector/promises`](#nodeinspectorpromises) | 0 | 10 | 0% | 0 | 0 |
-| [`node:module`](#nodemodule) | 0 | 48 | 0% | 38 | 0 |
-| [`node:net`](#nodenet) | 0 | 79 | 0% | 6 | 0 |
-| [`node:os`](#nodeos) | 0 | 23 | 0% | 43 | 2 |
-| [`node:path`](#nodepath) | 0 | 16 | 0% | 402 | 3 |
-| [`node:path/posix`](#nodepathposix) | 0 | 16 | 0% | 0 | 0 |
-| [`node:path/win32`](#nodepathwin32) | 0 | 16 | 0% | 2 | 0 |
-| [`node:perf_hooks`](#nodeperf_hooks) | 0 | 69 | 0% | 61 | 1 |
-| [`node:process`](#nodeprocess) | 0 | 68 | 0% | 822 | 10 |
-| [`node:punycode`](#nodepunycode) | 0 | 6 | 0% | 0 | 0 |
-| [`node:querystring`](#nodequerystring) | 0 | 7 | 0% | 1 | 0 |
-| [`node:readline`](#nodereadline) | 0 | 9 | 0% | 9 | 0 |
-| [`node:readline/promises`](#nodereadlinepromises) | 0 | 10 | 0% | 0 | 0 |
-| [`node:repl`](#noderepl) | 0 | 17 | 0% | 0 | 0 |
-| [`node:sea`](#nodesea) | 0 | 5 | 0% | 0 | 0 |
-| [`node:sqlite`](#nodesqlite) | 0 | 33 | 0% | 0 | 0 |
-| [`node:stream`](#nodestream) | 0 | 131 | 0% | 24 | 0 |
-| [`node:stream/consumers`](#nodestreamconsumers) | 0 | 6 | 0% | 0 | 0 |
-| [`node:stream/promises`](#nodestreampromises) | 0 | 2 | 0% | 4 | 0 |
-| [`node:stream/web`](#nodestreamweb) | 0 | 81 | 0% | 0 | 0 |
-| [`node:string_decoder`](#nodestring_decoder) | 0 | 7 | 0% | 2 | 0 |
-| [`node:sys`](#nodesys) | 0 | 53 | 0% | 0 | 0 |
-| [`node:test`](#nodetest) | 0 | 17 | 0% | 0 | 0 |
-| [`node:test/reporters`](#nodetestreporters) | 0 | 5 | 0% | 0 | 0 |
-| [`node:timers`](#nodetimers) | 0 | 7 | 0% | 185 | 2 |
-| [`node:timers/promises`](#nodetimerspromises) | 0 | 4 | 0% | 6 | 0 |
-| [`node:tls`](#nodetls) | 0 | 44 | 0% | 1 | 0 |
-| [`node:trace_events`](#nodetrace_events) | 0 | 2 | 0% | 0 | 0 |
-| [`node:tty`](#nodetty) | 0 | 12 | 0% | 6 | 0 |
-| [`node:url`](#nodeurl) | 0 | 61 | 0% | 141 | 0 |
-| [`node:util`](#nodeutil) | 0 | 53 | 0% | 42 | 0 |
-| [`node:util/types`](#nodeutiltypes) | 0 | 43 | 0% | 0 | 0 |
-| [`node:v8`](#nodev8) | 0 | 42 | 0% | 5 | 0 |
-| [`node:vm`](#nodevm) | 0 | 13 | 0% | 14 | 0 |
-| [`node:wasi`](#nodewasi) | 0 | 5 | 0% | 0 | 0 |
-| [`node:worker_threads`](#nodeworker_threads) | 0 | 51 | 0% | 25 | 0 |
-| [`node:zlib`](#nodezlib) | 0 | 47 | 0% | 7 | 0 |
+| Module | Covered | Members | % | Corpus uses | tsc members | Node tests |
+| --- | --- | --- | --- | --- | --- | --- |
+| [`node:assert`](#nodeassert) | 10 | 40 | 25% | 19 | 0 |  |
+| [`node:assert/strict`](#nodeassertstrict) | 0 | 40 | 0% | 0 | 0 |  |
+| [`node:async_hooks`](#nodeasync_hooks) | 0 | 13 | 0% | 2 | 0 |  |
+| [`node:buffer`](#nodebuffer) | 0 | 130 | 0% | 274 | 2 |  |
+| [`node:child_process`](#nodechild_process) | 0 | 12 | 0% | 17 | 0 |  |
+| [`node:cluster`](#nodecluster) | 0 | 19 | 0% | 0 | 0 |  |
+| [`node:console`](#nodeconsole) | 0 | 44 | 0% | 3 | 0 |  |
+| [`node:constants`](#nodeconstants) | 0 | 231 | 0% | 0 | 0 |  |
+| [`node:crypto`](#nodecrypto) | 0 | 148 | 0% | 17 | 1 |  |
+| [`node:dgram`](#nodedgram) | 0 | 29 | 0% | 0 | 0 |  |
+| [`node:diagnostics_channel`](#nodediagnostics_channel) | 0 | 21 | 0% | 0 | 0 |  |
+| [`node:dns`](#nodedns) | 0 | 65 | 0% | 1 | 0 |  |
+| [`node:dns/promises`](#nodednspromises) | 0 | 61 | 0% | 0 | 0 |  |
+| [`node:domain`](#nodedomain) | 0 | 12 | 0% | 0 | 0 |  |
+| [`node:events`](#nodeevents) | 0 | 47 | 0% | 19 | 0 |  |
+| [`node:fs`](#nodefs) | 16 | 124 | 13% | 182 | 15 |  |
+| [`node:fs/promises`](#nodefspromises) | 0 | 33 | 0% | 78 | 0 |  |
+| [`node:http`](#nodehttp) | 0 | 87 | 0% | 8 | 0 |  |
+| [`node:http2`](#nodehttp2) | 0 | 64 | 0% | 0 | 0 |  |
+| [`node:https`](#nodehttps) | 0 | 13 | 0% | 3 | 0 |  |
+| [`node:inspector`](#nodeinspector) | 0 | 13 | 0% | 2 | 1 |  |
+| [`node:inspector/promises`](#nodeinspectorpromises) | 0 | 10 | 0% | 0 | 0 |  |
+| [`node:module`](#nodemodule) | 3 | 48 | 6% | 38 | 0 |  |
+| [`node:net`](#nodenet) | 0 | 79 | 0% | 6 | 0 |  |
+| [`node:os`](#nodeos) | 0 | 23 | 0% | 43 | 2 |  |
+| [`node:path`](#nodepath) | 14 | 16 | 88% | 402 | 3 | 0 / 13 |
+| [`node:path/posix`](#nodepathposix) | 14 | 16 | 88% | 0 | 0 | 0 / 2 |
+| [`node:path/win32`](#nodepathwin32) | 0 | 16 | 0% | 2 | 0 | 0 / 2 |
+| [`node:perf_hooks`](#nodeperf_hooks) | 0 | 69 | 0% | 61 | 1 |  |
+| [`node:process`](#nodeprocess) | 0 | 68 | 0% | 822 | 10 |  |
+| [`node:punycode`](#nodepunycode) | 0 | 6 | 0% | 0 | 0 |  |
+| [`node:querystring`](#nodequerystring) | 0 | 7 | 0% | 1 | 0 |  |
+| [`node:readline`](#nodereadline) | 0 | 9 | 0% | 9 | 0 |  |
+| [`node:readline/promises`](#nodereadlinepromises) | 0 | 10 | 0% | 0 | 0 |  |
+| [`node:repl`](#noderepl) | 0 | 17 | 0% | 0 | 0 |  |
+| [`node:sea`](#nodesea) | 0 | 5 | 0% | 0 | 0 |  |
+| [`node:sqlite`](#nodesqlite) | 0 | 33 | 0% | 0 | 0 |  |
+| [`node:stream`](#nodestream) | 0 | 131 | 0% | 24 | 0 |  |
+| [`node:stream/consumers`](#nodestreamconsumers) | 0 | 6 | 0% | 0 | 0 |  |
+| [`node:stream/promises`](#nodestreampromises) | 0 | 2 | 0% | 4 | 0 |  |
+| [`node:stream/web`](#nodestreamweb) | 0 | 81 | 0% | 0 | 0 |  |
+| [`node:string_decoder`](#nodestring_decoder) | 0 | 7 | 0% | 2 | 0 |  |
+| [`node:sys`](#nodesys) | 0 | 53 | 0% | 0 | 0 |  |
+| [`node:test`](#nodetest) | 0 | 17 | 0% | 0 | 0 |  |
+| [`node:test/reporters`](#nodetestreporters) | 0 | 5 | 0% | 0 | 0 |  |
+| [`node:timers`](#nodetimers) | 0 | 7 | 0% | 185 | 2 |  |
+| [`node:timers/promises`](#nodetimerspromises) | 0 | 4 | 0% | 6 | 0 |  |
+| [`node:tls`](#nodetls) | 0 | 44 | 0% | 1 | 0 |  |
+| [`node:trace_events`](#nodetrace_events) | 0 | 2 | 0% | 0 | 0 |  |
+| [`node:tty`](#nodetty) | 0 | 12 | 0% | 6 | 0 |  |
+| [`node:url`](#nodeurl) | 0 | 61 | 0% | 141 | 0 |  |
+| [`node:util`](#nodeutil) | 0 | 53 | 0% | 42 | 0 |  |
+| [`node:util/types`](#nodeutiltypes) | 0 | 43 | 0% | 0 | 0 |  |
+| [`node:v8`](#nodev8) | 0 | 42 | 0% | 5 | 0 |  |
+| [`node:vm`](#nodevm) | 0 | 13 | 0% | 14 | 0 |  |
+| [`node:wasi`](#nodewasi) | 0 | 5 | 0% | 0 | 0 |  |
+| [`node:worker_threads`](#nodeworker_threads) | 0 | 51 | 0% | 25 | 0 |  |
+| [`node:zlib`](#nodezlib) | 0 | 47 | 0% | 7 | 0 |  |
 
 ## Members by module
 
 ### node:assert
 
-<details><summary><code>node:assert</code> — 0 / 40 (0%)</summary>
+<details><summary><code>node:assert</code> — 10 / 40 (25%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
@@ -103,27 +107,27 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `Assert.prototype.rejects` | method | — |  |  |
 | `Assert.prototype.strictEqual` | method | — |  |  |
 | `Assert.prototype.throws` | method | — |  |  |
-| `AssertionError` | class | — |  |  |
-| `AssertionError.prototype.toString` | method | — |  |  |
+| `AssertionError` | class | ✅ |  |  |
+| `AssertionError.prototype.toString` | method | ✅ |  |  |
 | `deepEqual` | function | — |  |  |
-| `deepStrictEqual` | function | — |  |  |
+| `deepStrictEqual` | function | ✅ |  |  |
 | `doesNotMatch` | function | — |  |  |
 | `doesNotReject` | function | — |  |  |
 | `doesNotThrow` | function | — |  |  |
 | `equal` | function | — |  |  |
-| `fail` | function | — |  |  |
+| `fail` | function | ✅ |  |  |
 | `ifError` | function | — |  |  |
-| `match` | function | — |  |  |
+| `match` | function | ✅ |  |  |
 | `notDeepEqual` | function | — |  |  |
 | `notDeepStrictEqual` | function | — |  |  |
 | `notEqual` | function | — |  |  |
-| `notStrictEqual` | function | — | 2 |  |
-| `ok` | function | — | 15 |  |
+| `notStrictEqual` | function | ✅ | 2 |  |
+| `ok` | function | ✅ | 15 |  |
 | `partialDeepStrictEqual` | function | — |  |  |
-| `rejects` | function | — |  |  |
+| `rejects` | function | ✅ |  |  |
 | `strict` | function | — |  |  |
-| `strictEqual` | function | — | 2 |  |
-| `throws` | function | — |  |  |
+| `strictEqual` | function | ✅ | 2 |  |
+| `throws` | function | ✅ |  |  |
 
 </details>
 
@@ -1127,7 +1131,7 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 
 ### node:fs
 
-<details><summary><code>node:fs</code> — 0 / 124 (0%)</summary>
+<details><summary><code>node:fs</code> — 16 / 124 (13%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
@@ -1141,9 +1145,9 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `Dirent` | class | — |  |  |
 | `Dirent.prototype.isBlockDevice` | method | — |  |  |
 | `Dirent.prototype.isCharacterDevice` | method | — |  |  |
-| `Dirent.prototype.isDirectory` | method | — |  |  |
+| `Dirent.prototype.isDirectory` | method | ✅ |  |  |
 | `Dirent.prototype.isFIFO` | method | — |  |  |
-| `Dirent.prototype.isFile` | method | — |  |  |
+| `Dirent.prototype.isFile` | method | ✅ |  |  |
 | `Dirent.prototype.isSocket` | method | — |  |  |
 | `Dirent.prototype.isSymbolicLink` | method | — |  |  |
 | `FileReadStream` | getter | — |  |  |
@@ -1156,7 +1160,7 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `Stats.prototype.birthtimeInstant` | accessor | — |  |  |
 | `Stats.prototype.ctime` | accessor | — |  |  |
 | `Stats.prototype.ctimeInstant` | accessor | — |  |  |
-| `Stats.prototype.mtime` | accessor | — |  |  |
+| `Stats.prototype.mtime` | accessor | ✅ |  |  |
 | `Stats.prototype.mtimeInstant` | accessor | — |  |  |
 | `Utf8Stream` | getter | — |  |  |
 | `WriteStream` | getter | — |  |  |
@@ -1169,7 +1173,7 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `chown` | function | — |  |  |
 | `chownSync` | function | — |  |  |
 | `close` | function | — |  |  |
-| `closeSync` | function | — | 4 | ✓ |
+| `closeSync` | function | ✅ | 4 | ✓ |
 | `constants` | value | — | 1 |  |
 | `copyFile` | function | — |  |  |
 | `copyFileSync` | function | — | 1 |  |
@@ -1178,7 +1182,7 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `createReadStream` | function | — | 2 |  |
 | `createWriteStream` | function | — | 1 |  |
 | `exists` | function | — |  |  |
-| `existsSync` | function | — | 35 | ✓ |
+| `existsSync` | function | ✅ | 35 | ✓ |
 | `fchmod` | function | — |  |  |
 | `fchmodSync` | function | — |  |  |
 | `fchown` | function | — |  |  |
@@ -1206,36 +1210,36 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `lutimes` | function | — |  |  |
 | `lutimesSync` | function | — |  |  |
 | `mkdir` | function | — |  |  |
-| `mkdirSync` | function | — | 8 | ✓ |
+| `mkdirSync` | function | ✅ | 8 | ✓ |
 | `mkdtemp` | function | — |  |  |
 | `mkdtempDisposableSync` | function | — |  |  |
 | `mkdtempSync` | function | — | 1 |  |
 | `open` | function | — |  |  |
 | `openAsBlob` | function | — |  |  |
-| `openSync` | function | — | 4 | ✓ |
+| `openSync` | function | ✅ | 4 | ✓ |
 | `opendir` | function | — |  |  |
 | `opendirSync` | function | — |  |  |
 | `promises` | getter | — | 9 |  |
 | `read` | function | — |  |  |
 | `readFile` | function | — |  |  |
-| `readFileSync` | function | — | 36 | ✓ |
+| `readFileSync` | function | ✅ | 36 | ✓ |
 | `readSync` | function | — | 1 |  |
 | `readdir` | function | — |  |  |
-| `readdirSync` | function | — | 9 | ✓ |
+| `readdirSync` | function | ✅ | 9 | ✓ |
 | `readlink` | function | — |  |  |
 | `readlinkSync` | function | — |  |  |
 | `readv` | function | — |  |  |
 | `readvSync` | function | — |  |  |
 | `realpath` | function | — | 1 |  |
-| `realpathSync` | function | — | 13 | ✓ |
+| `realpathSync` | function | ✅ | 13 | ✓ |
 | `rename` | function | — | 2 |  |
 | `renameSync` | function | — | 2 |  |
 | `rm` | function | — |  |  |
 | `rmSync` | function | — | 3 |  |
 | `rmdir` | function | — |  |  |
-| `rmdirSync` | function | — |  |  |
+| `rmdirSync` | function | ✅ |  |  |
 | `stat` | function | — | 1 |  |
-| `statSync` | function | — | 16 | ✓ |
+| `statSync` | function | ✅ | 16 | ✓ |
 | `statfs` | function | — |  |  |
 | `statfsSync` | function | — | 1 |  |
 | `symlink` | function | — |  |  |
@@ -1243,16 +1247,16 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `truncate` | function | — |  |  |
 | `truncateSync` | function | — |  |  |
 | `unlink` | function | — | 2 |  |
-| `unlinkSync` | function | — | 1 | ✓ |
+| `unlinkSync` | function | ✅ | 1 | ✓ |
 | `unwatchFile` | function | — | 1 | ✓ |
 | `utimes` | function | — |  |  |
-| `utimesSync` | function | — | 1 | ✓ |
+| `utimesSync` | function | ✅ | 1 | ✓ |
 | `watch` | function | — | 1 | ✓ |
 | `watchFile` | function | — | 1 | ✓ |
 | `write` | function | — |  |  |
 | `writeFile` | function | — |  |  |
-| `writeFileSync` | function | — | 10 | ✓ |
-| `writeSync` | function | — | 11 | ✓ |
+| `writeFileSync` | function | ✅ | 10 | ✓ |
+| `writeSync` | function | ✅ | 11 | ✓ |
 | `writev` | function | — |  |  |
 | `writevSync` | function | — |  |  |
 
@@ -1534,7 +1538,7 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 
 ### node:module
 
-<details><summary><code>node:module</code> — 0 / 48 (0%)</summary>
+<details><summary><code>node:module</code> — 3 / 48 (6%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
@@ -1569,9 +1573,9 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `SourceMap.prototype.findOrigin` | method | — |  |  |
 | `SourceMap.prototype.lineLengths` | accessor | — |  |  |
 | `SourceMap.prototype.payload` | accessor | — |  |  |
-| `builtinModules` | value | — | 4 |  |
+| `builtinModules` | value | ✅ | 4 |  |
 | `constants` | value | — |  |  |
-| `createRequire` | function | — | 12 |  |
+| `createRequire` | function | ✅ | 12 |  |
 | `enableCompileCache` | function | — |  |  |
 | `findPackageJSON` | function | — |  |  |
 | `findSourceMap` | function | — |  |  |
@@ -1579,7 +1583,7 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 | `getCompileCacheDir` | function | — |  |  |
 | `getSourceMapsSupport` | function | — |  |  |
 | `globalPaths` | value | — |  |  |
-| `isBuiltin` | function | — | 7 |  |
+| `isBuiltin` | function | ✅ | 7 |  |
 | `register` | function | — | 2 |  |
 | `registerHooks` | function | — | 2 |  |
 | `runMain` | function | — |  |  |
@@ -1711,50 +1715,50 @@ names are private and left out). **Corpus** counts uses in the T11.0 corpus
 
 ### node:path
 
-<details><summary><code>node:path</code> — 0 / 16 (0%)</summary>
+<details><summary><code>node:path</code> — 14 / 16 (88%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
-| `basename` | function | — | 23 |  |
-| `delimiter` | value | — | 2 |  |
-| `dirname` | function | — | 65 | ✓ |
-| `extname` | function | — | 27 |  |
-| `format` | function | — | 1 |  |
-| `isAbsolute` | function | — | 28 |  |
-| `join` | function | — | 58 | ✓ |
+| `basename` | function | ✅ | 23 |  |
+| `delimiter` | value | ✅ | 2 |  |
+| `dirname` | function | ✅ | 65 | ✓ |
+| `extname` | function | ✅ | 27 |  |
+| `format` | function | ✅ | 1 |  |
+| `isAbsolute` | function | ✅ | 28 |  |
+| `join` | function | ✅ | 58 | ✓ |
 | `matchesGlob` | function | — |  |  |
-| `normalize` | function | — | 5 |  |
-| `parse` | function | — | 4 |  |
-| `posix` | value | — | 44 |  |
-| `relative` | function | — | 34 |  |
-| `resolve` | function | — | 105 | ✓ |
-| `sep` | value | — | 3 |  |
-| `toNamespacedPath` | function | — | 1 |  |
+| `normalize` | function | ✅ | 5 |  |
+| `parse` | function | ✅ | 4 |  |
+| `posix` | value | ✅ | 44 |  |
+| `relative` | function | ✅ | 34 |  |
+| `resolve` | function | ✅ | 105 | ✓ |
+| `sep` | value | ✅ | 3 |  |
+| `toNamespacedPath` | function | ✅ | 1 |  |
 | `win32` | value | — | 2 |  |
 
 </details>
 
 ### node:path/posix
 
-<details><summary><code>node:path/posix</code> — 0 / 16 (0%)</summary>
+<details><summary><code>node:path/posix</code> — 14 / 16 (88%)</summary>
 
 | Member | Kind | Covered | Corpus | tsc |
 | --- | --- | --- | --- | --- |
-| `basename` | function | — |  |  |
-| `delimiter` | value | — |  |  |
-| `dirname` | function | — |  |  |
-| `extname` | function | — |  |  |
-| `format` | function | — |  |  |
-| `isAbsolute` | function | — |  |  |
-| `join` | function | — |  |  |
+| `basename` | function | ✅ |  |  |
+| `delimiter` | value | ✅ |  |  |
+| `dirname` | function | ✅ |  |  |
+| `extname` | function | ✅ |  |  |
+| `format` | function | ✅ |  |  |
+| `isAbsolute` | function | ✅ |  |  |
+| `join` | function | ✅ |  |  |
 | `matchesGlob` | function | — |  |  |
-| `normalize` | function | — |  |  |
-| `parse` | function | — |  |  |
-| `posix` | value | — |  |  |
-| `relative` | function | — |  |  |
-| `resolve` | function | — |  |  |
-| `sep` | value | — |  |  |
-| `toNamespacedPath` | function | — |  |  |
+| `normalize` | function | ✅ |  |  |
+| `parse` | function | ✅ |  |  |
+| `posix` | value | ✅ |  |  |
+| `relative` | function | ✅ |  |  |
+| `resolve` | function | ✅ |  |  |
+| `sep` | value | ✅ |  |  |
+| `toNamespacedPath` | function | ✅ |  |  |
 | `win32` | value | — |  |  |
 
 </details>

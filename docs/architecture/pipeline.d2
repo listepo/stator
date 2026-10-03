@@ -10,6 +10,18 @@ src: {
   shape: page
 }
 
+bundle: {
+  label: "js mode only, when the graph imports a package\nor, under --node, holds a CommonJS file (src/cli/bundler.ts)"
+
+  vendor: "vendor entry (src/frontend/vendor.ts)\nexport { a } from 'pkg' …"
+  adapter: "bundler adapter (--bundler, default vite\n→ vite-stator; loaded by name, never imported)"
+  overlay: "__stator_vendor__.js (virtual) + source map\nproject imports rewritten in place, lines kept"
+
+  vendor -> adapter -> overlay
+}
+
+locate: "under --node: module-location rewrite (src/frontend/location.ts)\nimport.meta.url · the vendor module's __filename/__dirname\n→ run-time calls relative to the executable"
+
 frontend: {
   label: "src/frontend/ — the only place ts.Type may appear"
 
@@ -54,6 +66,10 @@ runtime: {
 }
 
 src -> frontend.tsc
+frontend.ast -> bundle.vendor: "package imports" {style.stroke-dash: 3}
+bundle.overlay -> frontend.tsc: "reload over the overlay" {style.stroke-dash: 3}
+frontend.ast -> locate: "location reads" {style.stroke-dash: 3}
+locate -> frontend.tsc: "reload over the rewrite" {style.stroke-dash: 3}
 frontend.gate -> lower
 lower -> middle.hir
 middle.passes -> emit

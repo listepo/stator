@@ -1,5 +1,5 @@
-/* Module-graph tests (plan.md Task 3.11): topological order, cycle rejection, collision
- * refusal, and the type-only exemption.
+/* Module-graph tests (plan.md Task 3.11): topological order, cycle rejection, per-module
+ * namespaces (plan.md §11c T11.5a), re-export edges, and the type-only exemption.
  *
  * These build programs from REAL temp files, unlike the in-memory helper the other suites use:
  * moduleOrder resolves specifiers through ts.sys, so an in-memory host would exercise a
@@ -66,8 +66,8 @@ test('an import cycle is STA3001 and spells the cycle path', () => {
   assert.deepEqual(hops, ['a.ts', 'b.ts', 'a.ts']);
 });
 
-test('the same top-level name in two files is refused, naming both files', () => {
-  const { diagnostics } = order(
+test('the same top-level name in two files is no graph diagnostic (plan.md §11c T11.5a)', () => {
+  const { names, diagnostics } = order(
     {
       'a.ts':
         'import { helper } from "./b.ts";\nconst secret: number = 1;\nconsole.log(helper() + secret);\n',
@@ -76,11 +76,23 @@ test('the same top-level name in two files is refused, naming both files', () =>
     },
     'a.ts',
   );
-  const collision = diagnostics.find((d) => d.code === 'STA1214');
-  assert.ok(collision);
-  assert.match(collision.message, /'secret'/);
-  assert.match(collision.message, /a\.ts/);
-  assert.match(collision.message, /b\.ts/);
+  // Every module keeps its own namespace: the two `secret`s are two bindings, not a collision.
+  assert.deepEqual(names, ['b.ts', 'a.ts']);
+  assert.deepEqual(diagnostics, []);
+});
+
+test('a re-export is a graph edge, and so is its own target', () => {
+  const { names, diagnostics } = order(
+    {
+      'a.ts': 'import { x } from "./b.ts";\nconsole.log(x);\n',
+      'b.ts': 'export { x } from "./c.ts";\nexport * from "./d.ts";\n',
+      'c.ts': 'export const x: number = 1;\n',
+      'd.ts': 'export const y: number = 2;\n',
+    },
+    'a.ts',
+  );
+  assert.deepEqual(names, ['c.ts', 'd.ts', 'b.ts', 'a.ts']);
+  assert.deepEqual(diagnostics, []);
 });
 
 test('a type-only import creates no graph edge', () => {

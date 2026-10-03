@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://moonrepo.dev/schemas/project.json
+layer: 'library'
+language: 'typescript'
+
+# The --node platform (plan.md §11c T11.6): the node:* built-ins as strict TypeScript over std/*,
+# which the compiler resolves only under --node. Nothing to build: the modules compile into the
+# programs that import them. Tools are called directly, never through pnpm (plan-notes 204).
+tasks:
+  typecheck:
+    script: './node_modules/.bin/tsc --noEmit -p packages/node/tsconfig.json'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true
+  lint:
+    script: './node_modules/.bin/oxlint --deny-warnings packages/node && ./node_modules/.bin/oxfmt --check "packages/node/**/*.{ts,json}"'
+    toolchain: 'system'
+    options:
+      runFromWorkspaceRoot: true

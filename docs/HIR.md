@@ -60,7 +60,9 @@ Expressions produce values; statements do not. An expression-statement wraps an 
 - `ConsoleLogCall` — builtin console call. `method` names one of the eleven members of `CONSOLE_METHODS` (`src/hir/nodes.ts`), the single table the gate, the lowering, the verifier and the emitter all read: it gives each member its arity, how many trailing arguments are optional, and the C entry point the emitter calls. `args` is therefore either exactly `arity` long or, for the two members whose omitted tail is its own C entry point (`group`, `assert`), that minus its optional tail: the lowering pads an omitted optional with an `undefined` literal only where explicit `undefined` means what absence means. `consoleEntryPoint(method, width)` maps a width to the C call, and `STA4019` holds every node to a width it answers
 - `FunctionExpr` — a function expression or arrow function; `params`, a `body` Block, an
   optional `name` (a declaration's name, or the binding a function expression is assigned to, so
-  `[Function: name]` survives to the runtime), and a `provenance` grade (plan.md §8 step 1). The
+  `[Function: name]` survives to the runtime), `constructible: true` on a `function` declaration
+  or expression that is neither async nor a generator (the closures `new` may build through,
+  docs/VALUE.md §4.20; absent on an arrow, a method, an accessor and a constructor), and a `provenance` grade (plan.md §8 step 1). The
   grade is about the SIGNATURE and answers where its types came from: `typed` if the author
   annotated it whole — `x: number` and `@param {number} x` are the same claim in two spellings —
   `inferred` if the checker finished it, and `dynamic` if an `Unknown` is anywhere in it, which
@@ -200,12 +202,26 @@ the property is a NAME resolved through the shape table at run time, with a per-
 - **Everything dynamic types `Unknown`, and the verifier enforces it (`STA4059`).** A
   `DynFieldAccess` result and its target are Unknown by definition — an absent optional property
   reads as `undefined`, so any concrete type on the node is a narrowing nothing proved. The
-  consumer narrows the value back the way it narrows a `Map.get`.
+  consumer narrows the value back the way it narrows a `Map.get`. One typed target is admitted:
+  an array's `length`, which `DynFieldAssignment` writes (and, in value position, `DynFieldAccess`
+  reads) through the same runtime entries, because writing it resizes the array rather than
+  touching a slot (ECMA-262 §10.4.2.4, plan-notes 310). The other is a FUNCTION target
+  (`kind: 'fn'`): an ordinary function's own properties and its `prototype` live in a table on
+  its closure (`f.count`, `F.prototype`, `assert.same(…)`), so `DynFieldAccess`,
+  `DynFieldAssignment` and `DynMethodCall` reach them by name exactly as on an Unknown receiver
+  (docs/VALUE.md §4.20). The third is a fixed OBJECT target under a name its type does not
+  declare (plan.md §11c T11.4 step 7): the name lives in the object's overflow table
+  (docs/VALUE.md §4.24), so the same three nodes reach it; a DECLARED name on an object target is
+  still `STA4059`, because it has a slot. Such a `DynMethodCall` carries `notFunction`, the source
+  subject of Node's `TypeError` when nothing callable was stored under the name, where every
+  other dynamic call aborts `STA2006`. An `IndexAccess`/`IndexAssignment` on an object target
+  takes a string or number index too, besides step 44b's object key: `js` mode's computed key on
+  a fixed shape, read and written by name through the same degrading entry points.
 - **No pending check follows a dynamic access.** `jsrt_get_prop` allocates nothing and runs no
   user code; `jsrt_set_prop` can grow slot storage — which is why its operands sit in rooted
   frame slots. A nullish receiver is a TypeError; a primitive read answers `undefined`; a
-  primitive write is a TypeError; growing a *new* key on a fixed-layout object is `STA2004`
-  (Phase 8). Reads and writes of an existing field on an aliased fixed object walk the class
+  primitive write is a TypeError; growing a *new* key on a fixed-layout object fills its
+  overflow table (docs/VALUE.md §4.24). Reads and writes of an existing field on an aliased fixed object walk the class
   descriptor. An Unknown (or empty `{}`) receiver uses the same three nodes; a computed index
   on one emits `jsrt_dyn_index_get`/`set`, which dispatches arrays to the dense path and
   everything else through the property table. Calling a non-function is `STA2006` at `file:line`.
@@ -218,7 +234,26 @@ closed set is the point: an operation is not a general method call that happens 
 it is one HIR node the emitter turns into one runtime function with a fixed C signature. `.size` is
 an `op` with no arguments rather than a `FieldAccess`, so nothing below reads the struct field. The
 verifier checks the receiver's type kind and the argument count for both, because every `jsrt_value`
-argument has the same C type and the C compiler cannot catch either mistake.
+argument has the same C type and the C compiler cannot catch either mistake. A `WeakMap`/`WeakSet` is
+a Map/Set HType (the checker keeps every walk off it), and `CollectionNew.weak` is the one bit that
+records it: it picks the allocator whose `set`/`add` refuses a non-object key (docs/VALUE.md §4.22).
+
+`GlobalCall` (plan.md §11c T11.4) is one row of `GLOBAL_CALLS` called with boxed operands padded to
+the row's arity: `parseInt`, `parseFloat`, `isNaN`, `isFinite`, and since step 4b `RegExp`
+(`new RegExp(p, f)` and `RegExp(p, f)`, result `regexp`) and `Array` (`Array(n)` / `new Array(n)`
+with one argument, result an array of an Unknown element). A row with `throws` gets a pending check
+after the call. `Array()` and `Array(a, b, …)` are not calls at all: they lower to the array literal
+they equal. An `ArrayOp` with `spread` set is the `concat` an array-literal spread lowers to; its
+answer has its holes filled with `undefined`, because a spread iterates (docs/VALUE.md §4.4).
+Since step 5 two rows are not callee names: `Array.from` (`jsrt_array_from`) and `...`
+(`jsrt_spread_operand`), which the lowering wraps around any spread operand that is not an array,
+so the `concat` receives the drained iterable rather than appending it whole (docs/VALUE.md §4.23).
+
+A `CallExpr` or `DynMethodCall` with `spread` set (step 5) has exactly ONE argument: the array the
+lowering folded the whole argument list into, exactly as it folds an array literal's. The emitter
+calls `jsrt_call_spread_at`, which calls with the list's own count; the verifier holds the one
+array (`STA4104`), a spread `DynMethodCall` may have any receiver type (the method read is the
+shape table's, `STA4059` does not apply), and the inline pass never inlines one.
 
 The seven ES2025 set operations are `op`s too, and they are the only ones whose ARGUMENT is a
 collection: the emitter passes it to a runtime function that reads it as a `JSRTMap`, so the
@@ -421,7 +456,7 @@ interface HUnknown {
 
 ### 3.2.1 What a narrowing site is (Task 3.5)
 
-An `Unknown` becomes concrete in exactly one node, `BoundaryCheck`, and the lowering is the only thing that builds one — a later pass could not, because by then the HIR has already forgotten which type the checker narrowed to. Four spellings produce it: a read of an `Unknown` binding at a point where the checker has narrowed it (a `typeof` guard, an `instanceof`, an `!== undefined`); an `as` cast off an `Unknown`; a dynamic value flowing into an annotated binding, parameter, or return (plan.md §8 step 5 — the mixed-graph edge); and the same edge written in JSDoc (`/** @type {number} */ const n = produce()`). The emitted C is `jsrt_check_number/string/boolean(v, "file:line:col")`, which returns `v` or raises `STA2001`.
+An `Unknown` becomes concrete in exactly one node, `BoundaryCheck`, and the lowering is the only thing that builds one — a later pass could not, because by then the HIR has already forgotten which type the checker narrowed to. Four spellings produce it: a read of an `Unknown` binding at a point where the checker has narrowed it (a `typeof` guard, an `instanceof`, an `!== undefined`); an `as` cast off an `Unknown`; a dynamic value flowing into an annotated binding, parameter, or return (plan.md §8 step 5 — the mixed-graph edge); and the same edge written in JSDoc (`/** @type {number} */ const n = produce()`). A fifth exists only in js mode: a value of ANOTHER concrete type reaching a `.ts` variable annotated with a checkable type, at a declaration or assignment the checker refused with `TS2322`. js mode suppresses that refusal but keeps the annotation, so the check's operand is concrete and the check is what fails it (plan-notes 301). The verifier still refuses a check whose operand already has the checked type (`STA4056`), because that check can never fail. The emitted C is `jsrt_check_number/string/boolean(v, "file:line:col")`, which returns `v` or raises `STA2001`.
 
 Three rules follow from the preservation rule above rather than from convenience:
 

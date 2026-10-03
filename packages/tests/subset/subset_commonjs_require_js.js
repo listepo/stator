@@ -1,8 +1,7 @@
 // @mode: js
 // @verdict: error
 // @code: STA1110
-// @expected-fail: true
-// SUBSET.md: CommonJS require()
+// SUBSET.md: CommonJS require() — without --node, Stator is ES modules only.
 
 require("module");
 export {};

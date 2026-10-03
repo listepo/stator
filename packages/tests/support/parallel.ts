@@ -31,6 +31,7 @@ export interface ProcessResult {
 export interface RunOptions {
   readonly timeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;
+  readonly cwd?: string;
 }
 
 /** Async `spawnSync`, so a pool can keep every core busy. */
@@ -45,6 +46,7 @@ export function runProcess(
     const spawnOptions = {
       ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
       ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     };
     const child = spawn(command, [...args], spawnOptions);
     let stdout = '';
@@ -81,6 +83,7 @@ export function runProcess(
 export async function pool<T, R>(
   items: readonly T[],
   work: (item: T, slot: number) => Promise<R>,
+  jobs?: number,
 ): Promise<R[]> {
   // Preallocated on purpose: the pool writes every slot by index and never appends, so the length
   // is known before the first item runs.
@@ -90,7 +93,9 @@ export async function pool<T, R>(
   // `STATOR_TEST_JOBS` overrides pool width (default: os.availableParallelism()). `=1` forces
   // serial order when comparing against a serial report or when a shared box must not be saturated.
   const requested = Number.parseInt(process.env['STATOR_TEST_JOBS'] ?? '', 10);
-  const cores = Number.isFinite(requested) && requested > 0 ? requested : availableParallelism();
+  // An explicit `jobs` (a driver that sizes its own fan-out) wins over both.
+  const cores =
+    jobs ?? (Number.isFinite(requested) && requested > 0 ? requested : availableParallelism());
   const width = Math.max(1, Math.min(cores, items.length));
   await Promise.all(
     Array.from({ length: width }, async (_unused, slot) => {
@@ -126,10 +131,13 @@ export interface Shard {
   readonly total: number;
 }
 
-/** One `--filter` / `--shard` / `--shards` / `--json-out` command line, shared by the subset
- * and golden runners so the flag surface cannot drift between the two reports. */
+/** One `--filter` / `--only` / `--shard` / `--shards` / `--json-out` command line, shared by the
+ * subset and golden runners so the flag surface cannot drift between the two reports. */
 export interface ShardArgs {
   readonly filter: string | undefined;
+  /** `--only=<file>`: a list of test keys, one per line (`test:impact`'s selection, plan.md §9
+   * Task 6.17). Applies with `--filter`, before `--shard`. */
+  readonly only: string | undefined;
   readonly shard: Shard | undefined;
   readonly shards: number | undefined;
   readonly jsonOut: string | undefined;
@@ -147,6 +155,7 @@ export function parseShardArgs(
   },
 ): ShardArgs {
   let filter: string | undefined;
+  let only: string | undefined;
   let jsonOut: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -159,6 +168,11 @@ export function parseShardArgs(
       index += 1;
     } else if (arg !== undefined && arg.startsWith('--filter=')) {
       filter = arg.slice('--filter='.length);
+    } else if (arg !== undefined && arg.startsWith('--only=')) {
+      only = arg.slice('--only='.length);
+      if (only === '') {
+        throw new Error('--only requires a file path');
+      }
     } else if (arg !== undefined && arg.startsWith('--json-out=')) {
       // Worker protocol for `--shards` fan-out: the slice's per-item records go to this file as
       // JSON and nothing human-readable is printed, so the driver owns the one report.
@@ -181,7 +195,25 @@ export function parseShardArgs(
   if (jsonOut !== undefined && shard === undefined) {
     throw new Error('--json-out requires --shard (it is the worker protocol)');
   }
-  return { filter, shard, shards, jsonOut };
+  return { filter, only, shard, shards, jsonOut };
+}
+
+/** The keys of an `--only=<file>` list: one per line, blank lines ignored. */
+export function readOnlyList(path: string): ReadonlySet<string> {
+  return new Set(
+    readFileSync(path, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== ''),
+  );
+}
+
+/** The flags a `--shards` driver hands each worker, so a worker slices the driver's list. */
+export function workerBaseArgs(args: ShardArgs): string[] {
+  return [
+    ...(args.filter === undefined ? [] : [`--filter=${args.filter}`]),
+    ...(args.only === undefined ? [] : [`--only=${args.only}`]),
+  ];
 }
 
 /** `--shard=N/M`, spelled exactly as in packages/tests/test262/run.ts (equals form only).

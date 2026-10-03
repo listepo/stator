@@ -3,12 +3,14 @@
 //! links that archive only into programs whose module graph holds a `std` file. Every symbol
 //! exported here is a C-ABI function named `jsrt_std_*` that a `src/native/*.d.ts` declaration
 //! file binds through the extern surface (docs/FFI.md), so the ABI is the FFI table's: `f64` for
-//! `number`, NUL-terminated UTF-8 for `CString`, nothing else.
+//! `number`, NUL-terminated UTF-8 for `CString`, and a `[*]u8` + `usize` pair for a `Uint8Array`
+//! (the view's own bytes, valid for the call), nothing else.
 //!
-//! Two shared channels carry what one scalar return cannot:
+//! Shared channels carry what one scalar return cannot:
 //! - a failing call returns 1 and records a stable error code (docs/STD.md §3), which the TS
 //!   wrapper reads back through `jsrt_std_last_error` and throws;
-//! - a string answer is parked in one result buffer and read back through `jsrt_std_result`.
+//! - a string answer is parked in one result buffer and read back through `jsrt_std_result`;
+//!   bytes travel in the caller's `Uint8Array`, which the backing reads or fills in place.
 //!   The emitter copies a `CString` return into a runtime string at the call site
 //!   (docs/FFI.md §3), so the buffer only has to outlive that copy: the next call that parks a
 //!   result frees the previous one. Nothing here is thread-safe; v0 std is single-threaded like
@@ -94,6 +96,33 @@ export fn jsrt_std_last_error() [*:0]const u8 {
     return last_error.ptr;
 }
 
+/// The code of a libc errno, for the backings that call libc directly (fd I/O, where Zig's std
+/// treats `EBADF` as a programmer bug and would panic instead of answering). Same closed
+/// vocabulary as `failWith`; `EINTR` never reaches here, the callers retry it.
+pub fn failErrno(err: std.c.E) f64 {
+    return fail(switch (err) {
+        .NOENT => "ENOENT",
+        .ACCES, .PERM => "EACCES",
+        .EXIST => "EEXIST",
+        .NOTDIR => "ENOTDIR",
+        .NOTEMPTY => "ENOTEMPTY",
+        .NAMETOOLONG => "ENAMETOOLONG",
+        .LOOP => "ELOOP",
+        .ROFS => "EROFS",
+        .BUSY, .TXTBSY => "EBUSY",
+        .BADF => "EBADF",
+        .NOTTY => "ENOTTY",
+        .AGAIN => "EAGAIN",
+        .PIPE => "EPIPE",
+        .ISDIR => "EISDIR",
+        .NOSPC => "ENOSPC",
+        .NOMEM => "ENOMEM",
+        .INVAL => "EINVAL",
+        .FBIG => "EFBIG",
+        else => "EIO",
+    });
+}
+
 /// A JS number as a C `int` argument, or null when it is not an integer in `[lo, hi]`.
 pub fn intIn(value: f64, lo: c_int, hi: c_int) ?c_int {
     if (!(value >= @as(f64, @floatFromInt(lo)) and value <= @as(f64, @floatFromInt(hi)))) return null;
@@ -106,4 +135,8 @@ comptime {
     _ = @import("process.zig");
     _ = @import("fs.zig");
     _ = @import("time.zig");
+    _ = @import("os.zig");
+    _ = @import("io.zig");
+    _ = @import("encoding.zig");
+    _ = @import("hash.zig");
 }

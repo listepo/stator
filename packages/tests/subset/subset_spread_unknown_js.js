@@ -1,9 +1,8 @@
 // @mode: js
-// @verdict: not-yet
-// @code: STA1214
+// @verdict: dynamic
 // SUBSET.md: Spread operator ... in array literals
-// Spreading an unknown value needs GetIterator dispatch for a value with no static element
-// type — the Phase 5 iterator surface (plan.md §8 step 39), not the dynamic tier.
+// Spreading an unknown value drains it through the `...` row's iterator protocol at run time
+// (plan.md §11c T11.4 step 5; docs/VALUE.md §4.23).
 
 const u = JSON.parse('[1, 2]');
 export const a = [...u];

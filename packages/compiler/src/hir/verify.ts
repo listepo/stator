@@ -16,8 +16,10 @@ import type {
   Assignment,
   BinaryOp,
   Block,
+  CallExpr,
   ConsoleLogCall,
   Declaration,
+  DynMethodCall,
   Expression,
   ExpressionStatement,
   FunctionExpr,
@@ -36,6 +38,7 @@ import {
   consoleEntryPoint,
   DATE_OPS,
   DATE_STATICS,
+  GLOBAL_CALLS,
   errorHType,
   externConventionMismatch,
   externKindHType,
@@ -57,7 +60,9 @@ import {
   fieldSlot,
   H_BOOLEAN,
   H_NUMBER,
+  H_REGEXP,
   H_STRING,
+  H_UINT8ARRAY,
   H_UNDEFINED,
   hasTypeParam,
   hTypeAssignable,
@@ -176,7 +181,9 @@ function hoistFunctions(statements: readonly Statement[], bindings: Scope): void
  * value is the whole point, and the runtime decides. A CONCRETE non-array target means the
  * lowering built an index the checker would already have rejected — with one gate-admitted
  * exception: a fixed-shape target under an object-typed key (`o[kObj]`, plan.md §8 step 44b),
- * which coerces the key via ToPropertyKey and routes through the degrading array entry points.
+ * which coerces the key via ToPropertyKey and routes through the degrading array entry points --
+ * and, the same entry points again, a `js`-mode computed string or number key on one
+ * (`table[node.kind]`, docs/VALUE.md §4.24), which reads a declared slot or the overflow table.
  * The index-kind rule is what keeps the exception precise: the key must be object-typed (an
  * identifier of object type) or Unknown (a literal key — `{}` and `[]` lower dynamic, so their
  * node type is Unknown even though the gate admitted them by their checker type). Any other key
@@ -196,7 +203,10 @@ function checkIndexable(
   ) {
     if (
       target.type.kind === 'object' &&
-      (index.type.kind === 'object' || index.type.kind === 'unknown')
+      (index.type.kind === 'object' ||
+        index.type.kind === 'unknown' ||
+        index.type.kind === 'string' ||
+        index.type.kind === 'number')
     ) {
       return;
     }
@@ -220,7 +230,7 @@ function checkField(
   target: Expression,
   field: string,
   slot: number,
-  kind: 'field-access' | 'field-assignment',
+  kind: 'field-access' | 'field-assignment' | 'field-call',
   problems: VerifyProblem[],
 ): void {
   if (target.type.kind !== 'object') {
@@ -248,6 +258,20 @@ function checkField(
  * the class DECLARING the method, which for an inherited method is an ancestor rather than
  * the receiver's own class -- so the test is ancestry, not equality. It must still be an
  * ancestry the receiver has, or the emitted call reads a body belonging to another class. */
+/** A spread call passes ONE array holding every argument (`jsrt_call_spread_at` reads it as a
+ * `JSRTArray` without a tag test), and the lowering folds the spread list into exactly that. */
+function checkSpreadArguments(expr: CallExpr | DynMethodCall, problems: VerifyProblem[]): void {
+  const [list] = expr.args;
+  if (expr.spread === true && (expr.args.length !== 1 || list?.type.kind !== 'array')) {
+    problems.push({
+      kind: expr.kind,
+      span: expr.span,
+      code: 'STA4104',
+      message: `spread ${expr.kind} with ${String(expr.args.length)} arguments, first typed '${list === undefined ? 'none' : hTypeName(list.type)}', not one array`,
+    });
+  }
+}
+
 function checkMethodReceiver(expr: MethodCall | MethodValue, problems: VerifyProblem[]): void {
   if (
     expr.target.type.kind !== 'object' ||
@@ -658,7 +682,17 @@ function verifyStatement(
     case 'dyn-field-assignment': {
       verifyExpression(stmt.target, problems, bindings);
       verifyExpression(stmt.value, problems, bindings);
-      if (stmt.target.type.kind !== 'unknown') {
+      // The typed targets are an array's `length`, which the runtime entry resizes, a function,
+      // whose own properties live in its closure (plan-notes 310), and a fixed object's name its
+      // layout does not declare, which lives in the overflow table (docs/VALUE.md §4.24): the
+      // array has no other property this node may write, and a DECLARED field has a slot.
+      const arrayLength = stmt.target.type.kind === 'array' && stmt.field === 'length';
+      if (
+        stmt.target.type.kind !== 'unknown' &&
+        stmt.target.type.kind !== 'fn' &&
+        !arrayLength &&
+        !undeclaredMember(stmt.target.type, stmt.field)
+      ) {
         problems.push({
           kind: 'dyn-field-assignment',
           span: stmt.span,
@@ -674,6 +708,16 @@ function verifyStatement(
       throw new Error(`Exhaustiveness check failed: ${_exhaustive}`);
     }
   }
+}
+
+/** A fixed object's name its layout does not declare: no slot holds it, so the overflow table
+ * does (docs/VALUE.md §4.24), and a dynamic node over the object is the only way to reach it. */
+function undeclaredMember(type: HType, name: string): boolean {
+  return (
+    type.kind === 'object' &&
+    !type.fields.some((f) => f.name === name) &&
+    !type.methods.some((m) => m.name === name)
+  );
 }
 
 function verifyBlock(
@@ -1035,7 +1079,10 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // here, because both are ways the lowering could have inserted a check that does nothing: a
       // check on an already-concrete value is a runtime cost with no soundness gain, and a check
       // whose RESULT is Unknown has not narrowed anything and leaves the consumer no better off.
-      if (expr.value.type.kind !== 'unknown') {
+      // A concrete value of ANOTHER type is not a no-op: it is the js-mode edge where the checker's
+      // 2322 was suppressed against an annotated `.ts` binding, and the check is what fails it
+      // (plan-notes 301).
+      if (expr.value.type.kind !== 'unknown' && hTypeAssignable(expr.value.type, expr.type)) {
         problems.push({
           kind: 'boundary-check',
           span: expr.span,
@@ -1123,6 +1170,7 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           message: `callee has type '${hTypeName(expr.callee.type)}', which is not callable`,
         });
       }
+      checkSpreadArguments(expr, problems);
       break;
     }
 
@@ -1195,7 +1243,9 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
               ? H_BOOLEAN
               : kind === 'cstring' || kind === 'cstring-owned'
                 ? H_STRING
-                : undefined;
+                : kind === 'bytes'
+                  ? H_UINT8ARRAY
+                  : undefined;
         if (want !== undefined && !hTypeEquals(arg.type, want)) {
           problems.push({
             kind: 'extern-call',
@@ -1321,6 +1371,17 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
+    // The slot rule a field read follows; whether the loaded value is callable is the runtime's
+    // question (STA2006), exactly as for an ordinary call of an Unknown callee.
+    case 'field-call': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      checkField(expr.target, expr.field, expr.slot, 'field-call', problems);
+      break;
+    }
+
     case 'method-value': {
       verifyExpression(expr.target, problems, bindings);
       checkMethodReceiver(expr, problems);
@@ -1339,9 +1400,20 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       for (const arg of expr.args) {
         verifyExpression(arg, problems, bindings);
       }
-      // The lowering routes only Unknown receivers here; anything else is a call the typed
-      // arms own, and building this node for one would aim a shape-table read at a layout.
-      if (expr.target.type.kind !== 'unknown') {
+      // The lowering routes only Unknown receivers here, functions, whose own properties the
+      // closure holds (plan-notes 310), and a fixed object's undeclared name, which its overflow
+      // table holds (docs/VALUE.md §4.24); anything else is a call the typed arms own, and
+      // building this node for one would aim a shape-table read at a layout.
+      checkSpreadArguments(expr, problems);
+      // A spread call reads its method through the same shape-table entry for any receiver the
+      // gate admitted (arrays, class instances, plain objects; plan.md §11c T11.4 step 5): there
+      // is no typed arm for it to bypass, because no typed arm takes a spread.
+      if (
+        expr.spread !== true &&
+        expr.target.type.kind !== 'unknown' &&
+        expr.target.type.kind !== 'fn' &&
+        !undeclaredMember(expr.target.type, expr.method)
+      ) {
         problems.push({
           kind: 'dyn-method-call',
           span: expr.span,
@@ -1550,9 +1622,14 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       // field answers through the receiver's own descriptor (so a subclass value's added field
       // still resolves), a miss answers `undefined` — and the per-site cache is untouched on that
       // path. What is still rejected is a concrete NON-object target, which has no descriptor for
-      // any name.
+      // any name -- except an array's `length`, the place an assignment in value position resizes
+      // through, and a function's own properties, which its closure holds (plan-notes 310).
+      const arrayLength = expr.target.type.kind === 'array' && expr.field === 'length';
       if (
-        (expr.target.type.kind !== 'unknown' && expr.target.type.kind !== 'object') ||
+        (expr.target.type.kind !== 'unknown' &&
+          expr.target.type.kind !== 'object' &&
+          expr.target.type.kind !== 'fn' &&
+          !arrayLength) ||
         expr.type.kind !== 'unknown'
       ) {
         problems.push({
@@ -2029,6 +2106,28 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       break;
     }
 
+    // A `Number.prototype` call: the runtime reads the receiver as a number without a tag test,
+    // and the lowering pads the one argument.
+    case 'number-op': {
+      verifyExpression(expr.target, problems, bindings);
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      if (
+        expr.target.type.kind !== 'number' ||
+        expr.args.length !== 1 ||
+        !hTypeEquals(expr.type, H_STRING)
+      ) {
+        problems.push({
+          kind: 'number-op',
+          span: expr.span,
+          code: 'STA4103',
+          message: `${expr.op} on '${hTypeName(expr.target.type)}' with ${String(expr.args.length)} arguments, typed '${hTypeName(expr.type)}'`,
+        });
+      }
+      break;
+    }
+
     // `new Date(y, m, ...)`. The component list is EXACTLY seven -- the lowering pads omitted
     // trailing components with `undefined`, which the runtime reads as the spec's defaults, so a
     // short list here is a lowering bug rather than a source property. The result is pinned for
@@ -2075,6 +2174,40 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
           span: expr.span,
           code: 'STA4092',
           message: `Date.${expr.method} results in '${hTypeName(expr.type)}', not a number`,
+        });
+      }
+      break;
+    }
+
+    // `parseInt(s, r)`, `parseFloat(s)`, `isNaN(x)`, `isFinite(x)`, `RegExp(p, f)`, `Array(n)` (plan.md §11c T11.4): the
+    // arity is the row's exactly (the lowering padded an omitted argument with `undefined`), and
+    // the result is the row's. Argument types stay unchecked -- every entry point coerces.
+    case 'global-call': {
+      for (const arg of expr.args) {
+        verifyExpression(arg, problems, bindings);
+      }
+      const row = GLOBAL_CALLS[expr.name];
+      // An `Array(n)` result is whatever array the checker typed the call as; the rest are fixed.
+      const typed =
+        row.result === 'array'
+          ? expr.type.kind === 'array'
+          : hTypeEquals(
+              expr.type,
+              row.result === 'number' ? H_NUMBER : row.result === 'boolean' ? H_BOOLEAN : H_REGEXP,
+            );
+      if (expr.args.length !== row.arity) {
+        problems.push({
+          kind: 'global-call',
+          span: expr.span,
+          code: 'STA4102',
+          message: `${expr.name} takes ${String(row.arity)} arguments, not ${String(expr.args.length)}`,
+        });
+      } else if (!typed) {
+        problems.push({
+          kind: 'global-call',
+          span: expr.span,
+          code: 'STA4102',
+          message: `${expr.name} results in '${hTypeName(expr.type)}', not a ${row.result}`,
         });
       }
       break;

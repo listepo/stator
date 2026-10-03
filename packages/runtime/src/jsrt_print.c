@@ -170,13 +170,20 @@ static void append_utf8(JSRTBuf *out, uint32_t cp) {
   }
 }
 
-/* Appends one JSString as UTF-8. Unpaired surrogates become U+FFFD: they cannot be represented in
- * well-formed UTF-8, and a JS string is allowed to contain them. */
+static void append_units(JSRTBuf *out, const JSString *str, uint32_t from, uint32_t to);
+
 static void append_string(JSRTBuf *out, const JSString *str) {
-  for (uint32_t i = 0; i < str->length; i++) {
+  append_units(out, str, 0, str->length);
+}
+
+/* Appends code units [from, to) of a JSString as UTF-8. Unpaired surrogates become U+FFFD: they
+ * cannot be represented in well-formed UTF-8, and a JS string is allowed to contain them. A
+ * util.format slice ends at a `%`, so it never splits a pair. */
+static void append_units(JSRTBuf *out, const JSString *str, uint32_t from, uint32_t to) {
+  for (uint32_t i = from; i < to; i++) {
     uint32_t cp = str->data[i];
 
-    if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < str->length) {
+    if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < to) {
       uint32_t low = str->data[i + 1];
       if (low >= 0xDC00u && low <= 0xDFFFu) {
         cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
@@ -291,19 +298,15 @@ static void append_quoted(JSRTBuf *out, const JSString *str) {
       jsrt_buf_puts(out, esc);
     } else {
       /* Hand the code unit -- with its partner, when it starts a surrogate pair -- to the same
-       * UTF-8 writer the unquoted path uses, so a pair still comes out as one code point. A
-       * JSString ends in a flexible member, so the stand-in is a byte array shaped like one. */
-      _Alignas(JSString) unsigned char storage[sizeof(JSString) + 2 * sizeof(uint16_t)];
-      JSString *piece = (JSString *)storage;
+       * UTF-8 writer the unquoted path uses, so a pair still comes out as one code point. The
+       * stand-in is a view of those units in place. */
       const bool pair = c >= 0xD800u && c <= 0xDBFFu && i + 1 < str->length &&
                         str->data[i + 1] >= 0xDC00u && str->data[i + 1] <= 0xDFFFu;
-      piece->length = pair ? 2 : 1;
-      piece->data[0] = c;
+      const JSString piece = {pair ? 2u : 1u, 0u, &str->data[i], NULL};
+      append_string(out, &piece);
       if (pair) {
-        piece->data[1] = str->data[i + 1];
         i++;
       }
-      append_string(out, piece);
     }
   }
   jsrt_buf_putc(out, quote);
@@ -551,40 +554,70 @@ static void inspect_list(JSRTBuf *out, jsrt_value v, uint32_t length,
                          const char *abbrev, int recurse, size_t indent) {
   const JSRTArray *a = jsrt_is(v, JSRT_TAG_ARRAY) ? jsrt_as_array(v) : NULL;
   const size_t shown = length > INSPECT_MAX_ARRAY ? INSPECT_MAX_ARRAY : length;
-  const bool truncated = length > shown;
   /* A RegExp match is an array with NAMED properties, and Node prints them after the elements:
    * `[ 'a', index: 0, input: 'a', groups: undefined ]`. Every other array has none, so this is
    * zero and nothing below it changes. */
   const size_t props = a != NULL ? jsrt_shape_property_count(a->shape) : 0;
-  const size_t count = shown + (truncated ? 1 : 0) + props;
 
   /* Emptiness first: Node prints an empty container in full past the depth cap
    * (`[[[[]]]]` is `[ [ [ [] ] ] ]`), abbreviating only the non-empty ones. */
-  if (count == 0 || recurse > INSPECT_MAX_DEPTH) {
-    jsrt_buf_puts(out, count == 0 ? label : abbrev);
-    if (count == 0) {
+  if (length + props == 0 || recurse > INSPECT_MAX_DEPTH) {
+    jsrt_buf_puts(out, length + props == 0 ? label : abbrev);
+    if (length + props == 0) {
       jsrt_buf_puts(out, "[]");
     }
     return;
   }
 
-  JSRTBuf *entries = alloc_entries(count);
-  bool all_numbers = true;
-  for (size_t i = 0; i < shown; i++) {
-    jsrt_buf_init(&entries[i]);
+  /* Node's formatArray, and formatSpecialArray once a hole is met: at most `shown` entries, where
+   * a run of holes between two elements is ONE entry (`<2 empty items>`), a trailing run is one
+   * more when there is room, and whatever the budget did not reach is "... n more items". */
+  JSRTBuf *entries = alloc_entries(shown + 1 + props);
+  size_t count = 0;
+  uint32_t index = 0;
+  char hole_text[64];
+  while (index < length && count < shown) {
+    if (a != NULL && a->elements[index] == JSRT_HOLE) {
+      uint32_t next = index;
+      while (next < length && a->elements[next] == JSRT_HOLE) {
+        next++;
+      }
+      if (next == length) {
+        break;
+      }
+      snprintf(hole_text, sizeof hole_text, "<%u empty item%s>", next - index,
+               next - index > 1 ? "s" : "");
+      jsrt_buf_init(&entries[count]);
+      jsrt_buf_puts(&entries[count++], hole_text);
+      index = next;
+      if (count == shown) {
+        break;
+      }
+    }
+    jsrt_buf_init(&entries[count]);
     /* Elements are rendered two columns deeper: that indent is what a multi-line layout uses,
      * and it also shortens the budget a nested array has before it breaks. */
-    const jsrt_value item = element(v, (uint32_t)i);
-    inspect_value(&entries[i], item, recurse + 1, indent + 2);
-    all_numbers = all_numbers && jsrt_is_number(item);
+    inspect_value(&entries[count++], element(v, index), recurse + 1, indent + 2);
+    index++;
   }
-  if (truncated) {
-    init_more_entry(&entries[shown], length - (uint32_t)shown);
+  const uint32_t remaining = length - index;
+  bool truncated = false;
+  if (count != shown) {
+    if (remaining > 0) {
+      snprintf(hole_text, sizeof hole_text, "<%u empty item%s>", remaining,
+               remaining > 1 ? "s" : "");
+      jsrt_buf_init(&entries[count]);
+      jsrt_buf_puts(&entries[count++], hole_text);
+    }
+  } else if (remaining > 0) {
+    init_more_entry(&entries[count++], remaining);
+    truncated = true;
   }
+  const size_t listed = truncated ? count - 1 : count;
   if (props > 0) {
     const JSRTShape **links = jsrt_shape_property_order(a->shape, (uint32_t)props);
     for (size_t i = 0; i < props; i++) {
-      JSRTBuf *entry = &entries[shown + (truncated ? 1 : 0) + i];
+      JSRTBuf *entry = &entries[count++];
       jsrt_buf_init(entry);
       append_key(entry, links[i]->key);
       jsrt_buf_puts(entry, ": ");
@@ -594,15 +627,22 @@ static void inspect_list(JSRTBuf *out, jsrt_value v, uint32_t length,
   }
 
   /* Grouping is attempted first, because whether it fired decides the layout below: if it changed
-   * the number of lines, the single-line form is not even considered. */
+   * the number of lines, the single-line form is not even considered. Node right-aligns only when
+   * `value[i]` is a number for every i below the entry count -- read by INDEX, so a hole (or an
+   * index past the end) is not a number and left-aligns the whole block. */
   JSRTBuf *rows = NULL;
   size_t row_count = 0;
   if (count > 6 && props == 0) {
+    bool all_numbers = true;
+    for (size_t i = 0; i < count && all_numbers; i++) {
+      all_numbers = i < length && (a == NULL || a->elements[i] != JSRT_HOLE) &&
+                    jsrt_is_number(element(v, (uint32_t)i));
+    }
     rows = alloc_entries(count);
-    row_count = group_entries(entries, shown, count, indent, all_numbers, rows);
+    row_count = group_entries(entries, listed, count, indent, all_numbers, rows);
     if (row_count > 0 && truncated) {
       jsrt_buf_init(&rows[row_count]);
-      jsrt_buf_append(&rows[row_count], entries[shown].data, entries[shown].len);
+      jsrt_buf_append(&rows[row_count], entries[listed].data, entries[listed].len);
       row_count++;
     }
   }
@@ -740,6 +780,80 @@ static void append_key(JSRTBuf *out, const char *key) {
   jsrt_buf_putc(out, quote);
 }
 
+/* Whether `v` is an instance of the function `ctor` for the printer: `jsrt_instanceof_ctor`'s
+ * answer without its TypeError, which Node's own printer swallows the same way (an arrow found as
+ * a `constructor` simply does not name the object). */
+static bool printer_instanceof(jsrt_value v, jsrt_value ctor) {
+  const JSRTClosure *c = jsrt_as_closure(ctor);
+  if (c->klass != NULL) {
+    return jsrt_instanceof(v, c->klass);
+  }
+  const jsrt_value proto = jsrt_function_prototype(ctor);
+  if (!jsrt_is_object(proto)) {
+    return false;
+  }
+  for (jsrt_value p = v; jsrt_is_dynobj(p);) {
+    p = ((const JSRTDynObject *)jsrt_ptr(p))->proto;
+    if (p == proto) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* The constructor name Node prints in front of a dynamic object (util.inspect's
+ * getConstructorName, plan-notes 310): the first object on the chain -- the value itself first --
+ * whose own `constructor` is a named function the value is an instance of. `new F()` prints
+ * `F { x: 1 }`; a literal, and `F.prototype` itself (which is not an instance of F), reach
+ * %Object.prototype% and print bare, which NULL means. A class instance on the chain names its
+ * class, exactly as its own `constructor` would. */
+static const char *dynobj_constructor_name(jsrt_value v) {
+  for (jsrt_value p = v; p != 0;) {
+    if (!jsrt_is_dynobj(p)) {
+      if (jsrt_is(p, JSRT_TAG_OBJECT) && jsrt_as_object(p)->cls->name[0] != '\0') {
+        return jsrt_as_object(p)->cls->name;
+      }
+      return NULL;
+    }
+    const JSRTDynObject *o = (const JSRTDynObject *)jsrt_ptr(p);
+    jsrt_value ctor = o->ctor;
+    if (ctor == 0) {
+      const JSRTShape *hit = jsrt_shape_find(o->shape, "constructor");
+      ctor = hit == NULL ? 0 : o->slots[hit->offset];
+    }
+    if (jsrt_is(ctor, JSRT_TAG_CLOSURE) && jsrt_as_closure(ctor)->name[0] != '\0' &&
+        printer_instanceof(v, ctor)) {
+      return jsrt_as_closure(ctor)->name;
+    }
+    p = o->proto;
+  }
+  return NULL;
+}
+
+/* One `key: value` entry per own property of a dynamic object, in OrdinaryOwnPropertyKeys order
+ * (integer indices first, then insertion order). Shared by plain objects and by a function's own
+ * properties, which Node lays out the same way. */
+/* A shape table's `count` properties, in insertion order, into `entries[0..count)`: a dynamic
+ * object's whole body, and a fixed object's overflow table after its declared fields. */
+static void fill_dyn_entries(JSRTBuf *entries, const JSRTDynObject *dyn, size_t count, int recurse,
+                             size_t indent) {
+  const JSRTShape **links = jsrt_shape_property_order(dyn->shape, (uint32_t)count);
+  for (size_t i = 0; i < count; i++) {
+    JSRTBuf *entry = &entries[i];
+    jsrt_buf_init(entry);
+    append_key(entry, links[i]->key);
+    jsrt_buf_puts(entry, ": ");
+    inspect_value(entry, dyn->slots[links[i]->offset], recurse + 1, indent + 2);
+  }
+  free(links);
+}
+
+static JSRTBuf *dyn_entries(const JSRTDynObject *dyn, size_t count, int recurse, size_t indent) {
+  JSRTBuf *entries = alloc_entries(count);
+  fill_dyn_entries(entries, dyn, count, recurse, indent);
+  return entries;
+}
+
 static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTObject *o = jsrt_as_object(v);
   const JSRTClass *cls = o->cls;
@@ -769,6 +883,7 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
    * same way. Every other nameless object (a literal, a plain dynamic object) still prints bare. */
   const char *const name = cls == &jsrt_class_null_proto  ? "[Object: null prototype]"
                            : cls->name[0] != '\0'         ? cls->name
+                           : dyn != NULL                  ? dynobj_constructor_name(v)
                                                           : NULL;
   const bool named = name != NULL;
 
@@ -781,12 +896,15 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
    * first, then insertion order -- plan.md §8 step 28), so console.log and the keys walk cannot
    * disagree. `#private` slots never enter either order. */
   uint32_t *fixed_order = NULL;
+  /* A fixed object's undeclared properties print after its declared ones (docs/VALUE.md §4.24). */
+  const JSRTDynObject *extras = dyn != NULL ? NULL : jsrt_fixed_extras(v);
+  const size_t extras_count = extras != NULL ? jsrt_shape_property_count(extras->shape) : 0;
   if (dyn != NULL) {
     count = jsrt_shape_property_count(dyn->shape);
   } else {
     uint32_t fixed_count = 0;
     fixed_order = jsrt_fixed_key_order(cls, &fixed_count);
-    count = fixed_count;
+    count = fixed_count + extras_count;
   }
 
   /* Emptiness first, like inspect_array: Node prints `{}` and `C {}` in full past the depth cap
@@ -811,23 +929,16 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
     return;
   }
 
-  JSRTBuf *entries = alloc_entries(count);
-  size_t next = 0;
+  JSRTBuf *entries = NULL;
   if (dyn != NULL) {
-    /* Dynamic keys follow OrdinaryOwnPropertyKeys: integer indices first, then insertion order. */
-    const JSRTShape **links = jsrt_shape_property_order(dyn->shape, (uint32_t)count);
-    for (size_t i = 0; i < count; i++) {
-      JSRTBuf *entry = &entries[next++];
-      jsrt_buf_init(entry);
-      append_key(entry, links[i]->key);
-      jsrt_buf_puts(entry, ": ");
-      inspect_value(entry, dyn->slots[links[i]->offset], recurse + 1, indent + 2);
-    }
-    free(links);
+    entries = dyn_entries(dyn, count, recurse, indent);
   } else {
-    /* fixed_order holds exactly the visible slots in enumeration order, so this loop runs `count`
-     * times with no skips -- `next` and `count` agree at emit_braced. */
-    for (size_t i = 0; i < count; i++) {
+    entries = alloc_entries(count);
+    size_t next = 0;
+    /* fixed_order holds exactly the visible slots in enumeration order, so this loop runs once per
+     * declared key with no skips, and the overflow table fills the rest -- `next` plus the
+     * table's count and `count` agree at emit_braced. */
+    for (size_t i = 0; i < count - extras_count; i++) {
       /* Enumeration order, not slot order: integer indices first, then the insertion sequence
        * the layout's key_order records (jsrt_value.h, JSRTClass::key_order). */
       const uint32_t slot = fixed_order[i];
@@ -840,6 +951,9 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
       append_key(entry, cls->fields[slot]);
       jsrt_buf_puts(entry, ": ");
       inspect_value(entry, o->fields[slot], recurse + 1, indent + 2);
+    }
+    if (extras != NULL) {
+      fill_dyn_entries(&entries[next], extras, extras_count, recurse, indent);
     }
     free(fixed_order);
   }
@@ -866,6 +980,14 @@ static void inspect_object(JSRTBuf *out, jsrt_value v, int recurse, size_t inden
  * deletion left behind are skipped here exactly as they are skipped by a lookup. */
 static void inspect_map(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
   const JSRTMap *m = jsrt_as_map(v);
+  /* Node's formatWeakCollection: a weak collection's entries are never shown, so neither is a
+   * count -- `WeakMap { <items unknown> }`, or `[WeakMap]` past the depth cap. */
+  if (m->cls == &jsrt_class_weakmap || m->cls == &jsrt_class_weakset) {
+    jsrt_buf_puts(out, recurse > INSPECT_MAX_DEPTH ? "[" : "");
+    jsrt_buf_puts(out, m->cls->name);
+    jsrt_buf_puts(out, recurse > INSPECT_MAX_DEPTH ? "]" : " { <items unknown> }");
+    return;
+  }
   const bool is_map = m->cls == &jsrt_class_map;
 
   char base[32];
@@ -959,6 +1081,16 @@ static void inspect_date(JSRTBuf *out, jsrt_value v) {
   append_string(out, (const JSString *)jsrt_ptr(text));
 }
 
+/* `label { entries }` for a class object's statics and a function's own properties. The label and
+ * the space after it are part of the prefix Node measures, along with the `{` -- the same
+ * accounting a named instance's class name gets. */
+static void emit_labeled(JSRTBuf *out, const char *label, JSRTBuf *entries, size_t count,
+                         size_t indent) {
+  jsrt_buf_puts(out, label);
+  jsrt_buf_putc(out, ' ');
+  emit_braced(out, entries, count, indent, strlen(label) + 1 /* the space */ + 1 /* "{" */);
+}
+
 /* `[class Point] { count: 0 }` -- a class object (docs/VALUE.md §4.17).
  *
  * The label names the class and, past a base, what it extends; Node then shows the class's OWN
@@ -1006,11 +1138,33 @@ static void inspect_class(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
     jsrt_buf_puts(entry, ": ");
     inspect_value(entry, *e->slot, recurse + 1, indent + 2);
   }
-  /* The label and the space after it are part of the prefix Node measures, along with the `{` --
-   * the same accounting a named instance's class name gets. */
-  jsrt_buf_puts(out, label);
-  jsrt_buf_putc(out, ' ');
-  emit_braced(out, entries, count, indent, strlen(label) + 1 /* the space */ + 1 /* "{" */);
+  emit_labeled(out, label, entries, count, indent);
+}
+
+/* Whether `v` is an ordinary function carrying own properties, which print after its label. */
+static bool has_own_props(jsrt_value v) {
+  return jsrt_is(v, JSRT_TAG_CLOSURE) && jsrt_as_closure(v)->props != NULL &&
+         jsrt_shape_property_count(jsrt_as_closure(v)->props->shape) > 0;
+}
+
+/* A function with own properties (plan-notes 310): `[Function: f] { count: 1 }`, laid out like a
+ * class object's statics -- the label and its space count toward the line budget with the `{`.
+ * Past the depth cap Node names only what it is, `[Function]`. A function with none prints its
+ * label alone through inspect_scalar. */
+static void inspect_function(JSRTBuf *out, jsrt_value v, int recurse, size_t indent) {
+  const JSRTClosure *c = jsrt_as_closure(v);
+  const size_t count = jsrt_shape_property_count(c->props->shape);
+  if (recurse > INSPECT_MAX_DEPTH) {
+    jsrt_buf_puts(out, "[Function]");
+    return;
+  }
+  char label[256];
+  if (c->name[0] == '\0') {
+    snprintf(label, sizeof label, "[Function (anonymous)]");
+  } else {
+    snprintf(label, sizeof label, "[Function: %s]", c->name);
+  }
+  emit_labeled(out, label, dyn_entries(c->props, count, recurse, indent), count, indent);
 }
 
 /* Every heap value with a printer of its own, in the order the tests must run (a builtin object
@@ -1055,6 +1209,10 @@ static void inspect_value(JSRTBuf *out, jsrt_value v, int recurse, size_t indent
   /* A class object prints `[class …]`, not the `[Function: …]` every other closure gets. */
   if (jsrt_is(v, JSRT_TAG_CLOSURE) && jsrt_as_closure(v)->klass != NULL) {
     inspect_class(out, v, recurse, indent);
+    return;
+  }
+  if (has_own_props(v)) {
+    inspect_function(out, v, recurse, indent);
     return;
   }
   if (!inspect_heap(out, v, recurse, indent)) {
@@ -1103,7 +1261,9 @@ static void write_grouped(const char *text, size_t len, FILE *stream) {
  * no such exception -- it inspects whatever it is given, which is the whole difference between
  * the two entry points. */
 static void print_one(JSRTBuf *out, jsrt_value v, bool bare) {
-  if (!inspect_heap(out, v, 0, 0)) {
+  if (has_own_props(v)) {
+    inspect_function(out, v, 0, 0);
+  } else if (!inspect_heap(out, v, 0, 0)) {
     inspect_scalar(out, v, !bare);
   }
 }
@@ -1123,6 +1283,157 @@ void jsrt_print(jsrt_value v) { print_to(v, stdout, true); }
  * why the golden runner compares BOTH streams byte-for-byte. */
 void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
 
+/* ============================================================================
+ * util.format -- console.log's placeholders (plan.md §9 Task 6.24)
+ *
+ * Node's console methods run every call through `formatWithOptionsInternal`
+ * (lib/internal/util/inspect.js, v26.7.0; plan-notes 337). When the first of two or more
+ * arguments is a string, `%s %d %i %f %j %o %O %c` each consume the next argument and `%%` is a
+ * literal `%`. The loop below is that function's loop, statement for statement, because its edge
+ * cases ARE the semantics: a `%` in the last position is literal, an exhausted argument list
+ * leaves every placeholder but `%%` as written, and an unknown letter after `%` is skipped.
+ * ============================================================================ */
+
+static void json_format(JSRTBuf *out, jsrt_value v);
+
+/* A value util.format would hand to user code -- an own or class-declared method `name` -- and so
+ * one whose answer depends on running it. ToPrimitive here never calls a user method (see
+ * jsrt_to_primitive), so the honest answer is a loud refusal; the gate refuses every case it can
+ * see at compile time and this catches the ones only the run reaches. */
+static bool has_user_method(jsrt_value v, const char *name) {
+  if (jsrt_is_fixed_object(v)) {
+    /* The method table begins with the base's, so the class's own table covers the chain. */
+    const JSRTClass *cls = jsrt_as_object(v)->cls;
+    for (uint32_t i = 0; i < cls->method_count; i++) {
+      if (cls->method_names != NULL && strcmp(cls->method_names[i], name) == 0) {
+        return true;
+      }
+    }
+    return jsrt_has_prop(v, name);
+  }
+  return (jsrt_is_dynobj(v) || jsrt_is(v, JSRT_TAG_ARRAY)) && jsrt_has_prop(v, name);
+}
+
+static _Noreturn void format_refused(const char *what) {
+  char message[192];
+  snprintf(message, sizeof message,
+           "STA2005: console.log %s is not yet supported; Node's util.format would print what "
+           "this binary cannot reproduce",
+           what);
+  jsrt_panic(message);
+}
+
+/* `formatNumberNoColor`: the number's own string, with -0 kept visible. */
+static void format_number(JSRTBuf *out, double d) {
+  char buf[64];
+  format_double(d, buf, sizeof buf, true);
+  jsrt_buf_puts(out, buf);
+}
+
+/* One placeholder applied to one argument. The comments name Node's arm for each. */
+static void format_one(JSRTBuf *out, uint16_t spec, jsrt_value v) {
+  switch (spec) {
+  case 's':
+    /* number: formatNumber. A function: String(fn), its SOURCE TEXT, which no binary carries
+     * (jsrt_to_string's known ceiling). Another primitive: String(v). An object whose toString is
+     * a builtin: inspect at depth 0 -- here, the inspect walk entered at the depth cap. */
+    if (jsrt_is_number(v)) {
+      format_number(out, jsrt_number_value(v));
+    } else if (jsrt_is(v, JSRT_TAG_CLOSURE)) {
+      format_refused("%s of a function");
+    } else if (!jsrt_is_object(v)) {
+      inspect_scalar(out, v, false);
+    } else if (has_user_method(v, "toString")) {
+      format_refused("%s of an object with its own toString");
+    } else {
+      inspect_value(out, v, INSPECT_MAX_DEPTH, 0);
+    }
+    return;
+  case 'd':
+  case 'i':
+  case 'f':
+    /* Number(v), parseInt(v), parseFloat(v): each reaches ToPrimitive on an object, which here
+     * is ToString without a user method (jsrt_to_primitive). That is exact for every object but
+     * one carrying its own toString or valueOf, and a Date under `%d`, whose number hint asks
+     * valueOf for the time value where ToString would answer NaN. */
+    if (has_user_method(v, "toString") || has_user_method(v, "valueOf")) {
+      format_refused("a numeric placeholder for an object with its own toString or valueOf");
+    }
+    if (spec == 'd' && jsrt_is_date(v)) {
+      format_refused("%d of a Date");
+    }
+    format_number(out, spec == 'd'   ? jsrt_to_number(v)
+                       : spec == 'i' ? jsrt_number_value(jsrt_global_parse_int(v, JSRT_UNDEFINED))
+                                     : jsrt_number_value(jsrt_global_parse_float(v)));
+    return;
+  case 'j':
+    json_format(out, v);
+    return;
+  case 'O':
+    inspect_value(out, v, 0, 0);
+    return;
+  case 'o':
+    /* `{ showHidden: true, depth: 4 }`: identical to `%O` for a primitive, and different for
+     * nearly every object (`[length]` on arrays, a function's own properties, the compact rule
+     * once depth passes 2). The printer models neither option, so objects are refused. */
+    if (jsrt_is_object(v)) {
+      format_refused("%o of an object");
+    }
+    inspect_scalar(out, v, true);
+    return;
+  default: /* 'c': CSS is consumed and prints nothing */
+    return;
+  }
+}
+
+/* Writes the format string's expansion and answers the index of the first argument it did not
+ * consume -- or 0 when nothing in it was a placeholder, in which case the string prints as an
+ * ordinary first argument and nothing has been written. */
+static uint32_t format_into(JSRTBuf *out, uint32_t count, const jsrt_value *args) {
+  const JSString *first = (const JSString *)jsrt_ptr(args[0]);
+  uint32_t a = 0;
+  uint32_t last = 0;
+  for (uint32_t i = 0; i + 1 < first->length; i++) {
+    if (first->data[i] != '%') {
+      continue;
+    }
+    const uint16_t next = first->data[++i];
+    if (a + 1 != count) {
+      switch (next) {
+      case 's':
+      case 'j':
+      case 'd':
+      case 'O':
+      case 'o':
+      case 'i':
+      case 'f':
+      case 'c':
+        append_units(out, first, last, i - 1);
+        format_one(out, next, args[++a]);
+        if (jsrt_pending()) {
+          return 0;
+        }
+        last = i + 1;
+        break;
+      case '%':
+        append_units(out, first, last, i);
+        last = i + 1;
+        break;
+      default:
+        break;
+      }
+    } else if (next == '%') {
+      append_units(out, first, last, i);
+      last = i + 1;
+    }
+  }
+  if (last == 0) {
+    return 0;
+  }
+  append_units(out, first, last, first->length);
+  return a + 1;
+}
+
 /* The variadic console form (plan.md §8 step 18): Node inspects every argument -- each one with
  * the bare-string exception -- and joins the forms with one space. No arguments prints the bare
  * newline, which is what `console.log()` is. One buffer for the whole line, so a multi-line
@@ -1130,7 +1441,16 @@ void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
 static void print_many_to(uint32_t count, const jsrt_value *args, FILE *stream) {
   JSRTBuf out;
   jsrt_buf_init(&out);
-  for (uint32_t i = 0; i < count; i++) {
+  uint32_t from = 0;
+  if (count >= 2 && jsrt_is(args[0], JSRT_TAG_STRING)) {
+    from = format_into(&out, count, args);
+    /* A `%j` getter threw: Node's console.log throws before writing, so nothing is written. */
+    if (jsrt_pending()) {
+      jsrt_buf_free(&out);
+      return;
+    }
+  }
+  for (uint32_t i = from; i < count; i++) {
     if (i > 0) {
       jsrt_buf_putc(&out, ' ');
     }
@@ -1559,7 +1879,7 @@ void jsrt_console_table(jsrt_value v) {
       jsrt_buf_init(&label);
       inspect_scalar(&label, jsrt_number((double)i), false);
       jsrt_strvec_push(&labels, jsrt_buf_take(&label));
-      value = row_list->elements[i];
+      value = jsrt_unhole(row_list->elements[i]);
     } else {
       const jsrt_value key = row_list->elements[i];
       value = jsrt_get_prop(v, jsrt_shape_key(key), NULL);
@@ -1586,7 +1906,7 @@ void jsrt_console_table(jsrt_value v) {
         jsrt_buf_init(&name);
         inspect_scalar(&name, jsrt_number((double)k), false);
         jsrt_strvec_push(&keys_flat, jsrt_buf_take(&name));
-        jsrt_strvec_push(&vals_flat, cell_of(inner->elements[k]));
+        jsrt_strvec_push(&vals_flat, cell_of(jsrt_unhole(inner->elements[k])));
         key_counts[i]++;
       }
       continue;
@@ -1716,7 +2036,8 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
         append_string(&joined, (const JSString *)jsrt_ptr(separator));
       }
     }
-    const jsrt_value element = a->elements[i];
+    /* A hole joins as the empty string, as undefined does (§23.1.3.18 step 7.c). */
+    const jsrt_value element = jsrt_unhole(a->elements[i]);
     if (jsrt_is(element, JSRT_TAG_NULL) || jsrt_is(element, JSRT_TAG_UNDEFINED)) {
       continue;
     }
@@ -1790,23 +2111,37 @@ static void json_quote(JSRTBuf *out, const JSString *str) {
   jsrt_buf_putc(out, '"');
 }
 
-static void json_check_cycle(const void *ptr, const JSONAncestor *chain) {
+/* `cyclic` is NULL for JSON.stringify itself, which cannot throw its TypeError yet and aborts.
+ * util.format's `%j` passes a flag instead: Node's tryStringify catches exactly that TypeError and
+ * prints `[Circular]`, so the cycle is an answer there, not an error. */
+static bool json_cycle(const void *ptr, const JSONAncestor *chain, bool *cyclic) {
   for (; chain != NULL; chain = chain->parent) {
     if (chain->ptr == ptr) {
+      if (cyclic != NULL) {
+        *cyclic = true;
+        return true;
+      }
       jsrt_panic("STA2005: JSON.stringify of a cyclic structure is not yet supported; the spec "
                  "throws TypeError, which builtins cannot raise yet");
     }
   }
+  return false;
 }
 
-static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
+/* A nested serialization stopped: it threw, or `%j` met a cycle. Either way nothing more is
+ * written, and the caller unwinds. */
+static bool json_stopped(const bool *cyclic) {
+  return jsrt_pending() || (cyclic != NULL && *cyclic);
+}
+
+static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain, bool *cyclic) {
   /* §25.5.2.2 step 2: SerializeJSONProperty calls the value's own `toJSON` before doing anything
    * else, and `Date.prototype.toJSON` is the only one the subset has. It answers a STRING, or
    * `null` for an Invalid Date -- which is why `JSON.stringify(new Date(NaN))` is "null" and not
    * an abort, unlike `toISOString`. Serializing the ANSWER, not the Date, is what keeps this one
    * arm from needing a cycle check or a shape walk. */
   if (jsrt_is_date(v)) {
-    json_value(out, jsrt_date_to_json(v), chain);
+    json_value(out, jsrt_date_to_json(v), chain, cyclic);
     return;
   }
   if (jsrt_is(v, JSRT_TAG_NULL)) {
@@ -1834,7 +2169,9 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
   }
   if (jsrt_is(v, JSRT_TAG_ARRAY)) {
     const JSRTArray *a = jsrt_as_array(v);
-    json_check_cycle(a, chain);
+    if (json_cycle(a, chain, cyclic)) {
+      return;
+    }
     const JSONAncestor here = {a, chain};
     jsrt_buf_putc(out, '[');
     for (uint32_t i = 0; i < a->length; i++) {
@@ -1842,11 +2179,13 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
         jsrt_buf_putc(out, ',');
       }
       /* An unserializable ELEMENT is null, not skipped -- indices must keep their meaning. */
-      if (json_unserializable(a->elements[i])) {
+      /* A hole serializes as `undefined` does: Get answers undefined (§25.5.2.6 step 8.a). */
+      const jsrt_value element = jsrt_unhole(a->elements[i]);
+      if (json_unserializable(element)) {
         jsrt_buf_puts(out, "null");
       } else {
-        json_value(out, a->elements[i], &here);
-        if (jsrt_pending()) {
+        json_value(out, element, &here, cyclic);
+        if (json_stopped(cyclic)) {
           return;
         }
       }
@@ -1874,7 +2213,9 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
       jsrt_buf_putc(out, '}');
       return;
     }
-    json_check_cycle(jsrt_ptr(v), chain);
+    if (json_cycle(jsrt_ptr(v), chain, cyclic)) {
+      return;
+    }
     const JSONAncestor here = {jsrt_ptr(v), chain};
     /* A nested value may throw during serialization. Later getters must not run before it. */
     const JSRTArray *keys = jsrt_as_array(jsrt_object_keys(v));
@@ -1895,8 +2236,8 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
       first = false;
       json_quote(out, (const JSString *)jsrt_ptr(key));
       jsrt_buf_putc(out, ':');
-      json_value(out, value, &here);
-      if (jsrt_pending()) {
+      json_value(out, value, &here, cyclic);
+      if (json_stopped(cyclic)) {
         return;
       }
     }
@@ -1907,10 +2248,30 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
              "spec returns undefined where this call's type promises a string");
 }
 
+/* `%j`: Node's tryStringify -- JSON.stringify, `undefined` where it answers undefined, and
+ * `[Circular]` for the one TypeError it catches. A cycle is found before anything after it is
+ * written, but the partial text is discarded all the same: the answer replaces it. */
+static void json_format(JSRTBuf *out, jsrt_value v) {
+  if (json_unserializable(v)) {
+    jsrt_buf_puts(out, "undefined");
+    return;
+  }
+  JSRTBuf text;
+  jsrt_buf_init(&text);
+  bool cyclic = false;
+  json_value(&text, v, NULL, &cyclic);
+  if (cyclic) {
+    jsrt_buf_puts(out, "[Circular]");
+  } else if (!jsrt_pending()) {
+    jsrt_buf_append(out, text.data, text.len);
+  }
+  jsrt_buf_free(&text);
+}
+
 jsrt_value jsrt_json_stringify(jsrt_value v) {
   JSRTBuf out;
   jsrt_buf_init(&out);
-  json_value(&out, v, NULL);
+  json_value(&out, v, NULL, NULL);
   if (jsrt_pending()) {
     jsrt_buf_free(&out);
     return JSRT_UNDEFINED;
@@ -1955,10 +2316,10 @@ jsrt_value jsrt_to_string(jsrt_value v) {
      * function rather than "[object Object]", and differs from Node. */
     snprintf(buf, sizeof buf, "function %s() { [native code] }", jsrt_as_closure(v)->name);
   } else if (jsrt_is_map_or_set(v)) {
-    /* `Symbol.toStringTag` is "Map"/"Set", so `Object.prototype.toString` -- which is what
-     * ToString reaches through ToPrimitive here -- answers `[object Map]` (plan.md §8 step 29). */
-    snprintf(buf, sizeof buf, "[object %s]",
-             jsrt_as_object(v)->cls == &jsrt_class_map ? "Map" : "Set");
+    /* `Symbol.toStringTag` is the class name ("Map", "WeakSet", ...), so
+     * `Object.prototype.toString` -- which is what ToString reaches through ToPrimitive here --
+     * answers `[object Map]` (plan.md §8 step 29). */
+    snprintf(buf, sizeof buf, "[object %s]", jsrt_as_object(v)->cls->name);
   } else if (jsrt_is_regexp(v)) {
     /* `RegExp.prototype.toString`: `/source/flags` off the normalized strings (§22.2.6.13). */
     return jsrt_regexp_to_string(v);

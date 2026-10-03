@@ -18,12 +18,15 @@ import type {
   DateComponents,
   DateNew,
   DateOp,
+  NumberOp,
   DateStaticCall,
+  GlobalCall,
   DeleteProp,
   DynEntry,
   DynFieldAccess,
   DynFieldAssignment,
   DynMethodCall,
+  FieldCall,
   DynObjectLiteral,
   EnvCapture,
   ErrorNew,
@@ -46,6 +49,8 @@ import type {
   MethodValue,
   Module,
   NewExpr,
+  NewValue,
+  InstanceOfValue,
   ObjectLiteral,
   ObjectStaticCall,
   OptionalChain,
@@ -70,9 +75,12 @@ import type {
 } from '../hir/nodes.ts';
 import {
   consoleEntryPoint,
+  consoleMayThrow,
   isConsoleVariadicWidth,
   DATE_OPS,
+  NUMBER_OPS,
   DATE_STATICS,
+  GLOBAL_CALLS,
   errorDescriptor,
   isAccessorEntry,
   isComputedEntry,
@@ -148,6 +156,7 @@ const CHECK_FUNCTIONS: Readonly<Record<string, string | undefined>> = {
   number: 'jsrt_check_number',
   string: 'jsrt_check_string',
   boolean: 'jsrt_check_boolean',
+  uint8array: 'jsrt_check_uint8array',
 };
 
 const UNARY_EMITTERS: Readonly<Record<UnaryOp['operator'], (operand: string) => string>> = {
@@ -511,6 +520,8 @@ function escapeBytes(bytes: readonly number[]): string {
 /** Every node that claims a contiguous run of rooted call slots (see `callSlots`). */
 type CallSlotted =
   | ArrayOp
+  | InstanceOfValue
+  | NewValue
   | CallExpr
   | ConsoleLogCall
   | JsonParse
@@ -519,9 +530,12 @@ type CallSlotted =
   | DateComponents
   | DateNew
   | DateOp
+  | NumberOp
   | DateStaticCall
+  | GlobalCall
   | DynMethodCall
   | DynObjectLiteral
+  | FieldCall
   | ErrorNew
   | ExternCall
   | MathCall
@@ -822,9 +836,11 @@ class Emitter {
       out.push(
         `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env);`,
       );
+      // Not `const`: an ordinary function's `prototype` and own properties are written into its
+      // closure on first use (plan-notes 310), and writing a `const` object is undefined behavior.
       out.push(
-        `static const JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
-          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}, NULL};`,
+        `static JSRTClosure _jsrt_closure_${unit.id} = {_jsrt_fn_${unit.id}, ` +
+          `${closureMeta(unit.fn).arity}, ${cNameLiteral(unit.name)}, NULL, ${closureMeta(unit.fn).hasReceiver ? 'true' : 'false'}, NULL, ${unit.fn.constructible === true ? 'true' : 'false'}};`,
       );
     }
     if (this.functions.length > 0) {
@@ -971,15 +987,12 @@ class Emitter {
       return produced;
     }
 
-    this.appendLine('int main(void) {');
-    this.indent++;
-    this.appendLine('jsrt_init();', module.span);
-    this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
+    this.emitMainEntry(module, globalSlots);
     this.emitModuleEnv(module);
     this.emitSyncTopLevelStatements(module);
     this.emitMicrotaskDrain(module);
     // No pop: the globals frame is pushed once and lives as long as the program does.
-    this.appendLine('return 0;', module.span);
+    this.appendLine('return (int)jsrt_process_exit_code();', module.span);
     if (this.unwindUsed) {
       // An exception no try caught: report on stderr and exit(1), which is what Node does.
       this.appendLine('_jsrt_unwind: ;', module.span);
@@ -991,6 +1004,17 @@ class Emitter {
     return produced;
   }
 
+  /* The program entry both module shapes share. `main` keeps its argument vector for
+   * `std/process.argv` before any module code runs, and returns the status `std/process`'s
+   * `setExitCode` left (0 unless a program set one; docs/STD.md §5). */
+  private emitMainEntry(module: Module, globalSlots: number): void {
+    this.appendLine('int main(int argc, char **argv) {');
+    this.indent++;
+    this.appendLine('jsrt_init();', module.span);
+    this.appendLine('jsrt_process_args(argc, argv);', module.span);
+    this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
+  }
+
   /* A module with a top-level await is an async unit (Phase 5 step 9). Named bindings stay in
    * the globals array so the rest of the program still reads JSRT_GLOBAL; temps and await state
    * live in a heap environment because a suspension pops main's C frame. Init runs in Task 3.11's
@@ -1000,22 +1024,9 @@ class Emitter {
     this.emitModuleDoneMain();
     this.emitAsyncModuleForward();
 
-    this.appendLine('int main(void) {');
-    this.indent++;
-    this.appendLine('jsrt_init();', module.span);
-    this.appendLine(`JSRT_GLOBALS_ENTER(${globalSlots});`, module.span);
-    this.emitHoistedFunctions(module.statements);
-    this.appendLine('JSRT_FRAME(1);', module.span);
-    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
-    this.appendLine(
-      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
-      module.span,
-    );
-    this.appendLine('jsrt_promise_subscribe(JSRT_LOCAL(0), _jsrt_module_done, NULL);', module.span);
-    this.appendLine('jsrt_run_microtasks();', module.span);
-    this.appendLine('JSRT_FRAME_POP();', module.span);
-    this.appendLine('return 0;', module.span);
+    this.emitMainEntry(module, globalSlots);
+    this.emitAsyncModuleRun(module, envSlots, '_jsrt_module_done');
+    this.appendLine('return (int)jsrt_process_exit_code();', module.span);
     this.indent--;
     this.appendLine('}');
     this.appendLine('');
@@ -1293,6 +1304,23 @@ class Emitter {
     this.appendLine('');
   }
 
+  /* The body of an async unit's entry, `main` or `stator_init_<unit>`: start the module's async
+   * function in a fresh heap environment, subscribe `onDone` to its promise, and drain the
+   * microtasks. The frame pushed here pops before the caller's own exit code. */
+  private emitAsyncModuleRun(module: Module, envSlots: number, onDone: string): void {
+    this.emitHoistedFunctions(module.statements);
+    this.appendLine('JSRT_FRAME(1);', module.span);
+    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
+    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
+    this.appendLine(
+      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
+      module.span,
+    );
+    this.appendLine(`jsrt_promise_subscribe(JSRT_LOCAL(0), ${onDone}, NULL);`, module.span);
+    this.appendLine('jsrt_run_microtasks();', module.span);
+    this.appendLine('JSRT_FRAME_POP();', module.span);
+  }
+
   /* `stator_init_<unit>` for a top-level-await module: `main`'s async startup with the exit
    * replaced by init semantics. A rejected module body captures into the error cell instead
    * of `jsrt_uncaught`'s exit(1): libraries must not exit their host. An unhandled rejection
@@ -1306,17 +1334,7 @@ class Emitter {
     scratch: number,
   ): void {
     this.emitInitOpen(library.unit, module.span, globalSlots);
-    this.emitHoistedFunctions(module.statements);
-    this.appendLine('JSRT_FRAME(1);', module.span);
-    this.appendLine(`JSRTEnv *_jsrt_env = jsrt_env_new(NULL, ${String(envSlots)});`, module.span);
-    this.appendLine('JSRT_FRAME_ENV(_jsrt_env);', module.span);
-    this.appendLine(
-      'JSRT_LOCAL(0) = jsrt_async_start(_jsrt_env, _jsrt_async_module);',
-      module.span,
-    );
-    this.appendLine('jsrt_promise_subscribe(JSRT_LOCAL(0), _jsrt_init_done, NULL);', module.span);
-    this.appendLine('jsrt_run_microtasks();', module.span);
-    this.appendLine('JSRT_FRAME_POP();', module.span);
+    this.emitAsyncModuleRun(module, envSlots, '_jsrt_init_done');
     this.appendLine('if (_jsrt_init_rejected) {', module.span);
     this.indent++;
     this.appendLine(
@@ -2097,9 +2115,11 @@ class Emitter {
       case 'new':
       case 'method-call':
       case 'dyn-method-call':
+      case 'field-call':
         this.callSlots.set(expr, this.slotCount);
-        this.slotCount += (expr.kind === 'dyn-method-call' ? 2 : 1) + expr.args.length;
-        if (expr.kind === 'method-call' || expr.kind === 'dyn-method-call') {
+        this.slotCount +=
+          (expr.kind === 'method-call' || expr.kind === 'new' ? 1 : 2) + expr.args.length;
+        if (expr.kind !== 'new') {
           this.countExpression(expr.target);
         }
         for (const arg of expr.args) {
@@ -2223,6 +2243,7 @@ class Emitter {
       // `subarray` allocates the view while the bounds it was given are still live.
       case 'date-components':
       case 'date-static':
+      case 'global-call':
       case 'object-static':
       case 'typed-op':
         this.countRooted(expr, undefined, expr.args);
@@ -2237,6 +2258,7 @@ class Emitter {
       case 'array-op':
       case 'collection-op':
       case 'date-op':
+      case 'number-op':
       case 'regexp-op':
       case 'string-op':
         this.countRooted(expr, expr.target, expr.args);
@@ -2274,18 +2296,15 @@ class Emitter {
       case 'instanceof':
         this.countExpression(expr.target);
         break;
-      // The lowering never constructs these (class-object construction lands here only once
-      // the gate admits it): each counts its operands exactly like the named spelling it
-      // generalizes — one rooted slot per evaluated child, no call slots of its own.
+      // `new v(...)` takes the call layout: the constructor value, then each argument, rooted in
+      // one contiguous run that is also the `argv` the runtime reads (plan-notes 310).
       case 'new-value':
-        this.countExpression(expr.target);
-        for (const arg of expr.args) {
-          this.countExpression(arg);
-        }
+        this.countRooted(expr, expr.target, expr.args);
         break;
+      // The walk can throw (a right side with no object `prototype`), so it lands as a statement
+      // with its pending check, and both operands wait in rooted slots like a call's.
       case 'instanceof-value':
-        this.countExpression(expr.target);
-        this.countExpression(expr.ctor);
+        this.countRooted(expr, expr.target, [expr.ctor]);
         break;
       case 'class-value':
         break;
@@ -2356,7 +2375,7 @@ class Emitter {
         // has to append. See the `console-log` case in emitExpression for why the two differ.
         if (stmt.expression.kind === 'console-log') {
           this.appendLine(`${this.consoleCall(stmt.expression)};`, stmt.span);
-          if (stmt.expression.method === 'table') {
+          if (consoleMayThrow(stmt.expression)) {
             this.emitPendingCheck(stmt.span);
           }
           break;
@@ -2870,7 +2889,8 @@ class Emitter {
       this.appendLine(`${bind} = jsrt_number((double)${cursor});`, stmt.span);
       return;
     }
-    const element = `jsrt_as_array(${iterable})->elements[${cursor}]`;
+    // A hole reads as undefined (an array of an Unknown element may be sparse; docs/VALUE.md §4.4).
+    const element = `jsrt_unhole(jsrt_as_array(${iterable})->elements[${cursor}])`;
     if (stmt.view === 'entries') {
       const pair = `_jsrt_pair_${cursor}`;
       this.appendLine(
@@ -3282,13 +3302,14 @@ class Emitter {
       );
     }
     if (expr.op === 'concat') {
-      if (expr.args.length === 1 && expr.args[0]?.type.kind === 'array') {
-        return `jsrt_array_concat(${target}, ${arg(0)})`;
-      }
       const items = rest(0);
-      return items === ''
-        ? `jsrt_array_concat_many(${target}, 0)`
-        : `jsrt_array_concat_many(${target}, ${String(expr.args.length)}, ${items})`;
+      const call =
+        expr.args.length === 1 && expr.args[0]?.type.kind === 'array'
+          ? `jsrt_array_concat(${target}, ${arg(0)})`
+          : items === ''
+            ? `jsrt_array_concat_many(${target}, 0)`
+            : `jsrt_array_concat_many(${target}, ${String(expr.args.length)}, ${items})`;
+      return expr.spread === true ? `jsrt_array_fill_holes(${call})` : call;
     }
     if (expr.op === 'lastIndexOf' && expr.args.length === 2) {
       return `jsrt_array_last_index_of_from(${target}, ${arg(0)}, ${arg(1)})`;
@@ -3420,6 +3441,25 @@ class Emitter {
         // dispatch, neither of which this direct call can reach), so the collector sees the
         // handle for exactly as long as C may.
         cArgs.push(`jsrt_ptr(${slot})`);
+      } else if (kind === 'bytes') {
+        // Two C arguments for one TS parameter (docs/FFI.md §2): the view's bytes in place and
+        // its length. No copy -- the callee reads or writes the buffer's own block. Stable for
+        // the call: the view stays in its rooted slot (the buffer edge keeps the block alive),
+        // neither collector moves memory, a buffer never resizes, and the C call runs no Stator
+        // code, so nothing can collect or detach it mid-call (docs/VALUE.md §4.19). The `void *`
+        // cast lets a binding header spell the pointee its own way (`char *`, `unsigned char *`).
+        // The layout read is guarded EVEN for a statically proven view: a `.ts` parameter
+        // annotated `Uint8Array` is reachable from js-mode code with anything in it (only the
+        // number/string/boolean call edges are checked, plan-notes 308), and here a lie would
+        // be a wild pointer in C, not a wrong value. One tag and class compare per call; a
+        // dynamic argument already carries the lowering's check, so it is not checked twice.
+        if (expr.args[index]?.kind !== 'boundary-check') {
+          this.appendLine(
+            `(void)jsrt_check_uint8array(${slot}, ${this.callLocation(expr.span)});`,
+            expr.span,
+          );
+        }
+        cArgs.push(`(void *)jsrt_uint8array_bytes(${slot})`, `jsrt_uint8array_count(${slot})`);
       } else if (kind === 'out-pointer') {
         // A slot address, not a value (docs/FFI.md §2): the callee writes the `T*` through it
         // into the argument's own frame slot, which stays rooted across the call exactly like
@@ -3948,7 +3988,7 @@ class Emitter {
       // takes `consoleCall` bare instead, because `(jsrt_print(x), JSRT_UNDEFINED);` is a
       // -Wunused-value warning on every console.log in the program.
       case 'console-log': {
-        if (expr.method === 'table') {
+        if (consoleMayThrow(expr)) {
           this.appendLine(`${this.consoleCall(expr)};`, expr.span);
           this.emitPendingCheck(expr.span);
           return 'JSRT_UNDEFINED';
@@ -4054,9 +4094,14 @@ class Emitter {
         this.beginCall(parts, expr.callee, expr.args, expr.span, base);
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);
+        // A spread call's one argument is the folded list (verifier STA4104).
+        const call =
+          expr.spread === true
+            ? `jsrt_call_spread_at(${this.slotAt(base)}, NULL, ${this.slotAt(base + 1)}, ${loc})`
+            : `jsrt_call_at(${this.slotAt(base)}, ${expr.args.length}, ${argv}, ${loc})`;
         return this.finishStatement(
           parts,
-          `${this.slotAt(base)} = jsrt_call_at(${this.slotAt(base)}, ${expr.args.length}, ${argv}, ${loc})`,
+          `${this.slotAt(base)} = ${call}`,
           this.slotAt(base),
           expr.span,
         );
@@ -4091,11 +4136,6 @@ class Emitter {
       }
 
       case 'field-access': {
-        // A module namespace field is the export's own global slot (docs/VALUE.md §4.14).
-        if (expr.target.type.kind === 'object' && expr.target.type.namespace === true) {
-          this.emitExpression(expr.target);
-          return this.slotRef(expr.field);
-        }
         return `jsrt_object_get_field(${this.emitExpression(expr.target)}, ${expr.slot}, ${cNameLiteral(expr.field)})`;
       }
 
@@ -4260,21 +4300,43 @@ class Emitter {
       // when -- the loaded closure declares one (`has_receiver`, docs/VALUE.md §4.16). A
       // non-function callee panics exactly as an ordinary `call` does (`STA2006` with the site's
       // `file:line`).
-      case 'dyn-method-call': {
+      // A field call is the same call with the callee loaded from its slot rather than through
+      // the shape table: a slot load cannot throw, so no pending check follows it.
+      case 'dyn-method-call':
+      case 'field-call': {
         const base = this.callSlots.get(expr);
         if (base === undefined) {
-          throw new Error('dynamic method call was not registered during counting');
+          throw new Error(`${expr.kind} was not registered during counting`);
         }
         const method = this.slotAt(base + 1 + expr.args.length);
         const parts: string[] = [];
         this.beginCall(parts, expr.target, expr.args, expr.span, base);
         parts.push(
-          `${method} = jsrt_get_prop(${this.slotAt(base)}, ${cNameLiteral(expr.method)}, &${this.icSite()})`,
+          expr.kind === 'field-call'
+            ? `${method} = jsrt_object_get_field(${this.slotAt(base)}, ${expr.slot}, ${cNameLiteral(expr.field)})`
+            : `${method} = jsrt_get_prop(${this.slotAt(base)}, ${cNameLiteral(expr.method)}, &${this.icSite()})`,
         );
         this.flushParts(parts, expr.span);
-        this.emitPendingCheck(expr.span);
+        if (expr.kind === 'dyn-method-call') {
+          this.emitPendingCheck(expr.span);
+          if (expr.notFunction !== undefined) {
+            this.appendLine(
+              `if (!jsrt_is(${method}, JSRT_TAG_CLOSURE)) { jsrt_throw_error(&jsrt_class_type_error, "${this.escapeCString(`${expr.notFunction} is not a function`)}"); }`,
+              expr.span,
+            );
+            this.emitPendingCheck(expr.span);
+          }
+        }
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);
+        if (expr.kind === 'dyn-method-call' && expr.spread === true) {
+          return this.finishStatement(
+            [],
+            `${this.slotAt(base)} = jsrt_call_spread_at(${method}, &${this.slotAt(base)}, ${this.slotAt(base + 1)}, ${loc})`,
+            this.slotAt(base),
+            expr.span,
+          );
+        }
         const withReceiver = `jsrt_call_at(${method}, ${String(1 + expr.args.length)}, &${this.slotAt(base)}, ${loc})`;
         const withoutReceiver = `jsrt_call_at(${method}, ${String(expr.args.length)}, ${argv}, ${loc})`;
         return this.finishStatement(
@@ -4663,7 +4725,9 @@ class Emitter {
       }
 
       case 'collection-new':
-        return expr.collection === 'map' ? 'jsrt_map_new()' : 'jsrt_set_new()';
+        return expr.weak
+          ? `jsrt_weak_collection_new(${expr.collection === 'map' ? 'true' : 'false'})`
+          : `jsrt_${expr.collection}_new()`;
 
       // Compiled at EVERY evaluation, never hoisted: §22.2.4.1 makes each evaluation a fresh
       // object, and it has to be, because `lastIndex` is mutable state on it. The pattern rides in
@@ -4770,6 +4834,7 @@ class Emitter {
       case 'collection-op':
       case 'array-op':
       case 'date-op':
+      case 'number-op':
       case 'regexp-op':
       case 'string-op': {
         const base = this.callSlots.get(expr);
@@ -4813,16 +4878,18 @@ class Emitter {
               ? collectionCall(expr.op, expr.collection, operands)
               : expr.kind === 'date-op'
                 ? `${DATE_OPS[expr.op].fn}(${operands})`
-                : expr.kind === 'regexp-op'
-                  ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
-                    // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
-                    // `exec` already answers a value: the match array, or null.
-                    REGEXP_OPS[expr.op].result === 'boolean'
-                    ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
-                    : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
-                  : expr.kind === 'array-op'
-                    ? this.arrayOpCall(expr, base)
-                    : `jsrt_string_${snakeCase(expr.op)}(${operands})`;
+                : expr.kind === 'number-op'
+                  ? `${NUMBER_OPS[expr.op].fn}(${operands})`
+                  : expr.kind === 'regexp-op'
+                    ? // `test` is the one op that answers a C bool rather than a jsrt_value -- the engine
+                      // has no notion of our values, so the boxing is the bridge's job (jsrt_regexp.c).
+                      // `exec` already answers a value: the match array, or null.
+                      REGEXP_OPS[expr.op].result === 'boolean'
+                      ? `jsrt_bool(jsrt_regexp_${snakeCase(expr.op)}(${operands}))`
+                      : `jsrt_regexp_${snakeCase(expr.op)}(${operands})`
+                    : expr.kind === 'array-op'
+                      ? this.arrayOpCall(expr, base)
+                      : `jsrt_string_${snakeCase(expr.op)}(${operands})`;
         // An op that calls back into compiled code can throw, so it gets its own STATEMENT and a
         // pending check -- the same discipline `call` follows, and for the same reason: the check
         // has to sit between the op and whatever consumes its result, which a comma expression
@@ -4833,7 +4900,9 @@ class Emitter {
         const canThrow =
           expr.kind === 'array-op' ||
           (expr.kind === 'collection-op' && expr.op === 'forEach') ||
+          (expr.kind === 'collection-op' && mayRefuseWeakKey(expr)) ||
           (expr.kind === 'date-op' && expr.op === 'toISOString') ||
+          expr.kind === 'number-op' ||
           (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
         return this.finishOp(parts, base, opCall, expr.span, flushed, canThrow);
       }
@@ -4843,6 +4912,7 @@ class Emitter {
       // pick the order (`Math.pow(f(), g())` must run f first).
       case 'date-components':
       case 'date-static':
+      case 'global-call':
       case 'math-call':
       case 'object-static':
       case 'typed-op': {
@@ -4853,9 +4923,11 @@ class Emitter {
               ? 'jsrt_date_from_components'
               : expr.kind === 'date-static'
                 ? DATE_STATICS[expr.method].fn
-                : expr.kind === 'typed-op'
-                  ? TYPED_OPS[expr.op].fn
-                  : `jsrt_object_${snakeCase(expr.method)}`;
+                : expr.kind === 'global-call'
+                  ? GLOBAL_CALLS[expr.name].fn
+                  : expr.kind === 'typed-op'
+                    ? TYPED_OPS[expr.op].fn
+                    : `jsrt_object_${snakeCase(expr.method)}`;
         // Math takes immediates, so a lone argument has neither an order to fix nor anything to
         // keep rooted and nests directly. An Object walk always uses its slots (see counting).
         if (expr.kind === 'math-call' && expr.args.length <= 1) {
@@ -4878,7 +4950,9 @@ class Emitter {
           opCall,
           expr.span,
           flushed,
-          expr.kind === 'object-static' || expr.kind === 'typed-op',
+          expr.kind === 'object-static' ||
+            expr.kind === 'typed-op' ||
+            (expr.kind === 'global-call' && GLOBAL_CALLS[expr.name].throws),
         );
       }
 
@@ -4978,19 +5052,42 @@ class Emitter {
         return `jsrt_bool(jsrt_instanceof(${this.emitExpression(expr.target)}, &_jsrt_class_${id}))`;
       }
 
-      // `new v(...)` where `v` is a class-object value: allocation and the constructor both
-      // dispatch through the value (one runtime entry) because the instance's class is a
-      // run-time fact. Operands are counted above; slots follow the named-`new` counting rule
-      // (receiver slot holds the result, arguments after it) rather than inline C temporaries,
-      // so nothing the constructor's arguments allocate can collect the half-built object.
+      // `new v(...)` where `v` is a class object or a constructible function: allocation and the
+      // constructor both dispatch through the value (one runtime entry) because what it builds is
+      // a run-time fact. The constructor's slot receives the result, the arguments after it are
+      // the `argv`, and the call lands as a statement so a throwing constructor (or a
+      // non-constructor's TypeError) meets its pending check before anything consumes it.
       case 'new-value': {
-        return `jsrt_construct(${this.emitExpression(expr.target)}, ${expr.args.length}${expr.args.length === 0 ? '' : `, ${expr.args.map((arg) => this.emitExpression(arg)).join(', ')}`})`;
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('new-value was not registered during counting');
+        }
+        const parts: string[] = [];
+        this.beginCall(parts, expr.target, expr.args, expr.span, base);
+        const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
+        return this.finishStatement(
+          parts,
+          `${this.slotAt(base)} = jsrt_construct(${this.slotAt(base)}, ${expr.args.length}, ${argv})`,
+          this.slotAt(base),
+          expr.span,
+        );
       }
 
       // `o instanceof v` where `v` is a class-object value: the chain walk against the
       // descriptor the value carries, or Node's TypeError when it carries no constructor.
       case 'instanceof-value': {
-        return `jsrt_bool(jsrt_instanceof_ctor(${this.emitExpression(expr.target)}, ${this.emitExpression(expr.ctor)}))`;
+        const base = this.callSlots.get(expr);
+        if (base === undefined) {
+          throw new Error('instanceof-value was not registered during counting');
+        }
+        const parts: string[] = [];
+        this.beginCall(parts, expr.target, [expr.ctor], expr.span, base);
+        return this.finishStatement(
+          parts,
+          `${this.slotAt(base)} = jsrt_bool(jsrt_instanceof_ctor(${this.slotAt(base)}, ${this.slotAt(base + 1)}))`,
+          this.slotAt(base),
+          expr.span,
+        );
       }
 
       // One file-scope constant per class (docs/VALUE.md §4.17): the closure-shaped class
@@ -5017,6 +5114,8 @@ class Emitter {
       `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
     );
     this.indent++;
+    // Before the frame, so the overflow return has nothing to pop (plan.md §9 Task 6.23).
+    this.appendLine('JSRT_STACK_CHECK();', fn.span);
     // A zero-length array is not valid C11 and a function that roots nothing is valid TypeScript,
     // so the frame has a floor of one slot -- the same rule JSRT_GLOBALS(n) follows.
     this.appendLine(`JSRT_FRAME(${Math.max(1, this.slotCount)});`, fn.span);
@@ -5133,6 +5232,7 @@ class Emitter {
       `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
     );
     this.indent++;
+    this.appendLine('JSRT_STACK_CHECK();', fn.span);
     this.appendLine('JSRT_FRAME(1);', fn.span);
     this.appendLine(
       `JSRTEnv *_jsrt_env = jsrt_env_new(env, ${Math.max(1, this.slotCount)});`,
@@ -5293,6 +5393,10 @@ class Emitter {
         // name the pointee (that spelling lives in the binding header, when one governs),
         // so it takes `void **` and every argument arrives with an explicit cast to match.
         return 'void **';
+      case 'bytes':
+        // One TS parameter, two C parameters: the parameter list is joined from these, so
+        // the pair lands in place (docs/FFI.md §2).
+        return 'uint8_t *, size_t';
       case 'void':
         return 'void';
     }
@@ -5531,6 +5635,12 @@ class Emitter {
     for (let index = 1; index < partIndex; index++) {
       sequence.push(`${first} = jsrt_string_concat(${first}, ${this.slotAt(slots.base + index)})`);
     }
+    // Concatenating can throw past the maximum string length (see emitBinaryOp).
+    if (partIndex > 1) {
+      this.flushParts(sequence, expr.span);
+      this.emitPendingCheck(expr.span);
+      return first;
+    }
     if (!flushed) {
       sequence.push(first);
       return `(${sequence.join(', ')})`;
@@ -5561,6 +5671,15 @@ class Emitter {
     if (expr.operator === 'in') {
       this.flushParts(parts, expr.span);
       this.appendLine(`${left} = jsrt_bool(jsrt_in(${left}, ${right}));`, expr.span);
+      this.emitPendingCheck(expr.span);
+      return left;
+    }
+    // A `+` that may concatenate can throw too: past the maximum string length the runtime leaves
+    // `RangeError: Invalid string length` pending (plan.md §9 Task 6.23, F12). A `+` typed number
+    // adds and never throws, so it stays an expression.
+    if (expr.operator === '+' && expr.type.kind !== 'number') {
+      this.flushParts(parts, expr.span);
+      this.appendLine(`${left} = ${BINARY_EMITTERS['+'](left, right)};`, expr.span);
       this.emitPendingCheck(expr.span);
       return left;
     }
@@ -5803,6 +5922,11 @@ class Emitter {
         }
         const rhs = this.emitExpression(value);
         this.appendLine(`${result} = ${BINARY_EMITTERS[op](result, rhs)};`, expr.span);
+        // Before the write: a `+=` past the maximum string length throws and leaves the target as
+        // it was (see emitBinaryOp).
+        if (op === '+' && expr.type.kind !== 'number') {
+          this.emitPendingCheck(expr.span);
+        }
         this.appendLine(`${write(result)};`, expr.span);
       }
     }
@@ -5867,7 +5991,8 @@ class Emitter {
     }
     const name = cNameLiteral(fn.name ?? '');
     const meta = closureMeta(fn);
-    return `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? 'true' : 'false'})`;
+    const closure = `jsrt_closure_new(_jsrt_fn_${id}, ${meta.arity}, ${name}, ${this.currentEnv()}, ${meta.hasReceiver ? 'true' : 'false'})`;
+    return fn.constructible === true ? `jsrt_closure_constructible(${closure})` : closure;
   }
 
   private appendLine(line: string, span?: Span): void {
@@ -5942,9 +6067,27 @@ function indexSetCall(target: HType, object: string, index: string, value: strin
       return `jsrt_dyn_index_set(${object}, ${index}, ${value}, NULL)`;
     case 'uint8array':
       return `jsrt_uint8array_put(${object}, ${index}, ${value})`;
+    case 'array':
+      // Only an array whose element is Unknown may be made sparse: a typed element has no value
+      // that could stand for a hole, so its write past the end stays STA2002 (docs/VALUE.md §4.4).
+      return target.element.kind === 'unknown'
+        ? `jsrt_array_set_sparse(${object}, ${index}, ${value})`
+        : `jsrt_array_set(${object}, ${index}, ${value})`;
     default:
       return `jsrt_array_set(${object}, ${index}, ${value})`;
   }
+}
+
+/** Whether a `set`/`add` may meet a weak collection and a key it refuses (docs/VALUE.md §4.22).
+ * A WeakMap is typed as a Map, so the KEY type decides: a primitive key means a non-weak Map,
+ * and an object-typed key is always accepted, which leaves the open ones. */
+function mayRefuseWeakKey(expr: CollectionOp): boolean {
+  if (expr.op !== 'set' && expr.op !== 'add') {
+    return false;
+  }
+  const type = expr.target.type;
+  const key = type.kind === 'map' ? type.key : type.kind === 'set' ? type.element : undefined;
+  return key === undefined || key.kind === 'unknown' || key.kind === 'type-param';
 }
 
 function iteratorBoxCall(expr: ArrayOp | CollectionOp, operands: string): string | undefined {

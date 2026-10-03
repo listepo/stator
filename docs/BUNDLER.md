@@ -1,8 +1,10 @@
 # BUNDLER.md — the bundler contract for `js` mode (Phase 12)
 
-> **Status: design, nothing implemented.** This is T12.0's docs-first output (§15.6). It fixes
-> what T12.1 (`packages/compiler`: `statorc/api`) and T12.2 (`packages/vite-stator`) build, and
-> it records the measured spike the decisions rest on. The choice is plan-notes 296; the
+> **Status: T12.1 and T12.2 implemented (plan-notes 320, 321); T12.3 open.** This is T12.0's
+> docs-first output (§15.6). It fixes what T12.1 (`packages/compiler`: `statorc/api`) and T12.2
+> (`packages/vite-stator`) build, and it records the measured spike the decisions rest on. Where
+> T12.1 had to decide something this document left open, the section says so and names
+> plan-notes 320. The choice is plan-notes 296; the
 > creator settled §9's three questions on 2026-10-02. On any disagreement with `plan.md` §11d,
 > the plan wins.
 
@@ -109,13 +111,14 @@ T12.1 ships package imports. No card closes it. *Synthesis.*
 
 **Found by the spike, out of this card's scope.** In `boundary_inferred` (`.js` returns
 `` `${x}` ``; the `.ts` declares `number`), `tsc --strict` reports `TS2322` on `main.ts`. Stator
-`--mode=js` neither reports it nor checks the boundary, and it prints `10`. Under golden
-rule 4 this is a soundness bug. It is reported separately, not fixed here.
+`--mode=js` neither reported it nor checked the boundary, and it printed `10`. Under golden
+rule 4 this was a soundness bug. Fixed by plan-notes 301: the edge now gets a boundary check, and
+that program aborts with `STA2001` (golden `js/boundary_inferred` pins the passing half).
 
 ## 2. Output contract
 
 One ESM file, no code splitting, no minification, a source map. Measured configuration for
-Vite 8.3.1 (the `vite-stator` adapter's defaults):
+Vite 8.3.1, re-checked on the 8.3.2 pin (the `vite-stator` adapter's defaults):
 
 | Setting | Value | Why (source) |
 | --- | --- | --- |
@@ -129,13 +132,59 @@ Vite 8.3.1 (the `vite-stator` adapter's defaults):
 | `build.target` | `'esnext'` | no down-levelling, so Stator sees the source's own syntax |
 | plugins | `esmExternalRequirePlugin` | §4 |
 
+**As implemented (T12.2, `packages/vite-stator`, plan-notes 321).** The adapter is
+`src/adapter.ts`: one `vite.build()` per compile, exactly the table above, with these details the
+table leaves open:
+
+- The vendor entry has no file. A `pre` plugin serves it under the id
+  `<resolveDir>/__stator_vendor_entry__.js`, so a CommonJS project file's relative specifier
+  resolves from the project's directory.
+- `configFile: false`, `envFile: false`, `publicDir: false`: the project's own
+  `vite.config.*` never shapes the vendor build.
+- `build.outDir` is `resolveDir` with `write: false`. Nothing is written, and the map's
+  `sources` come out relative to `resolveDir`, which is what §5 promises.
+- `external` is the compiler's list (§3), passed to `esmExternalRequirePlugin` only.
+  Rolldown's own `external` answers before any plugin, so with the list there `require('path')`
+  stayed `__require("path")` through `createRequire` (measured). The plugin leaves every match
+  external for `import` too.
+- `treeshake.moduleSideEffects` is `false` for an external built-in, so the `import "node:module"`
+  Rolldown's runtime keeps after the last `__require` is gone is dropped.
+- `inputs` are the chunk's absolute module ids, less the virtual entry. A build that answers
+  more than one chunk, or no map, is an error, so `STA0015`.
+
+The pin is Vite **8.3.2** (npm registry `https://registry.npmjs.org/vite`, published
+2026-10-01T10:17:44.767Z, `dist-tags.latest` checked 2026-10-02), bumped from 8.3.1 with the
+creator's permission; vitest's own `vite` moved with it (plan-notes 321 item 2). The measurements
+in this section were taken on 8.3.1; the unit tests and goldens re-ran green on 8.3.2.
+
+**The `stator()` plugin** (`src/plugin.ts`) makes `vite build` produce the binary:
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import { stator } from 'vite-stator';
+export default defineConfig({ plugins: [stator({ entry: 'src/main.js', out: 'dist/hello' })] });
+```
+
+It applies to `build` only. It points `build.ssr` at the entry with `write: false`, so Vite's own
+pass writes nothing, and keeps `node:*` and `std/*` external. In `closeBundle` it calls
+`statorc/api`'s `compile` with this adapter (`js` mode by default; `mode: 'ts'` builds with no
+bundler, as §0 requires) and fails the Vite build with Stator's diagnostics when the compile
+fails. `examples/vite` is the worked example.
+
+**A namespace import of a package does not compile yet.** The vendor entry's
+`export * as p$ns from 'p'` makes Rolldown emit its `__exportAll` helper
+(`Object.defineProperty` and `Symbol.toStringTag`: STA1214 and STA1212, measured through the
+adapter). That is T12.3's "dynamic-import namespace helpers" item, so the namespace golden moved
+to T12.3's Check (plan-notes 321).
+
 **What Rolldown output always contains.** Two things the contract cannot switch off, so
 Stator must lower them (T12.3):
 
 - Every top-level class comes out as `var X = class {}`. The rolldown 1.2.12 typings say this
-  is "always", independent of `topLevelVar`. Stator lowers `const X = class {}` but reports
-  `var`/`let X = class {}` as STA1214 "anonymous class expression" (spike `exitcheck`, and
-  hand-checked).
+  is "always", independent of `topLevelVar`. Since T12.3, a `var`/`let` formation that nothing in
+  its file writes lowers like `const X = class {}` (golden `js/pkg_class`); before, it was
+  STA1214 "anonymous class expression" (spike `exitcheck`, and hand-checked).
 - Constants are inlined across modules (`inlineConst`, default `smart`). In `modules`, the
   bundle has `doubled + 10`. This is harmless.
 
@@ -169,10 +218,11 @@ What the bundle leaves for Stator:
 
 | Leftover | Measured | Who handles it |
 | --- | --- | --- |
+| `__commonJSMin` itself | `(mod \|\| (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports)`: an internal STA4013, because the checker typed the comma from `mod`'s declaration while its right operand read `mod` narrowed by the assignment | T12.3, landed: a comma types as its right operand (goldens `pkg_cjs_*`, `node_cjs_entry`, `node_pkg_location`, `comma_narrowing`) |
 | interop helpers `__toESM`, `__copyProps` | `Object.create`, `Object.defineProperty` (getter descriptors), `getOwnPropertyDescriptor`, `getOwnPropertyNames`, `getPrototypeOf`, `Object.prototype.hasOwnProperty.call`, `Function.prototype.bind`: 9 STA1214 in `cjs` | T12.3 (overlaps T11.4's `Object.*` and method-call families) |
 | `require('path')` of a built-in | `__require("path")` through `createRequire(import.meta.url)`. With `esmExternalRequirePlugin({ external: [/^node:/, …builtinModules] })` (re-exported by Vite 8.3.1) it becomes `import * as m from "path"` and `module.exports = m.default` | the plugin in `vite-stator` (T12.2). Built-ins need a default export (T11.6) |
 | computed `require('./' + n)` | stays `__require(...)`, and Node itself fails on the bundle with `Cannot find module './five.js'` | T11.5: a `require` over built-ins only. Anything else throws `MODULE_NOT_FOUND` |
-| `__filename`, `__dirname` | left free, so **Node itself crashes on the bundle** (`ReferenceError: __filename is not defined in ES module scope`) | **decided (§9):** a `not-yet` diagnostic naming T11.5 until `--node`, raised by T12.1's gate. No path is baked into the binary, so the spike's 6-line transform (which baked the build machine's absolute path) is not adopted. Unbundled, Stator today compiles a free `__filename` as `dynamic` and the binary throws `ReferenceError` where Node prints the path (measured), so the same diagnostic covers project files |
+| `__filename`, `__dirname` | left free, so **Node itself crashes on the bundle** (`ReferenceError: __filename is not defined in ES module scope`) | **decided (§9):** under `--node` the frontend injects a value relative to the executable (T11.5, plan-notes 316); a read that reaches the gate is `STA1110` (it was T12.1's not-yet `STA1218`, now retired). No path is baked into the binary, so the spike's 6-line transform (which baked the build machine's absolute path) is not adopted. Before T12.1, Stator compiled an unbundled free `__filename` as `dynamic` and the binary threw `ReferenceError` where Node prints the path (measured), so the same diagnostic covers project files |
 
 **CommonJS project files** (`cjs_entry`, the shape of `_tsc.js`) go to the bundler whole. A
 file is CommonJS by Node's rule (https://nodejs.org/api/packages.html, docs v26.10.0, checked
@@ -181,6 +231,26 @@ file is CommonJS by Node's rule (https://nodejs.org/api/packages.html, docs v26.
 - `.cjs` always;
 - `.js` under `"type": "commonjs"`;
 - `.js` with no `"type"` and no ES-module syntax. Syntax detection is unflagged since v22.7.0.
+
+**As implemented (T12.1, plan-notes 320; the creator's decision, plan-notes 315).** The third case
+is narrowed: a `.js` with no `"type"` and no ES-module syntax is routed only when it reads a free
+`require(…)`, `module.exports` or `exports`. A script that touches none of them means the same
+thing as a module or a CommonJS file, and routing it would make every plain script — Test262's
+harness, a tmpdir-staged test fixture — need a bundler. "Free" means no binding of the user's: a
+parameter or `const` named `exports` is the user's, while TypeScript's own CommonJS model of a
+`.js` file (it declares `module` and `exports` by the assignments that use them) is not. ES-module
+syntax is an import or export statement, `import.meta`, or a top-level `await`.
+`src/frontend/vendor.ts` `isCommonJsFile`. A CommonJS entry becomes one side-effect import of
+itself in the vendor entry (`import "./main.cjs";`), and the program's entry is a one-line import
+of the vendor module.
+
+**`--node` gates the routing of project files** (decided 2026-10-02, plan-notes 315). Only under
+`--node` in `js` mode does a CommonJS project file go to the bundler. Without the flag it stays
+in Stator's graph, and the gate answers its free `require`, `module.exports` and `exports` with
+`STA1110`: ES modules are the only module system there. A CommonJS file that reads none of them
+(a plain `.cjs` script) compiles as written, since it means the same either way. Packages under
+`node_modules` are bundled with or without the flag; a package's format is the bundler's
+business, not the platform's.
 
 The bundle runs on Node unchanged (= Node). With `esmExternalRequirePlugin`, Stator then
 reports four things:
@@ -200,12 +270,23 @@ the bundler. T11.5 shrinks to the `--node` flag, the Node globals, external reso
 T11.5 already planned. With `--node` in `js` mode a CommonJS project file goes to the bundler,
 and T11.5 owns what `__filename`/`__dirname` mean then, under the rule that no build path is
 baked into the binary.
-Without `--node`, under `--bundler=none`, or in `ts` mode, `require` stays `STA1110`.
+Landed (plan-notes 316): the bundle's `__require` is `node:module`'s `createRequire`, a `require`
+over built-ins that throws `MODULE_NOT_FOUND` for anything else, and the frontend rewrites each
+free `__filename`/`__dirname` left in the vendor module, and each `import.meta.url`, into a
+run-time value relative to the executable, using the source map to find the file the read was
+written in (`docs/MODES.md` §6).
+Without `--node`, or in `ts` mode, a free `require`, `module.exports`, `exports`, `__filename` or
+`__dirname` is `STA1110`. Under `--node` one that reaches the gate is in an ES module (Node has
+none of them there) or in a build under `--bundler=none`, where nothing converts CommonJS, and it
+is `STA1110` too. Fixtures `subset_commonjs_require_*`, `subset_commonjs_file_*`,
+`subset_node_filename_*` and `subset_node_dirname_*`; the `js` + `--node` cell needs an adapter
+and is proved in `unit/bundler.test.ts`.
 
 ## 5. The API
 
 `statorc/api` (T12.1). The compiler imports no bundler (§0.9). It loads an adapter by module
-name only when the graph imports a package.
+name only when the graph imports a package or, under `--node`, holds a CommonJS project file.
+`CompileRequest.node` and `vendorEntry(entry, mode, node)` carry the flag.
 
 ```ts
 export type VendorEntry = {
@@ -240,6 +321,39 @@ A name is mangled only when two packages export it, because Rolldown then emits
 T12.1 lowers that form. Only the named imports enter the vendor entry, so a package's unused
 exports never reach Stator.
 
+**As implemented (T12.1, `src/frontend/vendor.ts`).** A mangled name is `<stem>$<tail>`: the
+stem is the source spelled as an identifier (`@scope/util` → `_scope_util`), the tail `default`,
+`ns`, or the export name; a clash takes `$2`, `$3`. A named export that is not an identifier
+(`'a-b'`) is mangled too. A CommonJS project file is a source like a package, spelled relative to
+`resolveDir`. Each project declaration is rewritten in place to name the vendor module, every
+line kept (`import { pad } from "./__stator_vendor__.js";`); a mixed clause keeps its type-only
+names on an `import type` of the original specifier. Named re-exports and `export * as ns from
+'p'` are rewritten the same way. Import attributes (`with { type: 'json' }`) travel to the
+entry line, which is the bundler's to read; the rewritten import of the vendor module drops them,
+because that module is JavaScript (T12.3). The deprecated `assert` form is not rewritten.
+
+**`export * from 'p'` (T12.3).** Only the bundle knows `p`'s names, so the entry spells
+`export * from "p";` and the rewrite waits for the bundle: it parses the bundle's own `export`
+declarations and re-exports every plain name. With a star in the entry every named request is
+mangled, so the plain names are exactly the star's. The file's own exports, and names another
+`export *` of the same file also offers, are left out (an own export shadows a star; two stars
+make a name ambiguous, ECMA-262 §16.2.1.6.3). Two different packages under `export *` cannot be
+told apart in one bundle, so those declarations stay as written and STA1214, as does a bundle
+whose exports include an `export * from` an external. `import('p')` is STA1214 too: its namespace
+is Rolldown's `__exportAll` (§8).
+
+**Loading the adapter.** `vite` loads the `vite-stator` package; any other value is a module: a
+path (starting with `.` or absolute; relative to the current directory, or to the config file
+for the config key) or a package name, resolved from the entry's directory first and then from
+the compiler's own. The adapter is the module's default export, or a named `adapter`. Everything
+it answers is checked before use (golden rule 4): `code` a string, `map` a version-3 map, `inputs`
+a string array, else STA0015.
+
+**The library entry.** `statorc/api` (`packages/compiler/package.json` `exports`) has
+`compile({ entry, mode, bundle?, bundler?, out? })`, which answers `{ ok, diagnostics, stderr,
+error?, c? }` and never throws for a user error, and `vendorEntry(entry, mode)`, which answers
+what the bundler would be asked to bundle, or `undefined`.
+
 **CLI.** `--bundler=vite|none|<module>` on `build` and `explain`:
 
 - The default in `js` mode is `vite`, which loads `vite-stator`.
@@ -267,7 +381,10 @@ wraps it behind one function in `src/support/`.
 **Rules for T12.1:**
 
 - `sources` are relative to the map file (`../src/dep.js` measured). Resolve them against the
-  map's location and `sourceRoot`.
+  map's location and `sourceRoot`. The adapter hands back a map with no file of its own, so
+  T12.1 resolves `sources` against the vendor entry's `resolveDir`, then `sourceRoot`
+  (plan-notes 320); an absolute source or a `file:` URL stands as is, and a source with a
+  `\0` prefix or another URL scheme counts as unmapped.
 - A position with no mapping must say so. All 9 `cjs` diagnostics sit in Rolldown's
   `\0rolldown/runtime.js` region and map to nothing (measured). Report them as
   `<package bundle>:line:col (bundler runtime helper, no source mapping)`, never as a
@@ -276,6 +393,22 @@ wraps it behind one function in `src/support/`.
   for vendor statements use the mapped file and line.
 - Under B only the vendor module needs mapping. Project diagnostics point at real files, as
   today.
+
+**Checker errors in package code (plan-notes 320 Q4, decided 2026-10-02).** The vendor module
+is package code: untyped JavaScript on the dynamic path, which the user cannot edit. A
+type-checker complaint there (TypeScript code 2000 and up) is not reported, so it never fails the
+build. The binding the complaint names stops trusting its inferred type and goes dynamic, the way
+`js` mode already widens an incompatible assignment, so the program does at run time what Node
+does (`[1] < {}` prints `true`, `o++` on an object makes it `NaN`). Three things are still
+reported:
+
+- syntax and grammar errors (codes below 2000), which are early errors Node raises too;
+- a checker error where Node throws at run time and the compiled program would not: a binding
+  read in its temporal dead zone (TS2448, TS2449, TS2450) and an assignment to a `const`
+  (TS2588). They stay `STA0012` at the mapped position (`VENDOR_THROW_CODES`);
+- every Stator verdict: the gate, the module edges and the lowering (`STA1214`, `STA1110`, …).
+
+The same complaint in a project file is still `STA0012`.
 
 ## 7. Caching
 
@@ -312,16 +445,24 @@ list is what `vite-stator` hands Vite's watcher in dev, not moon.
   - the cache key (§7);
   - the `not-yet` diagnostic for `__filename`/`__dirname` without `--node` (§4, §9);
   - docs: `MODES.md` (packages and the order deviation), `HOW-IT-WORKS.md`, `pipeline.d2`.
-- **T12.2** (`packages/vite-stator`): §2's configuration, `esmExternalRequirePlugin`, and the
-  `stator()` Vite plugin.
-- **T12.3** (new): make Rolldown's output compile:
-  - `var`/`let X = class {}`;
-  - the interop helpers (§4 table);
+- **T12.2** (`packages/vite-stator`, implemented, plan-notes 321): §2's configuration,
+  `esmExternalRequirePlugin`, and the `stator()` Vite plugin.
+- **T12.3** (in progress): make Rolldown's output compile. Landed in its first slice:
+  `__commonJSMin`, whose comma expression was an internal STA4013 (the comma now types as its
+  right operand), so `exports.x` packages imported by name, nested `require`, CJS cycles and a
+  `.cjs` entry compile; `var`/`let X = class {}`; `export * from` one package; attributed package
+  imports. Open:
+  - the interop helpers (§4 table): `__toESM`/`__copyProps`, reached by a default import of a
+    CommonJS package or `module.exports` replacement, need T11.4 step 8's `Object.*`;
   - the dynamic-import namespace helpers (`__esmMin`, `__exportAll`: `Object.defineProperty`,
     `Symbol.toStringTag`, zero-argument `Promise.resolve()`), measured in `dynamic_import`'s A
-    bundle;
-  - `import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`);
-  - a computed `export default` (`cjs_entry`).
+    bundle and in every namespace import of a package (T12.2, plan-notes 321). The runtime has no
+    symbol values, so `Symbol.toStringTag` is Phase 5's STA1212, not only T11.4's `Object.*`
+    (plan-notes 323);
+  - ~~`import.meta.url` (STA1214 "MetaProperty" in `cjs_edges`)~~: landed under `--node` by T11.5
+    (plan-notes 316); without the flag it stays STA1214;
+  - ~~a computed `export default` (`cjs_entry`)~~: lowers since T11.5a
+    (`subset_export_default_expression_*`).
 - **T11.5**: re-scoped per §4, plus the meaning of `__filename`/`__dirname` under `--node`.
 
 ## 9. Decided by the creator (2026-10-02)

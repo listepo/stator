@@ -22,6 +22,11 @@ below the gate is allowed to branch on mode ([`MODES.md`](MODES.md), plan §0.8)
 | `any`, `eval`, `var`, `Proxy`, … | compile errors (`eval` permanently) | untyped code goes dynamic; `eval` is `not-yet` until Phase 8 |
 | Speed | unboxed values in checked code | same wherever the checker can infer a type |
 
+`--node` is a second frontend policy, orthogonal to the mode: the Node
+platform. Under it `node:*` and bare built-ins (`path`) resolve to
+`packages/node`, strict TypeScript over `std`, and a built-in that has not
+landed is a `not-yet` naming T11.6 ([`MODES.md`](MODES.md) §6).
+
 Per-construct verdicts (`static` / `dynamic` / `error` / `not-yet`) are the
 language of the subset matrix ([`SUBSET.md`](SUBSET.md)) and of
 `stator explain`.
@@ -29,7 +34,10 @@ language of the subset matrix ([`SUBSET.md`](SUBSET.md)) and of
 ## Pipeline (current)
 
 ```
-typescript API (parse + type-check, in-process)
+[js mode, graph imports a package or, under --node, holds a CommonJS file]
+  bundler adapter (--bundler, default vite) → one vendor ESM module + source map
+typescript API (parse + type-check, in-process; the vendor module joins as __stator_vendor__.js)
+[--node, a module reads its location] import.meta.url, the vendor module's __filename → run-time calls
   → mode gate
   → typed HIR
   → passes (monomorphize, boundary-insert, const-fold, DCE, inline, …)
@@ -45,6 +53,19 @@ Package layout:
 - `packages/runtime` — C11 + Zig memory core → `libjsrt.a` (not an npm package)
 - `packages/std` (`@stator/std`) — the `std/*` modules: strict TS surface + Zig backings → `libjsrt_std.a` (docs/STD.md)
 - `packages/tests` — unit, subset, golden, differential, Test262, leak, …
+
+The bundle step runs only in `js` mode and only when the loaded graph needs it. Its output is
+one virtual module the program reads from memory, and the project's package imports are rewritten
+in place to name it, line for line; a diagnostic inside it is reported at the package's own file
+and line through the bundle's source map (`src/cli/bundler.ts`, `src/frontend/vendor.ts`,
+`src/support/sourcemap.ts`). The library entry `statorc/api` (`compile`, `vendorEntry`) runs the
+same driver.
+
+Under `--node` one more frontend step follows: every `import.meta.url`, `.filename` and
+`.dirname`, and every free `__filename`/`__dirname` the bundler left in the vendor module, is
+rewritten in place into a call to `packages/node`'s location helpers, which answer relative to the
+executable when the program runs (`src/frontend/location.ts`, [`MODES.md`](MODES.md) §6). The
+program reloads over the rewrite, so no build-machine path reaches the binary.
 
 Invariants that matter when reading code or docs:
 
@@ -88,21 +109,32 @@ node packages/compiler/src/cli/main.ts build app.ts -o app
 # Build a JS / mixed-graph entry
 node packages/compiler/src/cli/main.ts build app.js -o app --mode=js
 
+# A js graph that imports packages: they are bundled first (docs/BUNDLER.md)
+node packages/compiler/src/cli/main.ts build app.js -o app --mode=js --bundler=vite
+
 # Per-construct verdicts (what the subset matrix tests use)
 node packages/compiler/src/cli/main.ts explain app.ts --json
 
 # Useful flags (see CLI help / AGENTS.md Commands)
 #   --emit=c --keep-c     keep generated C for inspection
 #   --mode=ts|js          frontend policy
+#   --node                the Node platform: node:* resolves to packages/node
+#   --bundler=vite|none|<module>  js mode: the bundler for packages and (--node) CommonJS files
+#   --config=<path>       options from a JSON file (default ./stator.config.json)
+#   --no-config           ignore stator.config.json
 ```
+
+Every flag above can also be a key in `stator.config.json`; the command line wins. See
+[CONFIG.md](CONFIG.md).
 
 Useful local gates (not a product feature list — just what the repo runs):
 
 ```sh
 pnpm run test            # unit (vitest)
-pnpm run test:affected   # unit tests your changes reach
+pnpm run test:impact     # tests your changes reach (per-test coverage map)
 pnpm run test:subset     # feature × mode decision matrix
 pnpm run test:golden     # compile + run vs pinned Node, byte-for-byte
+pnpm run test:selfhost   # Stator explains (and builds) its own packages; per-code counts may only shrink
 pnpm run ci              # full local gate before claiming work done
 ```
 

@@ -86,6 +86,7 @@ void jsrt_init(void) {
   free(test_ptr);
 
   jsrt_gc_init();
+  jsrt_stack_init();
 }
 
 /* ----------------------------------------------------------------- calls */
@@ -133,6 +134,66 @@ jsrt_value jsrt_call(jsrt_value callee, uint32_t argc, const jsrt_value *argv) {
   return jsrt_call_at(callee, argc, argv, NULL);
 }
 
+/* Runs `c` with `receiver` at argv[0] and the arguments after it. No arity guessing here, unlike
+ * jsrt_call's shift -- the callee is dynamic, so the convention is "receiver slot filled,
+ * `jsrt_arg` pads the rest" and no argc is ambiguous. The caller keeps `receiver` rooted. */
+static jsrt_value call_with_receiver(const JSRTClosure *c, jsrt_value receiver, uint32_t argc,
+                                     const jsrt_value *argv) {
+  jsrt_value call_argv[argc + 1U];
+  call_argv[0] = receiver;
+  for (uint32_t i = 0; i < argc; i++) {
+    call_argv[i + 1U] = argv[i];
+  }
+  return c->fn(argc + 1U, call_argv, c->env);
+}
+
+/* `f(...xs)` and `o.m(a, ...xs)` (plan.md §11c T11.4 step 5): `args` is every argument, spreads
+ * expanded, as one array the caller keeps rooted. jsrt_call_at's receiver test reads argc against
+ * the arity, which a spread's count cannot answer, so a method call names its receiver here
+ * instead: a closure that declares one gets `*receiver` (or `undefined` when there is none) and
+ * every argument after it; anything else is jsrt_call_at's call, panic and TypeError included. */
+jsrt_value jsrt_call_spread_at(jsrt_value callee, const jsrt_value *receiver, jsrt_value args,
+                               const char *loc) {
+  const JSRTArray *list = jsrt_as_array(args);
+  if (!jsrt_is(callee, JSRT_TAG_CLOSURE) || jsrt_as_closure(callee)->klass != NULL ||
+      !jsrt_as_closure(callee)->has_receiver) {
+    return jsrt_call_at(callee, list->length, list->elements, loc);
+  }
+  return call_with_receiver(jsrt_as_closure(callee), receiver != NULL ? *receiver : JSRT_UNDEFINED,
+                            list->length, list->elements);
+}
+
+/* `new F(...)` for an ordinary function (§10.2.2 [[Construct]], plan-notes 310). JavaScript
+ * splits its answer: a `function` constructs, an arrow, a method, an async function or a generator
+ * raises `X is not a constructor` -- the split the closure's `constructible` records. The object
+ * is a dynamic one whose prototype is `F.prototype` when that is an object; F runs with it as
+ * `this` when F reads `this` at all (a function that never does takes no receiver slot), and F's
+ * return replaces it exactly when the return is an object. */
+static jsrt_value construct_function(jsrt_value ctor, uint32_t argc, const jsrt_value *argv) {
+  const JSRTClosure *c = jsrt_as_closure(ctor);
+  if (!c->constructible) {
+    char message[256];
+    (void)snprintf(message, sizeof message, "%s is not a constructor",
+                   c->name[0] != '\0' ? c->name : "(intermediate value)");
+    jsrt_throw_error(&jsrt_class_type_error, message);
+    return JSRT_UNDEFINED;
+  }
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = jsrt_dynobj_new();
+  const jsrt_value proto = jsrt_function_prototype(ctor);
+  if (jsrt_is_object(proto)) {
+    ((JSRTDynObject *)jsrt_ptr(JSRT_LOCAL(0)))->proto = proto;
+  }
+  if (c->has_receiver) {
+    JSRT_LOCAL(1) = call_with_receiver(c, JSRT_LOCAL(0), argc, argv);
+  } else {
+    JSRT_LOCAL(1) = c->fn(argc, argv, c->env);
+  }
+  const jsrt_value out = jsrt_is_object(JSRT_LOCAL(1)) ? JSRT_LOCAL(1) : JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
+  return out;
+}
+
 jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv) {
   if (!jsrt_is(ctor, JSRT_TAG_CLOSURE)) {
     /* Node's wording names the operand's rendered value (`5 is not a constructor`). */
@@ -145,32 +206,15 @@ jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv
   }
   const JSRTClosure *c = jsrt_as_closure(ctor);
   if (c->klass == NULL) {
-    /* An ordinary function reached through `new`: JavaScript splits its own answer (`new f()`
-     * constructs for a `function` value and raises `X is not a constructor` for an arrow or a
-     * method), and the split is not visible on a `JSRTClosure`. Every branch needs `f.prototype`
-     * -- the constructed object's identity IS its prototype slot -- which is Phase 8's
-     * descriptor/prototype surface, so v0 raises for all of them and records the `function`
-     * half as residue (docs/VALUE.md §4.17). */
-    char message[256];
-    (void)snprintf(message, sizeof message, "%s is not a constructor",
-                   c->name[0] != '\0' ? c->name : "(intermediate value)");
-    jsrt_throw_error(&jsrt_class_type_error, message);
-    return JSRT_UNDEFINED;
+    return construct_function(ctor, argc, argv);
   }
   /* The fresh instance must survive whatever the constructor allocates, so it is rooted before
    * the call exactly as a generated `new` roots its object slot (docs/VALUE.md §4.17). */
   JSRT_FRAME(2);
   JSRT_LOCAL(0) = jsrt_object_new(c->klass);
   if (c->fn != NULL) {
-    /* Receiver at argv[0]: every class constructor declares one (`this` is parameter zero).
-     * No arity guessing here, unlike jsrt_call's shift -- the callee is dynamic, so the
-     * convention is "receiver slot filled, `jsrt_arg` pads the rest" and no argc is ambiguous. */
-    jsrt_value call_argv[argc + 1U];
-    call_argv[0] = JSRT_LOCAL(0);
-    for (uint32_t i = 0; i < argc; i++) {
-      call_argv[i + 1U] = argv[i];
-    }
-    (void)c->fn(argc + 1U, call_argv, c->env);
+    /* Every class constructor declares a receiver (`this` is parameter zero). */
+    (void)call_with_receiver(c, JSRT_LOCAL(0), argc, argv);
   }
   /* The constructor's return is ignored: the gate admits no explicit object return in a class
    * constructor, so the fresh instance IS the constructed value. */
@@ -185,9 +229,29 @@ bool jsrt_instanceof_ctor(jsrt_value obj, jsrt_value ctor) {
     if (c->klass != NULL) {
       return jsrt_instanceof(obj, c->klass);
     }
-    /* An ordinary function: Node answers through `f.prototype`, which is the Phase 8
-     * descriptor/prototype surface (a `new f()` instance can answer `true` there). `false` is
-     * the answer for every instance this subset can build; the residue is recorded. */
+    /* An ordinary function: §7.3.22 OrdinaryHasInstance against `f.prototype`. Only an object
+     * `new` built through a function has a prototype chain to walk (plan-notes 310); every
+     * other value's chain ends at a prototype this runtime does not represent. A primitive is
+     * `false` before the prototype is read, which is why `1 instanceof (() => 0)` does not throw. */
+    if (!jsrt_is_object(obj)) {
+      return false;
+    }
+    const jsrt_value proto = jsrt_function_prototype(ctor);
+    if (!jsrt_is_object(proto)) {
+      const char *shown = jsrt_shape_key(jsrt_to_string(proto));
+      char message[256];
+      (void)snprintf(message, sizeof message,
+                     "Function has non-object prototype '%s' in instanceof check", shown);
+      free((void *)shown);
+      jsrt_throw_error(&jsrt_class_type_error, message);
+      return false;
+    }
+    for (jsrt_value p = obj; jsrt_is_dynobj(p);) {
+      p = ((const JSRTDynObject *)jsrt_ptr(p))->proto;
+      if (p == proto) {
+        return true;
+      }
+    }
     return false;
   }
   /* Node distinguishes "not an object" (a primitive right operand) from "not callable" (an
@@ -332,10 +396,12 @@ jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {
   if (!index_of(index, &i) || i >= a->length) {
     return JSRT_UNDEFINED;
   }
-  return a->elements[i];
+  return jsrt_unhole(a->elements[i]);
 }
 
-void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
+/* The write both entry points share; `sparse` is whether the skipped indices of a write past the
+ * end may become holes (docs/VALUE.md §4.4). */
+static void array_store(jsrt_value array, jsrt_value index, jsrt_value element, bool sparse) {
   if (!jsrt_is(array, JSRT_TAG_ARRAY)) {
     /* Same degradation as the read: nullish throws Node's setting-message, a primitive throws
      * the dynamic write's TypeError, a fixed shape takes its existing-or-STA2004 path. */
@@ -350,25 +416,41 @@ void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
     return;
   }
 
-  if (i > a->length) {
-    /* A write more than one past the end leaves the skipped indices genuinely ABSENT in ECMA-262 --
-     * `console.log` prints `<2 empty items>`, not `undefined` -- and a dense array has no way to be
-     * absent. Filling with `undefined` would print a different program's output, so this refuses
-     * loudly instead (STA2002). In-range writes and the append idiom `a[a.length] = v` are the
-     * cases that matter and are unaffected; the refusal lifts when sparse arrays land. */
-    jsrt_panic("STA2002: sparse arrays are not yet supported: write past the end of an array");
+  if (i > a->length && !sparse) {
+    /* A write more than one past the end leaves the skipped indices ABSENT in ECMA-262, and a hole
+     * reads as `undefined` -- which an array of a typed element must never hand out, so only the
+     * sparse entry (an Unknown element type) may leave one (docs/VALUE.md §4.4). In-range writes
+     * and the append idiom `a[a.length] = v` are unaffected. */
+    jsrt_panic("STA2002: a write past the end of an array of a typed element would leave holes");
   }
 
   if (i >= a->capacity) {
     jsrt_array_grow(a, i);
   }
 
-  /* At this point `i <= a->length`, so the write either replaces an element or appends exactly
-   * one -- no gap is possible, which is what the refusal above buys. */
+  for (uint32_t k = a->length; k < i; k++) {
+    a->elements[k] = JSRT_HOLE;
+  }
   a->elements[i] = element;
   if (i >= a->length) {
     a->length = i + 1;
   }
+}
+
+void jsrt_array_set(jsrt_value array, jsrt_value index, jsrt_value element) {
+  array_store(array, index, element, false);
+}
+
+void jsrt_array_set_sparse(jsrt_value array, jsrt_value index, jsrt_value element) {
+  array_store(array, index, element, true);
+}
+
+bool jsrt_array_delete(jsrt_value array, uint32_t index) {
+  JSRTArray *a = jsrt_as_array(array);
+  if (index < a->length) {
+    a->elements[index] = JSRT_HOLE;
+  }
+  return true;
 }
 
 /* -------------------------------------------------------------- objects */

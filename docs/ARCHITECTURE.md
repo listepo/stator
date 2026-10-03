@@ -22,6 +22,13 @@ d2 docs/architecture/values.d2 docs/architecture/values.svg
 One pipeline, two modes. Mode is a policy layer at the frontend gate; nothing below it knows the
 mode existed (plan §0.8).
 
+In `js` mode a graph that imports a package or holds a CommonJS file takes one detour first
+(T12.1, `docs/BUNDLER.md`): the dependencies are bundled into one virtual module and the program
+is reloaded over it. Below the gate the vendor module is one more `js` file.
+Under `--node` a program whose modules read their own location (`import.meta.url`, the vendor
+module's `__filename`) is reloaded once more, over a rewrite that turns each read into a run-time
+call (T11.5, `docs/MODES.md` §6).
+
 ![Compile pipeline](architecture/pipeline.svg)
 
 Source: [`architecture/pipeline.d2`](architecture/pipeline.d2)
@@ -52,6 +59,12 @@ Invariants:
 - **`std` is resolved and linked, never imported** — `frontend` maps `std/*` to `packages/std`'s
   sources and `cli` adds `libjsrt_std.a` only for a program that imports one (docs/STD.md §6).
   Nothing in `packages/compiler` imports `packages/std`.
+- **`node` is resolved, never imported** — under `--node` only, `frontend` maps `node:*` and the
+  bare built-ins to `packages/node`'s sources (docs/MODES.md §6), strict TypeScript over `std/*`
+  that compiles like any user module. Nothing in `packages/compiler` imports `packages/node`.
+- **`vite-stator` is loaded, never imported** — it imports `statorc/api` and `vite`; the compiler
+  loads it by module name (`--bundler=vite`, the `js`-mode default) only when a program imports a
+  package (docs/BUNDLER.md §5). Nothing in `packages/compiler` imports a bundler (plan §0.9).
 
 ## 4. Value flow at a type boundary (activity view)
 

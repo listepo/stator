@@ -300,7 +300,9 @@ export interface NewExpr extends Node {
   readonly args: readonly Expression[];
 }
 
-/** `new v(a, b)` where `v` is a class-object VALUE rather than a name (docs/VALUE.md §4.17).
+/** `new v(a, b)` where `v` is a class-object VALUE rather than a name (docs/VALUE.md §4.17), or
+ * an ordinary function the program wrote -- `new P(1)` for `function P(x) { this.x = x; }`, or an
+ * Unknown callee -- which builds a dynamic object through `P.prototype` (§4.20, plan-notes 310).
  *
  * The instance's CLASS is a run-time fact: `v` may name one class statically and hold another
  * (a `typeof Base` parameter receiving a subclass's object constructs the subclass in
@@ -336,13 +338,13 @@ export interface InstanceOf extends Node {
 }
 
 /** `x instanceof v` where the right operand is a class-object VALUE rather than a name
- * (docs/VALUE.md §4.17).
+ * (docs/VALUE.md §4.17), or an ordinary function (§4.20).
  *
  * The class being tested against is a run-time fact for exactly the reason `NewValue` exists:
  * `v` may hold a subclass's object where its type names the base, and the prototype question is
  * about the VALUE. The emitter answers through one runtime entry (`jsrt_instanceof_ctor`), which
- * raises Node's TypeError for a right operand that is not a constructor and answers `false` for
- * an ordinary function (the `f.prototype` case is Phase 8's surface). The node's `type` is always
+ * raises Node's TypeError for a right operand that is not a constructor and walks the left side's
+ * prototype chain against `f.prototype` for an ordinary function. The node's `type` is always
  * `boolean`, and `target` may be any expression at all, exactly as on `InstanceOf`. */
 export interface InstanceOfValue extends Node {
   readonly kind: 'instanceof-value';
@@ -440,6 +442,34 @@ export interface DynMethodCall extends Node {
   readonly kind: 'dyn-method-call';
   readonly target: Expression;
   readonly method: string;
+  readonly args: readonly Expression[];
+  /** `o.m(a, ...xs)` (plan.md §11c T11.4 step 5): `args` is ONE array holding every argument,
+   * spreads expanded, and the receiver is passed by name rather than by count
+   * (`jsrt_call_spread_at`). A spread call takes this node whatever the receiver's type: the
+   * shape-table read answers a layout's methods and a builtin's bound ones as well. */
+  readonly spread?: true;
+  /** Node's `TypeError` subject (`c.missing`) when the loaded value is not callable, instead of
+   * the STA2006 abort. Set for a name a fixed object's layout does not declare, whose call
+   * answered that `TypeError` statically before growth could store a function there
+   * (docs/VALUE.md §4.24, plan.md §8 step 37). */
+  readonly notFunction?: string;
+}
+
+/** `o.f(a)` where `o` has a layout and `f` is one of its FIELDS holding a closure -- an object
+ * literal's `{ f: () => …, g }` rather than a method (plan-notes 310).
+ *
+ * The callee loads from the field's slot (`slot`, as in a `FieldAccess`), and the call follows
+ * `DynMethodCall`'s receiver rule: the receiver becomes argument zero when -- and only when --
+ * the loaded closure declares one (docs/VALUE.md §4.16). That is what `o.f()` means: a plain
+ * `function` stored in a field sees `o` as `this`, an arrow ignores it, and a non-function
+ * field value aborts with `STA2006` exactly as an ordinary call does.
+ *
+ * `target` is the receiver and is NOT in `args`. */
+export interface FieldCall extends Node {
+  readonly kind: 'field-call';
+  readonly target: Expression;
+  readonly field: string;
+  readonly slot: number;
   readonly args: readonly Expression[];
 }
 
@@ -579,14 +609,17 @@ export function isComputedEntry(entry: DynEntry): entry is ComputedEntry {
   return 'key' in entry;
 }
 
-/** `new Map()` and `new Set()`.
+/** `new Map()` and `new Set()`, and their weak twins.
  *
- * Not a `NewExpr`: that names a class the emitter emitted a descriptor for, and these two are
+ * Not a `NewExpr`: that names a class the emitter emitted a descriptor for, and these are
  * runtime structures with no declaration in the program. The `collection` field is the whole
- * difference between them below this point -- one allocator call each. */
+ * difference between them below this point -- one allocator call each. A WeakMap is typed as a
+ * Map (the checker keeps every walk off it), so `weak` is the one place its weakness is recorded:
+ * it picks the allocator whose `set`/`add` refuses a non-object key (docs/VALUE.md §4.22). */
 export interface CollectionNew extends Node {
   readonly kind: 'collection-new';
   readonly collection: 'map' | 'set';
+  readonly weak: boolean;
 }
 
 /** Every operation the subset performs on a Map or a Set.
@@ -671,7 +704,7 @@ export const STRING_OPS = {
   charAt: { arity: 1, result: 'string' },
   charCodeAt: { arity: 1, result: 'number' },
   codePointAt: { arity: 1, result: 'element' },
-  concat: { arity: 1, result: 'string' },
+  concat: { arity: 1, result: 'string', throws: true },
   endsWith: { arity: 2, result: 'boolean' },
   includes: { arity: 2, result: 'boolean' },
   indexOf: { arity: 2, result: 'number' },
@@ -705,7 +738,8 @@ export const STRING_OPS = {
     arity: number;
     result: 'boolean' | 'element' | 'iterator' | 'match' | 'number' | 'string' | 'string-array';
     /** Present on the ops whose runtime raises a catchable error (`repeat`/`padStart`/`padEnd`
-     * throw RangeError for a count/length the spec rejects). The emitter gives such an op its own
+     * throw RangeError for a count/length the spec rejects, `concat` past the maximum string
+     * length). The emitter gives such an op its own
      * statement and a pending check after it, the same discipline as {@link arrayOpCallsBack}. */
     throws?: true;
   }
@@ -743,6 +777,48 @@ export type StringStaticMethod = keyof typeof STRING_STATICS;
 export interface StringStaticCall extends Node {
   readonly kind: 'string-static';
   readonly method: StringStaticMethod;
+  readonly args: readonly Expression[];
+}
+
+/** The global functions that are calls rather than conversions (§19.2, plan.md §11c T11.4):
+ * `parseInt`, `parseFloat`, `isNaN`, `isFinite`, and the two constructors that answer the same
+ * object called or `new`ed -- `RegExp(p, f)` (§22.2.4.1) and the one-argument `Array(n)`
+ * (§23.1.1.1). On the `DateStaticCall` precedent -- no function value exists, each name is one
+ * runtime function over boxed operands, and the lowering pads an omitted argument with
+ * `undefined`, so `arity` is exact below the gate. `throws` marks the rows whose entry can leave an
+ * exception pending (a SyntaxError for a bad pattern, a RangeError for a bad length), which the
+ * emitter checks as a statement. `String(x)`, `Number(x)` and `Boolean(x)` are not here: each IS
+ * an existing operation (a template hole, unary `+`, `!!`) and lowers to that node instead of to a
+ * second spelling of it. `Array()` and `Array(a, b)` are array literals for the same reason.
+ *
+ * Two rows are not identifiers, so no global name reaches them: `Array.from(items)` with one
+ * argument (§23.1.2.1), and `...`, the operand of a spread that is not statically an array
+ * (`[...map.keys()]`, `f(...args)` with `args` Unknown), which the lowering wraps so the array
+ * concat that builds the list receives an array (step 5; docs/VALUE.md §4.23). */
+export const GLOBAL_CALLS = {
+  parseInt: { arity: 2, fn: 'jsrt_global_parse_int', result: 'number', throws: false },
+  parseFloat: { arity: 1, fn: 'jsrt_global_parse_float', result: 'number', throws: false },
+  isNaN: { arity: 1, fn: 'jsrt_global_is_nan', result: 'boolean', throws: false },
+  isFinite: { arity: 1, fn: 'jsrt_global_is_finite', result: 'boolean', throws: false },
+  RegExp: { arity: 2, fn: 'jsrt_regexp_construct', result: 'regexp', throws: true },
+  Array: { arity: 1, fn: 'jsrt_array_construct', result: 'array', throws: true },
+  'Array.from': { arity: 1, fn: 'jsrt_array_from', result: 'array', throws: true },
+  '...': { arity: 1, fn: 'jsrt_spread_operand', result: 'array', throws: true },
+} as const satisfies Record<
+  string,
+  {
+    readonly arity: number;
+    readonly fn: string;
+    readonly result: 'number' | 'boolean' | 'regexp' | 'array';
+    readonly throws: boolean;
+  }
+>;
+
+export type GlobalCallName = keyof typeof GLOBAL_CALLS;
+
+export interface GlobalCall extends Node {
+  readonly kind: 'global-call';
+  readonly name: GlobalCallName;
   readonly args: readonly Expression[];
 }
 
@@ -867,6 +943,9 @@ export interface ArrayOp extends Node {
   readonly op: ArrayOpName;
   readonly target: Expression;
   readonly args: readonly Expression[];
+  /** Set on the `concat` an array-literal spread lowers to: a spread ITERATES its operand, so a
+   * hole becomes `undefined` where a source-level `concat` keeps it (docs/VALUE.md §4.4). */
+  readonly spread?: true;
 }
 
 /** The `Object` namespace calls the HIR can spell — `Object.keys(o)` and its two siblings, each
@@ -1054,6 +1133,10 @@ export interface FunctionExpr extends Node {
    * one of its bindings lives in the heap environment for the same reason an async function's do:
    * a `yield` pops the C frame. Mutually exclusive with `isAsync` in this landing. */
   readonly isGenerator: boolean;
+  /** A `function` declaration or expression that is neither async nor a generator: the one kind
+   * of function JavaScript constructs (`new f()`), and therefore the one with a `prototype`
+   * (plan-notes 310). Absent for an arrow, a method, an accessor and a constructor. */
+  readonly constructible?: true;
   /** Where this function's SIGNATURE types came from (plan.md §8 step 1). About the signature
    * alone, not the body: the signature is what a caller — and therefore a boundary — can see. */
   readonly provenance: Provenance;
@@ -1140,6 +1223,9 @@ export interface CallExpr extends Node {
   readonly kind: 'call';
   readonly callee: Expression;
   readonly args: readonly Expression[];
+  /** `f(a, ...xs)` (plan.md §11c T11.4 step 5): `args` is ONE array holding every argument,
+   * spreads expanded, and the call passes its elements (`jsrt_call_spread_at`). */
+  readonly spread?: true;
 }
 
 /** One C-ABI slot of an extern signature (docs/FFI.md §2): the TS type a parameter or return
@@ -1147,8 +1233,10 @@ export interface CallExpr extends Node {
  * for the call (the emitter frees it); `cstring-owned` transfers it (never freed). `pointer`
  * is a branded opaque handle (docs/FFI.md §2 `T*`, step 6): borrow-only, passed as `void *`
  * and never dereferenced — there is no transfer spelling in v0, so every pointer is a borrow.
- * `void` is a return position only — a `void` parameter is STA1119, and `cstring-owned` as a
- * return is STA1119, both refused where the signature is classified, never here. */
+ * `bytes` is a `Uint8Array` (plan.md §11c T11.3a): parameter-only, it crosses as TWO C arguments,
+ * `uint8_t *` and `size_t`, pointing into the view's own storage for the call — no copy.
+ * `void` is a return position only — a `void` parameter is STA1119, and `cstring-owned` or
+ * `bytes` as a return is STA1119, all refused where the signature is classified, never here. */
 export type ExternAbiKind =
   | 'number'
   | 'boolean'
@@ -1156,6 +1244,7 @@ export type ExternAbiKind =
   | 'cstring-owned'
   | 'pointer'
   | 'out-pointer'
+  | 'bytes'
   | 'void';
 
 /** The closed `@statorError` vocabulary (docs/FFI.md §4): the only conventions a declaration
@@ -1228,6 +1317,10 @@ export function externKindHType(kind: ExternAbiKind): HType {
       // dynamically-typed argument is STA1125): an out-param WRITES through the pointer, so
       // unlike a `T*` read it cannot trust bits.
       return hUnknown(false);
+    case 'bytes':
+      // A real HType, unlike a handle: the view is a value the program owns, and the runtime
+      // CAN test it (`jsrt_check_uint8array`), so a dynamic argument takes a boundary check.
+      return H_UINT8ARRAY;
     case 'void':
       return H_UNDEFINED;
   }
@@ -1360,6 +1453,16 @@ export type ConsoleMethod = keyof typeof CONSOLE_METHODS;
 export function isConsoleVariadicWidth(method: ConsoleMethod, given: number): boolean {
   const shape = CONSOLE_METHODS[method];
   return 'variadic' in shape && given !== shape.arity;
+}
+
+/** Whether the call can leave an exception pending, so the emitter follows it with a check:
+ * `table` reads each row's properties, and a variadic call of two or more arguments may apply
+ * util.format, whose `%j` reads properties too (plan.md §9 Task 6.24) -- a getter there throws. */
+export function consoleMayThrow(call: ConsoleLogCall): boolean {
+  return (
+    call.method === 'table' ||
+    (call.args.length >= 2 && isConsoleVariadicWidth(call.method, call.args.length))
+  );
 }
 
 /** The C entry point for a call of this width, or `null` if the method has no such form. A method
@@ -1785,6 +1888,23 @@ export interface TypedOp extends Node {
   readonly args: readonly Expression[];
 }
 
+/** `Number.prototype`'s landed methods (plan-notes 310): one runtime function each, the receiver
+ * first and the one argument padded with `undefined`, which both read as the spec's default
+ * (radix 10, zero digits). Both answer a string and may leave a RangeError pending. */
+export const NUMBER_OPS = {
+  toString: { fn: 'jsrt_number_to_string_radix' },
+  toFixed: { fn: 'jsrt_number_to_fixed' },
+} as const satisfies Record<string, { readonly fn: string }>;
+
+export type NumberOperation = keyof typeof NUMBER_OPS;
+
+export interface NumberOp extends Node {
+  readonly kind: 'number-op';
+  readonly op: NumberOperation;
+  readonly target: Expression;
+  readonly args: readonly Expression[];
+}
+
 export interface DateOp extends Node {
   readonly kind: 'date-op';
   readonly op: DateOperation;
@@ -1973,6 +2093,8 @@ export type Expression =
   | FieldAccess
   | MethodCall
   | DynMethodCall
+  | FieldCall
+  | NumberOp
   | MethodValue
   | ObjectLiteral
   | DynObjectLiteral
@@ -1982,6 +2104,7 @@ export type Expression =
   | MathCall
   | StringOp
   | StringStaticCall
+  | GlobalCall
   | RegExpLiteral
   | RegExpOp
   | FunctionExpr
@@ -2070,7 +2193,8 @@ export interface FieldAssignment extends Node {
 
 /** `o.x = v` against a dynamic object: overwrite in place when the key exists, shape transition
  * when it does not. Same evaluation order as FieldAssignment (target, then value), and both land
- * in rooted slots first — `jsrt_set_prop` may grow the slot array, which allocates. */
+ * in rooted slots first — `jsrt_set_prop` may grow the slot array, which allocates. `xs.length = n`
+ * on an array-typed target is this node too: the same entry resizes the array (plan-notes 310). */
 export interface DynFieldAssignment extends Node {
   readonly kind: 'dyn-field-assignment';
   readonly target: Expression;

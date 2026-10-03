@@ -516,3 +516,257 @@ jsrt_value jsrt_op_shr(jsrt_value a, jsrt_value b) {
 jsrt_value jsrt_op_ushr(jsrt_value a, jsrt_value b) {
   return jsrt_number((double)(to_u32(a) >> shift_count(b)));
 }
+
+/* The global number functions -- parseInt, parseFloat, isNaN, isFinite (§19.2). */
+
+/* ToString of the argument, its leading StrWhiteSpaceChar skipped. Both parsers start here, and
+ * both read code units straight off the string: a non-ASCII unit after the trim ends the prefix,
+ * which is the spec's answer too (no digit and no sign is outside ASCII). The string comes back
+ * unrooted, so a caller does nothing that allocates on the GC heap while it holds it. */
+static jsrt_value trimmed_start(jsrt_value v, uint32_t *pos) {
+  jsrt_value s = jsrt_is(v, JSRT_TAG_STRING) ? v : jsrt_to_string(v);
+  uint32_t len = jsrt_string_length(s);
+  uint32_t i = 0;
+  while (i < len && is_str_white_space(jsrt_string_char(s, i))) {
+    i++;
+  }
+  *pos = i;
+  return s;
+}
+
+/* The value of one code unit as a digit, or 36 for "not a digit in any radix". */
+static unsigned digit_value(uint16_t ch) {
+  if (ch >= '0' && ch <= '9') {
+    return (unsigned)(ch - '0');
+  }
+  if (ch >= 'a' && ch <= 'z') {
+    return (unsigned)(ch - 'a') + 10u;
+  }
+  if (ch >= 'A' && ch <= 'Z') {
+    return (unsigned)(ch - 'A') + 10u;
+  }
+  return 36u;
+}
+
+/* Radix 2, 4, 8, 16 or 32: §19.2.5 step 11 makes the value exact, so it is rounded once, to
+ * nearest-even, the way V8's InternalStringToIntDouble does: bits accumulate in a uint64 until
+ * the value needs more than 53, the bits shifted out below the mantissa are kept for rounding,
+ * and every later digit only raises the exponent (and clears `zero_tail` when nonzero). */
+static double parse_power_of_two(jsrt_value s, uint32_t start, uint32_t end, unsigned radix) {
+  unsigned bits = 0;
+  while ((1u << bits) < radix) {
+    bits++;
+  }
+  const uint64_t limit = (uint64_t)1 << 53;
+  uint64_t number = 0;
+  uint32_t i = start;
+  for (; i < end; i++) {
+    number = (number << bits) + digit_value(jsrt_string_char(s, i));
+    if (number >= limit) {
+      i++;
+      break;
+    }
+  }
+  if (number < limit) {
+    return (double)number;
+  }
+  int exponent = 0;
+  unsigned overflow_bits = 1;
+  while ((number >> overflow_bits) >= limit) {
+    overflow_bits++;
+  }
+  uint64_t dropped = number & (((uint64_t)1 << overflow_bits) - 1u);
+  number >>= overflow_bits;
+  exponent = (int)overflow_bits;
+  bool zero_tail = true;
+  for (; i < end; i++) {
+    if (digit_value(jsrt_string_char(s, i)) != 0) {
+      zero_tail = false;
+    }
+    exponent += (int)bits;
+  }
+  uint64_t middle = (uint64_t)1 << (overflow_bits - 1u);
+  if (dropped > middle || (dropped == middle && ((number & 1u) != 0 || !zero_tail))) {
+    number++;
+    if (number == limit) {
+      number >>= 1;
+      exponent++;
+    }
+  }
+  return ldexp((double)number, exponent);
+}
+
+/* Any other radix but 10: the spec allows an approximation past 20 significant digits, and Node's
+ * is V8's -- multiply-add in 32-bit chunks, folded into a double one chunk at a time. Matching the
+ * chunking is what keeps a large result byte-identical with Node rather than merely close. */
+static double parse_generic_radix(jsrt_value s, uint32_t start, uint32_t end, unsigned radix) {
+  const uint32_t max_multiplier = 0xFFFFFFFFu / 36u;
+  double result = 0.0;
+  uint32_t i = start;
+  while (i < end) {
+    uint32_t part = 0;
+    uint32_t multiplier = 1;
+    while (i < end) {
+      uint32_t next = multiplier * radix;
+      if (next > max_multiplier) {
+        break;
+      }
+      part = part * radix + digit_value(jsrt_string_char(s, i));
+      multiplier = next;
+      i++;
+    }
+    result = result * (double)multiplier + (double)part;
+  }
+  return result;
+}
+
+/* The code units [start, end) as a NUL-terminated copy on the C heap, for a parser that wants
+ * a C string. Every caller has already proved the span ASCII (a unit past 127 truncates), and a
+ * NULL answer is OOM, which each one turns into NaN. */
+static char *ascii_copy(jsrt_value s, uint32_t start, uint32_t end) {
+  size_t n = (size_t)(end - start);
+  char *buf = (char *)malloc(n + 1);
+  if (buf == NULL) {
+    return NULL;
+  }
+  for (size_t k = 0; k < n; k++) {
+    buf[k] = (char)jsrt_string_char(s, start + (uint32_t)k);
+  }
+  buf[n] = '\0';
+  return buf;
+}
+
+/* Decimal digits [start, end), leading zeros already skipped by the caller: strtod over a pure
+ * digit run is correctly rounded and has no locale-dependent character to trip on. */
+static double parse_decimal_digits(jsrt_value s, uint32_t start, uint32_t end) {
+  if (start == end) {
+    return 0.0;
+  }
+  char *buf = ascii_copy(s, start, end);
+  if (buf == NULL) {
+    return 0.0 / 0.0; /* NaN: the OOM answer, as in jsrt_string_to_number */
+  }
+  double value = strtod(buf, NULL);
+  free(buf);
+  return value;
+}
+
+/* `parseInt(string, radix)` (§19.2.5). */
+jsrt_value jsrt_global_parse_int(jsrt_value string, jsrt_value radix) {
+  /* The spec runs ToString(string) before ToInt32(radix), but neither can call user code here
+   * (jsrt_to_primitive is ToString without a user method), so the order is unobservable -- and
+   * taking the radix first means nothing allocates while the NaN-boxed `s`, invisible to the
+   * collector, is live. */
+  int32_t r = jsrt_to_int32(jsrt_to_number(radix));
+  uint32_t pos = 0;
+  jsrt_value s = trimmed_start(string, &pos);
+  uint32_t len = jsrt_string_length(s);
+  bool negative = false;
+  if (pos < len && (jsrt_string_char(s, pos) == '-' || jsrt_string_char(s, pos) == '+')) {
+    negative = jsrt_string_char(s, pos) == '-';
+    pos++;
+  }
+  bool strip_prefix = true;
+  if (r != 0) {
+    if (r < 2 || r > 36) {
+      return jsrt_number(0.0 / 0.0);
+    }
+    strip_prefix = r == 16;
+  } else {
+    r = 10;
+  }
+  if (strip_prefix && pos + 1 < len && jsrt_string_char(s, pos) == '0' &&
+      (jsrt_string_char(s, pos + 1) == 'x' || jsrt_string_char(s, pos + 1) == 'X')) {
+    pos += 2;
+    r = 16;
+  }
+  unsigned base = (unsigned)r;
+  uint32_t end = pos;
+  while (end < len && digit_value(jsrt_string_char(s, end)) < base) {
+    end++;
+  }
+  if (end == pos) {
+    return jsrt_number(0.0 / 0.0);
+  }
+  /* Leading zeros add nothing in any radix, and skipping them keeps the power-of-two path's
+   * 53-bit window on significant digits. */
+  while (pos < end && jsrt_string_char(s, pos) == '0') {
+    pos++;
+  }
+  double magnitude;
+  if (base == 10) {
+    magnitude = parse_decimal_digits(s, pos, end);
+  } else if ((base & (base - 1u)) == 0) {
+    magnitude = parse_power_of_two(s, pos, end, base);
+  } else {
+    magnitude = parse_generic_radix(s, pos, end, base);
+  }
+  /* Step 15: a zero result keeps the sign, so `parseInt("-0")` is -0. */
+  return jsrt_number(negative ? -magnitude : magnitude);
+}
+
+/* `parseFloat(string)` (§19.2.4): the longest prefix that is a StrDecimalLiteral, converted by the
+ * same literal parser `Number(s)` uses -- the prefix is validated here, so it accepts it whole. */
+jsrt_value jsrt_global_parse_float(jsrt_value string) {
+  uint32_t pos = 0;
+  jsrt_value s = trimmed_start(string, &pos);
+  uint32_t len = jsrt_string_length(s);
+  uint32_t i = pos;
+  if (i < len && (jsrt_string_char(s, i) == '+' || jsrt_string_char(s, i) == '-')) {
+    i++;
+  }
+  static const char infinity[] = "Infinity";
+  uint32_t k = 0;
+  while (k < 8 && i + k < len && jsrt_string_char(s, i + k) == (uint16_t)infinity[k]) {
+    k++;
+  }
+  if (k == 8) {
+    return jsrt_number(jsrt_string_char(s, pos) == '-' ? -INFINITY : INFINITY);
+  }
+  uint32_t digits = 0;
+  while (i < len && digit_value(jsrt_string_char(s, i)) < 10u) {
+    i++;
+    digits++;
+  }
+  if (i < len && jsrt_string_char(s, i) == '.') {
+    uint32_t after = i + 1;
+    uint32_t fraction = 0;
+    while (after < len && digit_value(jsrt_string_char(s, after)) < 10u) {
+      after++;
+      fraction++;
+    }
+    /* "5." is a literal and "." is not: the point joins the prefix only beside a digit. */
+    if (digits > 0 || fraction > 0) {
+      i = after;
+      digits += fraction;
+    }
+  }
+  if (digits == 0) {
+    return jsrt_number(0.0 / 0.0);
+  }
+  if (i < len && (jsrt_string_char(s, i) == 'e' || jsrt_string_char(s, i) == 'E')) {
+    uint32_t e = i + 1;
+    if (e < len && (jsrt_string_char(s, e) == '+' || jsrt_string_char(s, e) == '-')) {
+      e++;
+    }
+    uint32_t exponent_start = e;
+    while (e < len && digit_value(jsrt_string_char(s, e)) < 10u) {
+      e++;
+    }
+    if (e > exponent_start) {
+      i = e;
+    }
+  }
+  char *buf = ascii_copy(s, pos, i);
+  if (buf == NULL) {
+    return jsrt_number(0.0 / 0.0);
+  }
+  double value = parse_numeric_literal(buf, (size_t)(i - pos));
+  free(buf);
+  return jsrt_number(value);
+}
+
+/* `isNaN(x)` and `isFinite(x)` (§19.2.2-3): ToNumber first, unlike their Number.* namesakes. */
+jsrt_value jsrt_global_is_nan(jsrt_value v) { return jsrt_bool(isnan(jsrt_to_number(v))); }
+
+jsrt_value jsrt_global_is_finite(jsrt_value v) { return jsrt_bool(isfinite(jsrt_to_number(v))); }

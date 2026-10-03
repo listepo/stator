@@ -15,7 +15,7 @@
 
 import * as ts from 'typescript';
 import type { ExternAbiKind } from '../hir/nodes.ts';
-import { diagnosticFromNode, type Diagnostic } from '../support/diagnostics.ts';
+import { diagnosticFromNode, syntaxKindName, type Diagnostic } from '../support/diagnostics.ts';
 import { exportAbiKindOf } from './extern.ts';
 import { outSlotInner } from './types.ts';
 import { tsTypeToHType } from './types.ts';
@@ -185,6 +185,10 @@ function abiCType(kind: ExternAbiKind, position: 'param' | 'return'): string {
       // rendered. The case exists only because the switch is exhaustive — a slot address has
       // no C-observable meaning, so there is no honest type to print here.
       return 'void *';
+    case 'bytes':
+      // Unreachable: `exportAbiKindOf` never answers `bytes`, so a `Uint8Array` position keeps
+      // the `jsrt_value` form. Exhaustiveness only, and the value form is the honest fallback.
+      return 'jsrt_value';
     case 'void':
       return position === 'return' ? 'void' : 'jsrt_value';
   }
@@ -537,7 +541,7 @@ export function collectUnitExports(
       collector.never(
         statement,
         'STA1122',
-        `exported ${ts.SyntaxKind[statement.kind]} cannot be exposed to C in v0 — only ` +
+        `exported ${syntaxKindName(statement.kind)} cannot be exposed to C in v0 — only ` +
           'non-generic function declarations and const primitives are exportable (docs/FFI.md)',
       );
     }

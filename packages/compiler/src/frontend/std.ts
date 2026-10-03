@@ -11,41 +11,38 @@
  *
  * Nothing here depends on the mode: `std` is the same library under `ts` and `js` (§0.8). */
 
-import { existsSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { checkerDir, packageRoot } from '../support/package-root.ts';
 
 const PREFIX = 'std/';
 
-/** The std package root: `STATOR_STD_ROOT`, else the sibling workspace package
- * (`packages/compiler/<src|dist>/frontend` → `packages/std`), else a published `std` beside
- * `dist`. Mirrors cli/build.ts's runtime-root rule, and a wrong guess fails the same way: the
- * module list comes back empty and every `std/` import is STA3002 naming no modules. */
-function resolveStdRoot(): string {
-  const override = process.env['STATOR_STD_ROOT'];
-  if (override !== undefined && override !== '') {
-    return override;
-  }
-  const here = dirname(fileURLToPath(import.meta.url));
-  const sibling = join(here, '..', '..', '..', 'std');
-  const bundled = join(here, '..', '..', 'std');
-  return existsSync(join(sibling, 'src')) ? sibling : bundled;
-}
+/** The std package root: `STATOR_STD_ROOT`, else the sibling workspace package, else a published
+ * `std` beside `dist` (`support/package-root.ts`). A wrong guess leaves the module list empty, and
+ * every `std/` import is STA3002 naming no modules. */
+export const STD_ROOT = packageRoot('STATOR_STD_ROOT', 'std', 'src');
 
-export const STD_ROOT = resolveStdRoot();
-
-/** Real path, forward slashes: the checker resolves modules to real paths and normalizes every
- * `fileName` to `/`, so a prefix test against a source file's name must compare like with like —
- * a root reached through a symlink (macOS `/tmp`) would otherwise never match. */
-function sourceDir(): string {
-  const dir = join(STD_ROOT, 'src');
-  return (existsSync(dir) ? realpathSync(dir) : dir).replace(/\\/g, '/');
-}
-
-const STD_SOURCE_DIR = sourceDir();
+const STD_SOURCE_DIR = checkerDir(join(STD_ROOT, 'src'));
 
 /** Modules whose surface needs T10.2's OS threads (docs/STD.md §5). */
 const THREAD_MODULES: ReadonlySet<string> = new Set(['sync', 'thread']);
+
+/** Members a std module will export once T10.2's thread pool exists: the Promise twins of the
+ * sync `std/fs` calls (docs/STD.md §2, T10.1 step 5). They are refused as not-yet rather than
+ * shipped as sync calls under `async`, which would block main inside an async program. */
+const THREAD_POOL_MEMBERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  [
+    'fs',
+    new Set([
+      'readTextAsync',
+      'writeTextAsync',
+      'statAsync',
+      'mkdirAsync',
+      'unlinkAsync',
+      'rmdirAsync',
+    ]),
+  ],
+]);
 
 let moduleNames: readonly string[] | undefined;
 
@@ -75,14 +72,16 @@ export function stdPathMapping(): Record<string, string[]> {
 
 /** What an import specifier means at the std edge, or `undefined` when it does not start with
  * `std/` (an ordinary relative import or a package, which the gate rules on as before). */
+export interface StdNotYet {
+  readonly kind: 'not-yet';
+  readonly code: 'STA1214';
+  readonly message: string;
+  readonly phase: 10;
+}
+
 export type StdSpecifier =
   | { readonly kind: 'module'; readonly name: string }
-  | {
-      readonly kind: 'not-yet';
-      readonly code: 'STA1214';
-      readonly message: string;
-      readonly phase: 10;
-    }
+  | StdNotYet
   | { readonly kind: 'unknown'; readonly code: 'STA3002'; readonly message: string };
 
 export function classifyStdSpecifier(specifier: string): StdSpecifier | undefined {
@@ -108,6 +107,25 @@ export function classifyStdSpecifier(specifier: string): StdSpecifier | undefine
     kind: 'unknown',
     code: 'STA3002',
     message: `unknown std module '${specifier}' — the std modules are ${known === '' ? '(none found)' : known}`,
+  };
+}
+
+/** A named import of a std member that waits for T10.2, or `undefined` for any other name (which
+ * the checker answers as before: a member no module exports is a plain error). */
+export function classifyStdMember(specifier: string, member: string): StdNotYet | undefined {
+  if (!specifier.startsWith(PREFIX)) {
+    return undefined;
+  }
+  if (THREAD_POOL_MEMBERS.get(specifier.slice(PREFIX.length))?.has(member) !== true) {
+    return undefined;
+  }
+  return {
+    kind: 'not-yet',
+    code: 'STA1214',
+    message:
+      `'${member}' from '${specifier}' is not yet supported; planned for Phase 10 ` +
+      '(T10.2: Promise-flavored std/fs runs on the thread pool)',
+    phase: 10,
   };
 }
 

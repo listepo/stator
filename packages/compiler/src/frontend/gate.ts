@@ -1,4 +1,6 @@
 import * as ts from 'typescript';
+import { ambiguousStarExports, namespaceModule } from './modules.ts';
+import { hasTypeScriptAnnotation } from './annotation.ts';
 import type {
   ConsoleMethod,
   DateOperation,
@@ -6,8 +8,11 @@ import type {
   ErrorClass,
   RegExpOperation,
 } from '../hir/nodes.ts';
+import { GLOBAL_CALLS, NUMBER_OPS } from '../hir/nodes.ts';
+import type { GlobalCallName } from '../hir/nodes.ts';
 import type { HType } from '../hir/types.ts';
-import { accessorName, hTypeEquals, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
+import { accessorName, hTypeName, objectFieldsPrefix } from '../hir/types.ts';
+import { callableFieldSlot } from '../hir/types.ts';
 import {
   ARRAY_OPS,
   CONSOLE_METHODS,
@@ -25,7 +30,7 @@ import {
   typedMember,
 } from '../hir/nodes.ts';
 import type { Diagnostic } from '../support/diagnostics.ts';
-import { diagnosticFromFile, diagnosticFromNode } from '../support/diagnostics.ts';
+import { diagnosticFromFile, diagnosticFromNode, syntaxKindName } from '../support/diagnostics.ts';
 import { intlEnabled } from '../support/features.ts';
 import {
   capturesEnclosingScope,
@@ -55,6 +60,10 @@ import {
   hirPropertyName,
   instanceMethodName,
   isDynamicShape,
+  isFunctionValueCallee,
+  isFunctionMemberRead,
+  isUndeclaredMemberRead,
+  isFunctionValueMember,
   isGlobalSymbolIteratorName,
   isImplicitAny,
   isSingleConstDeclarator,
@@ -67,6 +76,7 @@ import {
   tsTypeToHType,
   userIteratorMethod,
 } from './types.ts';
+import { isClassFormationDeclarator } from './types.ts';
 import {
   classifyExternDeclaration,
   classifyOutSlotCall,
@@ -79,6 +89,8 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
+import { isFreeCommonJsName, isPackageSpecifier } from './vendor.ts';
+import { type CommonJsBinding, commonJsVerdict, isNodeSourceFile, nodeBuiltinId } from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
@@ -88,7 +100,7 @@ type Mode = 'ts' | 'js';
  * In js mode: accepts both .ts and .js files; untyped becomes Unknown/dynamic.
  * Gating decisions produce diagnostics; nothing below the gate knows the mode exists.
  */
-export function gateProgram(program: ts.Program, mode: Mode): Diagnostic[] {
+export function gateProgram(program: ts.Program, mode: Mode, onNode = false): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const typeChecker = program.getTypeChecker();
   const classNameCounts = countClassNames(program, mode);
@@ -124,20 +136,23 @@ export function gateProgram(program: ts.Program, mode: Mode): Diagnostic[] {
     }
 
     // Walk the AST and gate each node
-    visitNode(sourceFile, sourceFile, typeChecker, mode, diagnostics, classNameCounts);
+    visitNode(sourceFile, sourceFile, typeChecker, mode, diagnostics, classNameCounts, onNode);
   }
 
   return diagnostics;
 }
 
-/** How many named class declarations and expressions each spelling has across the program.
+/** The file of every named class declaration and expression, by spelling, across the program. */
+type ClassNameFiles = ReadonlyMap<string, readonly ts.SourceFile[]>;
+
+/** Where each named class spelling is declared across the program, one entry per declaration.
  *
- * A nested generic class specializes under its source name, so two declarations sharing one
- * would share one mangled tuple. The gate holds that boundary by program-wide name uniqueness
- * (`nestedGenericIsScoped`), counted once here over exactly the files the walk below gates, so
- * the two cannot disagree about which files count. */
-function countClassNames(program: ts.Program, mode: Mode): ReadonlyMap<string, number> {
-  const counts = new Map<string, number>();
+ * A generic class specializes under its source name, so two declarations sharing one would share
+ * one mangled tuple. The gate holds that boundary by name uniqueness (`nestedGenericIsScoped`
+ * program-wide, `genericNameIsModuleLocal` across modules), counted once here over exactly the
+ * files the walk below gates, so the two cannot disagree about which files count. */
+function countClassNames(program: ts.Program, mode: Mode): ClassNameFiles {
+  const counts = new Map<string, ts.SourceFile[]>();
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.isDeclarationFile || program.isSourceFileDefaultLibrary(sourceFile)) {
       continue;
@@ -147,7 +162,9 @@ function countClassNames(program: ts.Program, mode: Mode): ReadonlyMap<string, n
     }
     const visit = (node: ts.Node): void => {
       if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.name !== undefined) {
-        counts.set(node.name.text, (counts.get(node.name.text) ?? 0) + 1);
+        const files = counts.get(node.name.text) ?? [];
+        files.push(sourceFile);
+        counts.set(node.name.text, files);
       }
       ts.forEachChild(node, visit);
     };
@@ -163,7 +180,8 @@ function visitNode(
   typeChecker: ts.TypeChecker,
   mode: Mode,
   diagnostics: Diagnostic[],
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
+  onNode: boolean,
 ): void {
   // Check for explicit `any` in ts mode (STA1001)
   if (mode === 'ts' && hasExplicitAny(node)) {
@@ -199,13 +217,13 @@ function visitNode(
   // apply, and we still recurse so a nested `any` (e.g. `Array<any>`) is found.
   if (ts.isTypeNode(node)) {
     ts.forEachChild(node, (child) =>
-      visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts),
+      visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts, onNode),
     );
     return;
   }
 
   // Gate specific constructs: accept the micro-subset, reject the rest
-  const gateResult = gateConstruct(node, mode, typeChecker, classNameCounts);
+  const gateResult = gateConstruct(node, mode, typeChecker, classNameCounts, onNode);
   if (gateResult.kind === 'not-yet') {
     diagnostics.push(
       diagnosticFromNode(
@@ -231,7 +249,7 @@ function visitNode(
 
   // Recurse
   ts.forEachChild(node, (child) =>
-    visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts),
+    visitNode(child, sourceFile, typeChecker, mode, diagnostics, classNameCounts, onNode),
   );
 }
 
@@ -262,9 +280,21 @@ function gateConstruct(
   node: ts.Node,
   mode: Mode,
   typeChecker: ts.TypeChecker,
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
+  onNode: boolean,
 ): GateResult {
   const kind = node.kind;
+
+  // Before the token skip below: a BigInt literal IS a token, and skipping it handed `1n` to the
+  // lowering, which can only answer STA4031 (plan.md §9 Task 6.25).
+  if (isBigIntUse(node, typeChecker)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1213',
+      message: 'BigInt is not yet supported; planned for Phase 5',
+      phase: 5,
+    };
+  }
 
   // Tokens carry no independent meaning: an operator token, keyword, or punctuation is only ever
   // reached as a child of a construct this function already ruled on. Gating them separately
@@ -282,6 +312,11 @@ function gateConstruct(
     kind !== ts.SyntaxKind.SuperKeyword
   ) {
     return { kind: 'accept' };
+  }
+
+  const moduleSyntax = gateModuleSyntax(node, typeChecker);
+  if (moduleSyntax !== undefined) {
+    return moduleSyntax;
   }
 
   switch (kind) {
@@ -310,53 +345,6 @@ function gateConstruct(
     case ts.SyntaxKind.ThrowStatement:
     case ts.SyntaxKind.TryStatement:
       return { kind: 'accept' };
-
-    // Task 3.11: modules, whole-program v0. The merged program has ONE namespace and an import
-    // binds nothing -- the importer's identifier resolves to the exporting file's own top-level
-    // binding BY NAME (src/frontend/graph.ts). Everything accepted here must preserve that
-    // resolution, which is why every renaming shape (`x as y`) is refused: it would make a name
-    // resolve to a binding that does not carry it.
-    case ts.SyntaxKind.ImportDeclaration:
-      return gateImport(node as ts.ImportDeclaration, typeChecker);
-    case ts.SyntaxKind.ImportClause:
-    case ts.SyntaxKind.NamedImports:
-    case ts.SyntaxKind.NamedExports:
-      return { kind: 'accept' };
-    case ts.SyntaxKind.ImportSpecifier: {
-      const spec = node as ts.ImportSpecifier;
-      // A type-only alias is erased whole, so renaming one changes nothing at runtime.
-      return spec.propertyName === undefined || importIsTypeOnly(spec)
-        ? { kind: 'accept' }
-        : notYet("renaming an import ('x as y') is not yet supported", 5);
-    }
-    // `export { x }` (no specifier). The re-export form carries a specifier and is an ALIAS: the
-    // local file never binds the name, so name-resolution through the merge cannot find it.
-    case ts.SyntaxKind.ExportDeclaration: {
-      const decl = node as ts.ExportDeclaration;
-      return decl.moduleSpecifier === undefined
-        ? { kind: 'accept' }
-        : notYet("re-exports (export { x } from '...') are not yet supported", 5);
-    }
-    case ts.SyntaxKind.ExportSpecifier: {
-      const spec = node as ts.ExportSpecifier;
-      const parent = spec.parent.parent;
-      const typeOnly = spec.isTypeOnly || (ts.isExportDeclaration(parent) && parent.isTypeOnly);
-      return spec.propertyName === undefined || typeOnly
-        ? { kind: 'accept' }
-        : notYet("renaming an export ('x as y') is not yet supported", 5);
-    }
-    // `export default <literal>`. Nothing can import a default in v0 (default imports are
-    // refused below), so the only thing at stake is the expression's side effects -- which a
-    // literal has none of, letting the lowering skip the statement entirely.
-    case ts.SyntaxKind.ExportAssignment: {
-      const assignment = node as ts.ExportAssignment;
-      if (assignment.isExportEquals) {
-        return notYet('export = is not yet supported', 5);
-      }
-      return isLiteralValue(assignment.expression)
-        ? { kind: 'accept' }
-        : notYet('a default export with a computed value is not yet supported', 5);
-    }
 
     // `catch (e)` / `catch {`. The binding must be a plain name -- `catch ({ message })`
     // destructures, and the HIR has one name per binding, the same rule gateDeclaration applies.
@@ -452,7 +440,7 @@ function gateConstruct(
       return { kind: 'accept' };
 
     case ts.SyntaxKind.Identifier:
-      return gateIdentifier(node as ts.Identifier, typeChecker, mode);
+      return gateIdentifier(node as ts.Identifier, typeChecker, mode, onNode);
 
     case ts.SyntaxKind.VariableDeclarationList:
       return gateDeclarationList(node as ts.VariableDeclarationList, mode);
@@ -530,14 +518,14 @@ function gateConstruct(
       ) {
         return { kind: 'accept' };
       }
-      return gateMemberAccess(access, typeChecker);
+      return gateMemberAccess(access, typeChecker, mode);
     }
 
     case ts.SyntaxKind.ArrayLiteralExpression:
       return gateArrayLiteral(node as ts.ArrayLiteralExpression, typeChecker);
 
     case ts.SyntaxKind.ElementAccessExpression:
-      return gateElementAccess(node as ts.ElementAccessExpression, typeChecker);
+      return gateElementAccess(node as ts.ElementAccessExpression, typeChecker, mode);
 
     case ts.SyntaxKind.ForOfStatement:
       return gateForOf(node as ts.ForOfStatement, mode, typeChecker);
@@ -647,10 +635,45 @@ function gateConstruct(
   }
 }
 
-/** A named or side-effect-only import. `import './x'` contributes an edge to the module graph
- * and nothing else; `import type` is erased whole. What is refused binds a NAME the exporting
- * file does not own under that spelling: a default import (the export is anonymous) and a
- * namespace import (`ns.x` would need an object no module is). */
+/** Task 3.11 + plan.md §11c T11.5a: the module syntax, or `undefined` for any other node. Every
+ * module has its own top-level namespace; an import binds its local name to the exporting
+ * module's binding, resolved through the checker's alias chain in the lowering, so every
+ * renaming shape (`x as y`, a default, a namespace, a re-export) names the binding it aliases
+ * rather than a spelling. */
+function gateModuleSyntax(node: ts.Node, typeChecker: ts.TypeChecker): GateResult | undefined {
+  if (MODULE_CLAUSE_KINDS.has(node.kind)) {
+    return { kind: 'accept' };
+  }
+  if (ts.isImportDeclaration(node)) {
+    return gateImport(node, typeChecker);
+  }
+  if (ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) {
+    return gateSpecifier(node, typeChecker);
+  }
+  // `export { x }`, `export { x as y }`, and the re-exports `export … from`, `export * from`,
+  // `export * as ns from`: a re-export's specifier is held to the import rules.
+  if (ts.isExportDeclaration(node)) {
+    return node.moduleSpecifier === undefined || node.isTypeOnly
+      ? { kind: 'accept' }
+      : gateModuleSpecifier(node.moduleSpecifier, typeChecker);
+  }
+  // `export default <expression>` evaluates its expression once, into the module's hidden
+  // `*default*` binding (ES §16.2.3.7), which a default import then reads.
+  if (ts.isExportAssignment(node)) {
+    return node.isExportEquals ? notYet('export = is not yet supported', 5) : { kind: 'accept' };
+  }
+  return undefined;
+}
+
+/** The clauses that only hold an import's or an export's names; each name is gated on its own. */
+const MODULE_CLAUSE_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.ImportClause,
+  ts.SyntaxKind.NamedImports,
+  ts.SyntaxKind.NamedExports,
+  ts.SyntaxKind.NamespaceImport,
+  ts.SyntaxKind.NamespaceExport,
+]);
+
 /** `import(s)`. A string literal names a file already in the whole-program graph. Anything
  * else needs runtime resolution, which is Phase 8 (plan.md §8 step 10c). */
 function gateImportCall(call: ts.CallExpression): GateResult {
@@ -673,12 +696,85 @@ function gateImportCall(call: ts.CallExpression): GateResult {
       phase: 8,
     };
   }
+  // A package's namespace object lives in the vendor bundle, where Rolldown builds it with
+  // `__exportAll` (`Object.defineProperty` getters and `Symbol.toStringTag`); until that helper
+  // compiles, the call has no module to load (plan.md §11d T12.3).
+  if (isPackageSpecifier(spec.text)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1214',
+      message:
+        "import() of a package is not yet supported; planned for Phase 12 (Rolldown's __exportAll)",
+      phase: 12,
+    };
+  }
   return { kind: 'accept' };
 }
 
+/** One name an import or a re-export takes from another module by name. A name two `export *`
+ * re-exports of that module bind differently is ambiguous, and naming it is the SyntaxError ES
+ * raises at link time (§16.2.1.6.3, plan-notes 302); js mode drops the checker's TS2308 so that
+ * this is where the program is refused, and the namespace merely leaves the name out. */
+function gateSpecifier(
+  spec: ts.ImportSpecifier | ts.ExportSpecifier,
+  typeChecker: ts.TypeChecker,
+): GateResult {
+  const declaration = ts.isImportSpecifier(spec) ? spec.parent.parent.parent : spec.parent.parent;
+  const moduleSpecifier = declaration.moduleSpecifier;
+  if (moduleSpecifier === undefined) {
+    return { kind: 'accept' };
+  }
+  const target = typeChecker.getSymbolAtLocation(moduleSpecifier)?.valueDeclaration;
+  const name = (spec.propertyName ?? spec.name).text;
+  return target !== undefined &&
+    ts.isSourceFile(target) &&
+    ambiguousStarExports(target, typeChecker).has(name)
+    ? {
+        kind: 'never',
+        code: 'STA3003',
+        message:
+          `'${name}' is ambiguous in ${target.fileName}: two \`export *\` re-exports bind it ` +
+          'differently, so it cannot be imported by name',
+      }
+    : { kind: 'accept' };
+}
+
+/** `ns.x` where `ns` is a module namespace: a member the lowering resolves to the export's own
+ * binding. */
+function isNamespaceMember(
+  node: ts.PropertyAccessExpression,
+  typeChecker: ts.TypeChecker,
+): boolean {
+  return namespaceModule(typeChecker.getTypeAtLocation(node.expression)) !== undefined;
+}
+
+/** An import declaration. `import './x'` contributes an edge to the module graph and nothing
+ * else; `import type` is erased whole; every binding shape -- named, renamed, default,
+ * namespace -- aliases the exporting module's binding (plan.md §11c T11.5a). */
 function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): GateResult {
-  const spec = node.moduleSpecifier;
-  if (ts.isStringLiteral(spec) && node.importClause?.isTypeOnly !== true) {
+  if (node.importClause?.isTypeOnly === true) {
+    return { kind: 'accept' };
+  }
+  const specifier = gateModuleSpecifier(node.moduleSpecifier, typeChecker);
+  if (specifier.kind !== 'accept') {
+    return specifier;
+  }
+  // A namespace of a declaration file has no module behind it: its bindings are extern C
+  // functions (docs/FFI.md §1), called by name, with no slot a namespace object could read.
+  const bindings = node.importClause?.namedBindings;
+  if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+    const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
+    if (target !== undefined && ts.isSourceFile(target) && target.isDeclarationFile) {
+      return notYet('a namespace import of a declaration file is not yet supported', 5);
+    }
+  }
+  return { kind: 'accept' };
+}
+
+/** The specifier rules every module edge obeys, an import's and a re-export's alike: a bare
+ * specifier is a package, a relative one names its extension, and `std/` is a reserved prefix. */
+function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): GateResult {
+  if (ts.isStringLiteral(spec)) {
     // `std/…` is a reserved prefix, not a package (docs/STD.md §1): a known module is an ordinary
     // edge into the std sources, judged by the clause rules below like any relative import. A
     // refused specifier that resolved to no file was already refused, with this same code, where
@@ -695,18 +791,33 @@ function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): Ga
         ? { kind: 'never', code: std.code, message: std.message }
         : { kind: 'not-yet', code: std.code, message: std.message, phase: std.phase };
     }
-    // Bare specifier: a package. Compiling one means compiling someone else's whole module graph.
+    // A Node built-in is never a package (docs/BUNDLER.md §1). Under `--node` a landed one
+    // resolved into `packages/node` and is an ordinary edge; every other one resolved to nothing
+    // and was refused where the checker's "cannot find module" is mapped (program.ts
+    // `edgeRefusal`), with the platform's answer.
+    if (nodeBuiltinId(spec.text) !== undefined) {
+      const target = typeChecker.getSymbolAtLocation(spec)?.valueDeclaration;
+      if (target === undefined || (ts.isSourceFile(target) && isNodeSourceFile(target.fileName))) {
+        return { kind: 'accept' };
+      }
+    }
+    // Bare specifier: a package. In js mode the bundler takes it (plan.md §11d T12.1), and the
+    // vendor rewrite turns every import declaration and re-export of one into an import of the
+    // vendor module, so a package specifier left here is ts mode, `--bundler=none`, or a form
+    // the rewrite does not take: `import()`, `export * from` a second package (the bundle cannot
+    // say which star a name came from), or the deprecated `assert` attributes (plan.md T12.3).
     if (std === undefined && !spec.text.startsWith('./') && !spec.text.startsWith('../')) {
-      // No `phase`: compiling a package means compiling someone else's whole module graph
-      // (npm-ecosystem compatibility, a v1 non-goal in plan.md §0), and no open phase owns
-      // it — a phase number here would tell the user to wait for a release that has no card
-      // for the work (src/support/phases.ts).
+      // No `phase`: ts mode never bundles (a bundler strips the types it compiles), and no open
+      // phase owns the remaining forms — a phase number here would tell the user to wait for a
+      // release that has no card for the work (src/support/phases.ts).
       return {
         kind: 'not-yet',
         code: 'STA1214',
         message:
-          'importing a package is not yet supported (npm-ecosystem compatibility is a ' +
-          'v1 non-goal; no phase owns it)',
+          'importing a package is not yet supported here (a package reaches a program only ' +
+          'through the js-mode bundler, which takes import declarations, re-exports and ' +
+          "one package's `export *`; " +
+          'docs/BUNDLER.md)',
       };
     }
     // Node ESM never resolves an extensionless relative specifier, and Node is the ground truth
@@ -722,31 +833,38 @@ function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): Ga
       };
     }
   }
-  const clause = node.importClause;
-  if (clause === undefined || clause.isTypeOnly) {
-    return { kind: 'accept' };
-  }
-  if (clause.name !== undefined) {
-    return notYet('default imports are not yet supported', 5);
-  }
-  if (clause.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
-    return notYet('namespace imports (import * as ns) are not yet supported', 5);
-  }
   return { kind: 'accept' };
 }
 
-function importIsTypeOnly(spec: ts.ImportSpecifier): boolean {
-  return spec.isTypeOnly || spec.parent.parent.isTypeOnly;
-}
-
-function isLiteralValue(expr: ts.Expression): boolean {
-  return (
-    ts.isStringLiteral(expr) ||
-    ts.isNumericLiteral(expr) ||
-    expr.kind === ts.SyntaxKind.TrueKeyword ||
-    expr.kind === ts.SyntaxKind.FalseKeyword ||
-    expr.kind === ts.SyntaxKind.NullKeyword
-  );
+/** Which CommonJS binding a free identifier reads or writes (plan-notes 315, 316): `require`,
+ * `__filename`, `__dirname`, `module` as the base of `module.exports`, or `exports` itself.
+ * `typeof module` / `typeof exports` is a probe, not a use: a UMD wrapper asks it in every
+ * environment, and it answers `'undefined'`. */
+function commonJsBinding(
+  node: ts.Identifier,
+  typeChecker: ts.TypeChecker,
+): CommonJsBinding | undefined {
+  for (const name of ['__filename', '__dirname'] as const) {
+    if (isFreeCommonJsName(node, name, typeChecker)) return name;
+  }
+  if (isFreeCommonJsName(node, 'require', typeChecker)) {
+    return 'require()';
+  }
+  if (ts.isTypeOfExpression(node.parent)) {
+    return undefined;
+  }
+  if (isFreeCommonJsName(node, 'exports', typeChecker)) {
+    return 'exports';
+  }
+  const parent = node.parent;
+  const exportsOf =
+    (ts.isPropertyAccessExpression(parent) && parent.name.text === 'exports') ||
+    (ts.isElementAccessExpression(parent) &&
+      ts.isStringLiteralLike(parent.argumentExpression) &&
+      parent.argumentExpression.text === 'exports');
+  return exportsOf && parent.expression === node && isFreeCommonJsName(node, 'module', typeChecker)
+    ? 'module.exports'
+    : undefined;
 }
 
 /** One code for the whole Phase 2 boundary. These constructs are not deferred for six different
@@ -759,6 +877,31 @@ function notYet(message: string, phase: number): GateResult {
     message: `${message}; planned for Phase ${phase}`,
     phase,
   };
+}
+
+/** A BigInt literal, or a value whose type may be a bigint (plan.md §9 Task 6.25).
+ *
+ * A name is judged by its DECLARED type, not the narrowed one: `typeof u === 'bigint'` narrows an
+ * `unknown` to bigint in a branch no compiled program can enter, because every way to make a
+ * bigint is refused here (node:assert's `inspect` has exactly that branch). A declaration's own
+ * name is not a value read; its uses are. */
+function isBigIntUse(node: ts.Node, checker: ts.TypeChecker): boolean {
+  if (ts.isBigIntLiteral(node)) {
+    return true;
+  }
+  if (!ts.isExpression(node) || ts.getNameOfDeclaration(node.parent as ts.Declaration) === node) {
+    return false;
+  }
+  const named = ts.isIdentifier(node)
+    ? node
+    : ts.isPropertyAccessExpression(node)
+      ? node.name
+      : undefined;
+  const symbol = named === undefined ? undefined : checker.getSymbolAtLocation(named);
+  const type =
+    symbol === undefined ? checker.getTypeAtLocation(node) : checker.getTypeOfSymbol(symbol);
+  const parts = type.isUnion() ? type.types : [type];
+  return parts.some((part) => (part.flags & ts.TypeFlags.BigIntLike) !== 0);
 }
 
 function symbolNotYet(): GateResult {
@@ -898,7 +1041,7 @@ function describeKind(kind: ts.SyntaxKind): string {
     case ts.SyntaxKind.ExportAssignment:
       return 'modules';
     default:
-      return `this construct (${ts.SyntaxKind[kind]})`;
+      return `this construct (${syntaxKindName(kind)})`;
   }
 }
 
@@ -938,11 +1081,36 @@ function classConstructorTypeOf(type: ts.Type): boolean {
   });
 }
 
+function isModuleClauseName(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  return (
+    ts.isImportSpecifier(parent) ||
+    ts.isExportSpecifier(parent) ||
+    ts.isImportClause(parent) ||
+    ts.isNamespaceImport(parent) ||
+    ts.isNamespaceExport(parent)
+  );
+}
+
 /** Cross-function references are what rung 4b implements, so an identifier is accepted on its own.
  * The one shape held back: a binding declared inside a loop is a FRESH binding per iteration, and
  * rung 4b gives a function one environment per call, so every iteration's closure would share the
  * one slot and read the last iteration's value. Reject the capture rather than emit that program. */
-function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: Mode): GateResult {
+function gateIdentifier(
+  node: ts.Identifier,
+  typeChecker: ts.TypeChecker,
+  mode: Mode,
+  onNode: boolean,
+): GateResult {
+  // A name in an import or export clause is a boundary spelling, never evaluated: it names the
+  // binding the lowering aliases (plan.md §11c T11.5a), whatever that binding is.
+  if (isModuleClauseName(node)) {
+    return { kind: 'accept' };
+  }
+  const binding = commonJsBinding(node, typeChecker);
+  if (binding !== undefined) {
+    return commonJsVerdict(binding, mode, onNode);
+  }
   const symbol = typeChecker.getSymbolAtLocation(node);
   const decl = symbol?.valueDeclaration;
   // A class NAME is not a value here. Five spellings are not uses of the value and must pass: the
@@ -1126,8 +1294,8 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
   if (node.text === 'outSlot' && isOutSlotCallee(node, typeChecker)) {
     return { kind: 'accept' };
   }
-  // A global the compiler does not model -- `String`, `Number`, `parseInt`, `NaN`, `Infinity`,
-  // `Math`, `globalThis`, `console` as a value, and everything else that resolves outside the
+  // A global the compiler does not model -- `JSON`, `Math`, `globalThis`, `console` as a value, a
+  // global function read rather than called, and everything else that resolves outside the
   // module being compiled. The lowering creates bindings only for declarations it lowers, so every
   // one of these used to be ACCEPTED here and then hit `STA4035 identifier used before
   // declaration` -- an INTERNAL error, for legal source. The accept set has to equal the HIR's
@@ -1189,6 +1357,21 @@ function gateIdentifier(node: ts.Identifier, typeChecker: ts.TypeChecker, mode: 
         }
         return symbolNotYet();
       }
+      // A global function as a CALLEE: gateCall already vetted the call (plan.md §11c T11.4), and
+      // the lowering answers it with one node -- the function itself is never a value.
+      if (
+        ts.isCallExpression(node.parent) &&
+        node.parent.expression === node &&
+        globalFunctionOf(node, typeChecker) !== undefined
+      ) {
+        return { kind: 'accept' };
+      }
+      // `typeof JSON`, `typeof parseInt`: a global the language defines has a fixed `typeof`,
+      // which the lowering folds to its string -- the feature test `typeof JSON !== "undefined"`
+      // reads no value at all.
+      if (ts.isTypeOfExpression(node.parent) && globalTypeofOf(node, typeChecker) !== undefined) {
+        return { kind: 'accept' };
+      }
       // A catch-all keeps the phase that owns MOST of what it refuses (plan §7 Task 4.7 step 5).
       // What is left of the global surface is `Symbol` and the iterator protocol around it, which
       // is Phase 5 step 8; `globalThis` and `Reflect` are Phase 8's, and `Proxy` is a `never` the
@@ -1231,7 +1414,9 @@ export const INSTANCEOF_BUILTINS: ReadonlySet<string> = new Set([
   'Function',
   'Date',
   'Map',
+  'WeakMap',
   'Set',
+  'WeakSet',
   'RegExp',
   'Promise',
   'Uint8Array',
@@ -1342,6 +1527,12 @@ function isGlobalReference(node: ts.Identifier): boolean {
   if (ts.isTypeNode(parent)) {
     return false;
   }
+  // The property NAME in an object binding pattern (`const { length: n } = xs`) names a key of
+  // the value being destructured. The checker resolves it to that property's declaration, which
+  // for a lib type lives in a `.d.ts` -- but it reads no binding (plan-notes 310).
+  if (ts.isBindingElement(parent) && parent.propertyName === node) {
+    return false;
+  }
   if (ts.isNewExpression(parent) && parent.expression === node) {
     return false;
   }
@@ -1357,11 +1548,14 @@ function isGlobalReference(node: ts.Identifier): boolean {
     // gateMemberAccess and gateCall judge the member itself, with a sharper message than a
     // blanket "the global 'Math'" — and the declaration-file test in isGlobalMath keeps a user
     // binding named Math on the ordinary identifier path. `String` is exempt the same way for
-    // its namespace calls (`String.fromCharCode`, plan.md §8 step 19).
+    // its namespace calls (`String.fromCharCode`, plan.md §8 step 19), and `Array` for
+    // `Array.isArray` and `Number` for `Number.parseInt` (plan.md §11c T11.4).
     return !(
       parent.name === node ||
       (parent.expression === node &&
         (isConsoleLog(parent) ||
+          node.text === 'Array' ||
+          node.text === 'Number' ||
           node.text === 'Date' ||
           node.text === 'Uint8Array' ||
           node.text === 'ArrayBuffer' ||
@@ -1444,6 +1638,31 @@ export function isSimpleBindingPattern(name: ts.BindingName): boolean {
     );
   }
   return false;
+}
+
+/** `({ a, b: c } = rhs)` / `[a, , b] = rhs`: the assignment twin of isSimpleBindingPattern, whose
+ * targets are variables rather than new bindings (plan-notes 310). */
+function isSimpleAssignmentPattern(
+  pattern: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
+): boolean {
+  if (ts.isObjectLiteralExpression(pattern)) {
+    return pattern.properties.every(
+      (p) =>
+        (ts.isShorthandPropertyAssignment(p) && p.objectAssignmentInitializer === undefined) ||
+        (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && ts.isIdentifier(p.initializer)),
+    );
+  }
+  return pattern.elements.every((el) => ts.isOmittedExpression(el) || ts.isIdentifier(el));
+}
+
+/** Whether the value of `node` is discarded: the whole of an expression statement, parentheses
+ * aside. */
+function isStatementPosition(node: ts.Expression): boolean {
+  let at: ts.Node = node;
+  while (ts.isParenthesizedExpression(at.parent)) {
+    at = at.parent;
+  }
+  return ts.isExpressionStatement(at.parent);
 }
 
 function gateDeclaration(decl: ts.VariableDeclaration, checker: ts.TypeChecker): GateResult {
@@ -1543,6 +1762,18 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       }
     }
   }
+  // Every compound assignment, `+=` through `??=`, which TypeScript numbers as one contiguous range.
+  // `x += e` on an identifier folds to `x = x + e`, sound because a bare identifier cannot have
+  // side effects. An element target cannot use that fold -- `a[i()] += 1` must call `i` ONCE --
+  // so the lowering hoists the target and the index into temporaries and reads the element from
+  // those (the promise rung 3 made in plan-notes 43, kept here).
+  const op = bin.operatorToken.kind;
+  if (op >= ts.SyntaxKind.FirstCompoundAssignment && op <= ts.SyntaxKind.LastCompoundAssignment) {
+    if (!isAssignableTarget(bin.left, typeChecker, mode)) {
+      return notYet('compound assignment to anything but a variable is not yet supported', 5);
+    }
+    return gateUpdate(bin, typeChecker, mode);
+  }
   switch (bin.operatorToken.kind) {
     // Every operator BinaryOp and LogicalOp model, plus plain assignment. Loose equality is here
     // rather than deferred because docs/NUMERIC.md §6.3 defines it for primitives without any
@@ -1581,6 +1812,11 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
     // compare against. (There is no `instanceof Box<number>` spelling — the right operand is an
     // expression, and type arguments are not expressions.)
     case ts.SyntaxKind.InstanceOfKeyword: {
+      // `x instanceof F` against an ordinary function or an untyped value answers through the
+      // value's `prototype` at run time (`jsrt_instanceof_ctor`, plan-notes 310).
+      if (mode === 'js' && isFunctionValueCallee(bin.right, typeChecker)) {
+        return { kind: 'accept' };
+      }
       if (!ts.isIdentifier(bin.right)) {
         return notYet('instanceof against anything but a class name is not yet supported', 5);
       }
@@ -1626,15 +1862,29 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       // A bare name is HIR Assignment, `a[i] = v` is IndexAssignment, `o.x = v` is FieldAssignment.
       // Neither member form is re-checked here for what it is a member OF: this node's child is
       // gated in its own right, and gateElementAccess and gateMemberAccess are where that lives.
-      // A dynamic-shape member is a fourth target, plain `=` only: the compound forms fold to a
-      // read of the place, and the read-once machinery hoists SLOTS, which a shape-table entry
-      // is not -- so they stay refused below, not admitted here.
-      // A name the class never declared is refused first: growing a fixed layout is Phase 8's
-      // dictionary mode (the write twin of the dynamic read, plan.md §8 step 37). In `ts` mode
-      // the checker's own TS2339 owns the program, so refusing here too would report one mistake
-      // twice — and `explain` would answer not-yet where the build answers error.
-      if (mode === 'js' && isAbsentClassMemberWrite(bin.left, typeChecker)) {
+      // A dynamic-shape or Unknown member is a fourth target, DynFieldAssignment, for every
+      // assignment form: the key is static, so the read-once machinery need only hoist the
+      // receiver, and the fold reads and writes the shape-table entry through it.
+      // So is a name the receiver's fixed layout never declared, `o.extra = v`: the write grows
+      // the object's overflow table (docs/VALUE.md §4.24). Only the ELEMENT spelling over a class,
+      // `c["extra"] = v`, is still refused, first. In `ts` mode the checker's own TS2339 owns the
+      // program, so refusing here too would report one mistake twice — and `explain` would answer
+      // not-yet where the build answers error.
+      if (
+        mode === 'js' &&
+        ts.isElementAccessExpression(bin.left) &&
+        isAbsentClassMemberWrite(bin.left, typeChecker)
+      ) {
         return notYet('assigning a new property on a class instance is not yet supported', 8);
+      }
+      if (ts.isObjectLiteralExpression(bin.left) || ts.isArrayLiteralExpression(bin.left)) {
+        return isStatementPosition(bin) && isSimpleAssignmentPattern(bin.left)
+          ? { kind: 'accept' }
+          : notYet(
+              'destructuring assignment is supported only as a statement whose targets are ' +
+                'variables, with no default, rest or nesting',
+              5,
+            );
       }
       // An Out-bound name takes only slots: anything else stored would read back as a handle
       // the callee never wrote (docs/FFI.md §2). Property targets hold copied bits and are
@@ -1656,42 +1906,28 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
           }
         }
       }
-      return isAssignableTarget(bin.left, typeChecker) ||
-        (ts.isPropertyAccessExpression(bin.left) &&
-          (isDynamicShape(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker) ||
-            tsTypeToHType(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker).kind ===
-              'unknown'))
-        ? { kind: 'accept' }
-        : notYet('assignment to anything but a variable is not yet supported', 5);
-
-    // `x += e` on an identifier folds to `x = x + e`, sound because a bare identifier cannot have
-    // side effects. An element target cannot use that fold -- `a[i()] += 1` must call `i` ONCE --
-    // so the lowering hoists the target and the index into temporaries and reads the element from
-    // those (the promise rung 3 made in plan-notes 43, kept here).
-    case ts.SyntaxKind.PlusEqualsToken:
-    case ts.SyntaxKind.MinusEqualsToken:
-    case ts.SyntaxKind.AsteriskEqualsToken:
-    case ts.SyntaxKind.SlashEqualsToken:
-    case ts.SyntaxKind.PercentEqualsToken:
-    case ts.SyntaxKind.AsteriskAsteriskEqualsToken:
-    case ts.SyntaxKind.AmpersandEqualsToken:
-    case ts.SyntaxKind.BarEqualsToken:
-    case ts.SyntaxKind.CaretEqualsToken:
-    case ts.SyntaxKind.LessThanLessThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanEqualsToken:
-    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken:
-      if (!isAssignableTarget(bin.left, typeChecker)) {
-        return notYet('compound assignment to anything but a variable is not yet supported', 5);
+      if (isAssignableTarget(bin.left, typeChecker, mode)) {
+        return { kind: 'accept' };
       }
-      return gateUpdate(bin, typeChecker, mode);
-
-    case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
-    case ts.SyntaxKind.BarBarEqualsToken:
-    case ts.SyntaxKind.QuestionQuestionEqualsToken:
-      if (!isAssignableTarget(bin.left, typeChecker)) {
-        return notYet('compound assignment to anything but a variable is not yet supported', 5);
+      // `f.count = 0` in ts mode: the same property-table write js mode accepts above.
+      if (
+        ts.isPropertyAccessExpression(bin.left) &&
+        isFunctionValueMember(bin.left.expression, bin.left.name.text, typeChecker)
+      ) {
+        return functionMemberResult(mode);
       }
-      return gateUpdate(bin, typeChecker, mode);
+      // A name an object's type never declared: in `js` mode isAssignableTarget accepted it above
+      // (the write grows the overflow table, docs/VALUE.md §4.24); in `ts` mode the checker's
+      // TS2339 owns the program, and refusing here too would report one mistake twice.
+      if (
+        mode === 'ts' &&
+        ts.isPropertyAccessExpression(bin.left) &&
+        tsTypeToHType(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker).kind ===
+          'object'
+      ) {
+        return { kind: 'accept' };
+      }
+      return notYet('assignment to anything but a variable is not yet supported', 5);
 
     default:
       return notYet('this operator is not yet supported', 5);
@@ -1717,7 +1953,7 @@ function gatePrefixUnary(
     // to the same positional rule as compound assignment.
     case ts.SyntaxKind.PlusPlusToken:
     case ts.SyntaxKind.MinusMinusToken:
-      if (!isAssignableTarget(unary.operand, typeChecker)) {
+      if (!isAssignableTarget(unary.operand, typeChecker, mode)) {
         return notYet('++ and -- on anything but a variable are not yet supported', 5);
       }
       return gateUpdate(unary, typeChecker, mode);
@@ -1727,21 +1963,23 @@ function gatePrefixUnary(
   }
 }
 
-/** What a read-modify-write may be applied to: a variable, or an array element.
+/** What a read-modify-write may be applied to: a variable, an array element, a layout field, an
+ * array's `length`, a member of a dynamic-shape or Unknown receiver, or -- in `js` mode -- an own
+ * property of an ordinary function (`f.count = 0`, `F.prototype.m = …`; plan-notes 310).
  *
- * Both are the HIR's vocabulary -- `Assignment` and `IndexAssignment` -- and the gate's accept set
+ * Each is the HIR's vocabulary -- `Assignment`, `IndexAssignment`, `FieldAssignment` and
+ * `DynFieldAssignment` -- and the gate's accept set
  * must equal that vocabulary exactly, which is why this is one predicate rather than a check
  * duplicated at each operator. The element case is admitted here and vetted for real by
  * gateElementAccess when the child node is reached. */
-function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boolean {
+function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker, mode: Mode): boolean {
   if (ts.isIdentifier(node) || ts.isElementAccessExpression(node)) {
     return true;
   }
   if (!ts.isPropertyAccessExpression(node)) {
     return false;
   }
-  // A field, and ONLY a field: `a.length = 0` is a property access too, and writing it resizes an
-  // array -- which is a hole-creating operation the dense representation refuses (STA2002).
+  // A class or constraint layout field.
   if (
     classLikeOf(checker.getTypeAtLocation(node.expression)) !== undefined ||
     constraintDeclaration(checker.getTypeAtLocation(node.expression), checker) !== undefined
@@ -1752,9 +1990,6 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   // against it, and the lowering substitutes the concrete type per specialization. Method slots
   // take the same rule here classes do — a write replaces whatever the slot holds.
   const receiver = checker.getTypeAtLocation(node.expression);
-  // A field through `T`: the constraint declares the layout, the checker proved the access
-  // against it, and the lowering substitutes the concrete type per specialization. Method slots
-  // take the same rule classes do — a write replaces whatever the slot holds.
   const constraint = typeParameterConstraint(receiver, checker);
   if (
     constraint !== undefined &&
@@ -1762,11 +1997,28 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker): boole
   ) {
     return true;
   }
+  // A dynamic-shape or Unknown receiver: the shape table is the place, read and written by name
+  // through the receiver the lowering evaluates once (plan-notes 310).
   if (isDynamicShape(receiver, checker)) {
     return true;
   }
+  if (
+    mode === 'js' &&
+    (isFunctionValueMember(node.expression, node.name.text, checker) ||
+      isFunctionMemberRead(node.expression, checker) ||
+      isUndeclaredMemberRead(node, checker))
+  ) {
+    return true;
+  }
   const shape = tsTypeToHType(receiver, checker);
-  return shape.kind === 'object' && shape.fields.some((f) => f.name === node.name.text);
+  // `a.length = n` resizes an array (ECMA-262 §10.4.2.4): shrinking drops the tail, a non-uint32
+  // is a RangeError, and growing would create holes, which the runtime refuses (STA2002) as it
+  // refuses a write past the end (plan-notes 310).
+  return (
+    shape.kind === 'unknown' ||
+    (shape.kind === 'array' && node.name.text === 'length') ||
+    (shape.kind === 'object' && shape.fields.some((f) => f.name === node.name.text))
+  );
 }
 
 /** A write to a name a class never declared (`c.missing = 1`): JavaScript grows the object,
@@ -1806,17 +2058,23 @@ function isAbsentClassMemberWrite(target: ts.Expression, checker: ts.TypeChecker
 
 /** `++`/`--`/`+=`/`=` in any position: statement form folds to Assignment; value form is UpdateExpr. */
 function gateUpdate(node: ts.Node, checker: ts.TypeChecker, mode: Mode): GateResult {
-  // Every read-modify-write grows nothing, but an absent member's write would have to: `c.missing
-  // += 1` reads `undefined` fine and then has nowhere to store. One predicate covers the compound,
-  // logical and update spellings alike — plain `=` is decided in gateBinary, the one assignment
-  // form that does not route through here. In `ts` mode the checker's own TS2339 owns the program
-  // (see gateBinary's `=` arm for why the refusal is js-only).
+  // An absent member's read-modify-write grows the object: `c.missing += 1` reads `undefined` and
+  // stores into the overflow table (docs/VALUE.md §4.24). Only the element spelling over a class,
+  // `c["missing"] += 1`, is still refused. One predicate covers the compound, logical and update
+  // spellings alike — plain `=` is decided in gateBinary, the one assignment form that does not
+  // route through here. In `ts` mode the checker's own TS2339 owns the program (see gateBinary's
+  // `=` arm for why the refusal is js-only).
   const target = ts.isBinaryExpression(node)
     ? node.left
     : ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)
       ? node.operand
       : undefined;
-  if (mode === 'js' && target !== undefined && isAbsentClassMemberWrite(target, checker)) {
+  if (
+    mode === 'js' &&
+    target !== undefined &&
+    ts.isElementAccessExpression(target) &&
+    isAbsentClassMemberWrite(target, checker)
+  ) {
     return notYet('assigning a new property on a class instance is not yet supported', 8);
   }
   return { kind: 'accept' };
@@ -1844,6 +2102,11 @@ function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mo
     return notYet('delete of anything but a property access is not yet supported', 5);
   }
   const target = tsTypeToHType(checker.getTypeAtLocation(operand.expression), checker);
+  // A name the layout never declared lives in the overflow table, which can lose it
+  // (docs/VALUE.md §4.24); only a DECLARED slot has no encoding for absence.
+  if (mode === 'js' && isUndeclaredMemberRead(operand, checker)) {
+    return { kind: 'accept' };
+  }
   if (target.kind === 'object') {
     return mode === 'ts'
       ? {
@@ -1860,8 +2123,10 @@ function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mo
           phase: 8,
         };
   }
-  if (target.kind === 'array') {
-    return notYet('delete of an array element is not yet supported', 5);
+  // An array of an Unknown element may hold holes (docs/VALUE.md §4.4), so deleting one of its
+  // elements leaves a hole; a typed element has no value that could stand for one.
+  if (target.kind === 'array' && target.element.kind !== 'unknown') {
+    return notYet('delete of an element of an array with a typed element is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -1933,7 +2198,7 @@ function gateLinkPragmas(sourceFile: ts.SourceFile, mode: Mode, diagnostics: Dia
   let headers = 0;
   for (const pragma of pragmas) {
     if (pragma.kind === 'invalid') {
-      refuse(pragma.line, pragma.col, `malformed @statorLink pragma: ${pragma.reason}`);
+      refuse(pragma.line, pragma.col, `refused @statorLink pragma: ${pragma.reason}`);
     } else if (pragma.kind === 'header') {
       headers += 1;
       if (headers > 1) {
@@ -2321,10 +2586,22 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     return gateOutSlotCall(call, typeChecker);
   }
 
+  // A global function called by name (plan.md §11c T11.4): `String(x)`, `Number(x)`,
+  // `Boolean(x)`, `parseInt(s, r)`, `parseFloat(s)`, `isNaN(x)`, `isFinite(x)`. Each lowers to
+  // one fixed-arity node, so a spread (whose count is not its arity) and an argument past the
+  // last parameter (evaluated, then ignored) are refused rather than lowered wrong. Any argument
+  // type is accepted -- every one of these coerces.
+  const globalFunction = globalFunctionOf(callee, typeChecker);
+  if (globalFunction !== undefined) {
+    return gateGlobalArguments(globalFunction, call, typeChecker);
+  }
+
   // Two property-access callees, each its own HIR node: `console.log`, and a method of a class
   // this subset lays out. Anything else -- a method on a built-in, on an object literal, on an
   // interface-typed value -- needs the shape lookup the dynamic path will bring.
-  if (ts.isPropertyAccessExpression(callee)) {
+  // `ns.f(…)` on a module namespace calls the export's own binding, exactly as `f(…)` would
+  // (plan.md §11c T11.5a): it is no method call, so it takes the ordinary-call rules below.
+  if (ts.isPropertyAccessExpression(callee) && !isNamespaceMember(callee, typeChecker)) {
     if (isConsoleLog(callee)) {
       const method = callee.name.text as ConsoleMethod;
       const shape = CONSOLE_METHODS[method];
@@ -2333,6 +2610,13 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       // picks an entry point by COUNT, and a spread's count is not its arity.
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet(`a spread argument to console.${method} is not yet supported`, 5);
+      }
+      const placeholder = 'variadic' in shape ? formatRefusal(call, typeChecker) : undefined;
+      if (placeholder !== undefined) {
+        return notYet(
+          `console.${method} ${placeholder.what} is not yet supported`,
+          placeholder.phase,
+        );
       }
       // The five printing methods are variadic (plan.md §8 step 18): any width reaches the
       // `(count, argv)` entry point, so neither bound applies — `console.log()` prints the bare
@@ -2501,6 +2785,48 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       }
       return { kind: 'accept' };
     }
+    // `Array.isArray(x)` (plan.md §11c T11.4) is the builtin `x instanceof Array` -- one realm and
+    // no Proxy is where the two agree -- so it takes that node's one operand. Every other member
+    // is deferred by name rather than by the method-call catch-all.
+    // `Number.parseInt` and `Number.parseFloat` were accepted above as the global functions
+    // they are; every other `Number` member is deferred by name here.
+    if (isGlobalNamed(callee.expression, typeChecker, 'Number')) {
+      return notYet(`Number.${callee.name.text} is not yet supported`, 5);
+    }
+    // `Number.prototype.toString(radix)` and `toFixed(digits)` (plan-notes 310): one runtime
+    // function each over a number receiver. Every other member is deferred by name.
+    if (
+      tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind === 'number'
+    ) {
+      const method = callee.name.text;
+      if (!Object.hasOwn(NUMBER_OPS, method)) {
+        return notYet(`Number.prototype.${method} is not yet supported`, 5);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet(`a spread argument to Number.prototype.${method} is not yet supported`, 5);
+      }
+      return call.arguments.length > 1
+        ? notYet(
+            `${method} with ${String(call.arguments.length)} arguments is not yet supported`,
+            5,
+          )
+        : { kind: 'accept' };
+    }
+    if (isGlobalArray(callee.expression, typeChecker)) {
+      const method = callee.name.text;
+      if (method !== 'isArray') {
+        return notYet(`Array.${method} is not yet supported`, 5);
+      }
+      if (call.arguments.some((a) => ts.isSpreadElement(a))) {
+        return notYet('a spread argument to Array.isArray is not yet supported', 5);
+      }
+      return call.arguments.length > 1
+        ? notYet(
+            `Array.isArray with ${String(call.arguments.length)} arguments is not yet supported`,
+            5,
+          )
+        : { kind: 'accept' };
+    }
     // A method ON a promise. then/catch/finally land via jsrt_call_protected (Phase 5 step 11).
     if (
       tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker).kind ===
@@ -2619,8 +2945,15 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       if (!Object.hasOwn(ARRAY_OPS, op)) {
         return notYet(`Array.prototype.${op} is not yet supported`, 5);
       }
+      // A spread calls the bound method (`jsrt_array_method`) with the drained argument list, which
+      // reads `push`/`unshift`/`splice`/`concat` by COUNT the way the specification does (step 5).
+      // The callback ops stay refused: the callback rule below cannot see an argument a spread
+      // carries, and `reduce` tells an absent initial value from an `undefined` one by count the
+      // bound entry does not keep. `toSpliced` reads a fixed pair and drops its insertion tail.
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
-        return notYet('a spread argument to an array method is not yet supported', 5);
+        return Object.hasOwn(CALLBACK_ARRAY_OPS, op) || op === 'toSpliced'
+          ? notYet(`a spread argument to Array.prototype.${op} is not yet supported`, 5)
+          : { kind: 'accept' };
       }
       if (op === 'lastIndexOf' && call.arguments.length > 2) {
         return notYet('lastIndexOf with more than two arguments is not yet supported', 5);
@@ -2746,13 +3079,10 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
     if (collection !== undefined) {
       return collection;
     }
-    // A spread's count is not its arity: the lowering pads every other call to a fixed argv, and
-    // a spread needs a dynamic one nothing builds (plan.md §8 step 37). Refused here rather than
-    // lowered wrong — the lowering's STA4031 on SpreadElement is the same bug wearing an
-    // internal error's clothes, in both modes. The builtin namespaces refuse their own spreads
-    // above with their own messages; what reaches here is a user function or method.
+    // The builtin namespaces refuse their own spreads above with their own messages; what reaches
+    // here is a user function or method, which a spread calls through the shape table (step 5).
     if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
-      return notYet('a spread argument to a method call is not yet supported', 5);
+      return gateSpreadMethodCall(call, callee, typeChecker, mode);
     }
     // `C.m(…)` -- a static method, which is an ordinary function with no receiver. It is decided
     // before the instance case because the receiver's type answers the same for both.
@@ -2816,10 +3146,26 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       }
       // `o.m()` on an Unknown receiver: get the name through the shape table, then call.
       const shape = tsTypeToHType(typeChecker.getTypeAtLocation(callee.expression), typeChecker);
-      if (shape.kind === 'unknown') {
+      if (readsAsUnknown(callee.expression, shape, typeChecker, mode)) {
         return { kind: 'accept' };
       }
       if (shape.kind === 'object' && shape.methods.some((m) => m.name === callee.name.text)) {
+        return { kind: 'accept' };
+      }
+      // `o.f()` where `f` is a field holding a closure -- an object literal's `{ f: () => … }`
+      // or `{ scan }` (plan-notes 310): the callee loads from its slot and the receiver rides
+      // along exactly as a dynamic method call passes it.
+      if (callableFieldSlot(shape, callee.name.text) !== undefined) {
+        return { kind: 'accept' };
+      }
+      // `assert.sameValue(a, b)`: a function stored on a function, called with the function as
+      // its receiver through the closure's own properties (plan-notes 310).
+      if (isFunctionValueMember(callee.expression, callee.name.text, typeChecker)) {
+        return functionMemberResult(mode);
+      }
+      // `info.cb()` where `cb` was grown onto the object (docs/VALUE.md §4.24): get the name
+      // through the overflow table, then call it with the object as receiver.
+      if (mode === 'js' && isUndeclaredMemberRead(callee, typeChecker)) {
         return { kind: 'accept' };
       }
       return notYet('method calls are not yet supported', 5);
@@ -2849,10 +3195,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
 
   // `super(...)`, which the gate reaches only after gateClass proved it is the first statement of a
   // derived constructor: it is the base constructor run against the receiver this one was handed.
-  // A spread needs the same dynamic argv an ordinary spread call does (above), so it waits with it.
+  // A spread would run the base constructor through `jsrt_call_spread_at`, which passes no `this`
+  // a constructor call can bind; it waits with the spread `new` (`gateNew`).
   if (callee.kind === ts.SyntaxKind.SuperKeyword) {
     return call.arguments.some((argument) => ts.isSpreadElement(argument))
-      ? notYet('a spread argument to a function call is not yet supported', 5)
+      ? notYet('a spread argument to a super call is not yet supported', 5)
       : { kind: 'accept' };
   }
 
@@ -2866,11 +3213,70 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
   //
   // The argument count is deliberately unchecked: JavaScript drops extras and fills missing ones
   // with `undefined`, and the calling convention does that at runtime rather than making it a gate
-  // decision. A spread is the one argument form with no fixed count at all (plan.md §8 step 37).
+  // decision. A spread is the one argument form with no fixed count at all: its list is built at
+  // run time and called through `jsrt_call_spread_at` (step 5).
   if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
-    return notYet('a spread argument to a function call is not yet supported', 5);
+    return spreadCallRefusal(call, typeChecker, mode) ?? { kind: 'accept' };
   }
   return { kind: 'accept' };
+}
+
+/** What every spread call is still refused for (plan.md §11c T11.4 step 5): a call inside an
+ * optional chain, whose short-circuit the spread lowering does not build, and -- in js mode -- a
+ * callee with a TypeScript-annotated parameter. That annotation is a claim the edge check keeps
+ * (`STA2001`, plan-notes 308), and a spread's elements reach parameters by position only at run
+ * time, where no check stands. ts mode's checker proved the spread against the parameters itself. */
+function spreadCallRefusal(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+  mode: Mode,
+): GateResult | undefined {
+  if (ts.isOptionalChain(call)) {
+    return notYet('a spread argument in an optional chain is not yet supported', 5);
+  }
+  if (mode !== 'js') {
+    return undefined;
+  }
+  const declaration = checker.getResolvedSignature(call)?.declaration;
+  return declaration !== undefined &&
+    !ts.isJSDocSignature(declaration) &&
+    declaration.parameters.some((parameter) => hasTypeScriptAnnotation(parameter))
+    ? notYet(
+        'a spread argument to a function with annotated TypeScript parameters is not yet supported in js mode',
+        5,
+      )
+    : undefined;
+}
+
+/** `o.m(...xs)`: the method read through the shape table and called with `o` as its receiver
+ * (`jsrt_call_spread_at`). That read answers an Unknown or plain-object receiver, a class instance
+ * (its methods are the class's closures), an array, and a function's own property; the other
+ * receivers the static arms own -- iterators, collections, RegExp matches -- stay refused, as does
+ * `super.m(...)`, which names no value to read through. */
+function gateSpreadMethodCall(
+  call: ts.CallExpression,
+  callee: ts.PropertyAccessExpression,
+  checker: ts.TypeChecker,
+  mode: Mode,
+): GateResult {
+  const refused = spreadCallRefusal(call, checker, mode);
+  if (refused !== undefined) {
+    return refused;
+  }
+  if (callee.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    return notYet('a spread argument to a super method call is not yet supported', 5);
+  }
+  if (staticMemberOf(callee, checker, true) !== undefined) {
+    return { kind: 'accept' };
+  }
+  if (isFunctionValueMember(callee.expression, callee.name.text, checker)) {
+    return functionMemberResult(mode);
+  }
+  const receiver = tsTypeToHType(checker.getTypeAtLocation(callee.expression), checker);
+  return (receiver.kind === 'unknown' || receiver.kind === 'object') &&
+    !isMatchReceiver(callee.expression, checker)
+    ? { kind: 'accept' }
+    : notYet('a spread argument to a method call is not yet supported', 5);
 }
 
 /** Whether `fn` is an overload signature with a runnable implementation: bodiless, named,
@@ -3265,50 +3671,25 @@ function isFunctionLength(access: ts.PropertyAccessExpression, checker: ts.TypeC
  * iteration — and the dense runtime array has no way to be absent. A spread needs the iterator
  * protocol. Both are rejected rather than approximated. */
 function gateArrayLiteral(literal: ts.ArrayLiteralExpression, checker: ts.TypeChecker): GateResult {
+  // The left side of `[a, , b] = rhs` builds no array: its hole skips an index of the right side,
+  // and the `=` arm rules on the pattern (plan-notes 310).
+  if (
+    ts.isBinaryExpression(literal.parent) &&
+    literal.parent.left === literal &&
+    literal.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  ) {
+    return { kind: 'accept' };
+  }
   for (const element of literal.elements) {
     if (!ts.isOmittedExpression(element) && isOutSlotValue(element, checker)) {
       return outSlotInValuePosition('an array literal');
     }
   }
-  for (const element of literal.elements) {
-    if (ts.isOmittedExpression(element)) {
-      return notYet('a hole in an array literal is not yet supported', 5);
-    }
-    if (ts.isSpreadElement(element)) {
-      // Judged by the type the lowering gives the operand (spreadOperandType), not by the
-      // checker's asserted type: a checker-level array the HType model calls Unknown — a tuple,
-      // a union of arrays — emits the same uncompilable concat as a directly unknown value.
-      const hir = spreadOperandType(element.expression, checker);
-      if (hir.kind === 'array') {
-        continue;
-      }
-      const operandType = checker.getTypeAtLocation(element.expression);
-      if ((operandType.flags & ts.TypeFlags.StringLike) !== 0) {
-        return notYet('spread of a string in an array literal is not yet supported', 5);
-      }
-      if (hir.kind === 'unknown') {
-        // Unknown is three different things and only two of them are this gate's to report. An
-        // `any` operand, a tuple, or a dropped `as` assertion is silent at the checker and fatal
-        // at the verifier (STA4082): spreading one stays refused even though the GetIterator
-        // dispatch exists now (plan.md §8 step 2a(c) landed it for `for-of`), because driving an
-        // element walk is not copying elements — spread-of-unknown is step 12(c) residue with
-        // its own card, not this dispatch's second caller. A directly-`unknown` operand
-        // is the third thing and is excluded: in ts mode the checker refuses it (TS2488) before
-        // the gate runs, so speaking here too would double-report one mistake — and `explain`
-        // would answer not-yet where the build answers error. In js mode that refusal is
-        // suppressed (plan.md §8 step 2a(c)), so the operand falls through to the lowering's
-        // own STA1214 arm instead (subset_spread_direct_unknown_js.js pins the wake).
-        if (
-          spreadAdmitsAny(operandType) ||
-          isArrayOrTuple(operandType, checker) ||
-          isDroppedSpreadAssertion(element.expression, checker)
-        ) {
-          return notYet('spread of an unknown value in an array literal is not yet supported', 5);
-        }
-        continue;
-      }
-      return notYet('spread in an array literal of a non-array value is not yet supported', 5);
-    }
+  // A spread of any operand is accepted (plan.md §11c T11.4 step 5): the lowering spreads an array
+  // through the concat and drains anything else at run time, where a non-iterable is Node's
+  // `TypeError` (docs/VALUE.md §4.23).
+  if (literal.elements.some((element) => ts.isOmittedExpression(element))) {
+    return notYet('a hole in an array literal is not yet supported', 5);
   }
   return { kind: 'accept' };
 }
@@ -3344,44 +3725,6 @@ function spreadOperandType(expression: ts.Expression, checker: ts.TypeChecker): 
     return spreadOperandType(current.expression, checker);
   }
   return tsTypeToHType(checker.getTypeAtLocation(current), checker);
-}
-
-/** Whether `expression` is an `as` assertion the lowering drops rather than checks.
- *
- * Only consulted where the effective operand type is already Unknown, so the BoundaryCheck case
- * (a checkable assertion, which keeps the ASSERTED type and never lands here) is unreachable by
- * construction. What remains is an assertion to a type no tag settles — an array, a fixed shape —
- * off a value that stays dynamic: exactly the spelling the checker waves through and the verifier
- * then rejects. An `as unknown`/`as any` is not one: it asserts nothing, and the `any` half is
- * refused (or owned by the checker's own diagnostic) through the operand-type rule beside this
- * one. */
-function isDroppedSpreadAssertion(expression: ts.Expression, checker: ts.TypeChecker): boolean {
-  let current = expression;
-  while (ts.isParenthesizedExpression(current)) {
-    current = current.expression;
-  }
-  if (!ts.isAsExpression(current)) {
-    return false;
-  }
-  const asserted = tsTypeToHType(checker.getTypeAtLocation(current), checker);
-  return (
-    asserted.kind !== 'unknown' &&
-    !hTypeEquals(asserted, spreadOperandType(current.expression, checker))
-  );
-}
-
-/** Whether the checker lets this operand's Unknown through untouched: an `any` (whose spread
- * needs no iterator method to satisfy the checker) or a union carrying one. A directly-`unknown`
- * operand is excluded on purpose in ts mode — spreading it is TS2488, the checker's own
- * diagnostic — so the gate stays silent there rather than reporting one mistake twice (and
- * `explain` answering not-yet where the build answers error). In js mode that refusal is
- * suppressed (plan.md §8 step 2a(c)): the operand still skips this gate arm, but it lands on the
- * lowering's own STA1214 rather than compiling. */
-function spreadAdmitsAny(type: ts.Type): boolean {
-  if ((type.flags & ts.TypeFlags.Any) !== 0) {
-    return true;
-  }
-  return type.isUnion() && type.types.some((arm) => (arm.flags & ts.TypeFlags.Any) !== 0);
 }
 
 /** Whether `name` is a key a FIXED layout can carry.
@@ -3667,15 +4010,15 @@ function gateObjectLiteral(
 function gateClass(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
   checker: ts.TypeChecker,
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
 ): GateResult {
   if (declaration.name === undefined) {
     // Only a bound expression has an identity (Node's `.name`: the variable it binds);
     // an unbound one — a heritage base, a call argument, a parenthesized expression — has
     // no layout key, and nominal equality has nothing to hold onto. An anonymous
-    // DECLARATION stays refused here too: its only identity would be `default`, whose
-    // uses arrive through default imports, which name Phase 5's module-namespace residue
-    // (plan-notes 278).
+    // DECLARATION stays refused here too: its only identity would be `default`, and the class
+    // pipeline keys every descriptor on a declared name (plan-notes 278; default imports
+    // themselves landed with plan.md §11c T11.5a).
     if (ts.isClassExpression(declaration) && expressionClassName(declaration) !== undefined) {
       // fall through to member vetting below
     } else {
@@ -3709,6 +4052,16 @@ function gateClass(
     if (!nestedGenericIsScoped(declaration, classNameCounts)) {
       return notYet('a nested generic class is not yet supported', 5);
     }
+  }
+  if (
+    declaration.typeParameters !== undefined &&
+    declaration.typeParameters.length > 0 &&
+    !genericNameIsModuleLocal(declaration, classNameCounts)
+  ) {
+    return notYet(
+      "a generic class sharing its name with another module's class is not yet supported",
+      11,
+    );
   }
   const heritage = gateHeritage(declaration, checker);
   if (heritage.kind !== 'accept') {
@@ -4031,8 +4384,7 @@ function gateClass(
       parent !== undefined &&
       ts.isVariableDeclaration(parent) &&
       parent.initializer === declaration &&
-      ts.isIdentifier(parent.name) &&
-      isSingleConstDeclarator(parent);
+      isClassFormationDeclarator(parent, checker);
     if (!bound) {
       const name = declaration.name?.text;
       return name === undefined
@@ -4139,7 +4491,7 @@ function genericBaseArgumentsAreConcrete(
  * across the program, so the one mangled tuple names one declaration. */
 function nestedGenericIsScoped(
   declaration: ts.ClassDeclaration | ts.ClassExpression,
-  classNameCounts: ReadonlyMap<string, number>,
+  classNameCounts: ClassNameFiles,
 ): boolean {
   const name = declaration.name?.text;
   if (name === undefined) {
@@ -4148,7 +4500,24 @@ function nestedGenericIsScoped(
   if (enclosingTypeParameterNames(declaration).size > 0) {
     return false;
   }
-  return (classNameCounts.get(name) ?? 0) === 1;
+  return (classNameCounts.get(name)?.length ?? 0) === 1;
+}
+
+/** Whether no OTHER module declares a class under a generic class's name. Every module keeps its
+ * own namespace (plan.md §11c T11.5a), and an ordinary class takes a fresh HIR name when another
+ * module's class shares its spelling, but a generic one specializes under the bare source name
+ * (`Box<number>`) -- which the frontend also spells for generic bases, before any module scope
+ * exists -- so a second module's `Box` would share its descriptors. */
+function genericNameIsModuleLocal(
+  declaration: ts.ClassDeclaration | ts.ClassExpression,
+  classNameCounts: ClassNameFiles,
+): boolean {
+  const name = declaration.name?.text;
+  const file = declaration.getSourceFile();
+  return (
+    name === undefined ||
+    (classNameCounts.get(name) ?? []).every((declaredIn) => declaredIn === file)
+  );
 }
 
 /** Every member name declared by any ANCESTOR -- fields and methods alike, because the two collide
@@ -4826,6 +5195,13 @@ function gateCollectionCall(
   if (arity === undefined) {
     return notYet(`${callee.name.text} on a ${collectionName(collection)} is not yet supported`, 5);
   }
+  // Each op is one fixed-arity node, and a spread's count is not its arity.
+  if (call.arguments.some((argument) => ts.isSpreadElement(argument))) {
+    return notYet(
+      `a spread argument to a ${collectionName(collection)} method is not yet supported`,
+      5,
+    );
+  }
   if (call.arguments.length !== arity) {
     return notYet(
       `${collectionName(collection)}.${callee.name.text} with ${String(call.arguments.length)} arguments is not yet supported`,
@@ -4862,6 +5238,27 @@ function gateCollectionCall(
     }
   }
   return { kind: 'accept' };
+}
+
+/** Whether a member's receiver goes through the shape table the way an Unknown one does: its
+ * HType is Unknown, or -- in `js` mode -- it reads a function's own property (`F.prototype`),
+ * whose checker type is no layout (plan-notes 310). */
+function readsAsUnknown(
+  receiver: ts.Expression,
+  shape: HType,
+  checker: ts.TypeChecker,
+  mode: Mode,
+): boolean {
+  return shape.kind === 'unknown' || (mode === 'js' && isFunctionMemberRead(receiver, checker));
+}
+
+/** An own property of an ordinary function (`f.count`, `F.prototype`): the closure's property
+ * table in `js` mode (plan-notes 310). `ts` mode would need the member typed, and the property
+ * table is untyped, so it waits on Phase 8's descriptor surface. */
+function functionMemberResult(mode: Mode): GateResult {
+  return mode === 'js'
+    ? { kind: 'accept' }
+    : notYet('a property of a function value is not yet supported in ts mode', 8);
 }
 
 function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): GateResult {
@@ -4946,6 +5343,22 @@ function gateNew(node: ts.NewExpression, checker: ts.TypeChecker, mode: Mode): G
     return args.length <= 1
       ? { kind: 'accept' }
       : notYet('the Error constructor options argument is not yet supported', 5);
+  }
+  // `new RegExp(p, f)` and `new Array(n)` answer what the call without `new` answers (§22.2.4.1,
+  // §23.1.1.1), so they are the same node. `new String(x)` and its siblings are wrapper OBJECTS,
+  // not the conversions, and keep their refusal below.
+  const global = globalFunctionOf(node.expression, checker);
+  if (global === 'RegExp' || global === 'Array') {
+    return gateGlobalArguments(global, node, checker);
+  }
+  // `new F(...)` on an ordinary function, or on a value of unknown type -- tsc's
+  // `new (NodeConstructor || (NodeConstructor = getNodeConstructor()))(kind)` -- constructs
+  // through the value at run time (`jsrt_construct`, plan-notes 310). In `ts` mode the checker
+  // refuses `new` on a function (TS7009), and an untyped callee is `any`.
+  if (mode === 'js' && isFunctionValueCallee(node.expression, checker)) {
+    return node.arguments?.some((argument) => ts.isSpreadElement(argument)) === true
+      ? notYet('a spread argument to a constructor is not yet supported', 5)
+      : { kind: 'accept' };
   }
   if (node.typeArguments !== undefined) {
     // Explicit type arguments on a generic class are the tuple spelled out: the checker applies
@@ -5226,6 +5639,7 @@ function superValueHasReceiver(access: ts.PropertyAccessExpression): boolean {
 function gateMemberAccess(
   access: ts.PropertyAccessExpression,
   checker: ts.TypeChecker,
+  mode: Mode,
 ): GateResult {
   // `Symbol.iterator` as a computed class-method name is the well-known iterator, not a stored
   // symbol value. Any other property of `Symbol` (and `Symbol.iterator` as a value) is STA1212 —
@@ -5285,9 +5699,7 @@ function gateMemberAccess(
       return { kind: 'accept' };
     }
     if (MATH_METHODS.has(member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Math method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Math method');
     }
     return notYet(`Math.${member} is not yet supported`, 5);
   }
@@ -5297,9 +5709,7 @@ function gateMemberAccess(
   if (isGlobalObject(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(OBJECT_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using an Object method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'an Object method');
     }
     return notYet(`Object.${member} is not yet supported`, OBJECT_STATIC_OWNER[member] ?? 5);
   }
@@ -5309,11 +5719,19 @@ function gateMemberAccess(
   if (isGlobalDate(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(DATE_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Date method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Date method');
     }
     return dateNotYet(`Date.${member}`, 5);
+  }
+
+  // A Number.prototype method follows the same rule (plan-notes 310). A number has no data
+  // properties, so any other member is a method of the real prototype that has not landed.
+  if (tsTypeToHType(checker.getTypeAtLocation(access.expression), checker).kind === 'number') {
+    const member = access.name.text;
+    if (Object.hasOwn(NUMBER_OPS, member)) {
+      return calleeOnlyMember(access, 'a Number method');
+    }
+    return notYet(`Number.prototype.${member} is not yet supported`, 5);
   }
 
   // A Date.prototype method exists only as a callee, the rule every builtin receiver follows.
@@ -5322,9 +5740,7 @@ function gateMemberAccess(
   if (isDateReceiver(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(DATE_OPS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Date method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Date method');
     }
     return dateNotYet(`Date.prototype.${member}`);
   }
@@ -5335,9 +5751,7 @@ function gateMemberAccess(
   if (isGlobalPromise(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(PROMISE_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet('using a Promise method as a value is not yet supported', 5);
+      return calleeOnlyMember(access, 'a Promise method');
     }
     return notYet(`Promise.${member} is not yet supported`, 5);
   }
@@ -5345,9 +5759,7 @@ function gateMemberAccess(
   if (tsTypeToHType(checker.getTypeAtLocation(access.expression), checker).kind === 'promise') {
     const member = access.name.text;
     if (member === 'then' || member === 'catch' || member === 'finally') {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet(`using Promise.prototype.${member} as a value is not yet supported`, 5);
+      return calleeOnlyMember(access, `Promise.prototype.${member}`);
     }
     return {
       kind: 'not-yet',
@@ -5364,9 +5776,7 @@ function gateMemberAccess(
   if (isGlobalJson(access.expression, checker)) {
     const member = access.name.text;
     if (member === 'stringify' || member === 'parse') {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' }
-        : notYet(`using JSON.${member} as a value is not yet supported`, 5);
+      return calleeOnlyMember(access, `JSON.${member}`);
     }
     return notYet(`JSON.${member} is not yet supported`, 5);
   }
@@ -5377,11 +5787,24 @@ function gateMemberAccess(
   if (isGlobalString(access.expression, checker)) {
     const member = access.name.text;
     if (Object.hasOwn(STRING_STATICS, member)) {
-      return ts.isCallExpression(access.parent) && access.parent.expression === access
-        ? { kind: 'accept' } // gateCall vets the arguments themselves
-        : notYet(`using String.${member} as a value is not yet supported`, 5);
+      return calleeOnlyMember(access, `String.${member}`);
     }
     return notYet(`String.${member} is not yet supported`, 5);
+  }
+
+  // `Array` and `Number` follow them too: `Array.isArray`, `Number.parseInt` and
+  // `Number.parseFloat` exist only as callees (plan.md §11c T11.4).
+  if (numberConstant(access, checker) !== undefined) {
+    return { kind: 'accept' }; // the lowering folds it to a literal
+  }
+  for (const [base, members] of Object.entries(CALLEE_ONLY_STATICS)) {
+    if (isGlobalNamed(access.expression, checker, base)) {
+      const member = access.name.text;
+      if (members.includes(member)) {
+        return calleeOnlyMember(access, `${base}.${member}`);
+      }
+      return notYet(`${base}.${member} is not yet supported`, 5);
+    }
   }
 
   // A String.prototype method exists only as a callee -- there is no function value to bind, the
@@ -5571,7 +5994,7 @@ function gateMemberAccess(
         : notYet(`${access.name.text} on a RegExp match is not yet supported`, 5);
     }
     const shape = tsTypeToHType(checker.getTypeAtLocation(access.expression), checker);
-    if (shape.kind === 'unknown') {
+    if (readsAsUnknown(access.expression, shape, checker, mode)) {
       return { kind: 'accept' };
     }
     // Dynamic shapes (optional fields, index signatures, empty `{}`) must be asked BEFORE the
@@ -5590,11 +6013,18 @@ function gateMemberAccess(
         return { kind: 'accept' };
       }
       if (shape.methods.some((m) => m.name === access.name.text)) {
-        return ts.isCallExpression(access.parent) && access.parent.expression === access
-          ? { kind: 'accept' }
-          : notYet('using a method as a value is not yet supported', 5);
+        return calleeOnlyMember(access, 'a method');
+      }
+      // A name the layout never declared: `js` mode reads it from the overflow table, which
+      // answers `undefined` until a write grows it (docs/VALUE.md §4.24). Calling it is a
+      // get-then-call on the Unknown that read answers.
+      if (mode === 'js' && isUndeclaredMemberRead(access, checker)) {
+        return { kind: 'accept' };
       }
       return notYet('a property that is not a field of the shape is not yet supported', 5);
+    }
+    if (isFunctionValueMember(access.expression, access.name.text, checker)) {
+      return functionMemberResult(mode);
     }
     return notYet('property access is not yet supported', 5);
   }
@@ -5668,6 +6098,7 @@ function isReadModifyWrite(place: ts.Expression): boolean {
 function gateElementAccess(
   access: ts.ElementAccessExpression,
   checker: ts.TypeChecker,
+  mode: Mode,
 ): GateResult {
   const chained = optionalChainElementReceiver(access, checker);
   if (chained !== undefined) {
@@ -5727,9 +6158,7 @@ function gateElementAccess(
         return { kind: 'accept' };
       }
       if (hir.methods.some((m) => m.name === key)) {
-        return ts.isCallExpression(access.parent) && access.parent.expression === access
-          ? { kind: 'accept' }
-          : notYet('using a method as a value is not yet supported', 5);
+        return calleeOnlyMember(access, 'a method');
       }
       // An accessor read is a call to the getter, so a read is fine; a read-modify-write in
       // VALUE position lowers the target to the getter call, which is not an update place --
@@ -5758,6 +6187,12 @@ function gateElementAccess(
         (ts.TypeFlags.Object | ts.TypeFlags.NonPrimitive)) !==
         0
     ) {
+      return { kind: 'accept' };
+    }
+    // `table[node.kind]` in `js` mode: a computed key on a fixed shape reads and writes by NAME,
+    // through the same coercing entry points -- a declared name answers its slot, any other the
+    // overflow table, or `undefined` (docs/VALUE.md §4.24). A module namespace is no object.
+    if (mode === 'js' && hir.kind === 'object' && hir.namespace !== true && key === null) {
       return { kind: 'accept' };
     }
     return hir.kind === 'unknown' || isDynamicShape(receiver, checker)
@@ -5889,6 +6324,34 @@ export const MATH_CONSTANTS: ReadonlySet<string> = new Set([
   'SQRT1_2',
   'SQRT2',
 ]);
+
+/** `Number`'s constants (§21.1.2), folded the same way: each is non-writable and
+ * non-configurable, so no program can observe a different value (plan-notes 310). */
+const NUMBER_CONSTANTS: ReadonlyMap<string, number> = new Map(
+  (
+    [
+      'EPSILON',
+      'MAX_SAFE_INTEGER',
+      'MAX_VALUE',
+      'MIN_SAFE_INTEGER',
+      'MIN_VALUE',
+      'NaN',
+      'NEGATIVE_INFINITY',
+      'POSITIVE_INFINITY',
+    ] as const
+  ).map((name) => [name, Number[name]]),
+);
+
+/** The value a `Number.MAX_VALUE` read folds to, or undefined for any other access. */
+export function numberConstant(
+  node: ts.PropertyAccessExpression,
+  checker: ts.TypeChecker,
+): number | undefined {
+  const value = NUMBER_CONSTANTS.get(node.name.text);
+  return value !== undefined && isGlobalNamed(node.expression, checker, 'Number')
+    ? value
+    : undefined;
+}
 
 /** `Math` the GLOBAL, not a user binding that borrowed the name: every declaration behind the
  * symbol is ambient. A local `const Math = …` shadows the global at runtime and must win here
@@ -6080,6 +6543,158 @@ export function isGlobalJson(node: ts.Expression, checker: ts.TypeChecker): bool
   return isGlobalNamed(node, checker, 'JSON');
 }
 
+/** The `Array` constructor read as a namespace -- `Array.isArray`. The same declaration-file
+ * test, so a user `class Array` stays on the ordinary class path. */
+export function isGlobalArray(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isGlobalNamed(node, checker, 'Array');
+}
+
+/** A builtin member that exists only as a callee -- there is no function value to bind -- is
+ * accepted as one and refused by name anywhere else; `gateCall` vets the arguments. */
+function calleeOnlyMember(access: ts.Expression, what: string): GateResult {
+  return ts.isCallExpression(access.parent) && access.parent.expression === access
+    ? { kind: 'accept' }
+    : notYet(`using ${what} as a value is not yet supported`, 5);
+}
+
+/** The namespace members that exist only as callees, by namespace. `Array.from` is a global-call
+ * row (step 5); `Number.parseInt` and `Number.parseFloat` are the global functions themselves
+ * (§21.1.2.12-13). */
+const CALLEE_ONLY_STATICS: Readonly<Record<string, readonly string[]>> = {
+  Array: ['isArray', 'from'],
+  Number: ['parseInt', 'parseFloat'],
+};
+
+/** The three conversion functions: each lowers to the operation it is (`String(x)` to a template
+ * hole, `Number(x)` to unary `+`, `Boolean(x)` to `!!x`), so they have no `GLOBAL_CALLS` row. */
+const GLOBAL_CONVERSIONS: ReadonlySet<string> = new Set(['String', 'Number', 'Boolean']);
+
+export type GlobalFunction = GlobalCallName | 'String' | 'Number' | 'Boolean';
+
+/** The global function this callee names, by the declaration-file test, or undefined. */
+export function globalFunctionOf(
+  node: ts.Expression,
+  checker: ts.TypeChecker,
+): GlobalFunction | undefined {
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    (node.name.text === 'parseInt' || node.name.text === 'parseFloat')
+  ) {
+    return isGlobalNamed(node.expression, checker, 'Number') ? node.name.text : undefined;
+  }
+  if (ts.isPropertyAccessExpression(node) && node.name.text === 'from') {
+    return isGlobalArray(node.expression, checker) ? 'Array.from' : undefined;
+  }
+  if (!ts.isIdentifier(node)) {
+    return undefined;
+  }
+  const name = node.text;
+  if (!Object.hasOwn(GLOBAL_CALLS, name) && !GLOBAL_CONVERSIONS.has(name)) {
+    return undefined;
+  }
+  return isGlobalNamed(node, checker, name) ? (name as GlobalFunction) : undefined;
+}
+
+/** The argument list of a global function called by name or, for `RegExp` and `Array`, `new`ed
+ * (plan.md §11c T11.4). Each lowers to one fixed-arity node, so a spread (whose count is not its
+ * arity) and an argument past the last parameter (evaluated, then ignored) are refused rather than
+ * lowered wrong. Any argument type is accepted -- every one of these coerces. `Array` is the
+ * exception both ways: any count but one is an array literal, and one argument may be a LENGTH,
+ * whose array is all holes (docs/VALUE.md §4.4). A hole reads as `undefined`, which only an
+ * Unknown element type admits: `new Array<string>(n)` would hand typed code an `undefined` its
+ * element type says cannot be there. */
+function gateGlobalArguments(
+  name: GlobalFunction,
+  node: ts.CallExpression | ts.NewExpression,
+  checker: ts.TypeChecker,
+): GateResult {
+  const args = node.arguments ?? [];
+  if (args.some((a) => ts.isSpreadElement(a))) {
+    return notYet(`a spread argument to ${name} is not yet supported`, 5);
+  }
+  if (name === 'Array') {
+    // Only a lone argument that may be a number is a LENGTH, and only a length leaves holes;
+    // `Array('a')` is `['a']`.
+    const [only] = args;
+    if (
+      args.length !== 1 ||
+      only === undefined ||
+      !mayBeArrayLength(checker.getTypeAtLocation(only))
+    ) {
+      return { kind: 'accept' };
+    }
+    const created = tsTypeToHType(checker.getTypeAtLocation(node), checker);
+    return created.kind === 'array' && created.element.kind === 'unknown'
+      ? { kind: 'accept' }
+      : notYet(
+          'Array(n) with a typed element is not yet supported: its holes read as undefined',
+          5,
+        );
+  }
+  const arity = globalFunctionArity(name);
+  return args.length > arity
+    ? notYet(`${name} with ${String(args.length)} arguments is not yet supported`, 5)
+    : { kind: 'accept' };
+}
+
+/** Whether `Array(x)` may read `x` as a length (§23.1.1.1 step 4): a number, or a type that
+ * does not rule one out. */
+function mayBeArrayLength(type: ts.Type): boolean {
+  if (type.isUnion()) {
+    return type.types.some(mayBeArrayLength);
+  }
+  const open =
+    ts.TypeFlags.NumberLike | ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter;
+  return (type.flags & open) !== 0;
+}
+
+/** The most arguments a global function's node holds: a conversion reads one. */
+export function globalFunctionArity(name: GlobalFunction): number {
+  return name === 'String' || name === 'Number' || name === 'Boolean'
+    ? 1
+    : GLOBAL_CALLS[name].arity;
+}
+
+/** `typeof` of the ECMAScript globals (ECMA-262 §19), which no program can change without
+ * shadowing the name -- and a shadowing binding fails the declaration-file test. The namespace
+ * objects answer "object" and every constructor and function "function". `Symbol` is absent on
+ * purpose: its identifier keeps its own refusal until the primitive lands. */
+const GLOBAL_OBJECTS: ReadonlySet<string> = new Set(
+  'globalThis JSON Math Reflect Atomics Intl'.split(' '),
+);
+const GLOBAL_CALLABLES: ReadonlySet<string> = new Set(
+  (
+    'Object Function Array String Number Boolean BigInt Date RegExp Map Set WeakMap WeakSet ' +
+    'WeakRef FinalizationRegistry Promise Proxy ArrayBuffer SharedArrayBuffer DataView ' +
+    'Int8Array Uint8Array Uint8ClampedArray Int16Array Uint16Array Int32Array Uint32Array ' +
+    'Float32Array Float64Array BigInt64Array BigUint64Array Error EvalError RangeError ' +
+    'ReferenceError SyntaxError TypeError URIError AggregateError parseInt parseFloat isNaN ' +
+    'isFinite encodeURI encodeURIComponent decodeURI decodeURIComponent'
+  ).split(' '),
+);
+
+/** The folded `typeof` of a global this identifier names, or undefined. */
+export function globalTypeofOf(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+): 'object' | 'function' | undefined {
+  const answer = GLOBAL_OBJECTS.has(node.text)
+    ? 'object'
+    : GLOBAL_CALLABLES.has(node.text)
+      ? 'function'
+      : undefined;
+  if (answer === undefined) {
+    return undefined;
+  }
+  const declarations = checker.getSymbolAtLocation(node)?.declarations ?? [];
+  // `globalThis` has no declaration at all -- the checker models it that way -- and is still
+  // the global; every other name must be declared, and only in declaration files.
+  return declarations.every((d) => d.getSourceFile().isDeclarationFile) &&
+    (declarations.length > 0 || node.text === 'globalThis')
+    ? answer
+    : undefined;
+}
+
 /** True when `type` (or any union arm of it) admits `undefined` or a function — the values
  * JSON.stringify answers `undefined` FOR at the top level, where the call's type promises a
  * string. Checked at the gate so the runtime's loud abort is a compiler bug, not a user path. */
@@ -6090,6 +6705,94 @@ function admitsUnserializable(type: ts.Type, checker: ts.TypeChecker): boolean {
       (arm.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 ||
       checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0,
   );
+}
+
+/** The placeholders util.format applies to a format string, each with the index of the argument it
+ * consumes: the runtime's `format_into` loop (Node's `formatWithOptionsInternal`), restated so the
+ * gate can see which value each placeholder meets. `%%` consumes nothing, and once the arguments
+ * run out no placeholder applies (plan.md §9 Task 6.24). */
+function formatPlaceholders(
+  format: string,
+  count: number,
+): readonly { readonly spec: string; readonly index: number }[] {
+  const applied: { spec: string; index: number }[] = [];
+  let consumed = 0;
+  for (let i = 0; i < format.length - 1; i++) {
+    if (format[i] !== '%') {
+      continue;
+    }
+    i += 1;
+    const spec = format[i] ?? '';
+    if (consumed + 1 !== count && spec !== '' && 'sjdOoifc'.includes(spec)) {
+      consumed += 1;
+      applied.push({ spec, index: consumed });
+    }
+  }
+  return applied;
+}
+
+/** A user-written `name` on the value — declared in a source file, not the lib — which util.format
+ * would CALL: the runtime's ToPrimitive never does (jsrt_to_primitive), so the answer would differ. */
+function hasUserMethod(type: ts.Type, name: string): boolean {
+  const declarations = type.getProperty(name)?.getDeclarations() ?? [];
+  return declarations.some((d) => !d.getSourceFile().isDeclarationFile);
+}
+
+/** The placeholder a console call's literal format string applies to a value the runtime cannot
+ * print as Node does, or `undefined`. A format only the run sees is the runtime's to refuse, and
+ * it does so loudly (STA2005, `format_refused` in jsrt_print.c); this is the same rule, reported
+ * at compile time wherever the checker knows the format and the argument's type. */
+function formatRefusal(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+): { readonly what: string; readonly phase: number } | undefined {
+  const [first] = call.arguments;
+  const format = first === undefined ? undefined : checker.getTypeAtLocation(first);
+  if (call.arguments.length < 2 || format === undefined || !format.isStringLiteral()) {
+    return undefined;
+  }
+  for (const { spec, index } of formatPlaceholders(format.value, call.arguments.length)) {
+    const argument = call.arguments[index];
+    const type = argument === undefined ? undefined : checker.getTypeAtLocation(argument);
+    for (const arm of type === undefined ? [] : type.isUnion() ? type.types : [type]) {
+      // An untyped value is the run's to settle, like every other unknown argument.
+      const primitive =
+        (arm.flags &
+          (ts.TypeFlags.StringLike |
+            ts.TypeFlags.NumberLike |
+            ts.TypeFlags.BooleanLike |
+            ts.TypeFlags.Undefined |
+            ts.TypeFlags.Void |
+            ts.TypeFlags.Null |
+            ts.TypeFlags.Any |
+            ts.TypeFlags.Unknown)) !==
+        0;
+      if (spec === 'o' && !primitive) {
+        return { what: '%o of an object', phase: 5 };
+      }
+      // A function or a class: String() of either is its source text, which no binary carries.
+      if (
+        spec === 's' &&
+        (checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0 ||
+          checker.getSignaturesOfType(arm, ts.SignatureKind.Construct).length > 0)
+      ) {
+        return { what: '%s of a function', phase: 5 };
+      }
+      if (spec === 's' && hasUserMethod(arm, 'toString')) {
+        return { what: '%s of an object with its own toString', phase: 8 };
+      }
+      if (
+        (spec === 'd' || spec === 'i' || spec === 'f') &&
+        (hasUserMethod(arm, 'toString') || hasUserMethod(arm, 'valueOf'))
+      ) {
+        return { what: `%${spec} of an object with its own toString or valueOf`, phase: 8 };
+      }
+      if (spec === 'd' && tsTypeToHType(arm, checker).kind === 'date') {
+        return { what: '%d of a Date', phase: 5 };
+      }
+    }
+  }
+  return undefined;
 }
 
 /** A console call the HIR can spell. The method table lives with the node it configures

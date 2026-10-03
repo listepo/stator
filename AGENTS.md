@@ -59,13 +59,21 @@ packages/runtime/  C11 + Zig memory core (plan-notes 238 / T9.1; NOT an npm pack
   vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
 packages/std/      "@stator/std" — the std/* modules (docs/STD.md): src/<module>.ts surface (strict TS,
                    Stator's own subset) + zig/<module>.zig backings → packages/std/build/libjsrt_std.a (justfile)
+packages/node/     "@stator/node" — the --node platform (docs/MODES.md §6): src/<id>.ts is node:<id>, strict TS
+                   over std/*; resolved by the compiler only under --node, compiled into the importer
+packages/vite-stator/ "vite-stator" — the default bundler adapter (`--bundler=vite`) and the stator() Vite
+                   plugin (docs/BUNDLER.md); calls statorc/api only, never compiler internals
 packages/tests/    the test package "@stator/tests" — every harness + a tsconfig extending compiler's
   unit/            vitest unit tests (*.test.ts; config: packages/tests/vitest.config.ts)
   subset/          decision tests (feature × mode matrix)
   golden/ts|js     machine-checked vs Node, byte-for-byte
   differential/    fuzzer corpus       bench/  baselines + results
   test262/         runner + pin (corpus fetched, not vendored)
+  node-suite/      Node's own test/parallel slice: pin, expectations, strict-TS common/, vitest driver (corpus fetched)
   leak/            GC hygiene: a 10M-object loop whose RSS must plateau
+  impact/          test impact: map recorder, selector driver (`test:impact`), mutation check
+  selfhost/        self-compilation ratchet: targets.json, baseline.json (plan §9 Task 6.19)
+examples/vite/     `vite build` → native binary through vite-stator (a workspace package)
 ```
 
 Paths in prose below are written relative to their package (`src/frontend/` = `packages/compiler/src/frontend/`, `runtime/vendor/` = `packages/runtime/vendor/`, `tests/subset/` = `packages/tests/subset/`).
@@ -104,17 +112,21 @@ pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lin
 pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)
 pnpm run dupes                  # jscpd over our source (no tests/vendor/docs): fails on any clone not in .jscpd-baseline.json
 pnpm run dupes:baseline         # rewrite .jscpd-baseline.json — only to SHRINK it after removing clones
+pnpm run schema:config          # regenerate packages/compiler/schema/stator.config.schema.json after a config key changes
 pnpm run docs:node              # regenerate docs/NODE.md (Node API coverage, % per module and member)
 pnpm run test:node-coverage     # fail when docs/NODE.md is stale (part of `ci`)
 pnpm run test                   # unit tests (vitest) — the default; use this for the gate
-pnpm run test:affected          # only the unit tests your uncommitted changes reach (append a commit, e.g. origin/main, for a whole branch) — iteration, never the gate
+pnpm run test:impact            # only the tests (every harness) your diff reaches, from the impact map; falls back to everything, saying why — iteration, never the gate
+pnpm run test:impact:record     # full instrumented run at a clean HEAD → .cache/impact/impact-map.json (never committed)
 pnpm run test:coverage          # same under c8 + packages/compiler/src coverage table; writes coverage/lcov.info — ONLY when the coverage table is the question (it costs ~4x wall time)
 pnpm run test:subset            # decision tests → verdict matrix
 pnpm run test:golden            # compile + run vs Node, byte-for-byte
+pnpm run test:selfhost          # Stator explains (and builds) its own packages; per-code counts may only shrink
 pnpm run test:runtime           # the runtime's own print corpus vs Node, byte-for-byte
 pnpm run test:asan              # golden fixtures with runtime + generated C under ASan/UBSan
 pnpm run test:leak              # 10M-object loop; RSS must plateau (skips without Boehm)
 pnpm run test262                # Test262 slice against packages/tests/test262/pin.json (not part of `ci`)
+pnpm run test:node-suite        # Node's own tests (packages/tests/node-suite/pin.json) through vitest, ratcheted (not part of `ci`)
 pnpm run differential           # fuzzer vs Node (failures land in packages/tests/differential/failures/)
 pnpm run bench:record           # refresh packages/tests/bench/baseline.json (valid for this machine only)
 pnpm run runtime                # build libjsrt.a (clang, -Wall -Wextra -Werror; wraps the just recipe), then libjsrt_std.a
@@ -125,8 +137,9 @@ just -f packages/std/justfile -d packages/std std                  # the std/* b
 pnpm run test:intl              # the intl_* golden fixtures against that build (not part of `ci`)
 pnpm run ci                     # all of the above, in order — run before claiming any task done
 moon run tests:ci               # same gate through moon (dependency graph + caching); wraps the above
-node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--emit=c] [--keep-c]
+node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js] [--node] [--emit=c] [--keep-c]
 node packages/compiler/src/cli/main.ts explain file.ts --json   # per-construct verdicts (decision tests use this)
+node packages/compiler/src/cli/main.ts build                   # entry, -o, mode, … from ./stator.config.json (docs/CONFIG.md); flags override it
 ```
 
 The monorepo (plan-notes 204): `packages/{compiler,runtime,std,tests}` under a pnpm workspace,
@@ -138,8 +151,9 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 
 - `tsconfig.json` is locked (full flag list in plan §4 Task 1.0): `strict` + `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`, `erasableSyntaxOnly`, NodeNext modules.
 - oxlint (`.oxlintrc.json`, type-aware through `oxlint-tsgolint`) enforces: no `any`, no non-null assertions, exhaustive switches, type-only imports. Model discriminated unions and switch exhaustively — this is a compiler; unhandled cases are bugs.
-- Runtime dependency budget: **`typescript` only**, plus the owner-directed CLI/observability set recorded in `plan-notes.md` 187 (ink, react, dotenv, `@opentelemetry/*` behind `STATOR_OTEL`; execa is dev-only). This set may not leak below `src/cli/` (except `src/support/telemetry.ts`, which is the pipeline's only OTel seam). New dependencies (even dev) need a `plan-notes.md` entry saying what a few lines couldn't do.
+- Runtime dependency budget: **`typescript` only**, plus the owner-directed CLI/observability set recorded in `plan-notes.md` 187 (ink, react, dotenv, `@opentelemetry/*` behind `STATOR_OTEL`; execa is dev-only), and `typebox` + `jsonc-parser` for `stator.config.json`, confined to `src/cli/config.ts` (plan-notes 303). This set may not leak below `src/cli/` (except `src/support/telemetry.ts`, which is the pipeline's only OTel seam). New dependencies (even dev) need a `plan-notes.md` entry saying what a few lines couldn't do.
 - User-facing failures are diagnostics (stable `STA` code + span + mode), never thrown stack traces. A thrown exception reaching the CLI is a compiler bug (`STA4xxx`).
+- **Every new CLI flag lands with its config key** in `src/cli/config.ts` and a regenerated schema (`pnpm run schema:config`) in the same change, plus its row in `docs/CONFIG.md`. Only `--config`, `--no-config`, `--help` and `--version` have no key (plan.md §9 Task 6.18).
 - `ts.Type` never leaks past `src/frontend/` — everything downstream speaks HType.
 - Comments state invariants the code can't (`// pops must mirror frame pushes, incl. landing pads`), not narration.
 
@@ -154,11 +168,11 @@ because mise's `pnpm` is unusable from a raw child process on this machine — p
 ## Testing rules
 
 - **Decision tests** (`tests/subset/`): first-line directives `// @mode: ts|js`, `// @verdict: static|dynamic|error|not-yet`, `// @code: STAxxxx` (required for error/not-yet). Pre-implementation tests carry `// @expected-fail: true`; the runner reports (never hides) that count; removing the marker happens in the same commit that makes the test pass.
-- **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug.
+- **Golden tests** (`tests/golden/`): stdout must match the pinned Node **byte-for-byte** — including number formatting (Ryū shortest-round-trip). Never loosen a comparison to make a test pass; a mismatch is a semantics bug. A fixture named `node_*` builds with `--node`, so its `node:*` imports resolve to `packages/node`.
 - Every new language construct lands with: decision test(s) for both modes + at least one golden test + HIR-verifier-clean build. Non-trivial runtime code lands with a unit test.
 - Differential ground truth is the pinned Node LTS in `.node-version` — that Node, and only that Node.
 - **Unit-test default is plain `test`.** Run `pnpm run test`, not `pnpm run test:coverage`, unless the coverage table itself is what you need — coverage is measured in CI (the stage-1 `frontend (linux/x64)` job, id `frontend-coverage`, owns the lcov artifact; Windows and macOS jobs never collect coverage), not on every local run.
-- **`test:affected` is for iteration only.** It follows the import graph from your diff, so it cannot see a test that reaches compiler code only through a spawned CLI process; plain `test` stays the gate.
+- **`test:impact` is for iteration only.** It selects from a per-test coverage map (`pnpm run test:impact:record`, plan.md §9 Task 6.17): the functions each test executed, the data files it read, and the runtime sources its binaries linked. It prints what it chose and why, and falls back to the full run when the map cannot be trusted (none, another Node or platform, a commit that is not an ancestor, a dirty recording). Plain `test` and `pnpm run ci` stay the gate.
 
 ## Diagnostics conventions
 

@@ -578,6 +578,18 @@ export function compileAndRunStreams(
   prefix: string,
   tz?: string,
 ): { stdout: string; stderr: string } {
+  const run = compileAndRunRaw(source, prefix, tz);
+  assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
+  return { stdout: run.stdout, stderr: run.stderr };
+}
+
+/** The run that compileAndRunStreams asserts on, for a proof whose point is how the binary FAILS:
+ * its exit status and the signal that ended it, beside both streams. The build must still pass. */
+export function compileAndRunRaw(
+  source: string,
+  prefix: string,
+  tz?: string,
+): { status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string } {
   const cli = fileURLToPath(new URL('../../compiler/src/cli/main.ts', import.meta.url));
   const dir = mkdtempSync(join(tmpdir(), `stator-${prefix}-`));
   try {
@@ -592,8 +604,7 @@ export function compileAndRunStreams(
       encoding: 'utf8',
       ...(tz !== undefined && { env: { ...process.env, TZ: tz } }),
     });
-    assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
-    return { stdout: run.stdout, stderr: run.stderr };
+    return { status: run.status, signal: run.signal, stdout: run.stdout, stderr: run.stderr };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

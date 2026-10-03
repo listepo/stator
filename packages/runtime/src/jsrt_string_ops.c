@@ -25,11 +25,6 @@
 
 static JSString *str_of(jsrt_value v) { return (JSString *)jsrt_ptr(v); }
 
-/* Maximum string length in code units: 2^29 - 24 = 536870888, matching V8's
- * `String::kMaxLength` on 64-bit (the pinned Node's limit; plan-notes 251 A12).
- * An earlier cap of 2^31-1 (plan-notes 203) disagreed with Node: lengths between
- * the two caps must throw `RangeError: Invalid string length`. */
-#define JSRT_MAX_STRING_LENGTH 536870888.0
 
 /* Node's RangeError for a bad repeat count names the ORIGINAL argument value, not the truncated
  * one (`repeat(-1.5)` says `-1.5`, `repeat(1/0)` says `Infinity`), so the message renders ToString
@@ -45,12 +40,8 @@ static void count_to_ascii(jsrt_value n, char *buf, size_t buflen) {
   buf[i] = '\0';
 }
 
-static JSString *alloc_str(uint32_t len) {
-  size_t size = sizeof(JSString) + (size_t)len * sizeof(uint16_t);
-  JSString *s = (JSString *)jsrt_gc_alloc(size, "string");
-  s->length = len;
-  return s;
-}
+
+static JSString *alloc_str(uint32_t len) { return jsrt_string_alloc(len); }
 
 static jsrt_value box_str(JSString *s) { return JSRT_BOX(JSRT_TAG_STRING, (uintptr_t)s); }
 
