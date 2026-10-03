@@ -422,6 +422,30 @@ test('explain lists every diagnostic of the deciding stage, in source order', as
   }
 });
 
+test('a BigInt literal is not-yet STA1213, never internal STA4031', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-bigint-'));
+  try {
+    writeFileSync(join(work, 'b.ts'), 'const b = 1n;\n');
+    writeFileSync(join(work, 'b.js'), 'console.log(1n === 1n);\n');
+    const [ts, js] = await Promise.all([
+      stator('explain', join(work, 'b.ts'), '--json'),
+      stator('build', join(work, 'b.js'), '-o', join(work, 'b'), '--mode=js'),
+    ]);
+    assert.equal(ts.status, 0, ts.stderr);
+    const report: unknown = JSON.parse(ts.stdout);
+    assert.ok(typeof report === 'object' && report !== null);
+    assert.deepEqual(
+      { ...report, diagnostics: undefined },
+      { verdict: 'not-yet', code: 'STA1213', diagnostics: undefined },
+    );
+    assert.notEqual(js.status, 0);
+    assert.match(js.stderr, /STA1213/);
+    assert.doesNotMatch(js.stderr, /STA4031/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test("a .js entry under default ts mode is STA1002 with a --mode=js hint, not tsc's allowJs error", async () => {
   const work = mkdtempSync(join(tmpdir(), 'stator-js-under-ts-'));
   try {

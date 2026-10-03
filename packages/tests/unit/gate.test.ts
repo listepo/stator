@@ -78,6 +78,26 @@ test('for-of and for-in report distinctly from the for loop they are not', () =>
   assert.deepEqual(codesFor('for (let i: number = 0; i < 1; i++) { }'), []);
 });
 
+// A BigInt literal is a token, and the token skip used to accept it into a lowering that could
+// only answer STA4031 (audit F5, plan.md §9 Task 6.25).
+test('BigInt is not-yet STA1213 in both modes, never an internal error', () => {
+  for (const mode of ['ts', 'js'] as const) {
+    assert.deepEqual(codesFor('const b = 1n;', mode), ['STA1213']);
+    assert.deepEqual(codesFor('console.log(typeof 1n);', mode), ['STA1213']);
+    assert.deepEqual(codesFor('console.log(10n > 5);', mode), ['STA1213']);
+    assert.deepEqual(codesFor('const b = BigInt(5);', mode), ['STA1213']);
+  }
+  // A bigint that arrives without a literal is refused where it is read, not where it is named.
+  assert.deepEqual(codesFor('function f(a: bigint): bigint {\n  return a;\n}\nf;'), ['STA1213']);
+  // A narrowing of `unknown` to bigint is a branch no compiled program can enter.
+  assert.deepEqual(
+    codesFor(
+      'function g(u: unknown): string {\n  if (typeof u === "bigint") return String(u);\n  return "";\n}\ng(1);',
+    ),
+    [],
+  );
+});
+
 // Index access is admitted only where the target is genuinely an array. `s[0]` and `o['k']` are
 // the same syntax reaching a different runtime operation, and neither has an HIR node yet.
 test('index access is accepted on an array and not-yet on anything else', () => {

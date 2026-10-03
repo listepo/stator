@@ -2739,6 +2739,41 @@ selfhost baseline grew by 4 `STA1214` in `packages/compiler` (1791 → 1795), re
   expected-fail, 0 failed`), golden (`453 fixtures — 453 passed, 0 failed`), selfhost (14 targets
   match the baseline), builtins 255/324, node-coverage, leak (plateau), ASan (453/453).
 
+### Task 6.25 — A BigInt is not-yet, never an internal error (F5) ✅ (landed 2026-10-04)
+
+Audit finding F5 (plan-notes 330): `const b = 1n;` answered `STA4031` "unexpected expression kind:
+BigIntLiteral" in both modes, because a BigInt literal is a token and `gateConstruct` accepted
+every token before its switch. The lowering then had nothing to lower it to.
+
+What landed (plan-notes 334):
+
+- `isBigIntUse` in `src/frontend/gate.ts` runs before the token skip. It refuses a BigInt literal
+  and every expression whose type, or a member of whose union type, is `BigIntLike`, with not-yet
+  `STA1213` (Phase 5). `BigInt(5)` moves from `STA1214` ("the global 'BigInt'") to `STA1213`.
+- A name or property access is judged by its symbol's declared type, not the narrowed one.
+  `node:assert`'s `inspect` has `typeof value === 'bigint'` over an `unknown`, a branch no compiled
+  program can enter; the narrowed type would have refused `packages/node`.
+- A declaration's own name is skipped (`ts.getNameOfDeclaration`), so a bigint is refused where
+  it is read, once, not again where it is named or exported.
+- Tests: the audit's F5 test (`unit/cli.test.ts`, `explain --json` in ts mode plus a js-mode
+  `build`), a gate unit test covering literals, `typeof 1n`, `10n > 5`, `BigInt(5)`, a `bigint`
+  parameter and the narrowing in both modes, and both `subset_bigint_primitive_*` fixtures without
+  `@expected-fail`.
+- `docs/SUBSET.md` describes what the refusal covers. The selfhost baseline grows by 3 `STA1214`
+  in `packages/compiler`: the new function's `ts.Node`/`ts.TypeChecker`/`ts.Declaration`
+  qualified type names, which every gate function carries.
+
+Check evidence: `pnpm run test:subset` → `921 fixtures — 890 passed, 31 expected-fail, 0 failed`
+(both `subset_bigint_primitive_*` pass without the marker); `pnpm run test` → 57 files, 736
+tests passed (the audit's F5 test included); `pnpm run test:golden` → `453 passed, 0 failed`;
+`pnpm run test:selfhost` → `14 targets match the baseline`; typecheck, lint and dupes clean.
+
+> **Task 6.25 — A BigInt is not-yet, never an internal error (F5).** The gate refuses
+> `SyntaxKind.BigIntLiteral` and any expression whose type is `BigIntLike` with not-yet `STA1213`
+> (Phase 5), in both modes, in `build` and `explain`. **Check:** `subset_bigint_primitive_ts.ts`
+> loses its `@expected-fail` marker; a js-mode twin passes; the audit's F5 test passes;
+> `pnpm run ci` green.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

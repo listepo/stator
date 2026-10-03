@@ -11943,4 +11943,66 @@ objection on review):
   commands, as `CONFIG.md` already said: one file serves both.
 - **Unit name from the config.** The card says `STA0004` for the flag and its key alike, so the
   check is in `build()` and the schema keeps no `pattern` (that would make the key `STA0017`).
+- **Self-compilation.** `packages/compiler` `STA1214` 1791 → 1795 on 3aeb9dd. Merged with Task
+  6.25 (0b5c87c) it is 1794 → 1798, and the inode read adds two `STA1213` (the `bigint: true`
+  `Stats` fields `dev` and `ino`): a `number` inode loses precision past 2^53, so the bigint read
+  stays and the two refusals are recorded with `--update` (growth may be recorded, plan-notes 306).
 
+## 334. Task 6.25 lands: what "an expression whose type is BigIntLike" means (2026-10-04)
+
+**Finding (F5, plan-notes 330).** `const b = 1n;` answered `STA4031` in both modes. A BigInt
+literal is a token, and `gateConstruct` accepted every token before its switch, so the literal
+reached the lowering, which has no node for it.
+
+**Decisions the card left open.**
+
+- **Declared type, not narrowed type.** The first draft asked `getTypeAtLocation` of every
+  expression. That refuses `packages/node/src/assert.ts`: its `inspect(value: unknown)` has
+  ``if (typeof value === 'bigint') return `${String(value)}n`;``, where the narrowed `value` is
+  `bigint`. No compiled program can enter that branch, because every way to make a bigint is
+  refused. A name or a property access is therefore judged by its symbol's declared type
+  (`getTypeOfSymbol`), and every other expression by `getTypeAtLocation`.
+- **A union counts.** `number | bigint` is refused too: a value that may be a bigint has no
+  representation below the gate.
+- **Read, not named.** A declaration's own name (`ts.getNameOfDeclaration`) is skipped, so
+  `function f(a: bigint) { return a; }` is one `STA1213`, at the read, and `export { big }`
+  adds none.
+- **`BigInt(5)` moves from `STA1214` to `STA1213`.** The call is a bigint-typed expression and
+  the gate asks before the global-function rule. `typeof BigInt` is unchanged: the constructor
+  is not a bigint.
+
+**Evidence (macOS arm64, Node 26.7.0).**
+
+| Probe | Before | After |
+|---|---|---|
+| `explain` `const b = 1n;` (ts) | `error (STA4031)` | `not-yet (STA1213)` |
+| `build` `console.log(1n === 1n);` (js) | `STA4031` | `STA1213` |
+| `const b = BigInt(5);` | `STA1214` | `STA1213` |
+| `function f(a: bigint)` read | `dynamic` | `not-yet (STA1213)` |
+| `typeof u === 'bigint'` over `unknown` | `dynamic` | `dynamic` |
+
+`pnpm run test:subset`: 921 fixtures, 890 passed, 31 expected-fail (was 33), 0 failed.
+`pnpm run test`: 57 files, 736 tests passed. `pnpm run test:golden`: 453 passed, 0 failed.
+`pnpm run test:selfhost`: `packages/compiler` `STA1214` 1791 → 1794, re-recorded with
+`--update`. The three are the new function's `ts.Node`, `ts.TypeChecker` and `ts.Declaration`
+qualified type names (`QualifiedName`, STA1214), which every gate function carries; no
+behavior of the compiled packages changed.
+
+## 340. Task 7.4: a static library for C consumers (2026-10-04)
+
+**Asked by the creator (2026-10-04):** can the compiler build code into a static library and ship
+`.h` headers for FFI? On `3aeb9dd` it can do half of that.
+
+- `stator build lib.ts -o lib.o --emit-header=lib.h --unit-name=<unit>` (Task 7.2) writes a
+  deterministic header and one relocatable object. The C surface is `stator_<unit>_*` functions
+  plus `stator_<unit>_init()` and `stator_<unit>_last_error()`.
+- There is no archive output. The consumer links `libjsrt.a` (and `libjsrt_std.a` and `-lgc`
+  when used) itself. `packages/tests/ffi/example-c-consumer/c-consumer.ts` does it with paths
+  into `packages/runtime/build/`.
+- `ar rcs lib<unit>.a lib.o` by hand still leaves the runtime to the consumer. Two such units in
+  one program would each need the runtime once, and nothing enforces that.
+
+The creator approved turning this into a plan task, so Task 7.4 is added to Phase 7. The open
+design point is whether each library carries a private runtime (prelink and localize) or shares
+one external runtime. Step 3 of the card leaves it to measurement, because the deciding factor
+(two collectors in one process) cannot be settled on paper.
