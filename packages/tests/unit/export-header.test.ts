@@ -45,8 +45,9 @@ test('the default unit is the entry basename, sanitized to a C identifier', () =
   assert.equal(defaultUnitName('main.js'), 'main');
   assert.equal(exportCName('widget', 'add'), 'stator_widget_add');
   assert.equal(defaultUnitName('/d/my-lib.ts'), 'my_lib');
-  // An explicit --unit-name sanitizes the same way, minus the leading-digit rule: the unit
-  // never starts an identifier (`stator_` precedes it), so `9lives` stays usable.
+  // The sanitizer keeps the leading-digit rule out: the unit never starts an identifier
+  // (`stator_` precedes it), so `9lives` stays usable. An explicit --unit-name never reaches
+  // it: `build` refuses one that is not already clean (STA0004, Task 6.20).
   assert.equal(sanitizeUnitName('my-lib!'), 'my_lib_');
   assert.equal(sanitizeUnitName('9lives'), '9lives');
   assert.equal(sanitizeUnitName(''), '_');
@@ -393,24 +394,18 @@ test(
   () => {
     const work = mkdtempSync(join(tmpdir(), 'stator-export-collide-'));
     try {
-      const entry = join(work, 'm.ts');
+      // The entry name is the unit game now: an explicit `--unit-name` must already be a C
+      // identifier part (STA0004, Task 6.20), but the default unit is the entry basename,
+      // sanitized. The collision is detected on the SANITIZED symbol, so `my-lib.ts` still
+      // refuses on `stator_my_lib__foo` rather than slipping through.
+      const entry = join(work, 'my-lib.ts');
       const headerPath = join(work, 'm.h');
       const out = join(work, 'm.o');
       writeFileSync(entry, 'export function _foo(): void {}\nexport function $foo(): void {}\n');
-      // The `--unit-name` game: the collision is detected on the SANITIZED symbol, so a
-      // raw `my-lib!` still refuses on `stator_my_lib___foo` rather than slipping through.
-      const build = statorBuild([
-        'build',
-        entry,
-        '-o',
-        out,
-        `--emit-header=${headerPath}`,
-        '--unit-name',
-        'my-lib!',
-      ]);
+      const build = statorBuild(['build', entry, '-o', out, `--emit-header=${headerPath}`]);
       assert.equal(build.status, 1);
       assert.match(build.stderr, /STA1124/);
-      assert.match(build.stderr, /stator_my_lib___foo/);
+      assert.match(build.stderr, /stator_my_lib__foo/);
       assert.ok(!existsSync(headerPath), 'a refused unit writes no header');
       assert.ok(!existsSync(out), 'a refused unit writes no object');
     } finally {
@@ -419,30 +414,40 @@ test(
   },
 );
 
-test('--unit-name sets the stator_<unit>_<name> prefix, sanitized', NATIVE_ONLY, () => {
-  const work = mkdtempSync(join(tmpdir(), 'stator-export-unit-'));
-  try {
-    const entry = join(work, 'm.ts');
-    const headerPath = join(work, 'm.h');
-    writeFileSync(entry, 'export function foo(x: number): number {\n  return x;\n}\n');
-    const build = statorBuild([
-      'build',
-      entry,
-      '-o',
-      join(work, 'm.o'),
-      `--emit-header=${headerPath}`,
-      '--unit-name',
-      'my-lib!',
-    ]);
-    assert.equal(build.status, 0, build.stderr);
-    const header = readFileSync(headerPath, 'utf8');
-    assert.ok(header.includes('double stator_my_lib__foo(double x);'));
-    assert.ok(header.includes('extern const int stator_my_lib__abi_v0;'));
-    assert.ok(header.includes('#ifndef STATOR_MY_LIB__H'));
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
+test(
+  '--unit-name sets the stator_<unit>_<name> prefix; a non-identifier one is STA0004',
+  NATIVE_ONLY,
+  () => {
+    const work = mkdtempSync(join(tmpdir(), 'stator-export-unit-'));
+    try {
+      const entry = join(work, 'm.ts');
+      const headerPath = join(work, 'm.h');
+      writeFileSync(entry, 'export function foo(x: number): number {\n  return x;\n}\n');
+      const args = (unit: string) => [
+        'build',
+        entry,
+        '-o',
+        join(work, 'm.o'),
+        `--emit-header=${headerPath}`,
+        '--unit-name',
+        unit,
+      ];
+      // Sanitizing would map `my-lib!` and `my_lib_` to one set of symbols (QA audit F10).
+      const refused = statorBuild(args('my-lib!'));
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /STA0004/);
+      assert.ok(!existsSync(headerPath), 'a refused unit name writes no header');
+      const build = statorBuild(args('my_lib_'));
+      assert.equal(build.status, 0, build.stderr);
+      const header = readFileSync(headerPath, 'utf8');
+      assert.ok(header.includes('double stator_my_lib__foo(double x);'));
+      assert.ok(header.includes('extern const int stator_my_lib__abi_v0;'));
+      assert.ok(header.includes('#ifndef STATOR_MY_LIB__H'));
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  },
+);
 
 test('--emit-header without a value is STA0004, not a crash', () => {
   const build = statorBuild(['build', 'x.ts', '-o', 'x', '--emit-header']);

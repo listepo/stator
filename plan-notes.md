@@ -11918,3 +11918,29 @@ objection on review):
   (`-fplugin=`). `--link=` on the command line stays the user's escape hatch.
 - F12: the `RangeError` cap is required; the speed bar (within 3× Node at 200 000 appends) is the
   Check, and the mechanism (append buffer or rope) is the implementer's.
+
+## 331. Task 6.20 lands: outputs never alias inputs, user errors keep user codes (2026-10-04)
+
+**Decisions made while implementing** (QA audit F1, F2, F10, F11; plan.md §9 Task 6.20):
+
+- **Where the checks live.** `src/cli/outputs.ts`, called from `build()`, not `main.ts`, so the
+  in-process callers (`statorc/api`, the Test262 runner) are covered. The entry is checked before
+  compiling; the rest of the program's files are known only after the frontend, so they are
+  checked after `compileToC` and before the first write. Nothing is written by a refused build.
+- **Identity.** An existing file is its inode (`statSync(..., { bigint: true })`), which catches a
+  symlink, a hard link and a case-insensitive file system (macOS APFS: `-o App.ts` vs `app.ts`).
+  A file that does not exist yet can alias only another output, so its canonical directory plus
+  its name is enough.
+- **One new code, `STA0019`**, for every write the user's file system refuses. The errno set is
+  the card's five plus `ENOTDIR` (`-o file.ts/out`) and `EPERM`. Any other errno still reaches
+  `STA4072`: an unexpected write failure is not known to be the user's.
+- **Value flags and dashes.** The card's rule applies to every value flag, `--link` included:
+  `--link -lm` is refused with a hint to write `--link=-lm`. Nothing in the tree used the
+  space-separated form with a dash-led value (the FFI harness passes object paths). `-o` has no
+  `=` spelling, so an output path cannot start with `-`; `./-name` works.
+- **Per-command flags** reuse `STA0005` with a second template (`flag "{flag}" does not apply to
+  {command}`): the class (unknown on this command) is the same. Config keys stay shared by both
+  commands, as `CONFIG.md` already said: one file serves both.
+- **Unit name from the config.** The card says `STA0004` for the flag and its key alike, so the
+  check is in `build()` and the schema keeps no `pattern` (that would make the key `STA0017`).
+
