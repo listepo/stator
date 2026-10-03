@@ -66,6 +66,9 @@ function buildAndRun(
       encoding: 'utf8',
       input: options.input ?? '',
       timeout: 30_000,
+      // maxBuffer caps stdout and stderr TOGETHER (default 1 MiB): the MiB round trip plus its
+      // stderr count went over, and the child was SIGTERMed whenever it had not exited yet.
+      maxBuffer: 64 * 1024 * 1024,
     });
   });
 }
@@ -204,7 +207,7 @@ test('std/io moves a MiB through read and writeBytes byte for byte', NATIVE_ONLY
       '  chunk = read(stdin, 1048576);\n}\nwrite(stderr, `${total}\\n`);\n',
     { input },
   );
-  assert.equal(run.status, 0);
+  assert.equal(run.status, 0, `${String(run.signal)} ${String(run.error)} ${String(run.stderr)}`);
   assert.equal(run.stderr, `${String(1 << 20)}\n`);
   assert.ok(run.stdout === input, 'the MiB comes back unchanged');
 });

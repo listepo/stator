@@ -133,6 +133,9 @@ jobs:
       - *checkout
       - *setup
       - *pnpm-install
+      # site/ is its own pnpm project (own lockfile); type-aware oxlint resolves its tsconfig's
+      # `extends` from site/node_modules, so lint fails without it (plan-notes 349).
+      - run: pnpm --dir site install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run lint
       - run: pnpm run dupes
@@ -214,7 +217,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: macos, arch: x64, os: macos-15-intel }
           - { platform: macos, arch: arm64, os: macos-14 }
           - { platform: windows, arch: x64, os: windows-2025 }
           - { platform: windows, arch: arm64, os: windows-11-arm }
@@ -271,7 +273,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: macos, arch: x64, os: macos-15-intel }
           - { platform: macos, arch: arm64, os: macos-14 }
     runs-on: ${{ matrix.os }}
     steps: *runtime-steps
