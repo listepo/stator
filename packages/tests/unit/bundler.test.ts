@@ -34,9 +34,10 @@ afterAll(() => {
 });
 
 /** A project on disk: `files` maps relative paths to text. The root is the real path, because
- * the program names files by it (macOS's tmpdir is a symlink). */
+ * the program names files by it (macOS's tmpdir is a symlink), and it uses `/`, the separator
+ * the program's file names (and so `resolveDir`, `#line` and diagnostic files) use on Windows too. */
 function project(files: Record<string, string>): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'stator-bundler-')));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'stator-bundler-'))).replace(/\\/g, '/');
   roots.push(root);
   for (const [path, text] of Object.entries(files)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -210,10 +211,10 @@ test('export * from a package: the entry re-exports it whole; every named reques
   );
   // The star re-exports the bundle's plain names: not the mangled ones, not the file's own `own`.
   const bundle = 'const a = 1, own = 2, pad = 3;\nexport { a, own, pad as leftpad$pad };\n';
-  const more = plan.rewrites(bundle).get(join(root, 'more.js')) ?? '';
+  const more = plan.rewrites(bundle).get(`${root}/more.js`) ?? '';
   assert.equal(more.split('\n')[0]?.trimEnd(), `export { a } from "./${VENDOR_MODULE_NAME}";`);
   // Without the bundle, the declaration stays as written and the gate refuses it.
-  assert.equal(plan.rewrites(undefined).get(join(root, 'more.js')), undefined);
+  assert.equal(plan.rewrites(undefined).get(`${root}/more.js`), undefined);
 });
 
 test('export * from two packages: the bundle cannot say which star a name came from', () => {
@@ -221,7 +222,7 @@ test('export * from two packages: the bundle cannot say which star a name came f
     'main.js': "export * from 'one';\nexport * from 'two';\n",
   });
   assert.equal(plan.entry.code, 'export * from "one";\nexport * from "two";\n');
-  assert.equal(plan.rewrites('export const a = 1;\n').get(join(root, 'main.js')), undefined);
+  assert.equal(plan.rewrites('export const a = 1;\n').get(`${root}/main.js`), undefined);
 });
 
 test('a bundle that re-exports an external whole has no name list', () => {
@@ -251,7 +252,7 @@ test('import attributes travel to the entry; the rewritten import drops them', (
       '',
     ].join('\n'),
   );
-  const lines = (plan.rewrites(undefined).get(join(root, 'main.js')) ?? '').split('\n');
+  const lines = (plan.rewrites(undefined).get(`${root}/main.js`) ?? '').split('\n');
   assert.equal(
     lines[0]?.trimEnd(),
     `import { conf_data_json$default as data } from "./${VENDOR_MODULE_NAME}";`,

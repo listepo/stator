@@ -859,6 +859,38 @@ Find the root cause in lowering and the verifier's scope order, rather than rela
 prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
 HIR verifier is clean on all of them; `pnpm run ci` is green.
 
+**Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
+`b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
+(`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
+1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
+   phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
+   supported", from harness lines), so the runner records a skip. The SyntaxError for an
+   imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
+   is skipped the same way. Find the commit that dropped it (bisect with
+   `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
+   is a SyntaxError in every module.
+2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
+   specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
+   30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
+   before any bundle step runs.
+
+**Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
+five gained tests stay), and `ratchet.json` is raised to the new total.
+
+**Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
+and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
+since `76a69ed`, because stage 2 waits on the linux jobs, which were red.
+1. Ten `unit/bundler.test.ts` tests (T12.1–T12.3) compare a bundler path such as `resolveDir`, a
+   `#line` file or a diagnostic file against `join(...)`. The code answers `C:/Users/…` and the test
+   expects `C:\Users\…`. Decide which form the bundler seam promises, document it in
+   `docs/BUNDLER.md`, and make the code and the tests agree. A diagnostic shown to a Windows user
+   should use the platform's separators.
+2. `unit/selfhost.test.ts` "the committed baseline is in --update form" fails on Windows (most
+   likely CRLF from checkout, compared against the `--update` text). Fix it with a
+   `.gitattributes` rule or by normalizing the comparison, whichever is the root cause.
+
+**Check:** `frontend (windows/x64)` and `frontend (windows/arm64)` green on a PR.
+
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
@@ -2450,3 +2482,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
 - **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.
+- **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.
