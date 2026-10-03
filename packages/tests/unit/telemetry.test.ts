@@ -1,6 +1,7 @@
 /** OpenTelemetry export contract (plan-notes 187): spans flow OUT through the standard OTLP
- * endpoint when opted in, and `.env` (dotenv) is read before the opt-in is consulted, so a boxed
- * compiler honors the same configuration vocabulary as the service it reports to.
+ * endpoint when opted in, and `.env` (dotenv) is read before the opt-in is consulted. The file may
+ * set the opt-in only; the exporter's `OTEL_*` configuration comes from the real environment
+ * (plan.md §9 Task 6.21).
  *
  * The async execa here is deliberate, not style: the test's HTTP server must answer the exporter's
  * POST mid-child-process, which a sync spawn would block the event loop from doing. */
@@ -102,19 +103,28 @@ test('without STATOR_OTEL nothing is traced', async () => {
   }
 });
 
-test('dotenv is loaded before the telemetry switch is read', async () => {
-  const captured: Captured[] = [];
+test('.env switches telemetry on, but only the real environment picks the exporter', async () => {
+  const fromFile: Captured[] = [];
+  const fromEnv: Captured[] = [];
   const f = fixture();
-  const { server, url } = await startReceiver(captured);
+  const file = await startReceiver(fromFile);
+  const real = await startReceiver(fromEnv);
   try {
-    // The switch comes from the program's OWN directory, not the caller's environment — dotenv
-    // must have been loaded before telemetryInit() looked.
-    writeFileSync(join(f.work, '.env'), `STATOR_OTEL=1\nOTEL_EXPORTER_OTLP_ENDPOINT=${url}\n`);
-    const run = await runCli(f);
+    // The switch comes from the program's OWN directory: dotenv must have been loaded before
+    // telemetryInit() looked. The endpoint in the same file must be ignored -- the project being
+    // compiled cannot send the compiler's spans to a host of its choosing (plan.md §9 Task 6.21).
+    writeFileSync(join(f.work, '.env'), `STATOR_OTEL=1\nOTEL_EXPORTER_OTLP_ENDPOINT=${file.url}\n`);
+    const run = await runCli(f, { STATOR_OTEL: undefined, OTEL_EXPORTER_OTLP_ENDPOINT: real.url });
     assert.equal(run.status, 0, run.stderr);
-    assert.ok(captured.length >= 1, 'a .env opt-in must export exactly like an env-var opt-in');
+    assert.ok(fromEnv.length >= 1, 'a .env opt-in must export exactly like an env-var opt-in');
+    assert.equal(fromFile.length, 0, 'the exporter endpoint came from the project .env');
+    assert.match(
+      run.stderr,
+      /stator: \.env: applied STATOR_OTEL; ignored OTEL_EXPORTER_OTLP_ENDPOINT/,
+    );
   } finally {
     rmSync(f.work, { recursive: true, force: true });
-    server.close();
+    file.server.close();
+    real.server.close();
   }
 });

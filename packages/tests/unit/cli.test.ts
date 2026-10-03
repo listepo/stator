@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'vitest';
@@ -764,4 +764,137 @@ test('a bad STATOR_OPT names the environment as its origin (F11)', async () => {
   });
   assert.equal(run.exitCode, 1);
   assert.match(run.stderr, /STA0002 unknown opt "fast" in the environment variable STATOR_OPT/);
+});
+
+/* Task 6.21 (QA audit F3, F4): the runtime is resolved per build, and a project `.env` may choose
+ * only STATOR_OPT, STATOR_RUNTIME and STATOR_OTEL — never the C compiler, the runtime root or the
+ * telemetry exporter. */
+
+/** `stator` in `dir` with `env` merged over the real environment (`undefined` unsets a key). */
+async function statorEnv(
+  dir: string,
+  env: Readonly<Record<string, string | undefined>>,
+  ...args: string[]
+): Promise<Run> {
+  const merged: Record<string, string | undefined> = { ...process.env, ...env };
+  const result = await execa(process.execPath, [CLI, ...args], {
+    cwd: dir,
+    env: merged,
+    extendEnv: false,
+    reject: false,
+  });
+  return {
+    status: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr.replace(/\s+/g, ' '),
+  };
+}
+
+const LOCALE_COMPARE = "console.log('a'.localeCompare('b', 'en'));\n";
+
+test('STATOR_RUNTIME from .env reaches the link, not only the gate (F3)', NATIVE_ONLY, async () => {
+  await inScratch({ '.env': 'STATOR_RUNTIME=intl\n', 'lc.ts': LOCALE_COMPARE }, async (dir) => {
+    const b = await statorEnv(dir, { STATOR_RUNTIME: undefined }, 'build', 'lc.ts', '-o', 'lc');
+    assert.match(b.stderr, /stator: \.env: applied STATOR_RUNTIME/);
+    if (b.status === 0) {
+      const r = await spawn(join(dir, 'lc'), [], dir);
+      assert.equal(r.status, 0, `linked against the default archive and panicked:\n${r.stderr}`);
+    } else {
+      // Without the ICU build the answer is the same as with the variable set for real.
+      assert.match(b.stderr, /STA0011 runtime archive not found at .*build-intl/);
+    }
+  });
+});
+
+test('an in-process build reads the runtime when it runs, not when build.ts was imported (F3)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const saved = process.env['STATOR_RUNTIME_ROOT'];
+    process.env['STATOR_RUNTIME_ROOT'] = join(dir, 'no-runtime');
+    try {
+      await assert.rejects(
+        build({
+          entry: join(dir, 'app.ts'),
+          out: join(dir, 'app'),
+          mode: 'ts',
+          emitCOnly: false,
+          keepC: false,
+        }),
+        (error: unknown) =>
+          error instanceof BuildError &&
+          error.code === 'STA0011' &&
+          error.message.includes('no-runtime'),
+      );
+    } finally {
+      if (saved === undefined) {
+        delete process.env['STATOR_RUNTIME_ROOT'];
+      } else {
+        process.env['STATOR_RUNTIME_ROOT'] = saved;
+      }
+    }
+  });
+});
+
+test('a project .env must not choose the C compiler (F4)', NATIVE_ONLY, async () => {
+  await inScratch({ 'lib.ts': ADD }, async (dir) => {
+    const marker = join(dir, 'ran.txt');
+    const fake = join(dir, 'fakecc.sh');
+    writeFileSync(fake, `#!/bin/sh\necho ran > "${marker}"\n`);
+    chmodSync(fake, 0o755);
+    writeFileSync(
+      join(dir, '.env'),
+      `CC=${fake}\nSTATOR_RUNTIME_ROOT=/nonexistent\nOTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:9\n`,
+    );
+    const r = await statorEnv(
+      dir,
+      { CC: undefined, STATOR_RUNTIME_ROOT: undefined, OTEL_EXPORTER_OTLP_ENDPOINT: undefined },
+      'build',
+      'lib.ts',
+      '-o',
+      'lib.o',
+      '--emit-header=lib.h',
+    );
+    assert.equal(existsSync(marker), false, 'CC from the project .env was executed');
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(existsSync(join(dir, 'lib.o')), 'the real clang wrote the object');
+    assert.match(
+      r.stderr,
+      /stator: \.env: ignored CC, STATOR_RUNTIME_ROOT, OTEL_EXPORTER_OTLP_ENDPOINT \(only STATOR_OPT, STATOR_RUNTIME, STATOR_OTEL may come from \.env\)/,
+    );
+  });
+});
+
+test('.env may set STATOR_OPT, and the real environment wins over it (F4)', async () => {
+  await inScratch({ '.env': 'STATOR_OPT=fast\n', 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const [fromFile, fromEnv] = await Promise.all([
+      statorEnv(dir, { STATOR_OPT: undefined }, 'build', 'app.ts', '-o', 'a.c', '--emit=c'),
+      statorEnv(dir, { STATOR_OPT: '1' }, 'build', 'app.ts', '-o', 'b.c', '--emit=c'),
+    ]);
+    assert.equal(fromFile.status, 1);
+    assert.match(fromFile.stderr, /^stator: \.env: applied STATOR_OPT /);
+    assert.match(
+      fromFile.stderr,
+      /STA0002 unknown opt "fast" in the environment variable STATOR_OPT/,
+    );
+    assert.equal(fromEnv.status, 0, fromEnv.stderr);
+    assert.doesNotMatch(fromEnv.stderr, /\.env/, 'nothing applied, so nothing to say');
+  });
+});
+
+test('a C compiler that exits 0 but writes nothing fails the build (F4)', NATIVE_ONLY, async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n', 'lib.ts': ADD }, async (dir) => {
+    const fake = join(dir, 'silentcc.sh');
+    writeFileSync(fake, '#!/bin/sh\nexit 0\n');
+    chmodSync(fake, 0o755);
+    const [binary, object] = await Promise.all([
+      statorEnv(dir, { CC: fake }, 'build', 'app.ts', '-o', 'app'),
+      statorEnv(dir, { CC: fake }, 'build', 'lib.ts', '-o', 'lib.o', '--emit-header=lib.h'),
+    ]);
+    for (const r of [binary, object]) {
+      assert.equal(r.status, 1, 'a build that produced nothing reported success');
+      assert.match(
+        r.stderr,
+        /STA0009 C compiler ".*silentcc\.sh" exited 0 but wrote no "(app|lib\.o)"/,
+      );
+    }
+  });
 });

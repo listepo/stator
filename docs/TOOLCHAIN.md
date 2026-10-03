@@ -136,6 +136,32 @@ and the message names the environment variable, since no `--opt` is on the comma
 compiled as thin-LTO bitcode too when the archive was. Full PGO / a custom LLVM backend remains
 §12 rung 6 and needs the Task 6.3 measurement gate before it is scheduled.
 
+## Environment variables and `.env`
+
+`stator build` and `stator explain` read these from the environment:
+
+| Variable | What it picks | May a project `.env` set it? |
+| --- | --- | --- |
+| `STATOR_OPT` | clang `-O` level (above) | yes |
+| `STATOR_RUNTIME` | runtime flavor: `asan` or `intl` archive, and the builtins the gate admits | yes |
+| `STATOR_OTEL` | turns tracing on (plan-notes 187) | yes |
+| `CC` | the C compiler Stator runs | **no** |
+| `STATOR_RUNTIME_ROOT` (and `STATOR_STD_ROOT`, `STATOR_NODE_ROOT`) | where the runtime headers and archives live | **no** |
+| `OTEL_*` (`OTEL_EXPORTER_OTLP_ENDPOINT`, `_HEADERS`, `OTEL_SERVICE_NAME`, …) | where trace data goes | **no** |
+
+The CLI reads `./.env` from the **current directory**, which is the project being compiled and
+may be a repository someone else wrote. So the file may set only the three build options above.
+The programs Stator runs and the place its telemetry goes come from the real environment, never
+from the input tree (plan.md §9 Task 6.21, QA audit F4). A real variable always wins over the
+file. When the file applies a key, or holds `CC`, `STATOR_*` or `OTEL_*` keys it may not set, one
+stderr line says so: `stator: .env: applied STATOR_RUNTIME; ignored CC (only STATOR_OPT,
+STATOR_RUNTIME, STATOR_OTEL may come from .env)`. Other keys in the file are not read.
+
+The runtime flavor and root are resolved once per `build()` call, after `.env` is applied, and
+the gate and the link use that one value: `STATOR_RUNTIME=intl` in `.env` either links the ICU
+archive or fails with `STA0011` when it is not built, exactly as the real variable does (QA audit
+F3). A `CC` that exits 0 without writing its output is `STA0009`, not a successful build.
+
 ## Native libraries
 
 None of these come from the npm tree. Vendored sources live in the repo and build with the runtime;

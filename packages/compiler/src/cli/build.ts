@@ -27,7 +27,7 @@ import { isStdSourceFile, STD_ROOT } from '../frontend/std.ts';
 import { verifyHir } from '../hir/verify.ts';
 import { optimize } from '../passes/index.ts';
 import { BuildError, type Diagnostic } from '../support/diagnostics.ts';
-import { runtimeFlavor } from '../support/features.ts';
+import { type RuntimeFlavor, runtimeFlavor, withRuntimeFlavor } from '../support/features.ts';
 import { packageRoot } from '../support/package-root.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { isStaleLdSystemLibFailure, staleLdHint, staleLdRetryArgs } from '../support/toolchain.ts';
@@ -135,26 +135,46 @@ async function emitDiagnosticLines(lines: readonly Line[]): Promise<void> {
   await print(lines, process.stderr);
 }
 
-/** The C runtime (headers + built archive) is a sibling package (`support/package-root.ts`).
- * `STATOR_RUNTIME_ROOT` overrides the layout. A wrong guess is caught at link time (missing
- * archive). */
-const RUNTIME_ROOT = packageRoot('STATOR_RUNTIME_ROOT', 'runtime', 'include');
-const RUNTIME_INCLUDE = join(RUNTIME_ROOT, 'include');
-
-/** `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so CI can run
- * the SAME golden fixtures under ASan/UBSan (plan.md §5 Task 2.7). The sanitizer has to be on both
- * the archive and the final link or the instrumentation is only half applied, which is why one
- * variable controls both rather than exposing a flags knob. */
-const FLAVOR = runtimeFlavor();
-const SANITIZED = FLAVOR === 'asan';
 const RUNTIME_DIR_OF = { default: 'build', asan: 'build-asan', intl: 'build-intl' } as const;
 const RUNTIME_JUST_RECIPE = {
   default: 'runtime',
   asan: 'runtime-asan',
   intl: 'runtime-intl',
 } as const;
-const RUNTIME_LIB_DIR = join(RUNTIME_ROOT, RUNTIME_DIR_OF[FLAVOR]);
-const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
+
+/** The runtime one build compiles and links against. Resolved once per `build()` call, never at
+ * module load: the CLI applies `.env` after its imports run, and an in-process caller may set
+ * `STATOR_RUNTIME` around one build, so a value frozen at import time would link one flavor
+ * while the gate admitted another (plan.md §9 Task 6.21, QA audit F3).
+ *
+ * The C runtime (headers + built archive) is a sibling package (`support/package-root.ts`);
+ * `STATOR_RUNTIME_ROOT` overrides the layout, and a wrong guess is caught at link time (missing
+ * archive). `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so
+ * CI can run the SAME golden fixtures under ASan/UBSan (plan.md §5 Task 2.7). The sanitizer has to
+ * be on both the archive and the final link or the instrumentation is only half applied, which is
+ * why one variable controls both rather than exposing a flags knob. */
+export interface Runtime {
+  readonly flavor: RuntimeFlavor;
+  readonly sanitized: boolean;
+  readonly root: string;
+  readonly include: string;
+  readonly libDir: string;
+  readonly archive: string;
+}
+
+export function resolveRuntime(): Runtime {
+  const flavor = runtimeFlavor();
+  const root = packageRoot('STATOR_RUNTIME_ROOT', 'runtime', 'include');
+  const libDir = join(root, RUNTIME_DIR_OF[flavor]);
+  return {
+    flavor,
+    sanitized: flavor === 'asan',
+    root,
+    include: join(root, 'include'),
+    libDir,
+    archive: join(libDir, 'libjsrt.a'),
+  };
+}
 /** The std backings (plan.md §11c T11.2): one archive for every runtime flavor — ReleaseSafe Zig
  * over libc, with no dependency on libjsrt.a (packages/std/justfile). Linked only into a program
  * whose module graph holds a std file. */
@@ -171,8 +191,8 @@ const SANITIZER_FLAGS = ['-O1', '-g', '-fsanitize=address,undefined'];
  * the generated C into bitcode and the runtime inlines into it. Absent means an archive built
  * before the recipe wrote one; the link then fails the way it always did, which is the honest
  * outcome. */
-function extraLinkFlags(): string[] {
-  const recorded = join(RUNTIME_LIB_DIR, 'link-flags.txt');
+function extraLinkFlags(runtime: Runtime): string[] {
+  const recorded = join(runtime.libDir, 'link-flags.txt');
   if (!existsSync(recorded)) {
     return [];
   }
@@ -217,12 +237,11 @@ export async function build(options: BuildOptions): Promise<number> {
   if (!options.emitCOnly) {
     requireWritable(out);
   }
-  const compiled = await compileToC(
-    options.entry,
-    options.mode,
-    unit,
-    options.bundler,
-    options.node ?? false,
+  // One resolution feeds the gate (through the pinned flavor) and the link, so the surface the
+  // gate admits is the surface the linked archive carries.
+  const runtime = resolveRuntime();
+  const compiled = await withRuntimeFlavor(runtime.flavor, () =>
+    compileToC(options.entry, options.mode, unit, options.bundler, options.node ?? false),
   );
   if (compiled === null) {
     return 1;
@@ -249,7 +268,7 @@ export async function build(options: BuildOptions): Promise<number> {
     const cPath = keptC?.path ?? join(scratch ?? '', 'module.c');
     try {
       writeOutput(keptC ?? { role: 'the C file', path: cPath }, compiled.c);
-      compileObject(cPath, options.out, options.opt ?? 2);
+      compileObject(cPath, options.out, options.opt ?? 2, runtime);
       return 0;
     } finally {
       if (scratch !== null) {
@@ -273,6 +292,8 @@ export async function build(options: BuildOptions): Promise<number> {
       options.opt ?? 2,
       [...compiled.linkFlags, ...(options.linkFlags ?? [])],
       compiled.std,
+      runtime,
+      compiled.flavor,
     );
     return 0;
   } finally {
@@ -291,6 +312,8 @@ export interface CompiledC {
   readonly linkFlags: readonly string[];
   /** Whether the module graph holds a `std/*` file, so the link owes `libjsrt_std.a`. */
   readonly std: boolean;
+  /** The runtime flavor the gate admitted builtins against; the link must use the same one. */
+  readonly flavor: RuntimeFlavor;
   /** Every source file of the program, so `build` can refuse an output that names one. */
   readonly inputs: readonly string[];
   readonly header?: string;
@@ -335,6 +358,8 @@ async function compileToCInner(
     return null;
   }
 
+  // Read where the gate reads it (`intlEnabled`), so the link can check it got the same answer.
+  const flavor = runtimeFlavor();
   if (await report(withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)))) {
     return null;
   }
@@ -408,6 +433,7 @@ async function compileToCInner(
     c: emitC(optimized, library) + (unit === undefined ? '' : exportVersionDefinition(unit)),
     linkFlags: withSpan('frontend/link-flags', {}, () => collectLinkFlags(program)),
     std: order.some((file) => isStdSourceFile(file.fileName)),
+    flavor,
     inputs: program.getSourceFiles().map((file) => file.fileName),
     ...(header !== undefined && { header }),
   }));
@@ -427,9 +453,11 @@ function linkExecutable(
   opt: OptLevel,
   externFlags: readonly string[],
   std: boolean,
+  runtime: Runtime,
+  gateFlavor: RuntimeFlavor,
 ): void {
   withSpan('link/clang', {}, () => {
-    link(cPath, out, opt, externFlags, std);
+    link(cPath, out, opt, externFlags, std, runtime, gateFlavor);
   });
 }
 
@@ -458,10 +486,10 @@ export function dedupLinkLibs(flags: readonly string[]): string[] {
 // initialization on the current macOS host. Match justfile's sanitizer fallback so the
 // generated golden binaries use the same compiler as the sanitized runtime archive. An
 // explicit compiler-path CC remains authoritative for callers testing another toolchain.
-function selectCC(): string {
+function selectCC(runtime: Runtime): string {
   return (
     process.env['CC'] ??
-    (SANITIZED && process.platform === 'darwin' && existsSync('/usr/bin/clang')
+    (runtime.sanitized && process.platform === 'darwin' && existsSync('/usr/bin/clang')
       ? '/usr/bin/clang'
       : 'clang')
   );
@@ -523,13 +551,13 @@ function runClangCaptured(cc: string, args: readonly string[]): CapturedClang {
 /** Compile generated C to a relocatable object for a C consumer (`--emit-header`, plan §10
  * Task 7.2 step 1): `clang -c`, so `-o` names an object, not an executable. No archive, no
  * link flags — linking is the consumer's job once steps 3–5 emit the stubs and the init. */
-function compileObject(cPath: string, out: string, opt: OptLevel): void {
-  const cc = selectCC();
+function compileObject(cPath: string, out: string, opt: OptLevel, runtime: Runtime): void {
+  const cc = selectCC(runtime);
   const result = runClang(cc, [
     '-std=c11',
-    ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
+    ...(runtime.sanitized ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
     '-I',
-    RUNTIME_INCLUDE,
+    runtime.include,
     '-c',
     cPath,
     '-o',
@@ -546,6 +574,19 @@ function compileObject(cPath: string, out: string, opt: OptLevel): void {
         'keep the C with `--keep-c` and report it',
     );
   }
+  requireProduced(cc, out);
+}
+
+/** A zero exit is not proof of an output: a `CC` that is not clang (or a wrapper that swallows
+ * the call) can succeed and write nothing, and `build` must not report success for a file that
+ * is not there (QA audit F4). */
+function requireProduced(cc: string, out: string): void {
+  if (!existsSync(out)) {
+    throw new BuildError(
+      'STA0009',
+      `C compiler "${cc}" exited 0 but wrote no "${out}" — check that CC names a working clang`,
+    );
+  }
 }
 
 /** The clang link line, pure so a test can read it: the generated C, `libjsrt_std.a` exactly
@@ -557,6 +598,7 @@ export function linkArguments(
   opt: OptLevel,
   externFlags: readonly string[],
   std: boolean,
+  runtime: Runtime = resolveRuntime(),
 ): string[] {
   // Tree-shaking builtins (plan.md Task 3.12): builtins live in libjsrt.a, and the archive links
   // at .o granularity -- one referenced symbol drags in every builtin its object file holds. The
@@ -565,29 +607,29 @@ export function linkArguments(
   // compile time (the justfile does the same for the archive's own objects). Sanitized
   // builds skip it -- ASan's global registration arrays are exactly the kind of unreferenced
   // section --gc-sections is documented to break.
-  const shakeFlags = SANITIZED
+  const shakeFlags = runtime.sanitized
     ? []
     : process.platform === 'darwin'
       ? ['-Wl,-dead_strip']
       : ['-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections'];
   return [
     '-std=c11',
-    ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
+    ...(runtime.sanitized ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
     ...shakeFlags,
     '-I',
-    RUNTIME_INCLUDE,
+    runtime.include,
     cPath,
     // The std archive before the runtime's, though neither depends on the other: the order a
     // static link reads archives is load-bearing in general, and fixing it here keeps it stable.
     ...(std ? [STD_ARCHIVE] : []),
     '-L',
-    RUNTIME_LIB_DIR,
+    runtime.libDir,
     '-ljsrt',
     // The archive states its own system dependencies in `link-flags.txt` (SYS_LIBS, plan-notes
     // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
     // Extern surface flags last, in carrier order (pragma files in program order, then the CLI
     // escape hatch), duplicates dropped first-wins: dependents precede their dependencies.
-    ...dedupLinkLibs([...extraLinkFlags(), ...externFlags]),
+    ...dedupLinkLibs([...extraLinkFlags(runtime), ...externFlags]),
     '-o',
     out,
   ];
@@ -615,22 +657,32 @@ function link(
   opt: OptLevel,
   externFlags: readonly string[],
   std: boolean,
+  runtime: Runtime,
+  gateFlavor: RuntimeFlavor,
 ): void {
-  requireArchive('runtime', RUNTIME_ARCHIVE, RUNTIME_ROOT, RUNTIME_JUST_RECIPE[FLAVOR]);
+  // An invariant, not a user error: `build` pins the flavor it resolved around the gate, so a
+  // mismatch means some path read the environment again (QA audit F3).
+  if (gateFlavor !== runtime.flavor) {
+    throw new Error(
+      `the gate admitted the ${gateFlavor} runtime surface but the link uses the ${runtime.flavor} archive`,
+    );
+  }
+  requireArchive('runtime', runtime.archive, runtime.root, RUNTIME_JUST_RECIPE[runtime.flavor]);
   if (std) {
     requireArchive('std', STD_ARCHIVE, STD_ROOT, 'std');
   }
 
   // conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
   // initialization on the current macOS host (see selectCC above).
-  const cc = selectCC();
-  const args = linkArguments(cPath, out, opt, externFlags, std);
+  const cc = selectCC(runtime);
+  const args = linkArguments(cPath, out, opt, externFlags, std, runtime);
   const first = runClangCaptured(cc, args);
   const startError = clangStartError(cc, first);
   if (startError !== undefined) {
     throw startError;
   }
   if (first.status === 0) {
+    requireProduced(cc, out);
     return;
   }
 
@@ -642,7 +694,7 @@ function link(
   const retry = staleLdRetryArgs(args, first.stderr, {
     darwin: process.platform === 'darwin',
     defaultCc: process.env['CC'] === undefined,
-    sanitized: SANITIZED,
+    sanitized: runtime.sanitized,
   });
   if (retry !== undefined) {
     const second = runClangCaptured(cc, retry.args);
@@ -651,6 +703,7 @@ function link(
       throw secondStartError;
     }
     if (second.status === 0) {
+      requireProduced(cc, out);
       return;
     }
     process.stderr.write(second.stdout);
