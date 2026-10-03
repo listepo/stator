@@ -820,21 +820,7 @@ allowlist; `pnpm run ci` green.
 
 ~~**Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.22 (plan-notes 335).
 
-**Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12).**
-
-- **F6.** `JSRT_FRAME` (or the function prologue) checks the native stack against a limit set at
-  `jsrt_init` from the thread's stack size and throws a catchable
-  `RangeError: Maximum call stack size exceeded`. A `sigaltstack` SIGSEGV handler that prints
-  `PANIC: STA2005 stack overflow` is the fallback for frames the check cannot see.
-- **F12.** `jsrt_string_concat` throws `RangeError: Invalid string length` past Node's cap
-  (the one `jsrt_string_ops.c` already uses for `repeat`/`padStart`) instead of returning
-  `JSRT_NULL`. String `+=` in a loop becomes amortized linear (an append buffer with spare
-  capacity, or the rope `docs/VALUE.md §12` anticipates): 200 000 one-character appends must
-  stay within 3× Node's time on the same host.
-
-**Check:** a golden that catches the `RangeError` from deep recursion and prints its message;
-the audit's F6 test passes; a unit or bench measurement for F12 recorded in plan-notes;
-`pnpm run ci` green, including ASan.
+~~**Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.23 (plan-notes 338, 339).
 
 ~~**Task 6.24 — `console.log` formats like Node (F13).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.24 (plan-notes 337).
 
@@ -2429,4 +2415,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.64** (2026-10-04): **Task 6.22 lands: FFI inputs are validated before they reach C or clang** (plan-notes 335). `ffi-gen` refuses an `--out` that names its header or `--diff` file and a `--lib` that is not one library name, and `--help` exits 0 on stdout. A `@statorLink` header path holding a `"`, a line break or NUL is `STA1119`; every other path is emitted as written, because `#include` reads no escapes. Pragma flags are limited to `-l<name>`, `-L<dir>`, `-framework <name>` and `-Wl,-rpath,<dir>`; anything else is `STA1119` naming the flag, and `--link=` stays the escape hatch.
 - **v4.65** (2026-10-04): **Task 6.26 lands: the landing page works without storage, at 320 px and without third parties** (plan-notes 336; QA audit F14, F15, F16). The theme toggle cycles from in-memory state, so blocked storage still cycles `light → dark → system`, and it stays hidden until its script runs. The header wraps and drops the theme label under 400 px. IBM Plex is self-hosted from `@fontsource/ibm-plex-*`, and every page carries a `default-src 'self'` CSP meta with the inline boot script by hash. `site/scripts/check.ts` (`pnpm run check:browser`, `playwright-core` over the installed Chrome) proves all of it in the site workflow.
 - **v4.66** (2026-10-04): **Task 6.24 lands: `console.log` formats like Node** (plan-notes 337). One runtime function applies `%s %d %i %f %j %O %c %%` with `util.format` semantics for `log`/`info`/`debug`/`error`/`warn`, including missing and extra arguments. Cases whose Node output the binary cannot reproduce yet (`%o` of an object, `%s` of a function or of an object with its own `toString`, `%d`/`%i`/`%f` through a user `toString`/`valueOf`, `%d` of a `Date`) are not-yet `STA1214` at compile time and a named `STA2005` panic when the format string is only known at run time.
+- **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.

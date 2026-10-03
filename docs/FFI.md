@@ -467,8 +467,10 @@ and generated uniformly:
   guard: a second `jsrt_init()` would chain the Boehm roots hook into itself, and a second
   `JSRT_GLOBALS_ENTER` would wipe every global. Calling an exported function before init
   is undefined behavior (the header says so). A top-level throw lands in the error cell
-  like any stub failure instead of `jsrt_uncaught`'s exit — the unit is then unusable. A
-  top-level-await module starts and drains like `main`'s async startup; a rejected body
+  like any stub failure instead of `jsrt_uncaught`'s exit — the unit is then unusable.
+  `jsrt_init` also installs the stack-overflow fault handler for SIGSEGV and SIGBUS
+  (docs/VALUE.md §4.25); a fault that is not a stack overflow is handed back to whatever
+  handler the host program had installed before. A top-level-await module starts and drains like `main`'s async startup; a rejected body
   parks its reason for the init to capture rather than exiting, while an unhandled
   rejection from a queued job still exits exactly as in `main`.
 - **Throws are `stator_<unit>_last_error()` (NULL = success) plus a zero-value sentinel**

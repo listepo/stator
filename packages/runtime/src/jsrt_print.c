@@ -298,19 +298,15 @@ static void append_quoted(JSRTBuf *out, const JSString *str) {
       jsrt_buf_puts(out, esc);
     } else {
       /* Hand the code unit -- with its partner, when it starts a surrogate pair -- to the same
-       * UTF-8 writer the unquoted path uses, so a pair still comes out as one code point. A
-       * JSString ends in a flexible member, so the stand-in is a byte array shaped like one. */
-      _Alignas(JSString) unsigned char storage[sizeof(JSString) + 2 * sizeof(uint16_t)];
-      JSString *piece = (JSString *)storage;
+       * UTF-8 writer the unquoted path uses, so a pair still comes out as one code point. The
+       * stand-in is a view of those units in place. */
       const bool pair = c >= 0xD800u && c <= 0xDBFFu && i + 1 < str->length &&
                         str->data[i + 1] >= 0xDC00u && str->data[i + 1] <= 0xDFFFu;
-      piece->length = pair ? 2 : 1;
-      piece->data[0] = c;
+      const JSString piece = {pair ? 2u : 1u, 0u, &str->data[i], NULL};
+      append_string(out, &piece);
       if (pair) {
-        piece->data[1] = str->data[i + 1];
         i++;
       }
-      append_string(out, piece);
     }
   }
   jsrt_buf_putc(out, quote);

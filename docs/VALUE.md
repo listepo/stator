@@ -201,9 +201,40 @@ even though Phase 2's subset could get away with less.
 ```c
 typedef struct JSString {
   uint32_t length;   /* in UTF-16 code units, not bytes and not code points */
-  uint16_t data[];   /* flexible array member; NOT NUL-terminated */
+  uint32_t flags;    /* JSRT_STRING_GROWN: the string came out of a concatenation */
+  uint16_t *data;    /* NOT NUL-terminated */
+  void *buffer;      /* the append buffer `data` points into, or NULL for a flat string */
 } JSString;
 ```
+
+A string is a header and a view of its code units. A **flat** string is one pointer-free block:
+the header, then its own units, with `data` pointing just past the header (`jsrt_string_alloc`).
+Contents never change once a string is visible to anyone.
+
+**Concatenation and the append buffer** (plan.md §9 Task 6.23, F12; `jsrt_string_mem.zig`).
+Copying both operands on every `+` made `s += x` in a loop O(n²): 200k one-character appends took
+2.5 s against Node's 0.07 s. Now a concatenation onto a string that is itself a concatenation's
+result, once the result reaches 64 code units, goes through an **append buffer**: one block of
+units with spare capacity and `used`, the end of the longest string viewing it. Every string over
+a buffer is a prefix of it, so writing past `used` changes no string anyone holds:
+
+- `a + b` where `a` ends exactly at `used` and `b` fits writes `b` in place and allocates only a
+  header. This is the string the loop just made.
+- `a + b` where `a` is an older, shorter prefix (its next units belong to a longer string) copies
+  into a fresh buffer, as does a full one. Capacity doubles, so the copies total O(n).
+- Any other concatenation (a one-off `x + y`, a short result) is a flat copy marked
+  `JSRT_STRING_GROWN`, so a one-off concatenation costs no spare memory.
+
+A buffered header keeps the buffer's own address in `buffer`, so the collector retains the buffer
+through it without relying on interior-pointer recognition. The header is a scanned allocation;
+the flat string and the buffer are pointer-free (atomic). A long-lived built string may hold up to
+twice its length in capacity; that is the price of the amortized append.
+
+Past `JSRT_MAX_STRING_LENGTH` (2^29 − 24 code units, V8's `String::kMaxLength`)
+`jsrt_string_concat` leaves Node's catchable `RangeError: Invalid string length` pending. It used to
+return `JSRT_NULL`, which callers then used as a string. The emitter puts a pending check after
+every `+` that may concatenate (any `+` not typed `number`), after `+=` and before its write, after a
+template literal with more than one part, and after `String.prototype.concat`.
 
 UTF-16 is not negotiable for v0. `String.prototype.length`, `charCodeAt`, `codePointAt`, surrogate
 pair handling, and essentially all of Test262's string coverage are defined in UTF-16 code units.
@@ -229,8 +260,8 @@ uint32_t jsrt_string_length(jsrt_value v);
 uint16_t jsrt_string_char(jsrt_value v, uint32_t i);
 ```
 
-No direct `->data[i]` in emitted code, ever. The indirection is what allows §12's rope or
-small-string optimizations to be a runtime-only change. A bounds-check policy lives behind these
+No direct `->data[i]` in emitted code, ever. The indirection is what made the append buffer
+above a runtime-only change, and keeps a rope or small-string optimization one too. A bounds-check policy lives behind these
 accessors too, so it can be compiled out in release builds in one place rather than at thousands
 of emitted call sites.
 
@@ -1528,6 +1559,31 @@ names, so `{ ...grown, extra: 1 }` prints `extra` before them where Node prints 
 grown name the result's type also declares keeps the declared writer's value, since the runtime
 cannot tell an earlier writer (which the spread overrides) from a later one. The element spelling
 with a static key naming no member (`o["extra"] = 1`) is still refused (`STA1214`).
+
+## 4.25 The native stack guard — a catchable RangeError, then a loud panic (plan.md §9 Task 6.23)
+
+Node throws a catchable `RangeError: Maximum call stack size exceeded` on deep recursion. A Stator
+binary used to die of SIGSEGV with nothing printed (QA audit F6). Two layers now:
+
+- **The prologue check.** Every generated function opens with `JSRT_STACK_CHECK()` *before*
+  `JSRT_FRAME`, so its early return has no frame to pop. It compares
+  `__builtin_frame_address(0)` with the thread-local `jsrt_stack_limit`. Past it, the function
+  leaves the RangeError pending and returns `undefined`, and the caller's pending check unwinds as
+  for any throw (§4.9). `jsrt_init` measures the thread's real stack
+  (`pthread_get_stackaddr_np`/`pthread_get_stacksize_np` on Darwin, `pthread_getattr_np` on Linux)
+  and sets the limit 256 KiB above its low end. That headroom is for the runtime code the deepest
+  frame still calls: the throw itself, a catch handler's `console.log`. A thread `jsrt_init` never
+  ran on has limit 0, and the check is off there. Recursion depth therefore depends on the stack
+  size, not on Node's; only the error is Node's. Cost: about 1 ns per call on `fib` (plan-notes
+  338).
+- **The fault handler.** Recursion no prologue sees, the runtime's own C recursion over deeply
+  nested data (`JSON.stringify` of a million-deep array), still overflows. A SIGSEGV or SIGBUS
+  whose fault address lies at the stack's low end runs on an alternate signal stack. It prints
+  `PANIC: STA2005 stack overflow` and the shadow-stack depth with `write(2)` (stdio is not
+  async-signal-safe), then aborts. Any other fault is not ours: the handler reinstalls the action
+  it replaced (the default, ASan's reporter, a host program's handler) and returns, so the
+  faulting instruction re-runs into it. An alternate stack someone already installed (ASan does)
+  is kept.
 
 ## 5. What Phase 2 actually implements
 
