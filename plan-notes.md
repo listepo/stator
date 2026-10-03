@@ -12396,3 +12396,91 @@ of an object with a user `valueOf` (NaN), `Number(date)` (NaN), and `o == 3` wit
   effects, V8's TimSort may call it in a different order. Comparators already have this property.
 - Selfhost: `packages/compiler` `STA1214` 1813 → 1815. `userConversion`'s three `ts.*` parameter
   types add 3; removing the gate's format check removes 1.
+
+## 347. Task 6.28: an initializer's closure reads its own binding; closure-mediated TDZ is refused (2026-10-04)
+
+**Root cause.** The lowering was already right. `lowerDeclarator` declares the binding
+(`bindings.declare`) before it lowers the initializer, and capture analysis
+(`lower/captures.ts`) resolves a self-reference like any other capture: a function-local binding
+gets an environment slot, a module-level one its global. The verifier did the opposite: its
+`declaration` case verified the value first and registered the name after, so every read of the
+name inside its own initializer, including one inside a nested function, was `STA4002`. With the
+verifier order fixed, the five shapes of plan-notes 344 compile and print Node's bytes in both
+modes, with no change to lowering or codegen.
+
+**Not a relaxation.** Registering the name before the value would also have let a read on the
+initializer's own evaluation path through. Instead the binding is registered as `initializing`
+while its initializer is verified, and resolves only through a function-body scope
+(`Scope.functionChild`). Anywhere else the verifier still reports `STA4002` (`STA4003` for an
+assignment), with the old message. `unit/verify.test.ts` pins both halves.
+
+**How the tree models TDZ.** It does not, at run time. A direct read in the initializer is TS2448
+(fatal in both modes, docs/MODES.md §3). An immediately invoked closure, `const x = (() => x)()`,
+is TS2448 too (checked on 2026-10-04 at `b95a0dc`). What the checker cannot see is a closure the
+initializer runs some other way: a callback handed to a call (`const y = call(() => y)`), a
+`toString` that `'' + { … }` invokes, a getter a spread reads. Node throws a TDZ `ReferenceError`
+there. The compiled program has no TDZ sentinel, so it would read a slot nothing was stored in
+yet. The gate therefore refuses such a read with not-yet `STA1214`, and with no phase, because no
+open card adds a run-time TDZ check (`mayRunInOwnInitializer` in `src/frontend/gate.ts`). A read
+passes only when the outermost function between it and the initializer reaches the initializer
+through containers that hand a function on without calling it: parentheses, `as`, `satisfies`,
+`!`, `?:` branches, `&&`/`||`/`??`/`,`, array elements, and object-literal members. That is
+conservative. `const g = (() => { const h = () => g(); return h; })()` is refused although Node
+runs it.
+
+**Card deviation.** The card says a call before initialization "stays Node's TDZ
+`ReferenceError`". Without a run-time TDZ check the compiler cannot answer that, so the case is
+refused instead of printing different bytes. The card's `g(10000)` cannot be a golden on this
+host. With `1 + g(n - 1)`, Node 26.7.0 itself overflows (`RangeError: Maximum call stack size
+exceeded`; 8000 levels work). A tail-position `down(n - 1)` runs 10000 in Node and in the plain
+build, but the ASan build's frames are larger: its stack guard throws the same `RangeError` at
+6000 levels and passes at 5000 (macOS arm64, 8 MiB stack, measured 2026-10-04). Every golden also
+runs under ASan (`test:asan`), so the goldens recurse 3000 levels, in the card's own
+`1 + g(n - 1)` shape.
+
+**Found on the way, not changed.** In `js` mode, `let h = (n) => n; h = (n) => n * 100;` stops
+with internal error `STA4004` ("assignment target type (a0: unknown) => unknown does not match
+value type (a0: unknown) => number"). It reproduces at `b95a0dc`, has nothing to do with self-reference, and
+`h = (n) => n + 100` (an `unknown` result) compiles. The goldens use that spelling.
+
+## 349. Linux CI was red on main; three fixes and Task 6.29 (2026-10-03)
+
+**What happened.** PRs #98–#104 merged with no CI run (their status rollups were empty). The last
+green `ci.yml` run is `76a69ed` (2026-09-25). When CI ran again (on #105 and the dependabot PRs,
+2026-10-03), four jobs failed the same way on every branch:
+
+| Job | Failure | Cause | Fix |
+|---|---|---|---|
+| static analysis | `site/tsconfig.json: File 'astro/tsconfigs/strict' not found` | Since Task 6.26 (#100), type-aware oxlint also reads `site/`, which is its own pnpm project with its own lockfile, and CI never installed it | `pnpm --dir site install --frozen-lockfile` before lint, in `ci.yml` and in AGENTS.md Commands |
+| frontend (linux/x64, linux/arm64) | `ffi-gen-binding` "a quote in a binding directory is STA1119" | The diagnostic wraps at 80 columns, and with linux's shorter `/tmp` the break fell inside "refused @statorLink pragma" | The regex allows any whitespace there |
+| frontend (linux/x64), intermittent | `std/io moves a MiB …`: `status null` | `spawnSync`'s `maxBuffer` (default 1 MiB) caps stdout and stderr **together**. The test writes exactly 1 MiB to stdout plus `1048576\n` to stderr, so Node SIGTERMs the child with ENOBUFS whenever it has not exited yet. Measured on Node 26.7.0: a child writing 1 MiB, then 8 bytes to stderr, gives `status null signal SIGTERM error ENOBUFS`. Without the stderr write it exits 0 | `maxBuffer: 64 MiB`; the assertion now prints signal, error and stderr |
+| test262 conformance | `ratchet: passed dropped from 2372 to 2371` | Six tests lost and five gained since `76a69ed`, by per-test diff of the shard artifacts (runs 36145835756 and 37148352874) | Task 6.29 |
+
+The runtime is not involved in the `std/io` failure. It never reproduced on macOS arm64 (300 pipe
+runs) or on a linux/arm64 container with Ubuntu clang 18.1.3 and plain malloc (300 runs). That
+configuration is the frontend job's, which has no Boehm.
+
+**Test262 detail.** The lost tests are `language/module-code/early-import-{eval,arguments}.js`,
+`early-import-as-{eval,arguments}.js` and `instn-named-err-not-found-dflt.js`, which are now
+skipped as `STA1214`, and `language/import/dup-bound-names.js`, which now fails. Running locally
+with the build's stderr printed shows two causes:
+- the first five raise only `STA1214` "method calls are not yet supported" at harness lines, and
+  no longer any SyntaxError code;
+- `dup-bound-names` hands bare `'z'` to the Vite bundler, which fails as `STA0015` (and exceeded the
+  30 s ceiling on CI) before the duplicate binding is reported.
+
+The five tests gained are `module-code/early-dup-export-as-star-as.js`,
+`early-dup-export-star-as-dflt.js`, `instn-resolve-empty-export.js`,
+`parse-err-semi-export-star.js` and `parse-err-semi-name-space-export.js`. The ratchet is **not**
+lowered. Task 6.29 restores the six tests.
+
+**Stage 2, once it ran again (CI run 37150879614 on this PR).**
+- **macOS x64 dropped.** Intel macOS is unsupported (the creator's rule for all projects), so the
+  `macos-15-intel` matrix entries for `frontend-desktop` and `&macos-strategy` are removed, and
+  macOS CI is arm64 only. `frontend (macos/x64)` had failed its unit tests.
+- **ffi-gen-binding on Windows.** The quote test fails at `mkdir` (EINVAL), because Windows
+  refuses `"` in a file name. The case it guards cannot arise on Windows, so the test is skipped
+  there.
+- **Task 6.30: eleven other Windows failures.** Ten are `bundler.test.ts` path-form mismatches:
+  the code answers `C:/Users/…` and the tests expect `C:\Users\…`. The other is
+  `selfhost.test.ts` "the committed baseline is in --update form".

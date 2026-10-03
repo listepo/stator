@@ -107,6 +107,7 @@ If bare `node --version` disagrees with `.node-version` (on some hosts PATH puts
 ```
 mise install                    # Node, pnpm, just, moon, LLVM clang, Zig 0.16.0 (Unix)
 pnpm install --frozen-lockfile  # install (exact-pinned deps)
+pnpm --dir site install --frozen-lockfile  # site/ has its own lockfile; `lint` type-checks site/ too
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lint + format (must be clean)
 pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)
