@@ -3100,6 +3100,68 @@ verifier problem fails the build.
 > prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
 > HIR verifier is clean on all of them; `pnpm run ci` is green.
 
+### Task 6.29 — Test262 gets back the six module tests it lost ✅ (landed 2026-10-03)
+
+The six tests were lost for two reasons (plan-notes 349, 350). The four `early-import-*` tests
+and `instn-named-err-not-found-dflt` had never really passed. Until `68c8d57`, the runner compiled
+a module test under a temporary name, so its imports failed to resolve with `STA0012`, which
+counts as a SyntaxError. Stator had no refusal for either shape. `dup-bound-names` lost because
+the bundle step (T12.1) ran before the duplicate binding was reported.
+
+What landed (plan-notes 350):
+
+- `STA3005`, both modes: an imported binding named `eval` or `arguments` (`strictReservedImports`
+  in `src/frontend/modules.ts`, raised by `createProgram`).
+- `LoadedProgram.parseDiagnostics`: the parser's and the binder's diagnostics plus `STA3005`.
+  When there are any, `bundledFrontend` (`src/cli/bundler.ts`) reports only them and loads no
+  adapter.
+- `STA3004`, js mode: the default of a `.js` file that Node loads as an ES module and that has no
+  module syntax, in an import, an `import { default as x }`, or an `export { default } from`
+  (`missingDefault` in `src/frontend/gate.ts`, `isSyntaxFreeEsModule` in `src/frontend/vendor.ts`).
+- The Test262 runner maps both codes to SyntaxError, the way it maps `STA3003`.
+- Tests:
+  - decision tests `subset_import_binding_eval_{ts,js}` and `subset_import_default_missing_{ts,js}`;
+  - three unit tests in `unit/bundler.test.ts`: parse errors come before the adapter, the
+    binder's list is still where `parsePhaseKeys` reads it, and STA3004 in its three shapes but
+    not for a CommonJS file.
+- Docs: `docs/DIAGNOSTICS.md` (two rows), `docs/SUBSET.md` (the imports row), `docs/BUNDLER.md` §5.
+
+Check evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
+
+- `pnpm run test262` → `2377 passed, 49384 skipped, … 1819 failed`, exit 0.
+- `ratchet.json` `passed`: 2372 → 2377.
+- `run.ts --filter`:
+  - `module-code/early-import` → `4 passed`;
+  - `import/dup-bound-names` → `1 passed`;
+  - `instn-named-err-not-found-dflt` → `1 passed`;
+  - the five tests gained since `76a69ed` → `1 passed` each.
+- `pnpm run ci` → exit 0:
+  - typecheck and lint clean, dupes at 183 clones;
+  - unit `764 passed (764)`;
+  - `subset: 933 fixtures — 902 passed, 31 expected-fail, 0 failed`;
+  - `golden: 459 fixtures — 459 passed, 0 failed`;
+  - `selfhost: 14 targets match the baseline`, after `--update` raised compiler `STA1214` from
+    1813 to 1825 for the new frontend code;
+  - builtins, node-coverage, leak and ASan green.
+
+> **Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
+> `b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
+> (`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
+> 1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
+>    phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
+>    supported", from harness lines), so the runner records a skip. The SyntaxError for an
+>    imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
+>    is skipped the same way. Find the commit that dropped it (bisect with
+>    `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
+>    is a SyntaxError in every module.
+> 2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
+>    specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
+>    30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
+>    before any bundle step runs.
+>
+> **Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
+> five gained tests stay), and `ratchet.json` is raised to the new total.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

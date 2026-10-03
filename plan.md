@@ -849,23 +849,7 @@ of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
 
 ~~**Task 6.28 — A function initializer may refer to its own binding.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.28 (plan-notes 347).
 
-**Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
-`b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
-(`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
-1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
-   phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
-   supported", from harness lines), so the runner records a skip. The SyntaxError for an
-   imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
-   is skipped the same way. Find the commit that dropped it (bisect with
-   `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
-   is a SyntaxError in every module.
-2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
-   specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
-   30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
-   before any bundle step runs.
-
-**Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
-five gained tests stay), and `ratchet.json` is raised to the new total.
+~~**Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).**~~ ✅ **landed 2026-10-03** — evidence in [done.md](done.md) → Phase 6 Task 6.29 (plan-notes 350).
 
 **Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
 and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
@@ -2474,3 +2458,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.
 - **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
 - **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.
+- **v4.77** (2026-10-03): **Task 6.29 lands: Test262 gets back its six module tests** (plan-notes 350). The five `module-code` tests had only ever passed by accident: the runner compiled them under a temporary name, so their imports failed to resolve. A build now reports parse-phase errors (the parser's, the binder's, and the new `STA3005` for an imported binding named `eval`/`arguments`) before any bundle step runs. A default import of a syntax-free `.js` ES module is the new `STA3004`. `ratchet.json` `passed` goes from 2372 to 2377.

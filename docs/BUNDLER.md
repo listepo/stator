@@ -367,6 +367,13 @@ what the bundler would be asked to bundle, or `undefined`.
 - `STA0015`: the adapter's bundle step failed, with the bundler's message passed through, the
   same model as `STA0012`.
 
+**Parse errors come first** (plan.md §9 Task 6.29). The bundle step runs only on a graph that
+parses. When a project file has a parse-phase error, the build reports that error and stops
+before any adapter loads. Parse-phase errors are the parser's, the binder's (such as
+`import { x, y as x } from 'pkg'`) and `STA3005`. The package imports the graph leaves
+unresolved are not reported next to it. Without this, an unbuildable bare specifier would turn a
+SyntaxError into `STA0015`.
+
 ## 6. Diagnostics through the source map
 
 **Measured.** Node's built-in `module.SourceMap` maps a bundle position back:

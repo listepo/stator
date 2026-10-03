@@ -612,6 +612,59 @@ test('a graph with nothing to bundle never calls the adapter', async () => {
   assert.equal(adapter.calls.length, 0);
 });
 
+test('a parse-phase error is the answer before the bundle step (plan.md §9 Task 6.29)', async () => {
+  const cases = [
+    [
+      "import { pad, shared as pad } from 'leftpad';\nconsole.log(pad);\n",
+      /Duplicate identifier 'pad'/,
+    ],
+    ["import { pad as eval } from 'leftpad';\nconsole.log(eval);\n", /STA3005/],
+  ] as const;
+  for (const [main, expected] of cases) {
+    const root = leftpadProject(main);
+    const adapter = stubAdapter();
+    const result = await compile({ entry: join(root, 'main.js'), mode: 'js', bundler: adapter });
+    assert.equal(result.ok, false);
+    assert.equal(
+      adapter.calls.length,
+      0,
+      'the adapter must not run on a graph that does not parse',
+    );
+    assert.match(result.stderr, expected);
+    assert.doesNotMatch(result.stderr, /STA0015|Cannot find module/);
+  }
+});
+
+test('the pinned typescript still keeps the binder diagnostics where parsePhaseKeys reads them', () => {
+  // A duplicate import binding is a BINDER error, not a parser one: without the binder's list
+  // the parse phase loses it and a bundle step would run first (plan.md §9 Task 6.29).
+  const root = project({ 'main.js': "import { a, b as a } from './dep.js';\n", 'dep.js': '' });
+  const loaded = createProgram(join(root, 'main.js'), 'js');
+  assert.ok(loaded.parseDiagnostics.some((d) => /Duplicate identifier 'a'/.test(d.message)));
+});
+
+test('STA3004: the default of a syntax-free ES module, in every import and re-export shape', async () => {
+  const shapes = [
+    "import d from './empty.js';\n",
+    "import { default as d } from './empty.js';\nconsole.log(d);\n",
+    "export { default } from './empty.js';\n",
+  ];
+  for (const main of shapes) {
+    const root = project({
+      'package.json': '{"type":"module"}',
+      'empty.js': 'globalThis.loaded = true;\n',
+      'main.js': main,
+    });
+    const result = await compile({ entry: join(root, 'main.js'), mode: 'js', bundler: 'none' });
+    assert.match(result.stderr, /STA3004 .*empty\.js has no default export/, main);
+  }
+  // Without "type": "module" Node loads the same file as CommonJS, whose default is
+  // module.exports: not a link error, so not this refusal.
+  const commonJs = project({ 'empty.js': ';\n', 'main.js': "import d from './empty.js';\n" });
+  const result = await compile({ entry: join(commonJs, 'main.js'), mode: 'js', bundler: 'none' });
+  assert.doesNotMatch(result.stderr, /STA3004/);
+});
+
 test('ts mode refuses a bundler: STA0004 from the API and the CLI', async () => {
   const root = project({ 'main.ts': "console.log('x');\n" });
   const api = await compile({ entry: join(root, 'main.ts'), mode: 'ts', bundler: 'none' });
