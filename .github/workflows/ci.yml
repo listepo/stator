@@ -133,6 +133,9 @@ jobs:
       - *checkout
       - *setup
       - *pnpm-install
+      # site/ is its own pnpm project (own lockfile); type-aware oxlint resolves its tsconfig's
+      # `extends` from site/node_modules, so lint fails without it (plan-notes 349).
+      - run: pnpm --dir site install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run lint
       - run: pnpm run dupes

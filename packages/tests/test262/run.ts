@@ -289,7 +289,18 @@ async function buildInProcess(input: string, output: string): Promise<ProcessRes
   const work = async (): Promise<ProcessResult> => {
     try {
       const { result: status, stderr } = await withDiagnosticCapture(() =>
-        build({ entry: input, out: output, mode: 'js', emitCOnly: false, keepC: false }),
+        // `bundler: none`: Test262 has no packages. Its bare specifiers (`from 'z'` in
+        // language/import/dup-bound-names.js) name no real module, and the js-mode default bundler
+        // (vite-stator, T12.1) would resolve them against this repository's node_modules instead of
+        // letting the program report them; in-process, that Vite build never settled at all.
+        build({
+          entry: input,
+          out: output,
+          mode: 'js',
+          emitCOnly: false,
+          keepC: false,
+          bundler: { kind: 'none' },
+        }),
       );
       return { status, stdout: '', stderr };
     } catch (error) {
