@@ -11959,6 +11959,49 @@ reached the lowering, which has no node for it.
 qualified type names (`QualifiedName`, STA1214), which every gate function carries; no
 behavior of the compiled packages changed.
 
+## 335. Task 6.22 lands: `#include` reads no escapes, so F8 refuses instead of escaping (2026-10-04)
+
+**Contradiction.** The Task 6.22 card (plan-notes 330) said a header path is "emitted through the
+emitter's `escapeCString`, as `#line` is". That is wrong for `#include`. A header name is not a
+string literal, and clang takes its characters literally. Measured with clang 21.1.8 on macOS
+arm64, against a directory `q"d` and a directory `é` that both hold an `m.h`:
+
+| Spelling | Result |
+|---|---|
+| `#include ".../q\"d/m.h"` (escaped quote) | `fatal error: '.../q\"d/m.h' file not found` |
+| `#include ".../\303\251/m.h"` (`escapeCString`'s octal form of `é`) | `fatal error: '.../\303\251/m.h' file not found` |
+| `#include ".../é/m.h"` (as written, today's behavior) | compiles |
+
+Escaping would therefore break every non-ASCII binding directory that works today, and it still
+would not make a `"` spellable.
+
+**Decision.** A path that cannot be spelled (one holding a `"`, a line break or NUL) is
+`STA1119` at the pragma, which is the card's first half. Every other path is emitted as written,
+because that is exactly how clang reads it. The same refusal covers a bare name and an angle
+header, which can carry a mid-line `\r`. The audit's F8 test asserted an escaped `#include` and a
+passing `--emit=c` build. It now asserts the `STA1119` refusal and that no C file is written:
+the escaped line it expected would not compile.
+
+**F9 allowlist, as implemented.** The allowlist is `-l<name>` and `-L<dir>` (joined, non-empty),
+`-framework <name>` (the next word, not starting with `-`) and `-Wl,-rpath,<dir>` (no further
+comma, so no extra linker arguments ride along). Everything else is refused with the flag named:
+archive paths, `-Wl,--start-group`, `-fplugin=`, `-Xclang` and `-o`. In-tree uses were surveyed
+first. Every pragma in goldens, subset fixtures, examples and `packages/*` is `-l`, `-L` or
+`#include`. The one unit test that parsed an archive path (`"/p a t h/x.a"`) now groups
+`"-L/p a t h"`.
+
+**F7.** `--out` is refused when it names the header or `--diff`: the same `path.resolve`
+spelling (`./m.h`, `dir/../m.h`), or the same `dev:ino` (a symlink or a hard link), because the
+write would replace either one in place.
+
+**Check.**
+- `test:subset`: 923 fixtures, 892 passed, 31 expected-fail, 0 failed. Both new `-fplugin=`
+  fixtures pass.
+- `test`: 742 passed.
+- `test:golden`: 453 passed, 0 failed.
+- `test:selfhost`: 14 targets match.
+- typecheck, lint and dupes clean.
+
 ## 340. Task 7.4: a static library for C consumers (2026-10-04)
 
 **Asked by the creator (2026-10-04):** can the compiler build code into a static library and ship
