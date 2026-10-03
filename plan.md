@@ -795,6 +795,102 @@ built yet:
   Node-hosted compiler emits. Until this check exists, the runner fails when a `stage2` target
   reaches either verdict.
 
+**Tasks 6.20–6.26 — The 2026-10-01 QA audit (PR #57, plan-notes 330).** The find-only audit in draft PR #57
+(`docs/qa/2026-10-01-audit.md` on branch `qa/stator-audit-2026-10-01`) lists 16 findings (F1–F16) against `d1ed3d1`. Every one still
+reproduces on `338a3c2` (plan-notes 330 has the probe output). Each task below is one pull
+request. It lands the audit's proposed regression test (adapted to the current tree) in the same
+change as the fix, and updates the matching docs (golden rule 8). Order: 6.20 and 6.21 first
+(user data and trust boundaries), then 6.22–6.25.
+
+**Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug
+(F1, F2, F10, F11).**
+
+- **F1.** `build()` (not only `main.ts`, so in-process callers are covered) resolves `entry`, every
+  program source file, `out`, `emitHeader`, and `<out>.c` under `--keep-c`. It refuses any two
+  that name the same file with `STA0004` before compiling.
+- **F2.** One `writeOutput(path, text)` helper turns `ENOENT`/`EACCES`/`EROFS`/`ENOSPC`/`EISDIR`
+  into a user error with a new code (the next free `STA00xx`, allocated in `docs/DIAGNOSTICS.md`).
+  The link step checks `dirname(out)` before it blames the compiler (`linkFailure`).
+- **F10.** An explicit `--unit-name` (and its config key) must match `^[A-Za-z0-9_]+$`, else
+  `STA0004`. A derived default is still sanitized.
+- **F11.** A value flag refuses a next argument that starts with `-` (`-o --emit=c` is `STA0004`).
+  Each command accepts only its own flags (`explain --emit=c` is refused). A bad `STATOR_OPT`
+  names the environment as its origin.
+
+**Check:** the audit's F1, F2, F10 and F11 tests pass in `packages/tests/unit/cli.test.ts`;
+`docs/CLI.md`/`docs/DIAGNOSTICS.md` list the new refusals; `pnpm run ci` green.
+
+**Task 6.21 — The runtime selection and the toolchain come from the real environment (F3, F4).**
+
+- **F3.** The runtime flavor, root and archive are resolved once per `build()` call, inside it,
+  and the same value feeds the gate (`intlEnabled`) and the link. No module-level `const` reads
+  `STATOR_RUNTIME*` at import time. `link()` asserts the gate's flavor equals the archive's.
+- **F4.** A project `.env` (loaded from the working directory) may set only an allowlist:
+  `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`. It never sets `CC`, `STATOR_RUNTIME_ROOT`
+  or any `OTEL_*` exporter variable; those come from the real environment only. When `.env`
+  applies keys, one stderr line names them. After clang exits 0, `compileObject` and `link`
+  check that the output file exists.
+
+**Check:** the audit's F3 and F4 tests pass; `docs/TOOLCHAIN.md` and `docs/CONFIG.md` describe the
+allowlist; `pnpm run ci` green.
+
+**Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**
+
+- **F7.** `ffi-gen` refuses an `--out` (or `--diff`) equal to the input header, validates `--lib`
+  against `^[A-Za-z0-9_.+-]+$`, and prints `--help` to stdout with exit 0.
+- **F8.** A resolved `@statorLink` header path containing `"`, `\n`, `\r` or NUL is refused
+  (`STA1119`); every other path is emitted through the emitter's `escapeCString`, as `#line` is.
+- **F9.** `@statorLink` flags are limited to link flags: `-l<name>`, `-L<dir>`,
+  `-framework <name>` and `-Wl,-rpath,<dir>`. Anything else is `STA1119` naming the flag; the
+  explicit escape hatch stays `--link=` on the command line. `docs/FFI.md §9` changes from
+  "verbatim clang link flags" to the allowlist.
+
+**Check:** the audit's F7 and F8 tests pass, plus a decision test refusing `-fplugin=` in a
+pragma; `docs/FFI.md` updated; `pnpm run ci` green.
+
+**Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12).**
+
+- **F6.** `JSRT_FRAME` (or the function prologue) checks the native stack against a limit set at
+  `jsrt_init` from the thread's stack size and throws a catchable
+  `RangeError: Maximum call stack size exceeded`. A `sigaltstack` SIGSEGV handler that prints
+  `PANIC: STA2005 stack overflow` is the fallback for frames the check cannot see.
+- **F12.** `jsrt_string_concat` throws `RangeError: Invalid string length` past Node's cap
+  (the one `jsrt_string_ops.c` already uses for `repeat`/`padStart`) instead of returning
+  `JSRT_NULL`. String `+=` in a loop becomes amortized linear (an append buffer with spare
+  capacity, or the rope `docs/VALUE.md §12` anticipates): 200 000 one-character appends must
+  stay within 3× Node's time on the same host.
+
+**Check:** a golden that catches the `RangeError` from deep recursion and prints its message;
+the audit's F6 test passes; a unit or bench measurement for F12 recorded in plan-notes;
+`pnpm run ci` green, including ASan.
+
+**Task 6.24 — `console.log` formats like Node (F13).** `console.log`/`error`/`warn` with two or
+more arguments and a string first argument substitute `%s %d %i %f %j %o %O %c %%` with
+`util.format` semantics, in one runtime function. **Check:** a golden in each mode covering every
+specifier, `%%`, missing and extra arguments, byte-for-byte vs Node; `pnpm run ci` green.
+
+**Task 6.25 — A BigInt is not-yet, never an internal error (F5).** The gate refuses
+`SyntaxKind.BigIntLiteral` and any expression whose type is `BigIntLike` with not-yet `STA1213`
+(Phase 5), in both modes, in `build` and `explain`. **Check:** `subset_bigint_primitive_ts.ts`
+loses its `@expected-fail` marker; a js-mode twin passes; the audit's F5 test passes;
+`pnpm run ci` green.
+
+**Task 6.26 — The landing page works without storage, at 320 px and without third parties
+(F14, F15, F16).**
+
+- **F14.** `site/public/js/theme.js` cycles from an in-memory state that `apply()` updates, so a
+  blocked `localStorage` still cycles `light → dark → system`. The toggle is hidden until the
+  script runs.
+- **F15.** The header wraps (`flex-wrap`, `min-width: 0` on `.nav`) and drops the theme label
+  text under ~400 px, so nothing overflows at 320 and 360 px.
+- **F16.** IBM Plex is self-hosted under `site/` (OFL), the `fonts.googleapis.com` links go,
+  and the layout carries a restrictive CSP meta (`default-src 'self'`, the inline boot script by
+  hash).
+
+**Check:** the site builds; a check (in the site's own build or a script under `site/`) shows
+no request to another origin, no horizontal scroll at 320 px, and the blocked-storage cycle
+`light,dark,system`.
+
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
 **Check:** Test262 % visible and monotonically tracked; fuzzer runs ≥1 h nightly with zero unexplained divergences; benchmark page auto-updates; a shell whose bare `node` is off-pin cannot run CI silently (Task 6.2a); the unit gate runs without coverage (Task 6.4); the oracle never resolves to the host (Task 6.5).
@@ -2335,3 +2431,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.54** (2026-10-02): **T11.5 closes: `require` over built-ins, `import.meta` and the injected `__filename`/`__dirname`** (plan-notes 316). `node:module` lands (`createRequire`, `isBuiltin`, `builtinModules`): its `require` answers every landed built-in and throws Node's `MODULE_NOT_FOUND` for anything else. Under `--node` the frontend rewrites `import.meta.url`/`.filename`/`.dirname` and the vendor module's free `__filename`/`__dirname` into run-time calls relative to the executable (`frontend/location.ts`). A free `require`, `__filename` or `__dirname` that reaches the gate is `STA1110` in every cell; `STA1218` is retired. Goldens `node_module` (ts, js).
 - **v4.55** (2026-10-02): **T11.6, second slice: the `node:fs` sync subset** (plan-notes 317). `packages/node/src/fs.ts` lands 12 of the 15 `fs` functions `tsc` calls, plus `rmdirSync`, over `std/fs`: Node's `SystemError` (`code`, `errno`, `syscall`, `path`, the `<CODE>: <description>, <syscall> '<path>'` message), the encodings `std/encoding` decodes, `{ recursive }`, `{ withFileTypes }` and `{ throwIfNoEntry }`. `require('fs')` answers it. The watch trio waits on N2. Goldens `node_fs` (ts, js); slice N1 at 15 / 37.
 - **v4.56** (2026-10-02): **T11.7, second slice: `require('../common')` resolves in the Stator build** (plan-notes 318). `fetch.ts` links the corpus's `test/common` to the strict-TS harness (a junction on Windows), so the bundler resolves it like any relative require. The harness drops `node:util`, an N2 module, for `common/inspect.ts`, and `common/fixtures.ts` drops `suite.ts`. Every `fail` now stops at `node:process` (T11.6), then at T12.3's `__commonJSMin` (STA4013). Pass count unchanged: 0 of 17.
+- **v4.60** (2026-10-04): **Tasks 6.20–6.26: the 2026-10-01 QA audit (PR #57) becomes plan work** (plan-notes 330). All 16 findings still reproduce on `338a3c2`. They are grouped one task per layer: CLI outputs and flags (6.20), environment trust (6.21), FFI inputs (6.22), runtime errors (6.23), `console.log` format (6.24), the BigInt verdict (6.25) and the landing page (6.26).

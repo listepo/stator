@@ -11873,3 +11873,48 @@ import. Four of them failed only on `__commonJSMin`'s `STA4013`; the rest split 
   back from the bundle like item 3), which Stator's own namespace objects (T11.5a) then serve.
   It shares item 3's one-source limit. A package's own inlined `import()` would still need
   `__exportAll`.
+
+## 330. The 2026-10-01 QA audit becomes Tasks 6.20–6.26 (2026-10-04)
+
+**Source.** Draft PR #57 (`qa/stator-audit-2026-10-01`) adds `docs/qa/2026-10-01-audit.md`, a
+find-only audit against `d1ed3d1`: 16 findings (F1–F16), each with steps, the code location and a
+proposed vitest test. The creator asked for its findings to be fixed through plan tasks first,
+with pull requests after.
+
+**Re-checked on `338a3c2` (2026-10-04),** macOS arm64, Node 26.7.0, clang 21.1.8, with the
+audit's own steps run from a scratch directory:
+
+| # | Still reproduces | Observed on `338a3c2` |
+|---|---|---|
+| F1 | yes | `build app.ts -o app.ts --emit=c` exits 0 and `app.ts` starts `#include "jsrt_value…`; `-o lib.h --emit-header=lib.h` exits 0 |
+| F2 | yes | `-o ./nope/out.c` → `STA4072 internal error: ENOENT … this is a compiler bug` |
+| F3 | yes | `.env` `STATOR_RUNTIME=intl`: build exits 0, the binary prints `PANIC: STA2005 … ICU feature build` |
+| F4 | yes | `.env` `CC=<script>`: the script ran, build exit 0 |
+| F5 | yes | `const b = 1n;` → `"verdict":"error","code":"STA4031"` |
+| F6 | yes | `f(1000000)` recursion: SIGSEGV, exit 139, empty stderr |
+| F7 | yes | `--out` equal to the header overwrote it (exit 0); a newline in `--lib` injected a line; `--help` exits 2 |
+| F8 | yes (code) | `frontend/extern.ts` emits the matched `#include "…"` path without `escapeCString` |
+| F9 | yes (code) | `parseLinkPragmaBody` returns `{ kind: 'flags', flags: words }` with no allowlist |
+| F10 | yes | `--unit-name=my-lib` and `my_lib` give byte-identical headers |
+| F11 | yes | `build app.ts -o --emit=c` wrote a file named `--emit=c`; `explain --emit=c --opt=3 --keep-c` exits 0 |
+| F12 | yes | 200 000 one-character `+=`: 2.90 s real |
+| F13 | yes | `console.log('%s', 'fmt', 5)` prints `%s fmt 5` (Node: `fmt 5`) |
+| F14–F16 | yes (code) | `theme.js` cycles from `stored()` only; no `flex-wrap` in `site/src/styles/`; `BaseLayout.astro` links `fonts.googleapis.com` |
+
+**Grouping.** One task per layer, so each is one reviewable pull request: 6.20 CLI outputs and
+flags (F1, F2, F10, F11), 6.21 environment trust (F3, F4), 6.22 FFI inputs (F7, F8, F9), 6.23
+runtime errors (F6, F12), 6.24 `console.log` format (F13), 6.25 BigInt verdict (F5), 6.26 the
+site (F14, F15, F16).
+
+**Decisions taken in the cards** (from the audit's suggested fixes; open to the creator's
+objection on review):
+
+- F4: a project `.env` keeps working for `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL` only.
+  `CC`, `STATOR_RUNTIME_ROOT` and `OTEL_*` come from the real environment, because a cloned
+  repository must not pick the program `stator build` executes or where its telemetry goes.
+- F9: `@statorLink` narrows from "verbatim clang link flags" (`docs/FFI.md §9`) to `-l`, `-L`,
+  `-framework` and `-Wl,-rpath,`. Any `.d.ts` in the program, including a dependency's, can
+  carry the pragma, so verbatim flags let a dependency load code into clang at build time
+  (`-fplugin=`). `--link=` on the command line stays the user's escape hatch.
+- F12: the `RangeError` cap is required; the speed bar (within 3× Node at 200 000 appends) is the
+  Check, and the mechanism (append buffer or rope) is the implementer's.
