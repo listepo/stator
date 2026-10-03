@@ -847,17 +847,7 @@ above, inheritance, a throwing method caught by `try`, and the object-returning 
 match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
 of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
 
-**Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
-a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
-`const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
-defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
-`static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
-scope (and boxed, if captures box) before its initializer is lowered. A call made before
-initialization stays Node's TDZ `ReferenceError`.
-Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
-**Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
-prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
-HIR verifier is clean on all of them; `pnpm run ci` is green.
+~~**Task 6.28 — A function initializer may refer to its own binding.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.28 (plan-notes 347).
 
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
@@ -2450,3 +2440,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
 - **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.
+- **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
