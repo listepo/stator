@@ -847,17 +847,7 @@ above, inheritance, a throwing method caught by `try`, and the object-returning 
 match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
 of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
 
-**Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
-a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
-`const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
-defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
-`static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
-scope (and boxed, if captures box) before its initializer is lowered. A call made before
-initialization stays Node's TDZ `ReferenceError`.
-Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
-**Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
-prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
-HIR verifier is clean on all of them; `pnpm run ci` is green.
+~~**Task 6.28 — A function initializer may refer to its own binding.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.28 (plan-notes 347).
 
 **Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
 `b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
@@ -2482,4 +2472,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
 - **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.
+- **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
 - **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.

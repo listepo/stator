@@ -3047,6 +3047,59 @@ Check evidence:
 > the audit's F6 test passes; a unit or bench measurement for F12 recorded in plan-notes;
 > `pnpm run ci` green, including ASan.
 
+### Task 6.28 — A function initializer may refer to its own binding ✅ (landed 2026-10-04)
+
+Found while landing 6.24 (plan-notes 344): `const g = (n) => … g(n - 1)`, an anonymous
+`const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+`const o = { f: (n) => … o.f(n - 1) }` all stopped with `STA4002 internal error: identifier 'g'
+is not defined` in both modes while `explain` said `static`/`dynamic`.
+
+What landed (plan-notes 347):
+
+- Root cause in `src/hir/verify.ts`: the `declaration` case verified the initializer before it
+  registered the name. The lowering already declared the binding first and capture analysis
+  already gave it an environment slot or a global, so lowering and codegen are unchanged.
+- The verifier registers the binding as `initializing` while its initializer is verified, and
+  `Scope.readable` resolves it only through a function-body scope (`Scope.functionChild`). A read
+  or assignment on the initializer's own evaluation path is still `STA4002`/`STA4003`.
+- Closure-mediated TDZ: the gate (`mayRunInOwnInitializer` in `src/frontend/gate.ts`) refuses a
+  self-read whose function the initializer may call before it finishes, such as a callback passed
+  to a call, a `toString` coerced by `+`, or a spread. It is not-yet `STA1214` with no phase, because
+  the compiler has no run-time TDZ check to throw Node's `ReferenceError`. A direct read, an IIFE
+  included, stays TS2448.
+- Tests: goldens `ts/self_reference_initializer.ts` and `js/self_reference_initializer.js` (the
+  five shapes, a reassigned `let`, an object-literal method, `?:` and `&&`/`||` containers, and
+  3000-deep recursion at module level and in a function body); decision tests
+  `subset_self_reference_initializer_{ts,js}` (static/dynamic) and
+  `subset_self_reference_initializer_call_{ts,js}` (not-yet `STA1214`); three
+  `unit/verify.test.ts` cases (the shapes verify clean, a direct self-read is `STA4002`, the gate
+  refusals in both modes).
+- Docs: `docs/HIR.md` §5.1 (binding scope) and the functions row of `docs/SUBSET.md`. The
+  selfhost baseline grows by 7 `STA1214` in `packages/compiler`, all from the `ts.*` qualified type
+  names in the two new gate helpers.
+- Deviation from the card: the Check asked for `g(10000)`. ASan frames overflow the stack near
+  6000 levels, and Node itself overflows `1 + g(n - 1)` near 9000, so the goldens recurse 3000
+  levels (plan-notes 347).
+
+Check evidence: `pnpm run ci` → exit 0: typecheck and lint clean; `dupes` 183 clones
+(none new); unit 764/764; subset 933 fixtures (902 passed, 31 expected-fail, 0 failed); golden
+461/461 (both `self_reference_initializer` goldens included); selfhost 14 targets match the updated
+baseline; builtins 255/324; `docs/NODE.md` current; leak plateau (objects peak RSS 3840 KB, FFI
+strings 3904 KB); golden-asan 461/461 green. The HIR verifier is clean on every golden, since a
+verifier problem fails the build.
+
+> **Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
+> a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+> `const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
+> defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
+> `static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
+> scope (and boxed, if captures box) before its initializer is lowered. A call made before
+> initialization stays Node's TDZ `ReferenceError`.
+> Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
+> **Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
+> prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
+> HIR verifier is clean on all of them; `pnpm run ci` is green.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

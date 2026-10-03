@@ -12326,6 +12326,52 @@ user gets a wrong answer from it.
 That is deliberate policy, and nothing wrong is printed. Whether TS2365 should take the dynamic
 path in `js` mode is a separate question for the creator.
 
+## 347. Task 6.28: an initializer's closure reads its own binding; closure-mediated TDZ is refused (2026-10-04)
+
+**Root cause.** The lowering was already right. `lowerDeclarator` declares the binding
+(`bindings.declare`) before it lowers the initializer, and capture analysis
+(`lower/captures.ts`) resolves a self-reference like any other capture: a function-local binding
+gets an environment slot, a module-level one its global. The verifier did the opposite: its
+`declaration` case verified the value first and registered the name after, so every read of the
+name inside its own initializer, including one inside a nested function, was `STA4002`. With the
+verifier order fixed, the five shapes of plan-notes 344 compile and print Node's bytes in both
+modes, with no change to lowering or codegen.
+
+**Not a relaxation.** Registering the name before the value would also have let a read on the
+initializer's own evaluation path through. Instead the binding is registered as `initializing`
+while its initializer is verified, and resolves only through a function-body scope
+(`Scope.functionChild`). Anywhere else the verifier still reports `STA4002` (`STA4003` for an
+assignment), with the old message. `unit/verify.test.ts` pins both halves.
+
+**How the tree models TDZ.** It does not, at run time. A direct read in the initializer is TS2448
+(fatal in both modes, docs/MODES.md §3). An immediately invoked closure, `const x = (() => x)()`,
+is TS2448 too (checked on 2026-10-04 at `b95a0dc`). What the checker cannot see is a closure the
+initializer runs some other way: a callback handed to a call (`const y = call(() => y)`), a
+`toString` that `'' + { … }` invokes, a getter a spread reads. Node throws a TDZ `ReferenceError`
+there. The compiled program has no TDZ sentinel, so it would read a slot nothing was stored in
+yet. The gate therefore refuses such a read with not-yet `STA1214`, and with no phase, because no
+open card adds a run-time TDZ check (`mayRunInOwnInitializer` in `src/frontend/gate.ts`). A read
+passes only when the outermost function between it and the initializer reaches the initializer
+through containers that hand a function on without calling it: parentheses, `as`, `satisfies`,
+`!`, `?:` branches, `&&`/`||`/`??`/`,`, array elements, and object-literal members. That is
+conservative. `const g = (() => { const h = () => g(); return h; })()` is refused although Node
+runs it.
+
+**Card deviation.** The card says a call before initialization "stays Node's TDZ
+`ReferenceError`". Without a run-time TDZ check the compiler cannot answer that, so the case is
+refused instead of printing different bytes. The card's `g(10000)` cannot be a golden on this
+host. With `1 + g(n - 1)`, Node 26.7.0 itself overflows (`RangeError: Maximum call stack size
+exceeded`; 8000 levels work). A tail-position `down(n - 1)` runs 10000 in Node and in the plain
+build, but the ASan build's frames are larger: its stack guard throws the same `RangeError` at
+6000 levels and passes at 5000 (macOS arm64, 8 MiB stack, measured 2026-10-04). Every golden also
+runs under ASan (`test:asan`), so the goldens recurse 3000 levels, in the card's own
+`1 + g(n - 1)` shape.
+
+**Found on the way, not changed.** In `js` mode, `let h = (n) => n; h = (n) => n * 100;` stops
+with internal error `STA4004` ("assignment target type (a0: unknown) => unknown does not match
+value type (a0: unknown) => number"). It reproduces at `b95a0dc`, has nothing to do with self-reference, and
+`h = (n) => n + 100` (an `unknown` result) compiles. The goldens use that spelling.
+
 ## 349. Linux CI was red on main; three fixes and Task 6.29 (2026-10-03)
 
 **What happened.** PRs #98–#104 merged with no CI run (their status rollups were empty). The last
