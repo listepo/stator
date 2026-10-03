@@ -12288,3 +12288,40 @@ The creator approved turning this into a plan task, so Task 7.4 is added to Phas
 design point is whether each library carries a private runtime (prelink and localize) or shares
 one external runtime. Step 3 of the card leaves it to measurement, because the deciding factor
 (two collectors in one process) cannot be settled on paper.
+
+## 344. Two bugs found while landing 6.24 become Tasks 6.27–6.28 (2026-10-04)
+
+**Source.** The agent landing Task 6.24 reported two pre-existing bugs outside its scope
+(plan-notes 337, "Not changed, found on the way"). The creator approved turning them into plan
+tasks.
+
+**Re-checked on `2efaabb` (2026-10-04),** macOS arm64, Node 26.7.0, clang 21.1.8, from a scratch
+directory:
+
+| Probe | Node | Stator |
+|---|---|---|
+| `ts`: class `P` with `toString()` → `` `${a}` ``, `String(a)`, `'' + a`, `[a].join(',')` | `P(1)` ×4 | `explain`: `static`; binary prints `[object Object]` ×4 |
+| `js`: object literal with `toString()` → template, `String`, `'' + o` | `O!` ×3 | `explain`: `static`; binary prints `[object Object]` ×3 |
+| `js`: `{ valueOf() { return 41; } } + 1` | `42` | `STA0012` (TS2365), compile time |
+| `const g = (n) => … g(n - 1)` (`ts` and `js`) | `3` | `STA4002 internal error: identifier 'g' is not defined` |
+| `const walk = function (n) { … walk(n - 1) … }` | `2` | same, `'walk'` |
+| the `g` shape inside a function body | `4` | same |
+| `let h = (n) => … h(n - 1)` | `5` | same, `'h'` |
+| `const o = { f: (n) => … o.f(n - 1) }` | `2` | same, `'o'` |
+
+**Where.** For 6.27, the ToString fallback at the end of `jsrt_to_string` in
+`runtime/src/jsrt_print.c` answers `[object Object]` for every ordinary object. The runtime
+already has `jsrt_get_prop` and `jsrt_call`, so a dynamic receiver's method can be looked up and
+called. The `static` verdict is the worse half: it promises the output matches Node. For 6.28,
+the message comes from the HIR verifier's `identifier` case (`hir/verify.ts`), which means the
+binding is not in scope while its own initializer is lowered or verified. Every shape whose
+initializer closes over its own name fails, in both modes.
+
+**Order.** 6.27 first, because it prints wrong bytes under a `static` verdict, which golden rule
+"never loosen a comparison" exists to prevent. 6.28 is a loud failure (an internal error), so no
+user gets a wrong answer from it.
+
+**Not carded.** `v + 1` with a user `valueOf` in `js` mode is refused at compile time as
+`STA0012`, because TS2365 is not in `JS_MODE_RUNTIME_CODES` (docs/MODES.md §3, plan-notes 297).
+That is deliberate policy, and nothing wrong is printed. Whether TS2365 should take the dynamic
+path in `js` mode is a separate question for the creator.
