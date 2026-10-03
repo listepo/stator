@@ -820,44 +820,41 @@ change as the fix, and updates the matching docs (golden rule 8). Order: 6.20 an
 `2efaabb`. Neither is from the audit, so neither carries an `F` number. 6.28 is a crash, but 6.27
 prints different bytes while `explain` says `static`, so 6.27 comes first.
 
-**Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**
-Today ToString of an ordinary object ignores the user's method and prints `[object Object]`
-(`jsrt_print.c`, the fallback branch at the end of `jsrt_to_string`), while `explain` answers
-`static`. Wherever ECMA-262 runs ToPrimitive, call the method the object actually has: a template
-literal, `String(x)` and `.concat` (hint `string`: `toString` first, then `valueOf`), `'' + x`
-(hint `default`: `valueOf` first, then `toString`), and `Array.prototype.join`. That includes a
-class method, an object-literal method and an inherited one, with `Symbol.toPrimitive` not-yet
-until symbols exist (Phase 5). A method that throws propagates as a catchable exception. A method
-that returns an object is a `TypeError`, as in Node.
-1. In `ts` mode the receiver's type says whether the method is the user's, so lowering emits a
-   direct call and the runtime fallback is never reached.
-2. In `js` mode, and for a `ts` receiver whose type cannot say (a union, an interface), the
-   runtime looks the method up with `jsrt_get_prop` and calls it with `jsrt_call`. The emitter
-   follows every such conversion with the pending-exception check, as it does after
-   `JSON.stringify` (`consoleMayThrow` is the precedent).
-3. Lift the 6.24 refusals that share this path: `%s` of an object with its own `toString`, and
-   `%d`/`%i`/`%f` through a user `toString`/`valueOf`. They are `STA1214` at the gate today and
-   `PANIC: STA2005` at run time (plan-notes 337). A refusal this card cannot lift stays as it is.
-4. Where a case still cannot match Node, refuse it with a not-yet code and never print other bytes.
+~~**Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.27 (plan-notes 345).
 
-`v + 1` with a user `valueOf` in `js` mode is `STA0012` today, because TS2365 is not in
-`JS_MODE_RUNTIME_CODES`. That is a mode-policy question, not this card's (plan-notes 344).
-**Check:** goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` cover every site
-above, inheritance, a throwing method caught by `try`, and the object-returning `TypeError`, and
-match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
-of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
+~~**Task 6.28 — A function initializer may refer to its own binding.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.28 (plan-notes 347).
 
-**Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
-a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
-`const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
-defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
-`static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
-scope (and boxed, if captures box) before its initializer is lowered. A call made before
-initialization stays Node's TDZ `ReferenceError`.
-Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
-**Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
-prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
-HIR verifier is clean on all of them; `pnpm run ci` is green.
+**Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
+`b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
+(`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
+1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
+   phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
+   supported", from harness lines), so the runner records a skip. The SyntaxError for an
+   imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
+   is skipped the same way. Find the commit that dropped it (bisect with
+   `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
+   is a SyntaxError in every module.
+2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
+   specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
+   30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
+   before any bundle step runs.
+
+**Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
+five gained tests stay), and `ratchet.json` is raised to the new total.
+
+**Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
+and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
+since `76a69ed`, because stage 2 waits on the linux jobs, which were red.
+1. Ten `unit/bundler.test.ts` tests (T12.1–T12.3) compare a bundler path such as `resolveDir`, a
+   `#line` file or a diagnostic file against `join(...)`. The code answers `C:/Users/…` and the test
+   expects `C:\Users\…`. Decide which form the bundler seam promises, document it in
+   `docs/BUNDLER.md`, and make the code and the tests agree. A diagnostic shown to a Windows user
+   should use the platform's separators.
+2. `unit/selfhost.test.ts` "the committed baseline is in --update form" fails on Windows (most
+   likely CRLF from checkout, compared against the `--update` text). Fix it with a
+   `.gitattributes` rule or by normalizing the comparison, whichever is the root cause.
+
+**Check:** `frontend (windows/x64)` and `frontend (windows/arm64)` green on a PR.
 
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
@@ -2450,3 +2447,6 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
 - **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.
+- **v4.74** (2026-10-04): **Task 6.27 landed: a user `toString`/`valueOf` is honored by ToPrimitive** (plan-notes 345). A template hole, `String(x)`, `concat`, `join`, `'' + x`, `Number(x)`, the comparisons, `==` and util.format's `%s`/`%d`/`%i`/`%f` call the method the object has, in ECMA-262's hint order. A throwing method is catchable, and an object answer is Node's `TypeError`. The three 6.24 refusals that shared this path are lifted. The card moved to done.md.
+- **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
+- **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.

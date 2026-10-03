@@ -105,31 +105,60 @@ interface Enclosing {
  * 82% of the front end). Lookup walks the parent chain; `set` writes only the innermost map.
  * Semantics stay identical: a child shadow does not mutate the parent, and a missing name still
  * resolves through ancestors. */
-type Binding = { kind: 'let' | 'const'; type: HType };
+type Binding = {
+  kind: 'let' | 'const';
+  type: HType;
+  /** Set while the binding's own initializer is verified. The binding is in scope there, because
+   * a closure in the initializer captures the binding rather than its value (plan.md §9 Task
+   * 6.28), but nothing on the initializer's own evaluation path may read it: that read is TDZ,
+   * which the gate keeps out of the HIR. */
+  initializing?: true;
+};
+
+/** A binding found by name, and whether the lookup left a function body to reach it -- a read
+ * that did runs when that function is called, not while the enclosing code evaluates. */
+type Resolved = { binding: Binding; deferred: boolean };
 
 class Scope {
   private readonly own = new Map<string, Binding>();
   private readonly parent: Scope | null;
+  private readonly isFunction: boolean;
 
-  private constructor(parent: Scope | null) {
+  private constructor(parent: Scope | null, isFunction: boolean) {
     this.parent = parent;
+    this.isFunction = isFunction;
   }
 
   static root(): Scope {
-    return new Scope(null);
+    return new Scope(null, false);
   }
 
-  /** Nested block / function / catch / for-of scope. Replaces `new Map(bindings)`. */
+  /** Nested block / catch / for-of scope. Replaces `new Map(bindings)`. */
   child(): Scope {
-    return new Scope(this);
+    return new Scope(this, false);
   }
 
-  get(name: string): Binding | undefined {
-    return this.own.get(name) ?? this.parent?.get(name);
+  /** A function body's scope: what it reads from outside runs only when the function is called. */
+  functionChild(): Scope {
+    return new Scope(this, true);
   }
 
-  has(name: string): boolean {
-    return this.own.has(name) || (this.parent?.has(name) ?? false);
+  /** A binding still being initialized resolves only from inside a function body; anywhere else
+   * the read would run before the binding exists, so it is reported as undefined, exactly as it
+   * was before the binding was declared. */
+  readable(name: string): Binding | undefined {
+    const resolved = this.resolve(name);
+    return resolved === undefined || (resolved.binding.initializing && !resolved.deferred)
+      ? undefined
+      : resolved.binding;
+  }
+
+  private resolve(name: string, deferred = false): Resolved | undefined {
+    const binding = this.own.get(name);
+    if (binding !== undefined) {
+      return { binding, deferred };
+    }
+    return this.parent?.resolve(name, deferred || this.isFunction);
   }
 
   set(name: string, binding: Binding): void {
@@ -346,9 +375,9 @@ function verifyStatement(
     case 'declaration': {
       const decl = stmt as Declaration;
       if (decl.value !== undefined) {
+        bindings.set(decl.name, { kind: decl.declKind, type: decl.type, initializing: true });
         verifyExpression(decl.value, problems, bindings);
       }
-      // Register the binding for future reference
       bindings.set(decl.name, { kind: decl.declKind, type: decl.type });
       break;
     }
@@ -358,7 +387,7 @@ function verifyStatement(
       verifyExpression(assign.value, problems, bindings);
 
       // Check that the target is a known binding
-      const binding = bindings.get(assign.target);
+      const binding = bindings.readable(assign.target);
       if (!binding) {
         problems.push({
           kind: 'assignment',
@@ -751,7 +780,7 @@ function verifyBlock(
  * can name. `enclosing` restarts at ['function'] so a `break` cannot escape into the enclosing
  * function's loop, and a `return` inside the body is recognised as in-function. */
 function verifyFunction(fn: FunctionExpr, problems: VerifyProblem[], bindings: Scope): void {
-  const inner = bindings.child();
+  const inner = bindings.functionChild();
   if (fn.selfBinding !== undefined) {
     inner.set(fn.selfBinding, { kind: 'const', type: fn.type });
   }
@@ -864,27 +893,22 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
 
     case 'identifier': {
       const id = expr as Identifier;
-      // Check that the identifier is in scope
-      if (!bindings.has(id.name)) {
+      const binding = bindings.readable(id.name);
+      if (binding === undefined) {
         problems.push({
           kind: 'identifier',
           span: id.span,
           code: 'STA4002',
           message: `identifier '${id.name}' is not defined`,
         });
-      }
-      // Otherwise, type should match the binding's type — this is verified by lowering,
-      // but we can check it for assurance
-      const binding = bindings.get(id.name);
-      if (binding) {
-        if (!hTypeEquals(expr.type, binding.type)) {
-          problems.push({
-            kind: 'identifier',
-            span: id.span,
-            code: 'STA4010',
-            message: `identifier '${id.name}' has type '${hTypeName(binding.type)}' but is used as '${hTypeName(expr.type)}'`,
-          });
-        }
+      } else if (!hTypeEquals(expr.type, binding.type)) {
+        // The lowering already types every read from its binding; this is the assurance.
+        problems.push({
+          kind: 'identifier',
+          span: id.span,
+          code: 'STA4010',
+          message: `identifier '${id.name}' has type '${hTypeName(binding.type)}' but is used as '${hTypeName(expr.type)}'`,
+        });
       }
       break;
     }

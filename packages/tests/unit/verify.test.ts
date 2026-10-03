@@ -17,7 +17,16 @@ import type {
 import type { HType } from '../../compiler/src/hir/types.ts';
 import { H_BOOLEAN, H_NUMBER, H_STRING, hUnknown } from '../../compiler/src/hir/types.ts';
 import { verifyHir } from '../../compiler/src/hir/verify.ts';
-import { assign, decl, makeModule, num, span, str } from './helpers.ts';
+import {
+  assign,
+  decl,
+  gateCodes,
+  makeModule,
+  num,
+  span,
+  str,
+  verifiedStatements,
+} from './helpers.ts';
 
 test('a well-typed declaration followed by a matching assignment verifies clean', () => {
   const problems = verifyHir(makeModule([decl('x', num(1)), assign('x', num(2))]));
@@ -50,6 +59,45 @@ test('a statement with no HType at all is STA4020, caught before anything reads 
   const problems = verifyHir(makeModule([untyped]));
   assert.equal(problems.length, 1);
   assert.equal(problems[0]?.code, 'STA4020');
+});
+
+/* plan.md §9 Task 6.28: a binding is in scope during its own initializer, but only a function
+ * there may read it -- the read runs when the function is called, after the binding exists. */
+
+test('an initializer whose closure reads its own binding verifies clean', () => {
+  verifiedStatements(
+    [
+      'const g = (n: number): number => (n <= 0 ? 0 : 1 + g(n - 1));',
+      'const walk = function (n: number): number { return n <= 0 ? 0 : walk(n - 1); };',
+      'function main(): number {',
+      '  const k = (n: number): number => (n <= 0 ? 0 : k(n - 1));',
+      '  return k(4);',
+      '}',
+      'let h = (n: number): number => (n <= 0 ? 0 : 1 + h(n - 1));',
+      'const o = { f: (n: number): number => (n <= 0 ? 0 : 1 + o.f(n - 1)) };',
+      'console.log(g(1), walk(1), main(), h(1), o.f(1));',
+    ].join('\n'),
+  );
+});
+
+test('an initializer that reads its own binding outside any function is still STA4002', () => {
+  const self: Expression = { kind: 'identifier', type: H_NUMBER, span: span(1), name: 'x' };
+  const problems = verifyHir(makeModule([decl('x', self)]));
+  assert.deepEqual(
+    problems.map((p) => p.code),
+    ['STA4002'],
+  );
+});
+
+test('a closure that may run during its own initializer is refused at the gate', () => {
+  for (const [mode, source] of [
+    ['ts', 'const call = (cb: () => number): number => cb();\nconst y: number = call(() => y);'],
+    ['js', 'const call = (cb) => cb();\nconst y = call(() => y);'],
+    ['ts', "const z: string = '' + { toString(): string { return z; } };"],
+  ] as const) {
+    assert.deepEqual(gateCodes(source, mode), ['STA1214'], source);
+  }
+  assert.deepEqual(gateCodes('const o = { f: (): number => o.g, g: 1 };'), []);
 });
 
 /* STA4056: a boundary check that cannot fail is a lowering bug. A concrete value of ANOTHER type
