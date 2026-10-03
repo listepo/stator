@@ -12482,6 +12482,6 @@ reports `2377 passed, 49384 skipped, 1819 failed`. Before this change, CI on `b9
 `ratchet.json` `passed` goes from 2372 to 2377. `failed` and `skipped` keep CI's values: the
 gate fails only when `failed` rises, and this change moves tests from failed or skipped to passed.
 
-The selfhost baseline for `packages/compiler` rises from 1813 to 1825 `STA1214`. The new frontend
+The selfhost baseline for `packages/compiler` rises from 1820 to 1832 `STA1214`. The new frontend
 code (the binder-list read, the import walks and the gate check) uses constructs Stator does not
 compile yet. `--update` records that rise.

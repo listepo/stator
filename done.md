@@ -3145,7 +3145,7 @@ Local evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
   - `subset: 933 fixtures — 902 passed, 31 expected-fail, 0 failed`;
   - `golden: 459 fixtures — 459 passed, 0 failed`;
   - `selfhost: 14 targets match the baseline`, after `--update` raised compiler `STA1214` from
-    1813 to 1825 for the new frontend code;
+    1820 to 1832 for the new frontend code;
   - builtins, node-coverage, leak and ASan green.
 
 > **Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
