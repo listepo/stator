@@ -32,6 +32,7 @@ export fn jsrt_object_new(cls: *const c.JSRTClass) Value {
     const object = create(c.JSRTObject, bytes, "object");
     object.cls = cls;
     object.frozen = false;
+    object.extras = null;
     @memset(object.fields()[0..cls.field_count], undefined_value);
     return c.JSRT_BOX(c.JSRT_TAG_OBJECT, @intFromPtr(object));
 }

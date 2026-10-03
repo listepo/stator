@@ -1470,6 +1470,34 @@ export function isFunctionValueMember(
   return !declaredOnlyInDeclarationFiles(checker.getPropertyOfType(type, name));
 }
 
+/** A member the receiver's fixed layout does not declare -- `host.configFileName` on an object
+ * literal's type, `c.extra` on a class instance. Only a `js`-mode program reaches the lowering with
+ * one (in `ts` mode it is the checker's TS2339): the write grows the object's overflow table and
+ * the read answers from it, or `undefined`, through the shape-table entries (docs/VALUE.md §4.24).
+ * A module namespace is no object at run time, so its absent export is no such member. */
+export function isUndeclaredMember(
+  receiver: ts.Expression,
+  name: string,
+  checker: ts.TypeChecker,
+): boolean {
+  const type = checker.getTypeAtLocation(receiver);
+  const shape = tsTypeToHType(type, checker);
+  return (
+    shape.kind === 'object' &&
+    shape.namespace !== true &&
+    checker.getPropertyOfType(type, name) === undefined
+  );
+}
+
+/** Whether `expr` READS a member its receiver's layout does not declare (isUndeclaredMember). */
+export function isUndeclaredMemberRead(expr: ts.Expression, checker: ts.TypeChecker): boolean {
+  return (
+    ts.isPropertyAccessExpression(expr) &&
+    !ts.isPrivateIdentifier(expr.name) &&
+    isUndeclaredMember(expr.expression, expr.name.text, checker)
+  );
+}
+
 /** Whether `expr` READS a member of an ordinary function value (`F.prototype`, `f.cache`). The
  * value is whatever the program last stored there, so the checker's type for it -- inferred from
  * one assignment such as `F.prototype = { … }` -- is no layout, and every use of it goes through

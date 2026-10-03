@@ -181,7 +181,9 @@ function hoistFunctions(statements: readonly Statement[], bindings: Scope): void
  * value is the whole point, and the runtime decides. A CONCRETE non-array target means the
  * lowering built an index the checker would already have rejected — with one gate-admitted
  * exception: a fixed-shape target under an object-typed key (`o[kObj]`, plan.md §8 step 44b),
- * which coerces the key via ToPropertyKey and routes through the degrading array entry points.
+ * which coerces the key via ToPropertyKey and routes through the degrading array entry points --
+ * and, the same entry points again, a `js`-mode computed string or number key on one
+ * (`table[node.kind]`, docs/VALUE.md §4.24), which reads a declared slot or the overflow table.
  * The index-kind rule is what keeps the exception precise: the key must be object-typed (an
  * identifier of object type) or Unknown (a literal key — `{}` and `[]` lower dynamic, so their
  * node type is Unknown even though the gate admitted them by their checker type). Any other key
@@ -201,7 +203,10 @@ function checkIndexable(
   ) {
     if (
       target.type.kind === 'object' &&
-      (index.type.kind === 'object' || index.type.kind === 'unknown')
+      (index.type.kind === 'object' ||
+        index.type.kind === 'unknown' ||
+        index.type.kind === 'string' ||
+        index.type.kind === 'number')
     ) {
       return;
     }
@@ -677,11 +682,17 @@ function verifyStatement(
     case 'dyn-field-assignment': {
       verifyExpression(stmt.target, problems, bindings);
       verifyExpression(stmt.value, problems, bindings);
-      // The typed targets are an array's `length`, which the runtime entry resizes, and a
-      // function, whose own properties live in its closure (plan-notes 310): the array has no
-      // other property this node may write.
+      // The typed targets are an array's `length`, which the runtime entry resizes, a function,
+      // whose own properties live in its closure (plan-notes 310), and a fixed object's name its
+      // layout does not declare, which lives in the overflow table (docs/VALUE.md §4.24): the
+      // array has no other property this node may write, and a DECLARED field has a slot.
       const arrayLength = stmt.target.type.kind === 'array' && stmt.field === 'length';
-      if (stmt.target.type.kind !== 'unknown' && stmt.target.type.kind !== 'fn' && !arrayLength) {
+      if (
+        stmt.target.type.kind !== 'unknown' &&
+        stmt.target.type.kind !== 'fn' &&
+        !arrayLength &&
+        !undeclaredMember(stmt.target.type, stmt.field)
+      ) {
         problems.push({
           kind: 'dyn-field-assignment',
           span: stmt.span,
@@ -697,6 +708,16 @@ function verifyStatement(
       throw new Error(`Exhaustiveness check failed: ${_exhaustive}`);
     }
   }
+}
+
+/** A fixed object's name its layout does not declare: no slot holds it, so the overflow table
+ * does (docs/VALUE.md §4.24), and a dynamic node over the object is the only way to reach it. */
+function undeclaredMember(type: HType, name: string): boolean {
+  return (
+    type.kind === 'object' &&
+    !type.fields.some((f) => f.name === name) &&
+    !type.methods.some((m) => m.name === name)
+  );
 }
 
 function verifyBlock(
@@ -1379,9 +1400,10 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       for (const arg of expr.args) {
         verifyExpression(arg, problems, bindings);
       }
-      // The lowering routes only Unknown receivers here, and functions, whose own properties the
-      // closure holds (plan-notes 310); anything else is a call the typed arms own, and building
-      // this node for one would aim a shape-table read at a layout.
+      // The lowering routes only Unknown receivers here, functions, whose own properties the
+      // closure holds (plan-notes 310), and a fixed object's undeclared name, which its overflow
+      // table holds (docs/VALUE.md §4.24); anything else is a call the typed arms own, and
+      // building this node for one would aim a shape-table read at a layout.
       checkSpreadArguments(expr, problems);
       // A spread call reads its method through the same shape-table entry for any receiver the
       // gate admitted (arrays, class instances, plain objects; plan.md §11c T11.4 step 5): there
@@ -1389,7 +1411,8 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       if (
         expr.spread !== true &&
         expr.target.type.kind !== 'unknown' &&
-        expr.target.type.kind !== 'fn'
+        expr.target.type.kind !== 'fn' &&
+        !undeclaredMember(expr.target.type, expr.method)
       ) {
         problems.push({
           kind: 'dyn-method-call',

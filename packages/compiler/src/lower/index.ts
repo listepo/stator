@@ -89,6 +89,7 @@ import {
   isFunctionValueCallee,
   isFunctionMemberRead,
   isFunctionValueMember,
+  isUndeclaredMemberRead,
   isStaticMember,
   isSymbolIteratorKey,
   methodDeclaringClass,
@@ -2913,7 +2914,8 @@ function receiverTypeAt(obj: ts.Expression, checker: ts.TypeChecker, bindings: S
   return ts.isPropertyAccessExpression(obj) &&
     !folds &&
     (targetIsDynamic(obj.expression, checker, bindings) ||
-      isFunctionValueMember(obj.expression, obj.name.text, checker))
+      isFunctionValueMember(obj.expression, obj.name.text, checker) ||
+      isUndeclaredMemberRead(obj, checker))
     ? hUnknown(false)
     : typeAt(obj, checker, bindings);
 }
@@ -2924,6 +2926,7 @@ function targetIsDynamic(target: ts.Expression, checker: ts.TypeChecker, binding
   }
   return (
     isFunctionMemberRead(target, checker) ||
+    isUndeclaredMemberRead(target, checker) ||
     isDynamicShape(checker.getTypeAtLocation(target), checker) ||
     typeAt(target, checker, bindings).kind === 'unknown'
   );
@@ -3554,6 +3557,7 @@ function memberAssignment(
   } else if (
     targetIsDynamic(targetNode.expression, checker, bindings) ||
     isFunctionValueMember(targetNode.expression, targetNode.name.text, checker) ||
+    isUndeclaredMemberRead(targetNode, checker) ||
     (target.type.kind === 'array' && targetNode.name.text === 'length')
   ) {
     // A dynamic-shape write goes through the shape table (docs/VALUE.md §4.10). The compound and
@@ -4296,6 +4300,12 @@ function lowerClassMethodCall(
   bindings: Scope,
   diagnostics: Diagnostic[],
 ): Expression | null | undefined {
+  // `c.grown()`: a name the class never declared may have been grown onto this instance, so the
+  // dot spelling falls through to the get-then-call the overflow table answers
+  // (docs/VALUE.md §4.24), and to Node's TypeError when nothing was stored there.
+  if (!viaSuper && ts.isPropertyAccessExpression(at) && isUndeclaredMemberRead(at, checker)) {
+    return undefined;
+  }
   // `super.m()` is a call on THIS receiver that skips the override -- the object is the same
   // one, only the function differs. So the target is the receiver parameter, not an
   // evaluation of `super`, which names no value at all.
@@ -5035,7 +5045,8 @@ function lowerExpression(
     ts.isPropertyAccessExpression(node) &&
     !isMatchReceiver(node.expression, checker) &&
     (targetIsDynamic(node.expression, checker, bindings) ||
-      isFunctionValueMember(node.expression, node.name.text, checker))
+      isFunctionValueMember(node.expression, node.name.text, checker) ||
+      isUndeclaredMemberRead(node, checker))
   ) {
     const target = lowerExpression(node.expression, sourceFile, checker, bindings, diagnostics);
     if (target === null) {
@@ -7331,7 +7342,10 @@ function lowerDynMethodCall(
   // Its result is Unknown: the checker types it from whatever was assigned, which no layout holds
   // the program to (plan-notes 310).
   const functionMember = isFunctionValueMember(obj, expr.name.text, checker);
-  if (receiver.kind !== 'unknown' && slot === undefined && !functionMember) {
+  // `info.cb()` where `cb` was grown onto a fixed object: the overflow table holds it, and its
+  // result is Unknown for the same reason (docs/VALUE.md §4.24).
+  const grown = isUndeclaredMemberRead(expr, checker);
+  if (receiver.kind !== 'unknown' && slot === undefined && !functionMember && !grown) {
     return undefined;
   }
   const target = lowerExpression(obj, sourceFile, checker, bindings, diagnostics);
@@ -7342,12 +7356,23 @@ function lowerDynMethodCall(
   if (args === null) {
     return null;
   }
-  const type = functionMember ? hUnknown(false) : typeAt(node, checker, bindings);
+  const type = functionMember || grown ? hUnknown(false) : typeAt(node, checker, bindings);
   const span = makeSpan(node.getStart(sourceFile), node.getWidth(sourceFile), sourceFile);
   const field = expr.name.text;
-  return slot === undefined
-    ? { kind: 'dyn-method-call', type, span, target, method: field, args }
-    : { kind: 'field-call', type, span, target, field, slot, args };
+  if (slot !== undefined) {
+    return { kind: 'field-call', type, span, target, field, slot, args };
+  }
+  return grown
+    ? {
+        kind: 'dyn-method-call',
+        type,
+        span,
+        target,
+        method: field,
+        args,
+        notFunction: notFunctionSubject(expr, sourceFile),
+      }
+    : { kind: 'dyn-method-call', type, span, target, method: field, args };
 }
 
 /** A call with a spread argument (plan.md §11c T11.4 step 5): the arguments fold into ONE array

@@ -209,12 +209,19 @@ the property is a NAME resolved through the shape table at run time, with a per-
   (`kind: 'fn'`): an ordinary function's own properties and its `prototype` live in a table on
   its closure (`f.count`, `F.prototype`, `assert.same(…)`), so `DynFieldAccess`,
   `DynFieldAssignment` and `DynMethodCall` reach them by name exactly as on an Unknown receiver
-  (docs/VALUE.md §4.20).
+  (docs/VALUE.md §4.20). The third is a fixed OBJECT target under a name its type does not
+  declare (plan.md §11c T11.4 step 7): the name lives in the object's overflow table
+  (docs/VALUE.md §4.24), so the same three nodes reach it; a DECLARED name on an object target is
+  still `STA4059`, because it has a slot. Such a `DynMethodCall` carries `notFunction`, the source
+  subject of Node's `TypeError` when nothing callable was stored under the name, where every
+  other dynamic call aborts `STA2006`. An `IndexAccess`/`IndexAssignment` on an object target
+  takes a string or number index too, besides step 44b's object key: `js` mode's computed key on
+  a fixed shape, read and written by name through the same degrading entry points.
 - **No pending check follows a dynamic access.** `jsrt_get_prop` allocates nothing and runs no
   user code; `jsrt_set_prop` can grow slot storage — which is why its operands sit in rooted
   frame slots. A nullish receiver is a TypeError; a primitive read answers `undefined`; a
-  primitive write is a TypeError; growing a *new* key on a fixed-layout object is `STA2004`
-  (Phase 8). Reads and writes of an existing field on an aliased fixed object walk the class
+  primitive write is a TypeError; growing a *new* key on a fixed-layout object fills its
+  overflow table (docs/VALUE.md §4.24). Reads and writes of an existing field on an aliased fixed object walk the class
   descriptor. An Unknown (or empty `{}`) receiver uses the same three nodes; a computed index
   on one emits `jsrt_dyn_index_get`/`set`, which dispatches arrays to the dense path and
   everything else through the property table. Calling a non-function is `STA2006` at `file:line`.

@@ -10885,6 +10885,75 @@ iterables here. It is not a spread defect; step 9 owns it (plan.md §11c T11.4).
 - Self-compilation: `STA1214` 1763 → 1742 on f752d15, and 1781 → 1759 rebased onto 288a641 (T11.5, #72), recorded with `--update`.
 - jscpd: 188 → 187.
 
+### Step 7: layout growth
+
+**An overflow table, not a second layout.** `tsc` builds most of its objects as literals and then
+writes names the literal never had (`host.configFileName = …`, `info.cb = …`); the checker types
+each literal by its first spelling, so the HIR sees a fixed layout and the write a name it lacks.
+Turning those objects dynamic at the literal would lose the fixed reads everywhere else, so the
+fixed layout stays and grows beside itself instead: `JSRTObject` gains `extras`, a
+`JSRTDynObject` that is `NULL` until the first write of a name the descriptor does not list
+(the `JSRTClosure.props` precedent, plan-notes 310 step 4). Every reader that enumerates an
+object asks `jsrt_fixed_extras` and handles the declared names first, then the table: the
+property read (after the fixed slots, before the methods), `in`, `delete`, `Object.keys`/
+`entries`/`values`, `hasOwnProperty`, both spread paths, `freeze`/`isFrozen` and the printer
+(docs/VALUE.md §4.24). Which values carry the field is a denylist, `jsrt_is_fixed_object`, of
+the runtime layouts that share the `JSRTObject` prefix but are other structs (`Map`, `Date`,
+`RegExp`, iterators, `Uint8Array`, accessors, …); it moved from `jsrt_object_ops.c` into
+`jsrt_shape.c` so the property path and the object ops answer from one place. A write to one of
+those still aborts `STA2004`, and a frozen fixed object refuses a new name with Node's
+`TypeError: Cannot add property x, object is not extensible`.
+
+**The compiler side is one predicate.** `isUndeclaredMember` (frontend/types.ts) holds for an
+object HType that is not a namespace and whose checker type has no such property. In js mode the
+gate accepts a read, write, compound or update write, call and `delete` of such a member, and
+the lowering routes them to `dyn-field-access`, `dyn-field-assignment` and `dyn-method-call`;
+the verifier accepts those nodes over an object target exactly when the name is undeclared, so
+a declared field can still never reach a dynamic node. ts mode keeps refusing growth (`STA1214`
+for the writes, `STA1108` for `delete`), because there the checker's TS2339 is the user's error.
+A call of a grown member types its result Unknown, and when the name is absent at run time the
+call throws `TypeError: x.m is not a function` (`DynMethodCall.notFunction`, the subject's source
+text) as Node does, not the `STA2006` panic a compiler-proven callee would earn. A string or
+number key on a fixed object in js mode is an index access through `jsrt_array_get`/`set`, which
+already degrade to a by-name lookup for an object.
+
+**Known divergences.**
+- A spread whose result is a fixed layout lists grown names after ALL the declared ones, where
+  Node interleaves them in insertion order. A grown name the result's type also declares keeps
+  the declared writer's value. Both follow from the table sitting beside the descriptor; the
+  golden spells its spread `{ extra: 1, ...file }`, whose order agrees.
+- A static element key that names no member (`o["x"]`, `counts['b'] += 10`) is still refused:
+  the checker types it `any` through an implicit index signature, which is a different gate arm.
+  `_tsc.js` has none.
+
+**What is left on `_tsc.js`, and its owner.** 3 named writes on an array (`queue.pollIndex = 0`,
+4059–4061) and 2 on a `Map` (`map2.add = …`, 780–781) go through the builtins' member gate, not
+the shape gate. An array already keeps named properties in its own shape table, so what is left
+is the gate and `Object.keys` over an array; the `Map` pair rides step 6. 6 index accesses are
+not fixed objects: `levels[level]` (3989) on a union, `str[0]`/`path[...]` (64982, 65022) on a
+string the checker types oddly, and `fileIncludeReasons[0]` (125888, 125890). Both residues stay
+with step 7, queued after step 11; steps 8 and 9 moved to the bundler work (plan-notes 323).
+
+**Newly exposed.** Clearing the growth refusals exposed 3 more `.bind(...)` sites behind them
+("method calls" 19 → 22); step 9 already owns `.bind`/`.call`/`.apply`.
+
+**Evidence** (this branch, Node 26.7.0):
+- Goldens `js/object_growth.js` (growth, every compound form, calls including an absent one,
+  class instances, `delete`, chains, spreads, `freeze`, computed keys) and
+  `js/object_growth_typed/` (a `.ts` entry importing a `.js` library whose objects grow) match
+  Node byte for byte; `absent_class`, `dynamic`, `accessor` and the spread goldens still pass.
+- Decision fixtures: `subset_object_grow_assign_js` and `subset_absent_class_member_write_js`
+  move to dynamic; new `subset_object_grow_{compound,call,delete}_{js,ts}` and
+  `subset_object_computed_key_{js,ts}` (js dynamic; ts `STA1214`, `STA1214`, `STA1108`,
+  `STA1214`). Subset: 895 fixtures, 0 failed.
+- `_tsc.js` (`--stack-size=8000`, `--bundler=none`) rebased onto d97b5dd: 387 → 215 `STA1214`,
+  267 diagnostics. Property reads not a field of the shape 55 → 0, their writes 92 → 5, index
+  access on a non-array 33 → 6.
+- Self-compilation: `STA1214` 1759 → 1763 on d97b5dd, and 1787 → 1791 rebased onto c353c49, from
+  the new code's `ts.*` type references, recorded with `--update`.
+- jscpd: 187 → 186. Seven fingerprints changed because the content of existing clones moved;
+  their file pairs are the same as main's.
+
 ## 311. T11.3a: `Uint8Array` across the extern boundary (2026-10-02)
 
 **Trigger.** The creator's priority change: the T11.3 byte channel (plan-notes 309 step 1) cost

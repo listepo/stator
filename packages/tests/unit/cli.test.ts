@@ -168,7 +168,7 @@ test('a fixed-shape object answers an aliased read of an existing field', NATIVE
 });
 
 test(
-  'adding a new key to a fixed-shape object still aborts with STA2004',
+  'adding a new key to a fixed-shape object grows its overflow table (docs/VALUE.md §4.24)',
   NATIVE_ONLY,
   async () => {
     const work = mkdtempSync(join(tmpdir(), 'stator-cli-'));
@@ -180,9 +180,8 @@ test(
       );
       const binary = join(work, 'grow');
       const run = await buildAndRun(entry, binary);
-      assert.notEqual(run.status, 0, 'growing a fixed layout must abort, never invent a slot');
-      assert.match(run.stderr, /STA2004/);
-      assert.equal(run.stdout, '', 'nothing may print before the abort');
+      assert.equal(run.status, 0, run.stderr);
+      assert.equal(run.stdout, '2\n');
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
