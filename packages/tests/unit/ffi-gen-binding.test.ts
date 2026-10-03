@@ -659,7 +659,8 @@ test('a quote in a binding directory is STA1119, not unspellable C', NEEDS_CLANG
     const out = join(dir, 'use.c');
     const b = run(STATOR, ['build', join(dir, 'use.ts'), '-o', out, '--emit=c']);
     assert.notEqual(b.status, 0);
-    assert.match(b.stderr, /STA1119 \[ts\] refused @statorLink pragma/);
+    // The diagnostic wraps at 80 columns, and where depends on the temp directory's length.
+    assert.match(b.stderr, /STA1119 \[ts\] refused @statorLink\s+pragma/);
     assert.doesNotMatch(b.stderr, /STA4\d{3}/);
     assert.equal(existsSync(out), false);
   } finally {
