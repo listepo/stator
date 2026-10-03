@@ -86,6 +86,7 @@ void jsrt_init(void) {
   free(test_ptr);
 
   jsrt_gc_init();
+  jsrt_stack_init();
 }
 
 /* ----------------------------------------------------------------- calls */

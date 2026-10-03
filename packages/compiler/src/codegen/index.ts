@@ -5114,6 +5114,8 @@ class Emitter {
       `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
     );
     this.indent++;
+    // Before the frame, so the overflow return has nothing to pop (plan.md §9 Task 6.23).
+    this.appendLine('JSRT_STACK_CHECK();', fn.span);
     // A zero-length array is not valid C11 and a function that roots nothing is valid TypeScript,
     // so the frame has a floor of one slot -- the same rule JSRT_GLOBALS(n) follows.
     this.appendLine(`JSRT_FRAME(${Math.max(1, this.slotCount)});`, fn.span);
@@ -5230,6 +5232,7 @@ class Emitter {
       `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
     );
     this.indent++;
+    this.appendLine('JSRT_STACK_CHECK();', fn.span);
     this.appendLine('JSRT_FRAME(1);', fn.span);
     this.appendLine(
       `JSRTEnv *_jsrt_env = jsrt_env_new(env, ${Math.max(1, this.slotCount)});`,
@@ -5632,6 +5635,12 @@ class Emitter {
     for (let index = 1; index < partIndex; index++) {
       sequence.push(`${first} = jsrt_string_concat(${first}, ${this.slotAt(slots.base + index)})`);
     }
+    // Concatenating can throw past the maximum string length (see emitBinaryOp).
+    if (partIndex > 1) {
+      this.flushParts(sequence, expr.span);
+      this.emitPendingCheck(expr.span);
+      return first;
+    }
     if (!flushed) {
       sequence.push(first);
       return `(${sequence.join(', ')})`;
@@ -5662,6 +5671,15 @@ class Emitter {
     if (expr.operator === 'in') {
       this.flushParts(parts, expr.span);
       this.appendLine(`${left} = jsrt_bool(jsrt_in(${left}, ${right}));`, expr.span);
+      this.emitPendingCheck(expr.span);
+      return left;
+    }
+    // A `+` that may concatenate can throw too: past the maximum string length the runtime leaves
+    // `RangeError: Invalid string length` pending (plan.md §9 Task 6.23, F12). A `+` typed number
+    // adds and never throws, so it stays an expression.
+    if (expr.operator === '+' && expr.type.kind !== 'number') {
+      this.flushParts(parts, expr.span);
+      this.appendLine(`${left} = ${BINARY_EMITTERS['+'](left, right)};`, expr.span);
       this.emitPendingCheck(expr.span);
       return left;
     }
@@ -5904,6 +5922,11 @@ class Emitter {
         }
         const rhs = this.emitExpression(value);
         this.appendLine(`${result} = ${BINARY_EMITTERS[op](result, rhs)};`, expr.span);
+        // Before the write: a `+=` past the maximum string length throws and leaves the target as
+        // it was (see emitBinaryOp).
+        if (op === '+' && expr.type.kind !== 'number') {
+          this.emitPendingCheck(expr.span);
+        }
         this.appendLine(`${write(result)};`, expr.span);
       }
     }

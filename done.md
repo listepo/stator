@@ -2979,6 +2979,74 @@ Check evidence:
 > `util.format` semantics, in one runtime function. **Check:** a golden in each mode covering every
 > specifier, `%%`, missing and extra arguments, byte-for-byte vs Node; `pnpm run ci` green.
 
+### Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12) ✅ (landed 2026-10-04)
+
+What landed (plan-notes 338, 339; docs/VALUE.md §2 and §4.25):
+
+- **F6.**
+  - Every generated function opens with `JSRT_STACK_CHECK()` before `JSRT_FRAME`. It compares
+    its frame address against the thread-local `jsrt_stack_limit`, which `jsrt_stack_init`
+    (`runtime/src/jsrt_stack.zig`) sets at `jsrt_init` from the thread's real stack bounds
+    plus 256 KiB of headroom. Past the limit it throws a catchable
+    `RangeError: Maximum call stack size exceeded`.
+  - Recursion that no prologue sees, such as the runtime's C recursion over deeply nested data,
+    hits a SIGSEGV/SIGBUS handler on an alternate stack. It prints
+    `PANIC: STA2005 stack overflow` and the shadow-stack depth. Any other fault goes to the
+    handler that was installed before.
+  - Overhead: +3.7 % on `fib(36)`, about 0.8 ns per call.
+- **F12.**
+  - `JSString` is now `{length, flags, data, buffer}`. `jsrt_string_concat`, moved to
+    `runtime/src/jsrt_string_mem.zig`, extends a shared append buffer when the left operand
+    ends at the buffer's end, and doubles the buffer otherwise. 200 000 one-character appends
+    take 15.1 ms, against Node's 54.9 ms and 2.32 s before this change.
+  - Past 2^29 − 24 code units, concat throws `RangeError: Invalid string length` instead of
+    answering `JSRT_NULL`. The emitter now checks for a pending exception at four places:
+    - after every `+` not typed `number`;
+    - after `+=`, before the write;
+    - after a template literal with more than one part;
+    - after `String.prototype.concat`.
+- Docs: `docs/VALUE.md` §2 (the layout and the append buffer) and new §4.25 (the stack guard),
+  `docs/DIAGNOSTICS.md` (`STA2005`), `docs/FFI.md` (the fault handler under `stator_init_<unit>`).
+
+Check evidence:
+
+- New goldens match Node byte-for-byte:
+  - `golden/ts/stack_overflow.ts` and `golden/js/stack_overflow.js` catch the `RangeError` from
+    deep recursion (a function, a method, mutual recursion, a recursion allocating per frame)
+    and print its message.
+  - `golden/ts/string_append.ts` and `golden/js/string_append.js` hold the prefix-sharing cases.
+- `unit/runtime-errors.test.ts` covers:
+  - the audit's F6 test (`f(1000000)`: no signal, exit 1, `RangeError` on stderr);
+  - the native-recursion `PANIC: STA2005 stack overflow`;
+  - the string cap across `+=`, a template literal and `concat`.
+- The F12 measurement is in plan-notes 339.
+- `pnpm run ci` exited 0:
+  - typecheck and lint clean;
+  - dupes: 183 clones, baseline shrunk 186 → 183;
+  - `pnpm run test`: 756 tests passed;
+  - `test:runtime`: print corpus matches Node;
+  - `test:subset`: `929 fixtures — 898 passed, 31 expected-fail, 0 failed`;
+  - `test:golden`: `459 fixtures — 459 passed, 0 failed`;
+  - `test:selfhost`: green and unchanged (`STA1214` 1804);
+  - builtins, node-coverage and leak (both plateau) green;
+  - `test:asan`: print corpus matches Node under ASan/UBSan, `golden-asan green`, 459 passed.
+
+> **Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12).**
+> 
+> - **F6.** `JSRT_FRAME` (or the function prologue) checks the native stack against a limit set at
+>   `jsrt_init` from the thread's stack size and throws a catchable
+>   `RangeError: Maximum call stack size exceeded`. A `sigaltstack` SIGSEGV handler that prints
+>   `PANIC: STA2005 stack overflow` is the fallback for frames the check cannot see.
+> - **F12.** `jsrt_string_concat` throws `RangeError: Invalid string length` past Node's cap
+>   (the one `jsrt_string_ops.c` already uses for `repeat`/`padStart`) instead of returning
+>   `JSRT_NULL`. String `+=` in a loop becomes amortized linear (an append buffer with spare
+>   capacity, or the rope `docs/VALUE.md §12` anticipates): 200 000 one-character appends must
+>   stay within 3× Node's time on the same host.
+> 
+> **Check:** a golden that catches the `RangeError` from deep recursion and prints its message;
+> the audit's F6 test passes; a unit or bench measurement for F12 recorded in plan-notes;
+> `pnpm run ci` green, including ASan.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

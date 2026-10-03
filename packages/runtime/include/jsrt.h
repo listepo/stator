@@ -30,4 +30,8 @@ void *jsrt_gc_alloc(size_t bytes, const char *what);
 /* Called by jsrt_init once the pointer-width assumption holds. */
 void jsrt_gc_init(void);
 
+/* Called by jsrt_init after jsrt_gc_init: measures this thread's stack for JSRT_STACK_CHECK and
+ * installs the stack-overflow fault handler (jsrt_stack.zig). */
+void jsrt_stack_init(void);
+
 #endif /* JSRT_H */

@@ -12159,6 +12159,117 @@ the lead for its own card.
 exception (a `%j` getter that throws). `consoleMayThrow` (in `hir/nodes.ts`) makes codegen emit
 the pending check after it, as it already did for `console.table`.
 
+## 338. Task 6.23 (F6): a stack guard in every prologue, a fault handler behind it (2026-10-04)
+
+**Contradiction with the card, none; the choices it left open:**
+
+- **Where the check sits.** It sits in the prologue (`JSRT_STACK_CHECK()`, emitted before
+  `JSRT_FRAME` in `emitSyncUnit` and `emitSuspendEntry`), not inside `JSRT_FRAME`. A check inside
+  the frame macro would have to pop the frame it had just pushed. Before the frame, the early
+  return has nothing to pop, so the frame-pop audit (`frames.test.ts`) is unaffected. Async and
+  generator *resume* functions are not checked. They run only under an entry or a `next()` that
+  already passed one, so recursion through them still meets a checked prologue.
+- **What the limit is.** It is the frame address, not a depth count. `jsrt_stack_init` (new Zig
+  module `runtime/src/jsrt_stack.zig`, golden rule 9: OS abstraction) reads the real bounds of the
+  calling thread:
+  - Darwin: `pthread_get_stackaddr_np`/`pthread_get_stacksize_np`.
+  - Linux: `pthread_getattr_np` + `pthread_attr_getstack`, with an unlimited main stack trusted
+    to 1 GiB.
+  - Elsewhere the check stays off.
+
+  The limit is the low end plus 256 KiB of headroom for the runtime code the deepest frame still
+  calls. A frame count would have tied the limit to frame sizes, which differ by function, by
+  optimization level and under ASan. `jsrt_stack_limit` is `_Thread_local`, like
+  `jsrt_frame_top`: a limit taken from one thread's stack is meaningless on another, and 0 (a
+  thread that never ran `jsrt_init`) disables the check.
+- **Depth is not Node's.** Node's V8 stops at about 10 800 frames of the audit's `f` (`--stack-size`
+  984 KiB). A Stator binary stops when its 8 MiB stack is nearly full. The golden therefore prints
+  the error, never a depth.
+- **The fallback.** SIGSEGV and SIGBUS run on a 128 KiB alternate stack. An alternate stack that
+  already exists (ASan installs one) is kept.
+  - A fault address within 1 MiB below the measured low end (or 64 KiB above it) prints
+    `PANIC: STA2005 stack overflow` and `Shadow stack depth: N frames` with `write(2)`, then
+    aborts.
+  - Any other fault reinstalls the previous action and returns, so the default crash, ASan's
+    report or a host program's handler still sees it. A C program that dereferences address 16
+    after `jsrt_init` still exits 139.
+
+  The fallback catches `JSON.stringify` of a 2 000 000-deep array, which recurses in C.
+
+**Overhead (bench program `packages/tests/bench/programs/fib.ts` at n = 36, about 48.3 M calls).**
+Host: Apple M3 Max, macOS 27.0.1, default `stator build` (`-O2`, Boehm), `hyperfine -N -w 3 -r 30`.
+The binary without the check (the Task 6.24 tree, which has no check) averaged 1.074 s ± 0.010 s; with
+the check, 1.114 s ± 0.008 s. That is +3.7 %, about 0.8 ns per call: one thread-local load, a
+compare and a not-taken branch.
+
+**Out of scope, recorded:** an uncaught overflow prints Stator's usual `Uncaught RangeError { … }`
+form and exits 1. Node prints a stack trace. The audit's F6 test only asks for no signal and a
+`RangeError` mention, and both hold.
+
+## 339. Task 6.23 (F12): an append buffer behind `+=`, and the length cap on concat (2026-10-04)
+
+**Why the layout changed.** `JSString` kept its units inline (`uint16_t data[]`), so two strings
+could never share storage, and `jsrt_string_concat` had to copy both operands every time. The
+header is now `{length, flags, data, buffer}`:
+
+- `data` points just past the header for a flat string, or at the first unit of a shared append
+  buffer.
+- Generated C was already confined to `jsrt_string_length`/`jsrt_string_char` (docs/VALUE.md §2),
+  so this is a runtime-only change. Every runtime read site (`s->data[i]`) compiles unchanged.
+- The five allocation sites now go through `jsrt_string_alloc`. `jsrt_print.c`'s stack-built
+  stand-in became a view of the units in place.
+
+The card offered a rope instead. A rope flattens on read, so a loop that reads the string between
+appends (`s += x; if (s.length …)`, `s[i]`) re-copies it each time. The prefix-sharing buffer stays
+linear under reads.
+
+**The buffer** (`runtime/src/jsrt_string_mem.zig`; `jsrt_string_concat` moved there from
+`jsrt_string.c`, golden rule 9):
+
+- Every string over a buffer is a prefix, and `used` is the longest prefix's end. Appending onto
+  the string that ends at `used` writes in place.
+- Appending onto an older prefix, or onto a full buffer, copies into a new buffer of twice the
+  length.
+- A concatenation onto a string that did not come out of a concatenation stays a flat copy, as
+  does a result under 64 units. A one-off `x + y` therefore wastes nothing, and only a string
+  that keeps growing pays for spare capacity.
+- The header keeps the buffer's own address in `buffer`, so Boehm retains the buffer without
+  relying on interior-pointer recognition.
+- Flat strings and buffers are pointer-free atomic allocations. They used to be scanned word by
+  word.
+
+The golden `string_append` holds the prefix-sharing cases to Node: two appends onto one prefix,
+snapshots taken mid-loop, `e += e`, a built string as a Map key, in a regex and in JSON.
+
+**The cap.** Past `JSRT_MAX_STRING_LENGTH` (2^29 − 24, now in `jsrt_value.h`, shared with
+`repeat`/`padStart`), concat leaves `RangeError: Invalid string length` pending and answers the
+empty string. It used to answer `JSRT_NULL`.
+
+Making that catchable needed the emitter to check pending after concatenation, which it never did:
+
+- every `+` not typed `number`, as a statement;
+- `+=` before its write, so the target keeps its old value;
+- a template literal with more than one part;
+- `String.prototype.concat`, which is now `throws: true` in `STRING_OPS`.
+
+`unit/runtime-errors.test.ts` checks all four forms against Node's output with a 2^28-unit
+operand. It is a unit test rather than a golden so that the golden and ASan passes do not each
+allocate half a gigabyte.
+
+**Measurement.** Host: Apple M3 Max, macOS 27.0.1, Node v26.7.0, default `stator build` (`-O2`,
+Boehm), `hyperfine -N -w 2 -r 20`. Program: the audit's
+`let s: string = ''; for (let i = 0; i < N; i++) { s += 'x'; } console.log(s.length);`.
+
+| N | before (the Task 6.24 tree) | after | Node |
+|---|---|---|---|
+| 200 000 | 2.322 s ± 0.181 s | 15.1 ms ± 0.9 ms | 54.9 ms ± 1.6 ms |
+| 400 000 | (audit: 9.63 s) | 25.5 ms ± 0.6 ms | 60.0 ms ± 1.8 ms |
+
+200 000 appends take 0.28× Node's time; the card's bound is 3×. Doubling N adds 10 ms, not 4×.
+
+Three clones went with the copies `jsrt_string_alloc` replaced, so `.jscpd-baseline.json` shrinks
+from 186 to 183 fingerprints.
+
 ## 340. Task 7.4: a static library for C consumers (2026-10-04)
 
 **Asked by the creator (2026-10-04):** can the compiler build code into a static library and ship

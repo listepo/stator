@@ -100,10 +100,30 @@ static inline bool jsrt_fits_int32(double d) {
 
 /* --------------------------------------------------------------- strings */
 
+/* A string is a header and a view of its code units (docs/VALUE.md §2). `data` points either just
+ * past the header, where a flat string keeps its own units, or into an append buffer that several
+ * strings share: each of those is a prefix of the buffer, so appending past every prefix's end
+ * changes none of them, and `s += x` in a loop extends the buffer instead of copying the whole
+ * string again (plan.md §9 Task 6.23, F12). Contents never change once a string is visible.
+ * Construction goes through jsrt_string_alloc and jsrt_string_concat (jsrt_string_mem.zig). */
 typedef struct JSString {
-  uint32_t length;  /* UTF-16 code units -- not bytes, not code points */
-  uint16_t data[];  /* flexible array member; NOT NUL-terminated */
+  uint32_t length;   /* UTF-16 code units -- not bytes, not code points */
+  uint32_t flags;    /* JSRT_STRING_* */
+  uint16_t *data;    /* NOT NUL-terminated */
+  void *buffer;      /* the append buffer `data` points into, or NULL for a flat string */
 } JSString;
+
+/* The string came out of a concatenation: the next concatenation onto it reserves room to grow. */
+#define JSRT_STRING_GROWN 1u
+
+/* Maximum string length in code units: 2^29 - 24 = 536870888, matching V8's `String::kMaxLength`
+ * on 64-bit (the pinned Node's limit; plan-notes 251 A12). An earlier cap of 2^31-1 (plan-notes
+ * 203) disagreed with Node: lengths between the two caps must throw
+ * `RangeError: Invalid string length`. */
+#define JSRT_MAX_STRING_LENGTH 536870888u
+
+/* A flat string of `len` code units for the caller to fill before it is visible anywhere. */
+JSString *jsrt_string_alloc(uint32_t len);
 
 /* Generated C touches string contents only through these two, never ->data[i] directly, so that
  * rope/small-string representations stay a runtime-only change (docs/VALUE.md §2). */
@@ -1906,6 +1926,22 @@ typedef struct JSRTFrame {
 extern _Thread_local JSRTFrame *jsrt_frame_top;
 
 void jsrt_frame_init(JSRTFrame *frame);
+
+/* The native stack guard (plan.md §9 Task 6.23, docs/VALUE.md §4.25). Every generated function opens
+ * with JSRT_STACK_CHECK() BEFORE its JSRT_FRAME, so the early return has no frame to pop: it leaves
+ * Node's catchable `RangeError: Maximum call stack size exceeded` pending and returns undefined,
+ * and the caller's pending check unwinds as for any throw. `jsrt_stack_limit` is the lowest frame
+ * address a generated function may open at on this thread; jsrt_init sets it from the thread's real
+ * stack bounds, leaving headroom for the runtime code the deepest frame still calls. It is 0 on a
+ * thread jsrt_init never ran on, which disables the check rather than failing every call. */
+extern _Thread_local uintptr_t jsrt_stack_limit;
+jsrt_value jsrt_stack_overflow(void);
+#define JSRT_STACK_CHECK()                                                               \
+  do {                                                                                   \
+    if (__builtin_expect((uintptr_t)__builtin_frame_address(0) < jsrt_stack_limit, 0)) { \
+      return jsrt_stack_overflow();                                                      \
+    }                                                                                    \
+  } while (0)
 
 /* Slots are filled with JSRT_UNDEFINED and only THEN is the frame published to jsrt_frame_top,
  * so a collection triggered mid-prologue can never scan an uninitialized slot. */

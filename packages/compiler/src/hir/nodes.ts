@@ -704,7 +704,7 @@ export const STRING_OPS = {
   charAt: { arity: 1, result: 'string' },
   charCodeAt: { arity: 1, result: 'number' },
   codePointAt: { arity: 1, result: 'element' },
-  concat: { arity: 1, result: 'string' },
+  concat: { arity: 1, result: 'string', throws: true },
   endsWith: { arity: 2, result: 'boolean' },
   includes: { arity: 2, result: 'boolean' },
   indexOf: { arity: 2, result: 'number' },
@@ -738,7 +738,8 @@ export const STRING_OPS = {
     arity: number;
     result: 'boolean' | 'element' | 'iterator' | 'match' | 'number' | 'string' | 'string-array';
     /** Present on the ops whose runtime raises a catchable error (`repeat`/`padStart`/`padEnd`
-     * throw RangeError for a count/length the spec rejects). The emitter gives such an op its own
+     * throw RangeError for a count/length the spec rejects, `concat` past the maximum string
+     * length). The emitter gives such an op its own
      * statement and a pending check after it, the same discipline as {@link arrayOpCallsBack}. */
     throws?: true;
   }

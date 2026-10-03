@@ -158,11 +158,7 @@ jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len) {
     utf16_len += utf16_units_for(codepoint);
   }
 
-  /* Allocate the JSString structure. */
-  size_t alloc_size = sizeof(JSString) + (size_t)utf16_len * sizeof(uint16_t);
-  JSString *str = (JSString *)jsrt_gc_alloc(alloc_size, "string");
-
-  str->length = utf16_len;
+  JSString *str = jsrt_string_alloc(utf16_len);
 
   /* Second pass: decode UTF-8 and encode as UTF-16. */
   uint16_t *out_ptr = str->data;
@@ -180,9 +176,7 @@ jsrt_value jsrt_string_from_utf8(const char *bytes, size_t len) {
  * parsed JSON string is already a unit sequence (escapes decoded, surrogate pairs left as the
  * two units they are). No validation: lone surrogates are legal JS string contents. */
 jsrt_value jsrt_string_from_units(const uint16_t *units, uint32_t len) {
-  size_t alloc_size = sizeof(JSString) + (size_t)len * sizeof(uint16_t);
-  JSString *str = (JSString *)jsrt_gc_alloc(alloc_size, "string");
-  str->length = len;
+  JSString *str = jsrt_string_alloc(len);
   if (len > 0) {
     memcpy(str->data, units, (size_t)len * sizeof(uint16_t));
   }
@@ -333,9 +327,7 @@ jsrt_value jsrt_string_from_cstr(const char *s) {
     utf8_strict_step(bytes, len, &i, &codepoint);
     utf16_len += utf16_units_for(codepoint);
   }
-  size_t alloc_size = sizeof(JSString) + (size_t)utf16_len * sizeof(uint16_t);
-  JSString *str = (JSString *)jsrt_gc_alloc(alloc_size, "string");
-  str->length = utf16_len;
+  JSString *str = jsrt_string_alloc(utf16_len);
   /* Second pass: decode again, this time storing. */
   uint16_t *out_ptr = str->data;
   i = 0;
@@ -421,33 +413,3 @@ int jsrt_string_compare(jsrt_value a, jsrt_value b) {
   return 0;
 }
 
-jsrt_value jsrt_string_concat(jsrt_value a, jsrt_value b) {
-  JSString *sa = as_string(a);
-  JSString *sb = as_string(b);
-
-  /* Check for uint32_t overflow when summing lengths. */
-  if (sa->length > UINT32_MAX - sb->length) {
-    return JSRT_NULL; /* Allocation would overflow. */
-  }
-
-  uint32_t new_len = sa->length + sb->length;
-
-  /* Allocate the combined JSString. */
-  size_t alloc_size = sizeof(JSString) + (size_t)new_len * sizeof(uint16_t);
-  JSString *result = (JSString *)jsrt_gc_alloc(alloc_size, "string");
-
-  result->length = new_len;
-
-  /* Copy first string. */
-  if (sa->length > 0) {
-    memcpy(result->data, sa->data, (size_t)sa->length * sizeof(uint16_t));
-  }
-
-  /* Copy second string. */
-  if (sb->length > 0) {
-    memcpy(result->data + sa->length, sb->data, (size_t)sb->length * sizeof(uint16_t));
-  }
-
-  /* Box and return. */
-  return JSRT_BOX(JSRT_TAG_STRING, (uintptr_t)result);
-}
