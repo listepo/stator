@@ -117,7 +117,8 @@ STATOR_OPT=0 node packages/compiler/src/cli/main.ts build file.ts -o app   # fas
 node packages/compiler/src/cli/main.ts build file.ts -o app --opt=3         # max clang opts
 ```
 
-`--opt` wins over `STATOR_OPT` when both are set. ASan builds ignore this and keep `-O1 -g
+`--opt` wins over `STATOR_OPT` when both are set. A `STATOR_OPT` outside `0`–`3` is `STA0002`,
+and the message names the environment variable, since no `--opt` is on the command line. ASan builds ignore this and keep `-O1 -g
 -fsanitize=…`. The release runtime archive may already record `-flto=thin` in
 `packages/runtime/build/link-flags.txt`; `extraLinkFlags()` picks that up so the generated C is
 compiled as thin-LTO bitcode too when the archive was. Full PGO / a custom LLVM backend remains
