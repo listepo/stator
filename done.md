@@ -3126,7 +3126,11 @@ What landed (plan-notes 350):
     not for a CommonJS file.
 - Docs: `docs/DIAGNOSTICS.md` (two rows), `docs/SUBSET.md` (the imports row), `docs/BUNDLER.md` §5.
 
-Check evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
+The Check, on linux CI: run 37154148433 on `eb44366`, job "test262 conformance" (Aggregate and
+gate), reports `test262: merged 8 shard(s), 53580 results` and `test262: 2377 passed, 49384
+skipped, … 1819 failed`. The ratchet gate is green.
+
+Local evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
 
 - `pnpm run test262` → `2377 passed, 49384 skipped, … 1819 failed`, exit 0.
 - `ratchet.json` `passed`: 2372 → 2377.
