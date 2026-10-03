@@ -11918,3 +11918,22 @@ objection on review):
   (`-fplugin=`). `--link=` on the command line stays the user's escape hatch.
 - F12: the `RangeError` cap is required; the speed bar (within 3× Node at 200 000 appends) is the
   Check, and the mechanism (append buffer or rope) is the implementer's.
+
+## 340. Task 7.4: a static library for C consumers (2026-10-04)
+
+**Asked by the creator (2026-10-04):** can the compiler build code into a static library and ship
+`.h` headers for FFI? On `3aeb9dd` it can do half of that.
+
+- `stator build lib.ts -o lib.o --emit-header=lib.h --unit-name=<unit>` (Task 7.2) writes a
+  deterministic header and one relocatable object. The C surface is `stator_<unit>_*` functions
+  plus `stator_<unit>_init()` and `stator_<unit>_last_error()`.
+- There is no archive output. The consumer links `libjsrt.a` (and `libjsrt_std.a` and `-lgc`
+  when used) itself. `packages/tests/ffi/example-c-consumer/c-consumer.ts` does it with paths
+  into `packages/runtime/build/`.
+- `ar rcs lib<unit>.a lib.o` by hand still leaves the runtime to the consumer. Two such units in
+  one program would each need the runtime once, and nothing enforces that.
+
+The creator approved turning this into a plan task, so Task 7.4 is added to Phase 7. The open
+design point is whether each library carries a private runtime (prelink and localize) or shares
+one external runtime. Step 3 of the card leaves it to measurement, because the deciding factor
+(two collectors in one process) cannot be settled on paper.

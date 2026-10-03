@@ -1114,6 +1114,47 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 **Check:** ✅ **met 2026-09-15** — `examples/ffi/sqlite/` (generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node; the CI proof is the ffi job's own run (plan-notes 271): an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
+**[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
+Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
+The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
+libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
+This task makes `stator build` produce one static library plus its header, which a C build can
+use with no Stator checkout.
+
+Steps:
+
+1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
+   `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
+   member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
+   written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
+   same input are byte-identical, as the header already is (Task 7.2 step 8).
+2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
+   it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
+   writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
+   the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
+3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
+   program would each carry `jsrt_*` and collide. Measure both options and record the result in
+   plan-notes before choosing:
+   (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
+   `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
+   on ELF), so each library carries a private runtime; this must prove two such libraries work
+   in one process, including two collectors' init and roots;
+   (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
+   shared `libjsrt.a` installed once.
+   Whichever is chosen, the other combination is refused or documented. It never fails at run
+   time.
+4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
+   (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
+   Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
+5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
+   refused with a not-yet diagnostic until then.
+
+**Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
+`<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
+runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
+linked into one C program and both called, under the option step 3 chose. The ffi CI job and
+the ASan job run it. `pnpm run ci` is green.
+
 ---
 
 ## 11. Phase 8 — The dynamic tier (gated; `js` mode only) — **[D5]**
@@ -2432,3 +2473,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.55** (2026-10-02): **T11.6, second slice: the `node:fs` sync subset** (plan-notes 317). `packages/node/src/fs.ts` lands 12 of the 15 `fs` functions `tsc` calls, plus `rmdirSync`, over `std/fs`: Node's `SystemError` (`code`, `errno`, `syscall`, `path`, the `<CODE>: <description>, <syscall> '<path>'` message), the encodings `std/encoding` decodes, `{ recursive }`, `{ withFileTypes }` and `{ throwIfNoEntry }`. `require('fs')` answers it. The watch trio waits on N2. Goldens `node_fs` (ts, js); slice N1 at 15 / 37.
 - **v4.56** (2026-10-02): **T11.7, second slice: `require('../common')` resolves in the Stator build** (plan-notes 318). `fetch.ts` links the corpus's `test/common` to the strict-TS harness (a junction on Windows), so the bundler resolves it like any relative require. The harness drops `node:util`, an N2 module, for `common/inspect.ts`, and `common/fixtures.ts` drops `suite.ts`. Every `fail` now stops at `node:process` (T11.6), then at T12.3's `__commonJSMin` (STA4013). Pass count unchanged: 0 of 17.
 - **v4.60** (2026-10-04): **Tasks 6.20–6.26: the 2026-10-01 QA audit (PR #57) becomes plan work** (plan-notes 330). All 16 findings still reproduce on `338a3c2`. They are grouped one task per layer: CLI outputs and flags (6.20), environment trust (6.21), FFI inputs (6.22), runtime errors (6.23), `console.log` format (6.24), the BigInt verdict (6.25) and the landing page (6.26).
+- **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
