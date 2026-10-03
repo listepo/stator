@@ -75,6 +75,7 @@ import type {
 } from '../hir/nodes.ts';
 import {
   consoleEntryPoint,
+  consoleMayThrow,
   isConsoleVariadicWidth,
   DATE_OPS,
   NUMBER_OPS,
@@ -2374,7 +2375,7 @@ class Emitter {
         // has to append. See the `console-log` case in emitExpression for why the two differ.
         if (stmt.expression.kind === 'console-log') {
           this.appendLine(`${this.consoleCall(stmt.expression)};`, stmt.span);
-          if (stmt.expression.method === 'table') {
+          if (consoleMayThrow(stmt.expression)) {
             this.emitPendingCheck(stmt.span);
           }
           break;
@@ -3987,7 +3988,7 @@ class Emitter {
       // takes `consoleCall` bare instead, because `(jsrt_print(x), JSRT_UNDEFINED);` is a
       // -Wunused-value warning on every console.log in the program.
       case 'console-log': {
-        if (expr.method === 'table') {
+        if (consoleMayThrow(expr)) {
           this.appendLine(`${this.consoleCall(expr)};`, expr.span);
           this.emitPendingCheck(expr.span);
           return 'JSRT_UNDEFINED';

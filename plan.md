@@ -864,10 +864,7 @@ pragma; `docs/FFI.md` updated; `pnpm run ci` green.
 the audit's F6 test passes; a unit or bench measurement for F12 recorded in plan-notes;
 `pnpm run ci` green, including ASan.
 
-**Task 6.24 — `console.log` formats like Node (F13).** `console.log`/`error`/`warn` with two or
-more arguments and a string first argument substitute `%s %d %i %f %j %o %O %c %%` with
-`util.format` semantics, in one runtime function. **Check:** a golden in each mode covering every
-specifier, `%%`, missing and extra arguments, byte-for-byte vs Node; `pnpm run ci` green.
+~~**Task 6.24 — `console.log` formats like Node (F13).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.24 (plan-notes 337).
 
 ~~**Task 6.25 — A BigInt is not-yet, never an internal error (F5).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.25 (plan-notes 334).
 
@@ -2470,4 +2467,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.56** (2026-10-02): **T11.7, second slice: `require('../common')` resolves in the Stator build** (plan-notes 318). `fetch.ts` links the corpus's `test/common` to the strict-TS harness (a junction on Windows), so the bundler resolves it like any relative require. The harness drops `node:util`, an N2 module, for `common/inspect.ts`, and `common/fixtures.ts` drops `suite.ts`. Every `fail` now stops at `node:process` (T11.6), then at T12.3's `__commonJSMin` (STA4013). Pass count unchanged: 0 of 17.
 - **v4.60** (2026-10-04): **Tasks 6.20–6.26: the 2026-10-01 QA audit (PR #57) becomes plan work** (plan-notes 330). All 16 findings still reproduce on `338a3c2`. They are grouped one task per layer: CLI outputs and flags (6.20), environment trust (6.21), FFI inputs (6.22), runtime errors (6.23), `console.log` format (6.24), the BigInt verdict (6.25) and the landing page (6.26).
 - **v4.63** (2026-10-04): **Task 6.25 lands: a BigInt is not-yet `STA1213`, never internal `STA4031`** (plan-notes 334). The gate refuses a BigInt literal before its token skip, and every read of a value whose declared type may be a bigint, in both modes and in `build` and `explain`. A `typeof u === 'bigint'` narrowing of an `unknown` stays accepted. Both `subset_bigint_primitive_*` fixtures lose `@expected-fail`.
+- **v4.66** (2026-10-04): **Task 6.24 lands: `console.log` formats like Node** (plan-notes 337). One runtime function applies `%s %d %i %f %j %O %c %%` with `util.format` semantics for `log`/`info`/`debug`/`error`/`warn`, including missing and extra arguments. Cases whose Node output the binary cannot reproduce yet (`%o` of an object, `%s` of a function or of an object with its own `toString`, `%d`/`%i`/`%f` through a user `toString`/`valueOf`, `%d` of a `Date`) are not-yet `STA1214` at compile time and a named `STA2005` panic when the format string is only known at run time.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.

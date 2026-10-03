@@ -170,13 +170,20 @@ static void append_utf8(JSRTBuf *out, uint32_t cp) {
   }
 }
 
-/* Appends one JSString as UTF-8. Unpaired surrogates become U+FFFD: they cannot be represented in
- * well-formed UTF-8, and a JS string is allowed to contain them. */
+static void append_units(JSRTBuf *out, const JSString *str, uint32_t from, uint32_t to);
+
 static void append_string(JSRTBuf *out, const JSString *str) {
-  for (uint32_t i = 0; i < str->length; i++) {
+  append_units(out, str, 0, str->length);
+}
+
+/* Appends code units [from, to) of a JSString as UTF-8. Unpaired surrogates become U+FFFD: they
+ * cannot be represented in well-formed UTF-8, and a JS string is allowed to contain them. A
+ * util.format slice ends at a `%`, so it never splits a pair. */
+static void append_units(JSRTBuf *out, const JSString *str, uint32_t from, uint32_t to) {
+  for (uint32_t i = from; i < to; i++) {
     uint32_t cp = str->data[i];
 
-    if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < str->length) {
+    if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < to) {
       uint32_t low = str->data[i + 1];
       if (low >= 0xDC00u && low <= 0xDFFFu) {
         cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
@@ -1280,6 +1287,157 @@ void jsrt_print(jsrt_value v) { print_to(v, stdout, true); }
  * why the golden runner compares BOTH streams byte-for-byte. */
 void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
 
+/* ============================================================================
+ * util.format -- console.log's placeholders (plan.md §9 Task 6.24)
+ *
+ * Node's console methods run every call through `formatWithOptionsInternal`
+ * (lib/internal/util/inspect.js, v26.7.0; plan-notes 337). When the first of two or more
+ * arguments is a string, `%s %d %i %f %j %o %O %c` each consume the next argument and `%%` is a
+ * literal `%`. The loop below is that function's loop, statement for statement, because its edge
+ * cases ARE the semantics: a `%` in the last position is literal, an exhausted argument list
+ * leaves every placeholder but `%%` as written, and an unknown letter after `%` is skipped.
+ * ============================================================================ */
+
+static void json_format(JSRTBuf *out, jsrt_value v);
+
+/* A value util.format would hand to user code -- an own or class-declared method `name` -- and so
+ * one whose answer depends on running it. ToPrimitive here never calls a user method (see
+ * jsrt_to_primitive), so the honest answer is a loud refusal; the gate refuses every case it can
+ * see at compile time and this catches the ones only the run reaches. */
+static bool has_user_method(jsrt_value v, const char *name) {
+  if (jsrt_is_fixed_object(v)) {
+    /* The method table begins with the base's, so the class's own table covers the chain. */
+    const JSRTClass *cls = jsrt_as_object(v)->cls;
+    for (uint32_t i = 0; i < cls->method_count; i++) {
+      if (cls->method_names != NULL && strcmp(cls->method_names[i], name) == 0) {
+        return true;
+      }
+    }
+    return jsrt_has_prop(v, name);
+  }
+  return (jsrt_is_dynobj(v) || jsrt_is(v, JSRT_TAG_ARRAY)) && jsrt_has_prop(v, name);
+}
+
+static _Noreturn void format_refused(const char *what) {
+  char message[192];
+  snprintf(message, sizeof message,
+           "STA2005: console.log %s is not yet supported; Node's util.format would print what "
+           "this binary cannot reproduce",
+           what);
+  jsrt_panic(message);
+}
+
+/* `formatNumberNoColor`: the number's own string, with -0 kept visible. */
+static void format_number(JSRTBuf *out, double d) {
+  char buf[64];
+  format_double(d, buf, sizeof buf, true);
+  jsrt_buf_puts(out, buf);
+}
+
+/* One placeholder applied to one argument. The comments name Node's arm for each. */
+static void format_one(JSRTBuf *out, uint16_t spec, jsrt_value v) {
+  switch (spec) {
+  case 's':
+    /* number: formatNumber. A function: String(fn), its SOURCE TEXT, which no binary carries
+     * (jsrt_to_string's known ceiling). Another primitive: String(v). An object whose toString is
+     * a builtin: inspect at depth 0 -- here, the inspect walk entered at the depth cap. */
+    if (jsrt_is_number(v)) {
+      format_number(out, jsrt_number_value(v));
+    } else if (jsrt_is(v, JSRT_TAG_CLOSURE)) {
+      format_refused("%s of a function");
+    } else if (!jsrt_is_object(v)) {
+      inspect_scalar(out, v, false);
+    } else if (has_user_method(v, "toString")) {
+      format_refused("%s of an object with its own toString");
+    } else {
+      inspect_value(out, v, INSPECT_MAX_DEPTH, 0);
+    }
+    return;
+  case 'd':
+  case 'i':
+  case 'f':
+    /* Number(v), parseInt(v), parseFloat(v): each reaches ToPrimitive on an object, which here
+     * is ToString without a user method (jsrt_to_primitive). That is exact for every object but
+     * one carrying its own toString or valueOf, and a Date under `%d`, whose number hint asks
+     * valueOf for the time value where ToString would answer NaN. */
+    if (has_user_method(v, "toString") || has_user_method(v, "valueOf")) {
+      format_refused("a numeric placeholder for an object with its own toString or valueOf");
+    }
+    if (spec == 'd' && jsrt_is_date(v)) {
+      format_refused("%d of a Date");
+    }
+    format_number(out, spec == 'd'   ? jsrt_to_number(v)
+                       : spec == 'i' ? jsrt_number_value(jsrt_global_parse_int(v, JSRT_UNDEFINED))
+                                     : jsrt_number_value(jsrt_global_parse_float(v)));
+    return;
+  case 'j':
+    json_format(out, v);
+    return;
+  case 'O':
+    inspect_value(out, v, 0, 0);
+    return;
+  case 'o':
+    /* `{ showHidden: true, depth: 4 }`: identical to `%O` for a primitive, and different for
+     * nearly every object (`[length]` on arrays, a function's own properties, the compact rule
+     * once depth passes 2). The printer models neither option, so objects are refused. */
+    if (jsrt_is_object(v)) {
+      format_refused("%o of an object");
+    }
+    inspect_scalar(out, v, true);
+    return;
+  default: /* 'c': CSS is consumed and prints nothing */
+    return;
+  }
+}
+
+/* Writes the format string's expansion and answers the index of the first argument it did not
+ * consume -- or 0 when nothing in it was a placeholder, in which case the string prints as an
+ * ordinary first argument and nothing has been written. */
+static uint32_t format_into(JSRTBuf *out, uint32_t count, const jsrt_value *args) {
+  const JSString *first = (const JSString *)jsrt_ptr(args[0]);
+  uint32_t a = 0;
+  uint32_t last = 0;
+  for (uint32_t i = 0; i + 1 < first->length; i++) {
+    if (first->data[i] != '%') {
+      continue;
+    }
+    const uint16_t next = first->data[++i];
+    if (a + 1 != count) {
+      switch (next) {
+      case 's':
+      case 'j':
+      case 'd':
+      case 'O':
+      case 'o':
+      case 'i':
+      case 'f':
+      case 'c':
+        append_units(out, first, last, i - 1);
+        format_one(out, next, args[++a]);
+        if (jsrt_pending()) {
+          return 0;
+        }
+        last = i + 1;
+        break;
+      case '%':
+        append_units(out, first, last, i);
+        last = i + 1;
+        break;
+      default:
+        break;
+      }
+    } else if (next == '%') {
+      append_units(out, first, last, i);
+      last = i + 1;
+    }
+  }
+  if (last == 0) {
+    return 0;
+  }
+  append_units(out, first, last, first->length);
+  return a + 1;
+}
+
 /* The variadic console form (plan.md §8 step 18): Node inspects every argument -- each one with
  * the bare-string exception -- and joins the forms with one space. No arguments prints the bare
  * newline, which is what `console.log()` is. One buffer for the whole line, so a multi-line
@@ -1287,7 +1445,16 @@ void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
 static void print_many_to(uint32_t count, const jsrt_value *args, FILE *stream) {
   JSRTBuf out;
   jsrt_buf_init(&out);
-  for (uint32_t i = 0; i < count; i++) {
+  uint32_t from = 0;
+  if (count >= 2 && jsrt_is(args[0], JSRT_TAG_STRING)) {
+    from = format_into(&out, count, args);
+    /* A `%j` getter threw: Node's console.log throws before writing, so nothing is written. */
+    if (jsrt_pending()) {
+      jsrt_buf_free(&out);
+      return;
+    }
+  }
+  for (uint32_t i = from; i < count; i++) {
     if (i > 0) {
       jsrt_buf_putc(&out, ' ');
     }
@@ -1948,23 +2115,37 @@ static void json_quote(JSRTBuf *out, const JSString *str) {
   jsrt_buf_putc(out, '"');
 }
 
-static void json_check_cycle(const void *ptr, const JSONAncestor *chain) {
+/* `cyclic` is NULL for JSON.stringify itself, which cannot throw its TypeError yet and aborts.
+ * util.format's `%j` passes a flag instead: Node's tryStringify catches exactly that TypeError and
+ * prints `[Circular]`, so the cycle is an answer there, not an error. */
+static bool json_cycle(const void *ptr, const JSONAncestor *chain, bool *cyclic) {
   for (; chain != NULL; chain = chain->parent) {
     if (chain->ptr == ptr) {
+      if (cyclic != NULL) {
+        *cyclic = true;
+        return true;
+      }
       jsrt_panic("STA2005: JSON.stringify of a cyclic structure is not yet supported; the spec "
                  "throws TypeError, which builtins cannot raise yet");
     }
   }
+  return false;
 }
 
-static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
+/* A nested serialization stopped: it threw, or `%j` met a cycle. Either way nothing more is
+ * written, and the caller unwinds. */
+static bool json_stopped(const bool *cyclic) {
+  return jsrt_pending() || (cyclic != NULL && *cyclic);
+}
+
+static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain, bool *cyclic) {
   /* §25.5.2.2 step 2: SerializeJSONProperty calls the value's own `toJSON` before doing anything
    * else, and `Date.prototype.toJSON` is the only one the subset has. It answers a STRING, or
    * `null` for an Invalid Date -- which is why `JSON.stringify(new Date(NaN))` is "null" and not
    * an abort, unlike `toISOString`. Serializing the ANSWER, not the Date, is what keeps this one
    * arm from needing a cycle check or a shape walk. */
   if (jsrt_is_date(v)) {
-    json_value(out, jsrt_date_to_json(v), chain);
+    json_value(out, jsrt_date_to_json(v), chain, cyclic);
     return;
   }
   if (jsrt_is(v, JSRT_TAG_NULL)) {
@@ -1992,7 +2173,9 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
   }
   if (jsrt_is(v, JSRT_TAG_ARRAY)) {
     const JSRTArray *a = jsrt_as_array(v);
-    json_check_cycle(a, chain);
+    if (json_cycle(a, chain, cyclic)) {
+      return;
+    }
     const JSONAncestor here = {a, chain};
     jsrt_buf_putc(out, '[');
     for (uint32_t i = 0; i < a->length; i++) {
@@ -2005,8 +2188,8 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
       if (json_unserializable(element)) {
         jsrt_buf_puts(out, "null");
       } else {
-        json_value(out, element, &here);
-        if (jsrt_pending()) {
+        json_value(out, element, &here, cyclic);
+        if (json_stopped(cyclic)) {
           return;
         }
       }
@@ -2034,7 +2217,9 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
       jsrt_buf_putc(out, '}');
       return;
     }
-    json_check_cycle(jsrt_ptr(v), chain);
+    if (json_cycle(jsrt_ptr(v), chain, cyclic)) {
+      return;
+    }
     const JSONAncestor here = {jsrt_ptr(v), chain};
     /* A nested value may throw during serialization. Later getters must not run before it. */
     const JSRTArray *keys = jsrt_as_array(jsrt_object_keys(v));
@@ -2055,8 +2240,8 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
       first = false;
       json_quote(out, (const JSString *)jsrt_ptr(key));
       jsrt_buf_putc(out, ':');
-      json_value(out, value, &here);
-      if (jsrt_pending()) {
+      json_value(out, value, &here, cyclic);
+      if (json_stopped(cyclic)) {
         return;
       }
     }
@@ -2067,10 +2252,30 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain) {
              "spec returns undefined where this call's type promises a string");
 }
 
+/* `%j`: Node's tryStringify -- JSON.stringify, `undefined` where it answers undefined, and
+ * `[Circular]` for the one TypeError it catches. A cycle is found before anything after it is
+ * written, but the partial text is discarded all the same: the answer replaces it. */
+static void json_format(JSRTBuf *out, jsrt_value v) {
+  if (json_unserializable(v)) {
+    jsrt_buf_puts(out, "undefined");
+    return;
+  }
+  JSRTBuf text;
+  jsrt_buf_init(&text);
+  bool cyclic = false;
+  json_value(&text, v, NULL, &cyclic);
+  if (cyclic) {
+    jsrt_buf_puts(out, "[Circular]");
+  } else if (!jsrt_pending()) {
+    jsrt_buf_append(out, text.data, text.len);
+  }
+  jsrt_buf_free(&text);
+}
+
 jsrt_value jsrt_json_stringify(jsrt_value v) {
   JSRTBuf out;
   jsrt_buf_init(&out);
-  json_value(&out, v, NULL);
+  json_value(&out, v, NULL, NULL);
   if (jsrt_pending()) {
     jsrt_buf_free(&out);
     return JSRT_UNDEFINED;
