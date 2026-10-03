@@ -38,7 +38,7 @@ src/app.ts:42:10 STA1001 [ts] explicit 'any' is not allowed in ts mode; use 'unk
 ```
 
 Fields:
-- `file:line:col`: source location (1-indexed)
+- `file:line:col`: source location (1-indexed); `file` uses the platform's separators (`\` on Windows; `docs/BUNDLER.md` §5, "Paths")
 - `STA1234`: diagnostic code (5 chars, always)
 - `[mode]`: `ts` or `js` (braced, always)
 - `message text`: human-readable explanation (may name phases, hint fixes, etc.)
@@ -79,7 +79,7 @@ diagnostic at all.
 ```
 
 Schema:
-- `file` (string): source file path
+- `file` (string): source file path, with the platform's separators (as in the text form)
 - `span` (object): offset and length in the source, in UTF-16 code units (the units the TypeScript compiler API reports, so no re-encoding is needed)
   - `start` (number): 0-indexed offset
   - `length` (number): span length

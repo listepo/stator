@@ -13,6 +13,7 @@ import {
   type BundleResult,
   type BundlerAdapter,
   compile,
+  type CompileRequest,
   type VendorEntry,
   vendorEntry,
 } from '../../compiler/src/api.ts';
@@ -43,6 +44,13 @@ function project(files: Record<string, string>): string {
     writeFileSync(join(root, path), text);
   }
   return root;
+}
+
+/** A path as the checker names a file, and so as the compiler's own maps key it: forward slashes
+ * on every platform. What the compiler hands out is in the platform's form instead, the form
+ * `join` gives (docs/BUNDLER.md §5, "Paths"). */
+function checkerName(path: string): string {
+  return path.replace(/\\/g, '/');
 }
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -170,7 +178,7 @@ test('the rewrite keeps every line and splits type-only names onto the original 
   assert.ok(entry !== undefined);
   const plan = planVendor(program, entry, false);
   assert.ok(plan !== undefined);
-  assert.equal(plan.modulePath, `${root}/${VENDOR_MODULE_NAME}`);
+  assert.equal(plan.modulePath, checkerName(join(root, VENDOR_MODULE_NAME)));
   const rewritten = plan.rewrites(undefined).get(entry.fileName) ?? '';
   assert.equal(rewritten.split('\n').length, source.split('\n').length);
   const lines = rewritten.split('\n').map((line) => line.trimEnd());
@@ -210,10 +218,10 @@ test('export * from a package: the entry re-exports it whole; every named reques
   );
   // The star re-exports the bundle's plain names: not the mangled ones, not the file's own `own`.
   const bundle = 'const a = 1, own = 2, pad = 3;\nexport { a, own, pad as leftpad$pad };\n';
-  const more = plan.rewrites(bundle).get(join(root, 'more.js')) ?? '';
+  const more = plan.rewrites(bundle).get(checkerName(join(root, 'more.js'))) ?? '';
   assert.equal(more.split('\n')[0]?.trimEnd(), `export { a } from "./${VENDOR_MODULE_NAME}";`);
   // Without the bundle, the declaration stays as written and the gate refuses it.
-  assert.equal(plan.rewrites(undefined).get(join(root, 'more.js')), undefined);
+  assert.equal(plan.rewrites(undefined).get(checkerName(join(root, 'more.js'))), undefined);
 });
 
 test('export * from two packages: the bundle cannot say which star a name came from', () => {
@@ -221,7 +229,10 @@ test('export * from two packages: the bundle cannot say which star a name came f
     'main.js': "export * from 'one';\nexport * from 'two';\n",
   });
   assert.equal(plan.entry.code, 'export * from "one";\nexport * from "two";\n');
-  assert.equal(plan.rewrites('export const a = 1;\n').get(join(root, 'main.js')), undefined);
+  assert.equal(
+    plan.rewrites('export const a = 1;\n').get(checkerName(join(root, 'main.js'))),
+    undefined,
+  );
 });
 
 test('a bundle that re-exports an external whole has no name list', () => {
@@ -251,7 +262,9 @@ test('import attributes travel to the entry; the rewritten import drops them', (
       '',
     ].join('\n'),
   );
-  const lines = (plan.rewrites(undefined).get(join(root, 'main.js')) ?? '').split('\n');
+  const lines = (plan.rewrites(undefined).get(checkerName(join(root, 'main.js'))) ?? '').split(
+    '\n',
+  );
   assert.equal(
     lines[0]?.trimEnd(),
     `import { conf_data_json$default as data } from "./${VENDOR_MODULE_NAME}";`,
@@ -358,8 +371,10 @@ test('compile: the bundle joins the program and #line names the package file', a
     code: 'export { pad } from "leftpad";\n',
     resolveDir: root,
   });
-  assert.match(result.c ?? '', new RegExp(`#line 3 "${root}/node_modules/leftpad/index.js"`));
-  assert.match(result.c ?? '', new RegExp(`#line 2 "${root}/main.js"`));
+  // A `#line` names the file the checker's way (docs/BUNDLER.md §5, "Paths").
+  const c = result.c ?? '';
+  assert.ok(c.includes(`#line 3 "${checkerName(join(root, 'node_modules/leftpad/index.js'))}"`), c);
+  assert.ok(c.includes(`#line 2 "${checkerName(join(root, 'main.js'))}"`), c);
 });
 
 test('compile: a diagnostic in the bundle reports the original file and line', async () => {
@@ -373,9 +388,10 @@ test('compile: a diagnostic in the bundle reports the original file and line', a
   const [diagnostic] = result.diagnostics;
   assert.ok(diagnostic !== undefined, result.stderr);
   assert.equal(diagnostic.code, 'STA1214');
-  assert.equal(diagnostic.file, `${root}/node_modules/leftpad/index.js`);
+  const file = join(root, 'node_modules/leftpad/index.js');
+  assert.equal(diagnostic.file, file);
   assert.equal(diagnostic.line, 6);
-  assert.match(result.stderr, /node_modules\/leftpad\/index\.js:6:1 STA1214/);
+  assert.ok(result.stderr.includes(`${file}:6:1 STA1214`), result.stderr);
 });
 
 test('compile: a diagnostic in a runtime helper says it has no source mapping', async () => {
@@ -443,7 +459,7 @@ test('the same checker error in a project file is still STA0012', async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(
     result.diagnostics.map((d) => [d.code, d.file, d.line]),
-    [['STA0012', `${root}/main.js`, 2]],
+    [['STA0012', join(root, 'main.js'), 2]],
   );
 });
 
@@ -460,7 +476,7 @@ test('a vendor read in the temporal dead zone stays reported: Node throws there'
   });
   assert.deepEqual(
     result.diagnostics.map((d) => [d.code, d.file, d.line]),
-    [['STA0012', `${root}/node_modules/leftpad/index.js`, 2]],
+    [['STA0012', join(root, 'node_modules/leftpad/index.js'), 2]],
   );
 });
 
@@ -490,7 +506,8 @@ const EDGE_BUNDLE = [
   '',
 ].join('\n');
 
-test('--node: the vendor module requires a built-in and reads its location at run time', async () => {
+/** A project whose package `edge` the bundle above stands for, and the request that compiles it. */
+function edgeRequest(): { readonly root: string; readonly request: CompileRequest } {
   const main =
     "import { base, dir, load, helper } from 'edge';\nconsole.log(base, dir, load('five.js'), helper);\n";
   const root = project({
@@ -499,26 +516,37 @@ test('--node: the vendor module requires a built-in and reads its location at ru
     'node_modules/edge/index.js': 'module.exports = {};\n',
     'main.js': main,
   });
-  const out = join(root, 'app');
   const bundle: BundleResult = {
     code: EDGE_BUNDLE,
     // Lines 1-6 come from the package; line 7 stands for a bundler helper, which has no mapping.
     map: lineMap('node_modules/edge/index.js', [1, 1, 1, 2, 3, 4]),
     inputs: [],
   };
-  const result = await compile({
-    entry: join(root, 'main.js'),
-    mode: 'js',
-    bundle,
-    node: true,
-    out,
-  });
+  return { root, request: { entry: join(root, 'main.js'), mode: 'js', bundle, node: true } };
+}
+
+// On a Windows runner the project (the temp directory, C:) and the compiler (the checkout, D:)
+// sit on different drives, so the location rewrite imports its helper by absolute path: no
+// relative one exists.
+test('--node: the location rewrite compiles wherever the project sits', async () => {
+  const result = await compile(edgeRequest().request);
   assert.equal(result.ok, true, result.stderr);
-  const run = spawnSync(out, [], { encoding: 'utf8' });
-  // `__filename` is the binary's directory joined with the file the read was written in; a read
-  // with no mapping is the vendor module's own, beside the entry.
-  assert.equal(run.stdout, 'index.js edge MODULE_NOT_FOUND __stator_vendor__.js\n', run.stderr);
 });
+
+test(
+  '--node: the vendor module requires a built-in and reads its location at run time',
+  NATIVE_ONLY,
+  async () => {
+    const { root, request } = edgeRequest();
+    const out = join(root, 'app');
+    const result = await compile({ ...request, out });
+    assert.equal(result.ok, true, result.stderr);
+    const run = spawnSync(out, [], { encoding: 'utf8' });
+    // `__filename` is the binary's directory joined with the file the read was written in; a read
+    // with no mapping is the vendor module's own, beside the entry.
+    assert.equal(run.stdout, 'index.js edge MODULE_NOT_FOUND __stator_vendor__.js\n', run.stderr);
+  },
+);
 
 test('STA0014: an adapter package that is not installed; a module path that does not exist', async () => {
   const root = leftpadProject("import { pad } from 'leftpad';\nconsole.log(pad('x', 3));\n");

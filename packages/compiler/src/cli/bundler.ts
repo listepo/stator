@@ -12,7 +12,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type * as ts from 'typescript';
 import { locationRewrites } from '../frontend/location.ts';
-import { planVendor, type VendorEntry } from '../frontend/vendor.ts';
+import { planVendor, platformPath, type VendorEntry } from '../frontend/vendor.ts';
 import { createProgram, type LoadedProgram, sha256 } from '../frontend/program.ts';
 import type { Module } from '../hir/nodes.ts';
 import { lowerProgram } from '../lower/index.ts';
@@ -329,26 +329,31 @@ function offsetIn(file: string, line: number, column: number): number {
   return offset + column - 1;
 }
 
-/** Diagnostics in the vendor module, reported where the code was written (docs/BUNDLER.md §6):
+/** Diagnostics as they leave the compiler, the one step `build` and `explain` both take. A
+ * diagnostic in the vendor module is reported where the code was written (docs/BUNDLER.md §6):
  * the original file and position, or `<package bundle>` and the bundle's own position with a
- * note that no mapping exists. Every other diagnostic passes through unchanged. */
-export function mapVendorDiagnostics(
+ * note that no mapping exists. Every file is then in the platform's form (§5, "Paths"). */
+export function reportedDiagnostics(
   diagnostics: readonly Diagnostic[],
   vendor: VendorModule | undefined,
 ): readonly Diagnostic[] {
-  if (vendor === undefined) return diagnostics;
   return diagnostics.map((diagnostic) => {
-    if (diagnostic.file !== vendor.path) return diagnostic;
-    const at = vendor.map(diagnostic.line, diagnostic.column);
-    if (at === undefined) {
-      return { ...diagnostic, file: UNMAPPED_FILE, message: diagnostic.message + UNMAPPED_NOTE };
-    }
-    return {
-      ...diagnostic,
-      file: at.file,
-      line: at.line,
-      column: at.column,
-      span: { start: offsetIn(at.file, at.line, at.column), length: diagnostic.span.length },
-    };
+    const mapped = vendor === undefined ? diagnostic : vendorMapped(diagnostic, vendor);
+    return { ...mapped, file: platformPath(mapped.file) };
   });
+}
+
+function vendorMapped(diagnostic: Diagnostic, vendor: VendorModule): Diagnostic {
+  if (diagnostic.file !== vendor.path) return diagnostic;
+  const at = vendor.map(diagnostic.line, diagnostic.column);
+  if (at === undefined) {
+    return { ...diagnostic, file: UNMAPPED_FILE, message: diagnostic.message + UNMAPPED_NOTE };
+  }
+  return {
+    ...diagnostic,
+    file: at.file,
+    line: at.line,
+    column: at.column,
+    span: { start: offsetIn(at.file, at.line, at.column), length: diagnostic.span.length },
+  };
 }

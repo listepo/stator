@@ -1,0 +1,4 @@
+# Every text file checks out with LF, Windows included. Tests compare committed bytes (the selfhost
+# baseline against its `--update` form, golden expectations against Node's stdout), and the CRLF
+# translation git does on Windows by default would change those bytes under them (plan-notes 352).
+* text=auto eol=lf

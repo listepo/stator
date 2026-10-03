@@ -12367,3 +12367,52 @@ lowered. Task 6.29 restores the six tests.
 - **Task 6.30: eleven other Windows failures.** Ten are `bundler.test.ts` path-form mismatches:
   the code answers `C:/Users/…` and the tests expect `C:\Users\…`. The other is
   `selfhost.test.ts` "the committed baseline is in --update form".
+
+## 352. Task 6.30: which path form the bundler seam promises, and LF everywhere (2026-10-03)
+
+**Evidence.** CI run 37150879614, job 111286117947 (`frontend (windows/x64)`), on `0cad209`:
+eleven unit failures besides the FFI quote test plan-notes 349 already skipped.
+
+| Test | Code answered | Test expected | Cause |
+|---|---|---|---|
+| `resolveDir` (3 tests) | `C:/Users/RUNNER~1/…/stator-bundler-X` | `C:\Users\RUNNER~1\…\stator-bundler-X` | `resolveDir` was `dirname(entryFile.fileName)`, the checker's spelling; the test's root comes from `mkdtemp` |
+| `modulePath`, `#line`, diagnostic `file` (4 tests) | `C:/…/node_modules/leftpad/index.js` | `C:\…\stator-bundler-X/node_modules/leftpad/index.js` | the checker's spelling against a test that glued `${root}/…`, a mixed form no code answers |
+| `rewrites(bundle).get(join(root, 'more.js'))` (2 tests) | `''` | the rewritten line | the map is keyed by checker file names; `join` gives `\` |
+| `--node` location read (1 test) | `STA0012 Cannot find module './D:/a/stator/stator/packages/node/src/internal/location.ts'` | `ok` | **a real bug**: the runner's temp dir is on `C:` and the checkout on `D:`. `path.relative` across drives answers the absolute path, and `relativeSpecifier` put `./` in front of it |
+| selfhost "the committed baseline is in --update form" | LF | `\r\n` on every line | the repo has no `.gitattributes`, and git on the Windows runner checks out with `core.autocrlf=true` |
+
+Two more assertions passed on Windows by accident: `rewrites(undefined).get(join(root, 'more.js'))`
+and `rewrites(…).get(join(root, 'main.js'))` expected `undefined`, which a wrongly spelled key
+always answers.
+
+**Decision (the card asked for one).** A file name has two spellings, and docs/BUNDLER.md §5
+"Paths" now says which one is used where:
+
+- **Out of the compiler, the platform's form** (`path.join`'s): `VendorEntry.resolveDir`, and
+  the `file` of every diagnostic (`CompileResult.diagnostics`, `stderr`, `stator explain` text and
+  `--json`). The card's requirement: a diagnostic shown to a Windows user uses `\`. One function,
+  `platformPath` in `frontend/vendor.ts` (the seam's module), does the conversion. A module of
+  its own would cost the selfhost ratchet one STA1214 for its `node:path` import. It is applied
+  in the one step both `build` and `explain` already took on the way out:
+  `mapVendorDiagnostics` becomes `reportedDiagnostics`, which maps vendor diagnostics and then
+  converts every `file`.
+- **Inside the compiler and in the generated C, the checker's form** (absolute, `/`): TypeScript
+  names every `SourceFile` that way, so `modulePath`, the `rewrites` keys (the overlay the program
+  is re-created with), `#line` and the run-time locations the binary prints keep it. Converting
+  them would mean converting back at every lookup. clang and debuggers take `/` on Windows.
+- **Written specifiers** are relative with `/`, or, when no relative path exists (another drive),
+  the absolute target with `/`. `relativeSpecifier` checks `isAbsolute` on what `relative`
+  answers.
+
+The tests now say which form they expect: `join(root, …)` for what comes out, and a
+`checkerName` helper (`/` for `\`) for `modulePath`, the `rewrites` keys and `#line`. No
+assertion became looser: the `#line` regexes, which matched any character at each `.` of the
+root, are now exact `includes` checks, and the stderr check names the whole path instead of its
+tail. The `--node` test is split. The compile, which is where the cross-drive bug failed, runs on
+every platform. Running the binary is `NATIVE_ONLY`, like every other test that runs one.
+
+**CRLF.** The root cause is the checkout, not the comparison: the committed bytes are LF (`git
+ls-files --eol` shows `i/lf` for every text file), and `--update` writes LF. A `.gitattributes`
+of `* text=auto eol=lf` makes every checkout LF. `git add --renormalize .` changed no file. This
+also removes the reason `ci.yml` gave for keeping `lint` off the desktop legs ("arguing with
+git's line-ending translation"), so the comment now says why one run in `static` is enough.

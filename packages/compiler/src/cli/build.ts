@@ -36,7 +36,7 @@ import {
   DEFAULT_BUNDLER,
   loadFrontend,
   lowerFrontend,
-  mapVendorDiagnostics,
+  reportedDiagnostics,
 } from './bundler.ts';
 import { type NamedPath, refuseAliasedOutputs, requireWritable, writeOutput } from './outputs.ts';
 import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
@@ -353,7 +353,7 @@ async function compileToCInner(
   const { program } = frontend;
   // Every stage's diagnostics in the vendor module are mapped before they print (T12.1 step 5).
   const report = (diagnostics: readonly Diagnostic[]): Promise<boolean> =>
-    reportDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
+    reportDiagnostics(reportedDiagnostics(diagnostics, frontend.vendor));
   if (await report(frontend.diagnostics)) {
     return null;
   }
