@@ -84,10 +84,18 @@ static jsrt_value string_method_call(uint32_t argc, const jsrt_value *argv, JSRT
   if (row->fn2 != NULL) {
     return row->fn2(receiver, jsrt_arg(argc, argv, 0), jsrt_arg(argc, argv, 1));
   }
-  jsrt_value out = receiver;
-  for (uint32_t i = 0; i < argc; i++) {
-    out = jsrt_string_concat(out, jsrt_to_string(argv[i]));
+  /* An argument's ToString may run the program's `toString`, which allocates and may throw: the
+   * text so far stays rooted across it, and a throw stops the walk before a later one runs. */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = receiver;
+  for (uint32_t i = 0; i < argc && !jsrt_pending(); i++) {
+    JSRT_LOCAL(1) = jsrt_to_string(argv[i]);
+    if (!jsrt_pending()) {
+      JSRT_LOCAL(0) = jsrt_string_concat(JSRT_LOCAL(0), JSRT_LOCAL(1));
+    }
   }
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 

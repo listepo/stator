@@ -208,16 +208,23 @@ int32_t jsrt_to_int32(double d);
 /* ToUint32: convert a double to uint32_t using the spec algorithm. */
 uint32_t jsrt_to_uint32(double d);
 
+/* ToPrimitive's preferred type (ECMA-262 §7.1.1): `string` tries `toString` first, the other two
+ * `valueOf` first. `default` is what `+` and `==` pass; only a Date tells it from `number`. */
+typedef enum { JSRT_HINT_DEFAULT, JSRT_HINT_NUMBER, JSRT_HINT_STRING } jsrt_hint;
+
 /* ToPrimitive (ECMA-262 §7.1.1, docs/NUMERIC.md §7): the conversion every other abstract
  * operation runs FIRST when handed an object. A primitive passes through untouched.
  *
- * There is no `hint` parameter, and that is a fact about the subset rather than a shortcut: the
- * hint only selects whether `valueOf` or `toString` is tried first, and this subset has neither a
- * user-written `valueOf` nor a `Symbol.toPrimitive` (STA1212, Phase 5). The inherited
- * `Object.prototype.valueOf` returns the object itself -- not a primitive -- so BOTH hints fall
- * through to `toString` for every object that exists here, and the two hints cannot be told apart.
- * Adding user methods is what makes the hint observable; add the parameter then, not before. */
-jsrt_value jsrt_to_primitive(jsrt_value v);
+ * An object runs OrdinaryToPrimitive (§7.1.1.1): the two methods in the hint's order, the one the
+ * object actually has -- its own, its class's, a prototype's (jsrt_user_get) -- or else the builtin
+ * prototype's. The first call that answers a primitive wins; a method that is not callable is
+ * skipped; when neither answers a primitive the result is Node's `TypeError: Cannot convert
+ * object to primitive value`. A Date's default hint is `string` (§21.4.4.45). There is no
+ * `Symbol.toPrimitive`: symbols are STA1212 (Phase 5), so no object can carry one.
+ *
+ * User code runs here, so the answer may be an exception: it is left pending and the value is
+ * `undefined`, which the caller must not use before checking jsrt_pending(). */
+jsrt_value jsrt_to_primitive(jsrt_value v, jsrt_hint hint);
 
 /* ToNumber: convert a jsrt_value to a double. An object is run through ToPrimitive first.
  * Handles double, boolean, null, undefined, string, and Int32. */
@@ -537,6 +544,20 @@ const char *jsrt_shape_key(jsrt_value name);
 /* Reading a property the object does not have is `undefined` -- that IS the semantics of an
  * optional property. A miss is never cached: the same object can gain the key later. */
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic);
+/* [[Get]] of `key` restricted to what the PROGRAM put there: the object's own properties, its
+ * class's methods, and a dynamic object's prototype chain. False on a miss, which means the key
+ * resolves on a builtin prototype (%Object.prototype%, %Array.prototype%, ...) whose methods the
+ * caller models itself -- ToPrimitive's fallback, util.format's `hasBuiltInToString`. A getter
+ * found runs, and may leave an exception pending.
+ *
+ * `holder` (may be NULL) answers where the hit lives: NULL for an own property, otherwise the
+ * `constructor.name` of the prototype that holds it ("" when that prototype has none). A class
+ * method whose capturing closure has no table entry cannot be traced to one class; `*exact` (may
+ * be NULL) is then false and `*holder` names the most-derived candidate, or a builtin-named one
+ * when any candidate is (jsrt_is_builtin_constructor_name), so a caller refuses rather than
+ * guesses. */
+bool jsrt_user_get(jsrt_value obj, const char *key, jsrt_value *out, const char **holder,
+                   bool *exact);
 /* Overwrites in place when the key exists; transitions the shape (growing slots) when it does
  * not. Transitions are not IC-cached -- each object performs a given addition once. `key` must
  * outlive the program (generated C passes string literals); the shape table stores the pointer. */
@@ -1584,6 +1605,11 @@ jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv
  * method call's receiver, passed to a closure that declares one, or NULL for a plain call. */
 jsrt_value jsrt_call_spread_at(jsrt_value callee, const jsrt_value *receiver, jsrt_value args,
                                const char *loc);
+/* A call the RUNTIME makes with a known `this` (ToPrimitive calling `toString`): a closure that
+ * declares a receiver gets `receiver` in slot zero whatever its arity, anything else is
+ * jsrt_call's call -- a class object's TypeError included. */
+jsrt_value jsrt_call_with_this(jsrt_value callee, jsrt_value receiver, uint32_t argc,
+                               const jsrt_value *argv);
 
 /* `new v(...)`: the one caller of a class object's constructor (docs/VALUE.md §4.17).
  *
@@ -1864,7 +1890,20 @@ jsrt_value jsrt_console_time(jsrt_value label);
 jsrt_value jsrt_console_time_end(jsrt_value label);
 void jsrt_console_trace(jsrt_value message);
 void jsrt_console_trace_bare(void);
-jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
+/* ECMA-262 ToString: -0 becomes "0". An object goes through ToPrimitive with hint `string`, so a
+ * `toString` (or `valueOf`) the program wrote RUNS here and may throw: the exception is left
+ * pending and the answer is the empty string, which no caller may use before it checks
+ * jsrt_pending() (plan.md §9 Task 6.27). */
+jsrt_value jsrt_to_string(jsrt_value v);
+/* What the builtin prototypes' own `toString` answers for an object -- `[object Object]`, an
+ * array's join, a Date's or an Error's text -- never a method the program wrote. ToPrimitive's
+ * fallback when the program wrote none, and the rendering a runtime error MESSAGE uses, which must
+ * not call into the program (Node names such an operand without converting it). */
+jsrt_value jsrt_builtin_to_string(jsrt_value v);
+/* util.format's `builtInObjects` (lib/internal/util/inspect.js, Node v26.7.0): the globals whose
+ * name, as a holder's `constructor.name`, makes `%s` inspect an object instead of calling its
+ * `toString`. The list is the pinned Node's, measured, and a unit test re-measures it. */
+bool jsrt_is_builtin_constructor_name(const char *name);
 
 /* ----------------------------------------------------------- exceptions */
 

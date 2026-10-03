@@ -464,8 +464,10 @@ and generated uniformly:
   frame, the module environment, then the merged module's top-level statements in Task
   3.11 order (the SAME emission `main` runs, shared helpers, never a second copy), then
   the microtask drain, then the exported-const stores. Idempotent via a set-before static
-  guard: a second `jsrt_init()` would chain the Boehm roots hook into itself, and a second
-  `JSRT_GLOBALS_ENTER` would wipe every global. Calling an exported function before init
+  guard: a second `JSRT_GLOBALS_ENTER` would wipe every global. `jsrt_init()` is
+  idempotent on its own (plan-notes 341): two units linked against one `libjsrt.a` each
+  call it, and before the guard in `jsrt_gc_init` the second call installed the Boehm roots
+  hook as its own predecessor, so the first collection overflowed the stack. Calling an exported function before init
   is undefined behavior (the header says so). A top-level throw lands in the error cell
   like any stub failure instead of `jsrt_uncaught`'s exit — the unit is then unusable.
   `jsrt_init` also installs the stack-overflow fault handler for SIGSEGV and SIGBUS
@@ -529,7 +531,8 @@ plus a manual link proof (fresh pair links and runs; version-skewed pair fails w
   (`^[A-Za-z0-9_]+$`, else `STA0004`, plan.md §9 Task 6.20): sanitizing is not injective, so
   `my-lib` and `my_lib` would export the same symbols. `--link` and
   `@statorLink` flags are accepted but inert with the flag — linking is the consumer's
-  job, and the consumer link line arrives with step 9. An exported function whose WHOLE
+  job, and the consumer link line arrives with step 9. Under `--emit=lib` (below) they are
+  not inert: they join the `.pc` file's `Libs`. An exported function whose WHOLE
   signature is in §2's table spells plain C types; any other position spells `jsrt_value`.
   An exported `const` number/boolean spells `extern const double`/`bool`, a `CString`
   `extern const char *`, a string/null/undefined `extern const jsrt_value`. The header
@@ -552,6 +555,72 @@ plus a manual link proof (fresh pair links and runs; version-skewed pair fails w
   exported `Out<T>` slot, which names a call-local address with no cross-boundary meaning.
 - **Tests:** `tests/ffi/` fixture + `main.c` byte-compare, double-build `cmp`
   determinism, collision/error-path goldens, GC-hygiene loop under Boehm, ASan job.
+
+### Static library: `--emit=lib` (plan.md §10 Task 7.4) — LANDED
+
+`--emit=lib` (config `"emit": "lib"`) turns the `--emit-header` object into three files a C
+build can use with no Stator checkout:
+
+```sh
+stator build unit.ts --emit=lib -o out/libconsumer.a --emit-header=out/consumer.h --unit-name consumer
+PKG_CONFIG_PATH=out cc main.c $(pkg-config --cflags --libs libconsumer) -o app
+```
+
+- **`-o lib<name>.a`** holds one member, `<name>.o`: the unit's object prelinked (`cc -r`)
+  with the runtime archive members it reaches — `libjsrt_std.a` when the unit imports
+  `std/*`, then `libjsrt.a`. Any other `-o` spelling is `STA0004`, because `-l<name>` finds
+  nothing else, and so is `--emit=lib` without `--emit-header`.
+- **`lib<name>.pc`** is written beside the archive. It is relocatable (`prefix=${pcfiledir}`),
+  so the three files can move together. `Libs` carries exactly the binary link's list
+  (`build.ts` `systemLinkFlags`: the runtime's recorded `link-flags.txt` — Boehm's `-lgc`,
+  `-lm` — plus the unit's `@statorLink` and `--link=` flags), all in `Libs` rather than
+  `Libs.private`: there is no shared variant, and `pkg-config --libs` must give a working
+  line without `--static`.
+- **The runtime is private.** Every global in the member except the header's symbols
+  (`stator_<unit>_*`, the version symbol) is made local: on Mach-O through the linker's
+  `-exported_symbols_list`, which `ld -r` turns into static symbols; on ELF through
+  `objcopy --keep-global-symbols` after the link. Two Stator libraries therefore link into
+  one program without colliding on `jsrt_*`, each with its own runtime, frames and
+  globals. A third choice, `--runtime=external` (the consumer links one shared
+  `libjsrt.a`), was measured and not taken: it leaks the runtime's ~900 symbols into the
+  consumer's namespace and makes the consumer pick a matching archive by hand
+  (plan-notes 342).
+- **Consequences of the private runtime**, measured in plan-notes 342:
+  1. *Size*: each library carries its own runtime, about 200 KB of code per extra library
+     in a program (`-dead_strip`; the member before the final link is about 400 KB). One
+     library costs what an `--emit-header` object plus `libjsrt.a` costs.
+  2. *One collector*: Boehm stays a shared system library, so every runtime copy shares one
+     heap. The copies share one Boehm object kind through a weak global the library keeps
+     exported (`jsrt_gc_shared_kind_p48`, `packages/runtime/src/jsrt_mem.h`); without it the
+     13th library in one process aborted with Boehm's "Too many kinds". Each copy chains
+     its own roots hook, so a collection sees every library's frames.
+  3. *No `jsrt_value` crossing*: an export whose header would need `jsrt_value.h` (any
+     position outside §2's table) is `STA1220` under `--emit=lib`, because the consumer
+     has no runtime API to make or read one. Plain `--emit-header` still exposes it.
+  4. *One stack guard per copy*: each runtime's init measures the calling thread's stack and
+     sets its own limit, so unbounded recursion inside any library is a `RangeError` in that
+     library's `last_error`. The SIGSEGV/SIGBUS fault handler (plan-notes 338) is installed
+     once per copy; each one hands a fault outside its guard region back to the handler it
+     replaced, so the copies chain like the Boehm roots hooks do.
+- **Deterministic**: the prelink drops debug information (`-Wl,-S`), which would name the
+  build machine's runtime paths, and the archiver runs in its deterministic mode (`ar D` on
+  ELF; `ZERO_AR_DATE=1` for Apple's `ar`, which refuses `D`). Two builds of the same input
+  give byte-identical `.a`, `.h` and `.pc`. The archive still names the unit's own source
+  files where the program reports them (a call site's `file:line` for error stacks, as in a
+  binary), so building the same unit from another directory changes those strings. The sanitized flavor (`STATOR_RUNTIME=asan`)
+  keeps its debug information for line numbers in reports, so its archive is not
+  byte-reproducible; it is a test build, never one to hand out.
+- **Tools**: `$CC` for the prelink, `objcopy` on ELF and `ar`; `OBJCOPY` and `AR` override
+  the last two. A missing or failing one is `STA0020` (`docs/TOOLCHAIN.md`).
+- **Windows** is `STA1219` (not yet): a COFF library needs `llvm-lib` and a symbol
+  localization this path does not have.
+- **Proof**: `packages/tests/ffi/example-c-consumer/static-lib.ts` builds the example twice
+  and compares the bytes, links `main.c` from a fresh directory through `pkg-config` alone
+  and checks `expected.txt`, then links `consumer` and a second library (`keeper.ts`) into
+  `two.c`, forces Boehm collections between calls into both, and overflows the stack in one
+  while the other keeps answering. The ffi CI jobs (Linux and
+  macOS) run it, and so does the ASan gate (`pnpm run test:asan`) against the sanitized
+  runtime.
 
 ---
 

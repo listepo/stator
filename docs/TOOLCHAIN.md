@@ -193,8 +193,10 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 
 | Tool            | Used by                                                              | For                                                      |
 | --------------- | -------------------------------------------------------------------- | -------------------------------------------------------- |
-| `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`                       | the runtime, the emitted C, and the final link           |
-| `ar` (`$AR`)    | justfiles                                                            | archiving `libjsrt.a` and `libjsrt_std.a`                |
+| `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`, `src/cli/library.ts` | the runtime, the emitted C, the final link, and the `--emit=lib` prelink (`cc -r`) |
+| `ar` (`$AR`)    | justfiles, `packages/compiler/src/cli/library.ts`                    | archiving `libjsrt.a` and `libjsrt_std.a`; the `--emit=lib` archive (`ar rcsD` on ELF, `ZERO_AR_DATE=1 ar rcs` with Apple's `ar`, so it is byte-reproducible; plan.md §10 Task 7.4). Missing or failing under `--emit=lib`: `STA0020` |
+| `objcopy` (`$OBJCOPY`) | `packages/compiler/src/cli/library.ts`, ELF only               | `--emit=lib`: `--keep-global-symbols` makes the private runtime's symbols local (GNU binutils or `llvm-objcopy`; macOS needs none, its linker localizes). Missing or failing: `STA0020` |
+| `pkg-config` (consumer side) | a C build using an `--emit=lib` library              | `pkg-config --cflags --libs lib<name>` reads the emitted `.pc` (docs/FFI.md §8); the CI check `static-lib.ts` uses it |
 | `just`          | justfile                                                             | the runtime build (pinned `1.58.0` in `mise.toml`)       |
 | `zig`           | justfiles (T9.1, T11.2)                                              | memory-core objects into `libjsrt.a`, std backings into `libjsrt_std.a` (pinned `0.16.0` in `mise.toml`; required) |
 | `pkg-config`    | justfile                                                             | finding bdw-gc and ICU; absent means both are simply off |

@@ -820,32 +820,7 @@ change as the fix, and updates the matching docs (golden rule 8). Order: 6.20 an
 `2efaabb`. Neither is from the audit, so neither carries an `F` number. 6.28 is a crash, but 6.27
 prints different bytes while `explain` says `static`, so 6.27 comes first.
 
-**Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**
-Today ToString of an ordinary object ignores the user's method and prints `[object Object]`
-(`jsrt_print.c`, the fallback branch at the end of `jsrt_to_string`), while `explain` answers
-`static`. Wherever ECMA-262 runs ToPrimitive, call the method the object actually has: a template
-literal, `String(x)` and `.concat` (hint `string`: `toString` first, then `valueOf`), `'' + x`
-(hint `default`: `valueOf` first, then `toString`), and `Array.prototype.join`. That includes a
-class method, an object-literal method and an inherited one, with `Symbol.toPrimitive` not-yet
-until symbols exist (Phase 5). A method that throws propagates as a catchable exception. A method
-that returns an object is a `TypeError`, as in Node.
-1. In `ts` mode the receiver's type says whether the method is the user's, so lowering emits a
-   direct call and the runtime fallback is never reached.
-2. In `js` mode, and for a `ts` receiver whose type cannot say (a union, an interface), the
-   runtime looks the method up with `jsrt_get_prop` and calls it with `jsrt_call`. The emitter
-   follows every such conversion with the pending-exception check, as it does after
-   `JSON.stringify` (`consoleMayThrow` is the precedent).
-3. Lift the 6.24 refusals that share this path: `%s` of an object with its own `toString`, and
-   `%d`/`%i`/`%f` through a user `toString`/`valueOf`. They are `STA1214` at the gate today and
-   `PANIC: STA2005` at run time (plan-notes 337). A refusal this card cannot lift stays as it is.
-4. Where a case still cannot match Node, refuse it with a not-yet code and never print other bytes.
-
-`v + 1` with a user `valueOf` in `js` mode is `STA0012` today, because TS2365 is not in
-`JS_MODE_RUNTIME_CODES`. That is a mode-policy question, not this card's (plan-notes 344).
-**Check:** goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` cover every site
-above, inheritance, a throwing method caught by `try`, and the object-returning `TypeError`, and
-match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
-of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
+~~**Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.27 (plan-notes 345).
 
 ~~**Task 6.28 — A function initializer may refer to its own binding.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.28 (plan-notes 347).
 
@@ -1088,46 +1063,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 **Check:** ✅ **met 2026-09-15** — `examples/ffi/sqlite/` (generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node; the CI proof is the ffi job's own run (plan-notes 271): an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
-**[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
-Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
-The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
-libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
-This task makes `stator build` produce one static library plus its header, which a C build can
-use with no Stator checkout.
-
-Steps:
-
-1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
-   `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
-   member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
-   written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
-   same input are byte-identical, as the header already is (Task 7.2 step 8).
-2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
-   it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
-   writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
-   the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
-3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
-   program would each carry `jsrt_*` and collide. Measure both options and record the result in
-   plan-notes before choosing:
-   (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
-   `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
-   on ELF), so each library carries a private runtime; this must prove two such libraries work
-   in one process, including two collectors' init and roots;
-   (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
-   shared `libjsrt.a` installed once.
-   Whichever is chosen, the other combination is refused or documented. It never fails at run
-   time.
-4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
-   (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
-   Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
-5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
-   refused with a not-yet diagnostic until then.
-
-**Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
-`<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
-runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
-linked into one C program and both called, under the option step 3 chose. The ffi CI job and
-the ASan job run it. `pnpm run ci` is green.
+~~**Task 7.4 — A self-contained static library for C consumers.**~~ ✅ **landed 2026-10-03** — evidence in [done.md](done.md) → Phase 7 Task 7.4 (plan-notes 341, 342, 343).
 
 ---
 
@@ -2456,6 +2392,8 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.67** (2026-10-04): **Task 6.23 lands: runtime failures are Node's errors** (plan-notes 338, 339). Every generated function checks its frame address against a per-thread limit measured at `jsrt_init` and throws a catchable `RangeError: Maximum call stack size exceeded` (+3.7 % on `fib`). A SIGSEGV/SIGBUS at the stack's low end prints `PANIC: STA2005 stack overflow`, and other faults go to the handler that was there before. `JSString` is now a header viewing its units, so `+=` in a loop extends a shared append buffer: 200 000 appends take 15 ms against Node's 55 ms, down from 2.3 s. Past 2^29 − 24 units, concatenation throws `RangeError: Invalid string length` instead of answering `JSRT_NULL`, and the emitter checks pending after every `+` not typed `number`, `+=`, multi-part template literals and `String.prototype.concat`.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
 - **v4.73** (2026-10-04): **Tasks 6.27–6.28 added: two bugs found while landing 6.24** (plan-notes 344). 6.27: a user `toString`/`valueOf` is honored wherever an object becomes a string, instead of `[object Object]` under a `static` verdict. 6.28: a function initializer that refers to its own binding no longer stops with internal error `STA4002`.
+- **v4.74** (2026-10-04): **Task 6.27 landed: a user `toString`/`valueOf` is honored by ToPrimitive** (plan-notes 345). A template hole, `String(x)`, `concat`, `join`, `'' + x`, `Number(x)`, the comparisons, `==` and util.format's `%s`/`%d`/`%i`/`%f` call the method the object has, in ECMA-262's hint order. A throwing method is catchable, and an object answer is Node's `TypeError`. The three 6.24 refusals that shared this path are lifted. The card moved to done.md.
 - **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
 - **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.
 - **v4.77** (2026-10-03): **Task 6.29 lands: Test262 gets back its six module tests** (plan-notes 350). The five `module-code` tests had only ever passed by accident: the runner compiled them under a temporary name, so their imports failed to resolve. A build now reports parse-phase errors (the parser's, the binder's, and the new `STA3005` for an imported binding named `eval`/`arguments`) before any bundle step runs. A default import of a syntax-free `.js` ES module is the new `STA3004`. `ratchet.json` `passed` goes from 2372 to 2377.
+- **v4.79** (2026-10-03): **Task 7.4 lands: a self-contained static library for C consumers** (plan-notes 341–343). `stator build --emit=lib -o lib<name>.a --emit-header=<h>` prelinks the unit with a private runtime (`cc -r`; Mach-O `-exported_symbols_list`, ELF `objcopy --keep-global-symbols`), archives it deterministically and writes a relocatable `lib<name>.pc` from the binary link's own flag list, so `cc main.c $(pkg-config --cflags --libs lib<name>)` builds with no Stator checkout. Two libraries share one Boehm through a weak shared object kind and chained roots hooks; `jsrt_gc_init` is idempotent, which also fixes two `--emit-header` objects sharing one `libjsrt.a`. New codes STA0020, STA1219 (Windows) and STA1220 (`jsrt_value` surface). About 200 KB of runtime per extra library.
