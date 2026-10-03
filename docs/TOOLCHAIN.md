@@ -38,6 +38,18 @@ the GitHub Actions, and cannot keep the rule above by itself: a PR from its `too
 a row of this table, so it needs that row and a `plan-notes.md` line before merge. It never
 proposes a TypeScript or `@types/node` major. Node, pnpm, LLVM, just and Zig stay hand-bumped.
 
+## Site (`site/`)
+
+The landing page is its own Astro project with its own lockfile (`site/pnpm-lock.yaml`), built and
+checked by `.github/workflows/pages.yml`, never by `pnpm run ci`.
+
+| Package                     | Pin                | Where pinned                                                                                                                                         |
+| --------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| astro                       | `^7.3.3`           | `dependencies` in `site/package.json`. The static site build and its `<meta>` CSP (`security.csp`)                                                   |
+| `@fontsource/ibm-plex-sans` | `5.3.0` (exact)    | `dependencies` in `site/package.json`. Self-hosted IBM Plex Sans (OFL-1.1), so a visit requests nothing from a third party (Task 6.26, plan-notes 336) |
+| `@fontsource/ibm-plex-mono` | `5.3.0` (exact)    | `dependencies` in `site/package.json`. Self-hosted IBM Plex Mono, as above                                                                           |
+| playwright-core             | `1.63.0` (exact)   | `devDependencies` in `site/package.json`. `pnpm run check:browser` drives the installed Chrome over `dist/`; downloads no browser (plan-notes 336)   |
+
 ## Verified development host
 
 The host this bootstrap was verified on (a data point, not a requirement):

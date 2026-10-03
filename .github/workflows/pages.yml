@@ -69,6 +69,12 @@ jobs:
           grep -q 'TS/JS' index.html
           echo "site ok: $(find . -name '*.html' | wc -l) pages"
 
+      # Same-origin requests only, no CSP violation, no sideways scroll at 320/360 px, a theme
+      # toggle that cycles with storage blocked (plan.md Task 6.26). The runner's Chrome.
+      - name: Browser check
+        working-directory: site
+        run: pnpm run check:browser
+
       - uses: actions/upload-pages-artifact@v5
         if: github.event_name != 'pull_request'
         with:

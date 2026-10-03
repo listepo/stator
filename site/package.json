@@ -8,10 +8,16 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
+    "check:browser": "node scripts/check.ts",
     "astro": "astro"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "5.3.0",
+    "@fontsource/ibm-plex-sans": "5.3.0",
     "astro": "^7.3.3"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
   },
   "engines": {
     "node": ">=22.12.0"
