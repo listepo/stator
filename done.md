@@ -2774,6 +2774,57 @@ tests passed (the audit's F5 test included); `pnpm run test:golden` → `453 pas
 > loses its `@expected-fail` marker; a js-mode twin passes; the audit's F5 test passes;
 > `pnpm run ci` green.
 
+### Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9) ✅ (landed 2026-10-04)
+
+Audit findings F7, F8 and F9 (plan-notes 330). What landed (plan-notes 335):
+
+- **F7, `ffi-gen/main.ts`.** `--out` that names the input header or the `--diff` file (same resolved path, or the same inode through a symlink or hard link) is
+  refused (exit 2) before anything is read or written. `--lib` must match
+  `^[A-Za-z0-9_.+-]+$`, so a newline or a space can no longer append source or a second clang
+  flag to the committed `.d.ts`. `--help`/`-h` prints the usage to stdout and exits 0.
+- **F8, `frontend/extern.ts`.** A resolved quote-form header path, a bare name or an angle header
+  holding a `"`, a line break or NUL is an `invalid` pragma, which the gate reports as `STA1119`
+  at the pragma's line. Every other path is emitted as written. The card said "through
+  `escapeCString`", but clang reads a header name literally: `#include "…/q\"d/m.h"` and the
+  octal-escaped spelling of a non-ASCII directory are both "file not found" (plan-notes 335).
+  Escaping would have broken every non-ASCII binding directory that works today.
+- **F9, `frontend/extern.ts`.** `linkFlagRefused` allows `-l<name>`, `-L<dir>`,
+  `-framework <name>` and `-Wl,-rpath,<dir>` (no further comma). Anything else is `invalid`, and
+  the message names the flag and points at `--link=`. The gate's prefix for an invalid pragma
+  now reads "refused @statorLink pragma", since a disallowed flag is not malformed.
+- **Fixtures adjusted on purpose.** One unit test parsed `-lfoo "/p a t h/x.a"`, an archive
+  path, which the allowlist now refuses. It now groups `"-L/p a t h"`, and the test also covers
+  `-framework` and `-Wl,-rpath,`. No golden, example or `packages/*` binding used a flag outside
+  the allowlist. Every pragma in the tree is `-l<name>`, `-L<dir>` or `#include`.
+- **Tests.** The audit's F7 tests and its F8 test, adapted to assert the `STA1119` refusal and
+  that no C is written (`unit/ffi-gen-binding.test.ts`). Unit tests for the allowlist (eight
+  refused spellings, each named) and for unspellable paths, with a non-ASCII directory kept as
+  written (`unit/extern_link.test.ts`). Decision tests `subset_extern_link_flag_{ts,js}`
+  refusing `-fplugin=` in both modes.
+- **Docs.** `docs/FFI.md §9`, `docs/SUBSET.md` and `docs/DIAGNOSTICS.md` (the STA1119 row).
+
+Check evidence:
+- `pnpm run test:subset`: 923 fixtures, 892 passed, 31 expected-fail, 0 failed. Both
+  `subset_extern_link_flag_*` pass.
+- `pnpm run test`: 57 files, 742 tests passed, including the audit's F7 and F8 tests.
+- `pnpm run test:golden`: 453 passed, 0 failed.
+- `pnpm run test:selfhost`: 14 targets match the baseline.
+- typecheck, lint and dupes clean.
+
+> **Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**
+>
+> - **F7.** `ffi-gen` refuses an `--out` (or `--diff`) equal to the input header, validates `--lib`
+>   against `^[A-Za-z0-9_.+-]+$`, and prints `--help` to stdout with exit 0.
+> - **F8.** A resolved `@statorLink` header path containing `"`, `\n`, `\r` or NUL is refused
+>   (`STA1119`); every other path is emitted through the emitter's `escapeCString`, as `#line` is.
+> - **F9.** `@statorLink` flags are limited to link flags: `-l<name>`, `-L<dir>`,
+>   `-framework <name>` and `-Wl,-rpath,<dir>`. Anything else is `STA1119` naming the flag; the
+>   explicit escape hatch stays `--link=` on the command line. `docs/FFI.md §9` changes from
+>   "verbatim clang link flags" to the allowlist.
+>
+> **Check:** the audit's F7 and F8 tests pass, plus a decision test refusing `-fplugin=` in a
+> pragma; `docs/FFI.md` updated; `pnpm run ci` green.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

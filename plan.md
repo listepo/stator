@@ -818,19 +818,7 @@ change as the fix, and updates the matching docs (golden rule 8). Order: 6.20 an
 **Check:** the audit's F3 and F4 tests pass; `docs/TOOLCHAIN.md` and `docs/CONFIG.md` describe the
 allowlist; `pnpm run ci` green.
 
-**Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**
-
-- **F7.** `ffi-gen` refuses an `--out` (or `--diff`) equal to the input header, validates `--lib`
-  against `^[A-Za-z0-9_.+-]+$`, and prints `--help` to stdout with exit 0.
-- **F8.** A resolved `@statorLink` header path containing `"`, `\n`, `\r` or NUL is refused
-  (`STA1119`); every other path is emitted through the emitter's `escapeCString`, as `#line` is.
-- **F9.** `@statorLink` flags are limited to link flags: `-l<name>`, `-L<dir>`,
-  `-framework <name>` and `-Wl,-rpath,<dir>`. Anything else is `STA1119` naming the flag; the
-  explicit escape hatch stays `--link=` on the command line. `docs/FFI.md §9` changes from
-  "verbatim clang link flags" to the allowlist.
-
-**Check:** the audit's F7 and F8 tests pass, plus a decision test refusing `-fplugin=` in a
-pragma; `docs/FFI.md` updated; `pnpm run ci` green.
+~~**Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.22 (plan-notes 335).
 
 **Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12).**
 
@@ -2455,4 +2443,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.60** (2026-10-04): **Tasks 6.20–6.26: the 2026-10-01 QA audit (PR #57) becomes plan work** (plan-notes 330). All 16 findings still reproduce on `338a3c2`. They are grouped one task per layer: CLI outputs and flags (6.20), environment trust (6.21), FFI inputs (6.22), runtime errors (6.23), `console.log` format (6.24), the BigInt verdict (6.25) and the landing page (6.26).
 - **v4.61** (2026-10-04): **Task 6.20 lands: `build` never destroys an input and never calls a user's mistake a compiler bug** (plan-notes 331; QA audit F1, F2, F10, F11). `build()` refuses (`STA0004`) any two of the entry, the program's source files, `-o`, `--emit-header` and the `--keep-c` file that name one file, before anything is written. An output the file system refuses is the new `STA0019`, never `STA4072`, and `-o`'s directory is checked before clang runs. An explicit `--unit-name` must match `^[A-Za-z0-9_]+$`. The CLI parser is one table: a value flag refuses a dash-led next argument, a flag outside its command is `STA0005`, and a bad `STATOR_OPT` names the environment.
 - **v4.63** (2026-10-04): **Task 6.25 lands: a BigInt is not-yet `STA1213`, never internal `STA4031`** (plan-notes 334). The gate refuses a BigInt literal before its token skip, and every read of a value whose declared type may be a bigint, in both modes and in `build` and `explain`. A `typeof u === 'bigint'` narrowing of an `unknown` stays accepted. Both `subset_bigint_primitive_*` fixtures lose `@expected-fail`.
+- **v4.64** (2026-10-04): **Task 6.22 lands: FFI inputs are validated before they reach C or clang** (plan-notes 335). `ffi-gen` refuses an `--out` that names its header or `--diff` file and a `--lib` that is not one library name, and `--help` exits 0 on stdout. A `@statorLink` header path holding a `"`, a line break or NUL is `STA1119`; every other path is emitted as written, because `#include` reads no escapes. Pragma flags are limited to `-l<name>`, `-L<dir>`, `-framework <name>` and `-Wl,-rpath,<dir>`; anything else is `STA1119` naming the flag, and `--link=` stays the escape hatch.
 - **v4.69** (2026-10-04): **Task 7.4 added: a self-contained static library for C consumers** (plan-notes 340). `--emit=lib` with `--emit-header` produces `lib<unit>.a`, its header and a `lib<unit>.pc` with the system libraries. Before choosing between a prelinked private runtime and a shared external one, both are measured.
