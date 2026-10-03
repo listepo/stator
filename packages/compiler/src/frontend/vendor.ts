@@ -17,7 +17,7 @@
 
 import { readFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import * as ts from 'typescript';
 import { classifyStdSpecifier, isStdSourceFile } from './std.ts';
 
@@ -321,9 +321,6 @@ function vendorSource(
 
 export function relativeSpecifier(fromDir: string, to: string): string {
   const rel = relative(fromDir, to).replace(/\\/g, '/');
-  // On Windows a file on another drive has no relative path: `relative` answers `to` itself
-  // (`D:/a/...`), and `./D:/a/...` names nothing. The absolute path is the specifier then.
-  if (isAbsolute(rel)) return rel;
   return rel.startsWith('../') ? rel : `./${rel}`;
 }
 

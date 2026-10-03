@@ -41,6 +41,10 @@ export function nodeLocationFile(): string {
   return `${NODE_SOURCE_DIR}/internal/location.ts`;
 }
 
+/** The helpers by the `node:*` `paths` wildcard instead of a path: what a rewritten file imports
+ * when no relative path reaches `nodeLocationFile()` (Windows, another drive). */
+export const NODE_LOCATION_SPECIFIER = 'node:internal/location';
+
 /** The pinned Node's public built-in ids, without the prefix. `_`-prefixed ids (`_http_agent`)
  * are Node's own internals, the same exclusion `docs/NODE.md` makes. The list is read from the
  * Node running the compiler, which `pnpm run ci` pins to `.node-version`, so it is the same list

@@ -16,10 +16,10 @@
  * Pure: a program in, text out. The flag is a platform, not a mode (§0.8): nothing below the
  * frontend sees either the reads or the rewrite. */
 
-import { dirname, relative } from 'node:path';
+import { dirname, isAbsolute, relative } from 'node:path';
 import * as ts from 'typescript';
 import type { PositionMapper } from '../support/sourcemap.ts';
-import { isNodeSourceFile, nodeLocationFile } from './node.ts';
+import { isNodeSourceFile, NODE_LOCATION_SPECIFIER, nodeLocationFile } from './node.ts';
 import { isFreeCommonJsName, isProjectFile, relativeSpecifier } from './vendor.ts';
 
 /** The helper each read becomes. */
@@ -103,9 +103,20 @@ function importOffset(text: string): number {
   return end === -1 ? text.length : text.indexOf('\n', end) + 1;
 }
 
+/** How a rewritten file imports the helpers: by relative path, or, when no relative path exists
+ * (Windows, the project and `packages/node` on different drives: `relative` answers an absolute
+ * `D:/...`, which an import cannot spell), through the `--node` `paths` wildcard `node:*`, which
+ * maps `NODE_LOCATION_SPECIFIER` to the same file. */
+function helperSpecifier(fromDir: string): string {
+  const helper = nodeLocationFile();
+  return isAbsolute(relative(fromDir, helper))
+    ? NODE_LOCATION_SPECIFIER
+    : relativeSpecifier(fromDir, helper);
+}
+
 function rewrite(file: ts.SourceFile, sites: readonly Site[]): string {
   const used = [...new Set(sites.map((site) => HELPERS[site.read]))].sort();
-  const specifier = relativeSpecifier(dirname(file.fileName), nodeLocationFile());
+  const specifier = helperSpecifier(dirname(file.fileName));
   const header = `import { ${used.join(', ')} } from ${JSON.stringify(specifier)}; `;
   const at = importOffset(file.text);
   let out = file.text.slice(0, at) + header;

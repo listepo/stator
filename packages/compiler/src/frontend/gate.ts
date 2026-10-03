@@ -90,7 +90,13 @@ import {
   linkPragmasOf,
 } from './extern.ts';
 import { isFreeCommonJsName, isPackageSpecifier } from './vendor.ts';
-import { type CommonJsBinding, commonJsVerdict, isNodeSourceFile, nodeBuiltinId } from './node.ts';
+import {
+  type CommonJsBinding,
+  commonJsVerdict,
+  isNodeSourceFile,
+  NODE_LOCATION_SPECIFIER,
+  nodeBuiltinId,
+} from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
@@ -795,7 +801,8 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
     // resolved into `packages/node` and is an ordinary edge; every other one resolved to nothing
     // and was refused where the checker's "cannot find module" is mapped (program.ts
     // `edgeRefusal`), with the platform's answer.
-    if (nodeBuiltinId(spec.text) !== undefined) {
+    // `NODE_LOCATION_SPECIFIER` is the `--node` location rewrite's own import of its helpers.
+    if (nodeBuiltinId(spec.text) !== undefined || spec.text === NODE_LOCATION_SPECIFIER) {
       const target = typeChecker.getSymbolAtLocation(spec)?.valueDeclaration;
       if (target === undefined || (ts.isSourceFile(target) && isNodeSourceFile(target.fileName))) {
         return { kind: 'accept' };
