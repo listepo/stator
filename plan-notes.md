@@ -12079,6 +12079,56 @@ restricted where the page could load from.
 
 Before: 7 checks failed. After: `site check: all passed`.
 
+## 337. Task 6.24 lands: `console.log` format placeholders follow `util.format` (2026-10-04)
+
+**Source (checked 2026-10-04 against the pinned Node v26.7.0):**
+`formatWithOptionsInternal` in `lib/internal/util/inspect.js`
+(https://github.com/nodejs/node/blob/v26.7.0/lib/internal/util/inspect.js, line 2805), with
+`hasBuiltInToString` (line 2707) and `tryStringify` (line 2758). The console calls
+`formatWithOptions` with `kNoColorInspectOptions = {}`
+(https://github.com/nodejs/node/blob/v26.7.0/lib/internal/console/constructor.js, lines 188-189,
+358, 375). Documented contract: https://nodejs.org/docs/v26.7.0/api/util.html#utilformatformat-args.
+
+**What one runtime function does (`format_into` in `runtime/src/jsrt_print.c`).** It is used by
+`log`/`info`/`debug`/`error`/`warn` whenever there are two or more arguments and the first is a
+string at run time. It mirrors Node's loop:
+
+- `%s`: a number prints through the shortest-round-trip printer, `-0` kept. Other primitives
+  print as `String()`. An object prints as `inspect` with depth 0.
+- `%d`: `Number()`. `%i`: `parseInt`. `%f`: `parseFloat`.
+- `%j`: `JSON.stringify`, with `[Circular]` for a cycle and `undefined` for an unserializable
+  value. It shares the stringifier with `JSON.stringify`, so a throwing getter propagates and is
+  catchable.
+- `%O`: `inspect`. `%c` consumes its argument and prints nothing. `%%` prints `%`.
+- A trailing `%` and an unknown `%x` stay literal. Once the arguments run out, only `%%`
+  collapses. The arguments that are left are appended with a space each. When nothing was
+  substituted, every argument is joined as before.
+
+**What is refused instead of printing a different answer** (golden rule: never loosen a
+comparison):
+
+| Case | Why it cannot match yet | Gate (compile time) | Runtime fallback |
+|---|---|---|---|
+| `%o` of an object | Node prints `inspect` with `showHidden: true, depth: 4`: hidden `[length]`, function `[name]`/`[prototype]` and similar. The runtime has no hidden-property inspector. | `STA1214` (phase 5) | `PANIC: STA2005` |
+| `%s` of a function | Node prints the function's source text (`String(fn)`). The binary does not keep source text. | `STA1214` (phase 5) | `PANIC: STA2005` |
+| `%s` of an object with its own `toString` | Node calls the user's method. The runtime print path cannot call back into compiled code. | `STA1214` (phase 8) | `PANIC: STA2005` |
+| `%d`/`%i`/`%f` of an object with its own `toString` or `valueOf` | Same reason: `Number()` and `parseInt` would call user code. | `STA1214` (phase 8) | `PANIC: STA2005` |
+| `%d` of a `Date` | `Number(date)` goes through `valueOf`, which the runtime's `jsrt_to_number` does not model for dates. | `STA1214` (phase 5) | `PANIC: STA2005` |
+
+The gate decides only when the format string is a literal type. A format string known only at
+run time reaches the runtime check, which names the case in its `STA2005` panic rather than
+printing different bytes. The unit test `console-format.test.ts` pins that path.
+
+**Not changed, found on the way:** a user-defined `toString` is ignored when the value is
+converted to a string outside console. A template literal, `String(a)` and `'' + a` print
+`[object Object]` where Node prints the method's result, and `explain` says `static`. This is
+the same missing callback as the `%s` row above, but outside 6.24's scope. It was reported to
+the lead for its own card.
+
+**Gate wiring.** A variadic console call with format placeholders can now leave a pending
+exception (a `%j` getter that throws). `consoleMayThrow` (in `hir/nodes.ts`) makes codegen emit
+the pending check after it, as it already did for `console.table`.
+
 ## 340. Task 7.4: a static library for C consumers (2026-10-04)
 
 **Asked by the creator (2026-10-04):** can the compiler build code into a static library and ship

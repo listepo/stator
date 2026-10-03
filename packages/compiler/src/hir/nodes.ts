@@ -1454,6 +1454,16 @@ export function isConsoleVariadicWidth(method: ConsoleMethod, given: number): bo
   return 'variadic' in shape && given !== shape.arity;
 }
 
+/** Whether the call can leave an exception pending, so the emitter follows it with a check:
+ * `table` reads each row's properties, and a variadic call of two or more arguments may apply
+ * util.format, whose `%j` reads properties too (plan.md §9 Task 6.24) -- a getter there throws. */
+export function consoleMayThrow(call: ConsoleLogCall): boolean {
+  return (
+    call.method === 'table' ||
+    (call.args.length >= 2 && isConsoleVariadicWidth(call.method, call.args.length))
+  );
+}
+
 /** The C entry point for a call of this width, or `null` if the method has no such form. A method
  * without `bare` is always called at full arity because the lowering padded it there; a method
  * with `variadic` takes any other width at its `(count, argv)` entry point. */

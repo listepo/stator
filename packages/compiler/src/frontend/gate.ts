@@ -2611,6 +2611,13 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet(`a spread argument to console.${method} is not yet supported`, 5);
       }
+      const placeholder = 'variadic' in shape ? formatRefusal(call, typeChecker) : undefined;
+      if (placeholder !== undefined) {
+        return notYet(
+          `console.${method} ${placeholder.what} is not yet supported`,
+          placeholder.phase,
+        );
+      }
       // The five printing methods are variadic (plan.md §8 step 18): any width reaches the
       // `(count, argv)` entry point, so neither bound applies — `console.log()` prints the bare
       // newline. `dir` stays unary — its second argument in Node is an options object, not a
@@ -6698,6 +6705,94 @@ function admitsUnserializable(type: ts.Type, checker: ts.TypeChecker): boolean {
       (arm.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 ||
       checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0,
   );
+}
+
+/** The placeholders util.format applies to a format string, each with the index of the argument it
+ * consumes: the runtime's `format_into` loop (Node's `formatWithOptionsInternal`), restated so the
+ * gate can see which value each placeholder meets. `%%` consumes nothing, and once the arguments
+ * run out no placeholder applies (plan.md §9 Task 6.24). */
+function formatPlaceholders(
+  format: string,
+  count: number,
+): readonly { readonly spec: string; readonly index: number }[] {
+  const applied: { spec: string; index: number }[] = [];
+  let consumed = 0;
+  for (let i = 0; i < format.length - 1; i++) {
+    if (format[i] !== '%') {
+      continue;
+    }
+    i += 1;
+    const spec = format[i] ?? '';
+    if (consumed + 1 !== count && spec !== '' && 'sjdOoifc'.includes(spec)) {
+      consumed += 1;
+      applied.push({ spec, index: consumed });
+    }
+  }
+  return applied;
+}
+
+/** A user-written `name` on the value — declared in a source file, not the lib — which util.format
+ * would CALL: the runtime's ToPrimitive never does (jsrt_to_primitive), so the answer would differ. */
+function hasUserMethod(type: ts.Type, name: string): boolean {
+  const declarations = type.getProperty(name)?.getDeclarations() ?? [];
+  return declarations.some((d) => !d.getSourceFile().isDeclarationFile);
+}
+
+/** The placeholder a console call's literal format string applies to a value the runtime cannot
+ * print as Node does, or `undefined`. A format only the run sees is the runtime's to refuse, and
+ * it does so loudly (STA2005, `format_refused` in jsrt_print.c); this is the same rule, reported
+ * at compile time wherever the checker knows the format and the argument's type. */
+function formatRefusal(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+): { readonly what: string; readonly phase: number } | undefined {
+  const [first] = call.arguments;
+  const format = first === undefined ? undefined : checker.getTypeAtLocation(first);
+  if (call.arguments.length < 2 || format === undefined || !format.isStringLiteral()) {
+    return undefined;
+  }
+  for (const { spec, index } of formatPlaceholders(format.value, call.arguments.length)) {
+    const argument = call.arguments[index];
+    const type = argument === undefined ? undefined : checker.getTypeAtLocation(argument);
+    for (const arm of type === undefined ? [] : type.isUnion() ? type.types : [type]) {
+      // An untyped value is the run's to settle, like every other unknown argument.
+      const primitive =
+        (arm.flags &
+          (ts.TypeFlags.StringLike |
+            ts.TypeFlags.NumberLike |
+            ts.TypeFlags.BooleanLike |
+            ts.TypeFlags.Undefined |
+            ts.TypeFlags.Void |
+            ts.TypeFlags.Null |
+            ts.TypeFlags.Any |
+            ts.TypeFlags.Unknown)) !==
+        0;
+      if (spec === 'o' && !primitive) {
+        return { what: '%o of an object', phase: 5 };
+      }
+      // A function or a class: String() of either is its source text, which no binary carries.
+      if (
+        spec === 's' &&
+        (checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0 ||
+          checker.getSignaturesOfType(arm, ts.SignatureKind.Construct).length > 0)
+      ) {
+        return { what: '%s of a function', phase: 5 };
+      }
+      if (spec === 's' && hasUserMethod(arm, 'toString')) {
+        return { what: '%s of an object with its own toString', phase: 8 };
+      }
+      if (
+        (spec === 'd' || spec === 'i' || spec === 'f') &&
+        (hasUserMethod(arm, 'toString') || hasUserMethod(arm, 'valueOf'))
+      ) {
+        return { what: `%${spec} of an object with its own toString or valueOf`, phase: 8 };
+      }
+      if (spec === 'd' && tsTypeToHType(arm, checker).kind === 'date') {
+        return { what: '%d of a Date', phase: 5 };
+      }
+    }
+  }
+  return undefined;
 }
 
 /** A console call the HIR can spell. The method table lives with the node it configures

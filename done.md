@@ -2878,6 +2878,52 @@ visible toggle without JS. Root `pnpm run lint` clean.
 > no request to another origin, no horizontal scroll at 320 px, and the blocked-storage cycle
 > `light,dark,system`.
 
+### Task 6.24 — `console.log` formats like Node (F13) ✅ (landed 2026-10-04)
+
+What landed (plan-notes 337):
+
+- `format_into` in `runtime/src/jsrt_print.c` is the one runtime function. It mirrors Node
+  v26.7.0's `formatWithOptionsInternal` for `log`/`info`/`debug`/`error`/`warn` whenever there
+  are two or more arguments and the first is a string at run time. `%s %d %i %f %j %O %c %%` are
+  applied; `%o` is applied to primitives. A trailing `%` and an unknown `%x` stay literal. Only
+  `%%` collapses once the arguments run out, and arguments left over are appended with a space.
+- `%j` shares `JSON.stringify`'s stringifier (`json_format`): a cycle prints `[Circular]`, an
+  unserializable value prints `undefined`, and a throwing getter leaves the exception pending.
+  `consoleMayThrow` (`hir/nodes.ts`) makes codegen emit the pending check after such a call.
+- What the binary cannot print identically yet is refused, never approximated. These cases are
+  `%o` of an object, `%s` of a function, `%s` of an object with its own `toString`,
+  `%d`/`%i`/`%f` through a user `toString`/`valueOf`, and `%d` of a `Date`. With a literal
+  format string the gate (`formatRefusal` in `frontend/gate.ts`) answers not-yet `STA1214`. A
+  format string known only at run time reaches a named `PANIC: STA2005` in the runtime.
+- Docs: `docs/SUBSET.md` (console row), `docs/DIAGNOSTICS.md` (`STA2005`).
+
+Check evidence:
+
+- New goldens `golden/ts/console_format.ts` and `golden/js/console_format.js` cover every
+  specifier, `%%`, missing and extra arguments, `error`/`warn`/`info`/`debug`, a runtime format
+  string, a cyclic `%j` and a caught `%j` getter throw. Both match Node byte-for-byte, stdout and
+  stderr.
+- Six decision tests `subset/subset_console_format_*`.
+- `unit/console-format.test.ts` covers the audit's F13 test (`'%s=%d', 'n', 5` → `n=5`) and the
+  runtime `STA2005` refusal.
+- `pnpm run ci` on the rebased branch exited 0:
+  - typecheck and lint clean;
+  - dupes: 186 clones, unchanged;
+  - `pnpm run test`: 738 tests passed;
+  - `test:runtime`: the print corpus matches Node;
+  - `test:subset`: `927 fixtures — 896 passed, 31 expected-fail, 0 failed`;
+  - `test:golden`: `455 fixtures — 455 passed, 0 failed`;
+  - `test:selfhost`: green after re-recording `packages/compiler` `STA1214` 1794 → 1800, for
+    the gate's new format-string scan Merged with main f126a49 (Tasks 6.20, 6.22, 6.25,
+    6.26) the count is 1798 → 1804: the same six;
+  - builtins, node-coverage and leak green;
+  - `test:asan`: `golden-asan green`, 455 passed.
+
+> **Task 6.24 — `console.log` formats like Node (F13).** `console.log`/`error`/`warn` with two or
+> more arguments and a string first argument substitute `%s %d %i %f %j %o %O %c %%` with
+> `util.format` semantics, in one runtime function. **Check:** a golden in each mode covering every
+> specifier, `%%`, missing and extra arguments, byte-for-byte vs Node; `pnpm run ci` green.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is
