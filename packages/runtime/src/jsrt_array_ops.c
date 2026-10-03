@@ -762,7 +762,14 @@ static int sort_compare(jsrt_value x, jsrt_value y, jsrt_value cmp) {
     const double d = jsrt_to_number(jsrt_call(cmp, 2, args));
     return (d < 0) ? -1 : (d > 0) ? 1 : 0;
   }
-  return jsrt_string_compare(jsrt_to_string(x), jsrt_to_string(y));
+  /* Either ToString may run the program's `toString`, so the left text stays rooted while the
+   * right one converts, and a throw ends the comparison (the merge stops on it). */
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_to_string(x);
+  const jsrt_value right = jsrt_pending() ? JSRT_LOCAL(0) : jsrt_to_string(y);
+  const int order = jsrt_pending() ? 0 : jsrt_string_compare(JSRT_LOCAL(0), right);
+  JSRT_FRAME_POP();
+  return order;
 }
 
 /* Bottom-up stable merge over [lo, mid) x [mid, hi), scratch mirrors the receiver's storage. */

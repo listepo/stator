@@ -1296,22 +1296,61 @@ void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
 
 static void json_format(JSRTBuf *out, jsrt_value v);
 
-/* A value util.format would hand to user code -- an own or class-declared method `name` -- and so
- * one whose answer depends on running it. ToPrimitive here never calls a user method (see
- * jsrt_to_primitive), so the honest answer is a loud refusal; the gate refuses every case it can
- * see at compile time and this catches the ones only the run reaches. */
-static bool has_user_method(jsrt_value v, const char *name) {
-  if (jsrt_is_fixed_object(v)) {
-    /* The method table begins with the base's, so the class's own table covers the chain. */
-    const JSRTClass *cls = jsrt_as_object(v)->cls;
-    for (uint32_t i = 0; i < cls->method_count; i++) {
-      if (cls->method_names != NULL && strcmp(cls->method_names[i], name) == 0) {
-        return true;
-      }
+/* `builtInObjects` as the pinned Node builds it: the capitalized own properties of `globalThis`
+ * at the moment inspect.js loads, during bootstrap -- so the web globals installed later
+ * (`Event`, `URL`, `Buffer`, ...) are NOT in it. Measured on v26.7.0 by asking util.format('%s')
+ * of a class named after each global (plan-notes 345); `to-primitive.test.ts` re-measures it. */
+static const char *const BUILTIN_CONSTRUCTOR_NAMES[] = {
+    "AggregateError", "Array",          "ArrayBuffer",    "Atomics",
+    "BigInt",         "BigInt64Array",  "BigUint64Array", "Boolean",
+    "DataView",       "Date",           "Error",          "EvalError",
+    "FinalizationRegistry",             "Float32Array",   "Float64Array",
+    "Function",       "Infinity",       "Int16Array",     "Int32Array",
+    "Int8Array",      "Intl",           "Iterator",       "JSON",
+    "Map",            "Math",           "NaN",            "Number",
+    "Object",         "Promise",        "Proxy",          "RangeError",
+    "ReferenceError", "Reflect",        "RegExp",         "Set",
+    "String",         "Symbol",         "SyntaxError",    "TypeError",
+    "URIError",       "Uint16Array",    "Uint32Array",    "Uint8Array",
+    "Uint8ClampedArray",                "WeakMap",        "WeakRef",
+    "WeakSet",
+};
+
+bool jsrt_is_builtin_constructor_name(const char *name) {
+  for (size_t i = 0; i < sizeof BUILTIN_CONSTRUCTOR_NAMES / sizeof BUILTIN_CONSTRUCTOR_NAMES[0];
+       i++) {
+    if (strcmp(BUILTIN_CONSTRUCTOR_NAMES[i], name) == 0) {
+      return true;
     }
-    return jsrt_has_prop(v, name);
   }
-  return (jsrt_is_dynobj(v) || jsrt_is(v, JSRT_TAG_ARRAY)) && jsrt_has_prop(v, name);
+  return false;
+}
+
+static _Noreturn void format_refused(const char *what);
+
+/* Node's `hasBuiltInToString` (inspect.js line 2707): an object whose `toString` is not callable
+ * counts as builtin, an OWN one does not, and an inherited one is builtin exactly when the
+ * prototype holding it has a `constructor` named in `builtInObjects`. A miss on everything the
+ * program wrote leaves %Object.prototype%'s (or another builtin prototype's) method, which is
+ * builtin. No object here can carry `Symbol.toPrimitive` (STA1212), so that half is absent. A
+ * getter on `toString` that throws leaves the exception pending and answers true; the caller
+ * checks before printing. */
+static bool has_builtin_to_string(jsrt_value v) {
+  jsrt_value method = JSRT_UNDEFINED;
+  const char *holder = NULL;
+  bool exact = true;
+  if (!jsrt_user_get(v, "toString", &method, &holder, &exact) || jsrt_pending() ||
+      !jsrt_is(method, JSRT_TAG_CLOSURE)) {
+    return true;
+  }
+  if (holder == NULL) {
+    return false;
+  }
+  const bool builtin = jsrt_is_builtin_constructor_name(holder);
+  if (builtin && !exact) {
+    format_refused("%s of an object whose toString may belong to a class named like a builtin");
+  }
+  return builtin;
 }
 
 static _Noreturn void format_refused(const char *what) {
@@ -1336,32 +1375,29 @@ static void format_one(JSRTBuf *out, uint16_t spec, jsrt_value v) {
   case 's':
     /* number: formatNumber. A function: String(fn), its SOURCE TEXT, which no binary carries
      * (jsrt_to_string's known ceiling). Another primitive: String(v). An object whose toString is
-     * a builtin: inspect at depth 0 -- here, the inspect walk entered at the depth cap. */
+     * a builtin: inspect at depth 0 -- here, the inspect walk entered at the depth cap. Any other
+     * object: String(v), which runs the program's toString and may throw. */
     if (jsrt_is_number(v)) {
       format_number(out, jsrt_number_value(v));
     } else if (jsrt_is(v, JSRT_TAG_CLOSURE)) {
       format_refused("%s of a function");
     } else if (!jsrt_is_object(v)) {
       inspect_scalar(out, v, false);
-    } else if (has_user_method(v, "toString")) {
-      format_refused("%s of an object with its own toString");
-    } else {
+    } else if (!has_builtin_to_string(v)) {
+      const jsrt_value text = jsrt_to_string(v);
+      if (!jsrt_pending()) {
+        append_string(out, (const JSString *)jsrt_ptr(text));
+      }
+    } else if (!jsrt_pending()) {
       inspect_value(out, v, INSPECT_MAX_DEPTH, 0);
     }
     return;
   case 'd':
   case 'i':
   case 'f':
-    /* Number(v), parseInt(v), parseFloat(v): each reaches ToPrimitive on an object, which here
-     * is ToString without a user method (jsrt_to_primitive). That is exact for every object but
-     * one carrying its own toString or valueOf, and a Date under `%d`, whose number hint asks
-     * valueOf for the time value where ToString would answer NaN. */
-    if (has_user_method(v, "toString") || has_user_method(v, "valueOf")) {
-      format_refused("a numeric placeholder for an object with its own toString or valueOf");
-    }
-    if (spec == 'd' && jsrt_is_date(v)) {
-      format_refused("%d of a Date");
-    }
+    /* Number(v), parseInt(v), parseFloat(v): ToPrimitive runs the program's own valueOf or
+     * toString on an object (hint number for `%d`, string for the other two), and may throw;
+     * the caller checks before anything is written. */
     format_number(out, spec == 'd'   ? jsrt_to_number(v)
                        : spec == 'i' ? jsrt_number_value(jsrt_global_parse_int(v, JSRT_UNDEFINED))
                                      : jsrt_number_value(jsrt_global_parse_float(v)));
@@ -2028,7 +2064,10 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
   }
   JSRTBuf joined;
   jsrt_buf_init(&joined);
-  for (uint32_t i = 0; i < a->length; i++) {
+  /* The length is read ONCE (§23.1.3.18 step 2): an element's own `toString` may grow or shrink
+   * the array, and an index past its new end reads `undefined`, which joins as empty. */
+  const uint32_t length = a->length;
+  for (uint32_t i = 0; i < length; i++) {
     if (i > 0) {
       if (jsrt_is(separator, JSRT_TAG_UNDEFINED)) {
         jsrt_buf_putc(&joined, ',');
@@ -2037,11 +2076,15 @@ jsrt_value jsrt_array_join(jsrt_value array, jsrt_value separator) {
       }
     }
     /* A hole joins as the empty string, as undefined does (§23.1.3.18 step 7.c). */
-    const jsrt_value element = jsrt_unhole(a->elements[i]);
+    const jsrt_value element = i < a->length ? jsrt_unhole(a->elements[i]) : JSRT_UNDEFINED;
     if (jsrt_is(element, JSRT_TAG_NULL) || jsrt_is(element, JSRT_TAG_UNDEFINED)) {
       continue;
     }
     const jsrt_value text = jsrt_to_string(element);
+    if (jsrt_pending()) {
+      jsrt_buf_free(&joined);
+      return JSRT_UNDEFINED;
+    }
     append_string(&joined, (const JSString *)jsrt_ptr(text));
   }
   const jsrt_value result = jsrt_string_from_utf8(joined.data == NULL ? "" : joined.data,
@@ -2282,6 +2325,19 @@ jsrt_value jsrt_json_stringify(jsrt_value v) {
 }
 
 jsrt_value jsrt_to_string(jsrt_value v) {
+  if (!jsrt_is_object(v)) {
+    return jsrt_builtin_to_string(v);
+  }
+  /* §7.1.17 step 10: ToPrimitive(argument, string), then ToString of what it answered -- a
+   * primitive, so the builtin form below is the whole rest of the algorithm. */
+  const jsrt_value primitive = jsrt_to_primitive(v, JSRT_HINT_STRING);
+  if (jsrt_pending()) {
+    return jsrt_string_from_utf8("", 0);
+  }
+  return jsrt_builtin_to_string(primitive);
+}
+
+jsrt_value jsrt_builtin_to_string(jsrt_value v) {
   char buf[64];
 
   /* Array.prototype.toString is join(","), which is a different algorithm from the inspect form
@@ -2295,7 +2351,9 @@ jsrt_value jsrt_to_string(jsrt_value v) {
    * until js mode's dynamic arrays land -- and the guard belongs there, with the seen-set that
    * inspect will need at the same time. (inspect_array is already safe: its depth cap stops it.) */
   if (jsrt_is(v, JSRT_TAG_ARRAY)) {
-    return jsrt_array_join(v, JSRT_UNDEFINED);
+    /* An element's own `toString` may throw; the answer stays a string either way. */
+    const jsrt_value joined = jsrt_array_join(v, JSRT_UNDEFINED);
+    return jsrt_pending() ? jsrt_string_from_utf8("", 0) : joined;
   }
 
   if (jsrt_is_double(v)) {

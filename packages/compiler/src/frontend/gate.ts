@@ -6812,13 +6812,6 @@ function formatPlaceholders(
   return applied;
 }
 
-/** A user-written `name` on the value — declared in a source file, not the lib — which util.format
- * would CALL: the runtime's ToPrimitive never does (jsrt_to_primitive), so the answer would differ. */
-function hasUserMethod(type: ts.Type, name: string): boolean {
-  const declarations = type.getProperty(name)?.getDeclarations() ?? [];
-  return declarations.some((d) => !d.getSourceFile().isDeclarationFile);
-}
-
 /** The placeholder a console call's literal format string applies to a value the runtime cannot
  * print as Node does, or `undefined`. A format only the run sees is the runtime's to refuse, and
  * it does so loudly (STA2005, `format_refused` in jsrt_print.c); this is the same rule, reported
@@ -6858,18 +6851,6 @@ function formatRefusal(
           checker.getSignaturesOfType(arm, ts.SignatureKind.Construct).length > 0)
       ) {
         return { what: '%s of a function', phase: 5 };
-      }
-      if (spec === 's' && hasUserMethod(arm, 'toString')) {
-        return { what: '%s of an object with its own toString', phase: 8 };
-      }
-      if (
-        (spec === 'd' || spec === 'i' || spec === 'f') &&
-        (hasUserMethod(arm, 'toString') || hasUserMethod(arm, 'valueOf'))
-      ) {
-        return { what: `%${spec} of an object with its own toString or valueOf`, phase: 8 };
-      }
-      if (spec === 'd' && tsTypeToHType(arm, checker).kind === 'date') {
-        return { what: '%d of a Date', phase: 5 };
       }
     }
   }
