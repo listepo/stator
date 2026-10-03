@@ -17,6 +17,7 @@ import { collectLinkFlags } from '../frontend/extern.ts';
 import {
   collectUnitExports,
   defaultUnitName,
+  exportSymbols,
   exportVersionDefinition,
   renderHeader,
   sanitizeUnitName,
@@ -40,6 +41,7 @@ import {
 } from './bundler.ts';
 import { type NamedPath, refuseAliasedOutputs, requireWritable, writeOutput } from './outputs.ts';
 import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
+import { libraryName, objectFormat, pkgConfigPath, writeStaticLibrary } from './library.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -61,13 +63,17 @@ export interface BuildOptions {
    * command-line order. The `.d.ts` `@statorLink` pragma flags travel inside the compiled
    * result instead — see `compileToC` — and the link deduplicates libraries across all three
    * sources while preserving order. Accepted but inert with `--emit-header`: nothing links,
-   * so there is no line to join (docs/FFI.md §8). */
+   * so there is no line to join (docs/FFI.md §8). Under `--emit=lib` they join the `.pc`. */
   readonly linkFlags?: readonly string[];
   /** Write a C header for the unit's exports to this path (docs/FFI.md §8, plan §10 Task 7.2
    * steps 1–2) and compile a relocatable object instead of linking an executable: a unit
    * exposed to C usually has no `main`, and linking is the consumer's job. Export refusals
    * (STA1122–STA1124) stop the build before anything is written. */
   readonly emitHeader?: string;
+  /** `--emit=lib` (plan §10 Task 7.4, docs/FFI.md §8): with `emitHeader`, `out` is
+   * `lib<name>.a` — the unit prelinked with a private runtime — and `lib<name>.pc` is written
+   * beside it. Without `emitHeader` it is STA0004. */
+  readonly emitLib?: boolean;
   /** `--unit-name` override for the `stator_<unit>_<name>` mangling; defaults to the entry's
    * file basename, sanitized to a C identifier. An explicit name must already be one
    * (`^[A-Za-z0-9_]+$`), else STA0004. */
@@ -214,6 +220,7 @@ export async function build(options: BuildOptions): Promise<number> {
         'digits and _ — it becomes part of every exported C symbol',
     );
   }
+  const lib = options.emitLib === true ? libraryOutputs(options) : undefined;
   const unit =
     options.emitHeader === undefined
       ? undefined
@@ -229,7 +236,7 @@ export async function build(options: BuildOptions): Promise<number> {
     options.keepC && !options.emitCOnly
       ? { role: 'the --keep-c file', path: `${options.out}.c` }
       : undefined;
-  const outputs = [out, header, keptC].filter((target) => target !== undefined);
+  const outputs = [out, header, keptC, lib?.pc].filter((target) => target !== undefined);
   // Refused before compiling, so a slip like `-o app.ts` costs nothing and destroys nothing. The
   // whole program's sources are known only after the frontend; they are checked again below,
   // still before the first write.
@@ -260,20 +267,51 @@ export async function build(options: BuildOptions): Promise<number> {
   }
 
   if (header !== undefined) {
+    if (lib !== undefined && compiled.exportSurface?.needsJsrtValue === true) {
+      throw new BuildError(
+        'STA1220',
+        `unit "${unit ?? ''}" has an export that crosses as jsrt_value, which --emit=lib does ` +
+          "not support yet: the library's runtime is private, so a consumer has no runtime API " +
+          'to make or read one (docs/FFI.md §8) — keep plain C types, or use --emit-header ' +
+          'without --emit=lib',
+      );
+    }
     writeOutput(header, compiled.header ?? '');
     // A unit exposed to C links at the consumer, not here: `clang -c`, no `-ljsrt`, no
     // extern link flags. The init, stubs, and error cell (Task 7.2 steps 3–5) are already in
     // the C; only `main` is absent, which is what makes this an object and not a program.
-    const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
-    const cPath = keptC?.path ?? join(scratch ?? '', 'module.c');
+    // `--emit=lib` prelinks that object with the runtime instead of handing it over.
+    const scratch = mkdtempSync(join(tmpdir(), 'stator-'));
+    const cPath = keptC?.path ?? join(scratch, 'module.c');
     try {
       writeOutput(keptC ?? { role: 'the C file', path: cPath }, compiled.c);
-      compileObject(cPath, options.out, options.opt ?? 2, runtime);
+      if (lib === undefined) {
+        compileObject(cPath, options.out, options.opt ?? 2, runtime);
+        return 0;
+      }
+      const object = join(scratch, 'unit.o');
+      compileObject(cPath, object, options.opt ?? 2, runtime);
+      requireLinkArchives(compiled.std, runtime);
+      writeStaticLibrary({
+        cc: selectCC(runtime),
+        object,
+        archives: [...(compiled.std ? [STD_ARCHIVE] : []), runtime.archive],
+        symbols: compiled.exportSurface?.symbols ?? [],
+        out,
+        pc: lib.pc,
+        header: header.path,
+        unit: unit ?? '',
+        libs: [
+          ...(runtime.sanitized ? ['-fsanitize=address,undefined'] : []),
+          ...systemLinkFlags(runtime, [...compiled.linkFlags, ...(options.linkFlags ?? [])]),
+        ],
+        scratch,
+        format: lib.format,
+        debug: runtime.sanitized,
+      });
       return 0;
     } finally {
-      if (scratch !== null) {
-        rmSync(scratch, { recursive: true, force: true });
-      }
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
@@ -303,6 +341,39 @@ export async function build(options: BuildOptions): Promise<number> {
   }
 }
 
+/** `--emit=lib`'s refusals, before anything is compiled, and the `.pc` output it adds. */
+function libraryOutputs(options: BuildOptions): {
+  readonly pc: NamedPath;
+  readonly format: 'macho' | 'elf';
+} {
+  if (options.emitHeader === undefined) {
+    throw new BuildError(
+      'STA0004',
+      '--emit=lib requires --emit-header=<h> (config "emitHeader"): the header is the ' +
+        "library's C surface",
+    );
+  }
+  const name = libraryName(options.out);
+  if (name === undefined) {
+    throw new BuildError(
+      'STA0004',
+      `--emit=lib requires -o lib<name>.a, not "${options.out}" — the consumer links it as -l<name>`,
+    );
+  }
+  const format = objectFormat(process.platform);
+  if (format === undefined) {
+    throw new BuildError(
+      'STA1219',
+      '--emit=lib is not yet supported on Windows (docs/FFI.md §8) — use --emit-header for ' +
+        'an object, linked with the runtime archive',
+    );
+  }
+  return {
+    pc: { role: 'the --emit=lib pkg-config file', path: pkgConfigPath(options.out, name) },
+    format,
+  };
+}
+
 /** Source text compiled to C, plus what the link owes the extern surface: the `@statorLink`
  * flags every extern-bearing `.d.ts` contributed (docs/FFI.md §9), in program order. The CLI
  * `--link=` flags join them at the link, never here — one source per carrier. `header` is the
@@ -317,6 +388,12 @@ export interface CompiledC {
   /** Every source file of the program, so `build` can refuse an output that names one. */
   readonly inputs: readonly string[];
   readonly header?: string;
+  /** The unit's C symbols (`exportSymbols`) and whether any crosses as `jsrt_value`, present
+   * with `header`: `--emit=lib` keeps exactly these global (plan §10 Task 7.4). */
+  readonly exportSurface?: {
+    readonly symbols: readonly string[];
+    readonly needsJsrtValue: boolean;
+  };
 }
 
 /** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
@@ -375,6 +452,7 @@ async function compileToCInner(
   // before the lowering, so no object or header is written for a unit C cannot see.
   let header: string | undefined;
   let library: LibraryEmit | undefined;
+  let exportSurface: CompiledC['exportSurface'];
   if (unit !== undefined) {
     const unitExports = withSpan('frontend/export', {}, () =>
       collectUnitExports(entryFile, program.getTypeChecker(), unit, mode),
@@ -384,6 +462,10 @@ async function compileToCInner(
     }
     header = renderHeader(unitExports);
     library = { unit, exports: unitExports };
+    exportSurface = {
+      symbols: exportSymbols(unitExports),
+      needsJsrtValue: unitExports.needsJsrtValue,
+    };
   }
 
   // The module graph: every reachable file, dependencies first, cycles refused (STA3001). The
@@ -436,6 +518,7 @@ async function compileToCInner(
     flavor,
     inputs: program.getSourceFiles().map((file) => file.fileName),
     ...(header !== undefined && { header }),
+    ...(exportSurface !== undefined && { exportSurface }),
   }));
 }
 
@@ -486,7 +569,8 @@ export function dedupLinkLibs(flags: readonly string[]): string[] {
 // initialization on the current macOS host. Match justfile's sanitizer fallback so the
 // generated golden binaries use the same compiler as the sanitized runtime archive. An
 // explicit compiler-path CC remains authoritative for callers testing another toolchain.
-function selectCC(runtime: Runtime): string {
+// Exported for the `--emit=lib` consumer test, whose link must use the same compiler.
+export function selectCC(runtime: Runtime): string {
   return (
     process.env['CC'] ??
     (runtime.sanitized && process.platform === 'darwin' && existsSync('/usr/bin/clang')
@@ -629,10 +713,17 @@ export function linkArguments(
     // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
     // Extern surface flags last, in carrier order (pragma files in program order, then the CLI
     // escape hatch), duplicates dropped first-wins: dependents precede their dependencies.
-    ...dedupLinkLibs([...extraLinkFlags(runtime), ...externFlags]),
+    ...systemLinkFlags(runtime, externFlags),
     '-o',
     out,
   ];
+}
+
+/** What a link owes beyond the archives: the runtime's recorded system flags, then the extern
+ * surface's, deduplicated. The binary link and the `--emit=lib` `.pc` file both read it, so a
+ * library's consumer links exactly what the binary would have (plan §10 Task 7.4 step 2). */
+function systemLinkFlags(runtime: Runtime, externFlags: readonly string[]): string[] {
+  return dedupLinkLibs([...extraLinkFlags(runtime), ...externFlags]);
 }
 
 /** STA0011 for a missing archive (the runtime's, or the std library's for a `std/*` importer),
@@ -648,6 +739,15 @@ function requireArchive(
       'STA0011',
       `${what} archive not found at ${archive} — run \`just -f ${join(root, 'justfile')} -d ${root} ${recipe}\``,
     );
+  }
+}
+
+/** The archives a link (or a `--emit=lib` prelink) reads: the runtime's, and the std library's
+ * for a `std/*` importer. */
+function requireLinkArchives(std: boolean, runtime: Runtime): void {
+  requireArchive('runtime', runtime.archive, runtime.root, RUNTIME_JUST_RECIPE[runtime.flavor]);
+  if (std) {
+    requireArchive('std', STD_ARCHIVE, STD_ROOT, 'std');
   }
 }
 
@@ -667,10 +767,7 @@ function link(
       `the gate admitted the ${gateFlavor} runtime surface but the link uses the ${runtime.flavor} archive`,
     );
   }
-  requireArchive('runtime', runtime.archive, runtime.root, RUNTIME_JUST_RECIPE[runtime.flavor]);
-  if (std) {
-    requireArchive('std', STD_ARCHIVE, STD_ROOT, 'std');
-  }
+  requireLinkArchives(std, runtime);
 
   // conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
   // initialization on the current macOS host (see selectCC above).

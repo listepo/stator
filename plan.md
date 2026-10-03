@@ -1117,6 +1117,18 @@ Steps:
 5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
    refused with a not-yet diagnostic until then.
 
+**Execution plan (in progress, Claude Code / opus-5-5; plan-notes 341, 342):** step 3 measured, (a)
+chosen. `src/cli/library.ts` owns the archive: `clang -r` the unit object with `libjsrt_std.a`
+(when used) and `libjsrt.a`, localize every global except the unit's exact C symbols (Mach-O
+`-exported_symbols_list`, ELF `objcopy --keep-global-symbols`), archive with `ar` (`D`, or
+`ZERO_AR_DATE=1` for Apple `ar`), write `lib<name>.pc` from the binary link's own flag list.
+`build.ts` gains only the `--emit=lib` branch. Refusals: `--emit=lib` without `--emit-header` or
+with an `-o` not named `lib<name>.a` (STA0004), Windows (new not-yet code), a `jsrt_value`
+surface (new not-yet code), a failing `ld -r`/`objcopy`/`ar` (new STA0xxx code). Runtime:
+`jsrt_gc_init` idempotent (two units sharing one `libjsrt.a` crashed). Proof:
+`packages/tests/ffi/example-c-consumer/static-lib.ts` (temp-dir copy built through `pkg-config`,
+`cmp` double build, two libraries in one program), run by the ffi CI job and by `test:asan`.
+
 **Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
 `<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
 runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are

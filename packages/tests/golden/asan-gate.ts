@@ -1,7 +1,8 @@
 /* The ASan golden gate (plan.md §9 Task 6.8, option (a): content-hash skip).
  *
  * `test:asan` is three stages: (1) `just runtime-asan` plus the std archive (`just std`, the
- * one flavor every runtime flavor links), (2) `just runtime-test-asan`, (3) the golden suite
+ * one flavor every runtime flavor links), (2) `just runtime-test-asan` plus the `--emit=lib`
+ * Check (`ffi/example-c-consumer/static-lib.ts`, Task 7.4), (3) the golden suite
  * linked against the sanitized archive. Stages 1-2 are seconds
  * (incremental objects behind the justfile's `stale()` walk); stage 3 re-runs every
  * fixture's generated C under ASan and is >85% of the cost (plan-notes 244), a
@@ -44,6 +45,7 @@ import { nodePath } from '../support/node-path.ts';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..', '..');
 const GOLDEN_RUN = join(HERE, 'run.ts');
+const STATIC_LIB_RUN = join(HERE, '..', 'ffi', 'example-c-consumer', 'static-lib.ts');
 
 export const RECORD_VERSION = 1;
 
@@ -349,6 +351,19 @@ function runGoldenAsan(): { status: number; passed: number; failed: number; tota
   return { status: result.status ?? 1, ...counts };
 }
 
+/* Stage 2b, unconditional like stages 1-2 and as cheap: the `--emit=lib` Check (plan.md §10
+ * Task 7.4) against the sanitized runtime -- two private runtime copies in one program, under
+ * ASan/UBSan and forced Boehm collections. */
+function runStaticLibAsan(): void {
+  const result = spawnSync(process.execPath, [STATIC_LIB_RUN], {
+    stdio: 'inherit',
+    env: { ...process.env, STATOR_RUNTIME: 'asan', ASAN_OPTIONS: 'detect_leaks=0' },
+  });
+  if (result.status !== 0) {
+    throw new Error(`static-lib under asan failed (exit ${String(result.status)})`);
+  }
+}
+
 function main(): void {
   const forced = isForceRequested();
   // Stages 1-2 run on EVERY invocation: they are the seconds-long incremental half,
@@ -356,6 +371,7 @@ function main(): void {
   runJust('runtime', 'runtime-asan');
   runJust('std', 'std');
   runJust('runtime', 'runtime-test-asan');
+  runStaticLibAsan();
   const hash = hashGateInputs(collectGateInputs());
   const path = recordPath();
   const record = readGreenRecord(path);

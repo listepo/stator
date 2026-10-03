@@ -360,6 +360,20 @@ jobs:
       # `--emit-header`/`--unit-name` exist (cli/main.ts), so this builds, links, runs, and
       # byte-compares like the unit-level stub proof, as a CI step.
       - run: node packages/tests/ffi/example-c-consumer/c-consumer.ts
+      # Task 7.4 Check: `--emit=lib` archives used through pkg-config alone from a directory
+      # with no repo paths, byte-identical across two builds, and two libraries (two private
+      # runtimes) in one C program over forced Boehm collections. The versions are the
+      # evidence plan-notes 342 cites for each object format's localization.
+      - name: Static library (--emit=lib)
+        shell: bash
+        run: |
+          clang --version | head -n 1
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            ld --version | head -n 1; objcopy --version | head -n 1; ar --version | head -n 1
+          else
+            ld -v 2>&1 | head -n 1
+          fi
+          node packages/tests/ffi/example-c-consumer/static-lib.ts
       # Task 7.3 Check: the SQLite demo's C main() against the emitted sqlitedemo header
       # (row-count success + nonzero-convention error paths, header double-build cmp).
       - run: node examples/ffi/sqlite/sqlite-c-main.ts

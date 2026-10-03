@@ -26,6 +26,7 @@ type Command =
       out: string;
       mode: Mode;
       emitC: boolean;
+      emitLib: boolean;
       keepC: boolean;
       opt: OptLevel;
       linkFlags: readonly string[];
@@ -46,7 +47,7 @@ type Command =
 const USAGE = `stator — ahead-of-time compiler for TypeScript/JavaScript
 
 Usage:
-  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
+  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c|lib] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
     [--bundler=vite|none|<module>]
   stator explain <entry> [--mode=ts|js] [--node] [--json] [--bundler=vite|none|<module>]
@@ -72,7 +73,7 @@ Config:
  * that fits the fallback width reads the same on a TTY and on a pipe (plan-notes 187). */
 const COMMAND_USAGE = {
   build: `Usage:
-  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c] [--keep-c]
+  stator build <entry> -o <out> [--mode=ts|js] [--node] [--emit=c|lib] [--keep-c]
     [--opt=0|1|2|3] [--link=<flags>]... [--emit-header=<h> [--unit-name=<unit>]]
     [--bundler=vite|none|<module>]
 
@@ -88,10 +89,12 @@ Flags:
                    joins the @statorLink pragma flags (docs/FFI.md)
   --emit-header <h> write a C header for the unit's exports (docs/FFI.md);
                    -o names a relocatable object, not an executable
+  --emit=lib       with --emit-header: -o lib<name>.a is a static library
+                   with a private runtime, plus lib<name>.pc beside it
   --unit-name <unit> prefix for stator_<unit>_<name> (default: entry basename)
   --bundler <b>    js mode: bundles package imports and CommonJS files;
                    vite (default), none, or an adapter module (BUNDLER.md)
-  --emit=binary    build a binary (default; overrides "emit": "c")
+  --emit=binary    build a binary (default; overrides "emit": "c" or "lib")
   --config <path>  read options from this JSON file (default:
                    ./stator.config.json when it exists; docs/CONFIG.md)
   --no-config      ignore stator.config.json
@@ -285,6 +288,12 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
       s.cli.emit = 'c';
     },
   },
+  '--emit=lib': {
+    commands: BUILD,
+    apply: (s) => {
+      s.cli.emit = 'lib';
+    },
+  },
   '--emit=binary': {
     commands: BUILD,
     apply: (s) => {
@@ -433,6 +442,7 @@ function parse(argv: readonly string[]): Command {
       out,
       mode,
       emitC: options.emit === 'c',
+      emitLib: options.emit === 'lib',
       keepC: options.keepC,
       opt: options.opt,
       linkFlags: options.link,
@@ -486,6 +496,7 @@ async function runCommand(command: Command): Promise<void> {
         out: command.out,
         mode: command.mode,
         emitCOnly: command.emitC,
+        emitLib: command.emitLib,
         keepC: command.keepC,
         opt: command.opt,
         linkFlags: command.linkFlags,

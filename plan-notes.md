@@ -12352,3 +12352,74 @@ we registered a second kind and installed the hook a second time.
 one libjsrt.a across forced collections". Two units each keep 5,000 strings, and the C `main`
 calls `GC_gcollect()` after every call when the archive links Boehm. Before the fix the test
 fails with `SIGSEGV`. After it, the test prints `a=5000 b=5000`.
+
+## 342. Task 7.4 step 3: each library carries a private runtime (2026-10-04)
+
+**Question.** Two Stator libraries in one C program each need the runtime. Either (a) every
+library prelinks a private copy and hides it, or (b) `--runtime=external` leaves the runtime out
+and the consumer links one shared `libjsrt.a`. Both were measured before choosing.
+
+**Host.** macOS 27.0.1 arm64; `clang version 21.1.8` (conda, the `mise.toml` pin) and Apple
+clang 21.0.0 (clang-2100.3.34.2); `ld-27037.1` (Xcode 27.0); Apple `ar` (cctools); bdw-gc 8.2.12
+(Homebrew); pkg-config 3.0.7.
+
+**(b), one shared runtime.** Two `--emit-header` objects linked against one `libjsrt.a` crashed
+at the first forced collection. That was a Task 7.2 bug, not a property of (b), and it is fixed
+separately (plan-notes 341). With the fix, (b) works, but it leaves the consumer to find and
+link a `libjsrt.a` built from the same commit, and the runtime's ~900 global symbols land in the
+consumer's namespace. Neither is visible in the library's own files.
+
+**(a), a private runtime per library.** `cc -r unit.o libjsrt.a` with
+`-Wl,-exported_symbols_list` on Mach-O: the list marks every other global private extern, and
+`ld -r` makes private externs static unless `-keep_private_externs` is given (local `man ld`,
+ld-27037.1). On ELF, `objcopy --keep-global-symbols=<file>` makes every other global local
+(https://sourceware.org/binutils/docs/binutils/objcopy.html, checked 2026-10-04). Measured:
+
+| What | Result |
+|---|---|
+| globals left in `libconsumer.a` | 7: the unit's 6 `stator_consumer_*` symbols and `jsrt_gc_shared_kind_p48` |
+| runtime symbols made non-external | 894 at first measurement (1,313 local symbols in the stripped member) |
+| two libraries in one program, forced Boehm collections | works, default and ASan runtime |
+| app through the library vs object + `libjsrt.a` (`-dead_strip`) | 240 KB vs 245 KB |
+| cost of each extra library in one program | about 200 KB (its own runtime) |
+| member before the final link | about 390 KB |
+
+**Decision: (a).** The coordinator approved it on this evidence. (b) is not offered: there is no
+`--runtime=external` flag, and docs/FFI.md §8 says why.
+
+**Three things (a) needed:**
+
+1. *A shared Boehm object kind.* Each runtime copy registered its own kind, and bdw-gc allows
+   `MAXOBJKINDS` = 16 (https://github.com/ivmai/bdwgc/blob/v8.2.12/include/private/gc_priv.h).
+   `GC_new_kind` aborts with "Too many kinds" past it
+   (https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04), so the 13th
+   library's init killed the process. A clean `last_error` before the abort was considered and
+   not needed: the copies now share one kind through a weak global, `jsrt_gc_shared_kind_p48`
+   (`packages/runtime/src/jsrt_mem.h`), which the library keeps exported so the copies coalesce.
+   The first copy to initialize registers the kind, and the rest reuse it. Measured: 15 units in
+   one process initialize and collect. Sharing is sound because every copy's mark procedure
+   masks the same 48-bit payload; a runtime that marks differently must rename the symbol.
+   The weak definition is in C (`jsrt_value.c`): Zig 0.16.0 emits a weak data `@export` as a
+   non-external symbol on Mach-O, which does not coalesce.
+2. *`--no-default-config` on the prelink.* The pinned conda clang's configuration file adds
+   `-Wl,-rpath`, and `ld -r` refuses it ("-rpath can only be used when creating a dynamic final
+   linked image"). Without the config file, conda clang's output is byte-identical to Apple
+   clang's.
+3. *No debug information.* The runtime's Zig object carries debug stabs even in a release build,
+   naming `packages/runtime/src/` and the archive path on the build machine. The prelink passes
+   `-Wl,-S` (ld(1): do not put debug information in the output; GNU ld documents the same
+   flag). The sanitized flavor keeps it for line numbers in reports, and so its archive is not
+   byte-reproducible (the debug map also names the scratch directory).
+
+**Determinism.** Two builds into different directories give byte-identical `.a`, `.h` and
+`.pc`. Apple's `ar` refuses the `D` modifier; it zeroes the member date, uid and gid when
+`ZERO_AR_DATE` is set
+(https://raw.githubusercontent.com/apple-oss-distributions/cctools/main/misc/libtool.c, checked
+2026-10-04). GNU `ar` takes `D` (https://sourceware.org/binutils/docs/binutils/ar-cmdline.html,
+checked 2026-10-04). Plain Apple `ar rcs` gave different bytes on every build.
+
+**The `.pc`.** `prefix=${pcfiledir}` makes it relocatable. `Libs` is the binary link's own list
+(`build.ts` `systemLinkFlags`, shared with `linkArguments`), so the two cannot drift.
+
+**Proof.** `packages/tests/ffi/example-c-consumer/static-lib.ts`, run by the ffi CI jobs (Linux
+and macOS) and by the ASan gate.

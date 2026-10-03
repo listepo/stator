@@ -570,6 +570,20 @@ export function exportLastErrorName(unit: string): string {
   return `stator_${unit}_last_error`;
 }
 
+/** Every C symbol the unit's object defines for its consumer, in header order: the ABI identity,
+ * init, the error cell, then each function and const. `--emit=lib` keeps exactly these global
+ * when it makes the runtime private (plan §10 Task 7.4 step 3), so a name the header declares and
+ * this list misses would be an undefined symbol in every consumer. */
+export function exportSymbols(exports: UnitExports): string[] {
+  return [
+    exportVersionSymbol(exports.unit),
+    exportInitName(exports.unit),
+    exportLastErrorName(exports.unit),
+    ...exports.functions.map((fn) => fn.cName),
+    ...exports.consts.map((constant) => constant.cName),
+  ];
+}
+
 /** The header text: byte-identical for the same input (Task 7.2 step 8) — declarations in
  * source order, LF newlines, no timestamps, no paths. The version in the ABI-identity
  * symbol is a compiler constant, so it cannot leak per-build state either. */
