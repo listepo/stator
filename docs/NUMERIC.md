@@ -338,35 +338,41 @@ get §7's ordering right instead of one.
 
 The spec's ordering:
 
-**`ToPrimitive(value, hint)`**, for hint `number` (the default for arithmetic and relational
-operators):
+**`ToPrimitive(value, hint)`** (ECMA-262 §7.1.1 and §7.1.1.1 OrdinaryToPrimitive), for hint
+`number` (`Number(x)`, unary `+`/`-`, the numeric operators, `<` `>` `<=` `>=`) and hint `default`
+(binary `+`, `==`):
 1. If `value` is already a primitive, return it.
-2. Call `value.valueOf()`. If the result is a primitive, return it.
-3. Call `value.toString()`. If the result is a primitive, return it.
-4. Throw a `TypeError`.
+2. Get `value.valueOf`. If it is callable, call it; if the result is a primitive, return it.
+3. Get `value.toString`. If it is callable, call it; if the result is a primitive, return it.
+4. Throw a `TypeError` (Node: `Cannot convert object to primitive value`).
 
-For hint `string` (used by `String()` and by `+` when the other operand is known to be a string),
-steps 2 and 3 swap: `toString` first, then `valueOf`.
+For hint `string` (a template hole, `String(x)`, `concat`, `join`, `parseInt`), steps 2 and 3
+swap: `toString` first, then `valueOf`. A Date's `[Symbol.toPrimitive]` (§21.4.4.45) reads hint
+`default` as `string`, so `'' + date` is its text while `+date` is its time value.
 
 The order is observable — an object with both methods reveals which one ran — so it is not an
-implementation detail. `Symbol.toPrimitive` takes precedence over both when present; `Symbol` is
-`STA1212`, Phase 5, so that branch is unreachable until then and must be written as an explicit
-"not yet" rather than silently skipped.
+implementation detail. A method that is not callable is skipped, not called; a method that throws
+ends the conversion, and the operator with it, before anything else converts. `Symbol.toPrimitive`
+takes precedence over both when present; `Symbol` is `STA1212`, Phase 5, and the computed member
+name that would spell the method is refused with it, so no object here can carry one.
 
-`+`: `ToPrimitive` both with hint `number`, then **if either result is a string, concatenate;
+`+`: `ToPrimitive` both with hint `default`, then **if either result is a string, concatenate;
 otherwise `ToNumber` both and add.** The string check happens after `ToPrimitive` and before
 `ToNumber` — an order that is easy to get backwards and produces `"1" + 1 === 2` when you do, or
 `[1] + [2] === 3` where the language says `"12"`. Abstract Relational Comparison (`<`, `>`, `<=`,
-`>=`) has the same shape and the same trap: `ToPrimitive` both, and only then ask whether both are
-strings, which is what makes `["10"] < ["9"]` true and `["10"] < 9` false.
+`>=`) has the same shape and the same trap: `ToPrimitive` both (hint `number`), and only then ask
+whether both are strings, which is what makes `["10"] < ["9"]` true and `["10"] < 9` false.
 
-**The hint is unobservable in the subset as it stands, and `jsrt_to_primitive` therefore takes no
-hint parameter.** The hint chooses only whether `valueOf` or `toString` is tried first, and step 2
-never succeeds here: no object in the subset carries a user-written `valueOf`, and the inherited
-`Object.prototype.valueOf` returns the object, which is not a primitive. So every object reaches
-step 3 under either hint. User `valueOf`/`toString` methods are what make the two hints differ —
-the parameter goes in when they land, not before, and `Symbol.toPrimitive` (`STA1212`, Phase 5)
-gets its explicit "not yet" branch at the same time.
+**Where the methods come from (plan.md §9 Task 6.27, plan-notes 345).** `jsrt_to_primitive(v, hint)`
+asks the object for each method by name (`jsrt_user_get`): an own field or literal method, a class
+method (inherited ones included) or a constructor's prototype method is the program's and is
+called with the object as `this`; a miss is the builtin prototype's method, which the runtime
+models — every builtin `toString` answers a string, every builtin `valueOf` answers the object
+itself except a Date's. Lowering skips the lookup where it can: when the receiver's class declares
+the method the hint tries first, with no parameter and a primitive return, the conversion is a
+direct (or virtual) call to it. Every conversion of a value that may be an object can run user
+code, so the emitter follows it with a pending check, and a runtime function that converts several
+values in a row stops converting once one has thrown.
 
 ---
 

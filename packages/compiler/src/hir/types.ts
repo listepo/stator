@@ -456,6 +456,40 @@ export function hTypeCanBeNullish(t: HType): boolean {
   );
 }
 
+/** Can converting a value of this type to a primitive run a method the program wrote — the
+ * `toString` or `valueOf` ToPrimitive calls (ECMA-262 §7.1.1, plan.md §9 Task 6.27)? Such a
+ * conversion can throw, so the emitter follows it with a pending check.
+ *
+ * Any object may carry one: typing is structural, so even a type that declares neither method
+ * can hold an instance of a class that does. An array converts by joining its elements, so it
+ * asks its element type. The builtin kinds convert through their prototype's own methods, and a
+ * function's text is its source (the runtime's known ceiling), so neither calls the program. */
+export function hTypeConversionRunsUserCode(t: HType): boolean {
+  switch (t.kind) {
+    case 'object':
+    case 'unknown':
+    case 'type-param':
+      return true;
+    case 'array':
+      return hTypeConversionRunsUserCode(t.element);
+    case 'number':
+    case 'string':
+    case 'boolean':
+    case 'undefined':
+    case 'null':
+    case 'fn':
+    case 'map':
+    case 'set':
+    case 'iterator':
+    case 'regexp':
+    case 'date':
+    case 'uint8array':
+    case 'arraybuffer':
+    case 'promise':
+      return false;
+  }
+}
+
 /** Does Unknown appear ANYWHERE in this type, however deep?
  *
  * The verdict walk asks this, and the shallow question (`t.kind === 'unknown'`) is the wrong one:

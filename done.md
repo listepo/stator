@@ -2794,6 +2794,77 @@ Docs: `TOOLCHAIN.md` (new section "Environment variables and `.env`"), `CONFIG.m
   selfhost 14 targets match the baseline; builtins 255/324; `docs/NODE.md` current; leak plateau
   (objects peak RSS 3728 KB, FFI strings 3776 KB).
 
+### Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string ✅ (landed 2026-10-04)
+
+What landed (plan-notes 345; docs/NUMERIC.md §7, docs/SUBSET.md):
+
+- `jsrt_to_primitive(v, hint)` (`runtime/src/jsrt_ops.c`) follows ECMA-262 §7.1.1.1
+  OrdinaryToPrimitive. Each method is looked up with `jsrt_user_get` (`jsrt_shape.c`): an own
+  field, a literal method, a class method (inherited too) or a constructor's prototype method.
+  A hit is called with the object as `this` (`jsrt_call_with_this`). A miss is the builtin's
+  method, modelled. A Date's `default` hint reads as `string`. Callers pass the hint:
+  - `jsrt_to_string`: `string`;
+  - `+` and `==`: `default`;
+  - `jsrt_to_number` and the comparisons: `number`.
+  `join`, `concat`, the default `sort` and `parseInt` stop at a throw.
+- Codegen (`codegen/index.ts`) follows every conversion of a value that may be an object
+  (`hTypeConversionRunsUserCode`) with a pending check. The numeric operators convert their
+  operands in rooted slots, left then right.
+- Lowering (`userConversion`, `lower/index.ts`) turns a template hole, `String(x)` and a `+`
+  operand into a direct or virtual call when the receiver's class declares the first-tried
+  method with no parameter and a primitive return.
+- `%s`/`%d`/`%i`/`%f` follow Node's `hasBuiltInToString`. The 47-name `builtInObjects` copy is
+  re-measured by `unit/to-primitive.test.ts`. The gate's three STA1214 format refusals are lifted.
+- `emitErrorCell` falls back to the builtin text when the thrown object's own `toString` throws.
+
+Check evidence:
+
+- Goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` match Node byte-for-byte.
+  They cover every site, class/literal/inherited/prototype methods, a throwing method caught by
+  `try` (before the right operand converts), the object-returning `TypeError`, a skipped
+  non-callable method and the format placeholders.
+- Decision tests `subset_to_primitive_{ts,js}` and `subset_console_format_user_tostring_{ts,js}`
+  (the ts one flipped from not-yet to static).
+- `pnpm run ci` → exit 0:
+  - dupes 183 clones, none new;
+  - unit 763/763;
+  - runtime print corpus matches Node;
+  - subset 932 fixtures (901 passed, 31 expected-fail, 0 failed);
+  - golden 461/461;
+  - selfhost 14 targets match after re-recording `packages/compiler` `STA1214` 1813 → 1815
+    (plan-notes 345);
+  - builtins 255/324;
+  - `docs/NODE.md` current;
+  - leak plateau;
+  - golden-asan green (461 passed).
+
+> **Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**
+> Today ToString of an ordinary object ignores the user's method and prints `[object Object]`
+> (`jsrt_print.c`, the fallback branch at the end of `jsrt_to_string`), while `explain` answers
+> `static`. Wherever ECMA-262 runs ToPrimitive, call the method the object actually has: a template
+> literal, `String(x)` and `.concat` (hint `string`: `toString` first, then `valueOf`), `'' + x`
+> (hint `default`: `valueOf` first, then `toString`), and `Array.prototype.join`. That includes a
+> class method, an object-literal method and an inherited one, with `Symbol.toPrimitive` not-yet
+> until symbols exist (Phase 5). A method that throws propagates as a catchable exception. A method
+> that returns an object is a `TypeError`, as in Node.
+> 1. In `ts` mode the receiver's type says whether the method is the user's, so lowering emits a
+>    direct call and the runtime fallback is never reached.
+> 2. In `js` mode, and for a `ts` receiver whose type cannot say (a union, an interface), the
+>    runtime looks the method up with `jsrt_get_prop` and calls it with `jsrt_call`. The emitter
+>    follows every such conversion with the pending-exception check, as it does after
+>    `JSON.stringify` (`consoleMayThrow` is the precedent).
+> 3. Lift the 6.24 refusals that share this path: `%s` of an object with its own `toString`, and
+>    `%d`/`%i`/`%f` through a user `toString`/`valueOf`. They are `STA1214` at the gate today and
+>    `PANIC: STA2005` at run time (plan-notes 337). A refusal this card cannot lift stays as it is.
+> 4. Where a case still cannot match Node, refuse it with a not-yet code and never print other bytes.
+>
+> `v + 1` with a user `valueOf` in `js` mode is `STA0012` today, because TS2365 is not in
+> `JS_MODE_RUNTIME_CODES`. That is a mode-policy question, not this card's (plan-notes 344).
+> **Check:** goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` cover every site
+> above, inheritance, a throwing method caught by `try`, and the object-returning `TypeError`, and
+> match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
+> of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
+
 ### Task 6.25 — A BigInt is not-yet, never an internal error (F5) ✅ (landed 2026-10-04)
 
 Audit finding F5 (plan-notes 330): `const b = 1n;` answered `STA4031` "unexpected expression kind:

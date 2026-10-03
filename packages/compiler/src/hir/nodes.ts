@@ -1457,7 +1457,8 @@ export function isConsoleVariadicWidth(method: ConsoleMethod, given: number): bo
 
 /** Whether the call can leave an exception pending, so the emitter follows it with a check:
  * `table` reads each row's properties, and a variadic call of two or more arguments may apply
- * util.format, whose `%j` reads properties too (plan.md §9 Task 6.24) -- a getter there throws. */
+ * util.format, whose `%j` reads properties too (plan.md §9 Task 6.24) -- a getter there throws --
+ * and whose `%s`/`%d`/`%i`/`%f` run the value's own `toString`/`valueOf` (Task 6.27). */
 export function consoleMayThrow(call: ConsoleLogCall): boolean {
   return (
     call.method === 'table' ||

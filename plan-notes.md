@@ -12325,3 +12325,74 @@ user gets a wrong answer from it.
 `STA0012`, because TS2365 is not in `JS_MODE_RUNTIME_CODES` (docs/MODES.md §3, plan-notes 297).
 That is deliberate policy, and nothing wrong is printed. Whether TS2365 should take the dynamic
 path in `js` mode is a separate question for the creator.
+
+## 345. Task 6.27: a user `toString`/`valueOf` is honored by ToPrimitive (2026-10-04)
+
+**Sources (checked 2026-10-04).**
+- ECMA-262 2025 (16th edition), https://262.ecma-international.org/16.0/: §7.1.1 ToPrimitive,
+  §7.1.1.1 OrdinaryToPrimitive (hint order; a method that is not callable is skipped; step 3
+  throws a TypeError), §7.1.17 ToString, §7.2.13 IsLessThan (hint `number`), §7.2.14
+  IsLooselyEqual (hint `default`), §13.15.3 ApplyStringOrNumericBinaryOperator (both operands are
+  evaluated, then converted left to right), §21.4.4.45 `Date.prototype[@@toPrimitive]` (`default`
+  reads as `string`), §23.1.3.18 `Array.prototype.join` (the length is read once).
+- Node v26.7.0, `lib/internal/util/inspect.js`
+  (https://github.com/nodejs/node/blob/v26.7.0/lib/internal/util/inspect.js):
+  `hasBuiltInToString` (line 2707) and `formatWithOptionsInternal`'s `%s`/`%d`/`%i`/`%f` arms
+  (lines 2823–2876). `%s` calls `String(v)` unless the toString is a builtin's: not callable,
+  or inherited from a prototype whose own `constructor` is a function named in `builtInObjects`.
+  An own toString is never a builtin's.
+- `builtInObjects` is the capitalized own properties of `globalThis` when inspect.js loads, during
+  bootstrap. Measured on the pinned Node by asking `util.format('%s')` of an object inheriting a
+  toString from a prototype whose constructor carries each global's name: 47 names. Web globals
+  installed later (`Event`, `URL`, `Buffer`, …) are not among them. The runtime's copy
+  (`BUILTIN_CONSTRUCTOR_NAMES`, `jsrt_print.c`) is re-measured by `unit/to-primitive.test.ts`.
+
+**Design.**
+- `jsrt_to_primitive(v, hint)` replaces the hint-less version (the hint parameter docs/NUMERIC.md
+  §7 said would arrive with user methods). It asks the object for each method by name with
+  `jsrt_user_get`: own field, literal method, class method table (inherited included), a
+  constructor's prototype chain. A hit is the program's method and is called with the object as
+  `this` (`jsrt_call_with_this`). A miss is the builtin prototype's method, modelled: a builtin
+  `toString` answers `jsrt_builtin_to_string` (the old ToString body, renamed), and a builtin
+  `valueOf` answers the object itself (so the next rung runs), except a Date's time value.
+- The card named `jsrt_get_prop` + `jsrt_call`. `jsrt_user_get` is used instead, for two reasons:
+  `%s` needs to know which class holds an inherited toString (`hasBuiltInToString`), which a
+  property read does not say; and a miss must mean "the builtin's", which `undefined` from a read
+  cannot tell apart from a field holding `undefined`.
+- An object whose conversion is attempted while an exception is already pending converts to
+  nothing. This is what makes `Math.max(a, b)`, `String.fromCharCode`, a sort's keys and the other
+  runtime functions that convert several values in a row stop at the first throw, as JavaScript
+  does, without each of them checking.
+- Codegen follows every conversion of a value whose HType may be an object
+  (`hTypeConversionRunsUserCode`: object, unknown, type-param, an array of those) with a pending
+  check: template holes, binary and unary operators, `++`/`--`, compound assignment, and the
+  runtime calls that convert arguments. The numeric operators convert their operands in rooted
+  slots, left then right, each behind its own check, because C would choose the order inside one
+  expression.
+- Lowering: in a template hole, `String(x)` and either operand of `+`, a receiver whose class
+  declares the method the hint tries first (`toString` for hint `string`, `valueOf` for `default`)
+  with no parameter and a primitive return becomes a `MethodCall` (virtual where a subclass
+  overrides it). Other cases go to the runtime path. A class with only `toString` under `+` also
+  goes to the runtime path, because a subclass could add a `valueOf` that the static type cannot
+  see.
+- The gate's three STA1214 format refusals are gone: `%s` of an object with its own toString,
+  `%d`/`%i`/`%f` through a user method, `%d` of a Date. One runtime refusal is new (`STA2005`):
+  `%s` of an object whose inherited toString may come from a builtin-named class when a capturing
+  method (a NULL method-table entry) hides which class in the chain wrote it.
+- `emitErrorCell` (Task 7.2's C error message) now runs the thrown object's own toString. If that
+  throws in turn, the second exception is dropped and the builtin text is used.
+
+**Fixed on the way.** These printed wrong bytes before and now match Node: `+o` and `Number(o)`
+of an object with a user `valueOf` (NaN), `Number(date)` (NaN), and `o == 3` with a user
+`valueOf` (false).
+
+**Not changed.**
+- Arithmetic other than `+` on an operand the checker types as an object (or a Date) is still
+  refused at the gate (`STA1214`, "arithmetic on a … operand", Phase 8), or by the checker
+  (`STA0012`). The runtime and codegen now handle such operands, as an untyped value shows, but
+  lifting the gate is a subset decision outside this card.
+- `Symbol.toPrimitive` stays refused (`STA1212`, or `STA1214` for the computed member name).
+- The default `sort` compares ToString of each element. When an element's toString has side
+  effects, V8's TimSort may call it in a different order. Comparators already have this property.
+- Selfhost: `packages/compiler` `STA1214` 1813 → 1815. `userConversion`'s three `ts.*` parameter
+  types add 3; removing the gate's format check removes 1.
