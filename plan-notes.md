@@ -12500,3 +12500,12 @@ and discards the other, whose code still refers to it. The sanitized flavor now 
 `-fno-sanitize-address-globals-dead-stripping` (`packages/runtime/justfile`), so ASan registers
 globals through a metadata array instead. The release flavor is not instrumented and has no such
 groups.
+
+## 343. Task 7.4 lands (2026-10-03)
+
+The Check passes. The step 3 evidence and the decision are in 342, and the GC-init fix is in 341.
+The Linux proof is CI run 37148352874: both `ffi (linux/*)` and both `asan (linux/*)` jobs print
+`ffi static-lib: ok`. The macOS proof is a local run (default and ASan), and the macOS ffi and
+asan CI jobs run the same step on PR #105. The card moves to done.md, and plan.md keeps the stub.
+Changelog: v4.79. Left out of this task and not planned: a Windows library (STA1219) and a
+`jsrt_value` surface under `--emit=lib` (STA1220). Both are refusals, so neither fails at run time.
