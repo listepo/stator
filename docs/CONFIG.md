@@ -32,7 +32,7 @@ One key per flag. The schema is generated from `packages/compiler/src/cli/config
 | `mode` | `"ts"` \| `"js"` | `--mode` | `"ts"` | both |
 | `opt` | `0` \| `1` \| `2` \| `3` | `--opt` (env `STATOR_OPT`) | `2` | `build` |
 | `link` | array of strings | `--link` (repeatable) | `[]` | `build` |
-| `emit` | `"binary"` \| `"c"` | `--emit=binary`, `--emit=c` | `"binary"` | `build` |
+| `emit` | `"binary"` \| `"c"` \| `"lib"` | `--emit=binary`, `--emit=c`, `--emit=lib` | `"binary"` | `build` |
 | `keepC` | boolean | `--keep-c` | `false` | `build` |
 | `emitHeader` | path | `--emit-header` | — | `build` |
 | `unitName` | string, letters, digits and `_` only (else `STA0004`) | `--unit-name` | entry basename, sanitized | `build` |

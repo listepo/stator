@@ -2794,6 +2794,77 @@ Docs: `TOOLCHAIN.md` (new section "Environment variables and `.env`"), `CONFIG.m
   selfhost 14 targets match the baseline; builtins 255/324; `docs/NODE.md` current; leak plateau
   (objects peak RSS 3728 KB, FFI strings 3776 KB).
 
+### Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string ✅ (landed 2026-10-04)
+
+What landed (plan-notes 345; docs/NUMERIC.md §7, docs/SUBSET.md):
+
+- `jsrt_to_primitive(v, hint)` (`runtime/src/jsrt_ops.c`) follows ECMA-262 §7.1.1.1
+  OrdinaryToPrimitive. Each method is looked up with `jsrt_user_get` (`jsrt_shape.c`): an own
+  field, a literal method, a class method (inherited too) or a constructor's prototype method.
+  A hit is called with the object as `this` (`jsrt_call_with_this`). A miss is the builtin's
+  method, modelled. A Date's `default` hint reads as `string`. Callers pass the hint:
+  - `jsrt_to_string`: `string`;
+  - `+` and `==`: `default`;
+  - `jsrt_to_number` and the comparisons: `number`.
+  `join`, `concat`, the default `sort` and `parseInt` stop at a throw.
+- Codegen (`codegen/index.ts`) follows every conversion of a value that may be an object
+  (`hTypeConversionRunsUserCode`) with a pending check. The numeric operators convert their
+  operands in rooted slots, left then right.
+- Lowering (`userConversion`, `lower/index.ts`) turns a template hole, `String(x)` and a `+`
+  operand into a direct or virtual call when the receiver's class declares the first-tried
+  method with no parameter and a primitive return.
+- `%s`/`%d`/`%i`/`%f` follow Node's `hasBuiltInToString`. The 47-name `builtInObjects` copy is
+  re-measured by `unit/to-primitive.test.ts`. The gate's three STA1214 format refusals are lifted.
+- `emitErrorCell` falls back to the builtin text when the thrown object's own `toString` throws.
+
+Check evidence:
+
+- Goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` match Node byte-for-byte.
+  They cover every site, class/literal/inherited/prototype methods, a throwing method caught by
+  `try` (before the right operand converts), the object-returning `TypeError`, a skipped
+  non-callable method and the format placeholders.
+- Decision tests `subset_to_primitive_{ts,js}` and `subset_console_format_user_tostring_{ts,js}`
+  (the ts one flipped from not-yet to static).
+- `pnpm run ci` → exit 0:
+  - dupes 183 clones, none new;
+  - unit 763/763;
+  - runtime print corpus matches Node;
+  - subset 932 fixtures (901 passed, 31 expected-fail, 0 failed);
+  - golden 461/461;
+  - selfhost 14 targets match after re-recording `packages/compiler` `STA1214` 1813 → 1815
+    (plan-notes 345);
+  - builtins 255/324;
+  - `docs/NODE.md` current;
+  - leak plateau;
+  - golden-asan green (461 passed).
+
+> **Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**
+> Today ToString of an ordinary object ignores the user's method and prints `[object Object]`
+> (`jsrt_print.c`, the fallback branch at the end of `jsrt_to_string`), while `explain` answers
+> `static`. Wherever ECMA-262 runs ToPrimitive, call the method the object actually has: a template
+> literal, `String(x)` and `.concat` (hint `string`: `toString` first, then `valueOf`), `'' + x`
+> (hint `default`: `valueOf` first, then `toString`), and `Array.prototype.join`. That includes a
+> class method, an object-literal method and an inherited one, with `Symbol.toPrimitive` not-yet
+> until symbols exist (Phase 5). A method that throws propagates as a catchable exception. A method
+> that returns an object is a `TypeError`, as in Node.
+> 1. In `ts` mode the receiver's type says whether the method is the user's, so lowering emits a
+>    direct call and the runtime fallback is never reached.
+> 2. In `js` mode, and for a `ts` receiver whose type cannot say (a union, an interface), the
+>    runtime looks the method up with `jsrt_get_prop` and calls it with `jsrt_call`. The emitter
+>    follows every such conversion with the pending-exception check, as it does after
+>    `JSON.stringify` (`consoleMayThrow` is the precedent).
+> 3. Lift the 6.24 refusals that share this path: `%s` of an object with its own `toString`, and
+>    `%d`/`%i`/`%f` through a user `toString`/`valueOf`. They are `STA1214` at the gate today and
+>    `PANIC: STA2005` at run time (plan-notes 337). A refusal this card cannot lift stays as it is.
+> 4. Where a case still cannot match Node, refuse it with a not-yet code and never print other bytes.
+>
+> `v + 1` with a user `valueOf` in `js` mode is `STA0012` today, because TS2365 is not in
+> `JS_MODE_RUNTIME_CODES`. That is a mode-policy question, not this card's (plan-notes 344).
+> **Check:** goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` cover every site
+> above, inheritance, a throwing method caught by `try`, and the object-returning `TypeError`, and
+> match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
+> of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
+
 ### Task 6.25 — A BigInt is not-yet, never an internal error (F5) ✅ (landed 2026-10-04)
 
 Audit finding F5 (plan-notes 330): `const b = 1n;` answered `STA4031` "unexpected expression kind:
@@ -3047,6 +3118,125 @@ Check evidence:
 > the audit's F6 test passes; a unit or bench measurement for F12 recorded in plan-notes;
 > `pnpm run ci` green, including ASan.
 
+### Task 6.28 — A function initializer may refer to its own binding ✅ (landed 2026-10-04)
+
+Found while landing 6.24 (plan-notes 344): `const g = (n) => … g(n - 1)`, an anonymous
+`const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+`const o = { f: (n) => … o.f(n - 1) }` all stopped with `STA4002 internal error: identifier 'g'
+is not defined` in both modes while `explain` said `static`/`dynamic`.
+
+What landed (plan-notes 347):
+
+- Root cause in `src/hir/verify.ts`: the `declaration` case verified the initializer before it
+  registered the name. The lowering already declared the binding first and capture analysis
+  already gave it an environment slot or a global, so lowering and codegen are unchanged.
+- The verifier registers the binding as `initializing` while its initializer is verified, and
+  `Scope.readable` resolves it only through a function-body scope (`Scope.functionChild`). A read
+  or assignment on the initializer's own evaluation path is still `STA4002`/`STA4003`.
+- Closure-mediated TDZ: the gate (`mayRunInOwnInitializer` in `src/frontend/gate.ts`) refuses a
+  self-read whose function the initializer may call before it finishes, such as a callback passed
+  to a call, a `toString` coerced by `+`, or a spread. It is not-yet `STA1214` with no phase, because
+  the compiler has no run-time TDZ check to throw Node's `ReferenceError`. A direct read, an IIFE
+  included, stays TS2448.
+- Tests: goldens `ts/self_reference_initializer.ts` and `js/self_reference_initializer.js` (the
+  five shapes, a reassigned `let`, an object-literal method, `?:` and `&&`/`||` containers, and
+  3000-deep recursion at module level and in a function body); decision tests
+  `subset_self_reference_initializer_{ts,js}` (static/dynamic) and
+  `subset_self_reference_initializer_call_{ts,js}` (not-yet `STA1214`); three
+  `unit/verify.test.ts` cases (the shapes verify clean, a direct self-read is `STA4002`, the gate
+  refusals in both modes).
+- Docs: `docs/HIR.md` §5.1 (binding scope) and the functions row of `docs/SUBSET.md`. The
+  selfhost baseline grows by 7 `STA1214` in `packages/compiler`, all from the `ts.*` qualified type
+  names in the two new gate helpers.
+- Deviation from the card: the Check asked for `g(10000)`. ASan frames overflow the stack near
+  6000 levels, and Node itself overflows `1 + g(n - 1)` near 9000, so the goldens recurse 3000
+  levels (plan-notes 347).
+
+Check evidence: `pnpm run ci` → exit 0: typecheck and lint clean; `dupes` 183 clones
+(none new); unit 764/764; subset 933 fixtures (902 passed, 31 expected-fail, 0 failed); golden
+461/461 (both `self_reference_initializer` goldens included); selfhost 14 targets match the updated
+baseline; builtins 255/324; `docs/NODE.md` current; leak plateau (objects peak RSS 3840 KB, FFI
+strings 3904 KB); golden-asan 461/461 green. The HIR verifier is clean on every golden, since a
+verifier problem fails the build.
+
+> **Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
+> a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+> `const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
+> defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
+> `static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
+> scope (and boxed, if captures box) before its initializer is lowered. A call made before
+> initialization stays Node's TDZ `ReferenceError`.
+> Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
+> **Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
+> prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
+> HIR verifier is clean on all of them; `pnpm run ci` is green.
+
+### Task 6.29 — Test262 gets back the six module tests it lost ✅ (landed 2026-10-03)
+
+The six tests were lost for two reasons (plan-notes 349, 350). The four `early-import-*` tests
+and `instn-named-err-not-found-dflt` had never really passed. Until `68c8d57`, the runner compiled
+a module test under a temporary name, so its imports failed to resolve with `STA0012`, which
+counts as a SyntaxError. Stator had no refusal for either shape. `dup-bound-names` lost because
+the bundle step (T12.1) ran before the duplicate binding was reported.
+
+What landed (plan-notes 350):
+
+- `STA3005`, both modes: an imported binding named `eval` or `arguments` (`strictReservedImports`
+  in `src/frontend/modules.ts`, raised by `createProgram`).
+- `LoadedProgram.parseDiagnostics`: the parser's and the binder's diagnostics plus `STA3005`.
+  When there are any, `bundledFrontend` (`src/cli/bundler.ts`) reports only them and loads no
+  adapter.
+- `STA3004`, js mode: the default of a `.js` file that Node loads as an ES module and that has no
+  module syntax, in an import, an `import { default as x }`, or an `export { default } from`
+  (`missingDefault` in `src/frontend/gate.ts`, `isSyntaxFreeEsModule` in `src/frontend/vendor.ts`).
+- The Test262 runner maps both codes to SyntaxError, the way it maps `STA3003`.
+- Tests:
+  - decision tests `subset_import_binding_eval_{ts,js}` and `subset_import_default_missing_{ts,js}`;
+  - three unit tests in `unit/bundler.test.ts`: parse errors come before the adapter, the
+    binder's list is still where `parsePhaseKeys` reads it, and STA3004 in its three shapes but
+    not for a CommonJS file.
+- Docs: `docs/DIAGNOSTICS.md` (two rows), `docs/SUBSET.md` (the imports row), `docs/BUNDLER.md` §5.
+
+The Check, on linux CI: run 37154148433 on `eb44366`, job "test262 conformance" (Aggregate and
+gate), reports `test262: merged 8 shard(s), 53580 results` and `test262: 2377 passed, 49384
+skipped, … 1819 failed`. The ratchet gate is green.
+
+Local evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
+
+- `pnpm run test262` → `2377 passed, 49384 skipped, … 1819 failed`, exit 0.
+- `ratchet.json` `passed`: 2372 → 2377.
+- `run.ts --filter`:
+  - `module-code/early-import` → `4 passed`;
+  - `import/dup-bound-names` → `1 passed`;
+  - `instn-named-err-not-found-dflt` → `1 passed`;
+  - the five tests gained since `76a69ed` → `1 passed` each.
+- `pnpm run ci` → exit 0:
+  - typecheck and lint clean, dupes at 183 clones;
+  - unit `764 passed (764)`;
+  - `subset: 933 fixtures — 902 passed, 31 expected-fail, 0 failed`;
+  - `golden: 459 fixtures — 459 passed, 0 failed`;
+  - `selfhost: 14 targets match the baseline`, after `--update` raised compiler `STA1214` from
+    1833 to 1845 for the new frontend code;
+  - builtins, node-coverage, leak and ASan green.
+
+> **Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
+> `b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
+> (`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
+> 1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
+>    phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
+>    supported", from harness lines), so the runner records a skip. The SyntaxError for an
+>    imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
+>    is skipped the same way. Find the commit that dropped it (bisect with
+>    `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
+>    is a SyntaxError in every module.
+> 2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
+>    specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
+>    30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
+>    before any bundle step runs.
+>
+> **Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
+> five gained tests stay), and `ratchet.json` is raised to the new total.
+
 ### Task 6.30 — The Windows frontend legs are green again ✅ (landed 2026-10-04)
 
 `frontend (windows/x64)` failed eleven unit tests once stage 2 ran again (CI run 37150879614, job
@@ -3239,6 +3429,77 @@ Check evidence: 12/12 `subset_out_*` decision fixtures (ts/js twins with the
 checker-owns-ts splits), 5/5 `extern-out` classifier unit tests, 17/17 generator unit
 tests, golden 386/386 (serial, sharded, ASan), `test:ffi` 5/5, differential smoke 10/10
 with 0 divergences. Net `cpd` unchanged at 0.9%.
+
+### Task 7.4 — A self-contained static library for C consumers ✅ (landed 2026-10-03)
+
+Asked by the creator (plan-notes 340). Step 3 chose (a), a private runtime per library, on measured
+evidence (plan-notes 342); two runtime bugs found on the way are plan-notes 341 and 342.
+
+> **[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
+> Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
+> The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
+> libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
+> This task makes `stator build` produce one static library plus its header, which a C build can
+> use with no Stator checkout.
+>
+> Steps:
+>
+> 1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
+>    `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
+>    member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
+>    written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
+>    same input are byte-identical, as the header already is (Task 7.2 step 8).
+> 2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
+>    it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
+>    writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
+>    the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
+> 3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
+>    program would each carry `jsrt_*` and collide. Measure both options and record the result in
+>    plan-notes before choosing:
+>    (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
+>    `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
+>    on ELF), so each library carries a private runtime; this must prove two such libraries work
+>    in one process, including two collectors' init and roots;
+>    (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
+>    shared `libjsrt.a` installed once.
+>    Whichever is chosen, the other combination is refused or documented. It never fails at run
+>    time.
+> 4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
+>    (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
+>    Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
+> 5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
+>    refused with a not-yet diagnostic until then.
+>
+> **Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
+> `<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
+> runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
+> linked into one C program and both called, under the option step 3 chose. The ffi CI job and
+> the ASan job run it. `pnpm run ci` is green.
+
+**What landed.** `src/cli/library.ts` (prelink, localization, deterministic `ar`, the `.pc`),
+the `--emit=lib` branch and `systemLinkFlags` in `src/cli/build.ts`, the config key and schema,
+STA0020/STA1219/STA1220 and two STA0004 forms in `docs/DIAGNOSTICS.md`, the shared Boehm kind
+(`jsrt_gc_shared_kind_p48`) and idempotent `jsrt_gc_init` in the runtime, and
+`-fno-sanitize-address-globals-dead-stripping` for the sanitized runtime (ELF COMDAT groups broke
+two sanitized libraries in one link). Docs: `docs/FFI.md` §8 "Static library", TOOLCHAIN, CONFIG,
+HOW-IT-WORKS. Option (b), `--runtime=external`, is documented as not offered.
+
+**Check — PASSED:**
+
+- `packages/tests/ffi/example-c-consumer/static-lib.ts`: builds `libconsumer.a` twice and compares
+  the `.a`, `.h` and `.pc` bytes; copies them with `main.c` to a fresh temp dir, refuses any repo
+  path (the unit's own error-stack `file:line` strings excepted), links through `pkg-config` alone
+  and matches `expected.txt`; links `libconsumer` and `libkeeper` into `two.c` with forced Boehm
+  collections (`GC_get_gc_no() >= 10`) and a stack overflow in one library.
+- Linux CI (run 37148352874, ubuntu-24.04, clang 18.1.3, GNU binutils 2.42): `ffi (linux/x64)`,
+  `ffi (linux/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (linux/x64)`, `asan (linux/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm
+  collections)`.
+- macOS 27.0.1 arm64 locally: default and ASan both ok. CI run 37153833737 (Apple clang 15.0.0,
+  ld-1053.12): `ffi (macos/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (macos/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm collections)`.
+- `pnpm run ci` exit 0 locally (unit 772 passed, subset 0 failed, golden 459/459, selfhost matches
+  baseline); `pnpm run test:ffi` exit 0; `unit/static-lib.test.ts` 10 passed.
 
 ### Test-infra track: Darwin link retry, `test:ffi` real checks, C-consumer example ✅ (landed 2026-09-15)
 

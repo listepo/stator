@@ -12289,6 +12289,148 @@ design point is whether each library carries a private runtime (prelink and loca
 one external runtime. Step 3 of the card leaves it to measurement, because the deciding factor
 (two collectors in one process) cannot be settled on paper.
 
+## 341. Two units sharing one runtime crashed at the first collection (2026-10-04)
+
+**Found while measuring Task 7.4 step 3.** Two `--emit-header` objects (Task 7.2) linked with
+one `libjsrt.a` into one C program segfaulted (exit 139) at the first collection. Each unit's
+`stator_<unit>_init` calls `jsrt_init()`, and `jsrt_init` called `jsrt_gc_init` every time.
+The second call saved the current push-other-roots hook, which was already the runtime's own
+`pushRoots`, as its predecessor. `pushRoots` then called itself until the stack ran out. lldb
+stopped in `pushRoots` at `jsrt_gc.zig:102` with `EXC_BAD_ACCESS` (macOS 27.0.1 arm64,
+Boehm 8.2.12 from Homebrew).
+
+The unit-level guard in the generated init (Task 7.2 step 3) only stopped one unit from
+initializing twice. It could not see the other unit. The Task 7.2 comment said "a second
+`jsrt_init()` would chain the Boehm roots hook into itself". That described the failure,
+but nothing prevented it across units.
+
+**Fix:** `jsrt_gc_init` is now idempotent through a module-level flag in `jsrt_gc.zig`. The
+flag is single-threaded, like every v0 runtime entry. `GC_init` itself was already safe to
+call twice. bdwgc v8.2.12 `misc.c` starts `GC_init` with
+`if (EXPECT(GC_is_initialized, TRUE)) return;`
+(https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04). The bug was ours:
+we registered a second kind and installed the hook a second time.
+
+**Regression test:** `packages/tests/unit/export-stubs.test.ts`, "two --emit-header units share
+one libjsrt.a across forced collections". Two units each keep 5,000 strings, and the C `main`
+calls `GC_gcollect()` after every call when the archive links Boehm. Before the fix the test
+fails with `SIGSEGV`. After it, the test prints `a=5000 b=5000`.
+
+## 342. Task 7.4 step 3: each library carries a private runtime (2026-10-04)
+
+**Question.** Two Stator libraries in one C program each need the runtime. Either (a) every
+library prelinks a private copy and hides it, or (b) `--runtime=external` leaves the runtime out
+and the consumer links one shared `libjsrt.a`. Both were measured before choosing.
+
+**Host.** macOS 27.0.1 arm64; `clang version 21.1.8` (conda, the `mise.toml` pin) and Apple
+clang 21.0.0 (clang-2100.3.34.2); `ld-27037.1` (Xcode 27.0); Apple `ar` (cctools); bdw-gc 8.2.12
+(Homebrew); pkg-config 3.0.7.
+
+**(b), one shared runtime.** Two `--emit-header` objects linked against one `libjsrt.a` crashed
+at the first forced collection. That was a Task 7.2 bug, not a property of (b), and it is fixed
+separately (plan-notes 341). With the fix, (b) works, but it leaves the consumer to find and
+link a `libjsrt.a` built from the same commit, and the runtime's ~900 global symbols land in the
+consumer's namespace. Neither is visible in the library's own files.
+
+**(a), a private runtime per library.** `cc -r unit.o libjsrt.a` with
+`-Wl,-exported_symbols_list` on Mach-O: the list marks every other global private extern, and
+`ld -r` makes private externs static unless `-keep_private_externs` is given (local `man ld`,
+ld-27037.1). On ELF, `objcopy --keep-global-symbols=<file>` makes every other global local
+(https://sourceware.org/binutils/docs/binutils/objcopy.html, checked 2026-10-04). Measured:
+
+| What | Result |
+|---|---|
+| globals left in `libconsumer.a` | 7: the unit's 6 `stator_consumer_*` symbols and `jsrt_gc_shared_kind_p48` |
+| runtime symbols made non-external | 894 at first measurement (1,313 local symbols in the stripped member) |
+| two libraries in one program, forced Boehm collections | works, default and ASan runtime |
+| app through the library vs object + `libjsrt.a` (`-dead_strip`) | 240 KB vs 245 KB |
+| cost of each extra library in one program | about 200 KB (its own runtime) |
+| member before the final link | about 390 KB |
+
+**Decision: (a).** The coordinator approved it on this evidence. (b) is not offered: there is no
+`--runtime=external` flag, and docs/FFI.md §8 says why.
+
+**Three things (a) needed:**
+
+1. *A shared Boehm object kind.* Each runtime copy registered its own kind, and bdw-gc allows
+   `MAXOBJKINDS` = 16 (https://github.com/ivmai/bdwgc/blob/v8.2.12/include/private/gc_priv.h).
+   `GC_new_kind` aborts with "Too many kinds" past it
+   (https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04), so the 13th
+   library's init killed the process. A clean `last_error` before the abort was considered and
+   not needed: the copies now share one kind through a weak global, `jsrt_gc_shared_kind_p48`
+   (`packages/runtime/src/jsrt_mem.h`), which the library keeps exported so the copies coalesce.
+   The first copy to initialize registers the kind, and the rest reuse it. Measured: 15 units in
+   one process initialize and collect. Sharing is sound because every copy's mark procedure
+   masks the same 48-bit payload; a runtime that marks differently must rename the symbol.
+   The weak definition is in C (`jsrt_value.c`): Zig 0.16.0 emits a weak data `@export` as a
+   non-external symbol on Mach-O, which does not coalesce.
+2. *`--no-default-config` on the prelink.* The pinned conda clang's configuration file adds
+   `-Wl,-rpath`, and `ld -r` refuses it ("-rpath can only be used when creating a dynamic final
+   linked image"). Without the config file, conda clang's output is byte-identical to Apple
+   clang's.
+3. *No debug information.* The runtime's Zig object carries debug stabs even in a release build,
+   naming `packages/runtime/src/` and the archive path on the build machine. The prelink passes
+   `-Wl,-S` (ld(1): do not put debug information in the output; GNU ld documents the same
+   flag). The sanitized flavor keeps it for line numbers in reports, and so its archive is not
+   byte-reproducible (the debug map also names the scratch directory).
+
+**The stack guard (Task 6.23, rebased onto `2efaabb`).** Each copy's `jsrt_stack_init` sets
+its own thread-local `jsrt_stack_limit` from the same thread bounds, and installs its own
+SIGSEGV/SIGBUS handler, saving the previous one; a fault outside its guard region restores the
+previous handler and returns, so the copies chain. Proof: `keeper.ts` exports `deep()`, which
+recurses without bound; in `two.c` it answers the sentinel with "Maximum call stack size
+exceeded" in `stator_keeper_last_error()`, and the consumer library answers correctly right
+after. Default and ASan runtime, macOS.
+
+**Source paths.** The archive holds the unit's own source path where a call site records its
+`file:line` for error stacks, as a binary does. That is program data, not a build input, and the
+static-lib check exempts exactly those strings; every other path into the repository is refused.
+
+**Determinism.** Two builds into different directories give byte-identical `.a`, `.h` and
+`.pc`. Apple's `ar` refuses the `D` modifier; it zeroes the member date, uid and gid when
+`ZERO_AR_DATE` is set
+(https://raw.githubusercontent.com/apple-oss-distributions/cctools/main/misc/libtool.c, checked
+2026-10-04). GNU `ar` takes `D` (https://sourceware.org/binutils/docs/binutils/ar-cmdline.html,
+checked 2026-10-04). Plain Apple `ar rcs` gave different bytes on every build.
+
+**The `.pc`.** `prefix=${pcfiledir}` makes it relocatable. `Libs` is the binary link's own list
+(`build.ts` `systemLinkFlags`, shared with `linkArguments`), so the two cannot drift.
+
+**Proof.** `packages/tests/ffi/example-c-consumer/static-lib.ts`, run by the ffi CI jobs (Linux
+and macOS) and by the ASan gate.
+
+**Linux evidence (PR #105, CI run 37148352874 on `3d87e50`, 2026-10-03).** ubuntu-24.04 x64 and
+arm64; Ubuntu clang 18.1.3 (1ubuntu1); GNU ld, objcopy and ar from GNU Binutils for Ubuntu 2.42.
+`ffi (linux/x64)` and `ffi (linux/arm64)` print `ffi static-lib: ok (two libraries, forced Boehm
+collections)`, and `asan (linux/x64)` and `asan (linux/arm64)` print `ffi static-lib: ok (asan,
+two libraries, forced Boehm collections)`. So the ELF path (`cc -r`, then
+`objcopy --keep-global-symbols`, then `ar rcsD`) holds two private runtimes in one program. Both
+runtimes' collections and both stack guards are confirmed, and the archive is byte-identical
+across two builds.
+
+**The sanitized runtime on ELF.** The first asan run (linux/x64, on `fdeb612`) failed at the
+consumer link of `two.c` with "`jsrt_class_range_error` ... defined in discarded section
+`.data.rel.ro.jsrt_class_range_error[jsrt_class_range_error]`". Clang's ASan dead-strips globals
+by default (`-fsanitize-address-globals-dead-stripping`, on by default in
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/clang/lib/Driver/SanitizerArgs.cpp).
+On ELF it puts each instrumented global in a COMDAT group named after the symbol
+(`instrumentGlobalsELF`,
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp,
+checked 2026-10-03). Two prelinked copies carry same-named groups. The final link keeps one copy
+and discards the other, whose code still refers to it. The sanitized flavor now builds with
+`-fno-sanitize-address-globals-dead-stripping` (`packages/runtime/justfile`), so ASan registers
+globals through a metadata array instead. The release flavor is not instrumented and has no such
+groups.
+
+## 343. Task 7.4 lands (2026-10-03)
+
+The Check passes. The step 3 evidence and the decision are in 342, and the GC-init fix is in 341.
+The Linux proof is CI run 37148352874: both `ffi (linux/*)` and both `asan (linux/*)` jobs print
+`ffi static-lib: ok`. The macOS proof is a local run (default and ASan), and the macOS ffi and
+asan CI jobs passed the same step in CI run 37153833737 (Apple clang 15.0.0, ld-1053.12). The card moves to done.md, and plan.md keeps the stub.
+Changelog: v4.79. Left out of this task and not planned: a Windows library (STA1219) and a
+`jsrt_value` surface under `--emit=lib` (STA1220). Both are refusals, so neither fails at run time.
+
 ## 344. Two bugs found while landing 6.24 become Tasks 6.27–6.28 (2026-10-04)
 
 **Source.** The agent landing Task 6.24 reported two pre-existing bugs outside its scope
@@ -12325,6 +12467,123 @@ user gets a wrong answer from it.
 `STA0012`, because TS2365 is not in `JS_MODE_RUNTIME_CODES` (docs/MODES.md §3, plan-notes 297).
 That is deliberate policy, and nothing wrong is printed. Whether TS2365 should take the dynamic
 path in `js` mode is a separate question for the creator.
+
+## 345. Task 6.27: a user `toString`/`valueOf` is honored by ToPrimitive (2026-10-04)
+
+**Sources (checked 2026-10-04).**
+- ECMA-262 2025 (16th edition), https://262.ecma-international.org/16.0/: §7.1.1 ToPrimitive,
+  §7.1.1.1 OrdinaryToPrimitive (hint order; a method that is not callable is skipped; step 3
+  throws a TypeError), §7.1.17 ToString, §7.2.13 IsLessThan (hint `number`), §7.2.14
+  IsLooselyEqual (hint `default`), §13.15.3 ApplyStringOrNumericBinaryOperator (both operands are
+  evaluated, then converted left to right), §21.4.4.45 `Date.prototype[@@toPrimitive]` (`default`
+  reads as `string`), §23.1.3.18 `Array.prototype.join` (the length is read once).
+- Node v26.7.0, `lib/internal/util/inspect.js`
+  (https://github.com/nodejs/node/blob/v26.7.0/lib/internal/util/inspect.js):
+  `hasBuiltInToString` (line 2707) and `formatWithOptionsInternal`'s `%s`/`%d`/`%i`/`%f` arms
+  (lines 2823–2876). `%s` calls `String(v)` unless the toString is a builtin's: not callable,
+  or inherited from a prototype whose own `constructor` is a function named in `builtInObjects`.
+  An own toString is never a builtin's.
+- `builtInObjects` is the capitalized own properties of `globalThis` when inspect.js loads, during
+  bootstrap. Measured on the pinned Node by asking `util.format('%s')` of an object inheriting a
+  toString from a prototype whose constructor carries each global's name: 47 names. Web globals
+  installed later (`Event`, `URL`, `Buffer`, …) are not among them. The runtime's copy
+  (`BUILTIN_CONSTRUCTOR_NAMES`, `jsrt_print.c`) is re-measured by `unit/to-primitive.test.ts`.
+
+**Design.**
+- `jsrt_to_primitive(v, hint)` replaces the hint-less version (the hint parameter docs/NUMERIC.md
+  §7 said would arrive with user methods). It asks the object for each method by name with
+  `jsrt_user_get`: own field, literal method, class method table (inherited included), a
+  constructor's prototype chain. A hit is the program's method and is called with the object as
+  `this` (`jsrt_call_with_this`). A miss is the builtin prototype's method, modelled: a builtin
+  `toString` answers `jsrt_builtin_to_string` (the old ToString body, renamed), and a builtin
+  `valueOf` answers the object itself (so the next rung runs), except a Date's time value.
+- The card named `jsrt_get_prop` + `jsrt_call`. `jsrt_user_get` is used instead, for two reasons:
+  `%s` needs to know which class holds an inherited toString (`hasBuiltInToString`), which a
+  property read does not say; and a miss must mean "the builtin's", which `undefined` from a read
+  cannot tell apart from a field holding `undefined`.
+- An object whose conversion is attempted while an exception is already pending converts to
+  nothing. This is what makes `Math.max(a, b)`, `String.fromCharCode`, a sort's keys and the other
+  runtime functions that convert several values in a row stop at the first throw, as JavaScript
+  does, without each of them checking.
+- Codegen follows every conversion of a value whose HType may be an object
+  (`hTypeConversionRunsUserCode`: object, unknown, type-param, an array of those) with a pending
+  check: template holes, binary and unary operators, `++`/`--`, compound assignment, and the
+  runtime calls that convert arguments. The numeric operators convert their operands in rooted
+  slots, left then right, each behind its own check, because C would choose the order inside one
+  expression.
+- Lowering: in a template hole, `String(x)` and either operand of `+`, a receiver whose class
+  declares the method the hint tries first (`toString` for hint `string`, `valueOf` for `default`)
+  with no parameter and a primitive return becomes a `MethodCall` (virtual where a subclass
+  overrides it). Other cases go to the runtime path. A class with only `toString` under `+` also
+  goes to the runtime path, because a subclass could add a `valueOf` that the static type cannot
+  see.
+- The gate's three STA1214 format refusals are gone: `%s` of an object with its own toString,
+  `%d`/`%i`/`%f` through a user method, `%d` of a Date. One runtime refusal is new (`STA2005`):
+  `%s` of an object whose inherited toString may come from a builtin-named class when a capturing
+  method (a NULL method-table entry) hides which class in the chain wrote it.
+- `emitErrorCell` (Task 7.2's C error message) now runs the thrown object's own toString. If that
+  throws in turn, the second exception is dropped and the builtin text is used.
+
+**Fixed on the way.** These printed wrong bytes before and now match Node: `+o` and `Number(o)`
+of an object with a user `valueOf` (NaN), `Number(date)` (NaN), and `o == 3` with a user
+`valueOf` (false).
+
+**Not changed.**
+- Arithmetic other than `+` on an operand the checker types as an object (or a Date) is still
+  refused at the gate (`STA1214`, "arithmetic on a … operand", Phase 8), or by the checker
+  (`STA0012`). The runtime and codegen now handle such operands, as an untyped value shows, but
+  lifting the gate is a subset decision outside this card.
+- `Symbol.toPrimitive` stays refused (`STA1212`, or `STA1214` for the computed member name).
+- The default `sort` compares ToString of each element. When an element's toString has side
+  effects, V8's TimSort may call it in a different order. Comparators already have this property.
+- Selfhost: `packages/compiler` `STA1214` 1813 → 1815. `userConversion`'s three `ts.*` parameter
+  types add 3; removing the gate's format check removes 1.
+
+## 347. Task 6.28: an initializer's closure reads its own binding; closure-mediated TDZ is refused (2026-10-04)
+
+**Root cause.** The lowering was already right. `lowerDeclarator` declares the binding
+(`bindings.declare`) before it lowers the initializer, and capture analysis
+(`lower/captures.ts`) resolves a self-reference like any other capture: a function-local binding
+gets an environment slot, a module-level one its global. The verifier did the opposite: its
+`declaration` case verified the value first and registered the name after, so every read of the
+name inside its own initializer, including one inside a nested function, was `STA4002`. With the
+verifier order fixed, the five shapes of plan-notes 344 compile and print Node's bytes in both
+modes, with no change to lowering or codegen.
+
+**Not a relaxation.** Registering the name before the value would also have let a read on the
+initializer's own evaluation path through. Instead the binding is registered as `initializing`
+while its initializer is verified, and resolves only through a function-body scope
+(`Scope.functionChild`). Anywhere else the verifier still reports `STA4002` (`STA4003` for an
+assignment), with the old message. `unit/verify.test.ts` pins both halves.
+
+**How the tree models TDZ.** It does not, at run time. A direct read in the initializer is TS2448
+(fatal in both modes, docs/MODES.md §3). An immediately invoked closure, `const x = (() => x)()`,
+is TS2448 too (checked on 2026-10-04 at `b95a0dc`). What the checker cannot see is a closure the
+initializer runs some other way: a callback handed to a call (`const y = call(() => y)`), a
+`toString` that `'' + { … }` invokes, a getter a spread reads. Node throws a TDZ `ReferenceError`
+there. The compiled program has no TDZ sentinel, so it would read a slot nothing was stored in
+yet. The gate therefore refuses such a read with not-yet `STA1214`, and with no phase, because no
+open card adds a run-time TDZ check (`mayRunInOwnInitializer` in `src/frontend/gate.ts`). A read
+passes only when the outermost function between it and the initializer reaches the initializer
+through containers that hand a function on without calling it: parentheses, `as`, `satisfies`,
+`!`, `?:` branches, `&&`/`||`/`??`/`,`, array elements, and object-literal members. That is
+conservative. `const g = (() => { const h = () => g(); return h; })()` is refused although Node
+runs it.
+
+**Card deviation.** The card says a call before initialization "stays Node's TDZ
+`ReferenceError`". Without a run-time TDZ check the compiler cannot answer that, so the case is
+refused instead of printing different bytes. The card's `g(10000)` cannot be a golden on this
+host. With `1 + g(n - 1)`, Node 26.7.0 itself overflows (`RangeError: Maximum call stack size
+exceeded`; 8000 levels work). A tail-position `down(n - 1)` runs 10000 in Node and in the plain
+build, but the ASan build's frames are larger: its stack guard throws the same `RangeError` at
+6000 levels and passes at 5000 (macOS arm64, 8 MiB stack, measured 2026-10-04). Every golden also
+runs under ASan (`test:asan`), so the goldens recurse 3000 levels, in the card's own
+`1 + g(n - 1)` shape.
+
+**Found on the way, not changed.** In `js` mode, `let h = (n) => n; h = (n) => n * 100;` stops
+with internal error `STA4004` ("assignment target type (a0: unknown) => unknown does not match
+value type (a0: unknown) => number"). It reproduces at `b95a0dc`, has nothing to do with self-reference, and
+`h = (n) => n + 100` (an `unknown` result) compiles. The goldens use that spelling.
 
 ## 349. Linux CI was red on main; three fixes and Task 6.29 (2026-10-03)
 
@@ -12367,6 +12626,78 @@ lowered. Task 6.29 restores the six tests.
 - **Task 6.30: eleven other Windows failures.** Ten are `bundler.test.ts` path-form mismatches:
   the code answers `C:/Users/…` and the tests expect `C:\Users\…`. The other is
   `selfhost.test.ts` "the committed baseline is in --update form".
+
+## 350. Task 6.29: the six lost Test262 module tests were never real passes; three refusals land (2026-10-03)
+
+**Bisect.** No commit in `76a69ed..b95a0dc` dropped a refusal, because Stator never had one.
+At `76a69ed` the runner compiled a module test as `.tmp/test-<pid>-<slot>.js`. The test's
+self-import (`'./early-import-eval.js'`) and its `_FIXTURE` import then resolved to nothing. The
+build failed with `STA0012` "Cannot find module", which the runner maps to SyntaxError, so the
+negative test counted as a pass. Commit `68c8d57` (T11.5a, plan-notes 302) changed that: it
+compiles a module test under its own name, with its siblings copied next to it. From then on, the
+five tests reached the gate. The gate only raised `STA1214` at harness lines, and the runner
+recorded a skip. Reproduced on `76a69ed` by compiling a renamed copy of `early-import-eval.js`,
+which gives `STA0012` "Cannot find module".
+
+`dup-bound-names.js` lost for a different reason. At `76a69ed` the build raised `STA0012`
+(TS2300 "Duplicate identifier"). The bundle step (T12.1) came later and now runs before the
+program's diagnostics are reported. It hands the bare `'z'` to Vite, which fails with `STA0015`.
+
+**What TypeScript 6.0.3 does** (probed with `ts.getPreEmitDiagnostics`, the frontend's options):
+
+- `import { eval } from`, `import { y as arguments } from`: no diagnostic, in `.js` or `.ts`.
+  The binder checks strict-mode `eval`/`arguments` on every other binding (TS1100) but not on an
+  ImportedBinding.
+- `import { x, y as x } from 'z'`: TS2300 twice. These are **binder** diagnostics
+  (`SourceFile.bindDiagnostics`), not parser ones.
+- A default import of a `.js` file with no import or export statement: no diagnostic. TypeScript
+  cannot tell such a file from CommonJS, so it gives the file a synthesized default. Using the
+  binding then fails in the lowering with `STA4035`. For a `.ts` file, an `.mjs` file, a file with
+  `import.meta`, or a module with exports but no default, it reports TS1192, which becomes
+  `STA0012`.
+- Node 26.7.0 on the same file: under `"type": "module"`, `import x from './empty.js'` throws
+  SyntaxError "does not provide an export named 'default'". With no `"type"`, Node loads the file
+  as CommonJS and `x` is `{}`.
+
+**What landed.**
+
+1. **`STA3005`** (both modes): an imported binding named `eval` or `arguments`. The frontend
+   raises it after the checker (`strictReservedImports` in `frontend/modules.ts`). It is a
+   parse-phase error, so it is reported before the gate.
+2. **Parse errors come before the bundle step.** `LoadedProgram.parseDiagnostics` holds the
+   parse-phase subset: the parser's, the binder's and `STA3005`. When it is non-empty,
+   `bundledFrontend` reports only those and loads no adapter. The unresolved package imports
+   are not reported beside them, because those are the bundle's to resolve. The binder's list
+   is read through `Reflect.get(file, 'bindDiagnostics')`, an internal field. A unit test pins
+   that the pinned `typescript` still fills it, and a release without it degrades to the parser's
+   list without failing. A public alternative was considered and refused: treating every
+   base-program diagnostic as blocking would also block on the `STA0012` "Cannot find module"
+   of every package import, which is exactly what the bundle step resolves.
+3. **`STA3004`** (js mode): a default import, an `import { default as x }`, or an
+   `export { default } from` of a `.js` file that Node loads as an ES module (`"type": "module"`)
+   and that has no ES-module syntax. The gate raises it, next to `STA3003`. It is deliberately
+   narrower than Stator's own CommonJS rule (docs/MODES.md). With no `"type"`, Node gives the file
+   a CommonJS default, so refusing it would put a SyntaxError where Node prints `{}`.
+
+The runner maps `STA3004` and `STA3005` to SyntaxError, the same way it already maps `STA3003`.
+The classification is unchanged otherwise.
+
+**Not changed, found on the way.** Two shapes still hit `STA4035`:
+- a default import of a syntax-free `.js` with no `"type"`, which Node runs as CommonJS (`{}`);
+- `ns.default` through `import * as ns` of a syntax-free ES module, which Node answers with
+  `undefined`.
+
+Both are internal errors, not wrong output. They are left for a card if the creator wants one.
+
+**Measured** on macOS arm64, Node 26.7.0, corpus pin `771005236e88`. A full `pnpm run test262`
+reports `2377 passed, 49384 skipped, 1819 failed`. Before this change, CI on `b95a0dc` reported
+2371. The six tests pass under `--filter`, and so do the five tests gained since `76a69ed`.
+`ratchet.json` `passed` goes from 2372 to 2377. `failed` and `skipped` keep CI's values: the
+gate fails only when `failed` rises, and this change moves tests from failed or skipped to passed.
+
+The selfhost baseline for `packages/compiler` rises from 1833 to 1845 `STA1214`. The new frontend
+code (the binder-list read, the import walks and the gate check) uses constructs Stator does not
+compile yet. `--update` records that rise.
 
 ## 352. Task 6.30: which path form the bundler seam promises, and LF everywhere (2026-10-03)
 

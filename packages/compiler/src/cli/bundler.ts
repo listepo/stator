@@ -255,6 +255,11 @@ async function bundledFrontend(
   if (entryFile === undefined) return plain;
   const plan = planVendor(base.program, entryFile, node);
   if (plan === undefined) return plain;
+  // No bundle can make the source parse, so a parse-phase error is the build's answer before any
+  // adapter loads; the package imports it left unresolved are not reported beside it.
+  if (base.parseDiagnostics.length > 0) {
+    return { frontend: { ...base, diagnostics: [...base.parseDiagnostics] }, files: plain.files };
+  }
   const bundle = await obtainBundle(bundler, plan.entry);
   if (bundle === undefined) return plain;
   const files = new Map(plan.rewrites(bundle.code));

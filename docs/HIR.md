@@ -715,7 +715,7 @@ Each check is a compiler invariant. If it fails, the compiler has contradicted i
 
 **Type presence:** Every node has an `HType`. Missing `type` → `STA4020`.
 
-**Binding scope:** Every `Identifier` reference refers to a binding declared before use. Using a name never declared → `STA4002`. Assigning to a name never declared → `STA4003`.
+**Binding scope:** Every `Identifier` reference refers to a binding declared before use. Using a name never declared → `STA4002`. Assigning to a name never declared → `STA4003`. A `let`/`const` binding is in scope during its own initializer, because a closure there captures the binding rather than its value (`const g = (n) => … g(n - 1)`), but only from inside a function body: a read on the initializer's own evaluation path would run before the binding exists, and stays `STA4002`/`STA4003` (plan.md §9 Task 6.28). That read never reaches the HIR from source: a direct one is TS2448, and the gate refuses a function the initializer may call before it finishes (`STA1214`, docs/SUBSET.md).
 
 **Type agreement:** The type of each expression matches the operation that produced it:
 - `NumberLiteral` must have type `number` → `STA4007`

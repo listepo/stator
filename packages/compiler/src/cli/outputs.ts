@@ -93,10 +93,11 @@ export function requireWritable(target: NamedPath): void {
   }
 }
 
-/** `writeFileSync`, with the user's file-system failures as STA0019. */
-export function writeOutput(target: NamedPath, text: string): void {
+/** `writeFileSync`, with the user's file-system failures as STA0019. Text is written as UTF-8;
+ * bytes (a `--emit=lib` archive) as they are. */
+export function writeOutput(target: NamedPath, content: string | Uint8Array): void {
   try {
-    writeFileSync(target.path, text, 'utf8');
+    writeFileSync(target.path, content, typeof content === 'string' ? 'utf8' : null);
   } catch (error) {
     throwWriteError(target, error);
   }

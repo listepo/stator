@@ -61,6 +61,9 @@ bool jsrt_strict_equals(jsrt_value a, jsrt_value b) {
  * Initialization — assert 48-bit pointer assumption and set up GC
  * ============================================================================ */
 
+/* Weak so that several private runtime copies in one process share one definition (jsrt_mem.h). */
+__attribute__((weak)) unsigned jsrt_gc_shared_kind_p48 = 0;
+
 void jsrt_init(void) {
   /* Verify the 48-bit pointer assumption against a real heap allocation.
    * This check must fail loudly at startup, never silently. */
@@ -163,6 +166,15 @@ jsrt_value jsrt_call_spread_at(jsrt_value callee, const jsrt_value *receiver, js
                             list->length, list->elements);
 }
 
+jsrt_value jsrt_call_with_this(jsrt_value callee, jsrt_value receiver, uint32_t argc,
+                               const jsrt_value *argv) {
+  if (jsrt_is(callee, JSRT_TAG_CLOSURE) && jsrt_as_closure(callee)->klass == NULL &&
+      jsrt_as_closure(callee)->has_receiver) {
+    return call_with_receiver(jsrt_as_closure(callee), receiver, argc, argv);
+  }
+  return jsrt_call_at(callee, argc, argv, NULL);
+}
+
 /* `new F(...)` for an ordinary function (§10.2.2 [[Construct]], plan-notes 310). JavaScript
  * splits its answer: a `function` constructs, an arrow, a method, an async function or a generator
  * raises `X is not a constructor` -- the split the closure's `constructible` records. The object
@@ -196,8 +208,9 @@ static jsrt_value construct_function(jsrt_value ctor, uint32_t argc, const jsrt_
 
 jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv) {
   if (!jsrt_is(ctor, JSRT_TAG_CLOSURE)) {
-    /* Node's wording names the operand's rendered value (`5 is not a constructor`). */
-    const char *shown = jsrt_shape_key(jsrt_to_string(ctor));
+    /* Node's wording names the operand's rendered value (`5 is not a constructor`). Rendering a
+     * message must not call the program's own `toString`, which V8 never does here. */
+    const char *shown = jsrt_shape_key(jsrt_builtin_to_string(ctor));
     char message[256];
     (void)snprintf(message, sizeof message, "%s is not a constructor", shown);
     free((void *)shown);

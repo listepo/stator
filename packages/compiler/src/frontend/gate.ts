@@ -89,7 +89,7 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
-import { isFreeCommonJsName, isPackageSpecifier } from './vendor.ts';
+import { isFreeCommonJsName, isPackageSpecifier, isSyntaxFreeEsModule } from './vendor.ts';
 import {
   type CommonJsBinding,
   commonJsVerdict,
@@ -732,9 +732,13 @@ function gateSpecifier(
   }
   const target = typeChecker.getSymbolAtLocation(moduleSpecifier)?.valueDeclaration;
   const name = (spec.propertyName ?? spec.name).text;
-  return target !== undefined &&
-    ts.isSourceFile(target) &&
-    ambiguousStarExports(target, typeChecker).has(name)
+  if (target === undefined || !ts.isSourceFile(target)) {
+    return { kind: 'accept' };
+  }
+  if (name === 'default') {
+    return missingDefault(target) ?? { kind: 'accept' };
+  }
+  return ambiguousStarExports(target, typeChecker).has(name)
     ? {
         kind: 'never',
         code: 'STA3003',
@@ -743,6 +747,22 @@ function gateSpecifier(
           'differently, so it cannot be imported by name',
       }
     : { kind: 'accept' };
+}
+
+/** A default import of a module with no default export is the SyntaxError ES raises at link time
+ * (ResolveExport answers null, §16.2.1.6.3). TypeScript reports it (TS1192) for every module it
+ * knows to be one; the gap is a syntax-free `.js` ES module, which it takes for CommonJS and gives a
+ * synthesized default (plan.md §9 Task 6.29). */
+function missingDefault(target: ts.SourceFile): GateResult | undefined {
+  return isSyntaxFreeEsModule(target)
+    ? {
+        kind: 'never',
+        code: 'STA3004',
+        message:
+          `${target.fileName} has no default export: it is an ES module ("type": "module") ` +
+          'with no export statement',
+      }
+    : undefined;
 }
 
 /** `ns.x` where `ns` is a module namespace: a member the lowering resolves to the export's own
@@ -765,11 +785,15 @@ function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): Ga
   if (specifier.kind !== 'accept') {
     return specifier;
   }
+  const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
+  if (node.importClause?.name !== undefined && target !== undefined && ts.isSourceFile(target)) {
+    const missing = missingDefault(target);
+    if (missing !== undefined) return missing;
+  }
   // A namespace of a declaration file has no module behind it: its bindings are extern C
   // functions (docs/FFI.md §1), called by name, with no slot a namespace object could read.
   const bindings = node.importClause?.namedBindings;
   if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
-    const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
     if (target !== undefined && ts.isSourceFile(target) && target.isDeclarationFile) {
       return notYet('a namespace import of a declaration file is not yet supported', 5);
     }
@@ -1394,6 +1418,14 @@ function gateIdentifier(
   if (decl === undefined || enclosingFunction(decl) === enclosingFunction(node)) {
     return { kind: 'accept' };
   }
+  // No phase: the refusal waits on a run-time TDZ check, which no open phase has a card for.
+  if (mayRunInOwnInitializer(node, decl)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1214',
+      message: `reading '${node.text}' from a function that may run during its own initializer is not yet supported (no run-time TDZ check)`,
+    };
+  }
   // `var` is function-scoped even when its spelling sits inside a loop, so capturing it is the
   // ordinary shared-binding case — every closure sees one slot, which is already what env
   // capture implements. `let`/`const` in a loop are the ones that still need per-iteration
@@ -1590,6 +1622,79 @@ function enclosingFunction(node: ts.Node): ts.Node | undefined {
     }
   }
   return undefined;
+}
+
+/** Whether a read of a `let`/`const` binding sits in that binding's own initializer, inside a
+ * function that may run before the binding exists (plan.md §9 Task 6.28).
+ *
+ * A closure in the initializer captures the binding, not its value, so `const g = (n) => g(n - 1)`
+ * reads an initialized `g` whenever it is called afterwards. Called sooner -- an IIFE, a callback
+ * the initializer hands to a call, a method a coercion invokes -- Node throws a TDZ
+ * `ReferenceError`, and the compiled program has no TDZ check to throw it with: the slot would be
+ * read before anything was stored in it. A read outside every function is TS2448, already fatal.
+ * So the read passes only when the outermost function around it reaches the initializer through
+ * containers that hand a function on without calling it. */
+function mayRunInOwnInitializer(node: ts.Identifier, decl: ts.Declaration): boolean {
+  if (
+    !ts.isVariableDeclaration(decl) ||
+    decl.initializer === undefined ||
+    !ts.isVariableDeclarationList(decl.parent) ||
+    isVarDeclarationList(decl.parent)
+  ) {
+    return false;
+  }
+  const initializer = decl.initializer;
+  let outermost: ts.Node | undefined;
+  for (let n: ts.Node | undefined = node.parent; n !== initializer; n = n.parent) {
+    if (n === undefined) {
+      return false;
+    }
+    if (ts.isFunctionLike(n)) {
+      outermost = n;
+    }
+  }
+  if (ts.isFunctionLike(initializer)) {
+    outermost = initializer;
+  }
+  if (outermost === undefined) {
+    return true;
+  }
+  for (let n: ts.Node = outermost; n !== initializer; n = n.parent) {
+    if (!passesOnUncalled(n.parent, n)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether evaluating `parent` yields `child`'s value, or stores it, without calling it. A
+ * spread, a coercion (`'' + { toString() {…} }`) and a call are what this keeps out. */
+function passesOnUncalled(parent: ts.Node, child: ts.Node): boolean {
+  if (
+    ts.isParenthesizedExpression(parent) ||
+    ts.isAsExpression(parent) ||
+    ts.isSatisfiesExpression(parent) ||
+    ts.isNonNullExpression(parent) ||
+    ts.isArrayLiteralExpression(parent)
+  ) {
+    return true;
+  }
+  if (ts.isConditionalExpression(parent)) {
+    return child !== parent.condition;
+  }
+  if (ts.isBinaryExpression(parent)) {
+    const op = parent.operatorToken.kind;
+    return (
+      op === ts.SyntaxKind.BarBarToken ||
+      op === ts.SyntaxKind.AmpersandAmpersandToken ||
+      op === ts.SyntaxKind.QuestionQuestionToken ||
+      op === ts.SyntaxKind.CommaToken
+    );
+  }
+  if (ts.isPropertyAssignment(parent)) {
+    return child === parent.initializer;
+  }
+  return ts.isObjectLiteralExpression(parent) && !ts.isSpreadAssignment(child);
 }
 
 /** The loop giving `decl` a fresh binding each iteration. Searched no further out than the function
@@ -6743,13 +6848,6 @@ function formatPlaceholders(
   return applied;
 }
 
-/** A user-written `name` on the value — declared in a source file, not the lib — which util.format
- * would CALL: the runtime's ToPrimitive never does (jsrt_to_primitive), so the answer would differ. */
-function hasUserMethod(type: ts.Type, name: string): boolean {
-  const declarations = type.getProperty(name)?.getDeclarations() ?? [];
-  return declarations.some((d) => !d.getSourceFile().isDeclarationFile);
-}
-
 /** The placeholder a console call's literal format string applies to a value the runtime cannot
  * print as Node does, or `undefined`. A format only the run sees is the runtime's to refuse, and
  * it does so loudly (STA2005, `format_refused` in jsrt_print.c); this is the same rule, reported
@@ -6789,18 +6887,6 @@ function formatRefusal(
           checker.getSignaturesOfType(arm, ts.SignatureKind.Construct).length > 0)
       ) {
         return { what: '%s of a function', phase: 5 };
-      }
-      if (spec === 's' && hasUserMethod(arm, 'toString')) {
-        return { what: '%s of an object with its own toString', phase: 8 };
-      }
-      if (
-        (spec === 'd' || spec === 'i' || spec === 'f') &&
-        (hasUserMethod(arm, 'toString') || hasUserMethod(arm, 'valueOf'))
-      ) {
-        return { what: `%${spec} of an object with its own toString or valueOf`, phase: 8 };
-      }
-      if (spec === 'd' && tsTypeToHType(arm, checker).kind === 'date') {
-        return { what: '%d of a Date', phase: 5 };
       }
     }
   }

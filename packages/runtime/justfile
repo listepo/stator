@@ -145,8 +145,15 @@ _runtime flavor:
         DIR=build-asan
         LTO=''
         LTO_STATUS='no LTO (sanitized build)'
-        CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O1 -g -fsanitize=address,undefined"
-        VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O1 -g -fsanitize=address,undefined"
+        # No globals dead stripping: on ELF it puts every instrumented global in a COMDAT group
+        # named after the symbol, and a program linking two `--emit=lib` archives (two private
+        # runtime copies, plan-notes 342) then keeps one copy's group and discards the other's,
+        # whose code still references it -- "defined in discarded section" at the consumer's link.
+        # Without it ASan registers globals through a metadata array, which has no groups
+        # (llvm-project 18.1.3 AddressSanitizer.cpp, instrumentGlobals).
+        ASAN_FLAGS='-fsanitize=address,undefined -fno-sanitize-address-globals-dead-stripping'
+        CFLAGS="${CFLAGS_COMMON} ${DEPFLAGS} -O1 -g ${ASAN_FLAGS}"
+        VFLAGS="${CFLAGS_VENDOR} ${DEPFLAGS} -O1 -g ${ASAN_FLAGS}"
         ZIG_OPT=ReleaseSafe
         EXTRA_LIBS="${GC_LIBS} ${SYS_LIBS}"
         LABEL='Runtime (ASan) built with'

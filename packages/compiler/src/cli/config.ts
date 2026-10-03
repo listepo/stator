@@ -53,8 +53,11 @@ export const ConfigSchema = Type.Object(
       }),
     ),
     emit: Type.Optional(
-      Type.Enum(['binary', 'c'], {
-        description: 'build: "c" stops after writing C to out (--emit=c). Default "binary".',
+      Type.Enum(['binary', 'c', 'lib'], {
+        description:
+          'build: "c" stops after writing C to out (--emit=c); "lib" writes out as a static ' +
+          'library lib<name>.a plus lib<name>.pc, and needs emitHeader (--emit=lib). ' +
+          'Default "binary".',
       }),
     ),
     keepC: Type.Optional(
@@ -218,7 +221,7 @@ export interface CliOptions {
   mode: 'ts' | 'js' | undefined;
   opt: OptLevel | undefined;
   link: readonly string[];
-  emit: 'binary' | 'c' | undefined;
+  emit: 'binary' | 'c' | 'lib' | undefined;
   keepC: boolean | undefined;
   emitHeader: string | undefined;
   unitName: string | undefined;
@@ -233,7 +236,7 @@ export interface ResolvedOptions {
   mode: 'ts' | 'js';
   opt: OptLevel;
   link: readonly string[];
-  emit: 'binary' | 'c';
+  emit: 'binary' | 'c' | 'lib';
   keepC: boolean;
   emitHeader: string | undefined;
   unitName: string | undefined;
