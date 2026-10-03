@@ -6,6 +6,7 @@ import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
 import { hasTypeScriptAnnotation } from './annotation.ts';
+import { strictReservedImports } from './modules.ts';
 import { isCheckable } from './narrowing.ts';
 import {
   classifyNodeMember,
@@ -544,7 +545,36 @@ interface ProgramCacheEntry {
 export interface LoadedProgram {
   readonly program: ts.Program;
   readonly diagnostics: Diagnostic[];
+  /** The PARSE-phase subset of `diagnostics`: the parser's, the binder's (a duplicate or
+   * strict-mode-reserved binding) and Stator's own early errors (`STA3005`). Test262 calls these
+   * phase `parse`; a build that has one reports them before any bundle step runs, because no
+   * bundle can make the source parse (plan.md §9 Task 6.29). */
+  readonly parseDiagnostics: readonly Diagnostic[];
   readonly runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
+}
+
+/** `file:start:code` of every parser and binder diagnostic in the program. The binder's list is
+ * internal to `typescript` (`SourceFile.bindDiagnostics`, filled once the checker has bound the
+ * file); tests/unit/bundler.test.ts pins that the pinned release still keeps it there, and a
+ * release without it degrades to the parser's list rather than failing. */
+function parsePhaseKeys(program: ts.Program): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const file of program.getSourceFiles()) {
+    const bound: unknown = Reflect.get(file, 'bindDiagnostics');
+    const binder = Array.isArray(bound) ? bound.filter(isTsDiagnostic) : [];
+    for (const diag of [...program.getSyntacticDiagnostics(file), ...binder]) {
+      keys.add(diagnosticKey(diag));
+    }
+  }
+  return keys;
+}
+
+function isTsDiagnostic(value: unknown): value is ts.Diagnostic {
+  return typeof value === 'object' && value !== null && 'code' in value && 'messageText' in value;
+}
+
+function diagnosticKey(diag: ts.Diagnostic): string {
+  return `${diag.file?.fileName ?? ''}:${String(diag.start ?? -1)}:${String(diag.code)}`;
 }
 
 const PROGRAM_CACHE_SLOTS = 2;
@@ -765,10 +795,12 @@ function createProgramUncached(
       : overlayHost(host ?? ts.createCompilerHost(compilerOptions), overlay.files),
   );
   const diagnostics: Diagnostic[] = [];
+  const parseDiagnostics: Diagnostic[] = [];
   const runtimeDynamicSymbols = new Set<ts.Symbol>();
 
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = preEmitDiagnostics(program);
+  const parsePhase = parsePhaseKeys(program);
   for (const diag of tsDiagnostics) {
     // A free `__filename` or `__dirname` is the gate's STA1110 (plan-notes 316), in both modes:
     // the checker's "cannot find name" would make it an STA0012 type error in ts mode and silent
@@ -908,25 +940,43 @@ function createProgramUncached(
     } else {
       // Diagnostic has a location
       const { line, character } = file.getLineAndCharacterOfPosition(diag.start ?? 0);
-      diagnostics.push(
-        diagnosticFromFile(
-          file.fileName,
-          line + 1,
-          character + 1,
-          'STA0012',
-          'error',
-          mode,
-          ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
-          {
-            start: diag.start ?? 0,
-            length: (diag.length ?? 0) > 0 ? (diag.length ?? 0) : 1,
-          },
-        ),
+      const located = diagnosticFromFile(
+        file.fileName,
+        line + 1,
+        character + 1,
+        'STA0012',
+        'error',
+        mode,
+        ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+        {
+          start: diag.start ?? 0,
+          length: (diag.length ?? 0) > 0 ? (diag.length ?? 0) : 1,
+        },
       );
+      diagnostics.push(located);
+      if (parsePhase.has(diagnosticKey(diag))) parseDiagnostics.push(located);
+    }
+  }
+  for (const file of program.getSourceFiles()) {
+    if (file.isDeclarationFile) continue;
+    for (const name of strictReservedImports(file)) {
+      const { line, character } = file.getLineAndCharacterOfPosition(name.getStart(file));
+      const early = diagnosticFromFile(
+        file.fileName,
+        line + 1,
+        character + 1,
+        'STA3005',
+        'error',
+        mode,
+        `'${name.text}' cannot be an imported binding: a module is strict code`,
+        { start: name.getStart(file), length: name.text.length },
+      );
+      diagnostics.push(early);
+      parseDiagnostics.push(early);
     }
   }
 
-  return { program, diagnostics, runtimeDynamicSymbols };
+  return { program, diagnostics, parseDiagnostics, runtimeDynamicSymbols };
 }
 
 /** Checker codes in the vendor module that stay reported: where the checker sees one, Node

@@ -12626,3 +12626,75 @@ lowered. Task 6.29 restores the six tests.
 - **Task 6.30: eleven other Windows failures.** Ten are `bundler.test.ts` path-form mismatches:
   the code answers `C:/Users/…` and the tests expect `C:\Users\…`. The other is
   `selfhost.test.ts` "the committed baseline is in --update form".
+
+## 350. Task 6.29: the six lost Test262 module tests were never real passes; three refusals land (2026-10-03)
+
+**Bisect.** No commit in `76a69ed..b95a0dc` dropped a refusal, because Stator never had one.
+At `76a69ed` the runner compiled a module test as `.tmp/test-<pid>-<slot>.js`. The test's
+self-import (`'./early-import-eval.js'`) and its `_FIXTURE` import then resolved to nothing. The
+build failed with `STA0012` "Cannot find module", which the runner maps to SyntaxError, so the
+negative test counted as a pass. Commit `68c8d57` (T11.5a, plan-notes 302) changed that: it
+compiles a module test under its own name, with its siblings copied next to it. From then on, the
+five tests reached the gate. The gate only raised `STA1214` at harness lines, and the runner
+recorded a skip. Reproduced on `76a69ed` by compiling a renamed copy of `early-import-eval.js`,
+which gives `STA0012` "Cannot find module".
+
+`dup-bound-names.js` lost for a different reason. At `76a69ed` the build raised `STA0012`
+(TS2300 "Duplicate identifier"). The bundle step (T12.1) came later and now runs before the
+program's diagnostics are reported. It hands the bare `'z'` to Vite, which fails with `STA0015`.
+
+**What TypeScript 6.0.3 does** (probed with `ts.getPreEmitDiagnostics`, the frontend's options):
+
+- `import { eval } from`, `import { y as arguments } from`: no diagnostic, in `.js` or `.ts`.
+  The binder checks strict-mode `eval`/`arguments` on every other binding (TS1100) but not on an
+  ImportedBinding.
+- `import { x, y as x } from 'z'`: TS2300 twice. These are **binder** diagnostics
+  (`SourceFile.bindDiagnostics`), not parser ones.
+- A default import of a `.js` file with no import or export statement: no diagnostic. TypeScript
+  cannot tell such a file from CommonJS, so it gives the file a synthesized default. Using the
+  binding then fails in the lowering with `STA4035`. For a `.ts` file, an `.mjs` file, a file with
+  `import.meta`, or a module with exports but no default, it reports TS1192, which becomes
+  `STA0012`.
+- Node 26.7.0 on the same file: under `"type": "module"`, `import x from './empty.js'` throws
+  SyntaxError "does not provide an export named 'default'". With no `"type"`, Node loads the file
+  as CommonJS and `x` is `{}`.
+
+**What landed.**
+
+1. **`STA3005`** (both modes): an imported binding named `eval` or `arguments`. The frontend
+   raises it after the checker (`strictReservedImports` in `frontend/modules.ts`). It is a
+   parse-phase error, so it is reported before the gate.
+2. **Parse errors come before the bundle step.** `LoadedProgram.parseDiagnostics` holds the
+   parse-phase subset: the parser's, the binder's and `STA3005`. When it is non-empty,
+   `bundledFrontend` reports only those and loads no adapter. The unresolved package imports
+   are not reported beside them, because those are the bundle's to resolve. The binder's list
+   is read through `Reflect.get(file, 'bindDiagnostics')`, an internal field. A unit test pins
+   that the pinned `typescript` still fills it, and a release without it degrades to the parser's
+   list without failing. A public alternative was considered and refused: treating every
+   base-program diagnostic as blocking would also block on the `STA0012` "Cannot find module"
+   of every package import, which is exactly what the bundle step resolves.
+3. **`STA3004`** (js mode): a default import, an `import { default as x }`, or an
+   `export { default } from` of a `.js` file that Node loads as an ES module (`"type": "module"`)
+   and that has no ES-module syntax. The gate raises it, next to `STA3003`. It is deliberately
+   narrower than Stator's own CommonJS rule (docs/MODES.md). With no `"type"`, Node gives the file
+   a CommonJS default, so refusing it would put a SyntaxError where Node prints `{}`.
+
+The runner maps `STA3004` and `STA3005` to SyntaxError, the same way it already maps `STA3003`.
+The classification is unchanged otherwise.
+
+**Not changed, found on the way.** Two shapes still hit `STA4035`:
+- a default import of a syntax-free `.js` with no `"type"`, which Node runs as CommonJS (`{}`);
+- `ns.default` through `import * as ns` of a syntax-free ES module, which Node answers with
+  `undefined`.
+
+Both are internal errors, not wrong output. They are left for a card if the creator wants one.
+
+**Measured** on macOS arm64, Node 26.7.0, corpus pin `771005236e88`. A full `pnpm run test262`
+reports `2377 passed, 49384 skipped, 1819 failed`. Before this change, CI on `b95a0dc` reported
+2371. The six tests pass under `--filter`, and so do the five tests gained since `76a69ed`.
+`ratchet.json` `passed` goes from 2372 to 2377. `failed` and `skipped` keep CI's values: the
+gate fails only when `failed` rises, and this change moves tests from failed or skipped to passed.
+
+The selfhost baseline for `packages/compiler` rises from 1833 to 1845 `STA1214`. The new frontend
+code (the binder-list read, the import walks and the gate check) uses constructs Stator does not
+compile yet. `--update` records that rise.

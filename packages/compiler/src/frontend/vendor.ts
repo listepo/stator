@@ -213,6 +213,17 @@ export function isCommonJsFile(file: ts.SourceFile, checker: ts.TypeChecker): bo
   return !hasModuleSyntax(file) && usesCommonJsBindings(file, checker);
 }
 
+/** A `.js` file Node loads as an ES module (`"type": "module"`) that has no ES-module syntax.
+ * TypeScript cannot tell such a file from CommonJS, so it synthesizes a default export for it;
+ * Node gives it no exports at all, and importing its default is a SyntaxError at link time. */
+export function isSyntaxFreeEsModule(file: ts.SourceFile): boolean {
+  return (
+    file.fileName.endsWith('.js') &&
+    packageType(dirname(file.fileName)) === 'module' &&
+    !hasModuleSyntax(file)
+  );
+}
+
 /** A file the project wrote: not a declaration, not a lib, not a std source, not a dependency. */
 export function isProjectFile(program: ts.Program, file: ts.SourceFile): boolean {
   return (
