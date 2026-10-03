@@ -12356,3 +12356,14 @@ The five tests gained are `module-code/early-dup-export-as-star-as.js`,
 `early-dup-export-star-as-dflt.js`, `instn-resolve-empty-export.js`,
 `parse-err-semi-export-star.js` and `parse-err-semi-name-space-export.js`. The ratchet is **not**
 lowered. Task 6.29 restores the six tests.
+
+**Stage 2, once it ran again (CI run 37150879614 on this PR).**
+- **macOS x64 dropped.** Intel macOS is unsupported (the creator's rule for all projects), so the
+  `macos-15-intel` matrix entries for `frontend-desktop` and `&macos-strategy` are removed, and
+  macOS CI is arm64 only. `frontend (macos/x64)` had failed its unit tests.
+- **ffi-gen-binding on Windows.** The quote test fails at `mkdir` (EINVAL), because Windows
+  refuses `"` in a file name. The case it guards cannot arise on Windows, so the test is skipped
+  there.
+- **Task 6.30: eleven other Windows failures.** Ten are `bundler.test.ts` path-form mismatches:
+  the code answers `C:/Users/…` and the tests expect `C:\Users\…`. The other is
+  `selfhost.test.ts` "the committed baseline is in --update form".

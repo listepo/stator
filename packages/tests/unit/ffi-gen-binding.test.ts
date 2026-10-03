@@ -644,29 +644,34 @@ test('ffi-gen --help prints the usage to stdout and exits 0', () => {
 
 // Audit F8: `#include` cannot spell a quote (it reads no escapes), so a binding under such a
 // directory is the gate's STA1119 at the pragma, never C that fails to compile.
-test('a quote in a binding directory is STA1119, not unspellable C', NEEDS_CLANG, () => {
-  const work = mkdtempSync(join(tmpdir(), 'stator-ffigen-'));
-  try {
-    const dir = join(work, 'q"d');
-    mkdirSync(dir);
-    writeFileSync(join(dir, 'm.h'), 'int add(int a, int b);\n');
-    const gen = run(FFI_GEN, [join(dir, 'm.h'), `--out=${join(dir, 'm.d.ts')}`]);
-    assert.equal(gen.status, 0, gen.stderr);
-    writeFileSync(
-      join(dir, 'use.ts'),
-      '/// <reference path="./m.d.ts" />\nconsole.log(add(2, 3));\n',
-    );
-    const out = join(dir, 'use.c');
-    const b = run(STATOR, ['build', join(dir, 'use.ts'), '-o', out, '--emit=c']);
-    assert.notEqual(b.status, 0);
-    // The diagnostic wraps at 80 columns, and where depends on the temp directory's length.
-    assert.match(b.stderr, /STA1119 \[ts\] refused @statorLink\s+pragma/);
-    assert.doesNotMatch(b.stderr, /STA4\d{3}/);
-    assert.equal(existsSync(out), false);
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
+// Windows refuses `"` in a file name (EINVAL), so the directory this test needs cannot exist there.
+test(
+  'a quote in a binding directory is STA1119, not unspellable C',
+  { skip: !hasClang() || process.platform === 'win32' },
+  () => {
+    const work = mkdtempSync(join(tmpdir(), 'stator-ffigen-'));
+    try {
+      const dir = join(work, 'q"d');
+      mkdirSync(dir);
+      writeFileSync(join(dir, 'm.h'), 'int add(int a, int b);\n');
+      const gen = run(FFI_GEN, [join(dir, 'm.h'), `--out=${join(dir, 'm.d.ts')}`]);
+      assert.equal(gen.status, 0, gen.stderr);
+      writeFileSync(
+        join(dir, 'use.ts'),
+        '/// <reference path="./m.d.ts" />\nconsole.log(add(2, 3));\n',
+      );
+      const out = join(dir, 'use.c');
+      const b = run(STATOR, ['build', join(dir, 'use.ts'), '-o', out, '--emit=c']);
+      assert.notEqual(b.status, 0);
+      // The diagnostic wraps at 80 columns, and where depends on the temp directory's length.
+      assert.match(b.stderr, /STA1119 \[ts\] refused @statorLink\s+pragma/);
+      assert.doesNotMatch(b.stderr, /STA4\d{3}/);
+      assert.equal(existsSync(out), false);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  },
+);
 
 test('T** out-params share one Out alias that precedes its uses', () => {
   const model: HeaderModel = {
