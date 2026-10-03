@@ -81,7 +81,11 @@ uint32_t jsrt_to_uint32(double d) {
  * - object: ToPrimitive first, then the rules above -- so `Number([5])` is 5, not NaN. */
 double jsrt_to_number(jsrt_value v) {
   if (jsrt_is_object(v)) {
-    v = jsrt_to_primitive(v);
+    /* The program's `valueOf` may throw: NaN stands in until the caller's pending check. */
+    v = jsrt_to_primitive(v, JSRT_HINT_NUMBER);
+    if (jsrt_pending()) {
+      return 0.0 / 0.0;
+    }
   }
 
   if (jsrt_is_double(v)) {
@@ -414,13 +418,16 @@ bool jsrt_loose_equals(jsrt_value a, jsrt_value b) {
     return jsrt_strict_equals(a, b);
   }
 
-  /* object OP primitive -> ToPrimitive the object side and ask again. The recursion terminates
-   * because ToPrimitive of an object is a string, which no branch here sends back to an object. */
-  if (jsrt_is_object(a)) {
-    return jsrt_loose_equals(jsrt_to_primitive(a), b);
-  }
-  if (jsrt_is_object(b)) {
-    return jsrt_loose_equals(a, jsrt_to_primitive(b));
+  /* object OP primitive -> ToPrimitive the object side (no hint: `default`, §7.2.14 steps 11-12)
+   * and ask again. The recursion terminates because ToPrimitive answers a primitive, which no
+   * branch here sends back to an object -- or throws, which ends the comparison. */
+  if (jsrt_is_object(a) || jsrt_is_object(b)) {
+    const bool left = jsrt_is_object(a);
+    const jsrt_value primitive = jsrt_to_primitive(left ? a : b, JSRT_HINT_DEFAULT);
+    if (jsrt_pending()) {
+      return false;
+    }
+    return left ? jsrt_loose_equals(primitive, b) : jsrt_loose_equals(a, primitive);
   }
 
   /* Unreachable: the eight tags are exhausted above. Here so the function has one exit for a
@@ -651,13 +658,26 @@ static double parse_decimal_digits(jsrt_value s, uint32_t start, uint32_t end) {
   return value;
 }
 
-/* `parseInt(string, radix)` (§19.2.5). */
+static jsrt_value parse_int_text(jsrt_value string, jsrt_value radix);
+
+/* `parseInt(string, radix)` (§19.2.5). ToString(string) runs before ToInt32(radix), and either
+ * may call the program's own method, so the order is observable: the text is taken first and
+ * kept rooted while the radix converts. */
 jsrt_value jsrt_global_parse_int(jsrt_value string, jsrt_value radix) {
-  /* The spec runs ToString(string) before ToInt32(radix), but neither can call user code here
-   * (jsrt_to_primitive is ToString without a user method), so the order is unobservable -- and
-   * taking the radix first means nothing allocates while the NaN-boxed `s`, invisible to the
-   * collector, is live. */
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_to_string(string);
+  const jsrt_value out =
+      jsrt_pending() ? jsrt_number(0.0 / 0.0) : parse_int_text(JSRT_LOCAL(0), radix);
+  JSRT_FRAME_POP();
+  return out;
+}
+
+/* `string` is already a string, rooted by the caller. */
+static jsrt_value parse_int_text(jsrt_value string, jsrt_value radix) {
   int32_t r = jsrt_to_int32(jsrt_to_number(radix));
+  if (jsrt_pending()) {
+    return jsrt_number(0.0 / 0.0);
+  }
   uint32_t pos = 0;
   jsrt_value s = trimmed_start(string, &pos);
   uint32_t len = jsrt_string_length(s);

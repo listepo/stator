@@ -4276,6 +4276,60 @@ function lowerOptionalChain(
   };
 }
 
+/** ToPrimitive of a class instance, named statically (plan.md §9 Task 6.27): when the receiver's
+ * class declares the method the hint tries FIRST (§7.1.1.1 OrdinaryToPrimitive -- `toString` for
+ * a template hole or `String(x)`, `valueOf` for `+`), takes no parameter and answers a primitive,
+ * the conversion IS that call, so it is lowered to the call and the hole sees its primitive.
+ * Anything else -- no such method, an object answer the next rung would have to handle, an
+ * interface or a literal's type a subclass cannot be traced through -- keeps the value, and the
+ * runtime's ToPrimitive asks the object itself (docs/NUMERIC.md §7). The first rung cannot be
+ * skipped by a subclass: an override dispatches virtually, and the hint never reaches the other
+ * method while this one answers a primitive. */
+function userConversion(
+  node: ts.Expression,
+  value: Expression,
+  method: 'toString' | 'valueOf',
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  bindings: Scope,
+): Expression {
+  const type = value.type;
+  if (
+    type.kind !== 'object' ||
+    receiverClassLike(checker.getTypeAtLocation(node)) === undefined ||
+    !isClassInstance(node, checker, bindings)
+  ) {
+    return value;
+  }
+  const slot = type.methods.findIndex((m) => m.name === method);
+  const signature = type.methods[slot]?.type;
+  if (
+    signature?.kind !== 'fn' ||
+    signature.params.length !== 0 ||
+    (signature.ret.kind !== 'string' &&
+      signature.ret.kind !== 'number' &&
+      signature.ret.kind !== 'boolean')
+  ) {
+    return value;
+  }
+  const owner = declaringClassName(node, method, checker, bindings, sourceFile);
+  if (owner === null) {
+    return value;
+  }
+  const call: MethodCall = {
+    kind: 'method-call',
+    type: signature.ret,
+    span: value.span,
+    target: value,
+    className: owner,
+    method,
+    slot,
+    dispatch: isOverridden(type.name, method, checker) ? 'virtual' : 'direct',
+    args: [],
+  };
+  return call;
+}
+
 /** `o.m(a)` on a class instance: the receiver is lowered, the method is named, not loaded.
  *
  * One function is shared by every instance, so naming its class here is what lets the emitter
@@ -4869,7 +4923,9 @@ function lowerExpression(
       if (!value) {
         return null;
       }
-      expressions.push(value);
+      expressions.push(
+        userConversion(span.expression, value, 'toString', sourceFile, checker, bindings),
+      );
       quasis.push(span.literal.text);
     }
     const template: TemplateLiteral = {
@@ -6482,6 +6538,16 @@ function lowerExpression(
       // whole expression from the declared Unknown while the right lowers through the narrowing.
       return { kind: 'binary-op', type: right.type, span, operator, left, right };
     }
+    if (operator === '+') {
+      // `+` asks each operand's `valueOf` first (§13.15.3 step 1.a, hint default).
+      return arithmeticBinOp(
+        operator,
+        userConversion(node.left, left, 'valueOf', sourceFile, checker, bindings),
+        userConversion(node.right, right, 'valueOf', sourceFile, checker, bindings),
+        span,
+        type,
+      );
+    }
     if (operator !== undefined) {
       return arithmeticBinOp(operator, left, right, span, type);
     }
@@ -6540,9 +6606,23 @@ function lowerExpression(
     const globalFunction = globalFunctionOf(expr, checker);
     if (globalFunction !== undefined) {
       const prologue = lowerGlobalCall(node, sourceFile, checker, bindings, diagnostics);
-      return prologue === null
-        ? null
-        : globalFunctionNode(globalFunction, prologue, typeAt(node, checker, bindings));
+      if (prologue === null) {
+        return null;
+      }
+      // `String(x)` is a template hole, and converts the same way.
+      const first = prologue.args[0];
+      const firstNode = node.arguments[0];
+      const converted =
+        globalFunction === 'String' && first !== undefined && firstNode !== undefined
+          ? {
+              ...prologue,
+              args: [
+                userConversion(firstNode, first, 'toString', sourceFile, checker, bindings),
+                ...prologue.args.slice(1),
+              ],
+            }
+          : prologue;
+      return globalFunctionNode(globalFunction, converted, typeAt(node, checker, bindings));
     }
 
     // Check if this is a property access (console.log)

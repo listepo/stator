@@ -556,6 +556,145 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   return accessor_read((*o.slots)[hit->offset], obj);
 }
 
+/* `key`'s index in a class's method table, or -1. */
+static int32_t method_index(const JSRTClass *cls, const char *key) {
+  if (cls->method_names == NULL || cls->methods == NULL) {
+    return -1;
+  }
+  for (uint32_t i = 0; i < cls->method_count; i++) {
+    if (cls->method_names[i] != NULL && strcmp(cls->method_names[i], key) == 0) {
+      return (int32_t)i;
+    }
+  }
+  return -1;
+}
+
+/* The OWN `constructor` of a dynamic prototype object, by name: a `constructor` key written on
+ * it, else the hidden one `F.prototype` carries; "" for neither, or for a value that is not a
+ * function -- util.format reads the own descriptor's value and asks for a function's name. */
+static const char *own_constructor_name(const JSRTDynObject *o) {
+  const JSRTShape *hit = jsrt_shape_find(o->shape, "constructor");
+  const jsrt_value ctor = hit != NULL ? o->slots[hit->offset] : o->ctor;
+  return ctor != 0 && jsrt_is(ctor, JSRT_TAG_CLOSURE) ? jsrt_as_closure(ctor)->name : "";
+}
+
+/* A class method on a fixed instance: the descriptor's table entry, or the hidden `#method:` slot
+ * when the method captures and has no one constant form. The holder is the class whose prototype
+ * owns it -- the topmost class in the chain still sharing the receiver's entry -- which a NULL
+ * entry cannot single out; then every candidate is a class that lists the name. */
+static void class_method_holder(const JSRTClass *cls, const char *key, int32_t index,
+                                const char **holder, bool *exact) {
+  const JSRTClosure *entry = cls->methods[index];
+  const JSRTClass *k = cls;
+  if (entry != NULL) {
+    while (k->parent != NULL) {
+      const int32_t at = method_index(k->parent, key);
+      if (at < 0 || k->parent->methods[at] != entry) {
+        break;
+      }
+      k = k->parent;
+    }
+    *holder = k->name;
+    return;
+  }
+  *holder = cls->name;
+  for (; k != NULL && method_index(k, key) >= 0; k = k->parent) {
+    if (k != cls) {
+      *exact = false;
+    }
+    if (jsrt_is_builtin_constructor_name(k->name)) {
+      *holder = k->name;
+    }
+  }
+}
+
+/* A fixed-layout object's half of jsrt_user_get: an own field, the overflow table, a literal's own
+ * method slot, a class's method. */
+static bool fixed_user_get(jsrt_value obj, const char *key, jsrt_value *out, const char **holder,
+                           bool *exact) {
+  const JSRTObject *o = jsrt_as_object(obj);
+  const int32_t slot = fixed_slot(obj, key);
+  if (slot >= 0) {
+    *out = o->fields[slot];
+    return true;
+  }
+  const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+  if (extras != NULL && jsrt_shape_find(extras->shape, key) != NULL) {
+    *out = jsrt_get_prop(extras_value(extras), key, NULL);
+    return true;
+  }
+  const int32_t index = method_index(o->cls, key);
+  bool found = false;
+  const jsrt_value method = fixed_method_get(obj, key, &found);
+  if (!found) {
+    return false;
+  }
+  *out = method;
+  /* A `#method:` slot the class table does not list is an object literal's OWN method. */
+  if (index >= 0) {
+    class_method_holder(o->cls, key, index, holder, exact);
+  }
+  return true;
+}
+
+bool jsrt_user_get(jsrt_value obj, const char *key, jsrt_value *out, const char **holder,
+                   bool *exact) {
+  const char *where = NULL;
+  bool sure = true;
+  bool found = false;
+  jsrt_value value = JSRT_UNDEFINED;
+  if (jsrt_is(obj, JSRT_TAG_CLOSURE)) {
+    const JSRTClosure *c = jsrt_as_closure(obj);
+    const JSRTStaticEntry *entry = class_static_find(c, key, false);
+    if (entry != NULL) {
+      found = true;
+      value = entry->kind == JSRT_STATIC_GETTER ? jsrt_call(*entry->slot, 1, &obj) : *entry->slot;
+    } else if (c->klass == NULL) {
+      found = function_own_get(obj, key, &value);
+    }
+  } else if (jsrt_is_uint8array(obj) || jsrt_is_arraybuffer(obj)) {
+    found = false; /* no shape: every key is the layout's own, and none is a user method */
+  } else if (!has_prop_table(obj)) {
+    found = jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_user_get(obj, key, &value, &where, &sure);
+  } else {
+    const PropTable o = as_prop_table(obj, "get");
+    const JSRTShape *hit = jsrt_shape_find(*o.shape, key);
+    if (hit != NULL) {
+      found = true;
+      value = accessor_read((*o.slots)[hit->offset], obj);
+    }
+    /* §10.1.8.1 OrdinaryGet up a dynamic object's chain: a getter found runs with the ORIGINAL
+     * receiver. A prototype that is not a dynamic object answers for itself and has no own
+     * `constructor`; one with no representation (%Object.prototype%) ends the walk with a miss. */
+    for (jsrt_value p = jsrt_is_dynobj(obj) ? ((const JSRTDynObject *)jsrt_ptr(obj))->proto : 0;
+         !found && p != 0;) {
+      if (!jsrt_is_dynobj(p)) {
+        found = jsrt_user_get(p, key, &value, NULL, NULL);
+        where = "";
+        break;
+      }
+      const JSRTDynObject *proto = (const JSRTDynObject *)jsrt_ptr(p);
+      const JSRTShape *inherited = jsrt_shape_find(proto->shape, key);
+      if (inherited != NULL) {
+        found = true;
+        value = accessor_read(proto->slots[inherited->offset], obj);
+        where = own_constructor_name(proto);
+      }
+      p = proto->proto;
+    }
+  }
+  if (found) {
+    *out = value;
+    if (holder != NULL) {
+      *holder = where;
+    }
+    if (exact != NULL) {
+      *exact = sure;
+    }
+  }
+  return found;
+}
+
 bool jsrt_has_prop(jsrt_value obj, const char *key) {
   if (jsrt_is_nullish(obj)) {
     return false;

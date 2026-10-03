@@ -22,12 +22,60 @@
 
 /* Every operator below is defined on primitives; an object reaches one only through here.
  *
- * The spec's ladder is valueOf-then-toString (or the reverse, for hint `string`), and in this
- * subset every rung but the last is unreachable: no object carries a user `valueOf`, and the
- * inherited one answers with the object itself, which is not a primitive. So both hints land on
- * `toString`, which is why this takes no hint -- see the header for when that stops being true. */
-jsrt_value jsrt_to_primitive(jsrt_value v) {
-  return jsrt_is_object(v) ? jsrt_to_string(v) : v;
+ * §7.1.1.1 OrdinaryToPrimitive, rung by rung (ECMA-262 2025, plan-notes 345). Each rung asks for
+ * the method the program wrote (jsrt_user_get); a miss is the builtin prototype's method, modelled
+ * here: every builtin `toString` answers a string (jsrt_builtin_to_string), and every builtin
+ * `valueOf` answers the object itself -- not a primitive, so the next rung runs -- except
+ * Date.prototype.valueOf, the time value. */
+jsrt_value jsrt_to_primitive(jsrt_value v, jsrt_hint hint) {
+  if (!jsrt_is_object(v)) {
+    return v;
+  }
+  /* A runtime function that converts several values in a row (Math.max, String.fromCharCode, a
+   * sort's keys) stops at the first throw in JavaScript; here it reaches the next conversion with
+   * the exception still pending, and no further user method may run. Its caller checks. */
+  if (jsrt_pending()) {
+    return JSRT_UNDEFINED;
+  }
+  /* §21.4.4.45 Date.prototype[@@toPrimitive]: `default` means `string`. */
+  const bool string_first =
+      hint == JSRT_HINT_STRING || (hint == JSRT_HINT_DEFAULT && jsrt_is_date(v));
+  const char *const order[2] = {string_first ? "toString" : "valueOf",
+                                string_first ? "valueOf" : "toString"};
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = v;
+  for (int rung = 0; rung < 2; rung++) {
+    const bool to_string = order[rung][0] == 't';
+    jsrt_value method = JSRT_UNDEFINED;
+    if (!jsrt_user_get(JSRT_LOCAL(0), order[rung], &method, NULL, NULL)) {
+      const jsrt_value builtin = to_string                  ? jsrt_builtin_to_string(JSRT_LOCAL(0))
+                                 : jsrt_is_date(JSRT_LOCAL(0)) ? jsrt_number(jsrt_date_value(JSRT_LOCAL(0)))
+                                                               : JSRT_LOCAL(0);
+      if (jsrt_pending() || !jsrt_is_object(builtin)) {
+        JSRT_FRAME_POP();
+        return jsrt_pending() ? JSRT_UNDEFINED : builtin;
+      }
+      continue;
+    }
+    if (jsrt_pending()) { /* a getter on the name threw */
+      JSRT_FRAME_POP();
+      return JSRT_UNDEFINED;
+    }
+    /* IsCallable: anything else is skipped, not called (step 2.b). */
+    if (!jsrt_is(method, JSRT_TAG_CLOSURE)) {
+      continue;
+    }
+    JSRT_LOCAL(1) = method;
+    const jsrt_value result = jsrt_call_with_this(JSRT_LOCAL(1), JSRT_LOCAL(0), 0, NULL);
+    if (jsrt_pending() || !jsrt_is_object(result)) {
+      JSRT_FRAME_POP();
+      return jsrt_pending() ? JSRT_UNDEFINED : result;
+    }
+  }
+  JSRT_FRAME_POP();
+  /* Step 3: neither method answered a primitive. Node's message, word for word. */
+  jsrt_throw_error(&jsrt_class_type_error, "Cannot convert object to primitive value");
+  return JSRT_UNDEFINED; /* never read: the exception is pending */
 }
 
 /* ============================================================================
@@ -45,8 +93,18 @@ jsrt_value jsrt_op_add(jsrt_value a, jsrt_value b) {
    * `pa` was collected while `pb` was being built and jsrt_string_concat read a reclaimed block
    * (measured: 999685 of 1000000). `a` and `b` are parameters and already roots. */
   JSRT_FRAME(4);
-  JSRT_LOCAL(0) = jsrt_to_primitive(a);
-  JSRT_LOCAL(1) = jsrt_to_primitive(b);
+  /* Each ToPrimitive may run the program's `valueOf` and throw; the right operand's must not
+   * run after the left one's threw (§13.15.3 ApplyStringOrNumericBinaryOperator steps 1.a-b). */
+  JSRT_LOCAL(0) = jsrt_to_primitive(a, JSRT_HINT_DEFAULT);
+  if (jsrt_pending()) {
+    JSRT_FRAME_POP();
+    return JSRT_UNDEFINED;
+  }
+  JSRT_LOCAL(1) = jsrt_to_primitive(b, JSRT_HINT_DEFAULT);
+  if (jsrt_pending()) {
+    JSRT_FRAME_POP();
+    return JSRT_UNDEFINED;
+  }
 
   /* If EITHER operand is a string, ToString both and concatenate. */
   if (jsrt_is(JSRT_LOCAL(0), JSRT_TAG_STRING) || jsrt_is(JSRT_LOCAL(1), JSRT_TAG_STRING)) {
@@ -81,9 +139,20 @@ typedef enum {
 
 static jsrt_order jsrt_compare(jsrt_value a, jsrt_value b) {
   /* ToPrimitive first, for the same reason as `+`: the both-strings test has to see what the
-   * operands BECOME, so `["10"] < ["9"]` compares text and answers true. */
-  jsrt_value pa = jsrt_to_primitive(a);
-  jsrt_value pb = jsrt_to_primitive(b);
+   * operands BECOME, so `["10"] < ["9"]` compares text and answers true.
+   * Hint `number` (§7.2.13 IsLessThan steps 1-2), and the left operand's string stays rooted
+   * while the right one's `valueOf` runs. A throw stops the comparison; the caller checks. */
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = jsrt_to_primitive(a, JSRT_HINT_NUMBER);
+  if (!jsrt_pending()) {
+    JSRT_LOCAL(1) = jsrt_to_primitive(b, JSRT_HINT_NUMBER);
+  }
+  const jsrt_value pa = JSRT_LOCAL(0);
+  const jsrt_value pb = JSRT_LOCAL(1);
+  JSRT_FRAME_POP();
+  if (jsrt_pending()) {
+    return JSRT_ORDER_UNORDERED;
+  }
 
   /* Text order applies only when BOTH operands are strings. One non-string operand sends both
    * through ToNumber -- which is why `"10" < "9"` is true but `"10" < 9` is false. */
@@ -95,6 +164,7 @@ static jsrt_order jsrt_compare(jsrt_value a, jsrt_value b) {
     return c > 0 ? JSRT_ORDER_GT : JSRT_ORDER_EQ;
   }
 
+  /* Both are primitives now, so neither ToNumber can run user code or allocate. */
   double da = jsrt_to_number(pa);
   double db = jsrt_to_number(pb);
   if (isnan(da) || isnan(db)) {
