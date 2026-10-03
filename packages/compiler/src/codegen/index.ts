@@ -1235,8 +1235,9 @@ class Emitter {
   }
 
   /* The `stator_init_<unit>` opening both inits share: the idempotency guard FIRST, set
-   * before `jsrt_init()` — a second `jsrt_init()` would chain the Boehm roots hook into
-   * itself, and a second `JSRT_GLOBALS_ENTER` would wipe every global back to `undefined`. */
+   * before `jsrt_init()` — a second `JSRT_GLOBALS_ENTER` would wipe every global back to
+   * `undefined`. `jsrt_init()` itself is idempotent (plan-notes 341), because two units linked
+   * against one runtime each call it once. */
   private emitInitOpen(unit: string, span: Span, globalSlots: number): void {
     this.appendLine(`static bool _stator_${unit}_initialized = false;`);
     this.appendLine('');

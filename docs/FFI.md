@@ -464,8 +464,10 @@ and generated uniformly:
   frame, the module environment, then the merged module's top-level statements in Task
   3.11 order (the SAME emission `main` runs, shared helpers, never a second copy), then
   the microtask drain, then the exported-const stores. Idempotent via a set-before static
-  guard: a second `jsrt_init()` would chain the Boehm roots hook into itself, and a second
-  `JSRT_GLOBALS_ENTER` would wipe every global. Calling an exported function before init
+  guard: a second `JSRT_GLOBALS_ENTER` would wipe every global. `jsrt_init()` is
+  idempotent on its own (plan-notes 341): two units linked against one `libjsrt.a` each
+  call it, and before the guard in `jsrt_gc_init` the second call installed the Boehm roots
+  hook as its own predecessor, so the first collection overflowed the stack. Calling an exported function before init
   is undefined behavior (the header says so). A top-level throw lands in the error cell
   like any stub failure instead of `jsrt_uncaught`'s exit — the unit is then unusable.
   `jsrt_init` also installs the stack-overflow fault handler for SIGSEGV and SIGBUS

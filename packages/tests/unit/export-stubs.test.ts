@@ -23,6 +23,7 @@ import { verifyHir } from '../../compiler/src/hir/verify.ts';
 import { lowerSourceFile } from '../../compiler/src/lower/index.ts';
 import { eliminateDeadCode, optimize } from '../../compiler/src/passes/index.ts';
 import { staleLdRetryArgs } from '../../compiler/src/support/toolchain.ts';
+import { linkConsumer } from '../support/c-runner.ts';
 import {
   assertReturnsPopFrame,
   createProgram,
@@ -38,6 +39,11 @@ const RUNTIME_ROOT = join(HERE, '..', '..', 'runtime');
 const RUNTIME_INCLUDE = join(RUNTIME_ROOT, 'include');
 const RUNTIME_LIB_DIR = join(RUNTIME_ROOT, 'build');
 const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
+
+/** `c-runner`'s failure hook for a vitest body: throwing fails the test with the message. */
+function throwFail(message: string): never {
+  throw new Error(message);
+}
 
 /** Lower `source` straight to HIR, asserting the lowering itself was clean. */
 function loweredModule(source: string): Module {
@@ -107,8 +113,7 @@ test('the library object has init instead of main, with the guard set before jsr
   const initCall = c.indexOf('jsrt_init();');
   const globalsEnter = c.indexOf('JSRT_GLOBALS_ENTER(');
   assert.ok(guardSet !== -1 && initCall !== -1 && globalsEnter !== -1);
-  // Set-before: a second jsrt_init() would chain the Boehm roots hook into itself, and a
-  // second GLOBALS_ENTER would wipe every global — so the guard commits first.
+  // Set-before: a second GLOBALS_ENTER would wipe every global, so the guard commits first.
   assert.ok(guardSet < initCall && initCall < globalsEnter);
   // One extra global past the module's own: the scratch the init stash and the last
   // jsrt_value result share.
@@ -360,6 +365,101 @@ test('exported fallible and infallible functions callable through the header', N
     assert.equal(run.status, 0, `run failed:\n${run.stdout}${run.stderr}`);
     assert.equal(run.stdout, 'init-side-effect\ncaptured: Error: neg\n9\nffi-stubs ok\n');
     assert.equal(run.stderr, '');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+/** A unit that keeps what it allocates: every string `grow` pushes must still read back after
+ * the collections between calls, so a lost root shows up as a wrong count, not a pass. */
+const KEEPER = (tag: string): string =>
+  'const kept: string[] = [];\n' +
+  'export function grow(n: number): number {\n' +
+  '  for (let i = 0; i < n; i++) {\n' +
+  `    kept.push('${tag}' + String(kept.length));\n` +
+  '  }\n' +
+  '  return kept.length;\n' +
+  '}\n' +
+  'export function check(): number {\n' +
+  '  let total = 0;\n' +
+  '  for (let i = 0; i < kept.length; i++) {\n' +
+  `    if (kept[i] === '${tag}' + String(i)) {\n` +
+  '      total = total + 1;\n' +
+  '    }\n' +
+  '  }\n' +
+  '  return total;\n' +
+  '}\n';
+
+const TWO_UNITS_MAIN =
+  '#include "ka.h"\n' +
+  '#include "kb.h"\n' +
+  '#include <stdio.h>\n' +
+  '#ifdef STATOR_TEST_BOEHM\n' +
+  'void GC_gcollect(void);\n' +
+  '#define COLLECT() GC_gcollect()\n' +
+  '#else\n' +
+  '#define COLLECT() ((void)0)\n' +
+  '#endif\n' +
+  'int main(void) {\n' +
+  '  stator_ka_init();\n' +
+  '  stator_kb_init();\n' +
+  '  for (int round = 0; round < 10; round++) {\n' +
+  '    stator_ka_grow(500.0);\n' +
+  '    COLLECT();\n' +
+  '    stator_kb_grow(500.0);\n' +
+  '    COLLECT();\n' +
+  '  }\n' +
+  '  printf("a=%g b=%g\\n", stator_ka_check(), stator_kb_check());\n' +
+  '  return 0;\n' +
+  '}\n';
+
+// plan-notes 341: each unit's init calls jsrt_init, and a second jsrt_gc_init used to install the
+// roots hook as its own predecessor, so the first collection recursed until the stack overflowed.
+test('two --emit-header units share one libjsrt.a across forced collections', NATIVE_ONLY, () => {
+  assert.ok(existsSync(RUNTIME_ARCHIVE), `runtime archive missing at ${RUNTIME_ARCHIVE}`);
+  const work = mkdtempSync(join(tmpdir(), 'stator-two-units-'));
+  try {
+    const objects: string[] = [];
+    for (const unit of ['ka', 'kb']) {
+      const entry = join(work, `${unit}.ts`);
+      const out = join(work, `${unit}.o`);
+      writeFileSync(entry, KEEPER(unit));
+      const build = spawnSync(
+        process.execPath,
+        [CLI, 'build', entry, '-o', out, `--emit-header=${join(work, `${unit}.h`)}`],
+        { encoding: 'utf8' },
+      );
+      assert.equal(build.status, 0, `build ${unit} failed:\n${build.stdout}${build.stderr}`);
+      objects.push(out);
+    }
+    const mainPath = join(work, 'main.c');
+    writeFileSync(mainPath, TWO_UNITS_MAIN);
+    const sysFlags = archiveSystemFlags();
+    const app = join(work, 'app');
+    linkConsumer(
+      'clang',
+      [
+        '-std=c11',
+        '-Wall',
+        '-Wextra',
+        '-Werror',
+        ...(sysFlags.includes('-lgc') ? ['-DSTATOR_TEST_BOEHM'] : []),
+        '-I',
+        work,
+        mainPath,
+        ...objects,
+        '-L',
+        RUNTIME_LIB_DIR,
+        '-ljsrt',
+        ...sysFlags,
+        '-o',
+        app,
+      ],
+      throwFail,
+    );
+    const run = spawnSync(app, [], { encoding: 'utf8' });
+    assert.equal(run.status, 0, `run failed (signal ${String(run.signal)}):\n${run.stderr}`);
+    assert.equal(run.stdout, 'a=5000 b=5000\n');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

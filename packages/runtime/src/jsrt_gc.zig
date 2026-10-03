@@ -149,8 +149,17 @@ const impl = if (boehm) struct {
     }
 };
 
-/// Called by jsrt_init once the pointer-width assumption holds.
+/// Whether this runtime copy has installed its kind and roots hook. Single-threaded, like every
+/// runtime entry in v0 (docs/FFI.md §8).
+var gc_initialized = false;
+
+/// Called by jsrt_init once the pointer-width assumption holds. Idempotent: two `--emit-header`
+/// units linked against one libjsrt.a each call it from their own init, and a second install would
+/// save `pushRoots` as its own predecessor -- the first collection then recurses until the stack
+/// overflows (plan-notes 341).
 export fn jsrt_gc_init() void {
+    if (gc_initialized) return;
+    gc_initialized = true;
     impl.init();
 }
 

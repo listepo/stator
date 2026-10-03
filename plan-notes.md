@@ -12325,3 +12325,30 @@ user gets a wrong answer from it.
 `STA0012`, because TS2365 is not in `JS_MODE_RUNTIME_CODES` (docs/MODES.md §3, plan-notes 297).
 That is deliberate policy, and nothing wrong is printed. Whether TS2365 should take the dynamic
 path in `js` mode is a separate question for the creator.
+
+## 341. Two units sharing one runtime crashed at the first collection (2026-10-04)
+
+**Found while measuring Task 7.4 step 3.** Two `--emit-header` objects (Task 7.2) linked with
+one `libjsrt.a` into one C program segfaulted (exit 139) at the first collection. Each unit's
+`stator_<unit>_init` calls `jsrt_init()`, and `jsrt_init` called `jsrt_gc_init` every time.
+The second call saved the current push-other-roots hook, which was already the runtime's own
+`pushRoots`, as its predecessor. `pushRoots` then called itself until the stack ran out. lldb
+stopped in `pushRoots` at `jsrt_gc.zig:102` with `EXC_BAD_ACCESS` (macOS 27.0.1 arm64,
+Boehm 8.2.12 from Homebrew).
+
+The unit-level guard in the generated init (Task 7.2 step 3) only stopped one unit from
+initializing twice. It could not see the other unit. The Task 7.2 comment said "a second
+`jsrt_init()` would chain the Boehm roots hook into itself". That described the failure,
+but nothing prevented it across units.
+
+**Fix:** `jsrt_gc_init` is now idempotent through a module-level flag in `jsrt_gc.zig`. The
+flag is single-threaded, like every v0 runtime entry. `GC_init` itself was already safe to
+call twice. bdwgc v8.2.12 `misc.c` starts `GC_init` with
+`if (EXPECT(GC_is_initialized, TRUE)) return;`
+(https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04). The bug was ours:
+we registered a second kind and installed the hook a second time.
+
+**Regression test:** `packages/tests/unit/export-stubs.test.ts`, "two --emit-header units share
+one libjsrt.a across forced collections". Two units each keep 5,000 strings, and the C `main`
+calls `GC_gcollect()` after every call when the archive links Boehm. Before the fix the test
+fails with `SIGSEGV`. After it, the test prints `a=5000 b=5000`.
