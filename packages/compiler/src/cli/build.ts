@@ -9,7 +9,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { emitC, type LibraryEmit } from '../codegen/index.ts';
@@ -38,6 +38,7 @@ import {
   lowerFrontend,
   mapVendorDiagnostics,
 } from './bundler.ts';
+import { type NamedPath, refuseAliasedOutputs, requireWritable, writeOutput } from './outputs.ts';
 import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
 
 type Mode = 'ts' | 'js';
@@ -68,7 +69,8 @@ export interface BuildOptions {
    * (STA1122–STA1124) stop the build before anything is written. */
   readonly emitHeader?: string;
   /** `--unit-name` override for the `stator_<unit>_<name>` mangling; defaults to the entry's
-   * file basename. Sanitized to a C identifier wherever it came from. */
+   * file basename, sanitized to a C identifier. An explicit name must already be one
+   * (`^[A-Za-z0-9_]+$`), else STA0004. */
   readonly unitName?: string;
   /** `js` mode: the bundler for package imports and CommonJS project files (docs/BUNDLER.md
    * §5). Default `vite`; it loads only when the graph needs it. */
@@ -178,14 +180,43 @@ function extraLinkFlags(): string[] {
   return flags === '' ? [] : flags.split(/\s+/);
 }
 
+/** An explicit `--unit-name` is refused rather than sanitized: the mangling is not injective
+ * (`my-lib` and `my_lib` would share every symbol), so only a name that is already safe can be
+ * the user's. The default, derived from a file name the user did not choose for C, is sanitized. */
+const UNIT_NAME = /^[A-Za-z0-9_]+$/;
+
 /** Returns the process exit code: 0 on success, 1 if the program was rejected. */
 export async function build(options: BuildOptions): Promise<number> {
-  // Sanitized once here — including an explicit `--unit-name`, which the shell will carry
-  // verbatim — so the header and every mangled symbol are valid C whatever was spelled.
+  if (options.unitName !== undefined && !UNIT_NAME.test(options.unitName)) {
+    throw new BuildError(
+      'STA0004',
+      `unit name "${options.unitName}" (--unit-name, config "unitName") may hold only letters, ` +
+        'digits and _ — it becomes part of every exported C symbol',
+    );
+  }
   const unit =
     options.emitHeader === undefined
       ? undefined
-      : sanitizeUnitName(options.unitName ?? defaultUnitName(options.entry));
+      : (options.unitName ?? sanitizeUnitName(defaultUnitName(options.entry)));
+  // Every file `build` writes, named the way its diagnostics name them. `<out>.c` is one only
+  // when a C compiler runs after it and `--keep-c` keeps it.
+  const out: NamedPath = { role: '-o', path: options.out };
+  const header: NamedPath | undefined =
+    options.emitHeader === undefined
+      ? undefined
+      : { role: '--emit-header', path: options.emitHeader };
+  const keptC: NamedPath | undefined =
+    options.keepC && !options.emitCOnly
+      ? { role: 'the --keep-c file', path: `${options.out}.c` }
+      : undefined;
+  const outputs = [out, header, keptC].filter((target) => target !== undefined);
+  // Refused before compiling, so a slip like `-o app.ts` costs nothing and destroys nothing. The
+  // whole program's sources are known only after the frontend; they are checked again below,
+  // still before the first write.
+  refuseAliasedOutputs(outputs, [{ role: 'the entry file', path: options.entry }]);
+  if (!options.emitCOnly) {
+    requireWritable(out);
+  }
   const compiled = await compileToC(
     options.entry,
     options.mode,
@@ -196,24 +227,28 @@ export async function build(options: BuildOptions): Promise<number> {
   if (compiled === null) {
     return 1;
   }
+  refuseAliasedOutputs(
+    outputs,
+    compiled.inputs.map((path) => ({ role: 'a source file of the program', path })),
+  );
 
   if (options.emitCOnly) {
-    writeFileSync(options.out, compiled.c, 'utf8');
-    if (options.emitHeader !== undefined) {
-      writeFileSync(options.emitHeader, compiled.header ?? '', 'utf8');
+    writeOutput(out, compiled.c);
+    if (header !== undefined) {
+      writeOutput(header, compiled.header ?? '');
     }
     return 0;
   }
 
-  if (options.emitHeader !== undefined) {
-    writeFileSync(options.emitHeader, compiled.header ?? '', 'utf8');
+  if (header !== undefined) {
+    writeOutput(header, compiled.header ?? '');
     // A unit exposed to C links at the consumer, not here: `clang -c`, no `-ljsrt`, no
     // extern link flags. The init, stubs, and error cell (Task 7.2 steps 3–5) are already in
     // the C; only `main` is absent, which is what makes this an object and not a program.
     const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
-    const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
+    const cPath = keptC?.path ?? join(scratch ?? '', 'module.c');
     try {
-      writeFileSync(cPath, compiled.c, 'utf8');
+      writeOutput(keptC ?? { role: 'the C file', path: cPath }, compiled.c);
       compileObject(cPath, options.out, options.opt ?? 2);
       return 0;
     } finally {
@@ -226,10 +261,10 @@ export async function build(options: BuildOptions): Promise<number> {
   // The .c goes beside the executable when it is being kept, so `--keep-c` produces a file the
   // user can actually find; otherwise it lives in a temp dir that is removed on every exit path.
   const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
-  const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
+  const cPath = keptC?.path ?? join(scratch ?? '', 'module.c');
 
   try {
-    writeFileSync(cPath, compiled.c, 'utf8');
+    writeOutput(keptC ?? { role: 'the C file', path: cPath }, compiled.c);
     // Default -O2; STATOR_OPT=0 / --opt=0 skips most clang opts for faster iterate compiles.
     // Per-module parallel .o cache stays a follow-up (plan.md §12).
     linkExecutable(
@@ -256,6 +291,8 @@ export interface CompiledC {
   readonly linkFlags: readonly string[];
   /** Whether the module graph holds a `std/*` file, so the link owes `libjsrt_std.a`. */
   readonly std: boolean;
+  /** Every source file of the program, so `build` can refuse an output that names one. */
+  readonly inputs: readonly string[];
   readonly header?: string;
 }
 
@@ -371,6 +408,7 @@ async function compileToCInner(
     c: emitC(optimized, library) + (unit === undefined ? '' : exportVersionDefinition(unit)),
     linkFlags: withSpan('frontend/link-flags', {}, () => collectLinkFlags(program)),
     std: order.some((file) => isStdSourceFile(file.fileName)),
+    inputs: program.getSourceFiles().map((file) => file.fileName),
     ...(header !== undefined && { header }),
   }));
 }

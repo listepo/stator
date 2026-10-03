@@ -523,7 +523,9 @@ plus a manual link proof (fresh pair links and runs; version-skewed pair fails w
   `--flag value` forms) — LANDED. With the flag, `-o` names a relocatable object
   (`clang -c`), no `main()` required and nothing linked; `--emit=c` alongside writes the C
   and the header and skips clang. `--unit-name` overrides the default unit (the entry's
-  file basename); either spelling is sanitized to a C identifier. `--link` and
+  file basename, sanitized to a C identifier). An explicit name must already be one
+  (`^[A-Za-z0-9_]+$`, else `STA0004`, plan.md §9 Task 6.20): sanitizing is not injective, so
+  `my-lib` and `my_lib` would export the same symbols. `--link` and
   `@statorLink` flags are accepted but inert with the flag — linking is the consumer's
   job, and the consumer link line arrives with step 9. An exported function whose WHOLE
   signature is in §2's table spells plain C types; any other position spells `jsrt_value`.
@@ -570,8 +572,15 @@ One marker, two forms, per declaration file:
 declare function sqliteOpenV2(filename: CString, flags: number): sqlite3;
 ```
 
-- **Flags form.** Everything after the marker is verbatim clang link flags in file
-  order (`-l`, `-L`, frameworks, archives). The colon is optional —
+- **Flags form.** Everything after the marker is link flags in file order, from
+  an allowlist: `-l<name>`, `-L<dir>`, `-framework <name>` and
+  `-Wl,-rpath,<dir>` (one directory, no further comma). Anything else — an
+  archive path, `-Wl,--start-group`, `-fplugin=`, `-Xclang`, `-o` — is STA1119
+  naming the flag. Any `.d.ts` in the program can carry a pragma, a dependency's
+  included, and its words reach clang's argv, so an arbitrary flag would let a
+  dependency run or redirect code at `stator build` time; the user's own
+  `--link=` stays the escape hatch for everything else (plan-notes 330, 335).
+  The colon is optional —
   `// @statorLink: -lfoo` and `// @statorLink -lfoo` are the same pragma, matching
   the `// @directive: value` shape every other file-level directive in this repo
   uses. Words split on whitespace; `"..."` groups across it (for paths with
@@ -582,10 +591,14 @@ declare function sqliteOpenV2(filename: CString, flags: number): sqlite3;
   declaring file — because the generated C lives in a scratch directory where a
   relative include would otherwise point nowhere. At most one `#include` per
   file: one binding file wraps one library, so a second header names a second
-  binding the file does not contain.
+  binding the file does not contain. `#include` reads a header name literally
+  (no escape sequence exists inside one), so the resolved path is emitted as
+  written, non-ASCII included, and a path holding a `"`, a line break or NUL —
+  which no `#include` can spell — is STA1119 at the pragma.
 - **Shape rules, all permanent (`never`, STA1119 at the pragma's own line):** a
   malformed line (bare marker, unterminated quote, unquoted or doubled `#include`,
-  any other `#directive`); a pragma in a file with no `@statorExtern`
+  any other `#directive`); a flag outside the allowlist; a header path no
+  `#include` can spell; a pragma in a file with no `@statorExtern`
   declaration — flags belong to the binding they link, so a stray is refused
   rather than linked or dropped silently; a second `#include` in one file.
   Only `//` line comments carry the pragma (block comments and JSDoc never do),
@@ -619,8 +632,8 @@ imports discover the bindings in — which is the order a static link reads
 them), then the CLI flags in command-line order. Duplicate `-l` libraries drop
 first-wins; everything else passes through verbatim in order — no sorting ever,
 because link order is load-bearing for static archives, and grouping flags
-(`-Wl,--start-group` … `--end-group`) cross untouched for the rare circular
-one. A link that fails with extern flags on the line reports STA0009 naming the
+(`-Wl,--start-group` … `--end-group`, `--link=` only) cross untouched for the
+rare circular one. A link that fails with extern flags on the line reports STA0009 naming the
 flags: a missing library is a configuration error, not a compiler bug, and the
 message says where to look first.
 

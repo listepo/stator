@@ -11919,6 +11919,35 @@ objection on review):
 - F12: the `RangeError` cap is required; the speed bar (within 3× Node at 200 000 appends) is the
   Check, and the mechanism (append buffer or rope) is the implementer's.
 
+## 331. Task 6.20 lands: outputs never alias inputs, user errors keep user codes (2026-10-04)
+
+**Decisions made while implementing** (QA audit F1, F2, F10, F11; plan.md §9 Task 6.20):
+
+- **Where the checks live.** `src/cli/outputs.ts`, called from `build()`, not `main.ts`, so the
+  in-process callers (`statorc/api`, the Test262 runner) are covered. The entry is checked before
+  compiling; the rest of the program's files are known only after the frontend, so they are
+  checked after `compileToC` and before the first write. Nothing is written by a refused build.
+- **Identity.** An existing file is its inode (`statSync(..., { bigint: true })`), which catches a
+  symlink, a hard link and a case-insensitive file system (macOS APFS: `-o App.ts` vs `app.ts`).
+  A file that does not exist yet can alias only another output, so its canonical directory plus
+  its name is enough.
+- **One new code, `STA0019`**, for every write the user's file system refuses. The errno set is
+  the card's five plus `ENOTDIR` (`-o file.ts/out`) and `EPERM`. Any other errno still reaches
+  `STA4072`: an unexpected write failure is not known to be the user's.
+- **Value flags and dashes.** The card's rule applies to every value flag, `--link` included:
+  `--link -lm` is refused with a hint to write `--link=-lm`. Nothing in the tree used the
+  space-separated form with a dash-led value (the FFI harness passes object paths). `-o` has no
+  `=` spelling, so an output path cannot start with `-`; `./-name` works.
+- **Per-command flags** reuse `STA0005` with a second template (`flag "{flag}" does not apply to
+  {command}`): the class (unknown on this command) is the same. Config keys stay shared by both
+  commands, as `CONFIG.md` already said: one file serves both.
+- **Unit name from the config.** The card says `STA0004` for the flag and its key alike, so the
+  check is in `build()` and the schema keeps no `pattern` (that would make the key `STA0017`).
+- **Self-compilation.** `packages/compiler` `STA1214` 1791 → 1795 on 3aeb9dd. Merged with Task
+  6.25 (0b5c87c) it is 1794 → 1798, and the inode read adds two `STA1213` (the `bigint: true`
+  `Stats` fields `dev` and `ino`): a `number` inode loses precision past 2^53, so the bigint read
+  stays and the two refusals are recorded with `--update` (growth may be recorded, plan-notes 306).
+
 ## 334. Task 6.25 lands: what "an expression whose type is BigIntLike" means (2026-10-04)
 
 **Finding (F5, plan-notes 330).** `const b = 1n;` answered `STA4031` in both modes. A BigInt
@@ -11958,6 +11987,97 @@ reached the lowering, which has no node for it.
 `--update`. The three are the new function's `ts.Node`, `ts.TypeChecker` and `ts.Declaration`
 qualified type names (`QualifiedName`, STA1214), which every gate function carries; no
 behavior of the compiled packages changed.
+
+## 335. Task 6.22 lands: `#include` reads no escapes, so F8 refuses instead of escaping (2026-10-04)
+
+**Contradiction.** The Task 6.22 card (plan-notes 330) said a header path is "emitted through the
+emitter's `escapeCString`, as `#line` is". That is wrong for `#include`. A header name is not a
+string literal, and clang takes its characters literally. Measured with clang 21.1.8 on macOS
+arm64, against a directory `q"d` and a directory `é` that both hold an `m.h`:
+
+| Spelling | Result |
+|---|---|
+| `#include ".../q\"d/m.h"` (escaped quote) | `fatal error: '.../q\"d/m.h' file not found` |
+| `#include ".../\303\251/m.h"` (`escapeCString`'s octal form of `é`) | `fatal error: '.../\303\251/m.h' file not found` |
+| `#include ".../é/m.h"` (as written, today's behavior) | compiles |
+
+Escaping would therefore break every non-ASCII binding directory that works today, and it still
+would not make a `"` spellable.
+
+**Decision.** A path that cannot be spelled (one holding a `"`, a line break or NUL) is
+`STA1119` at the pragma, which is the card's first half. Every other path is emitted as written,
+because that is exactly how clang reads it. The same refusal covers a bare name and an angle
+header, which can carry a mid-line `\r`. The audit's F8 test asserted an escaped `#include` and a
+passing `--emit=c` build. It now asserts the `STA1119` refusal and that no C file is written:
+the escaped line it expected would not compile.
+
+**F9 allowlist, as implemented.** The allowlist is `-l<name>` and `-L<dir>` (joined, non-empty),
+`-framework <name>` (the next word, not starting with `-`) and `-Wl,-rpath,<dir>` (no further
+comma, so no extra linker arguments ride along). Everything else is refused with the flag named:
+archive paths, `-Wl,--start-group`, `-fplugin=`, `-Xclang` and `-o`. In-tree uses were surveyed
+first. Every pragma in goldens, subset fixtures, examples and `packages/*` is `-l`, `-L` or
+`#include`. The one unit test that parsed an archive path (`"/p a t h/x.a"`) now groups
+`"-L/p a t h"`.
+
+**F7.** `--out` is refused when it names the header or `--diff`: the same `path.resolve`
+spelling (`./m.h`, `dir/../m.h`), or the same `dev:ino` (a symlink or a hard link), because the
+write would replace either one in place.
+
+**Check.**
+- `test:subset`: 923 fixtures, 892 passed, 31 expected-fail, 0 failed. Both new `-fplugin=`
+  fixtures pass.
+- `test`: 742 passed.
+- `test:golden`: 453 passed, 0 failed.
+- `test:selfhost`: 14 targets match.
+- typecheck, lint and dupes clean.
+
+## 336. Task 6.26 lands: self-hosted fonts, a meta CSP and a browser check for the landing page (2026-10-04)
+
+**Findings (F14, F15, F16, plan-notes 330).** The theme toggle derived its state from storage
+alone, so a throwing `localStorage` pinned it to `light`. The header had no wrap, so it ran 10 px
+past a 360 px screen and 50 px past a 320 px one. IBM Plex came from Google, and nothing
+restricted where the page could load from.
+
+**Decisions the card left open.**
+
+- **Fonts from `@fontsource/ibm-plex-sans` and `@fontsource/ibm-plex-mono` (5.3.0, exact).**
+  They are the maintained npm packaging of IBM's OFL-1.1 release (https://fontsource.org,
+  https://github.com/fontsource/font-files, checked 2026-10-04). Astro bundles their woff2 files
+  into `dist/_astro/`, split by `unicode-range`, so a page fetches only the subsets it renders.
+  Copying files into `site/public/fonts/` by hand would have meant writing the `@font-face`
+  rules ourselves and re-copying them on every update; the packages do both.
+- **The CSP is Astro's `security.csp`, not a hand-written meta.** Astro 7.3.3 hashes the scripts
+  and styles it bundles into `script-src`/`style-src`, so a hand-written policy would go stale
+  with every build. It does not hash an `is:inline` script, and the theme boot script must stay
+  inline: it sets `data-theme` before first paint. Its source is therefore one exported string,
+  `site/src/scripts/theme-boot.ts`, that the layout renders with `set:html` and the config hashes
+  into `scriptDirective.hashes`; the two cannot disagree.
+- **The scripts open `<body>`.** Astro emits the CSP meta last in `<head>`, and a meta CSP only
+  governs elements after it. In `<head>` the boot script ran unchecked and `theme.js` was never
+  covered. At the top of `<body>` the boot script still runs before anything paints.
+- **`playwright-core` 1.63.0 is a site devDependency.** The Check needs a real browser: the
+  scroll width at 320 px, a `securitypolicyviolation`, and storage that throws are layout and
+  browser behavior, and no DOM emulation answers them. `playwright-core` is the maintained driver
+  without a browser download (https://playwright.dev/docs/library, checked 2026-10-04). It drives
+  the installed Chrome (`channel: 'chrome'`, or `CHROME_PATH`), which GitHub's `ubuntu-latest`
+  image ships. It stays out of the compiler's dependency budget: `site/` has its own lockfile,
+  and the check runs only in `.github/workflows/pages.yml`.
+- **The check is strict TypeScript run by Node's type stripping** (`site/scripts/check.ts`), per
+  AGENTS.md golden rule 9. `site/public/js/theme.js` stays JS: it is a browser-loaded asset under
+  `site/public/`, the rule's named exception.
+
+**Evidence (macOS arm64, Node 26.7.0, Astro 7.3.3, Chrome 154.0.8037.93).**
+
+| Probe (`pnpm run check:browser`) | Before | After |
+|---|---|---|
+| requests to another origin | 2 (`fonts.googleapis.com`) | 0 |
+| IBM Plex Sans and Mono loaded | no (the Google requests are aborted) | yes, from `dist/` |
+| CSP `default-src 'self'` | absent | present, 0 violations |
+| `scrollWidth` at 320 / 360 px | 370 / 370 | 320 / 360 |
+| theme cycle, storage blocked | `light,light,light` | `light,dark,system` |
+| toggle visible without JS | yes | no |
+
+Before: 7 checks failed. After: `site check: all passed`.
 
 ## 337. Task 6.24 lands: `console.log` format placeholders follow `util.format` (2026-10-04)
 

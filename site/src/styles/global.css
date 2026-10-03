@@ -53,7 +53,12 @@ pre,
   margin-inline: auto;
 }
 
-/* Theme toggle (system → light → dark) */
+/* Theme toggle (system → light → dark). It ships `hidden` and theme.js shows it, so a visitor
+   without JS never meets a button that does nothing; `display` below would override the UA rule. */
+.theme-toggle[hidden] {
+  display: none;
+}
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;
@@ -112,6 +117,13 @@ pre,
 
 .theme-toggle:not([data-theme="system"]) .icon-system {
   display: none;
+}
+
+/* Narrow phones: the icon alone carries the state (aria-label names it), so the header fits. */
+@media (max-width: 400px) {
+  .theme-toggle [data-theme-label] {
+    display: none;
+  }
 }
 
 /* ---------- glass + nerd + ai cues (ketch family) ---------- */

@@ -2198,7 +2198,7 @@ function gateLinkPragmas(sourceFile: ts.SourceFile, mode: Mode, diagnostics: Dia
   let headers = 0;
   for (const pragma of pragmas) {
     if (pragma.kind === 'invalid') {
-      refuse(pragma.line, pragma.col, `malformed @statorLink pragma: ${pragma.reason}`);
+      refuse(pragma.line, pragma.col, `refused @statorLink pragma: ${pragma.reason}`);
     } else if (pragma.kind === 'header') {
       headers += 1;
       if (headers > 1) {

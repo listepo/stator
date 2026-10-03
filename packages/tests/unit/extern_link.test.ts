@@ -74,8 +74,8 @@ function assertRefused(source: string, code: string): void {
 }
 
 /** The `@statorLink` lines of a `.d.ts` source, without a gate or a build. */
-function pragmasOf(source: string): readonly LinkPragma[] {
-  const { sourceFile } = createProgram(source, '/test.d.ts');
+function pragmasOf(source: string, fileName = '/test.d.ts'): readonly LinkPragma[] {
+  const { sourceFile } = createProgram(source, fileName);
   return linkPragmasOf(sourceFile);
 }
 
@@ -133,12 +133,53 @@ test('the null convention guards a pointer return; numeric ones do not fit it', 
 test('a flags pragma parses in order with quote grouping', () => {
   const pragmas = pragmasOf(
     '// @statorLink: -lsqlite3 -L/opt/x/lib\n' +
-      '//   @statorLink   -lfoo "/p a t h/x.a"\n' +
+      '//   @statorLink   -lfoo "-L/p a t h"\n' +
+      '// @statorLink -framework Cocoa -Wl,-rpath,@loader_path/../lib\n' +
       'declare function f(): void;\n',
   );
   assert.deepEqual(pragmas, [
     { kind: 'flags', flags: ['-lsqlite3', '-L/opt/x/lib'], line: 1, col: 4 },
-    { kind: 'flags', flags: ['-lfoo', '/p a t h/x.a'], line: 2, col: 6 },
+    { kind: 'flags', flags: ['-lfoo', '-L/p a t h'], line: 2, col: 6 },
+    {
+      kind: 'flags',
+      flags: ['-framework', 'Cocoa', '-Wl,-rpath,@loader_path/../lib'],
+      line: 3,
+      col: 4,
+    },
+  ]);
+});
+
+// Any .d.ts in the program carries a pragma, a dependency's included, and its words reach
+// clang's argv: only link flags may (audit F9, plan.md §9 Task 6.22).
+test('a pragma flag outside the link allowlist is invalid and named', () => {
+  for (const flag of [
+    '-fplugin=/tmp/x.so',
+    '-Xclang',
+    '-o',
+    '/p/x.a',
+    '-Wl,--start-group',
+    '-Wl,-rpath,/a,-z,b',
+    '-framework',
+    '-l',
+  ]) {
+    const [pragma] = pragmasOf(`// @statorLink -lfoo ${flag}\ndeclare function f(): void;\n`);
+    assert.ok(pragma?.kind === 'invalid', `${flag}: ${JSON.stringify(pragma)}`);
+    assert.ok(pragma.reason.startsWith(`'${flag}' is not a link flag`), pragma.reason);
+  }
+  const [frameworkFlag] = pragmasOf('// @statorLink -framework -o\ndeclare function f(): void;\n');
+  assert.equal(frameworkFlag?.kind, 'invalid');
+});
+
+// `#include` reads a header name literally (no escapes), so a quote or a line break in the
+// resolved directory cannot be spelled; non-ASCII can, as written (audit F8).
+test('a header path no #include can spell is invalid; non-ASCII stays as written', () => {
+  const source = '// @statorLink #include "./m.h"\ndeclare function f(): void;\n';
+  for (const dir of ['/q"d', '/a\nb', '/a\rb']) {
+    const [pragma] = pragmasOf(source, `${dir}/test.d.ts`);
+    assert.equal(pragma?.kind, 'invalid', JSON.stringify(dir));
+  }
+  assert.deepEqual(pragmasOf(source, '/é/test.d.ts'), [
+    { kind: 'header', header: `"${resolve('/é', 'm.h').replace(/\\/g, '/')}"`, line: 1, col: 4 },
   ]);
 });
 

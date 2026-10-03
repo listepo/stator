@@ -2680,6 +2680,65 @@ The card as it stood before landing:
 > - `std` builds and its smoke check runs.
 > - The `FirstNode` message names the real syntax kind, and the baseline is re-recorded.
 
+### Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug ✅ (landed 2026-10-04)
+
+From the 2026-10-01 QA audit (draft PR #57, findings F1, F2, F10, F11; plan-notes 330). The
+landing is plan-notes 331.
+
+> **Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug
+> (F1, F2, F10, F11).**
+>
+> - **F1.** `build()` (not only `main.ts`, so in-process callers are covered) resolves `entry`, every
+>   program source file, `out`, `emitHeader`, and `<out>.c` under `--keep-c`. It refuses any two
+>   that name the same file with `STA0004` before compiling.
+> - **F2.** One `writeOutput(path, text)` helper turns `ENOENT`/`EACCES`/`EROFS`/`ENOSPC`/`EISDIR`
+>   into a user error with a new code (the next free `STA00xx`, allocated in `docs/DIAGNOSTICS.md`).
+>   The link step checks `dirname(out)` before it blames the compiler (`linkFailure`).
+> - **F10.** An explicit `--unit-name` (and its config key) must match `^[A-Za-z0-9_]+$`, else
+>   `STA0004`. A derived default is still sanitized.
+> - **F11.** A value flag refuses a next argument that starts with `-` (`-o --emit=c` is `STA0004`).
+>   Each command accepts only its own flags (`explain --emit=c` is refused). A bad `STATOR_OPT`
+>   names the environment as its origin.
+>
+> **Check:** the audit's F1, F2, F10 and F11 tests pass in `packages/tests/unit/cli.test.ts`;
+> `docs/CLI.md`/`docs/DIAGNOSTICS.md` list the new refusals; `pnpm run ci` green.
+
+**What landed.**
+
+- **F1.** `src/cli/outputs.ts` `refuseAliasedOutputs`: `build()` compares `-o`, `--emit-header` and
+  the `--keep-c` file (`<out>.c`, only when clang runs) with each other and with the entry before
+  compiling, then with every source file of the program (`CompiledC.inputs`) before the first
+  write. An existing file is compared by inode (`dev:ino`, bigint), so a symlink, a hard link or a
+  case-folding file system cannot hide an alias; a new file by its canonical directory plus name.
+- **F2.** `writeOutput` and `requireWritable` turn `ENOENT`, `ENOTDIR`, `EISDIR`, `EACCES`,
+  `EPERM`, `EROFS` and `ENOSPC` into the new `STA0019` (`cannot write -o "missing/out.c": ENOENT
+  (the directory does not exist)`). `-o`'s directory is checked before clang runs, so the link
+  never blames the compiler for it. Any other write error is still `STA4072`.
+- **F10.** An explicit unit name outside `^[A-Za-z0-9_]+$` is `STA0004`, from the flag, the config
+  key or an in-process caller. The default (the entry basename) is still sanitized. The
+  `export-header` collision test now gets its unsanitized unit from the entry name `my-lib.ts`.
+- **F11.** The parser in `src/cli/main.ts` is one flag table with the commands each flag belongs
+  to. A value flag refuses a next argument that starts with `-` and suggests `--flag=value`
+  (`--link -lm` → `--link=-lm`); a flag on the wrong command is `STA0005 flag "--emit=c" does not
+  apply to explain`; `STATOR_OPT=fast` reports `unknown opt "fast" in the environment variable
+  STATOR_OPT`. An empty `--mode=`/`--opt=` is now `STA0004` (requires a value), like the others.
+
+Docs: `DIAGNOSTICS.md` (`STA0002`, `STA0004`, `STA0005`, new `STA0019`), `CONFIG.md` (flags per
+command, the Outputs section, the `unitName` row), `FFI.md` (unit name), `TOOLCHAIN.md`
+(`STATOR_OPT`). There is no `docs/CLI.md`; the CLI surface is documented in `CONFIG.md`. The
+selfhost baseline grew by 4 `STA1214` in `packages/compiler` (1791 → 1795), recorded with
+`--update` (plan-notes 306).
+
+**Check — PASSED** (2026-10-04, branch `t6-20-cli-outputs` on `3aeb9dd`):
+
+- The audit's tests, adapted, in `packages/tests/unit/cli.test.ts` (F1: entry, header, imported
+  module, `--keep-c`, in-process `build()`; F2: `--emit=c`, binary, header, directory; F10; F11:
+  value flags, per-command flags, `STATOR_OPT`): 9 passed.
+- `pnpm run ci` → exit 0: typecheck, lint, dupes (186 clones, none new), runtime, unit
+  (`Tests  743 passed (743)`), runtime corpus, subset (`921 fixtures — 888 passed, 33
+  expected-fail, 0 failed`), golden (`453 fixtures — 453 passed, 0 failed`), selfhost (14 targets
+  match the baseline), builtins 255/324, node-coverage, leak (plateau), ASan (453/453).
+
 ### Task 6.25 — A BigInt is not-yet, never an internal error (F5) ✅ (landed 2026-10-04)
 
 Audit finding F5 (plan-notes 330): `const b = 1n;` answered `STA4031` "unexpected expression kind:
@@ -2714,6 +2773,110 @@ tests passed (the audit's F5 test included); `pnpm run test:golden` → `453 pas
 > (Phase 5), in both modes, in `build` and `explain`. **Check:** `subset_bigint_primitive_ts.ts`
 > loses its `@expected-fail` marker; a js-mode twin passes; the audit's F5 test passes;
 > `pnpm run ci` green.
+
+### Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9) ✅ (landed 2026-10-04)
+
+Audit findings F7, F8 and F9 (plan-notes 330). What landed (plan-notes 335):
+
+- **F7, `ffi-gen/main.ts`.** `--out` that names the input header or the `--diff` file (same resolved path, or the same inode through a symlink or hard link) is
+  refused (exit 2) before anything is read or written. `--lib` must match
+  `^[A-Za-z0-9_.+-]+$`, so a newline or a space can no longer append source or a second clang
+  flag to the committed `.d.ts`. `--help`/`-h` prints the usage to stdout and exits 0.
+- **F8, `frontend/extern.ts`.** A resolved quote-form header path, a bare name or an angle header
+  holding a `"`, a line break or NUL is an `invalid` pragma, which the gate reports as `STA1119`
+  at the pragma's line. Every other path is emitted as written. The card said "through
+  `escapeCString`", but clang reads a header name literally: `#include "…/q\"d/m.h"` and the
+  octal-escaped spelling of a non-ASCII directory are both "file not found" (plan-notes 335).
+  Escaping would have broken every non-ASCII binding directory that works today.
+- **F9, `frontend/extern.ts`.** `linkFlagRefused` allows `-l<name>`, `-L<dir>`,
+  `-framework <name>` and `-Wl,-rpath,<dir>` (no further comma). Anything else is `invalid`, and
+  the message names the flag and points at `--link=`. The gate's prefix for an invalid pragma
+  now reads "refused @statorLink pragma", since a disallowed flag is not malformed.
+- **Fixtures adjusted on purpose.** One unit test parsed `-lfoo "/p a t h/x.a"`, an archive
+  path, which the allowlist now refuses. It now groups `"-L/p a t h"`, and the test also covers
+  `-framework` and `-Wl,-rpath,`. No golden, example or `packages/*` binding used a flag outside
+  the allowlist. Every pragma in the tree is `-l<name>`, `-L<dir>` or `#include`.
+- **Tests.** The audit's F7 tests and its F8 test, adapted to assert the `STA1119` refusal and
+  that no C is written (`unit/ffi-gen-binding.test.ts`). Unit tests for the allowlist (eight
+  refused spellings, each named) and for unspellable paths, with a non-ASCII directory kept as
+  written (`unit/extern_link.test.ts`). Decision tests `subset_extern_link_flag_{ts,js}`
+  refusing `-fplugin=` in both modes.
+- **Docs.** `docs/FFI.md §9`, `docs/SUBSET.md` and `docs/DIAGNOSTICS.md` (the STA1119 row).
+
+Check evidence:
+- `pnpm run test:subset`: 923 fixtures, 892 passed, 31 expected-fail, 0 failed. Both
+  `subset_extern_link_flag_*` pass.
+- `pnpm run test`: 57 files, 742 tests passed, including the audit's F7 and F8 tests.
+- `pnpm run test:golden`: 453 passed, 0 failed.
+- `pnpm run test:selfhost`: 14 targets match the baseline.
+- typecheck, lint and dupes clean.
+
+> **Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**
+>
+> - **F7.** `ffi-gen` refuses an `--out` (or `--diff`) equal to the input header, validates `--lib`
+>   against `^[A-Za-z0-9_.+-]+$`, and prints `--help` to stdout with exit 0.
+> - **F8.** A resolved `@statorLink` header path containing `"`, `\n`, `\r` or NUL is refused
+>   (`STA1119`); every other path is emitted through the emitter's `escapeCString`, as `#line` is.
+> - **F9.** `@statorLink` flags are limited to link flags: `-l<name>`, `-L<dir>`,
+>   `-framework <name>` and `-Wl,-rpath,<dir>`. Anything else is `STA1119` naming the flag; the
+>   explicit escape hatch stays `--link=` on the command line. `docs/FFI.md §9` changes from
+>   "verbatim clang link flags" to the allowlist.
+>
+> **Check:** the audit's F7 and F8 tests pass, plus a decision test refusing `-fplugin=` in a
+> pragma; `docs/FFI.md` updated; `pnpm run ci` green.
+
+### Task 6.26 — The landing page works without storage, at 320 px and without third parties (F14, F15, F16) ✅ (landed 2026-10-04)
+
+Audit findings F14, F15 and F16 (plan-notes 330). With `localStorage` blocked the theme toggle
+cycled `light, light, light`, and it showed without JS. At 320 and 360 px the header overflowed
+(`scrollWidth 370`). Every visit asked `fonts.googleapis.com` for IBM Plex, and the page had no CSP.
+
+What landed (plan-notes 336):
+
+- **F14.** `site/public/js/theme.js` keeps the preference in a closure variable that `apply()`
+  sets, and `cycle()` steps from it; storage only persists it. The button renders `hidden` and the
+  script unhides it when it wires the click.
+- **F15.** `.top-inner`, `.header-actions` and `.nav` wrap (`flex-wrap`, `min-width: 0`), and the
+  theme label hides under 400 px, leaving the icon button.
+- **F16.** IBM Plex Sans and Mono (400/500/600, OFL-1.1) come from `@fontsource/ibm-plex-sans` and
+  `@fontsource/ibm-plex-mono` 5.3.0, imported by `BaseLayout.astro`; the Google Fonts links are
+  gone. `security.csp` in `astro.config.mjs` puts a `<meta>` CSP on every page: `default-src
+  'self'`, `base-uri 'self'`, `object-src 'none'`, `form-action 'none'`, Astro's own script and
+  style hashes, and the inline boot script's hash, computed from `src/scripts/theme-boot.ts`, the
+  one source both the layout and the config read. The layout's scripts open `<body>`, because
+  Astro puts the meta at the end of `<head>`.
+- **Check script.** `site/scripts/check.ts` (strict TS; `pnpm run check:browser`) serves `dist/`
+  under the base path and drives the installed Chrome through `playwright-core` 1.63.0. It
+  aborts and records every request to another origin, collects `securitypolicyviolation` events,
+  and checks the fonts, the CSP meta, the scroll width at 320 and 360 px, the theme cycle with
+  storage blocked and with it, and the toggle without JS. `.github/workflows/pages.yml` runs it
+  after the build.
+- Docs: `site/README.md` (the check, fonts and CSP), `docs/TOOLCHAIN.md` (a Site table).
+
+Check evidence (macOS arm64, Node 26.7.0, Astro 7.3.3, Chrome 154.0.8037.93): `pnpm build` →
+`1 page(s) built`; `pnpm run check:browser` → 9 checks `ok`, `site check: all passed`
+(`no request to another origin ()`, `no CSP violation ()`, `IBM Plex Sans and Mono load from
+the site`, `scrollWidth 320, clientWidth 320`, `scrollWidth 360, clientWidth 360`,
+`blocked-storage cycle is light,dark,system`, `the toggle is hidden without JS`). The same script
+over the pre-fix site fails 7 checks: the Google Fonts requests, the fonts (those requests are
+aborted), the missing CSP meta, `scrollWidth 370` at both widths, `light,light,light`, and a
+visible toggle without JS. Root `pnpm run lint` clean.
+
+> **Task 6.26 — The landing page works without storage, at 320 px and without third parties
+> (F14, F15, F16).**
+>
+> - **F14.** `site/public/js/theme.js` cycles from an in-memory state that `apply()` updates, so a
+>   blocked `localStorage` still cycles `light → dark → system`. The toggle is hidden until the
+>   script runs.
+> - **F15.** The header wraps (`flex-wrap`, `min-width: 0` on `.nav`) and drops the theme label
+>   text under ~400 px, so nothing overflows at 320 and 360 px.
+> - **F16.** IBM Plex is self-hosted under `site/` (OFL), the `fonts.googleapis.com` links go,
+>   and the layout carries a restrictive CSP meta (`default-src 'self'`, the inline boot script by
+>   hash).
+>
+> **Check:** the site builds; a check (in the site's own build or a script under `site/`) shows
+> no request to another origin, no horizontal scroll at 320 px, and the blocked-storage cycle
+> `light,dark,system`.
 
 ### Task 6.24 — `console.log` formats like Node (F13) ✅ (landed 2026-10-04)
 
@@ -2751,7 +2914,8 @@ Check evidence:
   - `test:subset`: `927 fixtures — 896 passed, 31 expected-fail, 0 failed`;
   - `test:golden`: `455 fixtures — 455 passed, 0 failed`;
   - `test:selfhost`: green after re-recording `packages/compiler` `STA1214` 1794 → 1800, for
-    the gate's new format-string scan;
+    the gate's new format-string scan Merged with main f126a49 (Tasks 6.20, 6.22, 6.25,
+    6.26) the count is 1798 → 1804: the same six;
   - builtins, node-coverage and leak green;
   - `test:asan`: `golden-asan green`, 455 passed.
 

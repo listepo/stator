@@ -50,7 +50,7 @@
     "unitName": {
       "type": "string",
       "minLength": 1,
-      "description": "build: prefix for stator_<unit>_<name>."
+      "description": "build: prefix for stator_<unit>_<name>; letters, digits and _ only (else STA0004)."
     },
     "bundler": {
       "type": "string",

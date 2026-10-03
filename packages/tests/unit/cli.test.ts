@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'vitest';
@@ -572,4 +572,196 @@ test('an in-process build whose checker overflows is BuildError STA0013, not a t
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+/* Task 6.20 (QA audit F1, F2, F10, F11): `build` never destroys an input, and a user's mistake is
+ * a user error with a stable code, never STA4072 "compiler bug". Every refusal below happens
+ * before clang runs, so none of these needs the native toolchain. */
+
+/** A scratch directory with `files` written into it, removed after `body`. */
+async function inScratch(
+  files: Readonly<Record<string, string>>,
+  body: (dir: string) => Promise<void>,
+): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'stator-cli-outputs-'));
+  try {
+    for (const [name, text] of Object.entries(files)) {
+      writeFileSync(join(dir, name), text);
+    }
+    await body(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** `stator` in `dir`, with stderr on one line: ink wraps a diagnostic at the terminal width, and
+ * these tests read the message, not its layout. Paths stay relative so a wrap cannot split one. */
+async function statorIn(dir: string, ...args: string[]): Promise<Run> {
+  const run = await spawn(process.execPath, [CLI, ...args], dir);
+  return { ...run, stderr: run.stderr.replace(/\s+/g, ' ') };
+}
+
+const ADD = 'export function add(a: number, b: number): number { return a + b; }\n';
+
+test('build refuses an -o that is the entry file (F1: the source must survive)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const r = await statorIn(dir, 'build', 'app.ts', '-o', 'app.ts', '--emit=c');
+    const entry = join(dir, 'app.ts');
+    assert.equal(readFileSync(entry, 'utf8'), 'console.log(1);\n', 'entry overwritten with C');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^stator: STA0004 -o "app\.ts" is the entry file "app\.ts"/);
+  });
+});
+
+test('--emit-header refuses to alias -o or the entry (F1)', async () => {
+  await inScratch({ 'lib.ts': ADD }, async (dir) => {
+    const [aliasOut, aliasEntry] = await Promise.all([
+      statorIn(dir, 'build', 'lib.ts', '-o', 'lib.h', '--emit=c', '--emit-header=lib.h'),
+      statorIn(dir, 'build', 'lib.ts', '-o', 'lib.c', '--emit=c', '--emit-header=lib.ts'),
+    ]);
+    const entry = join(dir, 'lib.ts');
+    assert.equal(aliasOut.status, 1, 'the header silently replaced the C output');
+    assert.match(
+      aliasOut.stderr,
+      /STA0004 -o ".*lib\.h" and --emit-header ".*lib\.h" name the same file/,
+    );
+    assert.equal(aliasEntry.status, 1);
+    assert.match(aliasEntry.stderr, /STA0004 --emit-header ".*lib\.ts" is the entry file/);
+    assert.equal(readFileSync(entry, 'utf8'), ADD);
+    assert.equal(existsSync(join(dir, 'lib.h')), false);
+  });
+});
+
+test('-o naming an imported module, or the --keep-c file naming the header, is refused (F1)', async () => {
+  await inScratch(
+    { 'main.ts': "import { add } from './dep.ts';\nconsole.log(add(1, 2));\n", 'dep.ts': ADD },
+    async (dir) => {
+      const [imported, keptC] = await Promise.all([
+        statorIn(dir, 'build', 'main.ts', '-o', 'dep.ts', '--emit=c'),
+        statorIn(dir, 'build', 'main.ts', '-o', 'x', '--keep-c', '--emit-header=x.c'),
+      ]);
+      assert.equal(imported.status, 1);
+      assert.match(
+        imported.stderr,
+        /STA0004 -o "dep\.ts" is a source file of the program ".*dep\.ts"/,
+      );
+      assert.equal(readFileSync(join(dir, 'dep.ts'), 'utf8'), ADD);
+      assert.equal(keptC.status, 1);
+      assert.match(
+        keptC.stderr,
+        /STA0004 --emit-header "x\.c" and the --keep-c file "x\.c" name the same file/,
+      );
+    },
+  );
+});
+
+test('an in-process build() refuses an aliased output too (F1: statorc/api callers)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const entry = join(dir, 'app.ts');
+    await assert.rejects(
+      build({ entry, out: entry, mode: 'ts', emitCOnly: true, keepC: false }),
+      (error: unknown) => error instanceof BuildError && error.code === 'STA0004',
+    );
+    assert.equal(readFileSync(entry, 'utf8'), 'console.log(1);\n');
+  });
+});
+
+test('an unwritable output is STA0019, not STA4072 "compiler bug" (F2)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n', 'lib.ts': ADD }, async (dir) => {
+    const [cOut, binary, header, isDir] = await Promise.all([
+      statorIn(dir, 'build', 'app.ts', '-o', 'missing/out.c', '--emit=c'),
+      statorIn(dir, 'build', 'app.ts', '-o', 'missing/app'),
+      statorIn(dir, 'build', 'lib.ts', '-o', 'lib.c', '--emit=c', '--emit-header=missing/lib.h'),
+      statorIn(dir, 'build', 'app.ts', '-o', '.'),
+    ]);
+    for (const r of [cOut, binary, header, isDir]) {
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /^stator: STA0019 cannot write /);
+      assert.doesNotMatch(r.stderr, /STA4072|compiler bug/);
+    }
+    assert.match(
+      cOut.stderr,
+      /cannot write -o "missing\/out\.c": ENOENT \(the directory does not exist\)/,
+    );
+    assert.match(binary.stderr, /ENOENT/);
+    assert.match(header.stderr, /cannot write --emit-header /);
+    assert.match(isDir.stderr, /EISDIR \(it is a directory\)/);
+  });
+});
+
+test('an explicit --unit-name must already be a C identifier part (F10)', async () => {
+  await inScratch({ 'lib.ts': ADD }, async (dir) => {
+    const header = (name: string) =>
+      statorIn(
+        dir,
+        'build',
+        'lib.ts',
+        '-o',
+        `${name}.c`,
+        '--emit=c',
+        `--emit-header=${name}.h`,
+        `--unit-name=${name}`,
+      );
+    const [dashed, dotted, plain] = await Promise.all([
+      header('my-lib'),
+      header('my.lib'),
+      header('my_lib'),
+    ]);
+    for (const refused of [dashed, dotted]) {
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /^stator: STA0004 unit name "my[-.]lib"/);
+    }
+    assert.equal(existsSync(join(dir, 'my-lib.h')), false);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.match(readFileSync(join(dir, 'my_lib.h'), 'utf8'), /stator_my_lib_add/);
+  });
+});
+
+test('a value flag refuses a flag as its value (F11)', async () => {
+  await inScratch({ 'app.ts': 'console.log(1);\n' }, async (dir) => {
+    const [out, link, linkEq] = await Promise.all([
+      statorIn(dir, 'build', 'app.ts', '-o', '--emit=c'),
+      statorIn(dir, 'build', 'app.ts', '-o', 'app', '--link', '-lm'),
+      statorIn(dir, 'build', 'none.ts', '-o', 'app', '--link=-lm'),
+    ]);
+    assert.equal(out.status, 1);
+    assert.match(
+      out.stderr,
+      /^stator: STA0004 -o requires an output path, not the flag "--emit=c"/,
+    );
+    assert.equal(existsSync(join(dir, '--emit=c')), false);
+    assert.match(link.stderr, /^stator: STA0004 --link requires .*write --link=-lm/);
+    // The `=` spelling carries a dash-led value: the parse passes, and the missing entry is next.
+    assert.match(linkEq.stderr, /^stator: STA0007 /);
+  });
+});
+
+test('each command accepts only its own flags (F11)', async () => {
+  const runs = await Promise.all(
+    [
+      ['explain', 'lib.ts', '--emit=c'],
+      ['explain', 'lib.ts', '--opt=3'],
+      ['explain', 'lib.ts', '-o', 'x'],
+      ['explain', 'lib.ts', '--keep-c'],
+      ['explain', 'lib.ts', '--link=-lm'],
+      ['build', 'lib.ts', '-o', 'x', '--json'],
+    ].map(async (argv) => ({ argv, run: await stator(...argv) })),
+  );
+  for (const { argv, run } of runs) {
+    assert.equal(run.status, 1, argv.join(' '));
+    assert.match(
+      run.stderr,
+      new RegExp(`^stator: STA0005 flag "[^"]+" does not apply to ${argv[0] ?? ''}`),
+      argv.join(' '),
+    );
+  }
+});
+
+test('a bad STATOR_OPT names the environment as its origin (F11)', async () => {
+  const run = await execa(process.execPath, [CLI, 'build', 'x.ts', '-o', 'x.c', '--emit=c'], {
+    reject: false,
+    env: { STATOR_OPT: 'fast' },
+  });
+  assert.equal(run.exitCode, 1);
+  assert.match(run.stderr, /STA0002 unknown opt "fast" in the environment variable STATOR_OPT/);
 });
