@@ -7,6 +7,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef STATOR_TEST_BOEHM
 #include <stddef.h>
@@ -24,9 +25,13 @@ int main(void) {
     GC_gcollect();
 #endif
   }
+  /* Unbounded recursion in one library: its stack guard throws, the other library is untouched. */
+  assert(stator_keeper_deep() == 0.0);
+  assert(strstr(stator_keeper_last_error(), "Maximum call stack size exceeded") != NULL);
+  assert(stator_consumer_add(2.0, 3.0) == 5.0);
   assert(stator_consumer_boom(-1.0) == 0.0);
   assert(stator_consumer_last_error() != NULL);
-  assert(stator_keeper_last_error() == NULL);
+  assert(stator_keeper_grow(0.0) == 5000.0 && stator_keeper_last_error() == NULL);
 #ifdef STATOR_TEST_BOEHM
   assert(GC_get_gc_no() >= 10);
 #endif

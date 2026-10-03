@@ -597,10 +597,17 @@ PKG_CONFIG_PATH=out cc main.c $(pkg-config --cflags --libs libconsumer) -o app
   3. *No `jsrt_value` crossing*: an export whose header would need `jsrt_value.h` (any
      position outside §2's table) is `STA1220` under `--emit=lib`, because the consumer
      has no runtime API to make or read one. Plain `--emit-header` still exposes it.
+  4. *One stack guard per copy*: each runtime's init measures the calling thread's stack and
+     sets its own limit, so unbounded recursion inside any library is a `RangeError` in that
+     library's `last_error`. The SIGSEGV/SIGBUS fault handler (plan-notes 338) is installed
+     once per copy; each one hands a fault outside its guard region back to the handler it
+     replaced, so the copies chain like the Boehm roots hooks do.
 - **Deterministic**: the prelink drops debug information (`-Wl,-S`), which would name the
   build machine's runtime paths, and the archiver runs in its deterministic mode (`ar D` on
   ELF; `ZERO_AR_DATE=1` for Apple's `ar`, which refuses `D`). Two builds of the same input
-  give byte-identical `.a`, `.h` and `.pc`. The sanitized flavor (`STATOR_RUNTIME=asan`)
+  give byte-identical `.a`, `.h` and `.pc`. The archive still names the unit's own source
+  files where the program reports them (a call site's `file:line` for error stacks, as in a
+  binary), so building the same unit from another directory changes those strings. The sanitized flavor (`STATOR_RUNTIME=asan`)
   keeps its debug information for line numbers in reports, so its archive is not
   byte-reproducible; it is a test build, never one to hand out.
 - **Tools**: `$CC` for the prelink, `objcopy` on ELF and `ar`; `OBJCOPY` and `AR` override
@@ -610,7 +617,8 @@ PKG_CONFIG_PATH=out cc main.c $(pkg-config --cflags --libs libconsumer) -o app
 - **Proof**: `packages/tests/ffi/example-c-consumer/static-lib.ts` builds the example twice
   and compares the bytes, links `main.c` from a fresh directory through `pkg-config` alone
   and checks `expected.txt`, then links `consumer` and a second library (`keeper.ts`) into
-  `two.c` and forces Boehm collections between calls into both. The ffi CI jobs (Linux and
+  `two.c`, forces Boehm collections between calls into both, and overflows the stack in one
+  while the other keeps answering. The ffi CI jobs (Linux and
   macOS) run it, and so does the ASan gate (`pnpm run test:asan`) against the sanitized
   runtime.
 

@@ -12411,6 +12411,18 @@ ld-27037.1). On ELF, `objcopy --keep-global-symbols=<file>` makes every other gl
    flag). The sanitized flavor keeps it for line numbers in reports, and so its archive is not
    byte-reproducible (the debug map also names the scratch directory).
 
+**The stack guard (Task 6.23, rebased onto `2efaabb`).** Each copy's `jsrt_stack_init` sets
+its own thread-local `jsrt_stack_limit` from the same thread bounds, and installs its own
+SIGSEGV/SIGBUS handler, saving the previous one; a fault outside its guard region restores the
+previous handler and returns, so the copies chain. Proof: `keeper.ts` exports `deep()`, which
+recurses without bound; in `two.c` it answers the sentinel with "Maximum call stack size
+exceeded" in `stator_keeper_last_error()`, and the consumer library answers correctly right
+after. Default and ASan runtime, macOS.
+
+**Source paths.** The archive holds the unit's own source path where a call site records its
+`file:line` for error stacks, as a binary does. That is program data, not a build input, and the
+static-lib check exempts exactly those strings; every other path into the repository is refused.
+
 **Determinism.** Two builds into different directories give byte-identical `.a`, `.h` and
 `.pc`. Apple's `ar` refuses the `D` modifier; it zeroes the member date, uid and gid when
 `ZERO_AR_DATE` is set

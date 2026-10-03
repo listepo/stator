@@ -4,7 +4,7 @@
  *   builds must be byte-identical (the archive only in the default flavor: the sanitized one
  *   compiles with `-g`, whose debug map names the scratch directory).
  * - The three files and `main.c` are copied to a fresh directory, must hold no path into this
- *   repository, and `main.c` links through `pkg-config --cflags --libs libconsumer` alone, runs,
+ *   repository (but the unit's own error-stack locations), and `main.c` links through `pkg-config --cflags --libs libconsumer` alone, runs,
  *   and prints `expected.txt`.
  * - `keeper.ts` builds to a second library, and `two.c` links BOTH into one program: two private
  *   runtimes over one Boehm, with forced collections that `two.c` confirms through
@@ -55,8 +55,10 @@ function libraryFiles(unit: string): string[] {
   return [`lib${unit}.a`, `${unit}.h`, `lib${unit}.pc`];
 }
 
-/** Copies `unit`'s three files to `to`, refusing any that names this repository. */
-function deliver(from: string, unit: string, to: string): void {
+/** Copies `unit`'s three files to `to`, refusing any that names this repository. The one path
+ * allowed is the unit's own source, which a call site's error-stack location names exactly as it
+ * does in a binary (`file:line`, docs/FFI.md §8); nothing the consumer's build reads. */
+function deliver(from: string, unit: string, source: string, to: string): void {
   for (const name of libraryFiles(unit)) {
     copyFileSync(join(from, name), join(to, name));
     // The sanitized archive's debug info names the runtime's sources; that flavor is a test
@@ -64,7 +66,8 @@ function deliver(from: string, unit: string, to: string): void {
     if (SANITIZED && name.endsWith('.a')) {
       continue;
     }
-    if (readFileSync(join(to, name)).includes(REPO)) {
+    const text = readFileSync(join(to, name), 'latin1').replaceAll(`${join(HERE, source)}:`, '');
+    if (text.includes(REPO)) {
       fail(`${name} names the repository path ${REPO}`);
     }
   }
@@ -131,7 +134,7 @@ function main(): void {
 
     const consumer = join(work, 'consumer-app');
     mkdirSync(consumer);
-    deliver(first, 'consumer', consumer);
+    deliver(first, 'consumer', 'unit.ts', consumer);
     copyFileSync(join(HERE, 'main.c'), join(consumer, 'main.c'));
     const one = linkAndRun(consumer, 'main.c', ['libconsumer']);
     const expected = readFileSync(join(HERE, 'expected.txt'), 'utf8');
@@ -144,8 +147,8 @@ function main(): void {
 
     const both = join(work, 'two-app');
     mkdirSync(both);
-    deliver(first, 'consumer', both);
-    deliver(join(work, 'keeper'), 'keeper', both);
+    deliver(first, 'consumer', 'unit.ts', both);
+    deliver(join(work, 'keeper'), 'keeper', 'keeper.ts', both);
     copyFileSync(join(HERE, 'two.c'), join(both, 'two.c'));
     const two = linkAndRun(both, 'two.c', ['libconsumer', 'libkeeper']);
     if (two.output !== 'keeper=5000\ntwo libraries ok\n') {
