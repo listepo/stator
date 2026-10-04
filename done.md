@@ -3272,6 +3272,10 @@ What landed:
   `rewrites(…).get(…) === undefined` checks that passed vacuously on Windows now test something.
   The `--node` bundler test is split: the compile runs on every platform (on the Windows x64
   runner it crosses drives), and the run of the binary is `NATIVE_ONLY`.
+- Merging main brought Task 7.4's `unit/static-lib.test.ts`, whose Windows leg had never run:
+  "an export that crosses as jsrt_value is STA1220" met STA1219, because Windows refuses
+  `--emit=lib` before compiling (docs/FFI.md §8). It is skipped on `win32`; the next test pins
+  STA1219 there.
 
 Check evidence (PR #110, head `f9a5e72`, CI run 37155782218):
 

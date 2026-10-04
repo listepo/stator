@@ -12752,6 +12752,13 @@ root, are now exact `includes` checks, and the stderr check names the whole path
 tail. The `--node` test is split. The compile, which is where the cross-drive bug failed, runs on
 every platform. Running the binary is `NATIVE_ONLY`, like every other test that runs one.
 
+**After merging main (#105, Task 7.4).** CI on `685e025` failed one more Windows test, which no
+Windows leg had run before: `unit/static-lib.test.ts` "an export that crosses as jsrt_value is
+STA1220 under --emit=lib only" got `STA1219 --emit=lib is not yet supported on Windows`. That is
+the designed order (`libraryOutputs` refuses the platform before anything compiles), so STA1220
+cannot arise on Windows. The test is skipped on `win32`, and "--emit=lib on Windows is STA1219,
+before compiling" covers that platform.
+
 **CRLF.** The root cause is the checkout, not the comparison: the committed bytes are LF (`git
 ls-files --eol` shows `i/lf` for every text file), and `--update` writes LF. A `.gitattributes`
 of `* text=auto eol=lf` makes every checkout LF. `git add --renormalize .` changed no file. This

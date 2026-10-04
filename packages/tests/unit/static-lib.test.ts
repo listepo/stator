@@ -141,26 +141,31 @@ test('--emit=lib refuses a missing header and an -o that is not lib<name>.a (STA
   }
 });
 
-test('an export that crosses as jsrt_value is STA1220 under --emit=lib only', () => {
-  const dir = scratch({
-    'u.ts': 'export function kind(x: unknown): string {\n  return typeof x;\n}\n',
-  });
-  try {
-    const refused = statorBuild([
-      join(dir, 'u.ts'),
-      '--emit=lib',
-      '-o',
-      join(dir, 'libu.a'),
-      `--emit-header=${join(dir, 'u.h')}`,
-    ]);
-    assert.equal(refused.status, 1);
-    assert.match(refused.stderr, /STA1220/);
-    assert.equal(existsSync(join(dir, 'libu.a')), false);
-    assert.equal(existsSync(join(dir, 'u.h')), false);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+// Windows refuses --emit=lib before compiling (STA1219, the next test), so STA1220 cannot arise there.
+test(
+  'an export that crosses as jsrt_value is STA1220 under --emit=lib only',
+  { skip: process.platform === 'win32' },
+  () => {
+    const dir = scratch({
+      'u.ts': 'export function kind(x: unknown): string {\n  return typeof x;\n}\n',
+    });
+    try {
+      const refused = statorBuild([
+        join(dir, 'u.ts'),
+        '--emit=lib',
+        '-o',
+        join(dir, 'libu.a'),
+        `--emit-header=${join(dir, 'u.h')}`,
+      ]);
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /STA1220/);
+      assert.equal(existsSync(join(dir, 'libu.a')), false);
+      assert.equal(existsSync(join(dir, 'u.h')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test('--emit=lib on Windows is STA1219, before compiling', async () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
