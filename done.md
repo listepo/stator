@@ -3276,6 +3276,9 @@ What landed:
   "an export that crosses as jsrt_value is STA1220" met STA1219, because Windows refuses
   `--emit=lib` before compiling (docs/FFI.md §8). It is skipped on `win32`; the next test pins
   STA1219 there.
+- After that merge, `frontend (windows/arm64)` (CI on `54ba88f`, job 111328467740) still fails one
+  Task 6.27 test, `unit/to-primitive.test.ts`: Node's own builtin-constructor set is seven names
+  larger on that runner (plan-notes 352). `frontend (windows/x64)` passes.
 
 Check evidence (PR #110, head `f9a5e72`, CI run 37155782218):
 

@@ -12759,6 +12759,18 @@ the designed order (`libraryOutputs` refuses the platform before anything compil
 cannot arise on Windows. The test is skipped on `win32`, and "--emit=lib on Windows is STA1219,
 before compiling" covers that platform.
 
+**Still red after that: `frontend (windows/arm64)`, one test from Task 6.27.** CI on `54ba88f`
+(job 111328467740): `frontend (windows/x64)` passes, and `windows/arm64` fails only
+`unit/to-primitive.test.ts` "the runtime names the same builtin constructors as the pinned Node".
+On that runner Node v26.7.0's `util.format('%s')` treats seven more names as builtin
+constructors than on linux, macOS and windows/x64: `AsyncDisposableStack`, `DisposableStack`,
+`Float16Array`, `SharedArrayBuffer`, `SuppressedError`, `Temporal`, `WebAssembly`. So Node's
+`builtInObjects` differs by platform, and `BUILTIN_CONSTRUCTOR_NAMES` (`jsrt_print.c`) matches
+every platform except windows/arm64. Why that Node build differs (for example, whether it
+starts without the startup snapshot, so `inspect.js` loads after those globals exist) is
+**unverified**. Not fixed here: it is outside this card, and whether the runtime should carry a
+per-platform list is open.
+
 **CRLF.** The root cause is the checkout, not the comparison: the committed bytes are LF (`git
 ls-files --eol` shows `i/lf` for every text file), and `--update` writes LF. A `.gitattributes`
 of `* text=auto eol=lf` makes every checkout LF. `git add --renormalize .` changed no file. This
