@@ -90,7 +90,13 @@ import {
   linkPragmasOf,
 } from './extern.ts';
 import { isFreeCommonJsName, isPackageSpecifier, isSyntaxFreeEsModule } from './vendor.ts';
-import { type CommonJsBinding, commonJsVerdict, isNodeSourceFile, nodeBuiltinId } from './node.ts';
+import {
+  type CommonJsBinding,
+  commonJsVerdict,
+  isNodeSourceFile,
+  nodeBuiltinId,
+  nodeLocationModule,
+} from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
@@ -824,6 +830,12 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
       if (target === undefined || (ts.isSourceFile(target) && isNodeSourceFile(target.fileName))) {
         return { kind: 'accept' };
       }
+    }
+    // The `--node` location rewrite's own import of its helpers, spelled absolute where no
+    // relative path reaches them (`nodeLocationModule`). Not a package, and the same file a
+    // relative import of it already reaches.
+    if (spec.text === nodeLocationModule()) {
+      return { kind: 'accept' };
     }
     // Bare specifier: a package. In js mode the bundler takes it (plan.md §11d T12.1), and the
     // vendor rewrite turns every import declaration and re-export of one into an import of the

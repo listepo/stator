@@ -17,7 +17,7 @@
 
 import { readFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import * as ts from 'typescript';
 import { classifyStdSpecifier, isStdSourceFile } from './std.ts';
 
@@ -29,8 +29,9 @@ export const VENDOR_MODULE_NAME = '__stator_vendor__.js';
 export interface VendorEntry {
   /** Generated ESM: `export { pad } from "leftpad";` … */
   readonly code: string;
-  /** Where package resolution starts: the entry's directory. `sources` in the bundle's map are
-   * relative to it unless absolute. */
+  /** Where package resolution starts: the entry's directory, absolute, in the platform's form
+   * (docs/BUNDLER.md §5, "Paths"). `sources` in the bundle's map are relative to it unless
+   * absolute. */
   readonly resolveDir: string;
 }
 
@@ -38,7 +39,8 @@ export interface VendorPlan {
   readonly entry: VendorEntry;
   /** Absolute, forward-slash path of the virtual module the bundle becomes. */
   readonly modulePath: string;
-  /** Project files whose package imports now name the vendor module: path → rewritten text.
+  /** Project files whose package imports now name the vendor module: checker file name (absolute,
+   * forward slashes) → rewritten text.
    * `bundle` is the vendor bundle's code: an `export * from 'p'` re-exports the names the bundle
    * exports for it, so without the bundle such a declaration stays as written (the gate refuses
    * it). Every other rewrite is the same either way. */
@@ -330,9 +332,22 @@ function vendorSource(
   return undefined;
 }
 
+/** A checker file name (absolute, forward slashes) in the platform's form, the form `path.join`
+ * gives: what the compiler hands out (a diagnostic's file, the vendor entry's `resolveDir`) is
+ * spelled the way a Windows user reads it and a caller compares with (docs/BUNDLER.md §5,
+ * "Paths"). The same string where the separator is `/`. */
+export function platformPath(file: string): string {
+  return file.replaceAll('/', sep);
+}
+
+/** An import specifier for `to`, written in `fromDir`: relative where one exists, and `to` itself
+ * where none does. On Windows a file on another drive has no relative path, and `relative` answers
+ * the absolute one, which a `./` in front would turn into a path that names nothing. */
 export function relativeSpecifier(fromDir: string, to: string): string {
-  const rel = relative(fromDir, to).replace(/\\/g, '/');
-  return rel.startsWith('../') ? rel : `./${rel}`;
+  const rel = relative(fromDir, to);
+  if (isAbsolute(rel)) return to.replace(/\\/g, '/');
+  const posix = rel.replace(/\\/g, '/');
+  return posix.startsWith('../') ? posix : `./${posix}`;
 }
 
 function importSite(
@@ -710,7 +725,7 @@ export function planVendor(
     return out;
   };
   return {
-    entry: { code: `${lines.join('\n')}\n`, resolveDir },
+    entry: { code: `${lines.join('\n')}\n`, resolveDir: platformPath(resolveDir) },
     modulePath,
     rewrites,
   };

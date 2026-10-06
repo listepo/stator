@@ -19,7 +19,7 @@
 import { dirname, relative } from 'node:path';
 import * as ts from 'typescript';
 import type { PositionMapper } from '../support/sourcemap.ts';
-import { isNodeSourceFile, nodeLocationFile } from './node.ts';
+import { isNodeSourceFile, nodeLocationFile, nodeLocationModule } from './node.ts';
 import { isFreeCommonJsName, isProjectFile, relativeSpecifier } from './vendor.ts';
 
 /** The helper each read becomes. */
@@ -105,7 +105,8 @@ function importOffset(text: string): number {
 
 function rewrite(file: ts.SourceFile, sites: readonly Site[]): string {
   const used = [...new Set(sites.map((site) => HELPERS[site.read]))].sort();
-  const specifier = relativeSpecifier(dirname(file.fileName), nodeLocationFile());
+  const nearby = relativeSpecifier(dirname(file.fileName), nodeLocationFile());
+  const specifier = nearby.startsWith('.') ? nearby : nodeLocationModule();
   const header = `import { ${used.join(', ')} } from ${JSON.stringify(specifier)}; `;
   const at = importOffset(file.text);
   let out = file.text.slice(0, at) + header;

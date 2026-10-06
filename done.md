@@ -3237,6 +3237,72 @@ Local evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
 > **Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
 > five gained tests stay), and `ratchet.json` is raised to the new total.
 
+### Task 6.30 — The Windows frontend legs are green again ✅ (landed 2026-10-04)
+
+`frontend (windows/x64)` failed eleven unit tests once stage 2 ran again (CI run 37150879614, job
+111286117947). Ten were in `unit/bundler.test.ts` and one was the selfhost baseline test. Four
+root causes (plan-notes 352):
+
+- **No stated path form at the bundler seam.** The code answered the checker's spelling
+  (`C:/…`), and the tests glued `${root}/…` onto a `C:\…` root.
+- **A cross-drive bug.** The runner's temp dir is on `C:` and the checkout on `D:`.
+  `path.relative` answers an absolute path there, and `relativeSpecifier` put `./` in front of
+  it, so a `--node` location read failed with `Cannot find module './D:/…/location.ts'`.
+- **The helper's absolute import**, once spelled correctly, still met TS2877 (a non-relative
+  `.ts` import) and then the gate's package rule.
+- **CRLF.** The repo had no `.gitattributes`, and git on the Windows runner checks out with
+  `core.autocrlf=true`.
+
+What landed:
+
+- docs/BUNDLER.md §5 "Paths": what leaves the compiler is in the platform's form, namely
+  `VendorEntry.resolveDir` and every diagnostic's `file` (the API, `stderr`, `stator explain`).
+  `modulePath`, the `rewrites` keys, `#line` and run-time locations keep the checker's form.
+  docs/DIAGNOSTICS.md says the same for the `file` field.
+- `platformPath` in `frontend/vendor.ts`. `mapVendorDiagnostics` becomes `reportedDiagnostics`,
+  the one outbound step `build` and `explain` share, and it converts every `file`.
+- `relativeSpecifier` answers the absolute target when no relative path exists. The location
+  rewrite then imports `nodeLocationModule()` (the helper's checker path without `.ts`), and the
+  gate accepts exactly that string.
+- `.gitattributes`: `* text=auto eol=lf`. `git add --renormalize .` changed no file. The
+  `ci.yml` comment that blamed line-ending translation for keeping `lint` off the desktop legs
+  now gives the real reason.
+- Tests state which form they expect: `join(root, …)` for what comes out, `checkerName` for
+  internal names. No assertion got looser. The `#line` regexes became exact `includes`, and two
+  `rewrites(…).get(…) === undefined` checks that passed vacuously on Windows now test something.
+  The `--node` bundler test is split: the compile runs on every platform (on the Windows x64
+  runner it crosses drives), and the run of the binary is `NATIVE_ONLY`.
+- Merging main brought Task 7.4's `unit/static-lib.test.ts`, whose Windows leg had never run:
+  "an export that crosses as jsrt_value is STA1220" met STA1219, because Windows refuses
+  `--emit=lib` before compiling (docs/FFI.md §8). It is skipped on `win32`; the next test pins
+  STA1219 there.
+- After that merge, `frontend (windows/arm64)` (CI on `54ba88f`, job 111328467740) still fails one
+  Task 6.27 test, `unit/to-primitive.test.ts`: Node's own builtin-constructor set is seven names
+  larger on that runner (plan-notes 352). `frontend (windows/x64)` passes.
+
+Check evidence (PR #110, head `f9a5e72`, CI run 37155782218):
+
+- `frontend (windows/x64)` (job 111299744263) and `frontend (windows/arm64)` (job 111299744145):
+  pass, `Tests  702 passed | 63 skipped (765)` each.
+- Every other job passes except `test262 conformance` (`FAIL ratchet: passed dropped from 2372
+  to 2371`), which is Task 6.29's known drop and is on main too.
+- Local `pnpm run ci` → exit 0 (`Tests  762 passed (762)`, subset 898 passed + 31 expected-fail,
+  golden 459/459, selfhost 14 targets match the baseline).
+
+> **Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
+> and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
+> since `76a69ed`, because stage 2 waits on the linux jobs, which were red.
+> 1. Ten `unit/bundler.test.ts` tests (T12.1–T12.3) compare a bundler path such as `resolveDir`, a
+>    `#line` file or a diagnostic file against `join(...)`. The code answers `C:/Users/…` and the test
+>    expects `C:\Users\…`. Decide which form the bundler seam promises, document it in
+>    `docs/BUNDLER.md`, and make the code and the tests agree. A diagnostic shown to a Windows user
+>    should use the platform's separators.
+> 2. `unit/selfhost.test.ts` "the committed baseline is in --update form" fails on Windows (most
+>    likely CRLF from checkout, compared against the `--update` text). Fix it with a
+>    `.gitattributes` rule or by normalizing the comparison, whichever is the root cause.
+>
+> **Check:** `frontend (windows/x64)` and `frontend (windows/arm64)` green on a PR.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is

@@ -826,19 +826,7 @@ prints different bytes while `explain` says `static`, so 6.27 comes first.
 
 ~~**Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).**~~ ✅ **landed 2026-10-03** — evidence in [done.md](done.md) → Phase 6 Task 6.29 (plan-notes 350).
 
-**Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
-and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
-since `76a69ed`, because stage 2 waits on the linux jobs, which were red.
-1. Ten `unit/bundler.test.ts` tests (T12.1–T12.3) compare a bundler path such as `resolveDir`, a
-   `#line` file or a diagnostic file against `join(...)`. The code answers `C:/Users/…` and the test
-   expects `C:\Users\…`. Decide which form the bundler seam promises, document it in
-   `docs/BUNDLER.md`, and make the code and the tests agree. A diagnostic shown to a Windows user
-   should use the platform's separators.
-2. `unit/selfhost.test.ts` "the committed baseline is in --update form" fails on Windows (most
-   likely CRLF from checkout, compared against the `--update` text). Fix it with a
-   `.gitattributes` rule or by normalizing the comparison, whichever is the root cause.
-
-**Check:** `frontend (windows/x64)` and `frontend (windows/arm64)` green on a PR.
+~~**Task 6.30 — The Windows frontend legs are green again (plan-notes 349).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.30 (plan-notes 352).
 
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
@@ -2396,4 +2384,5 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
 - **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.
 - **v4.77** (2026-10-03): **Task 6.29 lands: Test262 gets back its six module tests** (plan-notes 350). The five `module-code` tests had only ever passed by accident: the runner compiled them under a temporary name, so their imports failed to resolve. A build now reports parse-phase errors (the parser's, the binder's, and the new `STA3005` for an imported binding named `eval`/`arguments`) before any bundle step runs. A default import of a syntax-free `.js` ES module is the new `STA3004`. `ratchet.json` `passed` goes from 2372 to 2377.
+- **v4.78** (2026-10-04): **Task 6.30 lands: the Windows frontend legs are green again** (plan-notes 352). Diagnostics and `VendorEntry.resolveDir` leave the compiler in the platform's form (`\` on Windows). Internal names and the generated C keep the checker's forward slashes. docs/BUNDLER.md §5 "Paths" states which form is used where. A `--node` program whose project sits on another Windows drive than the compiler now compiles, because the location helper is imported by its absolute path where no relative one exists. `.gitattributes` keeps every checkout LF, so the selfhost baseline matches its `--update` form on Windows.
 - **v4.79** (2026-10-03): **Task 7.4 lands: a self-contained static library for C consumers** (plan-notes 341–343). `stator build --emit=lib -o lib<name>.a --emit-header=<h>` prelinks the unit with a private runtime (`cc -r`; Mach-O `-exported_symbols_list`, ELF `objcopy --keep-global-symbols`), archives it deterministically and writes a relocatable `lib<name>.pc` from the binary link's own flag list, so `cc main.c $(pkg-config --cflags --libs lib<name>)` builds with no Stator checkout. Two libraries share one Boehm through a weak shared object kind and chained roots hooks; `jsrt_gc_init` is idempotent, which also fixes two `--emit-header` objects sharing one `libjsrt.a`. New codes STA0020, STA1219 (Windows) and STA1220 (`jsrt_value` surface). About 200 KB of runtime per extra library.

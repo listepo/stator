@@ -176,9 +176,9 @@ jobs:
           if-no-files-found: ignore
 
   # The compiler itself, which is portable TypeScript -- so this is the half of the suite Windows
-  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: a formatter check
-  # would be arguing with git's line-ending translation, not with the code. No coverage on any of
-  # these (plain `pnpm run test`); linux/x64 (above) is the only coverage owner.
+  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: `.gitattributes`
+  # checks out the same LF bytes everywhere, so the one run in `static` covers them. No coverage on
+  # any of these (plain `pnpm run test`); linux/x64 (above) is the only coverage owner.
   # This job is the ungated Linux arm64 leg; the same steps run for macOS/Windows in stage 2 below.
   frontend:
     name: frontend (${{ matrix.platform }}/${{ matrix.arch }})
