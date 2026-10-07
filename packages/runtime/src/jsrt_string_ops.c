@@ -267,6 +267,20 @@ jsrt_value jsrt_string_repeat(jsrt_value s, jsrt_value n) {
     jsrt_throw_error(&jsrt_class_range_error, "Invalid string length");
     return JSRT_UNDEFINED;
   }
+  if (str->length == 0) {
+    /* An empty receiver repeats to nothing whatever the count says: the cap above
+     * cannot fire (any count times zero length is zero), and falling through would
+     * run a `times`-iteration loop over zero bytes — Node answers "" instantly for
+     * "".repeat(4294967295), and the runtime must too. */
+    return s;
+  }
+  if (count > (double)UINT32_MAX) {
+    /* (uint32_t)count is undefined for a count past UINT32_MAX (C11 §6.3.1.4). The
+     * length cap fires first for every non-empty receiver today; the guard keeps
+     * that true by construction rather than by coincidence. */
+    jsrt_throw_error(&jsrt_class_range_error, "Invalid string length");
+    return JSRT_UNDEFINED;
+  }
   uint32_t times = (uint32_t)count;
   JSString *out = alloc_str(times * str->length);
   for (uint32_t k = 0; k < times; k++) {
