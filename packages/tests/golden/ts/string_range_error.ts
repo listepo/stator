@@ -98,4 +98,10 @@ console.log("empty: [" + "".repeat(536870889) + "]");
 console.log("ab".repeat(3));
 console.log("5".padStart(3, "0"));
 console.log("5".padEnd(3, "0"));
+
+// An empty receiver with a count at and past UINT32_MAX answers "" instantly in
+// Node; before the empty-receiver early return, one ran a 4294967295-iteration
+// loop over zero bytes and the other reached an undefined (uint32_t) cast.
+console.log("empty max: [" + "".repeat(4294967295) + "]");
+console.log("empty 2**53: [" + "".repeat(2 ** 53) + "]");
 console.log("done");
