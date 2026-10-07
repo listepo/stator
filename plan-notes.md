@@ -12776,3 +12776,19 @@ ls-files --eol` shows `i/lf` for every text file), and `--update` writes LF. A `
 of `* text=auto eol=lf` makes every checkout LF. `git add --renormalize .` changed no file. This
 also removes the reason `ci.yml` gave for keeping `lint` off the desktop legs ("arguing with
 git's line-ending translation"), so the comment now says why one run in `static` is enough.
+
+## 353. Task 6.31: sonarcloud.yml is a copy of the shared pyrlyn/ci workflow (2026-10-08)
+
+**Evidence.** pyrlyn/ci `.github/workflows/sonarcloud.yml` at
+`c875cd763ad0c4abbd936e480be5752330d3b66b` describes itself as "unifying the sonarcloud.yml of
+rtok, ketch, cox, runa, crates-packages, slint_dart and stator". Its steps are the ones stator's
+`sonarcloud.yml` carries by hand: skip with a notice without `SONAR_TOKEN`, full-history
+checkout, tool setup, a setup and a coverage command, the scan with soft-fail. What differs: the
+shared workflow sets tools up with mise (`mise-install-args`), not with `pnpm/action-setup`,
+`actions/setup-node`, `mlugg/setup-zig` and `extractions/setup-just`, and it runs a failing
+`setup-command` as a hard failure, where stator's `Build runtime archive` step is
+`continue-on-error`. The caller inputs, secret and permissions are in Task 6.31.
+
+GitHub Actions is enabled on this repository (2026-10-08), so the change can be checked on its
+own pull request.
+
