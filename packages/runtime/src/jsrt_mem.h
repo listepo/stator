@@ -65,6 +65,10 @@ extern JSRTShape jsrt_shape_root;
 const JSRTShape *jsrt_shape_find(const JSRTShape *shape, const char *key);
 /* The child of `from` that adds `key`, reusing an existing one before allocating. */
 JSRTShape *jsrt_shape_transition(JSRTShape *from, const char *key);
+/* Takes ownership of a malloc'd NUL-terminated UTF-8 key and returns a pointer that lives as
+ * long as the process — the same lifetime the shape table already gives every stored key. A
+ * second intern of the same bytes returns the first pointer and frees the duplicate. */
+const char *jsrt_shape_intern(char *key);
 /* Grows a property table's slot storage so `offset` is writable. */
 void jsrt_shape_reserve(jsrt_value **slots, uint32_t *capacity, uint32_t offset);
 /* Removes `hit` from `*shape`: replays the chain without it and compacts `slots` to match. */

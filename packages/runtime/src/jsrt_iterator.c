@@ -23,9 +23,12 @@ static const uint32_t ITER_DONE = UINT32_MAX;
 static jsrt_value iterator_result(jsrt_value value, bool done) {
   /* A nameless dynamic object, so `console.log` prints `{ value: …, done: … }` the way Node
    * prints IteratorResult — not `Iterator { … }`. Insertion order is the spec's field order. */
-  jsrt_value o = jsrt_dynobj_new();
-  jsrt_set_prop(o, "value", value, NULL);
-  jsrt_set_prop(o, "done", jsrt_bool(done), NULL);
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_dynobj_new();
+  jsrt_set_prop(JSRT_LOCAL(0), "value", value, NULL);
+  jsrt_set_prop(JSRT_LOCAL(0), "done", jsrt_bool(done), NULL);
+  const jsrt_value o = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return o;
 }
 
