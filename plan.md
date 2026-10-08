@@ -10,6 +10,26 @@
 
 ---
 
+## Cloud review findings (2026-10-08)
+
+New bugs, dead code and moves from a read-only Cursor cloud review of `main` at `ccf9818` (agent `bc-00769179-8c19-518a-869c-66b0c6473943`; full report: `cloud/stator.md` in the private `listepo/roadmap` repo). They take ids T20–T26, after T17 (`done.md`); T15, T16, T18 and T19 are left free because the review's source list uses those labels for other stator items. Ordered P0, P1, P2. **confirmed** means seen in the tree or in GitHub Actions logs; **suspected** means plausible but not proven. Line numbers are as of the review. Nothing here is scheduled into a phase yet: to take one, give it Steps and a Check per §15.
+
+| ID | Priority | Kind | Status | Where | Fix |
+| --- | --- | --- | --- | --- | --- |
+| T20 | P0 | bug | confirmed | `.github/workflows/ci.yml:3-10`; comment `:1-2`; `revert-on-failure` at `:406-410` | `ci.yml` runs only on `pull_request`, `workflow_dispatch` and `workflow_call`, not on `push` to `main`, so `main` has no test workflow and `revert-on-failure` never runs. Add `push: branches: [main]`, or make those checks required on `main`. |
+| T21 | P0 | bug | confirmed | PR CI run 37692965170 vs `ccf9818` on `main` | T17 was merged with red CI (`pipeline` failed in 0 s, `frontend (windows/arm64)` failed), so required checks are missing or bypassable. Require `static`, `frontend-coverage` and the Windows/macOS jobs (or a smaller set you actually enforce); do not merge on SonarCloud green alone. |
+| T22 | P0 | move | confirmed | `.github/workflows/pipeline.yml:26` (`uses: listepo/infra/…`) → the `pyrlyn/ci` reusable workflow | A public repo cannot call a private `listepo/infra` workflow; every pipeline run fails in 0 s (main run 37694735601). Merge PR #61, which repoints it. |
+| T23 | P1 | bug | confirmed | `packages/tests/unit/to-primitive.test.ts:45-47`; list at `packages/runtime/src/jsrt_print.c:1303-1317` | The test compares the runtime's builtin list with the host's `util.format` output; on Windows ARM64 Node also lists `DisposableStack`, `Float16Array`, `SharedArrayBuffer`, `SuppressedError`, `Temporal` and `WebAssembly`, which keeps `ci.yml` red on PRs. Pin the expected list instead of re-measuring the runner, or compare the intersection off the pinned platform. |
+| T24 | P1 | move | confirmed | `packages/compiler/src/codegen/index.ts` (6,276 lines, the only file in `codegen/`) → files under `packages/compiler/src/codegen/` | Split the C emitter by HIR family (expressions, statements, classes, closures, runtime calls); it is the merge bottleneck. |
+| T25 | P2 | bug | confirmed | `AGENTS.md` repo map; `packages/runtime/src/jsrt_print.c:42-46`, `:50-80`; `packages/runtime/vendor/` | The repo map says Ryū is vendored, but `vendor/` holds only `quickjs-ng/` and `fdlibm/`, and `shortest_digits` is a hand-written float printer. Fix the repo map now; vendoring Ryū stays with §12, where it is already scheduled. |
+| T26 | P2 | dead code | confirmed | root `package.json:53`; `packages/tests/package.json:10`; comments only in `packages/compiler/src/frontend/program.ts:532`, `:592`, `:608` | `memfs` is never imported. Remove it from both `package.json` files, or add the memfs host the comments describe. |
+
+Already tracked here, not added again: moving number printing to the vendored Ryū C code (the review's move M3) is in §12, "Ryū rides here too".
+
+Not added: exposing `ffi-gen` as a `stator ffi-gen` subcommand is optional, and the review says to keep it in-tree as it is; the identity string methods (`jsrt_string_to_string`, `jsrt_string_value_of`) are used through the method table.
+
+---
+
 ## 0. Prime directives (read before anything)
 
 1. **Compile a typed subset. Never attempt untyped, full-semantics JS→native via static analysis.** Every dead project in the field (JSSAT, NectarJS, TSLL, ts2c…) tried to statically compile untyped JS with full semantics; every living one (Static Hermes, Perry, Porffor, scriptc) compiles a typed or restricted subset and is explicit about what it drops. Path explosion in abstract interpretation of untyped JS is what killed JSSAT. In Stator, untyped code is handled by *dynamic representation at runtime* (tagged values, shapes, inline caches) or the Phase-8 interpreter tier — never by heroic static analysis.
