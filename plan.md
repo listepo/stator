@@ -1520,11 +1520,28 @@ both modes and goldens, a full `pnpm run ci`, and the self-compilation baseline 
    go through the builtins' member gate (the `Map` pair rides step 6; the array writes stay here),
    and 6 index accesses whose receiver is a string or a union. Both residues stay with this step,
    queued after step 11.
-8. **`Object.*` (21)** and destructuring (31, for-of, declarations, parameters).
-9. **Class expressions (~10)** and the remaining singletons (`encodeURI`, `Error.captureStackTrace`,
-   `Function.prototype.call`/`apply`, a spread into `String.fromCharCode`). Also a `[Symbol.iterator]`
-   method in an object literal, which is an internal `STA4068` in both modes today instead of a
-   refusal or a user iterable (plan-notes 310, step 5).
+8. **`Object.*` (21)** and destructuring (31, for-of, declarations, parameters), split in two:
+   8a. **`Object.*` reflection — in progress, Claude Code / sonnet-5-5** (handed over by the card's
+   owner; it unblocks T12.3's `__toESM`/`__copyProps`). Execution plan: property attributes on a
+   dynamic object (the accessor cell of docs/VALUE.md §4.15 grows a data form and
+   `enumerable`/`writable`/`configurable` flags, and every own-key walk skips a non-enumerable
+   key); `Object.create`, `Object.defineProperty`, `Object.getOwnPropertyDescriptor`,
+   `Object.getOwnPropertyNames` and `Object.getPrototypeOf` in `js` mode, as callees and as
+   values (`var __create = Object.create`); `Object.prototype` and
+   `Object.prototype.hasOwnProperty` as values. The runtime half is one new file,
+   `runtime/src/jsrt_reflect.c`; `ts` mode keeps its verdicts (prototype machinery, plan-notes
+   125). Decision tests in both modes, goldens `js/object_reflection` and T12.3's
+   `pkg_cjs_exports`/`pkg_cjs_replace`.
+   8b. Destructuring (31) — not claimed; stays with the card's owner.
+9. **Class expressions (~10)** and the remaining singletons, split in two:
+   9a. **`Function.prototype.call`/`apply`/`bind` — in progress, Claude Code / sonnet-5-5.**
+   Execution plan: `jsrt_get_prop` answers `call`/`apply`/`bind` on any closure through the
+   `jsrt_bound_method` mechanism the primitives use; `bind` builds the two-slot env docs/VALUE.md
+   §4.16 prescribes; the gate admits the three members on a function-typed receiver in `js` mode
+   and lowers them as the dynamic method call. Golden `js/function_call_apply_bind`.
+   9b. Class expressions, `encodeURI`, `Error.captureStackTrace`, a spread into
+   `String.fromCharCode`, and a `[Symbol.iterator]` method in an object literal (an internal
+   `STA4068` in both modes today, plan-notes 310 step 5) — not claimed.
 10. ~~**A `RegExp` method called straight off a union narrowing** (`unknown` or a union narrowed by `instanceof RegExp`, then `.test()` / `.toString()`) panics at run time with `STA2006` "calling a non-function"; binding it to a `RegExp`-typed local first works (plan-notes 314). Primitive and built-in method dispatch, `jsrt_get_prop` included.~~ Fixed by step 4b (v4.35): `jsrt_get_prop` answers a RegExp's methods and data properties on an Unknown receiver.
 11. **A `Date` method called off a union narrowing** (plan-notes 317). On `t: number | Date`
    narrowed by `typeof`, `instanceof Date` or `valueOf`, `t.getTime()` compiles but panics at run
