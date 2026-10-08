@@ -201,9 +201,40 @@ even though Phase 2's subset could get away with less.
 ```c
 typedef struct JSString {
   uint32_t length;   /* in UTF-16 code units, not bytes and not code points */
-  uint16_t data[];   /* flexible array member; NOT NUL-terminated */
+  uint32_t flags;    /* JSRT_STRING_GROWN: the string came out of a concatenation */
+  uint16_t *data;    /* NOT NUL-terminated */
+  void *buffer;      /* the append buffer `data` points into, or NULL for a flat string */
 } JSString;
 ```
+
+A string is a header and a view of its code units. A **flat** string is one pointer-free block:
+the header, then its own units, with `data` pointing just past the header (`jsrt_string_alloc`).
+Contents never change once a string is visible to anyone.
+
+**Concatenation and the append buffer** (plan.md §9 Task 6.23, F12; `jsrt_string_mem.zig`).
+Copying both operands on every `+` made `s += x` in a loop O(n²): 200k one-character appends took
+2.5 s against Node's 0.07 s. Now a concatenation onto a string that is itself a concatenation's
+result, once the result reaches 64 code units, goes through an **append buffer**: one block of
+units with spare capacity and `used`, the end of the longest string viewing it. Every string over
+a buffer is a prefix of it, so writing past `used` changes no string anyone holds:
+
+- `a + b` where `a` ends exactly at `used` and `b` fits writes `b` in place and allocates only a
+  header. This is the string the loop just made.
+- `a + b` where `a` is an older, shorter prefix (its next units belong to a longer string) copies
+  into a fresh buffer, as does a full one. Capacity doubles, so the copies total O(n).
+- Any other concatenation (a one-off `x + y`, a short result) is a flat copy marked
+  `JSRT_STRING_GROWN`, so a one-off concatenation costs no spare memory.
+
+A buffered header keeps the buffer's own address in `buffer`, so the collector retains the buffer
+through it without relying on interior-pointer recognition. The header is a scanned allocation;
+the flat string and the buffer are pointer-free (atomic). A long-lived built string may hold up to
+twice its length in capacity; that is the price of the amortized append.
+
+Past `JSRT_MAX_STRING_LENGTH` (2^29 − 24 code units, V8's `String::kMaxLength`)
+`jsrt_string_concat` leaves Node's catchable `RangeError: Invalid string length` pending. It used to
+return `JSRT_NULL`, which callers then used as a string. The emitter puts a pending check after
+every `+` that may concatenate (any `+` not typed `number`), after `+=` and before its write, after a
+template literal with more than one part, and after `String.prototype.concat`.
 
 UTF-16 is not negotiable for v0. `String.prototype.length`, `charCodeAt`, `codePointAt`, surrogate
 pair handling, and essentially all of Test262's string coverage are defined in UTF-16 code units.
@@ -229,8 +260,8 @@ uint32_t jsrt_string_length(jsrt_value v);
 uint16_t jsrt_string_char(jsrt_value v, uint32_t i);
 ```
 
-No direct `->data[i]` in emitted code, ever. The indirection is what allows §12's rope or
-small-string optimizations to be a runtime-only change. A bounds-check policy lives behind these
+No direct `->data[i]` in emitted code, ever. The indirection is what made the append buffer
+above a runtime-only change, and keeps a rope or small-string optimization one too. A bounds-check policy lives behind these
 accessors too, so it can be compiled out in release builds in one place rather than at thousands
 of emitted call sites.
 
@@ -484,9 +515,9 @@ anything else left-aligned (`padEnd`).
 
 A `JSRTObject` is a pointer to a `JSRTClass` descriptor followed by its slots, boxed under the
 `Object` tag. Unlike `JSRTArray`, the slots ARE a flexible array member — one allocation, not two —
-and that is safe here for the reason it is unsafe there: the slot count is fixed at construction
-and nothing in this subset adds a property, so the buffer never grows and the header's address
-never has to move.
+and that is safe here for the reason it is unsafe there: the slot count is fixed at construction,
+and a property added later goes to a separate overflow table (§4.24), so the buffer never grows and
+the header's address never has to move.
 
 The descriptor is `static const` and file-scope, one per class declaration, shared by every
 instance: the class name, the slot count, the field names in slot order, and the base class's
@@ -775,8 +806,10 @@ where that is decided: a FROZEN property is non-configurable, so it raises Node'
 element abort with `STA2007`, the mirror of `STA2004` below — a `JSRTClass` has no way to spell a
 missing slot, and a hole has no representation at all. Where the receiver's type is known the
 frontend refuses before any of that: `STA1108` in ts mode, `STA1205` in js. Keys are `const char *` with program lifetime
-(generated C passes string literals; the shape table stores the pointer and compares by pointer
-first, `strcmp` as the backstop for one key spelled at two sites). Each receiver has a deliberate path: a dynamic object or array walks the shape table; a
+(generated C passes string literals; `jsrt_shape_key` interns a UTF-8 conversion of a JS string
+into the same immortal table, so a lookup that only compared no longer leaks a malloc per call).
+The shape table stores the pointer and compares by pointer first, `strcmp` as the backstop for
+one key spelled at two sites. Each receiver has a deliberate path: a dynamic object or array walks the shape table; a
 fixed-layout object reads and writes existing fields through its `JSRTClass` descriptor and
 raises `STA2004` if asked to grow a new key (Phase 8); a string answers `"length"` and
 everything else `undefined`; nullish is a TypeError; a primitive write is a TypeError.
@@ -784,8 +817,9 @@ everything else `undefined`; nullish is a TypeError; a primitive write is a Type
 
 Pinned by `runtime/tests/print_shapes.{c,mjs}`: insertion-order printing through the chain,
 overwrite-in-place, undefined-on-miss, shared-IC reads across shape-sharing objects, the
-stale-cache miss after a transition, divergent histories landing on different shapes, and
-non-identifier keys printing quoted (`{ 'a-b': 1 }`). `delete` is pinned against Node instead, by
+stale-cache miss after a transition, divergent histories landing on different shapes,
+non-identifier keys printing quoted (`{ 'a-b': 1 }`), and intern identity (two conversions of
+the same bytes share one pointer; abort on mismatch, not a print). `delete` is pinned against Node instead, by
 `tests/golden/{ts,js}/delete_prop.*`: the boolean answer, the `undefined` read and the `in` result
 after removal, the print order after a re-add, one read site shared by two objects that rebuilt to
 the same shape, and the frozen `TypeError`.
@@ -1483,6 +1517,76 @@ checks (`STA2001`, plan-notes 308) at a position a spread knows only at run time
 iterable`), adds `(cannot read property undefined)` for a nullish call-side operand, and words a
 non-nullish one as `Spread syntax requires ...iterable[Symbol.iterator] to be a function`. The
 class is the same, so a `catch` that tests it behaves the same.
+
+## 4.24 Growing a fixed layout — an overflow table beside the slots (plan.md §11c T11.4 step 7)
+
+A fixed object's slot count is its class's, and the allocation never grows (§4.10's header-address
+rule). A name the class does not declare -- `host.configFileName = x` on an object literal's type,
+`c.parent = p` on a class instance -- therefore lands in `JSRTObject::extras`, a dynamic object
+(§4.10) created on the first such write and NULL until then. It is the same precedent as a
+function's own properties in `JSRTClosure::props` (§4.20) and an array's named extras.
+
+**Which values have one.** Only a value laid out as a `JSRTObject` (`jsrt_is_fixed_object`): a
+`JSRT_TAG_OBJECT` that is neither a dynamic object nor one of the runtime's own layouts that share
+only the `cls` prefix (`Map`, `Set`, their weak twins, `Date`, `RegExp`, `Promise`, iterators,
+generators, the typed-array pair, accessor cells). `jsrt_fixed_extras(v)` answers the table or NULL
+for anything else, so no caller has to ask first. Those other layouts still abort `STA2004`.
+
+**The property entries.** `jsrt_get_prop` answers a declared slot first, then the table (an own
+property, so it shadows a prototype method), then the class's methods. `jsrt_set_prop` writes a
+declared slot, else the table; a frozen object is not extensible, so adding to it throws Node's
+`Cannot add property X, object is not extensible`, and `Object.freeze` freezes the table with its
+owner, so writing a grown name throws the read-only `TypeError` too. `jsrt_has_prop`, `hasOwn` and
+`in` see both halves. `jsrt_delete` removes a grown name from the table; a DECLARED slot still has
+no encoding for absence (`STA2007`).
+
+**Reflection.** `Object.keys`/`values`/`entries`, `for-in`, `JSON.stringify` (which walks the
+keys) and `console.log` list the declared names in their class order, then the table's in insertion
+order. That is Node's order whenever the grown names were added after construction, which is the
+only way to add one. Object spread copies them: into a dynamic result after the declared names
+(`jsrt_dynobj_spread`), into a fixed result through `jsrt_spread_order_src`, which grows the
+result's own table.
+
+**The compiler.** In `js` mode a name the receiver's fixed type does not declare
+(`isUndeclaredMember`: an object HType, not a module namespace, and no property of that name on the
+checker's type) reads, writes and calls through the shape-table nodes an Unknown receiver uses:
+`DynFieldAccess`, `DynFieldAssignment` (every compound, logical and update form, the receiver read
+once) and `DynMethodCall`, whose `notFunction` subject keeps Node's `c.missing is not a function`
+`TypeError` for a name nothing was stored under. A read's result is Unknown. A computed string or
+number key on a fixed shape (`table[node.kind]`, `levels[level] = v`) takes the degrading index
+entry points by name, which answer a declared slot or the table. In `ts` mode each of these is the
+checker's own TS2339 or TS7053 and stays an error.
+
+**Known divergences.** A fixed spread result lists the source's grown names after ALL its declared
+names, so `{ ...grown, extra: 1 }` prints `extra` before them where Node prints it last; and a
+grown name the result's type also declares keeps the declared writer's value, since the runtime
+cannot tell an earlier writer (which the spread overrides) from a later one. The element spelling
+with a static key naming no member (`o["extra"] = 1`) is still refused (`STA1214`).
+
+## 4.25 The native stack guard — a catchable RangeError, then a loud panic (plan.md §9 Task 6.23)
+
+Node throws a catchable `RangeError: Maximum call stack size exceeded` on deep recursion. A Stator
+binary used to die of SIGSEGV with nothing printed (QA audit F6). Two layers now:
+
+- **The prologue check.** Every generated function opens with `JSRT_STACK_CHECK()` *before*
+  `JSRT_FRAME`, so its early return has no frame to pop. It compares
+  `__builtin_frame_address(0)` with the thread-local `jsrt_stack_limit`. Past it, the function
+  leaves the RangeError pending and returns `undefined`, and the caller's pending check unwinds as
+  for any throw (§4.9). `jsrt_init` measures the thread's real stack
+  (`pthread_get_stackaddr_np`/`pthread_get_stacksize_np` on Darwin, `pthread_getattr_np` on Linux)
+  and sets the limit 256 KiB above its low end. That headroom is for the runtime code the deepest
+  frame still calls: the throw itself, a catch handler's `console.log`. A thread `jsrt_init` never
+  ran on has limit 0, and the check is off there. Recursion depth therefore depends on the stack
+  size, not on Node's; only the error is Node's. Cost: about 1 ns per call on `fib` (plan-notes
+  338).
+- **The fault handler.** Recursion no prologue sees, the runtime's own C recursion over deeply
+  nested data (`JSON.stringify` of a million-deep array), still overflows. A SIGSEGV or SIGBUS
+  whose fault address lies at the stack's low end runs on an alternate signal stack. It prints
+  `PANIC: STA2005 stack overflow` and the shadow-stack depth with `write(2)` (stdio is not
+  async-signal-safe), then aborts. Any other fault is not ours: the handler reinstalls the action
+  it replaced (the default, ASan's reporter, a host program's handler) and returns, so the
+  faulting instruction re-runs into it. An alternate stack someone already installed (ASan does)
+  is kept.
 
 ## 5. What Phase 2 actually implements
 

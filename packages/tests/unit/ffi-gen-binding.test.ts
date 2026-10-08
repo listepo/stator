@@ -8,9 +8,18 @@
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'vitest';
 import * as ts from 'typescript';
 import { classifyFunction, mapCType, tsFunctionName } from '../../compiler/src/ffi-gen/abi.ts';
@@ -32,6 +41,22 @@ import { classifyExternDeclaration } from '../../compiler/src/frontend/extern.ts
 import { createProgram } from './helpers.ts';
 
 const CLANG = process.env['CC'] ?? 'clang';
+const COMPILER = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'compiler', 'src');
+const FFI_GEN = join(COMPILER, 'ffi-gen', 'main.ts');
+const STATOR = join(COMPILER, 'cli', 'main.ts');
+
+/** One CLI run, never throwing: the tests below assert the status and streams. */
+function run(
+  script: string,
+  args: readonly string[],
+): {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+} {
+  const result = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
 
 function hasClang(): boolean {
   try {
@@ -582,6 +607,71 @@ test('--lib emits one @statorLink line per lib, in order, after the header comme
     'header comment, then libs in order, then the include',
   );
 });
+
+// Audit F7 (plan.md §9 Task 6.22): every refusal below happens before clang runs.
+test('ffi-gen refuses --out equal to the input header', () => {
+  const work = mkdtempSync(join(tmpdir(), 'stator-ffigen-'));
+  try {
+    const header = join(work, 'm.h');
+    writeFileSync(header, 'int add(int a, int b);\n');
+    // The same file under another spelling, and through a hard link.
+    linkSync(header, join(work, 'alias.h'));
+    for (const out of [join(work, '.', 'm.h'), join(work, 'alias.h')]) {
+      const r = run(FFI_GEN, [header, `--out=${out}`]);
+      assert.equal(readFileSync(header, 'utf8'), 'int add(int a, int b);\n');
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /--out must differ/);
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('ffi-gen refuses a --lib value that is not a single library name', () => {
+  for (const lib of ['m\nexport const injected = 1;', 'm -fplugin=x.so']) {
+    const r = run(FFI_GEN, ['m.h', `--lib=${lib}`]);
+    assert.equal(r.status, 2, JSON.stringify(lib));
+    assert.doesNotMatch(r.stdout, /^export const injected/m);
+    assert.match(r.stderr, /--lib expects a library name/);
+  }
+});
+
+test('ffi-gen --help prints the usage to stdout and exits 0', () => {
+  const r = run(FFI_GEN, ['--help']);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /^usage: ffi-gen/);
+});
+
+// Audit F8: `#include` cannot spell a quote (it reads no escapes), so a binding under such a
+// directory is the gate's STA1119 at the pragma, never C that fails to compile.
+// Windows refuses `"` in a file name (EINVAL), so the directory this test needs cannot exist there.
+test(
+  'a quote in a binding directory is STA1119, not unspellable C',
+  { skip: !hasClang() || process.platform === 'win32' },
+  () => {
+    const work = mkdtempSync(join(tmpdir(), 'stator-ffigen-'));
+    try {
+      const dir = join(work, 'q"d');
+      mkdirSync(dir);
+      writeFileSync(join(dir, 'm.h'), 'int add(int a, int b);\n');
+      const gen = run(FFI_GEN, [join(dir, 'm.h'), `--out=${join(dir, 'm.d.ts')}`]);
+      assert.equal(gen.status, 0, gen.stderr);
+      writeFileSync(
+        join(dir, 'use.ts'),
+        '/// <reference path="./m.d.ts" />\nconsole.log(add(2, 3));\n',
+      );
+      const out = join(dir, 'use.c');
+      const b = run(STATOR, ['build', join(dir, 'use.ts'), '-o', out, '--emit=c']);
+      assert.notEqual(b.status, 0);
+      // The diagnostic wraps at 80 columns, and where depends on the temp directory's length.
+      assert.match(b.stderr, /STA1119 \[ts\] refused @statorLink\s+pragma/);
+      assert.doesNotMatch(b.stderr, /STA4\d{3}/);
+      assert.equal(existsSync(out), false);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  },
+);
 
 test('T** out-params share one Out alias that precedes its uses', () => {
   const model: HeaderModel = {

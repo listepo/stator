@@ -65,6 +65,10 @@ extern JSRTShape jsrt_shape_root;
 const JSRTShape *jsrt_shape_find(const JSRTShape *shape, const char *key);
 /* The child of `from` that adds `key`, reusing an existing one before allocating. */
 JSRTShape *jsrt_shape_transition(JSRTShape *from, const char *key);
+/* Takes ownership of a malloc'd NUL-terminated UTF-8 key and returns a pointer that lives as
+ * long as the process — the same lifetime the shape table already gives every stored key. A
+ * second intern of the same bytes returns the first pointer and frees the duplicate. */
+const char *jsrt_shape_intern(char *key);
 /* Grows a property table's slot storage so `offset` is writable. */
 void jsrt_shape_reserve(jsrt_value **slots, uint32_t *capacity, uint32_t offset);
 /* Removes `hit` from `*shape`: replays the chain without it and compacts `slots` to match. */
@@ -73,6 +77,14 @@ void jsrt_shape_remove(JSRTShape **shape, jsrt_value *slots, const JSRTShape *hi
 /* The canonical-array-index test these walks share is `jsrt_key_is_array_index` (jsrt_value.h):
  * fixed-shape enumeration answers it too, so the one spelling lives in C, and the Zig ordering
  * calls through to it rather than carrying a second copy. */
+
+/* ------------------------------------------------------------ the collector (jsrt_gc.zig) */
+
+/* The Boehm object kind every runtime copy in the process allocates from, plus one; 0 until the
+ * first copy registers it. Weak and defined in jsrt_value.c because Zig 0.16 emits a weak data
+ * export as a non-external symbol on Mach-O, and the copies only coalesce on an external one
+ * (plan-notes 342). */
+extern unsigned jsrt_gc_shared_kind_p48;
 
 /* ------------------------------------------------------ allocation helpers (jsrt_alloc.zig) */
 

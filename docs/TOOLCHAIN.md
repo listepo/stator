@@ -38,6 +38,18 @@ the GitHub Actions, and cannot keep the rule above by itself: a PR from its `too
 a row of this table, so it needs that row and a `plan-notes.md` line before merge. It never
 proposes a TypeScript or `@types/node` major. Node, pnpm, LLVM, just and Zig stay hand-bumped.
 
+## Site (`site/`)
+
+The landing page is its own Astro project with its own lockfile (`site/pnpm-lock.yaml`), built and
+checked by `.github/workflows/pages.yml`, never by `pnpm run ci`.
+
+| Package                     | Pin                | Where pinned                                                                                                                                         |
+| --------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| astro                       | `^7.3.3`           | `dependencies` in `site/package.json`. The static site build and its `<meta>` CSP (`security.csp`)                                                   |
+| `@fontsource/ibm-plex-sans` | `5.3.0` (exact)    | `dependencies` in `site/package.json`. Self-hosted IBM Plex Sans (OFL-1.1), so a visit requests nothing from a third party (Task 6.26, plan-notes 336) |
+| `@fontsource/ibm-plex-mono` | `5.3.0` (exact)    | `dependencies` in `site/package.json`. Self-hosted IBM Plex Mono, as above                                                                           |
+| playwright-core             | `1.63.0` (exact)   | `devDependencies` in `site/package.json`. `pnpm run check:browser` drives the installed Chrome over `dist/`; downloads no browser (plan-notes 336)   |
+
 ## Verified development host
 
 The host this bootstrap was verified on (a data point, not a requirement):
@@ -117,11 +129,38 @@ STATOR_OPT=0 node packages/compiler/src/cli/main.ts build file.ts -o app   # fas
 node packages/compiler/src/cli/main.ts build file.ts -o app --opt=3         # max clang opts
 ```
 
-`--opt` wins over `STATOR_OPT` when both are set. ASan builds ignore this and keep `-O1 -g
+`--opt` wins over `STATOR_OPT` when both are set. A `STATOR_OPT` outside `0`–`3` is `STA0002`,
+and the message names the environment variable, since no `--opt` is on the command line. ASan builds ignore this and keep `-O1 -g
 -fsanitize=…`. The release runtime archive may already record `-flto=thin` in
 `packages/runtime/build/link-flags.txt`; `extraLinkFlags()` picks that up so the generated C is
 compiled as thin-LTO bitcode too when the archive was. Full PGO / a custom LLVM backend remains
 §12 rung 6 and needs the Task 6.3 measurement gate before it is scheduled.
+
+## Environment variables and `.env`
+
+`stator build` and `stator explain` read these from the environment:
+
+| Variable | What it picks | May a project `.env` set it? |
+| --- | --- | --- |
+| `STATOR_OPT` | clang `-O` level (above) | yes |
+| `STATOR_RUNTIME` | runtime flavor: `asan` or `intl` archive, and the builtins the gate admits | yes |
+| `STATOR_OTEL` | turns tracing on (plan-notes 187) | yes |
+| `CC` | the C compiler Stator runs | **no** |
+| `STATOR_RUNTIME_ROOT` (and `STATOR_STD_ROOT`, `STATOR_NODE_ROOT`) | where the runtime headers and archives live | **no** |
+| `OTEL_*` (`OTEL_EXPORTER_OTLP_ENDPOINT`, `_HEADERS`, `OTEL_SERVICE_NAME`, …) | where trace data goes | **no** |
+
+The CLI reads `./.env` from the **current directory**, which is the project being compiled and
+may be a repository someone else wrote. So the file may set only the three build options above.
+The programs Stator runs and the place its telemetry goes come from the real environment, never
+from the input tree (plan.md §9 Task 6.21, QA audit F4). A real variable always wins over the
+file. When the file applies a key, or holds `CC`, `STATOR_*` or `OTEL_*` keys it may not set, one
+stderr line says so: `stator: .env: applied STATOR_RUNTIME; ignored CC (only STATOR_OPT,
+STATOR_RUNTIME, STATOR_OTEL may come from .env)`. Other keys in the file are not read.
+
+The runtime flavor and root are resolved once per `build()` call, after `.env` is applied, and
+the gate and the link use that one value: `STATOR_RUNTIME=intl` in `.env` either links the ICU
+archive or fails with `STA0011` when it is not built, exactly as the real variable does (QA audit
+F3). A `CC` that exits 0 without writing its output is `STA0009`, not a successful build.
 
 ## Native libraries
 
@@ -154,8 +193,10 @@ Beyond Node/pnpm (pinned above), the build shells out to:
 
 | Tool            | Used by                                                              | For                                                      |
 | --------------- | -------------------------------------------------------------------- | -------------------------------------------------------- |
-| `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`                       | the runtime, the emitted C, and the final link           |
-| `ar` (`$AR`)    | justfiles                                                            | archiving `libjsrt.a` and `libjsrt_std.a`                |
+| `clang` (`$CC`) | justfile, `packages/compiler/src/cli/build.ts`, `src/cli/library.ts` | the runtime, the emitted C, the final link, and the `--emit=lib` prelink (`cc -r`) |
+| `ar` (`$AR`)    | justfiles, `packages/compiler/src/cli/library.ts`                    | archiving `libjsrt.a` and `libjsrt_std.a`; the `--emit=lib` archive (`ar rcsD` on ELF, `ZERO_AR_DATE=1 ar rcs` with Apple's `ar`, so it is byte-reproducible; plan.md §10 Task 7.4). Missing or failing under `--emit=lib`: `STA0020` |
+| `objcopy` (`$OBJCOPY`) | `packages/compiler/src/cli/library.ts`, ELF only               | `--emit=lib`: `--keep-global-symbols` makes the private runtime's symbols local (GNU binutils or `llvm-objcopy`; macOS needs none, its linker localizes). Missing or failing: `STA0020` |
+| `pkg-config` (consumer side) | a C build using an `--emit=lib` library              | `pkg-config --cflags --libs lib<name>` reads the emitted `.pc` (docs/FFI.md §8); the CI check `static-lib.ts` uses it |
 | `just`          | justfile                                                             | the runtime build (pinned `1.58.0` in `mise.toml`)       |
 | `zig`           | justfiles (T9.1, T11.2)                                              | memory-core objects into `libjsrt.a`, std backings into `libjsrt_std.a` (pinned `0.16.0` in `mise.toml`; required) |
 | `pkg-config`    | justfile                                                             | finding bdw-gc and ICU; absent means both are simply off |

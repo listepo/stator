@@ -56,7 +56,7 @@ packages/compiler/ the compiler package "statorc" — holds src/ + the locked ts
   src/support/     diagnostics engine, shared utilities
 packages/runtime/  C11 + Zig memory core (plan-notes 238 / T9.1; NOT an npm package) → packages/runtime/build/libjsrt.a (justfile)
   include/jsrt_value.h   mirrors docs/VALUE.md — the codegen↔runtime contract
-  vendor/          Ryū, QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
+  vendor/          QuickJS-NG libregexp (+cutils/libunicode); patched only via plan-notes.md
 packages/std/      "@stator/std" — the std/* modules (docs/STD.md): src/<module>.ts surface (strict TS,
                    Stator's own subset) + zig/<module>.zig backings → packages/std/build/libjsrt_std.a (justfile)
 packages/node/     "@stator/node" — the --node platform (docs/MODES.md §6): src/<id>.ts is node:<id>, strict TS
@@ -107,6 +107,7 @@ If bare `node --version` disagrees with `.node-version` (on some hosts PATH puts
 ```
 mise install                    # Node, pnpm, just, moon, LLVM clang, Zig 0.16.0 (Unix)
 pnpm install --frozen-lockfile  # install (exact-pinned deps)
+pnpm --dir site install --frozen-lockfile  # site/ has its own lockfile; `lint` type-checks site/ too
 pnpm run typecheck              # tsc --noEmit (strict; must be clean)
 pnpm run lint                   # oxlint --deny-warnings + oxfmt --check — lint + format (must be clean)
 pnpm run format                 # oxlint --fix + oxfmt (applies safe fixes + formatting)

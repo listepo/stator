@@ -15,6 +15,7 @@ import { type Static, Type } from 'typebox';
 import { Value } from 'typebox/value';
 import { BuildError } from '../support/diagnostics.ts';
 import type { OptLevel } from './build.ts';
+import { errnoCode } from './outputs.ts';
 
 export const CONFIG_FILE_NAME = 'stator.config.json';
 
@@ -52,8 +53,11 @@ export const ConfigSchema = Type.Object(
       }),
     ),
     emit: Type.Optional(
-      Type.Enum(['binary', 'c'], {
-        description: 'build: "c" stops after writing C to out (--emit=c). Default "binary".',
+      Type.Enum(['binary', 'c', 'lib'], {
+        description:
+          'build: "c" stops after writing C to out (--emit=c); "lib" writes out as a static ' +
+          'library lib<name>.a plus lib<name>.pc, and needs emitHeader (--emit=lib). ' +
+          'Default "binary".',
       }),
     ),
     keepC: Type.Optional(
@@ -62,7 +66,11 @@ export const ConfigSchema = Type.Object(
     emitHeader: Type.Optional(
       nonEmpty('build: write a C header for the unit exports; relative to this file.'),
     ),
-    unitName: Type.Optional(nonEmpty('build: prefix for stator_<unit>_<name>.')),
+    unitName: Type.Optional(
+      nonEmpty(
+        'build: prefix for stator_<unit>_<name>; letters, digits and _ only (else STA0004).',
+      ),
+    ),
     bundler: Type.Optional(
       nonEmpty(
         'js mode: "vite" (default; the vite-stator package), "none", or an adapter module — a ' +
@@ -106,12 +114,6 @@ export interface LoadedConfig {
   /** Absolute path of the file that was read. */
   path: string;
   config: Config;
-}
-
-function errorCode(error: unknown): string | undefined {
-  return typeof error === 'object' && error !== null && 'code' in error
-    ? String(error.code)
-    : undefined;
 }
 
 function lineAndColumn(text: string, offset: number): { line: number; column: number } {
@@ -200,7 +202,7 @@ export function loadConfig(choice: ConfigChoice, cwd: string): LoadedConfig | un
   try {
     text = readFileSync(path, 'utf8');
   } catch (error) {
-    if (errorCode(error) === 'ENOENT') {
+    if (errnoCode(error) === 'ENOENT') {
       if (choice.kind === 'discover') {
         return undefined;
       }
@@ -219,7 +221,7 @@ export interface CliOptions {
   mode: 'ts' | 'js' | undefined;
   opt: OptLevel | undefined;
   link: readonly string[];
-  emit: 'binary' | 'c' | undefined;
+  emit: 'binary' | 'c' | 'lib' | undefined;
   keepC: boolean | undefined;
   emitHeader: string | undefined;
   unitName: string | undefined;
@@ -234,7 +236,7 @@ export interface ResolvedOptions {
   mode: 'ts' | 'js';
   opt: OptLevel;
   link: readonly string[];
-  emit: 'binary' | 'c';
+  emit: 'binary' | 'c' | 'lib';
   keepC: boolean;
   emitHeader: string | undefined;
   unitName: string | undefined;

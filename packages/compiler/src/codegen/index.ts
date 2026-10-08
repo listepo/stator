@@ -75,6 +75,7 @@ import type {
 } from '../hir/nodes.ts';
 import {
   consoleEntryPoint,
+  consoleMayThrow,
   isConsoleVariadicWidth,
   DATE_OPS,
   NUMBER_OPS,
@@ -89,7 +90,7 @@ import {
   stringOpCanThrow,
   TYPED_OPS,
 } from '../hir/nodes.ts';
-import type { HField, HType } from '../hir/types.ts';
+import { hTypeConversionRunsUserCode, type HField, type HType } from '../hir/types.ts';
 import {
   exportInitName,
   exportLastErrorName,
@@ -141,6 +142,21 @@ const BINARY_EMITTERS: Readonly<Record<BinaryOp['operator'], (l: string, r: stri
   in: (l, r) => `jsrt_bool(jsrt_in(${l}, ${r}))`,
 };
 
+/** The operators that apply ToNumeric to both operands (§13.15.3 steps 3-4). */
+const NUMERIC_BINARY_OPERATORS: readonly BinaryOp['operator'][] = [
+  '-',
+  '*',
+  '/',
+  '%',
+  '**',
+  '&',
+  '|',
+  '^',
+  '<<',
+  '>>',
+  '>>>',
+];
+
 /** C fragment for each unary operator.
  *
  * `-` is a real negation, not a constant fold: `-x` where x is `+0` must yield `-0`, which is why
@@ -165,6 +181,38 @@ const UNARY_EMITTERS: Readonly<Record<UnaryOp['operator'], (operand: string) => 
   '~': (x) => `jsrt_op_bitnot(${x})`,
   void: (x) => `(${x}, JSRT_UNDEFINED)`,
 };
+
+/** Whether a unary operator applies ToNumeric to an operand that may run the program's
+ * `valueOf` (§13.5.4-6). `!` and `void` take the operand as it is. */
+function unaryConverts(expr: UnaryOp): boolean {
+  return (
+    (expr.operator === '+' || expr.operator === '-' || expr.operator === '~') &&
+    hTypeConversionRunsUserCode(expr.operand.type)
+  );
+}
+
+/** Whether a compound assignment applies ToNumeric to an operand that may run the program's
+ * `valueOf` (§13.15.2). `+=` converts inside `jsrt_op_add`, in order, and needs no help. */
+function compoundConverts(expr: UpdateExpr): boolean {
+  const value = expr.value;
+  return (
+    value !== undefined &&
+    expr.operator !== '=' &&
+    expr.operator !== '++' &&
+    expr.operator !== '--' &&
+    expr.operator !== '&&' &&
+    expr.operator !== '||' &&
+    expr.operator !== '??' &&
+    NUMERIC_BINARY_OPERATORS.includes(expr.operator) &&
+    (hTypeConversionRunsUserCode(expr.target.type) || hTypeConversionRunsUserCode(value.type))
+  );
+}
+
+/** Whether a runtime call's ToString/ToNumber of its arguments may run the program's own
+ * `toString`/`valueOf` -- and so throw. */
+function argsConvert(args: readonly Expression[]): boolean {
+  return args.some((arg) => hTypeConversionRunsUserCode(arg.type));
+}
 
 /** Render a JS number as a C literal that parses back to the SAME double.
  *
@@ -569,7 +617,8 @@ class Emitter {
     | UpdateExpr
     | DynFieldAccess
     | GetIterator
-    | OptionalChain,
+    | OptionalChain
+    | UnaryOp,
     number
   > = new Map();
   /* The guarded base each open `optional-chain` holds in its frame temp, innermost last. An
@@ -1168,8 +1217,9 @@ class Emitter {
    * when the last call succeeded. Cleared on every stub entry; captured on every stub
    * failure. Capture is total: the value arrives already rooted in the caller's frame (a
    * frame slot or the scratch global — never a bare C local across the `to_string`
-   * allocation), and `jsrt_to_string` runs no user code in this subset (no `valueOf`, no
-   * `Symbol.toPrimitive`), so nothing on this path can throw past the stub. The accessor
+   * allocation). `jsrt_to_string` runs the thrown object's own `toString` (plan.md §9 Task
+   * 6.27), which may throw in turn: that second exception is dropped and the message falls back
+   * to the builtin form, so nothing on this path can throw past the stub. The accessor
    * hands out the cell WITHOUT transferring it: valid until the next exported call, which
    * clears or replaces it — the same rule a `const char *` answer's ownership does NOT
    * follow (that one is malloc-owned per call and the caller frees it). */
@@ -1185,6 +1235,12 @@ class Emitter {
     this.appendLine(`static void _stator_${unit}_error_capture(jsrt_value _stator_error) {`);
     this.indent++;
     this.appendLine('jsrt_value _stator_text = jsrt_to_string(_stator_error);');
+    this.appendLine('if (jsrt_pending()) {');
+    this.indent++;
+    this.appendLine('(void)jsrt_take_exception();');
+    this.appendLine('_stator_text = jsrt_builtin_to_string(_stator_error);');
+    this.indent--;
+    this.appendLine('}');
     this.appendLine(`free(_stator_${unit}_last_error_msg);`);
     this.appendLine(`_stator_${unit}_last_error_msg = jsrt_string_to_cstr(_stator_text);`);
     this.indent--;
@@ -1234,8 +1290,9 @@ class Emitter {
   }
 
   /* The `stator_init_<unit>` opening both inits share: the idempotency guard FIRST, set
-   * before `jsrt_init()` — a second `jsrt_init()` would chain the Boehm roots hook into
-   * itself, and a second `JSRT_GLOBALS_ENTER` would wipe every global back to `undefined`. */
+   * before `jsrt_init()` — a second `JSRT_GLOBALS_ENTER` would wipe every global back to
+   * `undefined`. `jsrt_init()` itself is idempotent (plan-notes 341), because two units linked
+   * against one runtime each call it once. */
   private emitInitOpen(unit: string, span: Span, globalSlots: number): void {
     this.appendLine(`static bool _stator_${unit}_initialized = false;`);
     this.appendLine('');
@@ -1976,7 +2033,14 @@ class Emitter {
         this.countExpression(expr.left);
         this.countExpression(expr.right);
         break;
+      // A numeric unary operator on what may be an object runs its `valueOf` (plan.md §9 Task
+      // 6.27): the converted operand lands in a rooted slot so the check can follow it.
       case 'unary-op':
+        if (unaryConverts(expr)) {
+          this.tempSlots.set(expr, this.slotCount++);
+        }
+        this.countExpression(expr.operand);
+        break;
       case 'typeof':
       case 'string-length':
       case 'function-length':
@@ -2011,6 +2075,11 @@ class Emitter {
       case 'update':
         this.tempSlots.set(expr, this.slotCount);
         this.slotCount++;
+        // The right operand of a numeric compound assignment waits in the slot after the result
+        // while the left one's `valueOf` runs (see emitUpdate).
+        if (compoundConverts(expr)) {
+          this.slotCount++;
+        }
         if (expr.target.kind === 'index-access') {
           this.indexSlots.set(expr, this.slotCount);
           this.slotCount += 2;
@@ -2274,7 +2343,9 @@ class Emitter {
       // is the same shape: a namespace call with no receiver, one runtime function per method.
       case 'math-call':
       case 'string-static':
-        if (expr.args.length > 1) {
+        // An argument that may be an object also takes the slots: its `valueOf` may throw, so the
+        // call becomes a statement with a pending check (plan.md §9 Task 6.27).
+        if (expr.args.length > 1 || argsConvert(expr.args)) {
           this.callSlots.set(expr, this.slotCount);
           this.slotCount += expr.args.length;
         }
@@ -2374,7 +2445,7 @@ class Emitter {
         // has to append. See the `console-log` case in emitExpression for why the two differ.
         if (stmt.expression.kind === 'console-log') {
           this.appendLine(`${this.consoleCall(stmt.expression)};`, stmt.span);
-          if (stmt.expression.method === 'table') {
+          if (consoleMayThrow(stmt.expression)) {
             this.emitPendingCheck(stmt.span);
           }
           break;
@@ -3908,7 +3979,15 @@ class Emitter {
       }
 
       case 'unary-op': {
-        return UNARY_EMITTERS[expr.operator](this.emitExpression(expr.operand));
+        const slot = this.tempSlots.get(expr);
+        if (slot === undefined) {
+          return UNARY_EMITTERS[expr.operator](this.emitExpression(expr.operand));
+        }
+        const temp = this.slotAt(slot);
+        const operand = this.emitExpression(expr.operand);
+        this.appendLine(`${temp} = jsrt_number(jsrt_to_number(${operand}));`, expr.span);
+        this.emitPendingCheck(expr.span);
+        return UNARY_EMITTERS[expr.operator](temp);
       }
 
       case 'typeof': {
@@ -3987,7 +4066,7 @@ class Emitter {
       // takes `consoleCall` bare instead, because `(jsrt_print(x), JSRT_UNDEFINED);` is a
       // -Wunused-value warning on every console.log in the program.
       case 'console-log': {
-        if (expr.method === 'table') {
+        if (consoleMayThrow(expr)) {
           this.appendLine(`${this.consoleCall(expr)};`, expr.span);
           this.emitPendingCheck(expr.span);
           return 'JSRT_UNDEFINED';
@@ -4318,6 +4397,13 @@ class Emitter {
         this.flushParts(parts, expr.span);
         if (expr.kind === 'dyn-method-call') {
           this.emitPendingCheck(expr.span);
+          if (expr.notFunction !== undefined) {
+            this.appendLine(
+              `if (!jsrt_is(${method}, JSRT_TAG_CLOSURE)) { jsrt_throw_error(&jsrt_class_type_error, "${this.escapeCString(`${expr.notFunction} is not a function`)}"); }`,
+              expr.span,
+            );
+            this.emitPendingCheck(expr.span);
+          }
         }
         const argv = expr.args.length === 0 ? 'NULL' : `&${this.slotAt(base + 1)}`;
         const loc = this.callLocation(expr.span);
@@ -4895,7 +4981,10 @@ class Emitter {
           (expr.kind === 'collection-op' && mayRefuseWeakKey(expr)) ||
           (expr.kind === 'date-op' && expr.op === 'toISOString') ||
           expr.kind === 'number-op' ||
-          (expr.kind === 'string-op' && stringOpCanThrow(expr.op));
+          (expr.kind === 'string-op' && stringOpCanThrow(expr.op)) ||
+          // ToString/ToNumber of an argument that may be an object runs its own
+          // `toString`/`valueOf` (plan.md §9 Task 6.27); a collection keeps its values as they are.
+          (expr.kind !== 'collection-op' && argsConvert(expr.args));
         return this.finishOp(parts, base, opCall, expr.span, flushed, canThrow);
       }
 
@@ -4922,7 +5011,7 @@ class Emitter {
                     : `jsrt_object_${snakeCase(expr.method)}`;
         // Math takes immediates, so a lone argument has neither an order to fix nor anything to
         // keep rooted and nests directly. An Object walk always uses its slots (see counting).
-        if (expr.kind === 'math-call' && expr.args.length <= 1) {
+        if (expr.kind === 'math-call' && this.callSlots.get(expr) === undefined) {
           const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
           return `${name}(${operands})`;
         }
@@ -4944,7 +5033,8 @@ class Emitter {
           flushed,
           expr.kind === 'object-static' ||
             expr.kind === 'typed-op' ||
-            (expr.kind === 'global-call' && GLOBAL_CALLS[expr.name].throws),
+            (expr.kind === 'global-call' && GLOBAL_CALLS[expr.name].throws) ||
+            argsConvert(expr.args),
         );
       }
 
@@ -4956,7 +5046,7 @@ class Emitter {
       // sequenced tail serves and no statement is needed.
       case 'string-static': {
         const name = 'jsrt_string_from_char_code';
-        if (expr.args.length <= 1) {
+        if (this.callSlots.get(expr) === undefined) {
           const operands = expr.args.map((arg) => this.emitExpression(arg)).join(', ');
           return operands === ''
             ? `${name}(0)`
@@ -4969,11 +5059,13 @@ class Emitter {
         const parts: string[] = [];
         const flushed = this.sequenceArgs(parts, expr.args, expr.span, base, 0);
         const operands = expr.args.map((_, index) => this.slotAt(base + index)).join(', ');
-        return this.finishSequenced(
+        return this.finishOp(
           parts,
+          base,
           `${name}(${String(expr.args.length)}, ${operands})`,
           expr.span,
           flushed,
+          argsConvert(expr.args),
         );
       }
 
@@ -5106,6 +5198,8 @@ class Emitter {
       `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
     );
     this.indent++;
+    // Before the frame, so the overflow return has nothing to pop (plan.md §9 Task 6.23).
+    this.appendLine('JSRT_STACK_CHECK();', fn.span);
     // A zero-length array is not valid C11 and a function that roots nothing is valid TypeScript,
     // so the frame has a floor of one slot -- the same rule JSRT_GLOBALS(n) follows.
     this.appendLine(`JSRT_FRAME(${Math.max(1, this.slotCount)});`, fn.span);
@@ -5222,6 +5316,7 @@ class Emitter {
       `static jsrt_value _jsrt_fn_${unit.id}(uint32_t argc, const jsrt_value *argv, JSRTEnv *env) {`,
     );
     this.indent++;
+    this.appendLine('JSRT_STACK_CHECK();', fn.span);
     this.appendLine('JSRT_FRAME(1);', fn.span);
     this.appendLine(
       `JSRTEnv *_jsrt_env = jsrt_env_new(env, ${Math.max(1, this.slotCount)});`,
@@ -5613,6 +5708,13 @@ class Emitter {
             expr.span,
             (v) => `${holeSlot} = jsrt_to_string(${v})`,
           ) || flushed;
+        // A hole whose ToString may run the program's `toString` may throw, and a later hole must
+        // not run after it did (plan.md §9 Task 6.27): the check sits right behind this one.
+        if (hTypeConversionRunsUserCode(hole.type)) {
+          this.flushParts(sequence, expr.span);
+          this.emitPendingCheck(expr.span);
+          flushed = true;
+        }
         partIndex++;
       }
     });
@@ -5624,12 +5726,27 @@ class Emitter {
     for (let index = 1; index < partIndex; index++) {
       sequence.push(`${first} = jsrt_string_concat(${first}, ${this.slotAt(slots.base + index)})`);
     }
+    // Concatenating can throw past the maximum string length (see emitBinaryOp).
+    if (partIndex > 1) {
+      this.flushParts(sequence, expr.span);
+      this.emitPendingCheck(expr.span);
+      return first;
+    }
     if (!flushed) {
       sequence.push(first);
       return `(${sequence.join(', ')})`;
     }
     this.flushParts(sequence, expr.span);
     return first;
+  }
+
+  /* ToNumber of a rooted slot whose value may be an object, in place, behind its own check: the
+   * object's `valueOf` may throw, and nothing after it may run if it does (plan.md §9 Task 6.27). */
+  private emitToNumber(slot: string, type: HType, span: Span): void {
+    if (hTypeConversionRunsUserCode(type)) {
+      this.appendLine(`${slot} = jsrt_number(jsrt_to_number(${slot}));`, span);
+      this.emitPendingCheck(span);
+    }
   }
 
   private emitBinaryOp(expr: BinaryOp): string {
@@ -5654,6 +5771,31 @@ class Emitter {
     if (expr.operator === 'in') {
       this.flushParts(parts, expr.span);
       this.appendLine(`${left} = jsrt_bool(jsrt_in(${left}, ${right}));`, expr.span);
+      this.emitPendingCheck(expr.span);
+      return left;
+    }
+    // An operand that may be an object reaches ToPrimitive, which runs the program's own
+    // `valueOf`/`toString` and may throw (plan.md §9 Task 6.27). The numeric operators convert
+    // here, left then right, each behind its own check (§13.15.3 steps 3-4: C would pick the
+    // order of two conversions nested in one expression); `+`, the comparisons and `==` convert
+    // inside the runtime, which keeps the order and stops at a throw, so only the check follows.
+    const converts =
+      expr.operator !== ',' &&
+      expr.operator !== '===' &&
+      expr.operator !== '!==' &&
+      (hTypeConversionRunsUserCode(expr.left.type) || hTypeConversionRunsUserCode(expr.right.type));
+    if (converts && NUMERIC_BINARY_OPERATORS.includes(expr.operator)) {
+      this.flushParts(parts, expr.span);
+      this.emitToNumber(left, expr.left.type, expr.span);
+      this.emitToNumber(right, expr.right.type, expr.span);
+      return BINARY_EMITTERS[expr.operator](left, right);
+    }
+    // A `+` that may concatenate can throw too: past the maximum string length the runtime leaves
+    // `RangeError: Invalid string length` pending (plan.md §9 Task 6.23, F12). A `+` typed number
+    // adds and never throws, so it stays an expression.
+    if ((expr.operator === '+' && expr.type.kind !== 'number') || converts) {
+      this.flushParts(parts, expr.span);
+      this.appendLine(`${left} = ${BINARY_EMITTERS[expr.operator](left, right)};`, expr.span);
       this.emitPendingCheck(expr.span);
       return left;
     }
@@ -5864,6 +6006,15 @@ class Emitter {
         this.emitPendingCheck(expr.span);
       }
       if (op === '++' || op === '--') {
+        // ToNumeric first (§13.4.2.1 step 2): the old value a postfix update answers is the
+        // number, not the string or object the place held, and an object's `valueOf` may throw
+        // before anything is written (plan.md §9 Task 6.27).
+        if (place.type.kind !== 'number') {
+          this.appendLine(`${result} = jsrt_number(jsrt_to_number(${result}));`, expr.span);
+          if (hTypeConversionRunsUserCode(place.type)) {
+            this.emitPendingCheck(expr.span);
+          }
+        }
         const next = `jsrt_number(jsrt_to_number(${result}) ${op === '++' ? '+' : '-'} 1.0)`;
         if (expr.prefix) {
           this.appendLine(`${result} = ${next};`, expr.span);
@@ -5894,8 +6045,22 @@ class Emitter {
         if (value === undefined) {
           throw new Error('compound update is missing its right-hand side');
         }
-        const rhs = this.emitExpression(value);
+        let rhs = this.emitExpression(value);
+        // Both operands are read before either converts (§13.15.2 step 7), so the right one waits
+        // rooted in the next slot while the left one's `valueOf` runs, each behind its own check.
+        if (compoundConverts(expr)) {
+          const right = this.slotAt(slot + 1);
+          this.appendLine(`${right} = ${rhs};`, expr.span);
+          this.emitToNumber(result, place.type, expr.span);
+          this.emitToNumber(right, value.type, expr.span);
+          rhs = right;
+        }
         this.appendLine(`${result} = ${BINARY_EMITTERS[op](result, rhs)};`, expr.span);
+        // Before the write: a `+=` past the maximum string length throws and leaves the target as
+        // it was (see emitBinaryOp).
+        if (op === '+' && expr.type.kind !== 'number') {
+          this.emitPendingCheck(expr.span);
+        }
         this.appendLine(`${write(result)};`, expr.span);
       }
     }

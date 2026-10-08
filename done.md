@@ -2680,6 +2680,629 @@ The card as it stood before landing:
 > - `std` builds and its smoke check runs.
 > - The `FirstNode` message names the real syntax kind, and the baseline is re-recorded.
 
+### Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug ✅ (landed 2026-10-04)
+
+From the 2026-10-01 QA audit (draft PR #57, findings F1, F2, F10, F11; plan-notes 330). The
+landing is plan-notes 331.
+
+> **Task 6.20 — `build` never destroys an input and never calls a user's mistake a compiler bug
+> (F1, F2, F10, F11).**
+>
+> - **F1.** `build()` (not only `main.ts`, so in-process callers are covered) resolves `entry`, every
+>   program source file, `out`, `emitHeader`, and `<out>.c` under `--keep-c`. It refuses any two
+>   that name the same file with `STA0004` before compiling.
+> - **F2.** One `writeOutput(path, text)` helper turns `ENOENT`/`EACCES`/`EROFS`/`ENOSPC`/`EISDIR`
+>   into a user error with a new code (the next free `STA00xx`, allocated in `docs/DIAGNOSTICS.md`).
+>   The link step checks `dirname(out)` before it blames the compiler (`linkFailure`).
+> - **F10.** An explicit `--unit-name` (and its config key) must match `^[A-Za-z0-9_]+$`, else
+>   `STA0004`. A derived default is still sanitized.
+> - **F11.** A value flag refuses a next argument that starts with `-` (`-o --emit=c` is `STA0004`).
+>   Each command accepts only its own flags (`explain --emit=c` is refused). A bad `STATOR_OPT`
+>   names the environment as its origin.
+>
+> **Check:** the audit's F1, F2, F10 and F11 tests pass in `packages/tests/unit/cli.test.ts`;
+> `docs/CLI.md`/`docs/DIAGNOSTICS.md` list the new refusals; `pnpm run ci` green.
+
+**What landed.**
+
+- **F1.** `src/cli/outputs.ts` `refuseAliasedOutputs`: `build()` compares `-o`, `--emit-header` and
+  the `--keep-c` file (`<out>.c`, only when clang runs) with each other and with the entry before
+  compiling, then with every source file of the program (`CompiledC.inputs`) before the first
+  write. An existing file is compared by inode (`dev:ino`, bigint), so a symlink, a hard link or a
+  case-folding file system cannot hide an alias; a new file by its canonical directory plus name.
+- **F2.** `writeOutput` and `requireWritable` turn `ENOENT`, `ENOTDIR`, `EISDIR`, `EACCES`,
+  `EPERM`, `EROFS` and `ENOSPC` into the new `STA0019` (`cannot write -o "missing/out.c": ENOENT
+  (the directory does not exist)`). `-o`'s directory is checked before clang runs, so the link
+  never blames the compiler for it. Any other write error is still `STA4072`.
+- **F10.** An explicit unit name outside `^[A-Za-z0-9_]+$` is `STA0004`, from the flag, the config
+  key or an in-process caller. The default (the entry basename) is still sanitized. The
+  `export-header` collision test now gets its unsanitized unit from the entry name `my-lib.ts`.
+- **F11.** The parser in `src/cli/main.ts` is one flag table with the commands each flag belongs
+  to. A value flag refuses a next argument that starts with `-` and suggests `--flag=value`
+  (`--link -lm` → `--link=-lm`); a flag on the wrong command is `STA0005 flag "--emit=c" does not
+  apply to explain`; `STATOR_OPT=fast` reports `unknown opt "fast" in the environment variable
+  STATOR_OPT`. An empty `--mode=`/`--opt=` is now `STA0004` (requires a value), like the others.
+
+Docs: `DIAGNOSTICS.md` (`STA0002`, `STA0004`, `STA0005`, new `STA0019`), `CONFIG.md` (flags per
+command, the Outputs section, the `unitName` row), `FFI.md` (unit name), `TOOLCHAIN.md`
+(`STATOR_OPT`). There is no `docs/CLI.md`; the CLI surface is documented in `CONFIG.md`. The
+selfhost baseline grew by 4 `STA1214` in `packages/compiler` (1791 → 1795), recorded with
+`--update` (plan-notes 306).
+
+**Check — PASSED** (2026-10-04, branch `t6-20-cli-outputs` on `3aeb9dd`):
+
+- The audit's tests, adapted, in `packages/tests/unit/cli.test.ts` (F1: entry, header, imported
+  module, `--keep-c`, in-process `build()`; F2: `--emit=c`, binary, header, directory; F10; F11:
+  value flags, per-command flags, `STATOR_OPT`): 9 passed.
+- `pnpm run ci` → exit 0: typecheck, lint, dupes (186 clones, none new), runtime, unit
+  (`Tests  743 passed (743)`), runtime corpus, subset (`921 fixtures — 888 passed, 33
+  expected-fail, 0 failed`), golden (`453 fixtures — 453 passed, 0 failed`), selfhost (14 targets
+  match the baseline), builtins 255/324, node-coverage, leak (plateau), ASan (453/453).
+
+### Task 6.21 — The runtime selection and the toolchain come from the real environment ✅ (landed 2026-10-04)
+
+From the 2026-10-01 QA audit (draft PR #57, findings F3, F4; plan-notes 330). The landing is
+plan-notes 332.
+
+> **Task 6.21 — The runtime selection and the toolchain come from the real environment (F3, F4).**
+>
+> - **F3.** The runtime flavor, root and archive are resolved once per `build()` call, inside it,
+>   and the same value feeds the gate (`intlEnabled`) and the link. No module-level `const` reads
+>   `STATOR_RUNTIME*` at import time. `link()` asserts the gate's flavor equals the archive's.
+> - **F4.** A project `.env` (loaded from the working directory) may set only an allowlist:
+>   `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`. It never sets `CC`, `STATOR_RUNTIME_ROOT`
+>   or any `OTEL_*` exporter variable; those come from the real environment only. When `.env`
+>   applies keys, one stderr line names them. After clang exits 0, `compileObject` and `link`
+>   check that the output file exists.
+>
+> **Check:** the audit's F3 and F4 tests pass; `docs/TOOLCHAIN.md` and `docs/CONFIG.md` describe the
+> allowlist; `pnpm run ci` green.
+
+**What landed.**
+
+- **F3.** `build.ts` has no module-level runtime `const` any more. `resolveRuntime()` (flavor, root,
+  include, lib dir, archive) runs once per `build()` call, after the CLI applied `.env`.
+  `support/features.ts` gains `withRuntimeFlavor`: `build()` pins the resolved flavor
+  (AsyncLocalStorage, so concurrent in-process builds keep their own) around `compileToC`, so the
+  gate's `intlEnabled()` reads the same value the link uses. `compileToC` records the flavor it
+  gated with (`CompiledC.flavor`), and `link()` throws (an internal error, `STA4072`) when it
+  differs from the archive's. `linkArguments` takes the runtime as an optional last argument.
+- **F4.** `src/cli/env-file.ts` replaces `dotenv.config()`: it parses `./.env` and copies only
+  `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL`, never over a real variable. One stderr line
+  names what it applied, and the `CC`/`STATOR_*`/`OTEL_*` keys it refused (`stator: .env: applied
+  STATOR_OTEL; ignored OTEL_EXPORTER_OTLP_ENDPOINT (only STATOR_OPT, STATOR_RUNTIME, STATOR_OTEL may
+  come from .env)`). Other keys are not read. An unreadable `.env` is a warning, not a failure.
+  After clang exits 0, `compileObject` and both link attempts check that the output exists
+  (`STA0009 C compiler "…" exited 0 but wrote no "…"`).
+- The telemetry test that took the OTLP endpoint from `.env` now proves the opposite: `.env`
+  switches tracing on, and the spans reach the real environment's endpoint, not the file's.
+
+Docs: `TOOLCHAIN.md` (new section "Environment variables and `.env`"), `CONFIG.md` (precedence),
+`DIAGNOSTICS.md` (`STA0009`'s second template). The selfhost baseline grew from 1804 to 1813
+`STA1214` in `packages/compiler`, recorded with `--update` (plan-notes 306).
+
+**Check — PASSED** (2026-10-04, branch `t6-21-env-trust` on `5f8e7e6`):
+
+- The audit's F3 and F4 tests, adapted, in `packages/tests/unit/cli.test.ts`: `.env`
+  `STATOR_RUNTIME=intl` reaches the link (`STA0011 … build-intl` without the ICU archive, a working
+  binary with it); an in-process `build()` honours a `STATOR_RUNTIME_ROOT` set after `build.ts` was
+  imported; a `.env` `CC` is never run and `STATOR_RUNTIME_ROOT`/`OTEL_*` in it are ignored and
+  named; `.env` `STATOR_OPT` applies and the real environment wins; a `CC` that exits 0 without
+  output fails both the link and the object compile. Plus `unit/telemetry.test.ts`.
+- `pnpm run ci` → exit 0: typecheck and lint clean; `dupes` 186 clones (none new);
+  unit 758/758; subset 929 fixtures (898 passed, 31 expected-fail, 0 failed); golden 455/455;
+  selfhost 14 targets match the baseline; builtins 255/324; `docs/NODE.md` current; leak plateau
+  (objects peak RSS 3728 KB, FFI strings 3776 KB).
+
+### Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string ✅ (landed 2026-10-04)
+
+What landed (plan-notes 345; docs/NUMERIC.md §7, docs/SUBSET.md):
+
+- `jsrt_to_primitive(v, hint)` (`runtime/src/jsrt_ops.c`) follows ECMA-262 §7.1.1.1
+  OrdinaryToPrimitive. Each method is looked up with `jsrt_user_get` (`jsrt_shape.c`): an own
+  field, a literal method, a class method (inherited too) or a constructor's prototype method.
+  A hit is called with the object as `this` (`jsrt_call_with_this`). A miss is the builtin's
+  method, modelled. A Date's `default` hint reads as `string`. Callers pass the hint:
+  - `jsrt_to_string`: `string`;
+  - `+` and `==`: `default`;
+  - `jsrt_to_number` and the comparisons: `number`.
+  `join`, `concat`, the default `sort` and `parseInt` stop at a throw.
+- Codegen (`codegen/index.ts`) follows every conversion of a value that may be an object
+  (`hTypeConversionRunsUserCode`) with a pending check. The numeric operators convert their
+  operands in rooted slots, left then right.
+- Lowering (`userConversion`, `lower/index.ts`) turns a template hole, `String(x)` and a `+`
+  operand into a direct or virtual call when the receiver's class declares the first-tried
+  method with no parameter and a primitive return.
+- `%s`/`%d`/`%i`/`%f` follow Node's `hasBuiltInToString`. The 47-name `builtInObjects` copy is
+  re-measured by `unit/to-primitive.test.ts`. The gate's three STA1214 format refusals are lifted.
+- `emitErrorCell` falls back to the builtin text when the thrown object's own `toString` throws.
+
+Check evidence:
+
+- Goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` match Node byte-for-byte.
+  They cover every site, class/literal/inherited/prototype methods, a throwing method caught by
+  `try` (before the right operand converts), the object-returning `TypeError`, a skipped
+  non-callable method and the format placeholders.
+- Decision tests `subset_to_primitive_{ts,js}` and `subset_console_format_user_tostring_{ts,js}`
+  (the ts one flipped from not-yet to static).
+- `pnpm run ci` → exit 0:
+  - dupes 183 clones, none new;
+  - unit 763/763;
+  - runtime print corpus matches Node;
+  - subset 932 fixtures (901 passed, 31 expected-fail, 0 failed);
+  - golden 461/461;
+  - selfhost 14 targets match after re-recording `packages/compiler` `STA1214` 1813 → 1815
+    (plan-notes 345);
+  - builtins 255/324;
+  - `docs/NODE.md` current;
+  - leak plateau;
+  - golden-asan green (461 passed).
+
+> **Task 6.27 — A user-defined `toString`/`valueOf` is honored when an object becomes a string.**
+> Today ToString of an ordinary object ignores the user's method and prints `[object Object]`
+> (`jsrt_print.c`, the fallback branch at the end of `jsrt_to_string`), while `explain` answers
+> `static`. Wherever ECMA-262 runs ToPrimitive, call the method the object actually has: a template
+> literal, `String(x)` and `.concat` (hint `string`: `toString` first, then `valueOf`), `'' + x`
+> (hint `default`: `valueOf` first, then `toString`), and `Array.prototype.join`. That includes a
+> class method, an object-literal method and an inherited one, with `Symbol.toPrimitive` not-yet
+> until symbols exist (Phase 5). A method that throws propagates as a catchable exception. A method
+> that returns an object is a `TypeError`, as in Node.
+> 1. In `ts` mode the receiver's type says whether the method is the user's, so lowering emits a
+>    direct call and the runtime fallback is never reached.
+> 2. In `js` mode, and for a `ts` receiver whose type cannot say (a union, an interface), the
+>    runtime looks the method up with `jsrt_get_prop` and calls it with `jsrt_call`. The emitter
+>    follows every such conversion with the pending-exception check, as it does after
+>    `JSON.stringify` (`consoleMayThrow` is the precedent).
+> 3. Lift the 6.24 refusals that share this path: `%s` of an object with its own `toString`, and
+>    `%d`/`%i`/`%f` through a user `toString`/`valueOf`. They are `STA1214` at the gate today and
+>    `PANIC: STA2005` at run time (plan-notes 337). A refusal this card cannot lift stays as it is.
+> 4. Where a case still cannot match Node, refuse it with a not-yet code and never print other bytes.
+>
+> `v + 1` with a user `valueOf` in `js` mode is `STA0012` today, because TS2365 is not in
+> `JS_MODE_RUNTIME_CODES`. That is a mode-policy question, not this card's (plan-notes 344).
+> **Check:** goldens `golden/ts/to_primitive.ts` and `golden/js/to_primitive.js` cover every site
+> above, inheritance, a throwing method caught by `try`, and the object-returning `TypeError`, and
+> match Node byte-for-byte. Decision tests in both modes. Any 6.24 refusal that was lifted moves out
+> of `docs/SUBSET.md`'s not-yet list. `pnpm run ci` is green.
+
+### Task 6.25 — A BigInt is not-yet, never an internal error (F5) ✅ (landed 2026-10-04)
+
+Audit finding F5 (plan-notes 330): `const b = 1n;` answered `STA4031` "unexpected expression kind:
+BigIntLiteral" in both modes, because a BigInt literal is a token and `gateConstruct` accepted
+every token before its switch. The lowering then had nothing to lower it to.
+
+What landed (plan-notes 334):
+
+- `isBigIntUse` in `src/frontend/gate.ts` runs before the token skip. It refuses a BigInt literal
+  and every expression whose type, or a member of whose union type, is `BigIntLike`, with not-yet
+  `STA1213` (Phase 5). `BigInt(5)` moves from `STA1214` ("the global 'BigInt'") to `STA1213`.
+- A name or property access is judged by its symbol's declared type, not the narrowed one.
+  `node:assert`'s `inspect` has `typeof value === 'bigint'` over an `unknown`, a branch no compiled
+  program can enter; the narrowed type would have refused `packages/node`.
+- A declaration's own name is skipped (`ts.getNameOfDeclaration`), so a bigint is refused where
+  it is read, once, not again where it is named or exported.
+- Tests: the audit's F5 test (`unit/cli.test.ts`, `explain --json` in ts mode plus a js-mode
+  `build`), a gate unit test covering literals, `typeof 1n`, `10n > 5`, `BigInt(5)`, a `bigint`
+  parameter and the narrowing in both modes, and both `subset_bigint_primitive_*` fixtures without
+  `@expected-fail`.
+- `docs/SUBSET.md` describes what the refusal covers. The selfhost baseline grows by 3 `STA1214`
+  in `packages/compiler`: the new function's `ts.Node`/`ts.TypeChecker`/`ts.Declaration`
+  qualified type names, which every gate function carries.
+
+Check evidence: `pnpm run test:subset` → `921 fixtures — 890 passed, 31 expected-fail, 0 failed`
+(both `subset_bigint_primitive_*` pass without the marker); `pnpm run test` → 57 files, 736
+tests passed (the audit's F5 test included); `pnpm run test:golden` → `453 passed, 0 failed`;
+`pnpm run test:selfhost` → `14 targets match the baseline`; typecheck, lint and dupes clean.
+
+> **Task 6.25 — A BigInt is not-yet, never an internal error (F5).** The gate refuses
+> `SyntaxKind.BigIntLiteral` and any expression whose type is `BigIntLike` with not-yet `STA1213`
+> (Phase 5), in both modes, in `build` and `explain`. **Check:** `subset_bigint_primitive_ts.ts`
+> loses its `@expected-fail` marker; a js-mode twin passes; the audit's F5 test passes;
+> `pnpm run ci` green.
+
+### Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9) ✅ (landed 2026-10-04)
+
+Audit findings F7, F8 and F9 (plan-notes 330). What landed (plan-notes 335):
+
+- **F7, `ffi-gen/main.ts`.** `--out` that names the input header or the `--diff` file (same resolved path, or the same inode through a symlink or hard link) is
+  refused (exit 2) before anything is read or written. `--lib` must match
+  `^[A-Za-z0-9_.+-]+$`, so a newline or a space can no longer append source or a second clang
+  flag to the committed `.d.ts`. `--help`/`-h` prints the usage to stdout and exits 0.
+- **F8, `frontend/extern.ts`.** A resolved quote-form header path, a bare name or an angle header
+  holding a `"`, a line break or NUL is an `invalid` pragma, which the gate reports as `STA1119`
+  at the pragma's line. Every other path is emitted as written. The card said "through
+  `escapeCString`", but clang reads a header name literally: `#include "…/q\"d/m.h"` and the
+  octal-escaped spelling of a non-ASCII directory are both "file not found" (plan-notes 335).
+  Escaping would have broken every non-ASCII binding directory that works today.
+- **F9, `frontend/extern.ts`.** `linkFlagRefused` allows `-l<name>`, `-L<dir>`,
+  `-framework <name>` and `-Wl,-rpath,<dir>` (no further comma). Anything else is `invalid`, and
+  the message names the flag and points at `--link=`. The gate's prefix for an invalid pragma
+  now reads "refused @statorLink pragma", since a disallowed flag is not malformed.
+- **Fixtures adjusted on purpose.** One unit test parsed `-lfoo "/p a t h/x.a"`, an archive
+  path, which the allowlist now refuses. It now groups `"-L/p a t h"`, and the test also covers
+  `-framework` and `-Wl,-rpath,`. No golden, example or `packages/*` binding used a flag outside
+  the allowlist. Every pragma in the tree is `-l<name>`, `-L<dir>` or `#include`.
+- **Tests.** The audit's F7 tests and its F8 test, adapted to assert the `STA1119` refusal and
+  that no C is written (`unit/ffi-gen-binding.test.ts`). Unit tests for the allowlist (eight
+  refused spellings, each named) and for unspellable paths, with a non-ASCII directory kept as
+  written (`unit/extern_link.test.ts`). Decision tests `subset_extern_link_flag_{ts,js}`
+  refusing `-fplugin=` in both modes.
+- **Docs.** `docs/FFI.md §9`, `docs/SUBSET.md` and `docs/DIAGNOSTICS.md` (the STA1119 row).
+
+Check evidence:
+- `pnpm run test:subset`: 923 fixtures, 892 passed, 31 expected-fail, 0 failed. Both
+  `subset_extern_link_flag_*` pass.
+- `pnpm run test`: 57 files, 742 tests passed, including the audit's F7 and F8 tests.
+- `pnpm run test:golden`: 453 passed, 0 failed.
+- `pnpm run test:selfhost`: 14 targets match the baseline.
+- typecheck, lint and dupes clean.
+
+> **Task 6.22 — FFI inputs are validated before they reach C or clang (F7, F8, F9).**
+>
+> - **F7.** `ffi-gen` refuses an `--out` (or `--diff`) equal to the input header, validates `--lib`
+>   against `^[A-Za-z0-9_.+-]+$`, and prints `--help` to stdout with exit 0.
+> - **F8.** A resolved `@statorLink` header path containing `"`, `\n`, `\r` or NUL is refused
+>   (`STA1119`); every other path is emitted through the emitter's `escapeCString`, as `#line` is.
+> - **F9.** `@statorLink` flags are limited to link flags: `-l<name>`, `-L<dir>`,
+>   `-framework <name>` and `-Wl,-rpath,<dir>`. Anything else is `STA1119` naming the flag; the
+>   explicit escape hatch stays `--link=` on the command line. `docs/FFI.md §9` changes from
+>   "verbatim clang link flags" to the allowlist.
+>
+> **Check:** the audit's F7 and F8 tests pass, plus a decision test refusing `-fplugin=` in a
+> pragma; `docs/FFI.md` updated; `pnpm run ci` green.
+
+### Task 6.26 — The landing page works without storage, at 320 px and without third parties (F14, F15, F16) ✅ (landed 2026-10-04)
+
+Audit findings F14, F15 and F16 (plan-notes 330). With `localStorage` blocked the theme toggle
+cycled `light, light, light`, and it showed without JS. At 320 and 360 px the header overflowed
+(`scrollWidth 370`). Every visit asked `fonts.googleapis.com` for IBM Plex, and the page had no CSP.
+
+What landed (plan-notes 336):
+
+- **F14.** `site/public/js/theme.js` keeps the preference in a closure variable that `apply()`
+  sets, and `cycle()` steps from it; storage only persists it. The button renders `hidden` and the
+  script unhides it when it wires the click.
+- **F15.** `.top-inner`, `.header-actions` and `.nav` wrap (`flex-wrap`, `min-width: 0`), and the
+  theme label hides under 400 px, leaving the icon button.
+- **F16.** IBM Plex Sans and Mono (400/500/600, OFL-1.1) come from `@fontsource/ibm-plex-sans` and
+  `@fontsource/ibm-plex-mono` 5.3.0, imported by `BaseLayout.astro`; the Google Fonts links are
+  gone. `security.csp` in `astro.config.mjs` puts a `<meta>` CSP on every page: `default-src
+  'self'`, `base-uri 'self'`, `object-src 'none'`, `form-action 'none'`, Astro's own script and
+  style hashes, and the inline boot script's hash, computed from `src/scripts/theme-boot.ts`, the
+  one source both the layout and the config read. The layout's scripts open `<body>`, because
+  Astro puts the meta at the end of `<head>`.
+- **Check script.** `site/scripts/check.ts` (strict TS; `pnpm run check:browser`) serves `dist/`
+  under the base path and drives the installed Chrome through `playwright-core` 1.63.0. It
+  aborts and records every request to another origin, collects `securitypolicyviolation` events,
+  and checks the fonts, the CSP meta, the scroll width at 320 and 360 px, the theme cycle with
+  storage blocked and with it, and the toggle without JS. `.github/workflows/pages.yml` runs it
+  after the build.
+- Docs: `site/README.md` (the check, fonts and CSP), `docs/TOOLCHAIN.md` (a Site table).
+
+Check evidence (macOS arm64, Node 26.7.0, Astro 7.3.3, Chrome 154.0.8037.93): `pnpm build` →
+`1 page(s) built`; `pnpm run check:browser` → 9 checks `ok`, `site check: all passed`
+(`no request to another origin ()`, `no CSP violation ()`, `IBM Plex Sans and Mono load from
+the site`, `scrollWidth 320, clientWidth 320`, `scrollWidth 360, clientWidth 360`,
+`blocked-storage cycle is light,dark,system`, `the toggle is hidden without JS`). The same script
+over the pre-fix site fails 7 checks: the Google Fonts requests, the fonts (those requests are
+aborted), the missing CSP meta, `scrollWidth 370` at both widths, `light,light,light`, and a
+visible toggle without JS. Root `pnpm run lint` clean.
+
+> **Task 6.26 — The landing page works without storage, at 320 px and without third parties
+> (F14, F15, F16).**
+>
+> - **F14.** `site/public/js/theme.js` cycles from an in-memory state that `apply()` updates, so a
+>   blocked `localStorage` still cycles `light → dark → system`. The toggle is hidden until the
+>   script runs.
+> - **F15.** The header wraps (`flex-wrap`, `min-width: 0` on `.nav`) and drops the theme label
+>   text under ~400 px, so nothing overflows at 320 and 360 px.
+> - **F16.** IBM Plex is self-hosted under `site/` (OFL), the `fonts.googleapis.com` links go,
+>   and the layout carries a restrictive CSP meta (`default-src 'self'`, the inline boot script by
+>   hash).
+>
+> **Check:** the site builds; a check (in the site's own build or a script under `site/`) shows
+> no request to another origin, no horizontal scroll at 320 px, and the blocked-storage cycle
+> `light,dark,system`.
+
+### Task 6.24 — `console.log` formats like Node (F13) ✅ (landed 2026-10-04)
+
+What landed (plan-notes 337):
+
+- `format_into` in `runtime/src/jsrt_print.c` is the one runtime function. It mirrors Node
+  v26.7.0's `formatWithOptionsInternal` for `log`/`info`/`debug`/`error`/`warn` whenever there
+  are two or more arguments and the first is a string at run time. `%s %d %i %f %j %O %c %%` are
+  applied; `%o` is applied to primitives. A trailing `%` and an unknown `%x` stay literal. Only
+  `%%` collapses once the arguments run out, and arguments left over are appended with a space.
+- `%j` shares `JSON.stringify`'s stringifier (`json_format`): a cycle prints `[Circular]`, an
+  unserializable value prints `undefined`, and a throwing getter leaves the exception pending.
+  `consoleMayThrow` (`hir/nodes.ts`) makes codegen emit the pending check after such a call.
+- What the binary cannot print identically yet is refused, never approximated. These cases are
+  `%o` of an object, `%s` of a function, `%s` of an object with its own `toString`,
+  `%d`/`%i`/`%f` through a user `toString`/`valueOf`, and `%d` of a `Date`. With a literal
+  format string the gate (`formatRefusal` in `frontend/gate.ts`) answers not-yet `STA1214`. A
+  format string known only at run time reaches a named `PANIC: STA2005` in the runtime.
+- Docs: `docs/SUBSET.md` (console row), `docs/DIAGNOSTICS.md` (`STA2005`).
+
+Check evidence:
+
+- New goldens `golden/ts/console_format.ts` and `golden/js/console_format.js` cover every
+  specifier, `%%`, missing and extra arguments, `error`/`warn`/`info`/`debug`, a runtime format
+  string, a cyclic `%j` and a caught `%j` getter throw. Both match Node byte-for-byte, stdout and
+  stderr.
+- Six decision tests `subset/subset_console_format_*`.
+- `unit/console-format.test.ts` covers the audit's F13 test (`'%s=%d', 'n', 5` → `n=5`) and the
+  runtime `STA2005` refusal.
+- `pnpm run ci` on the rebased branch exited 0:
+  - typecheck and lint clean;
+  - dupes: 186 clones, unchanged;
+  - `pnpm run test`: 738 tests passed;
+  - `test:runtime`: the print corpus matches Node;
+  - `test:subset`: `927 fixtures — 896 passed, 31 expected-fail, 0 failed`;
+  - `test:golden`: `455 fixtures — 455 passed, 0 failed`;
+  - `test:selfhost`: green after re-recording `packages/compiler` `STA1214` 1794 → 1800, for
+    the gate's new format-string scan Merged with main f126a49 (Tasks 6.20, 6.22, 6.25,
+    6.26) the count is 1798 → 1804: the same six;
+  - builtins, node-coverage and leak green;
+  - `test:asan`: `golden-asan green`, 455 passed.
+
+> **Task 6.24 — `console.log` formats like Node (F13).** `console.log`/`error`/`warn` with two or
+> more arguments and a string first argument substitute `%s %d %i %f %j %o %O %c %%` with
+> `util.format` semantics, in one runtime function. **Check:** a golden in each mode covering every
+> specifier, `%%`, missing and extra arguments, byte-for-byte vs Node; `pnpm run ci` green.
+
+### Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12) ✅ (landed 2026-10-04)
+
+What landed (plan-notes 338, 339; docs/VALUE.md §2 and §4.25):
+
+- **F6.**
+  - Every generated function opens with `JSRT_STACK_CHECK()` before `JSRT_FRAME`. It compares
+    its frame address against the thread-local `jsrt_stack_limit`, which `jsrt_stack_init`
+    (`runtime/src/jsrt_stack.zig`) sets at `jsrt_init` from the thread's real stack bounds
+    plus 256 KiB of headroom. Past the limit it throws a catchable
+    `RangeError: Maximum call stack size exceeded`.
+  - Recursion that no prologue sees, such as the runtime's C recursion over deeply nested data,
+    hits a SIGSEGV/SIGBUS handler on an alternate stack. It prints
+    `PANIC: STA2005 stack overflow` and the shadow-stack depth. Any other fault goes to the
+    handler that was installed before.
+  - Overhead: +3.7 % on `fib(36)`, about 0.8 ns per call.
+- **F12.**
+  - `JSString` is now `{length, flags, data, buffer}`. `jsrt_string_concat`, moved to
+    `runtime/src/jsrt_string_mem.zig`, extends a shared append buffer when the left operand
+    ends at the buffer's end, and doubles the buffer otherwise. 200 000 one-character appends
+    take 15.1 ms, against Node's 54.9 ms and 2.32 s before this change.
+  - Past 2^29 − 24 code units, concat throws `RangeError: Invalid string length` instead of
+    answering `JSRT_NULL`. The emitter now checks for a pending exception at four places:
+    - after every `+` not typed `number`;
+    - after `+=`, before the write;
+    - after a template literal with more than one part;
+    - after `String.prototype.concat`.
+- Docs: `docs/VALUE.md` §2 (the layout and the append buffer) and new §4.25 (the stack guard),
+  `docs/DIAGNOSTICS.md` (`STA2005`), `docs/FFI.md` (the fault handler under `stator_init_<unit>`).
+
+Check evidence:
+
+- New goldens match Node byte-for-byte:
+  - `golden/ts/stack_overflow.ts` and `golden/js/stack_overflow.js` catch the `RangeError` from
+    deep recursion (a function, a method, mutual recursion, a recursion allocating per frame)
+    and print its message.
+  - `golden/ts/string_append.ts` and `golden/js/string_append.js` hold the prefix-sharing cases.
+- `unit/runtime-errors.test.ts` covers:
+  - the audit's F6 test (`f(1000000)`: no signal, exit 1, `RangeError` on stderr);
+  - the native-recursion `PANIC: STA2005 stack overflow`;
+  - the string cap across `+=`, a template literal and `concat`.
+- The F12 measurement is in plan-notes 339.
+- `pnpm run ci` exited 0:
+  - typecheck and lint clean;
+  - dupes: 183 clones, baseline shrunk 186 → 183;
+  - `pnpm run test`: 756 tests passed;
+  - `test:runtime`: print corpus matches Node;
+  - `test:subset`: `929 fixtures — 898 passed, 31 expected-fail, 0 failed`;
+  - `test:golden`: `459 fixtures — 459 passed, 0 failed`;
+  - `test:selfhost`: green and unchanged (`STA1214` 1804);
+  - builtins, node-coverage and leak (both plateau) green;
+  - `test:asan`: print corpus matches Node under ASan/UBSan, `golden-asan green`, 459 passed.
+
+> **Task 6.23 — Runtime failures are Node's errors, not crashes or silent nulls (F6, F12).**
+> 
+> - **F6.** `JSRT_FRAME` (or the function prologue) checks the native stack against a limit set at
+>   `jsrt_init` from the thread's stack size and throws a catchable
+>   `RangeError: Maximum call stack size exceeded`. A `sigaltstack` SIGSEGV handler that prints
+>   `PANIC: STA2005 stack overflow` is the fallback for frames the check cannot see.
+> - **F12.** `jsrt_string_concat` throws `RangeError: Invalid string length` past Node's cap
+>   (the one `jsrt_string_ops.c` already uses for `repeat`/`padStart`) instead of returning
+>   `JSRT_NULL`. String `+=` in a loop becomes amortized linear (an append buffer with spare
+>   capacity, or the rope `docs/VALUE.md §12` anticipates): 200 000 one-character appends must
+>   stay within 3× Node's time on the same host.
+> 
+> **Check:** a golden that catches the `RangeError` from deep recursion and prints its message;
+> the audit's F6 test passes; a unit or bench measurement for F12 recorded in plan-notes;
+> `pnpm run ci` green, including ASan.
+
+### Task 6.28 — A function initializer may refer to its own binding ✅ (landed 2026-10-04)
+
+Found while landing 6.24 (plan-notes 344): `const g = (n) => … g(n - 1)`, an anonymous
+`const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+`const o = { f: (n) => … o.f(n - 1) }` all stopped with `STA4002 internal error: identifier 'g'
+is not defined` in both modes while `explain` said `static`/`dynamic`.
+
+What landed (plan-notes 347):
+
+- Root cause in `src/hir/verify.ts`: the `declaration` case verified the initializer before it
+  registered the name. The lowering already declared the binding first and capture analysis
+  already gave it an environment slot or a global, so lowering and codegen are unchanged.
+- The verifier registers the binding as `initializing` while its initializer is verified, and
+  `Scope.readable` resolves it only through a function-body scope (`Scope.functionChild`). A read
+  or assignment on the initializer's own evaluation path is still `STA4002`/`STA4003`.
+- Closure-mediated TDZ: the gate (`mayRunInOwnInitializer` in `src/frontend/gate.ts`) refuses a
+  self-read whose function the initializer may call before it finishes, such as a callback passed
+  to a call, a `toString` coerced by `+`, or a spread. It is not-yet `STA1214` with no phase, because
+  the compiler has no run-time TDZ check to throw Node's `ReferenceError`. A direct read, an IIFE
+  included, stays TS2448.
+- Tests: goldens `ts/self_reference_initializer.ts` and `js/self_reference_initializer.js` (the
+  five shapes, a reassigned `let`, an object-literal method, `?:` and `&&`/`||` containers, and
+  3000-deep recursion at module level and in a function body); decision tests
+  `subset_self_reference_initializer_{ts,js}` (static/dynamic) and
+  `subset_self_reference_initializer_call_{ts,js}` (not-yet `STA1214`); three
+  `unit/verify.test.ts` cases (the shapes verify clean, a direct self-read is `STA4002`, the gate
+  refusals in both modes).
+- Docs: `docs/HIR.md` §5.1 (binding scope) and the functions row of `docs/SUBSET.md`. The
+  selfhost baseline grows by 7 `STA1214` in `packages/compiler`, all from the `ts.*` qualified type
+  names in the two new gate helpers.
+- Deviation from the card: the Check asked for `g(10000)`. ASan frames overflow the stack near
+  6000 levels, and Node itself overflows `1 + g(n - 1)` near 9000, so the goldens recurse 3000
+  levels (plan-notes 347).
+
+Check evidence: `pnpm run ci` → exit 0: typecheck and lint clean; `dupes` 183 clones
+(none new); unit 764/764; subset 933 fixtures (902 passed, 31 expected-fail, 0 failed); golden
+461/461 (both `self_reference_initializer` goldens included); selfhost 14 targets match the updated
+baseline; builtins 255/324; `docs/NODE.md` current; leak plateau (objects peak RSS 3840 KB, FFI
+strings 3904 KB); golden-asan 461/461 green. The HIR verifier is clean on every golden, since a
+verifier problem fails the build.
+
+> **Task 6.28 — A function initializer may refer to its own binding.** `const g = (n) => … g(n - 1)`,
+> a `const walk = function (…) { … walk(…) }`, the same inside a function body, a `let` binding, and
+> `const o = { f: (n) => … o.f(n - 1) }` all stop with `STA4002 internal error: identifier 'g' is not
+> defined` (`hir/verify.ts`, the `identifier` case) in both modes, while `explain` says
+> `static`/`dynamic`. The closure captures the binding, not its value, so the binding has to be in
+> scope (and boxed, if captures box) before its initializer is lowered. A call made before
+> initialization stays Node's TDZ `ReferenceError`.
+> Find the root cause in lowering and the verifier's scope order, rather than relaxing the verifier.
+> **Check:** a golden in each mode covering the five shapes above and a recursion deep enough to
+> prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
+> HIR verifier is clean on all of them; `pnpm run ci` is green.
+
+### Task 6.29 — Test262 gets back the six module tests it lost ✅ (landed 2026-10-03)
+
+The six tests were lost for two reasons (plan-notes 349, 350). The four `early-import-*` tests
+and `instn-named-err-not-found-dflt` had never really passed. Until `68c8d57`, the runner compiled
+a module test under a temporary name, so its imports failed to resolve with `STA0012`, which
+counts as a SyntaxError. Stator had no refusal for either shape. `dup-bound-names` lost because
+the bundle step (T12.1) ran before the duplicate binding was reported.
+
+What landed (plan-notes 350):
+
+- `STA3005`, both modes: an imported binding named `eval` or `arguments` (`strictReservedImports`
+  in `src/frontend/modules.ts`, raised by `createProgram`).
+- `LoadedProgram.parseDiagnostics`: the parser's and the binder's diagnostics plus `STA3005`.
+  When there are any, `bundledFrontend` (`src/cli/bundler.ts`) reports only them and loads no
+  adapter.
+- `STA3004`, js mode: the default of a `.js` file that Node loads as an ES module and that has no
+  module syntax, in an import, an `import { default as x }`, or an `export { default } from`
+  (`missingDefault` in `src/frontend/gate.ts`, `isSyntaxFreeEsModule` in `src/frontend/vendor.ts`).
+- The Test262 runner maps both codes to SyntaxError, the way it maps `STA3003`.
+- Tests:
+  - decision tests `subset_import_binding_eval_{ts,js}` and `subset_import_default_missing_{ts,js}`;
+  - three unit tests in `unit/bundler.test.ts`: parse errors come before the adapter, the
+    binder's list is still where `parsePhaseKeys` reads it, and STA3004 in its three shapes but
+    not for a CommonJS file.
+- Docs: `docs/DIAGNOSTICS.md` (two rows), `docs/SUBSET.md` (the imports row), `docs/BUNDLER.md` §5.
+
+The Check, on linux CI: run 37154148433 on `eb44366`, job "test262 conformance" (Aggregate and
+gate), reports `test262: merged 8 shard(s), 53580 results` and `test262: 2377 passed, 49384
+skipped, … 1819 failed`. The ratchet gate is green.
+
+Local evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
+
+- `pnpm run test262` → `2377 passed, 49384 skipped, … 1819 failed`, exit 0.
+- `ratchet.json` `passed`: 2372 → 2377.
+- `run.ts --filter`:
+  - `module-code/early-import` → `4 passed`;
+  - `import/dup-bound-names` → `1 passed`;
+  - `instn-named-err-not-found-dflt` → `1 passed`;
+  - the five tests gained since `76a69ed` → `1 passed` each.
+- `pnpm run ci` → exit 0:
+  - typecheck and lint clean, dupes at 183 clones;
+  - unit `764 passed (764)`;
+  - `subset: 933 fixtures — 902 passed, 31 expected-fail, 0 failed`;
+  - `golden: 459 fixtures — 459 passed, 0 failed`;
+  - `selfhost: 14 targets match the baseline`, after `--update` raised compiler `STA1214` from
+    1833 to 1845 for the new frontend code;
+  - builtins, node-coverage, leak and ASan green.
+
+> **Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
+> `b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
+> (`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
+> 1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
+>    phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
+>    supported", from harness lines), so the runner records a skip. The SyntaxError for an
+>    imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
+>    is skipped the same way. Find the commit that dropped it (bisect with
+>    `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
+>    is a SyntaxError in every module.
+> 2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
+>    specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
+>    30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
+>    before any bundle step runs.
+>
+> **Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
+> five gained tests stay), and `ratchet.json` is raised to the new total.
+
+### Task 6.30 — The Windows frontend legs are green again ✅ (landed 2026-10-04)
+
+`frontend (windows/x64)` failed eleven unit tests once stage 2 ran again (CI run 37150879614, job
+111286117947). Ten were in `unit/bundler.test.ts` and one was the selfhost baseline test. Four
+root causes (plan-notes 352):
+
+- **No stated path form at the bundler seam.** The code answered the checker's spelling
+  (`C:/…`), and the tests glued `${root}/…` onto a `C:\…` root.
+- **A cross-drive bug.** The runner's temp dir is on `C:` and the checkout on `D:`.
+  `path.relative` answers an absolute path there, and `relativeSpecifier` put `./` in front of
+  it, so a `--node` location read failed with `Cannot find module './D:/…/location.ts'`.
+- **The helper's absolute import**, once spelled correctly, still met TS2877 (a non-relative
+  `.ts` import) and then the gate's package rule.
+- **CRLF.** The repo had no `.gitattributes`, and git on the Windows runner checks out with
+  `core.autocrlf=true`.
+
+What landed:
+
+- docs/BUNDLER.md §5 "Paths": what leaves the compiler is in the platform's form, namely
+  `VendorEntry.resolveDir` and every diagnostic's `file` (the API, `stderr`, `stator explain`).
+  `modulePath`, the `rewrites` keys, `#line` and run-time locations keep the checker's form.
+  docs/DIAGNOSTICS.md says the same for the `file` field.
+- `platformPath` in `frontend/vendor.ts`. `mapVendorDiagnostics` becomes `reportedDiagnostics`,
+  the one outbound step `build` and `explain` share, and it converts every `file`.
+- `relativeSpecifier` answers the absolute target when no relative path exists. The location
+  rewrite then imports `nodeLocationModule()` (the helper's checker path without `.ts`), and the
+  gate accepts exactly that string.
+- `.gitattributes`: `* text=auto eol=lf`. `git add --renormalize .` changed no file. The
+  `ci.yml` comment that blamed line-ending translation for keeping `lint` off the desktop legs
+  now gives the real reason.
+- Tests state which form they expect: `join(root, …)` for what comes out, `checkerName` for
+  internal names. No assertion got looser. The `#line` regexes became exact `includes`, and two
+  `rewrites(…).get(…) === undefined` checks that passed vacuously on Windows now test something.
+  The `--node` bundler test is split: the compile runs on every platform (on the Windows x64
+  runner it crosses drives), and the run of the binary is `NATIVE_ONLY`.
+- Merging main brought Task 7.4's `unit/static-lib.test.ts`, whose Windows leg had never run:
+  "an export that crosses as jsrt_value is STA1220" met STA1219, because Windows refuses
+  `--emit=lib` before compiling (docs/FFI.md §8). It is skipped on `win32`; the next test pins
+  STA1219 there.
+- After that merge, `frontend (windows/arm64)` (CI on `54ba88f`, job 111328467740) still fails one
+  Task 6.27 test, `unit/to-primitive.test.ts`: Node's own builtin-constructor set is seven names
+  larger on that runner (plan-notes 352). `frontend (windows/x64)` passes.
+
+Check evidence (PR #110, head `f9a5e72`, CI run 37155782218):
+
+- `frontend (windows/x64)` (job 111299744263) and `frontend (windows/arm64)` (job 111299744145):
+  pass, `Tests  702 passed | 63 skipped (765)` each.
+- Every other job passes except `test262 conformance` (`FAIL ratchet: passed dropped from 2372
+  to 2371`), which is Task 6.29's known drop and is on main too.
+- Local `pnpm run ci` → exit 0 (`Tests  762 passed (762)`, subset 898 passed + 31 expected-fail,
+  golden 459/459, selfhost 14 targets match the baseline).
+
+> **Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
+> and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
+> since `76a69ed`, because stage 2 waits on the linux jobs, which were red.
+> 1. Ten `unit/bundler.test.ts` tests (T12.1–T12.3) compare a bundler path such as `resolveDir`, a
+>    `#line` file or a diagnostic file against `join(...)`. The code answers `C:/Users/…` and the test
+>    expects `C:\Users\…`. Decide which form the bundler seam promises, document it in
+>    `docs/BUNDLER.md`, and make the code and the tests agree. A diagnostic shown to a Windows user
+>    should use the platform's separators.
+> 2. `unit/selfhost.test.ts` "the committed baseline is in --update form" fails on Windows (most
+>    likely CRLF from checkout, compared against the `--update` text). Fix it with a
+>    `.gitattributes` rule or by normalizing the comparison, whichever is the root cause.
+>
+> **Check:** `frontend (windows/x64)` and `frontend (windows/arm64)` green on a PR.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is
@@ -2813,6 +3436,77 @@ Check evidence: 12/12 `subset_out_*` decision fixtures (ts/js twins with the
 checker-owns-ts splits), 5/5 `extern-out` classifier unit tests, 17/17 generator unit
 tests, golden 386/386 (serial, sharded, ASan), `test:ffi` 5/5, differential smoke 10/10
 with 0 divergences. Net `cpd` unchanged at 0.9%.
+
+### Task 7.4 — A self-contained static library for C consumers ✅ (landed 2026-10-03)
+
+Asked by the creator (plan-notes 340). Step 3 chose (a), a private runtime per library, on measured
+evidence (plan-notes 342); two runtime bugs found on the way are plan-notes 341 and 342.
+
+> **[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
+> Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
+> The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
+> libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
+> This task makes `stator build` produce one static library plus its header, which a C build can
+> use with no Stator checkout.
+>
+> Steps:
+>
+> 1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
+>    `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
+>    member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
+>    written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
+>    same input are byte-identical, as the header already is (Task 7.2 step 8).
+> 2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
+>    it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
+>    writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
+>    the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
+> 3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
+>    program would each carry `jsrt_*` and collide. Measure both options and record the result in
+>    plan-notes before choosing:
+>    (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
+>    `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
+>    on ELF), so each library carries a private runtime; this must prove two such libraries work
+>    in one process, including two collectors' init and roots;
+>    (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
+>    shared `libjsrt.a` installed once.
+>    Whichever is chosen, the other combination is refused or documented. It never fails at run
+>    time.
+> 4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
+>    (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
+>    Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
+> 5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
+>    refused with a not-yet diagnostic until then.
+>
+> **Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
+> `<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
+> runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
+> linked into one C program and both called, under the option step 3 chose. The ffi CI job and
+> the ASan job run it. `pnpm run ci` is green.
+
+**What landed.** `src/cli/library.ts` (prelink, localization, deterministic `ar`, the `.pc`),
+the `--emit=lib` branch and `systemLinkFlags` in `src/cli/build.ts`, the config key and schema,
+STA0020/STA1219/STA1220 and two STA0004 forms in `docs/DIAGNOSTICS.md`, the shared Boehm kind
+(`jsrt_gc_shared_kind_p48`) and idempotent `jsrt_gc_init` in the runtime, and
+`-fno-sanitize-address-globals-dead-stripping` for the sanitized runtime (ELF COMDAT groups broke
+two sanitized libraries in one link). Docs: `docs/FFI.md` §8 "Static library", TOOLCHAIN, CONFIG,
+HOW-IT-WORKS. Option (b), `--runtime=external`, is documented as not offered.
+
+**Check — PASSED:**
+
+- `packages/tests/ffi/example-c-consumer/static-lib.ts`: builds `libconsumer.a` twice and compares
+  the `.a`, `.h` and `.pc` bytes; copies them with `main.c` to a fresh temp dir, refuses any repo
+  path (the unit's own error-stack `file:line` strings excepted), links through `pkg-config` alone
+  and matches `expected.txt`; links `libconsumer` and `libkeeper` into `two.c` with forced Boehm
+  collections (`GC_get_gc_no() >= 10`) and a stack overflow in one library.
+- Linux CI (run 37148352874, ubuntu-24.04, clang 18.1.3, GNU binutils 2.42): `ffi (linux/x64)`,
+  `ffi (linux/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (linux/x64)`, `asan (linux/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm
+  collections)`.
+- macOS 27.0.1 arm64 locally: default and ASan both ok. CI run 37153833737 (Apple clang 15.0.0,
+  ld-1053.12): `ffi (macos/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (macos/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm collections)`.
+- `pnpm run ci` exit 0 locally (unit 772 passed, subset 0 failed, golden 459/459, selfhost matches
+  baseline); `pnpm run test:ffi` exit 0; `unit/static-lib.test.ts` 10 passed.
 
 ### Test-infra track: Darwin link retry, `test:ffi` real checks, C-consumer example ✅ (landed 2026-09-15)
 
@@ -3836,3 +4530,9 @@ cycle and `module.exports` replacement goldens moved to T12.3.
 Left to other cards: `esmExternalRequirePlugin` in `vite-stator` (T12.2) and the CommonJS goldens
 through the default adapter (T12.3). The CJS cycle and `module.exports` replacement goldens moved
 to T12.3 earlier.
+
+### T17. `"".repeat` with a huge count no longer hangs or runs an undefined cast
+
+`packages/runtime/src/jsrt_string_ops.c` `jsrt_string_repeat` checked only `count * str->length > JSRT_MAX_STRING_LENGTH`: an empty receiver makes that product zero for any count, so `"".repeat(4294967295)` fell into a 4294967295-iteration loop over zero bytes (Node answers `""` instantly) and a count past UINT32_MAX reached `(uint32_t)count`, undefined by C11 §6.3.1.4. Found by the 2026-10-07 audit (task T17 of the audit set; the plan-table rows ride the in-flight plan restructure). Fix: an empty receiver returns itself before anything else, and a count past UINT32_MAX throws the spec's `Invalid string length` before the cast — keeping the length cap's coverage of the cast true by construction.
+Model: ZCode / GLM-5.3 · Status: done 2026-10-07 · Priority: P1 · Complexity: 1 · Files: `packages/runtime/src/jsrt_string_ops.c`, `packages/tests/golden/{js,ts}/string_range_error.ts`
+Check: `moon run tests:golden -- --filter string_range_error` — both fixtures' full outputs match Node, including the new `"".repeat(4294967295)` and `"".repeat(2**53)` cases (the full golden pass: 463/463).

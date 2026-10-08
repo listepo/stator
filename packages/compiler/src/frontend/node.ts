@@ -38,7 +38,16 @@ export function nodeGlobalsFile(): string | undefined {
 /** The run-time location helpers (`packages/node/src/internal/location.ts`) that `location.ts`
  * rewrites every module-location read into. */
 export function nodeLocationFile(): string {
-  return `${NODE_SOURCE_DIR}/internal/location.ts`;
+  return `${nodeLocationModule()}.ts`;
+}
+
+/** The same file as an absolute specifier: the checker's path without `.ts`. The rewrite imports
+ * the helpers this way only where no relative path reaches them (another Windows drive). With the
+ * extension the checker would warn that emit cannot rewrite a non-relative `.ts` import (TS2877),
+ * a warning for JavaScript emit, which Stator never does; Bundler resolution finds the file
+ * either way. The gate accepts exactly this spelling. */
+export function nodeLocationModule(): string {
+  return `${NODE_SOURCE_DIR}/internal/location`;
 }
 
 /** The pinned Node's public built-in ids, without the prefix. `_`-prefixed ids (`_http_agent`)

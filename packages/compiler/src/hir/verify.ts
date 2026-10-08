@@ -105,31 +105,60 @@ interface Enclosing {
  * 82% of the front end). Lookup walks the parent chain; `set` writes only the innermost map.
  * Semantics stay identical: a child shadow does not mutate the parent, and a missing name still
  * resolves through ancestors. */
-type Binding = { kind: 'let' | 'const'; type: HType };
+type Binding = {
+  kind: 'let' | 'const';
+  type: HType;
+  /** Set while the binding's own initializer is verified. The binding is in scope there, because
+   * a closure in the initializer captures the binding rather than its value (plan.md §9 Task
+   * 6.28), but nothing on the initializer's own evaluation path may read it: that read is TDZ,
+   * which the gate keeps out of the HIR. */
+  initializing?: true;
+};
+
+/** A binding found by name, and whether the lookup left a function body to reach it -- a read
+ * that did runs when that function is called, not while the enclosing code evaluates. */
+type Resolved = { binding: Binding; deferred: boolean };
 
 class Scope {
   private readonly own = new Map<string, Binding>();
   private readonly parent: Scope | null;
+  private readonly isFunction: boolean;
 
-  private constructor(parent: Scope | null) {
+  private constructor(parent: Scope | null, isFunction: boolean) {
     this.parent = parent;
+    this.isFunction = isFunction;
   }
 
   static root(): Scope {
-    return new Scope(null);
+    return new Scope(null, false);
   }
 
-  /** Nested block / function / catch / for-of scope. Replaces `new Map(bindings)`. */
+  /** Nested block / catch / for-of scope. Replaces `new Map(bindings)`. */
   child(): Scope {
-    return new Scope(this);
+    return new Scope(this, false);
   }
 
-  get(name: string): Binding | undefined {
-    return this.own.get(name) ?? this.parent?.get(name);
+  /** A function body's scope: what it reads from outside runs only when the function is called. */
+  functionChild(): Scope {
+    return new Scope(this, true);
   }
 
-  has(name: string): boolean {
-    return this.own.has(name) || (this.parent?.has(name) ?? false);
+  /** A binding still being initialized resolves only from inside a function body; anywhere else
+   * the read would run before the binding exists, so it is reported as undefined, exactly as it
+   * was before the binding was declared. */
+  readable(name: string): Binding | undefined {
+    const resolved = this.resolve(name);
+    return resolved === undefined || (resolved.binding.initializing && !resolved.deferred)
+      ? undefined
+      : resolved.binding;
+  }
+
+  private resolve(name: string, deferred = false): Resolved | undefined {
+    const binding = this.own.get(name);
+    if (binding !== undefined) {
+      return { binding, deferred };
+    }
+    return this.parent?.resolve(name, deferred || this.isFunction);
   }
 
   set(name: string, binding: Binding): void {
@@ -181,7 +210,9 @@ function hoistFunctions(statements: readonly Statement[], bindings: Scope): void
  * value is the whole point, and the runtime decides. A CONCRETE non-array target means the
  * lowering built an index the checker would already have rejected — with one gate-admitted
  * exception: a fixed-shape target under an object-typed key (`o[kObj]`, plan.md §8 step 44b),
- * which coerces the key via ToPropertyKey and routes through the degrading array entry points.
+ * which coerces the key via ToPropertyKey and routes through the degrading array entry points --
+ * and, the same entry points again, a `js`-mode computed string or number key on one
+ * (`table[node.kind]`, docs/VALUE.md §4.24), which reads a declared slot or the overflow table.
  * The index-kind rule is what keeps the exception precise: the key must be object-typed (an
  * identifier of object type) or Unknown (a literal key — `{}` and `[]` lower dynamic, so their
  * node type is Unknown even though the gate admitted them by their checker type). Any other key
@@ -201,7 +232,10 @@ function checkIndexable(
   ) {
     if (
       target.type.kind === 'object' &&
-      (index.type.kind === 'object' || index.type.kind === 'unknown')
+      (index.type.kind === 'object' ||
+        index.type.kind === 'unknown' ||
+        index.type.kind === 'string' ||
+        index.type.kind === 'number')
     ) {
       return;
     }
@@ -341,9 +375,9 @@ function verifyStatement(
     case 'declaration': {
       const decl = stmt as Declaration;
       if (decl.value !== undefined) {
+        bindings.set(decl.name, { kind: decl.declKind, type: decl.type, initializing: true });
         verifyExpression(decl.value, problems, bindings);
       }
-      // Register the binding for future reference
       bindings.set(decl.name, { kind: decl.declKind, type: decl.type });
       break;
     }
@@ -353,7 +387,7 @@ function verifyStatement(
       verifyExpression(assign.value, problems, bindings);
 
       // Check that the target is a known binding
-      const binding = bindings.get(assign.target);
+      const binding = bindings.readable(assign.target);
       if (!binding) {
         problems.push({
           kind: 'assignment',
@@ -677,11 +711,17 @@ function verifyStatement(
     case 'dyn-field-assignment': {
       verifyExpression(stmt.target, problems, bindings);
       verifyExpression(stmt.value, problems, bindings);
-      // The typed targets are an array's `length`, which the runtime entry resizes, and a
-      // function, whose own properties live in its closure (plan-notes 310): the array has no
-      // other property this node may write.
+      // The typed targets are an array's `length`, which the runtime entry resizes, a function,
+      // whose own properties live in its closure (plan-notes 310), and a fixed object's name its
+      // layout does not declare, which lives in the overflow table (docs/VALUE.md §4.24): the
+      // array has no other property this node may write, and a DECLARED field has a slot.
       const arrayLength = stmt.target.type.kind === 'array' && stmt.field === 'length';
-      if (stmt.target.type.kind !== 'unknown' && stmt.target.type.kind !== 'fn' && !arrayLength) {
+      if (
+        stmt.target.type.kind !== 'unknown' &&
+        stmt.target.type.kind !== 'fn' &&
+        !arrayLength &&
+        !undeclaredMember(stmt.target.type, stmt.field)
+      ) {
         problems.push({
           kind: 'dyn-field-assignment',
           span: stmt.span,
@@ -697,6 +737,16 @@ function verifyStatement(
       throw new Error(`Exhaustiveness check failed: ${_exhaustive}`);
     }
   }
+}
+
+/** A fixed object's name its layout does not declare: no slot holds it, so the overflow table
+ * does (docs/VALUE.md §4.24), and a dynamic node over the object is the only way to reach it. */
+function undeclaredMember(type: HType, name: string): boolean {
+  return (
+    type.kind === 'object' &&
+    !type.fields.some((f) => f.name === name) &&
+    !type.methods.some((m) => m.name === name)
+  );
 }
 
 function verifyBlock(
@@ -730,7 +780,7 @@ function verifyBlock(
  * can name. `enclosing` restarts at ['function'] so a `break` cannot escape into the enclosing
  * function's loop, and a `return` inside the body is recognised as in-function. */
 function verifyFunction(fn: FunctionExpr, problems: VerifyProblem[], bindings: Scope): void {
-  const inner = bindings.child();
+  const inner = bindings.functionChild();
   if (fn.selfBinding !== undefined) {
     inner.set(fn.selfBinding, { kind: 'const', type: fn.type });
   }
@@ -843,27 +893,22 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
 
     case 'identifier': {
       const id = expr as Identifier;
-      // Check that the identifier is in scope
-      if (!bindings.has(id.name)) {
+      const binding = bindings.readable(id.name);
+      if (binding === undefined) {
         problems.push({
           kind: 'identifier',
           span: id.span,
           code: 'STA4002',
           message: `identifier '${id.name}' is not defined`,
         });
-      }
-      // Otherwise, type should match the binding's type — this is verified by lowering,
-      // but we can check it for assurance
-      const binding = bindings.get(id.name);
-      if (binding) {
-        if (!hTypeEquals(expr.type, binding.type)) {
-          problems.push({
-            kind: 'identifier',
-            span: id.span,
-            code: 'STA4010',
-            message: `identifier '${id.name}' has type '${hTypeName(binding.type)}' but is used as '${hTypeName(expr.type)}'`,
-          });
-        }
+      } else if (!hTypeEquals(expr.type, binding.type)) {
+        // The lowering already types every read from its binding; this is the assurance.
+        problems.push({
+          kind: 'identifier',
+          span: id.span,
+          code: 'STA4010',
+          message: `identifier '${id.name}' has type '${hTypeName(binding.type)}' but is used as '${hTypeName(expr.type)}'`,
+        });
       }
       break;
     }
@@ -1379,9 +1424,10 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       for (const arg of expr.args) {
         verifyExpression(arg, problems, bindings);
       }
-      // The lowering routes only Unknown receivers here, and functions, whose own properties the
-      // closure holds (plan-notes 310); anything else is a call the typed arms own, and building
-      // this node for one would aim a shape-table read at a layout.
+      // The lowering routes only Unknown receivers here, functions, whose own properties the
+      // closure holds (plan-notes 310), and a fixed object's undeclared name, which its overflow
+      // table holds (docs/VALUE.md §4.24); anything else is a call the typed arms own, and
+      // building this node for one would aim a shape-table read at a layout.
       checkSpreadArguments(expr, problems);
       // A spread call reads its method through the same shape-table entry for any receiver the
       // gate admitted (arrays, class instances, plain objects; plan.md §11c T11.4 step 5): there
@@ -1389,7 +1435,8 @@ function verifyExpression(expr: Expression, problems: VerifyProblem[], bindings:
       if (
         expr.spread !== true &&
         expr.target.type.kind !== 'unknown' &&
-        expr.target.type.kind !== 'fn'
+        expr.target.type.kind !== 'fn' &&
+        !undeclaredMember(expr.target.type, expr.method)
       ) {
         problems.push({
           kind: 'dyn-method-call',

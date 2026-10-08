@@ -448,6 +448,11 @@ export interface DynMethodCall extends Node {
    * (`jsrt_call_spread_at`). A spread call takes this node whatever the receiver's type: the
    * shape-table read answers a layout's methods and a builtin's bound ones as well. */
   readonly spread?: true;
+  /** Node's `TypeError` subject (`c.missing`) when the loaded value is not callable, instead of
+   * the STA2006 abort. Set for a name a fixed object's layout does not declare, whose call
+   * answered that `TypeError` statically before growth could store a function there
+   * (docs/VALUE.md §4.24, plan.md §8 step 37). */
+  readonly notFunction?: string;
 }
 
 /** `o.f(a)` where `o` has a layout and `f` is one of its FIELDS holding a closure -- an object
@@ -699,7 +704,7 @@ export const STRING_OPS = {
   charAt: { arity: 1, result: 'string' },
   charCodeAt: { arity: 1, result: 'number' },
   codePointAt: { arity: 1, result: 'element' },
-  concat: { arity: 1, result: 'string' },
+  concat: { arity: 1, result: 'string', throws: true },
   endsWith: { arity: 2, result: 'boolean' },
   includes: { arity: 2, result: 'boolean' },
   indexOf: { arity: 2, result: 'number' },
@@ -733,7 +738,8 @@ export const STRING_OPS = {
     arity: number;
     result: 'boolean' | 'element' | 'iterator' | 'match' | 'number' | 'string' | 'string-array';
     /** Present on the ops whose runtime raises a catchable error (`repeat`/`padStart`/`padEnd`
-     * throw RangeError for a count/length the spec rejects). The emitter gives such an op its own
+     * throw RangeError for a count/length the spec rejects, `concat` past the maximum string
+     * length). The emitter gives such an op its own
      * statement and a pending check after it, the same discipline as {@link arrayOpCallsBack}. */
     throws?: true;
   }
@@ -1447,6 +1453,17 @@ export type ConsoleMethod = keyof typeof CONSOLE_METHODS;
 export function isConsoleVariadicWidth(method: ConsoleMethod, given: number): boolean {
   const shape = CONSOLE_METHODS[method];
   return 'variadic' in shape && given !== shape.arity;
+}
+
+/** Whether the call can leave an exception pending, so the emitter follows it with a check:
+ * `table` reads each row's properties, and a variadic call of two or more arguments may apply
+ * util.format, whose `%j` reads properties too (plan.md §9 Task 6.24) -- a getter there throws --
+ * and whose `%s`/`%d`/`%i`/`%f` run the value's own `toString`/`valueOf` (Task 6.27). */
+export function consoleMayThrow(call: ConsoleLogCall): boolean {
+  return (
+    call.method === 'table' ||
+    (call.args.length >= 2 && isConsoleVariadicWidth(call.method, call.args.length))
+  );
 }
 
 /** The C entry point for a call of this width, or `null` if the method has no such form. A method

@@ -66,6 +66,10 @@ const DIAGNOSTIC_ERROR_CLASSES: Readonly<Record<string, readonly string[]>> = {
   STA2006: ['TypeError'],
   // An ambiguous `export *` name imported by name: ES's link-time SyntaxError (plan-notes 302).
   STA3003: ['SyntaxError'],
+  // A default import of a syntax-free ES module: ES's link-time SyntaxError (plan-notes 350).
+  STA3004: ['SyntaxError'],
+  // An imported binding named `eval` or `arguments`: a strict-mode early SyntaxError.
+  STA3005: ['SyntaxError'],
 };
 
 function listValue(raw: string): string[] {

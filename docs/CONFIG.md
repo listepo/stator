@@ -32,15 +32,28 @@ One key per flag. The schema is generated from `packages/compiler/src/cli/config
 | `mode` | `"ts"` \| `"js"` | `--mode` | `"ts"` | both |
 | `opt` | `0` \| `1` \| `2` \| `3` | `--opt` (env `STATOR_OPT`) | `2` | `build` |
 | `link` | array of strings | `--link` (repeatable) | `[]` | `build` |
-| `emit` | `"binary"` \| `"c"` | `--emit=binary`, `--emit=c` | `"binary"` | `build` |
+| `emit` | `"binary"` \| `"c"` \| `"lib"` | `--emit=binary`, `--emit=c`, `--emit=lib` | `"binary"` | `build` |
 | `keepC` | boolean | `--keep-c` | `false` | `build` |
 | `emitHeader` | path | `--emit-header` | — | `build` |
-| `unitName` | string | `--unit-name` | entry basename | `build` |
+| `unitName` | string, letters, digits and `_` only (else `STA0004`) | `--unit-name` | entry basename, sanitized | `build` |
 | `bundler` | `"vite"` \| `"none"` \| module | `--bundler` | `"vite"` | both, `js` mode only (`STA0004` in `ts` mode) |
 | `diagnostics` | `"text"` \| `"json"` | `--json`, `--diagnostics=text\|json` | `"text"` | `explain` |
 | `node` | boolean | `--node` | `false` | both |
 
-A key a command does not use is ignored by that command, so one file serves both.
+A key a command does not use is ignored by that command, so one file serves both. A **flag** is
+not: on the command line, a flag that belongs to the other command is `STA0005` (`explain
+--emit=c`, `build --json`), because an inert flag hides a typo in a script (plan.md §9 Task 6.20).
+A value flag never takes a next argument that starts with `-`: `-o --emit=c` is `STA0004`. A
+value that really starts with `-` uses the `--flag=value` spelling (`--link=-lm`); `-o` has no
+such spelling, so an output path cannot start with `-` (write `./-name`).
+
+## Outputs
+
+`build` refuses (`STA0004`) any two of the entry, every source file of the program, `-o`,
+`--emit-header` and the `--keep-c` file (`<out>.c`) that name the same file, before anything is
+written, whether those paths came from flags or from this file. An output the file system will
+not take (a missing directory, no permission, a read-only or full disk, `-o` naming a directory)
+is `STA0019`, never the compiler-bug `STA4072` (docs/DIAGNOSTICS.md).
 
 **Paths** (`entry`, `out`, `emitHeader`, and a `bundler` module that starts with `.`) in the file resolve against the **file's directory**;
 paths on the command line resolve against the current directory. Each `link` entry splits on
@@ -57,7 +70,9 @@ its key and a regenerated schema
 Highest first:
 
 1. the command line;
-2. the environment (`STATOR_OPT` for `opt`);
+2. the environment (`STATOR_OPT` for `opt`), which a project `.env` may fill in for
+   `STATOR_OPT`, `STATOR_RUNTIME` and `STATOR_OTEL` only; never `CC`, `STATOR_RUNTIME_ROOT` or
+   `OTEL_*` (docs/TOOLCHAIN.md, "Environment variables and `.env`");
 3. the config file;
 4. the built-in default.
 

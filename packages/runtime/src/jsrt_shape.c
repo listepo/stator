@@ -119,6 +119,27 @@ static bool has_prop_table(jsrt_value v) {
   return jsrt_is(v, JSRT_TAG_ARRAY) || jsrt_is_dynobj(v);
 }
 
+bool jsrt_is_fixed_object(jsrt_value v) {
+  if (!jsrt_is(v, JSRT_TAG_OBJECT) || jsrt_is_dynobj(v)) {
+    return false;
+  }
+  const JSRTClass *cls = jsrt_as_object(v)->cls;
+  return cls != &jsrt_class_promise && cls != &jsrt_class_date && cls != &jsrt_class_map &&
+         cls != &jsrt_class_set && cls != &jsrt_class_weakmap && cls != &jsrt_class_weakset &&
+         cls != &jsrt_class_regexp && cls != &jsrt_class_iterator &&
+         cls != &jsrt_class_generator && cls != &jsrt_class_uint8array &&
+         cls != &jsrt_class_arraybuffer && cls != &jsrt_class_accessor;
+}
+
+JSRTDynObject *jsrt_fixed_extras(jsrt_value v) {
+  return jsrt_is_fixed_object(v) ? jsrt_as_object(v)->extras : NULL;
+}
+
+/* The overflow table as a value, for the property entries to recurse into. */
+static jsrt_value extras_value(const JSRTDynObject *extras) {
+  return JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)extras);
+}
+
 static int32_t fixed_slot(jsrt_value obj, const char *key) {
   JSRTObject *o = jsrt_as_object(obj);
   const JSRTClass *cls = o->cls;
@@ -205,6 +226,31 @@ static PropTable as_prop_table(jsrt_value v, const char *op) {
   return (PropTable){&o->shape, &o->slots, &o->capacity};
 }
 
+/* One code point as UTF-8 at `p`. Early-return branches, not `buf[i++]`, so this is not a
+ * second copy of the index-loop encoder in jsrt_regexp.c / jsrt_string.c. */
+static char *shape_utf8_put(char *p, uint32_t cp) {
+  if (cp < 0x80) {
+    *p++ = (char)cp;
+    return p;
+  }
+  if (cp < 0x800) {
+    *p++ = (char)(0xC0 | (cp >> 6));
+    *p++ = (char)(0x80 | (cp & 0x3F));
+    return p;
+  }
+  if (cp < 0x10000) {
+    *p++ = (char)(0xE0 | (cp >> 12));
+    *p++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+    *p++ = (char)(0x80 | (cp & 0x3F));
+    return p;
+  }
+  *p++ = (char)(0xF0 | (cp >> 18));
+  *p++ = (char)(0x80 | ((cp >> 12) & 0x3F));
+  *p++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+  *p++ = (char)(0x80 | (cp & 0x3F));
+  return p;
+}
+
 /* A shape key from a JS string. The shape table stores keys as NUL-terminated UTF-8 and keeps the
  * pointer forever, so the copy is deliberately immortal -- exactly the lifetime shapes already
  * have, and the reason this is plain malloc rather than a collected allocation. Surrogate pairs
@@ -217,7 +263,7 @@ const char *jsrt_shape_key(jsrt_value name) {
   if (key == NULL) {
     jsrt_panic("out of memory: shape key");
   }
-  size_t k = 0;
+  char *p = key;
   for (uint32_t i = 0; i < len; i++) {
     uint32_t cp = jsrt_string_char(name, i);
     if (cp == 0) {
@@ -231,23 +277,13 @@ const char *jsrt_shape_key(jsrt_value name) {
       }
     }
     if (cp < 0x80) {
-      key[k++] = (char)cp;
-    } else if (cp < 0x800) {
-      key[k++] = (char)(0xC0 | (cp >> 6));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-      key[k++] = (char)(0xE0 | (cp >> 12));
-      key[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
+      *p++ = (char)cp;
     } else {
-      key[k++] = (char)(0xF0 | (cp >> 18));
-      key[k++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-      key[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
+      p = shape_utf8_put(p, cp);
     }
   }
-  key[k] = '\0';
-  return key;
+  *p = '\0';
+  return jsrt_shape_intern(key);
 }
 
 /* A loaded slot, resolved. An accessor cell becomes a call with the receiver as argument zero --
@@ -482,6 +518,11 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
       if (slot >= 0) {
         return jsrt_as_object(obj)->fields[slot];
       }
+      /* An undeclared OWN property shadows a method the prototype would answer. */
+      const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+      if (extras != NULL && jsrt_shape_find(extras->shape, key) != NULL) {
+        return jsrt_get_prop(extras_value(extras), key, NULL);
+      }
       bool found = false;
       jsrt_value method = fixed_method_get(obj, key, &found);
       if (found || jsrt_regexp_property(obj, key, &method)) {
@@ -530,6 +571,145 @@ jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic) {
   return accessor_read((*o.slots)[hit->offset], obj);
 }
 
+/* `key`'s index in a class's method table, or -1. */
+static int32_t method_index(const JSRTClass *cls, const char *key) {
+  if (cls->method_names == NULL || cls->methods == NULL) {
+    return -1;
+  }
+  for (uint32_t i = 0; i < cls->method_count; i++) {
+    if (cls->method_names[i] != NULL && strcmp(cls->method_names[i], key) == 0) {
+      return (int32_t)i;
+    }
+  }
+  return -1;
+}
+
+/* The OWN `constructor` of a dynamic prototype object, by name: a `constructor` key written on
+ * it, else the hidden one `F.prototype` carries; "" for neither, or for a value that is not a
+ * function -- util.format reads the own descriptor's value and asks for a function's name. */
+static const char *own_constructor_name(const JSRTDynObject *o) {
+  const JSRTShape *hit = jsrt_shape_find(o->shape, "constructor");
+  const jsrt_value ctor = hit != NULL ? o->slots[hit->offset] : o->ctor;
+  return ctor != 0 && jsrt_is(ctor, JSRT_TAG_CLOSURE) ? jsrt_as_closure(ctor)->name : "";
+}
+
+/* A class method on a fixed instance: the descriptor's table entry, or the hidden `#method:` slot
+ * when the method captures and has no one constant form. The holder is the class whose prototype
+ * owns it -- the topmost class in the chain still sharing the receiver's entry -- which a NULL
+ * entry cannot single out; then every candidate is a class that lists the name. */
+static void class_method_holder(const JSRTClass *cls, const char *key, int32_t index,
+                                const char **holder, bool *exact) {
+  const JSRTClosure *entry = cls->methods[index];
+  const JSRTClass *k = cls;
+  if (entry != NULL) {
+    while (k->parent != NULL) {
+      const int32_t at = method_index(k->parent, key);
+      if (at < 0 || k->parent->methods[at] != entry) {
+        break;
+      }
+      k = k->parent;
+    }
+    *holder = k->name;
+    return;
+  }
+  *holder = cls->name;
+  for (; k != NULL && method_index(k, key) >= 0; k = k->parent) {
+    if (k != cls) {
+      *exact = false;
+    }
+    if (jsrt_is_builtin_constructor_name(k->name)) {
+      *holder = k->name;
+    }
+  }
+}
+
+/* A fixed-layout object's half of jsrt_user_get: an own field, the overflow table, a literal's own
+ * method slot, a class's method. */
+static bool fixed_user_get(jsrt_value obj, const char *key, jsrt_value *out, const char **holder,
+                           bool *exact) {
+  const JSRTObject *o = jsrt_as_object(obj);
+  const int32_t slot = fixed_slot(obj, key);
+  if (slot >= 0) {
+    *out = o->fields[slot];
+    return true;
+  }
+  const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+  if (extras != NULL && jsrt_shape_find(extras->shape, key) != NULL) {
+    *out = jsrt_get_prop(extras_value(extras), key, NULL);
+    return true;
+  }
+  const int32_t index = method_index(o->cls, key);
+  bool found = false;
+  const jsrt_value method = fixed_method_get(obj, key, &found);
+  if (!found) {
+    return false;
+  }
+  *out = method;
+  /* A `#method:` slot the class table does not list is an object literal's OWN method. */
+  if (index >= 0) {
+    class_method_holder(o->cls, key, index, holder, exact);
+  }
+  return true;
+}
+
+bool jsrt_user_get(jsrt_value obj, const char *key, jsrt_value *out, const char **holder,
+                   bool *exact) {
+  const char *where = NULL;
+  bool sure = true;
+  bool found = false;
+  jsrt_value value = JSRT_UNDEFINED;
+  if (jsrt_is(obj, JSRT_TAG_CLOSURE)) {
+    const JSRTClosure *c = jsrt_as_closure(obj);
+    const JSRTStaticEntry *entry = class_static_find(c, key, false);
+    if (entry != NULL) {
+      found = true;
+      value = entry->kind == JSRT_STATIC_GETTER ? jsrt_call(*entry->slot, 1, &obj) : *entry->slot;
+    } else if (c->klass == NULL) {
+      found = function_own_get(obj, key, &value);
+    }
+  } else if (jsrt_is_uint8array(obj) || jsrt_is_arraybuffer(obj)) {
+    found = false; /* no shape: every key is the layout's own, and none is a user method */
+  } else if (!has_prop_table(obj)) {
+    found = jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_user_get(obj, key, &value, &where, &sure);
+  } else {
+    const PropTable o = as_prop_table(obj, "get");
+    const JSRTShape *hit = jsrt_shape_find(*o.shape, key);
+    if (hit != NULL) {
+      found = true;
+      value = accessor_read((*o.slots)[hit->offset], obj);
+    }
+    /* §10.1.8.1 OrdinaryGet up a dynamic object's chain: a getter found runs with the ORIGINAL
+     * receiver. A prototype that is not a dynamic object answers for itself and has no own
+     * `constructor`; one with no representation (%Object.prototype%) ends the walk with a miss. */
+    for (jsrt_value p = jsrt_is_dynobj(obj) ? ((const JSRTDynObject *)jsrt_ptr(obj))->proto : 0;
+         !found && p != 0;) {
+      if (!jsrt_is_dynobj(p)) {
+        found = jsrt_user_get(p, key, &value, NULL, NULL);
+        where = "";
+        break;
+      }
+      const JSRTDynObject *proto = (const JSRTDynObject *)jsrt_ptr(p);
+      const JSRTShape *inherited = jsrt_shape_find(proto->shape, key);
+      if (inherited != NULL) {
+        found = true;
+        value = accessor_read(proto->slots[inherited->offset], obj);
+        where = own_constructor_name(proto);
+      }
+      p = proto->proto;
+    }
+  }
+  if (found) {
+    *out = value;
+    if (holder != NULL) {
+      *holder = where;
+    }
+    if (exact != NULL) {
+      *exact = sure;
+    }
+  }
+  return found;
+}
+
 bool jsrt_has_prop(jsrt_value obj, const char *key) {
   if (jsrt_is_nullish(obj)) {
     return false;
@@ -556,7 +736,9 @@ bool jsrt_has_prop(jsrt_value obj, const char *key) {
   }
   if (!has_prop_table(obj)) {
     if (jsrt_is(obj, JSRT_TAG_OBJECT)) {
-      return fixed_has(obj, key);
+      const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+      return fixed_has(obj, key) ||
+             (extras != NULL && jsrt_shape_find(extras->shape, key) != NULL);
     }
     return jsrt_is(obj, JSRT_TAG_STRING) && strcmp(key, "length") == 0;
   }
@@ -582,8 +764,6 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
     snprintf(message, sizeof message, "Cannot use 'in' operator to search for '%s' in %s", k,
              receiver);
     jsrt_throw_error(&jsrt_class_type_error, message);
-    free((void *)receiver);
-    free((void *)k);
     return false;
   }
   bool answer = false;
@@ -605,9 +785,6 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   if (!answer && jsrt_is_dynobj(obj)) {
     answer = inherited_get(obj, k, obj, &inherited);
   }
-  /* Compared only -- nothing here keeps the key, unlike a write that installs it in a shape -- so
-   * this copy dies with the call instead of joining the immortal shape table. */
-  free((void *)k);
   return answer;
 }
 
@@ -725,6 +902,23 @@ static void store_prop(jsrt_value obj, const char *key, jsrt_value value, JSRTIC
       if (fixed_set(obj, key, value)) {
         return;
       }
+      /* Growth (docs/VALUE.md §4.24): a name the class never declared lands in the overflow
+       * table, created on the first such write. A frozen object is not extensible, and strict
+       * code -- every compiled module -- throws Node's TypeError for adding to it. */
+      if (jsrt_is_fixed_object(obj)) {
+        JSRTObject *o = jsrt_as_object(obj);
+        if (o->frozen && (o->extras == NULL || jsrt_shape_find(o->extras->shape, key) == NULL)) {
+          char msg[256];
+          snprintf(msg, sizeof msg, "Cannot add property %s, object is not extensible", key);
+          jsrt_throw_error(&jsrt_class_type_error, msg);
+          return;
+        }
+        if (o->extras == NULL) {
+          o->extras = (JSRTDynObject *)jsrt_ptr(jsrt_dynobj_new());
+        }
+        store_prop(extras_value(o->extras), key, value, NULL, honor_accessor);
+        return;
+      }
       jsrt_panic(
           "STA2004: a statically-shaped object cannot grow a new property; planned for Phase 8");
     }
@@ -782,9 +976,8 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
     jsrt_throw_error(&jsrt_class_type_error, "Cannot convert undefined or null to object");
     return false;
   }
-  /* Owned here, unlike every other shape key: a delete only COMPARES the key -- the chain it
-   * replays carries the immortal keys the old shapes already held -- so this copy dies with the
-   * call instead of joining the table. */
+  /* Interned: a delete only COMPARES the key -- the chain it replays carries the same immortal
+   * pointers the intern table already holds. */
   const char *k = jsrt_shape_key(jsrt_to_string(key));
   bool answer = true;
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
@@ -806,18 +999,20 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
      * FROZEN is the one fixed-shape delete with a right answer, and it is the answer: a frozen
      * property is non-configurable, so the spec's `delete` raises in strict mode and never has to
      * reach a representation the layout does not have (plan.md §8 step 2a(c), bucket 2704). */
+    const JSRTDynObject *extras = jsrt_fixed_extras(obj);
+    if (extras != NULL && jsrt_shape_find(extras->shape, k) != NULL) {
+      return jsrt_delete(extras_value(extras), key);
+    }
     if (jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_has(obj, k)) {
       if (jsrt_as_object(obj)->frozen) {
         char msg[256];
         snprintf(msg, sizeof msg, "Cannot delete property '%s' of #<Object>", k);
         jsrt_throw_error(&jsrt_class_type_error, msg);
-        free((void *)k);
         return false;
       }
       jsrt_panic(
           "STA2007: a statically-shaped object cannot lose a property; planned for Phase 8");
     }
-    free((void *)k);
     return true;
   }
   const PropTable o = as_prop_table(obj, "delete");
@@ -825,7 +1020,6 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
   if (hit == NULL) {
     /* Absent is `true` even on a frozen object: §13.5.1.2 asks [[Delete]], and deleting what is
      * not there succeeds. Only an existing non-configurable property raises. */
-    free((void *)k);
     return true;
   }
   if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
@@ -836,7 +1030,6 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
   } else {
     jsrt_shape_remove(o.shape, *o.slots, hit);
   }
-  free((void *)k);
   return answer;
 }
 

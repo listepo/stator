@@ -6,6 +6,7 @@ import * as ts from 'typescript';
 import type { Diagnostic } from '../support/diagnostics.ts';
 import { BuildError, diagnosticFromFile, renderDiagnostic } from '../support/diagnostics.ts';
 import { hasTypeScriptAnnotation } from './annotation.ts';
+import { strictReservedImports } from './modules.ts';
 import { isCheckable } from './narrowing.ts';
 import {
   classifyNodeMember,
@@ -528,7 +529,7 @@ export function sha256(data: string | Buffer): string {
  * can repeat for different contents on a coarse-tick filesystem and serve a stale program under
  * the wrong test's name (plan-notes 245). A dep edit without an entry touch still does not bust
  * the cache — no runner does that mid-run; a watch daemon with a full dependency set is the
- * follow-up. Custom `host` (memfs tests) always bypasses the cache.
+ * follow-up. Custom `host` (in-memory CompilerHost tests) always bypasses the cache.
  *
  * Two slots: a graph that imports a package loads twice per build — once to find the imports,
  * once over the bundle — and one slot would evict each with the other. */
@@ -544,7 +545,36 @@ interface ProgramCacheEntry {
 export interface LoadedProgram {
   readonly program: ts.Program;
   readonly diagnostics: Diagnostic[];
+  /** The PARSE-phase subset of `diagnostics`: the parser's, the binder's (a duplicate or
+   * strict-mode-reserved binding) and Stator's own early errors (`STA3005`). Test262 calls these
+   * phase `parse`; a build that has one reports them before any bundle step runs, because no
+   * bundle can make the source parse (plan.md §9 Task 6.29). */
+  readonly parseDiagnostics: readonly Diagnostic[];
   readonly runtimeDynamicSymbols: ReadonlySet<ts.Symbol>;
+}
+
+/** `file:start:code` of every parser and binder diagnostic in the program. The binder's list is
+ * internal to `typescript` (`SourceFile.bindDiagnostics`, filled once the checker has bound the
+ * file); tests/unit/bundler.test.ts pins that the pinned release still keeps it there, and a
+ * release without it degrades to the parser's list rather than failing. */
+function parsePhaseKeys(program: ts.Program): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const file of program.getSourceFiles()) {
+    const bound: unknown = Reflect.get(file, 'bindDiagnostics');
+    const binder = Array.isArray(bound) ? bound.filter(isTsDiagnostic) : [];
+    for (const diag of [...program.getSyntacticDiagnostics(file), ...binder]) {
+      keys.add(diagnosticKey(diag));
+    }
+  }
+  return keys;
+}
+
+function isTsDiagnostic(value: unknown): value is ts.Diagnostic {
+  return typeof value === 'object' && value !== null && 'code' in value && 'messageText' in value;
+}
+
+function diagnosticKey(diag: ts.Diagnostic): string {
+  return `${diag.file?.fileName ?? ''}:${String(diag.start ?? -1)}:${String(diag.code)}`;
 }
 
 const PROGRAM_CACHE_SLOTS = 2;
@@ -559,9 +589,10 @@ export function clearProgramCache(): void {
  * Stator owns strict family + noEmit; user's tsconfig.json is ignored for these.
  * Returns the program and any diagnostics emitted during program construction.
  *
- * `host` is the seam for tests (plan-notes 187): unit suites back programs with a memfs volume
- * through it. Omitted means ts.sys against the real disk — the ONLY mode the shipped compiler
- * runs in, since every production call passes no host. `overlay` lays virtual text over either.
+ * `host` is the seam for tests (plan-notes 187): unit suites can back programs with an
+ * in-memory CompilerHost through it. Omitted means ts.sys against the real disk — the ONLY
+ * mode the shipped compiler runs in, since every production call passes no host. `overlay`
+ * lays virtual text over either.
  *
  * `node` is the `--node` platform (plan.md §11c T11.5): Node built-ins resolve to `packages/node`
  * (`./node.ts`). Like the mode, it is a frontend policy nothing below the gate reads.
@@ -575,7 +606,7 @@ export function createProgram(
   overlay?: ProgramOverlay,
   node = false,
 ): LoadedProgram {
-  // Custom hosts (memfs) have no meaningful disk mtime; never cache those.
+  // Custom hosts (in-memory) have no meaningful disk mtime; never cache those.
   if (host === undefined) {
     const absEntry = resolve(entryFile).replace(/\\/g, '/');
     const overlayKey = overlay?.key ?? '';
@@ -765,10 +796,12 @@ function createProgramUncached(
       : overlayHost(host ?? ts.createCompilerHost(compilerOptions), overlay.files),
   );
   const diagnostics: Diagnostic[] = [];
+  const parseDiagnostics: Diagnostic[] = [];
   const runtimeDynamicSymbols = new Set<ts.Symbol>();
 
   // Surface TypeScript's own diagnostics as Stator diagnostics
   const tsDiagnostics = preEmitDiagnostics(program);
+  const parsePhase = parsePhaseKeys(program);
   for (const diag of tsDiagnostics) {
     // A free `__filename` or `__dirname` is the gate's STA1110 (plan-notes 316), in both modes:
     // the checker's "cannot find name" would make it an STA0012 type error in ts mode and silent
@@ -908,25 +941,43 @@ function createProgramUncached(
     } else {
       // Diagnostic has a location
       const { line, character } = file.getLineAndCharacterOfPosition(diag.start ?? 0);
-      diagnostics.push(
-        diagnosticFromFile(
-          file.fileName,
-          line + 1,
-          character + 1,
-          'STA0012',
-          'error',
-          mode,
-          ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
-          {
-            start: diag.start ?? 0,
-            length: (diag.length ?? 0) > 0 ? (diag.length ?? 0) : 1,
-          },
-        ),
+      const located = diagnosticFromFile(
+        file.fileName,
+        line + 1,
+        character + 1,
+        'STA0012',
+        'error',
+        mode,
+        ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+        {
+          start: diag.start ?? 0,
+          length: (diag.length ?? 0) > 0 ? (diag.length ?? 0) : 1,
+        },
       );
+      diagnostics.push(located);
+      if (parsePhase.has(diagnosticKey(diag))) parseDiagnostics.push(located);
+    }
+  }
+  for (const file of program.getSourceFiles()) {
+    if (file.isDeclarationFile) continue;
+    for (const name of strictReservedImports(file)) {
+      const { line, character } = file.getLineAndCharacterOfPosition(name.getStart(file));
+      const early = diagnosticFromFile(
+        file.fileName,
+        line + 1,
+        character + 1,
+        'STA3005',
+        'error',
+        mode,
+        `'${name.text}' cannot be an imported binding: a module is strict code`,
+        { start: name.getStart(file), length: name.text.length },
+      );
+      diagnostics.push(early);
+      parseDiagnostics.push(early);
     }
   }
 
-  return { program, diagnostics, runtimeDynamicSymbols };
+  return { program, diagnostics, parseDiagnostics, runtimeDynamicSymbols };
 }
 
 /** Checker codes in the vendor module that stay reported: where the checker sees one, Node

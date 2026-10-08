@@ -56,17 +56,20 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
    * same way (integer indices first, then insertion order). Array extras share the dynamic
    * layout (shape + slots on JSRTArray), so they walk through the same pointers. Both arrays
    * are malloc-owned and die with the call; free(NULL) covers the layout that did not
-   * allocate. */
+   * allocate.
+   * A fixed object's overflow table (docs/VALUE.md §4.24) is the same layout again, walked after
+   * every declared key: its keys were all added after construction. */
+  const JSRTDynObject *table = dynamic ? dyn : jsrt_fixed_extras(v);
   JSRTShape *shape =
-      dynamic && dyn != NULL ? dyn->shape : (array && arr != NULL ? arr->shape : NULL);
+      table != NULL ? table->shape : (array && arr != NULL ? arr->shape : NULL);
   jsrt_value *slots =
-      dynamic && dyn != NULL ? dyn->slots : (array && arr != NULL ? arr->slots : NULL);
+      table != NULL ? table->slots : (array && arr != NULL ? arr->slots : NULL);
   const uint32_t shape_count = shape == NULL ? 0 : jsrt_shape_property_count(shape);
   const JSRTShape **links = shape == NULL ? NULL : jsrt_shape_property_order(shape, shape_count);
   uint32_t fixed_count = 0;
   uint32_t *fixed_order =
       (array || string || dynamic || fixed == NULL) ? NULL : jsrt_fixed_key_order(fixed->cls, &fixed_count);
-  const uint32_t count = (array || string || dynamic) ? shape_count : fixed_count;
+  const uint32_t count = fixed_count + shape_count;
 
   /* A getter can allocate or collect; the partially built result is not reachable from v. */
   JSRT_FRAME(2);
@@ -101,11 +104,12 @@ static jsrt_value collect(jsrt_value v, ObjSelect select) {
     jsrt_array_push(JSRT_LOCAL(0), JSRT_LOCAL(1));
   }
   for (uint32_t i = 0; i < count; i++) {
-    const uint32_t slot = (dynamic || array) && links != NULL ? links[i]->offset : fixed_order[i];
-    const char *key =
-        (dynamic || array) && links != NULL ? links[i]->key : fixed->cls->fields[slot];
-    jsrt_value value =
-        (dynamic || array) && links != NULL && slots != NULL ? slots[slot] : fixed->fields[slot];
+    /* The declared keys first (none on a dynamic object or an array), then the table's. */
+    const bool declared = i < fixed_count;
+    const JSRTShape *link = declared || links == NULL ? NULL : links[i - fixed_count];
+    const uint32_t slot = link != NULL ? link->offset : fixed_order[i];
+    const char *key = link != NULL ? link->key : fixed->cls->fields[slot];
+    jsrt_value value = link != NULL && slots != NULL ? slots[slot] : fixed->fields[slot];
     /* An accessor's value is what its getter RETURNS: Object.values and Object.entries perform a
      * [[Get]], while Object.keys needs only the key and must not call anything. jsrt_get_prop is
      * the single place that knows how to resolve a cell, so the call is spelled as a property
@@ -187,7 +191,10 @@ jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key) {
       return JSRT_TRUE;
     }
   }
-  return JSRT_FALSE;
+  const JSRTDynObject *extras = jsrt_fixed_extras(v);
+  return extras != NULL ? jsrt_bool(jsrt_has_prop(JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)extras),
+                                                  jsrt_shape_key(key)))
+                        : JSRT_FALSE;
 }
 
 /* Object.fromEntries (§20.1.2.7) over an ARRAY of pairs -- the iterable form the gate accepts.
@@ -198,7 +205,8 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
   if (!jsrt_is(pairs, JSRT_TAG_ARRAY)) {
     jsrt_panic("STA4084: Object.fromEntries on a value that is not an array");
   }
-  jsrt_value out = jsrt_dynobj_new();
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_dynobj_new();
   const JSRTArray *list = jsrt_as_array(pairs);
   for (uint32_t i = 0; i < list->length; i++) {
     const jsrt_value pair = jsrt_unhole(list->elements[i]);
@@ -212,8 +220,10 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
     if (!jsrt_is(key, JSRT_TAG_STRING)) {
       jsrt_panic("STA2005: Object.fromEntries with a non-string key is not yet supported");
     }
-    jsrt_set_prop(out, jsrt_shape_key(key), value, NULL);
+    jsrt_set_prop(JSRT_LOCAL(0), jsrt_shape_key(key), value, NULL);
   }
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 
@@ -250,46 +260,38 @@ jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   ) {
     return target;
   }
-  const jsrt_value keys = collect(source, OBJ_KEYS);
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = collect(source, OBJ_KEYS);
   if (jsrt_pending()) {
+    JSRT_FRAME_POP();
     return JSRT_UNDEFINED;
   }
   const bool sourceIsArray = jsrt_is(source, JSRT_TAG_ARRAY);
   const JSRTArray *srcArray = sourceIsArray ? jsrt_as_array(source) : NULL;
   const bool sourceIsString = jsrt_is(source, JSRT_TAG_STRING);
-  const JSRTArray *list = jsrt_as_array(keys);
+  const JSRTArray *list = jsrt_as_array(JSRT_LOCAL(0));
   for (uint32_t i = 0; i < list->length; i++) {
     const char *key = jsrt_shape_key(list->elements[i]);
     uint32_t index = 0;
     const bool indexed = jsrt_key_is_array_index(key, &index);
     uint16_t unit = 0;
-    const jsrt_value value =
+    JSRT_LOCAL(1) =
         srcArray != NULL && indexed && index < srcArray->length ? srcArray->elements[index]
         : sourceIsString && indexed
             ? (unit = jsrt_string_char(source, index), jsrt_string_from_units(&unit, 1))
             : jsrt_get_prop(source, key, NULL);
     if (jsrt_pending()) {
+      JSRT_FRAME_POP();
       return JSRT_UNDEFINED;
     }
-    jsrt_set_prop(target, key, value, NULL);
+    jsrt_set_prop(target, key, JSRT_LOCAL(1), NULL);
     if (jsrt_pending()) {
+      JSRT_FRAME_POP();
       return JSRT_UNDEFINED;
     }
   }
+  JSRT_FRAME_POP();
   return target;
-}
-
-
-static bool is_fixed_shape_object(jsrt_value v) {
-  if (!jsrt_is(v, JSRT_TAG_OBJECT) || jsrt_is_dynobj(v)) {
-    return false;
-  }
-  const JSRTClass *cls = jsrt_as_object(v)->cls;
-  return cls != &jsrt_class_promise && cls != &jsrt_class_date && cls != &jsrt_class_map &&
-         cls != &jsrt_class_set && cls != &jsrt_class_weakmap && cls != &jsrt_class_weakset &&
-         cls != &jsrt_class_regexp && cls != &jsrt_class_iterator &&
-         cls != &jsrt_class_generator && cls != &jsrt_class_uint8array &&
-         cls != &jsrt_class_arraybuffer;
 }
 
 jsrt_value jsrt_object_freeze(jsrt_value v) {
@@ -297,8 +299,13 @@ jsrt_value jsrt_object_freeze(jsrt_value v) {
     ((JSRTDynObject *)jsrt_ptr(v))->frozen = true;
     return v;
   }
-  if (is_fixed_shape_object(v)) {
-    jsrt_as_object(v)->frozen = true;
+  if (jsrt_is_fixed_object(v)) {
+    /* The overflow table freezes with its owner: its keys are the object's own properties. */
+    JSRTObject *o = jsrt_as_object(v);
+    o->frozen = true;
+    if (o->extras != NULL) {
+      o->extras->frozen = true;
+    }
     return v;
   }
   return v;
@@ -308,7 +315,7 @@ jsrt_value jsrt_object_is_frozen(jsrt_value v) {
   if (jsrt_is_dynobj(v)) {
     return jsrt_bool(((const JSRTDynObject *)jsrt_ptr(v))->frozen);
   }
-  if (is_fixed_shape_object(v)) {
+  if (jsrt_is_fixed_object(v)) {
     return jsrt_bool(jsrt_as_object(v)->frozen);
   }
   /* Primitives are frozen. Builtin objects this landing does not mark are not. */
@@ -366,6 +373,25 @@ static bool dst_slot_of(const JSRTClass *dst, const char *key, uint32_t *slot) {
   return false;
 }
 
+/* A spread source's undeclared properties (docs/VALUE.md §4.24), in insertion order, written onto
+ * `dst` through the ordinary property write -- except a key `skip` (a fixed result's layout)
+ * declares, which the caller's declared writers own. */
+static void copy_extras(jsrt_value dst, jsrt_value src, const JSRTClass *skip) {
+  const JSRTDynObject *extras = jsrt_fixed_extras(src);
+  if (extras == NULL) {
+    return;
+  }
+  const uint32_t n = jsrt_shape_property_count(extras->shape);
+  const JSRTShape **links = jsrt_shape_property_order(extras->shape, n);
+  for (uint32_t i = 0; i < n; i++) {
+    uint32_t slot = 0;
+    if (skip == NULL || !dst_slot_of(skip, links[i]->key, &slot)) {
+      jsrt_set_prop(dst, links[i]->key, extras->slots[links[i]->offset], NULL);
+    }
+  }
+  free((void *)links);
+}
+
 /* One spread fragment: every own key of the source that the result declares, in the SOURCE's
  * enumeration order. `#private` slots are not properties and never enter an order. A dynamic
  * source walks its shape chain; anything that is not an object at all is a compiler bug -- the
@@ -399,6 +425,12 @@ void jsrt_spread_order_src(uint32_t *order, uint32_t *count, uint32_t cap, jsrt_
       }
     }
   }
+  /* The source's undeclared properties (docs/VALUE.md §4.24): no per-field read copied them,
+   * because the source's TYPE does not list them, so they grow the result's own overflow table
+   * here, after its values landed. A key the result's type declares is left to its declared
+   * writer -- this call cannot tell an earlier writer, which the source overrides, from a later
+   * one, which overrides the source. */
+  copy_extras(dst, src, dc);
 }
 
 /* One (layout, order) pair, interned for the life of the program: two spread results with the
@@ -529,5 +561,7 @@ jsrt_value jsrt_dynobj_spread(jsrt_value dst, jsrt_value src) {
       jsrt_set_prop(dst, key, fixed->fields[slot], NULL);
     }
   }
+  /* The undeclared properties follow the declared ones, as they enumerate (docs/VALUE.md §4.24). */
+  copy_extras(dst, src, NULL);
   return dst;
 }

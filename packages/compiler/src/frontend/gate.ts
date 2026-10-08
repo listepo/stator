@@ -62,6 +62,7 @@ import {
   isDynamicShape,
   isFunctionValueCallee,
   isFunctionMemberRead,
+  isUndeclaredMemberRead,
   isFunctionValueMember,
   isGlobalSymbolIteratorName,
   isImplicitAny,
@@ -88,8 +89,14 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
-import { isFreeCommonJsName, isPackageSpecifier } from './vendor.ts';
-import { type CommonJsBinding, commonJsVerdict, isNodeSourceFile, nodeBuiltinId } from './node.ts';
+import { isFreeCommonJsName, isPackageSpecifier, isSyntaxFreeEsModule } from './vendor.ts';
+import {
+  type CommonJsBinding,
+  commonJsVerdict,
+  isNodeSourceFile,
+  nodeBuiltinId,
+  nodeLocationModule,
+} from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
@@ -283,6 +290,17 @@ function gateConstruct(
   onNode: boolean,
 ): GateResult {
   const kind = node.kind;
+
+  // Before the token skip below: a BigInt literal IS a token, and skipping it handed `1n` to the
+  // lowering, which can only answer STA4031 (plan.md §9 Task 6.25).
+  if (isBigIntUse(node, typeChecker)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1213',
+      message: 'BigInt is not yet supported; planned for Phase 5',
+      phase: 5,
+    };
+  }
 
   // Tokens carry no independent meaning: an operator token, keyword, or punctuation is only ever
   // reached as a child of a construct this function already ruled on. Gating them separately
@@ -513,7 +531,7 @@ function gateConstruct(
       return gateArrayLiteral(node as ts.ArrayLiteralExpression, typeChecker);
 
     case ts.SyntaxKind.ElementAccessExpression:
-      return gateElementAccess(node as ts.ElementAccessExpression, typeChecker);
+      return gateElementAccess(node as ts.ElementAccessExpression, typeChecker, mode);
 
     case ts.SyntaxKind.ForOfStatement:
       return gateForOf(node as ts.ForOfStatement, mode, typeChecker);
@@ -714,9 +732,13 @@ function gateSpecifier(
   }
   const target = typeChecker.getSymbolAtLocation(moduleSpecifier)?.valueDeclaration;
   const name = (spec.propertyName ?? spec.name).text;
-  return target !== undefined &&
-    ts.isSourceFile(target) &&
-    ambiguousStarExports(target, typeChecker).has(name)
+  if (target === undefined || !ts.isSourceFile(target)) {
+    return { kind: 'accept' };
+  }
+  if (name === 'default') {
+    return missingDefault(target) ?? { kind: 'accept' };
+  }
+  return ambiguousStarExports(target, typeChecker).has(name)
     ? {
         kind: 'never',
         code: 'STA3003',
@@ -725,6 +747,22 @@ function gateSpecifier(
           'differently, so it cannot be imported by name',
       }
     : { kind: 'accept' };
+}
+
+/** A default import of a module with no default export is the SyntaxError ES raises at link time
+ * (ResolveExport answers null, §16.2.1.6.3). TypeScript reports it (TS1192) for every module it
+ * knows to be one; the gap is a syntax-free `.js` ES module, which it takes for CommonJS and gives a
+ * synthesized default (plan.md §9 Task 6.29). */
+function missingDefault(target: ts.SourceFile): GateResult | undefined {
+  return isSyntaxFreeEsModule(target)
+    ? {
+        kind: 'never',
+        code: 'STA3004',
+        message:
+          `${target.fileName} has no default export: it is an ES module ("type": "module") ` +
+          'with no export statement',
+      }
+    : undefined;
 }
 
 /** `ns.x` where `ns` is a module namespace: a member the lowering resolves to the export's own
@@ -747,11 +785,15 @@ function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): Ga
   if (specifier.kind !== 'accept') {
     return specifier;
   }
+  const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
+  if (node.importClause?.name !== undefined && target !== undefined && ts.isSourceFile(target)) {
+    const missing = missingDefault(target);
+    if (missing !== undefined) return missing;
+  }
   // A namespace of a declaration file has no module behind it: its bindings are extern C
   // functions (docs/FFI.md §1), called by name, with no slot a namespace object could read.
   const bindings = node.importClause?.namedBindings;
   if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
-    const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
     if (target !== undefined && ts.isSourceFile(target) && target.isDeclarationFile) {
       return notYet('a namespace import of a declaration file is not yet supported', 5);
     }
@@ -788,6 +830,12 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
       if (target === undefined || (ts.isSourceFile(target) && isNodeSourceFile(target.fileName))) {
         return { kind: 'accept' };
       }
+    }
+    // The `--node` location rewrite's own import of its helpers, spelled absolute where no
+    // relative path reaches them (`nodeLocationModule`). Not a package, and the same file a
+    // relative import of it already reaches.
+    if (spec.text === nodeLocationModule()) {
+      return { kind: 'accept' };
     }
     // Bare specifier: a package. In js mode the bundler takes it (plan.md §11d T12.1), and the
     // vendor rewrite turns every import declaration and re-export of one into an import of the
@@ -865,6 +913,31 @@ function notYet(message: string, phase: number): GateResult {
     message: `${message}; planned for Phase ${phase}`,
     phase,
   };
+}
+
+/** A BigInt literal, or a value whose type may be a bigint (plan.md §9 Task 6.25).
+ *
+ * A name is judged by its DECLARED type, not the narrowed one: `typeof u === 'bigint'` narrows an
+ * `unknown` to bigint in a branch no compiled program can enter, because every way to make a
+ * bigint is refused here (node:assert's `inspect` has exactly that branch). A declaration's own
+ * name is not a value read; its uses are. */
+function isBigIntUse(node: ts.Node, checker: ts.TypeChecker): boolean {
+  if (ts.isBigIntLiteral(node)) {
+    return true;
+  }
+  if (!ts.isExpression(node) || ts.getNameOfDeclaration(node.parent as ts.Declaration) === node) {
+    return false;
+  }
+  const named = ts.isIdentifier(node)
+    ? node
+    : ts.isPropertyAccessExpression(node)
+      ? node.name
+      : undefined;
+  const symbol = named === undefined ? undefined : checker.getSymbolAtLocation(named);
+  const type =
+    symbol === undefined ? checker.getTypeAtLocation(node) : checker.getTypeOfSymbol(symbol);
+  const parts = type.isUnion() ? type.types : [type];
+  return parts.some((part) => (part.flags & ts.TypeFlags.BigIntLike) !== 0);
 }
 
 function symbolNotYet(): GateResult {
@@ -1345,6 +1418,14 @@ function gateIdentifier(
   if (decl === undefined || enclosingFunction(decl) === enclosingFunction(node)) {
     return { kind: 'accept' };
   }
+  // No phase: the refusal waits on a run-time TDZ check, which no open phase has a card for.
+  if (mayRunInOwnInitializer(node, decl)) {
+    return {
+      kind: 'not-yet',
+      code: 'STA1214',
+      message: `reading '${node.text}' from a function that may run during its own initializer is not yet supported (no run-time TDZ check)`,
+    };
+  }
   // `var` is function-scoped even when its spelling sits inside a loop, so capturing it is the
   // ordinary shared-binding case — every closure sees one slot, which is already what env
   // capture implements. `let`/`const` in a loop are the ones that still need per-iteration
@@ -1541,6 +1622,79 @@ function enclosingFunction(node: ts.Node): ts.Node | undefined {
     }
   }
   return undefined;
+}
+
+/** Whether a read of a `let`/`const` binding sits in that binding's own initializer, inside a
+ * function that may run before the binding exists (plan.md §9 Task 6.28).
+ *
+ * A closure in the initializer captures the binding, not its value, so `const g = (n) => g(n - 1)`
+ * reads an initialized `g` whenever it is called afterwards. Called sooner -- an IIFE, a callback
+ * the initializer hands to a call, a method a coercion invokes -- Node throws a TDZ
+ * `ReferenceError`, and the compiled program has no TDZ check to throw it with: the slot would be
+ * read before anything was stored in it. A read outside every function is TS2448, already fatal.
+ * So the read passes only when the outermost function around it reaches the initializer through
+ * containers that hand a function on without calling it. */
+function mayRunInOwnInitializer(node: ts.Identifier, decl: ts.Declaration): boolean {
+  if (
+    !ts.isVariableDeclaration(decl) ||
+    decl.initializer === undefined ||
+    !ts.isVariableDeclarationList(decl.parent) ||
+    isVarDeclarationList(decl.parent)
+  ) {
+    return false;
+  }
+  const initializer = decl.initializer;
+  let outermost: ts.Node | undefined;
+  for (let n: ts.Node | undefined = node.parent; n !== initializer; n = n.parent) {
+    if (n === undefined) {
+      return false;
+    }
+    if (ts.isFunctionLike(n)) {
+      outermost = n;
+    }
+  }
+  if (ts.isFunctionLike(initializer)) {
+    outermost = initializer;
+  }
+  if (outermost === undefined) {
+    return true;
+  }
+  for (let n: ts.Node = outermost; n !== initializer; n = n.parent) {
+    if (!passesOnUncalled(n.parent, n)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether evaluating `parent` yields `child`'s value, or stores it, without calling it. A
+ * spread, a coercion (`'' + { toString() {…} }`) and a call are what this keeps out. */
+function passesOnUncalled(parent: ts.Node, child: ts.Node): boolean {
+  if (
+    ts.isParenthesizedExpression(parent) ||
+    ts.isAsExpression(parent) ||
+    ts.isSatisfiesExpression(parent) ||
+    ts.isNonNullExpression(parent) ||
+    ts.isArrayLiteralExpression(parent)
+  ) {
+    return true;
+  }
+  if (ts.isConditionalExpression(parent)) {
+    return child !== parent.condition;
+  }
+  if (ts.isBinaryExpression(parent)) {
+    const op = parent.operatorToken.kind;
+    return (
+      op === ts.SyntaxKind.BarBarToken ||
+      op === ts.SyntaxKind.AmpersandAmpersandToken ||
+      op === ts.SyntaxKind.QuestionQuestionToken ||
+      op === ts.SyntaxKind.CommaToken
+    );
+  }
+  if (ts.isPropertyAssignment(parent)) {
+    return child === parent.initializer;
+  }
+  return ts.isObjectLiteralExpression(parent) && !ts.isSpreadAssignment(child);
 }
 
 /** The loop giving `decl` a fresh binding each iteration. Searched no further out than the function
@@ -1828,11 +1982,16 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       // A dynamic-shape or Unknown member is a fourth target, DynFieldAssignment, for every
       // assignment form: the key is static, so the read-once machinery need only hoist the
       // receiver, and the fold reads and writes the shape-table entry through it.
-      // A name the class never declared is refused first: growing a fixed layout is Phase 8's
-      // dictionary mode (the write twin of the dynamic read, plan.md §8 step 37). In `ts` mode
-      // the checker's own TS2339 owns the program, so refusing here too would report one mistake
-      // twice — and `explain` would answer not-yet where the build answers error.
-      if (mode === 'js' && isAbsentClassMemberWrite(bin.left, typeChecker)) {
+      // So is a name the receiver's fixed layout never declared, `o.extra = v`: the write grows
+      // the object's overflow table (docs/VALUE.md §4.24). Only the ELEMENT spelling over a class,
+      // `c["extra"] = v`, is still refused, first. In `ts` mode the checker's own TS2339 owns the
+      // program, so refusing here too would report one mistake twice — and `explain` would answer
+      // not-yet where the build answers error.
+      if (
+        mode === 'js' &&
+        ts.isElementAccessExpression(bin.left) &&
+        isAbsentClassMemberWrite(bin.left, typeChecker)
+      ) {
         return notYet('assigning a new property on a class instance is not yet supported', 8);
       }
       if (ts.isObjectLiteralExpression(bin.left) || ts.isArrayLiteralExpression(bin.left)) {
@@ -1874,21 +2033,16 @@ function gateBinary(bin: ts.BinaryExpression, typeChecker: ts.TypeChecker, mode:
       ) {
         return functionMemberResult(mode);
       }
-      // The object-shape twin of the class refusal above: a fixed layout cannot grow a name its
-      // type never declared, which waits on Phase 8's dictionary mode (plan-notes 310). In `ts`
-      // mode the checker's TS2339 owns the program, for the same reason as there.
+      // A name an object's type never declared: in `js` mode isAssignableTarget accepted it above
+      // (the write grows the overflow table, docs/VALUE.md §4.24); in `ts` mode the checker's
+      // TS2339 owns the program, and refusing here too would report one mistake twice.
       if (
+        mode === 'ts' &&
         ts.isPropertyAccessExpression(bin.left) &&
         tsTypeToHType(typeChecker.getTypeAtLocation(bin.left.expression), typeChecker).kind ===
           'object'
       ) {
-        if (mode === 'ts') {
-          return { kind: 'accept' };
-        }
-        return notYet(
-          "assigning a property the object's shape does not declare is not yet supported",
-          8,
-        );
+        return { kind: 'accept' };
       }
       return notYet('assignment to anything but a variable is not yet supported', 5);
 
@@ -1968,7 +2122,8 @@ function isAssignableTarget(node: ts.Expression, checker: ts.TypeChecker, mode: 
   if (
     mode === 'js' &&
     (isFunctionValueMember(node.expression, node.name.text, checker) ||
-      isFunctionMemberRead(node.expression, checker))
+      isFunctionMemberRead(node.expression, checker) ||
+      isUndeclaredMemberRead(node, checker))
   ) {
     return true;
   }
@@ -2020,17 +2175,23 @@ function isAbsentClassMemberWrite(target: ts.Expression, checker: ts.TypeChecker
 
 /** `++`/`--`/`+=`/`=` in any position: statement form folds to Assignment; value form is UpdateExpr. */
 function gateUpdate(node: ts.Node, checker: ts.TypeChecker, mode: Mode): GateResult {
-  // Every read-modify-write grows nothing, but an absent member's write would have to: `c.missing
-  // += 1` reads `undefined` fine and then has nowhere to store. One predicate covers the compound,
-  // logical and update spellings alike — plain `=` is decided in gateBinary, the one assignment
-  // form that does not route through here. In `ts` mode the checker's own TS2339 owns the program
-  // (see gateBinary's `=` arm for why the refusal is js-only).
+  // An absent member's read-modify-write grows the object: `c.missing += 1` reads `undefined` and
+  // stores into the overflow table (docs/VALUE.md §4.24). Only the element spelling over a class,
+  // `c["missing"] += 1`, is still refused. One predicate covers the compound, logical and update
+  // spellings alike — plain `=` is decided in gateBinary, the one assignment form that does not
+  // route through here. In `ts` mode the checker's own TS2339 owns the program (see gateBinary's
+  // `=` arm for why the refusal is js-only).
   const target = ts.isBinaryExpression(node)
     ? node.left
     : ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)
       ? node.operand
       : undefined;
-  if (mode === 'js' && target !== undefined && isAbsentClassMemberWrite(target, checker)) {
+  if (
+    mode === 'js' &&
+    target !== undefined &&
+    ts.isElementAccessExpression(target) &&
+    isAbsentClassMemberWrite(target, checker)
+  ) {
     return notYet('assigning a new property on a class instance is not yet supported', 8);
   }
   return { kind: 'accept' };
@@ -2058,6 +2219,11 @@ function gateDelete(node: ts.DeleteExpression, checker: ts.TypeChecker, mode: Mo
     return notYet('delete of anything but a property access is not yet supported', 5);
   }
   const target = tsTypeToHType(checker.getTypeAtLocation(operand.expression), checker);
+  // A name the layout never declared lives in the overflow table, which can lose it
+  // (docs/VALUE.md §4.24); only a DECLARED slot has no encoding for absence.
+  if (mode === 'js' && isUndeclaredMemberRead(operand, checker)) {
+    return { kind: 'accept' };
+  }
   if (target.kind === 'object') {
     return mode === 'ts'
       ? {
@@ -2149,7 +2315,7 @@ function gateLinkPragmas(sourceFile: ts.SourceFile, mode: Mode, diagnostics: Dia
   let headers = 0;
   for (const pragma of pragmas) {
     if (pragma.kind === 'invalid') {
-      refuse(pragma.line, pragma.col, `malformed @statorLink pragma: ${pragma.reason}`);
+      refuse(pragma.line, pragma.col, `refused @statorLink pragma: ${pragma.reason}`);
     } else if (pragma.kind === 'header') {
       headers += 1;
       if (headers > 1) {
@@ -2561,6 +2727,13 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       // picks an entry point by COUNT, and a spread's count is not its arity.
       if (call.arguments.some((a) => ts.isSpreadElement(a))) {
         return notYet(`a spread argument to console.${method} is not yet supported`, 5);
+      }
+      const placeholder = 'variadic' in shape ? formatRefusal(call, typeChecker) : undefined;
+      if (placeholder !== undefined) {
+        return notYet(
+          `console.${method} ${placeholder.what} is not yet supported`,
+          placeholder.phase,
+        );
       }
       // The five printing methods are variadic (plan.md §8 step 18): any width reaches the
       // `(count, argv)` entry point, so neither bound applies — `console.log()` prints the bare
@@ -3106,6 +3279,11 @@ function gateCall(call: ts.CallExpression, typeChecker: ts.TypeChecker, mode: Mo
       // its receiver through the closure's own properties (plan-notes 310).
       if (isFunctionValueMember(callee.expression, callee.name.text, typeChecker)) {
         return functionMemberResult(mode);
+      }
+      // `info.cb()` where `cb` was grown onto the object (docs/VALUE.md §4.24): get the name
+      // through the overflow table, then call it with the object as receiver.
+      if (mode === 'js' && isUndeclaredMemberRead(callee, typeChecker)) {
+        return { kind: 'accept' };
       }
       return notYet('method calls are not yet supported', 5);
     }
@@ -5954,6 +6132,12 @@ function gateMemberAccess(
       if (shape.methods.some((m) => m.name === access.name.text)) {
         return calleeOnlyMember(access, 'a method');
       }
+      // A name the layout never declared: `js` mode reads it from the overflow table, which
+      // answers `undefined` until a write grows it (docs/VALUE.md §4.24). Calling it is a
+      // get-then-call on the Unknown that read answers.
+      if (mode === 'js' && isUndeclaredMemberRead(access, checker)) {
+        return { kind: 'accept' };
+      }
       return notYet('a property that is not a field of the shape is not yet supported', 5);
     }
     if (isFunctionValueMember(access.expression, access.name.text, checker)) {
@@ -6031,6 +6215,7 @@ function isReadModifyWrite(place: ts.Expression): boolean {
 function gateElementAccess(
   access: ts.ElementAccessExpression,
   checker: ts.TypeChecker,
+  mode: Mode,
 ): GateResult {
   const chained = optionalChainElementReceiver(access, checker);
   if (chained !== undefined) {
@@ -6119,6 +6304,12 @@ function gateElementAccess(
         (ts.TypeFlags.Object | ts.TypeFlags.NonPrimitive)) !==
         0
     ) {
+      return { kind: 'accept' };
+    }
+    // `table[node.kind]` in `js` mode: a computed key on a fixed shape reads and writes by NAME,
+    // through the same coercing entry points -- a declared name answers its slot, any other the
+    // overflow table, or `undefined` (docs/VALUE.md §4.24). A module namespace is no object.
+    if (mode === 'js' && hir.kind === 'object' && hir.namespace !== true && key === null) {
       return { kind: 'accept' };
     }
     return hir.kind === 'unknown' || isDynamicShape(receiver, checker)
@@ -6631,6 +6822,75 @@ function admitsUnserializable(type: ts.Type, checker: ts.TypeChecker): boolean {
       (arm.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 ||
       checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0,
   );
+}
+
+/** The placeholders util.format applies to a format string, each with the index of the argument it
+ * consumes: the runtime's `format_into` loop (Node's `formatWithOptionsInternal`), restated so the
+ * gate can see which value each placeholder meets. `%%` consumes nothing, and once the arguments
+ * run out no placeholder applies (plan.md §9 Task 6.24). */
+function formatPlaceholders(
+  format: string,
+  count: number,
+): readonly { readonly spec: string; readonly index: number }[] {
+  const applied: { spec: string; index: number }[] = [];
+  let consumed = 0;
+  for (let i = 0; i < format.length - 1; i++) {
+    if (format[i] !== '%') {
+      continue;
+    }
+    i += 1;
+    const spec = format[i] ?? '';
+    if (consumed + 1 !== count && spec !== '' && 'sjdOoifc'.includes(spec)) {
+      consumed += 1;
+      applied.push({ spec, index: consumed });
+    }
+  }
+  return applied;
+}
+
+/** The placeholder a console call's literal format string applies to a value the runtime cannot
+ * print as Node does, or `undefined`. A format only the run sees is the runtime's to refuse, and
+ * it does so loudly (STA2005, `format_refused` in jsrt_print.c); this is the same rule, reported
+ * at compile time wherever the checker knows the format and the argument's type. */
+function formatRefusal(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+): { readonly what: string; readonly phase: number } | undefined {
+  const [first] = call.arguments;
+  const format = first === undefined ? undefined : checker.getTypeAtLocation(first);
+  if (call.arguments.length < 2 || format === undefined || !format.isStringLiteral()) {
+    return undefined;
+  }
+  for (const { spec, index } of formatPlaceholders(format.value, call.arguments.length)) {
+    const argument = call.arguments[index];
+    const type = argument === undefined ? undefined : checker.getTypeAtLocation(argument);
+    for (const arm of type === undefined ? [] : type.isUnion() ? type.types : [type]) {
+      // An untyped value is the run's to settle, like every other unknown argument.
+      const primitive =
+        (arm.flags &
+          (ts.TypeFlags.StringLike |
+            ts.TypeFlags.NumberLike |
+            ts.TypeFlags.BooleanLike |
+            ts.TypeFlags.Undefined |
+            ts.TypeFlags.Void |
+            ts.TypeFlags.Null |
+            ts.TypeFlags.Any |
+            ts.TypeFlags.Unknown)) !==
+        0;
+      if (spec === 'o' && !primitive) {
+        return { what: '%o of an object', phase: 5 };
+      }
+      // A function or a class: String() of either is its source text, which no binary carries.
+      if (
+        spec === 's' &&
+        (checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0 ||
+          checker.getSignaturesOfType(arm, ts.SignatureKind.Construct).length > 0)
+      ) {
+        return { what: '%s of a function', phase: 5 };
+      }
+    }
+  }
+  return undefined;
 }
 
 /** A console call the HIR can spell. The method table lives with the node it configures

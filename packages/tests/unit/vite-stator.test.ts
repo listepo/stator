@@ -105,7 +105,7 @@ test(
     const [diagnostic] = result.diagnostics;
     assert.ok(diagnostic !== undefined, result.stderr);
     assert.equal(diagnostic.code, 'STA1214');
-    assert.equal(diagnostic.file, `${root}/node_modules/proxied/index.js`);
+    assert.equal(diagnostic.file, join(root, 'node_modules/proxied/index.js'));
     assert.equal(diagnostic.line, 2);
   },
 );

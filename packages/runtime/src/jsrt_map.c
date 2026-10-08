@@ -411,57 +411,72 @@ static bool next_key(jsrt_value s, uint32_t *at, jsrt_value *key) {
   return false;
 }
 
+/* Keys of `walk` whose membership in `test` equals `want`, in `walk`'s insertion order. */
+static void add_where(jsrt_value out, jsrt_value walk, jsrt_value test, bool want) {
+  uint32_t at = 0;
+  jsrt_value key;
+  while (next_key(walk, &at, &key)) {
+    if (jsrt_map_has(test, key) == want) {
+      jsrt_set_add(out, key);
+    }
+  }
+}
+
+/* The result set is not reachable from either operand; pop the frame that rooted it. */
+#define SET_DONE()                         \
+  do {                                     \
+    const jsrt_value _out = JSRT_LOCAL(0); \
+    JSRT_FRAME_POP();                      \
+    return _out;                           \
+  } while (0)
+
 jsrt_value jsrt_set_union(jsrt_value a, jsrt_value b) {
-  jsrt_value out = jsrt_set_new();
-  copy_keys(out, a);
-  copy_keys(out, b);
-  return out;
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
+  copy_keys(JSRT_LOCAL(0), a);
+  copy_keys(JSRT_LOCAL(0), b);
+  SET_DONE();
 }
 
 jsrt_value jsrt_set_intersection(jsrt_value a, jsrt_value b) {
   /* §24.2.4.9: the walk runs over the receiver only while the receiver is no larger than the
    * argument; otherwise it runs over the argument, and the RESULT ORDER follows it. */
   const bool walk_a = set_count(a) <= set_count(b);
-  const jsrt_value walk = walk_a ? a : b;
-  const jsrt_value test = walk_a ? b : a;
-  jsrt_value out = jsrt_set_new();
-  uint32_t at = 0;
-  jsrt_value key;
-  while (next_key(walk, &at, &key)) {
-    if (jsrt_map_has(test, key)) {
-      jsrt_set_add(out, key);
-    }
-  }
-  return out;
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
+  add_where(JSRT_LOCAL(0), walk_a ? a : b, walk_a ? b : a, true);
+  SET_DONE();
 }
 
 jsrt_value jsrt_set_difference(jsrt_value a, jsrt_value b) {
-  jsrt_value out = jsrt_set_new();
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
   uint32_t at = 0;
   jsrt_value key;
   while (next_key(a, &at, &key)) {
     if (!jsrt_map_has(b, key)) {
-      jsrt_set_add(out, key);
+      jsrt_set_add(JSRT_LOCAL(0), key);
     }
   }
-  return out;
+  SET_DONE();
 }
 
 jsrt_value jsrt_set_symmetric_difference(jsrt_value a, jsrt_value b) {
-  jsrt_value out = jsrt_set_new();
-  copy_keys(out, a);
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
+  copy_keys(JSRT_LOCAL(0), a);
   /* Membership is tested against A, not against the result: the result is losing keys as this
    * runs, and the spec asks whether the RECEIVER had the key. */
   uint32_t at = 0;
   jsrt_value key;
   while (next_key(b, &at, &key)) {
     if (jsrt_map_has(a, key)) {
-      (void)jsrt_map_delete(out, key);
+      (void)jsrt_map_delete(JSRT_LOCAL(0), key);
     } else {
-      jsrt_set_add(out, key);
+      jsrt_set_add(JSRT_LOCAL(0), key);
     }
   }
-  return out;
+  SET_DONE();
 }
 
 bool jsrt_set_is_subset_of(jsrt_value a, jsrt_value b) {

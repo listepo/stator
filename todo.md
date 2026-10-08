@@ -1,0 +1,6 @@
+- T15. Required root docs
+- T16. Systemic `jsrt_shape_key` leak on every dynamic property read/write
+- T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion
+- T18. GC rooting hazards: boxed values held in C locals across allocating calls
+- T19. Small runtime fixes: RegExp NULL-capture and `replace_impl` double scan
+- T20. Tests for the runtime edges found by the audit

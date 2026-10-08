@@ -28,7 +28,7 @@ import {
   DEFAULT_BUNDLER,
   loadFrontend,
   lowerFrontend,
-  mapVendorDiagnostics,
+  reportedDiagnostics,
 } from './bundler.ts';
 import { diagnosticLines, INK_COLORS, type InkColor, type Line, print } from './render.ts';
 
@@ -154,7 +154,7 @@ export async function explainFile(
   const { program } = frontend;
   // The same mapping `build` applies (T12.1 step 5): a vendor diagnostic names the package file.
   const classify = (diagnostics: readonly Diagnostic[]): Explanation | null =>
-    classifyDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
+    classifyDiagnostics(reportedDiagnostics(diagnostics, frontend.vendor));
   const verdictFromDiagnostics = classify([
     ...frontend.diagnostics,
     ...withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)),
@@ -190,8 +190,9 @@ export async function explainFile(
   if (module === null) {
     // Lowering gave up without saying why. That is a bug, and reporting `static` here would be a
     // false claim about a program that does not compile.
-    await print(diagnosticLines(diagnostics), process.stderr);
-    return { verdict: 'error', code: 'STA4021', diagnostics: diagnosticReports(diagnostics) };
+    const reported = reportedDiagnostics(diagnostics, frontend.vendor);
+    await print(diagnosticLines(reported), process.stderr);
+    return { verdict: 'error', code: 'STA4021', diagnostics: diagnosticReports(reported) };
   }
 
   return {

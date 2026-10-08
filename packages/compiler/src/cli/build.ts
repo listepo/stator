@@ -9,7 +9,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { emitC, type LibraryEmit } from '../codegen/index.ts';
@@ -17,6 +17,7 @@ import { collectLinkFlags } from '../frontend/extern.ts';
 import {
   collectUnitExports,
   defaultUnitName,
+  exportSymbols,
   exportVersionDefinition,
   renderHeader,
   sanitizeUnitName,
@@ -27,7 +28,7 @@ import { isStdSourceFile, STD_ROOT } from '../frontend/std.ts';
 import { verifyHir } from '../hir/verify.ts';
 import { optimize } from '../passes/index.ts';
 import { BuildError, type Diagnostic } from '../support/diagnostics.ts';
-import { runtimeFlavor } from '../support/features.ts';
+import { type RuntimeFlavor, runtimeFlavor, withRuntimeFlavor } from '../support/features.ts';
 import { packageRoot } from '../support/package-root.ts';
 import { withSpan } from '../support/telemetry.ts';
 import { isStaleLdSystemLibFailure, staleLdHint, staleLdRetryArgs } from '../support/toolchain.ts';
@@ -36,9 +37,11 @@ import {
   DEFAULT_BUNDLER,
   loadFrontend,
   lowerFrontend,
-  mapVendorDiagnostics,
+  reportedDiagnostics,
 } from './bundler.ts';
+import { type NamedPath, refuseAliasedOutputs, requireWritable, writeOutput } from './outputs.ts';
 import { diagnosticLines, INK_COLORS, print, type Line } from './render.ts';
+import { libraryName, objectFormat, pkgConfigPath, writeStaticLibrary } from './library.ts';
 
 type Mode = 'ts' | 'js';
 
@@ -60,15 +63,20 @@ export interface BuildOptions {
    * command-line order. The `.d.ts` `@statorLink` pragma flags travel inside the compiled
    * result instead — see `compileToC` — and the link deduplicates libraries across all three
    * sources while preserving order. Accepted but inert with `--emit-header`: nothing links,
-   * so there is no line to join (docs/FFI.md §8). */
+   * so there is no line to join (docs/FFI.md §8). Under `--emit=lib` they join the `.pc`. */
   readonly linkFlags?: readonly string[];
   /** Write a C header for the unit's exports to this path (docs/FFI.md §8, plan §10 Task 7.2
    * steps 1–2) and compile a relocatable object instead of linking an executable: a unit
    * exposed to C usually has no `main`, and linking is the consumer's job. Export refusals
    * (STA1122–STA1124) stop the build before anything is written. */
   readonly emitHeader?: string;
+  /** `--emit=lib` (plan §10 Task 7.4, docs/FFI.md §8): with `emitHeader`, `out` is
+   * `lib<name>.a` — the unit prelinked with a private runtime — and `lib<name>.pc` is written
+   * beside it. Without `emitHeader` it is STA0004. */
+  readonly emitLib?: boolean;
   /** `--unit-name` override for the `stator_<unit>_<name>` mangling; defaults to the entry's
-   * file basename. Sanitized to a C identifier wherever it came from. */
+   * file basename, sanitized to a C identifier. An explicit name must already be one
+   * (`^[A-Za-z0-9_]+$`), else STA0004. */
   readonly unitName?: string;
   /** `js` mode: the bundler for package imports and CommonJS project files (docs/BUNDLER.md
    * §5). Default `vite`; it loads only when the graph needs it. */
@@ -133,26 +141,46 @@ async function emitDiagnosticLines(lines: readonly Line[]): Promise<void> {
   await print(lines, process.stderr);
 }
 
-/** The C runtime (headers + built archive) is a sibling package (`support/package-root.ts`).
- * `STATOR_RUNTIME_ROOT` overrides the layout. A wrong guess is caught at link time (missing
- * archive). */
-const RUNTIME_ROOT = packageRoot('STATOR_RUNTIME_ROOT', 'runtime', 'include');
-const RUNTIME_INCLUDE = join(RUNTIME_ROOT, 'include');
-
-/** `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so CI can run
- * the SAME golden fixtures under ASan/UBSan (plan.md §5 Task 2.7). The sanitizer has to be on both
- * the archive and the final link or the instrumentation is only half applied, which is why one
- * variable controls both rather than exposing a flags knob. */
-const FLAVOR = runtimeFlavor();
-const SANITIZED = FLAVOR === 'asan';
 const RUNTIME_DIR_OF = { default: 'build', asan: 'build-asan', intl: 'build-intl' } as const;
 const RUNTIME_JUST_RECIPE = {
   default: 'runtime',
   asan: 'runtime-asan',
   intl: 'runtime-intl',
 } as const;
-const RUNTIME_LIB_DIR = join(RUNTIME_ROOT, RUNTIME_DIR_OF[FLAVOR]);
-const RUNTIME_ARCHIVE = join(RUNTIME_LIB_DIR, 'libjsrt.a');
+
+/** The runtime one build compiles and links against. Resolved once per `build()` call, never at
+ * module load: the CLI applies `.env` after its imports run, and an in-process caller may set
+ * `STATOR_RUNTIME` around one build, so a value frozen at import time would link one flavor
+ * while the gate admitted another (plan.md §9 Task 6.21, QA audit F3).
+ *
+ * The C runtime (headers + built archive) is a sibling package (`support/package-root.ts`);
+ * `STATOR_RUNTIME_ROOT` overrides the layout, and a wrong guess is caught at link time (missing
+ * archive). `STATOR_RUNTIME=asan` links the sanitized archive and passes the matching flags, so
+ * CI can run the SAME golden fixtures under ASan/UBSan (plan.md §5 Task 2.7). The sanitizer has to
+ * be on both the archive and the final link or the instrumentation is only half applied, which is
+ * why one variable controls both rather than exposing a flags knob. */
+export interface Runtime {
+  readonly flavor: RuntimeFlavor;
+  readonly sanitized: boolean;
+  readonly root: string;
+  readonly include: string;
+  readonly libDir: string;
+  readonly archive: string;
+}
+
+export function resolveRuntime(): Runtime {
+  const flavor = runtimeFlavor();
+  const root = packageRoot('STATOR_RUNTIME_ROOT', 'runtime', 'include');
+  const libDir = join(root, RUNTIME_DIR_OF[flavor]);
+  return {
+    flavor,
+    sanitized: flavor === 'asan',
+    root,
+    include: join(root, 'include'),
+    libDir,
+    archive: join(libDir, 'libjsrt.a'),
+  };
+}
 /** The std backings (plan.md §11c T11.2): one archive for every runtime flavor — ReleaseSafe Zig
  * over libc, with no dependency on libjsrt.a (packages/std/justfile). Linked only into a program
  * whose module graph holds a std file. */
@@ -169,8 +197,8 @@ const SANITIZER_FLAGS = ['-O1', '-g', '-fsanitize=address,undefined'];
  * the generated C into bitcode and the runtime inlines into it. Absent means an archive built
  * before the recipe wrote one; the link then fails the way it always did, which is the honest
  * outcome. */
-function extraLinkFlags(): string[] {
-  const recorded = join(RUNTIME_LIB_DIR, 'link-flags.txt');
+function extraLinkFlags(runtime: Runtime): string[] {
+  const recorded = join(runtime.libDir, 'link-flags.txt');
   if (!existsSync(recorded)) {
     return [];
   }
@@ -178,58 +206,122 @@ function extraLinkFlags(): string[] {
   return flags === '' ? [] : flags.split(/\s+/);
 }
 
+/** An explicit `--unit-name` is refused rather than sanitized: the mangling is not injective
+ * (`my-lib` and `my_lib` would share every symbol), so only a name that is already safe can be
+ * the user's. The default, derived from a file name the user did not choose for C, is sanitized. */
+const UNIT_NAME = /^[A-Za-z0-9_]+$/;
+
 /** Returns the process exit code: 0 on success, 1 if the program was rejected. */
 export async function build(options: BuildOptions): Promise<number> {
-  // Sanitized once here — including an explicit `--unit-name`, which the shell will carry
-  // verbatim — so the header and every mangled symbol are valid C whatever was spelled.
+  if (options.unitName !== undefined && !UNIT_NAME.test(options.unitName)) {
+    throw new BuildError(
+      'STA0004',
+      `unit name "${options.unitName}" (--unit-name, config "unitName") may hold only letters, ` +
+        'digits and _ — it becomes part of every exported C symbol',
+    );
+  }
+  const lib = options.emitLib === true ? libraryOutputs(options) : undefined;
   const unit =
     options.emitHeader === undefined
       ? undefined
-      : sanitizeUnitName(options.unitName ?? defaultUnitName(options.entry));
-  const compiled = await compileToC(
-    options.entry,
-    options.mode,
-    unit,
-    options.bundler,
-    options.node ?? false,
+      : (options.unitName ?? sanitizeUnitName(defaultUnitName(options.entry)));
+  // Every file `build` writes, named the way its diagnostics name them. `<out>.c` is one only
+  // when a C compiler runs after it and `--keep-c` keeps it.
+  const out: NamedPath = { role: '-o', path: options.out };
+  const header: NamedPath | undefined =
+    options.emitHeader === undefined
+      ? undefined
+      : { role: '--emit-header', path: options.emitHeader };
+  const keptC: NamedPath | undefined =
+    options.keepC && !options.emitCOnly
+      ? { role: 'the --keep-c file', path: `${options.out}.c` }
+      : undefined;
+  const outputs = [out, header, keptC, lib?.pc].filter((target) => target !== undefined);
+  // Refused before compiling, so a slip like `-o app.ts` costs nothing and destroys nothing. The
+  // whole program's sources are known only after the frontend; they are checked again below,
+  // still before the first write.
+  refuseAliasedOutputs(outputs, [{ role: 'the entry file', path: options.entry }]);
+  if (!options.emitCOnly) {
+    requireWritable(out);
+  }
+  // One resolution feeds the gate (through the pinned flavor) and the link, so the surface the
+  // gate admits is the surface the linked archive carries.
+  const runtime = resolveRuntime();
+  const compiled = await withRuntimeFlavor(runtime.flavor, () =>
+    compileToC(options.entry, options.mode, unit, options.bundler, options.node ?? false),
   );
   if (compiled === null) {
     return 1;
   }
+  refuseAliasedOutputs(
+    outputs,
+    compiled.inputs.map((path) => ({ role: 'a source file of the program', path })),
+  );
 
   if (options.emitCOnly) {
-    writeFileSync(options.out, compiled.c, 'utf8');
-    if (options.emitHeader !== undefined) {
-      writeFileSync(options.emitHeader, compiled.header ?? '', 'utf8');
+    writeOutput(out, compiled.c);
+    if (header !== undefined) {
+      writeOutput(header, compiled.header ?? '');
     }
     return 0;
   }
 
-  if (options.emitHeader !== undefined) {
-    writeFileSync(options.emitHeader, compiled.header ?? '', 'utf8');
+  if (header !== undefined) {
+    if (lib !== undefined && compiled.exportSurface?.needsJsrtValue === true) {
+      throw new BuildError(
+        'STA1220',
+        `unit "${unit ?? ''}" has an export that crosses as jsrt_value, which --emit=lib does ` +
+          "not support yet: the library's runtime is private, so a consumer has no runtime API " +
+          'to make or read one (docs/FFI.md §8) — keep plain C types, or use --emit-header ' +
+          'without --emit=lib',
+      );
+    }
+    writeOutput(header, compiled.header ?? '');
     // A unit exposed to C links at the consumer, not here: `clang -c`, no `-ljsrt`, no
     // extern link flags. The init, stubs, and error cell (Task 7.2 steps 3–5) are already in
     // the C; only `main` is absent, which is what makes this an object and not a program.
-    const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
-    const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
+    // `--emit=lib` prelinks that object with the runtime instead of handing it over.
+    const scratch = mkdtempSync(join(tmpdir(), 'stator-'));
+    const cPath = keptC?.path ?? join(scratch, 'module.c');
     try {
-      writeFileSync(cPath, compiled.c, 'utf8');
-      compileObject(cPath, options.out, options.opt ?? 2);
+      writeOutput(keptC ?? { role: 'the C file', path: cPath }, compiled.c);
+      if (lib === undefined) {
+        compileObject(cPath, options.out, options.opt ?? 2, runtime);
+        return 0;
+      }
+      const object = join(scratch, 'unit.o');
+      compileObject(cPath, object, options.opt ?? 2, runtime);
+      requireLinkArchives(compiled.std, runtime);
+      writeStaticLibrary({
+        cc: selectCC(runtime),
+        object,
+        archives: [...(compiled.std ? [STD_ARCHIVE] : []), runtime.archive],
+        symbols: compiled.exportSurface?.symbols ?? [],
+        out,
+        pc: lib.pc,
+        header: header.path,
+        unit: unit ?? '',
+        libs: [
+          ...(runtime.sanitized ? ['-fsanitize=address,undefined'] : []),
+          ...systemLinkFlags(runtime, [...compiled.linkFlags, ...(options.linkFlags ?? [])]),
+        ],
+        scratch,
+        format: lib.format,
+        debug: runtime.sanitized,
+      });
       return 0;
     } finally {
-      if (scratch !== null) {
-        rmSync(scratch, { recursive: true, force: true });
-      }
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
   // The .c goes beside the executable when it is being kept, so `--keep-c` produces a file the
   // user can actually find; otherwise it lives in a temp dir that is removed on every exit path.
   const scratch = options.keepC ? null : mkdtempSync(join(tmpdir(), 'stator-'));
-  const cPath = options.keepC ? `${options.out}.c` : join(scratch ?? '', 'module.c');
+  const cPath = keptC?.path ?? join(scratch ?? '', 'module.c');
 
   try {
-    writeFileSync(cPath, compiled.c, 'utf8');
+    writeOutput(keptC ?? { role: 'the C file', path: cPath }, compiled.c);
     // Default -O2; STATOR_OPT=0 / --opt=0 skips most clang opts for faster iterate compiles.
     // Per-module parallel .o cache stays a follow-up (plan.md §12).
     linkExecutable(
@@ -238,6 +330,8 @@ export async function build(options: BuildOptions): Promise<number> {
       options.opt ?? 2,
       [...compiled.linkFlags, ...(options.linkFlags ?? [])],
       compiled.std,
+      runtime,
+      compiled.flavor,
     );
     return 0;
   } finally {
@@ -245,6 +339,39 @@ export async function build(options: BuildOptions): Promise<number> {
       rmSync(scratch, { recursive: true, force: true });
     }
   }
+}
+
+/** `--emit=lib`'s refusals, before anything is compiled, and the `.pc` output it adds. */
+function libraryOutputs(options: BuildOptions): {
+  readonly pc: NamedPath;
+  readonly format: 'macho' | 'elf';
+} {
+  if (options.emitHeader === undefined) {
+    throw new BuildError(
+      'STA0004',
+      '--emit=lib requires --emit-header=<h> (config "emitHeader"): the header is the ' +
+        "library's C surface",
+    );
+  }
+  const name = libraryName(options.out);
+  if (name === undefined) {
+    throw new BuildError(
+      'STA0004',
+      `--emit=lib requires -o lib<name>.a, not "${options.out}" — the consumer links it as -l<name>`,
+    );
+  }
+  const format = objectFormat(process.platform);
+  if (format === undefined) {
+    throw new BuildError(
+      'STA1219',
+      '--emit=lib is not yet supported on Windows (docs/FFI.md §8) — use --emit-header for ' +
+        'an object, linked with the runtime archive',
+    );
+  }
+  return {
+    pc: { role: 'the --emit=lib pkg-config file', path: pkgConfigPath(options.out, name) },
+    format,
+  };
 }
 
 /** Source text compiled to C, plus what the link owes the extern surface: the `@statorLink`
@@ -256,7 +383,17 @@ export interface CompiledC {
   readonly linkFlags: readonly string[];
   /** Whether the module graph holds a `std/*` file, so the link owes `libjsrt_std.a`. */
   readonly std: boolean;
+  /** The runtime flavor the gate admitted builtins against; the link must use the same one. */
+  readonly flavor: RuntimeFlavor;
+  /** Every source file of the program, so `build` can refuse an output that names one. */
+  readonly inputs: readonly string[];
   readonly header?: string;
+  /** The unit's C symbols (`exportSymbols`) and whether any crosses as `jsrt_value`, present
+   * with `header`: `--emit=lib` keeps exactly these global (plan §10 Task 7.4). */
+  readonly exportSurface?: {
+    readonly symbols: readonly string[];
+    readonly needsJsrtValue: boolean;
+  };
 }
 
 /** The pure half: source text in, C text out, diagnostics to stderr. Shared with `explain`, and
@@ -293,11 +430,13 @@ async function compileToCInner(
   const { program } = frontend;
   // Every stage's diagnostics in the vendor module are mapped before they print (T12.1 step 5).
   const report = (diagnostics: readonly Diagnostic[]): Promise<boolean> =>
-    reportDiagnostics(mapVendorDiagnostics(diagnostics, frontend.vendor));
+    reportDiagnostics(reportedDiagnostics(diagnostics, frontend.vendor));
   if (await report(frontend.diagnostics)) {
     return null;
   }
 
+  // Read where the gate reads it (`intlEnabled`), so the link can check it got the same answer.
+  const flavor = runtimeFlavor();
   if (await report(withSpan('frontend/gate', {}, () => gateProgram(program, mode, node)))) {
     return null;
   }
@@ -313,6 +452,7 @@ async function compileToCInner(
   // before the lowering, so no object or header is written for a unit C cannot see.
   let header: string | undefined;
   let library: LibraryEmit | undefined;
+  let exportSurface: CompiledC['exportSurface'];
   if (unit !== undefined) {
     const unitExports = withSpan('frontend/export', {}, () =>
       collectUnitExports(entryFile, program.getTypeChecker(), unit, mode),
@@ -322,6 +462,10 @@ async function compileToCInner(
     }
     header = renderHeader(unitExports);
     library = { unit, exports: unitExports };
+    exportSurface = {
+      symbols: exportSymbols(unitExports),
+      needsJsrtValue: unitExports.needsJsrtValue,
+    };
   }
 
   // The module graph: every reachable file, dependencies first, cycles refused (STA3001). The
@@ -371,7 +515,10 @@ async function compileToCInner(
     c: emitC(optimized, library) + (unit === undefined ? '' : exportVersionDefinition(unit)),
     linkFlags: withSpan('frontend/link-flags', {}, () => collectLinkFlags(program)),
     std: order.some((file) => isStdSourceFile(file.fileName)),
+    flavor,
+    inputs: program.getSourceFiles().map((file) => file.fileName),
     ...(header !== undefined && { header }),
+    ...(exportSurface !== undefined && { exportSurface }),
   }));
 }
 
@@ -389,9 +536,11 @@ function linkExecutable(
   opt: OptLevel,
   externFlags: readonly string[],
   std: boolean,
+  runtime: Runtime,
+  gateFlavor: RuntimeFlavor,
 ): void {
   withSpan('link/clang', {}, () => {
-    link(cPath, out, opt, externFlags, std);
+    link(cPath, out, opt, externFlags, std, runtime, gateFlavor);
   });
 }
 
@@ -420,10 +569,11 @@ export function dedupLinkLibs(flags: readonly string[]): string[] {
 // initialization on the current macOS host. Match justfile's sanitizer fallback so the
 // generated golden binaries use the same compiler as the sanitized runtime archive. An
 // explicit compiler-path CC remains authoritative for callers testing another toolchain.
-function selectCC(): string {
+// Exported for the `--emit=lib` consumer test, whose link must use the same compiler.
+export function selectCC(runtime: Runtime): string {
   return (
     process.env['CC'] ??
-    (SANITIZED && process.platform === 'darwin' && existsSync('/usr/bin/clang')
+    (runtime.sanitized && process.platform === 'darwin' && existsSync('/usr/bin/clang')
       ? '/usr/bin/clang'
       : 'clang')
   );
@@ -485,13 +635,13 @@ function runClangCaptured(cc: string, args: readonly string[]): CapturedClang {
 /** Compile generated C to a relocatable object for a C consumer (`--emit-header`, plan §10
  * Task 7.2 step 1): `clang -c`, so `-o` names an object, not an executable. No archive, no
  * link flags — linking is the consumer's job once steps 3–5 emit the stubs and the init. */
-function compileObject(cPath: string, out: string, opt: OptLevel): void {
-  const cc = selectCC();
+function compileObject(cPath: string, out: string, opt: OptLevel, runtime: Runtime): void {
+  const cc = selectCC(runtime);
   const result = runClang(cc, [
     '-std=c11',
-    ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
+    ...(runtime.sanitized ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
     '-I',
-    RUNTIME_INCLUDE,
+    runtime.include,
     '-c',
     cPath,
     '-o',
@@ -508,6 +658,19 @@ function compileObject(cPath: string, out: string, opt: OptLevel): void {
         'keep the C with `--keep-c` and report it',
     );
   }
+  requireProduced(cc, out);
+}
+
+/** A zero exit is not proof of an output: a `CC` that is not clang (or a wrapper that swallows
+ * the call) can succeed and write nothing, and `build` must not report success for a file that
+ * is not there (QA audit F4). */
+function requireProduced(cc: string, out: string): void {
+  if (!existsSync(out)) {
+    throw new BuildError(
+      'STA0009',
+      `C compiler "${cc}" exited 0 but wrote no "${out}" — check that CC names a working clang`,
+    );
+  }
 }
 
 /** The clang link line, pure so a test can read it: the generated C, `libjsrt_std.a` exactly
@@ -519,6 +682,7 @@ export function linkArguments(
   opt: OptLevel,
   externFlags: readonly string[],
   std: boolean,
+  runtime: Runtime = resolveRuntime(),
 ): string[] {
   // Tree-shaking builtins (plan.md Task 3.12): builtins live in libjsrt.a, and the archive links
   // at .o granularity -- one referenced symbol drags in every builtin its object file holds. The
@@ -527,32 +691,39 @@ export function linkArguments(
   // compile time (the justfile does the same for the archive's own objects). Sanitized
   // builds skip it -- ASan's global registration arrays are exactly the kind of unreferenced
   // section --gc-sections is documented to break.
-  const shakeFlags = SANITIZED
+  const shakeFlags = runtime.sanitized
     ? []
     : process.platform === 'darwin'
       ? ['-Wl,-dead_strip']
       : ['-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections'];
   return [
     '-std=c11',
-    ...(SANITIZED ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
+    ...(runtime.sanitized ? SANITIZER_FLAGS : [`-O${String(opt)}`]),
     ...shakeFlags,
     '-I',
-    RUNTIME_INCLUDE,
+    runtime.include,
     cPath,
     // The std archive before the runtime's, though neither depends on the other: the order a
     // static link reads archives is load-bearing in general, and fixing it here keeps it stable.
     ...(std ? [STD_ARCHIVE] : []),
     '-L',
-    RUNTIME_LIB_DIR,
+    runtime.libDir,
     '-ljsrt',
     // The archive states its own system dependencies in `link-flags.txt` (SYS_LIBS, plan-notes
     // 122). Repeating one here is not a safety net -- it made every link warn about a duplicate.
     // Extern surface flags last, in carrier order (pragma files in program order, then the CLI
     // escape hatch), duplicates dropped first-wins: dependents precede their dependencies.
-    ...dedupLinkLibs([...extraLinkFlags(), ...externFlags]),
+    ...systemLinkFlags(runtime, externFlags),
     '-o',
     out,
   ];
+}
+
+/** What a link owes beyond the archives: the runtime's recorded system flags, then the extern
+ * surface's, deduplicated. The binary link and the `--emit=lib` `.pc` file both read it, so a
+ * library's consumer links exactly what the binary would have (plan §10 Task 7.4 step 2). */
+function systemLinkFlags(runtime: Runtime, externFlags: readonly string[]): string[] {
+  return dedupLinkLibs([...extraLinkFlags(runtime), ...externFlags]);
 }
 
 /** STA0011 for a missing archive (the runtime's, or the std library's for a `std/*` importer),
@@ -571,28 +742,44 @@ function requireArchive(
   }
 }
 
+/** The archives a link (or a `--emit=lib` prelink) reads: the runtime's, and the std library's
+ * for a `std/*` importer. */
+function requireLinkArchives(std: boolean, runtime: Runtime): void {
+  requireArchive('runtime', runtime.archive, runtime.root, RUNTIME_JUST_RECIPE[runtime.flavor]);
+  if (std) {
+    requireArchive('std', STD_ARCHIVE, STD_ROOT, 'std');
+  }
+}
+
 function link(
   cPath: string,
   out: string,
   opt: OptLevel,
   externFlags: readonly string[],
   std: boolean,
+  runtime: Runtime,
+  gateFlavor: RuntimeFlavor,
 ): void {
-  requireArchive('runtime', RUNTIME_ARCHIVE, RUNTIME_ROOT, RUNTIME_JUST_RECIPE[FLAVOR]);
-  if (std) {
-    requireArchive('std', STD_ARCHIVE, STD_ROOT, 'std');
+  // An invariant, not a user error: `build` pins the flavor it resolved around the gate, so a
+  // mismatch means some path read the environment again (QA audit F3).
+  if (gateFlavor !== runtime.flavor) {
+    throw new Error(
+      `the gate admitted the ${gateFlavor} runtime surface but the link uses the ${runtime.flavor} archive`,
+    );
   }
+  requireLinkArchives(std, runtime);
 
   // conda-clang 21.1.8's Darwin ASan runtime deadlocks during dyld's early malloc
   // initialization on the current macOS host (see selectCC above).
-  const cc = selectCC();
-  const args = linkArguments(cPath, out, opt, externFlags, std);
+  const cc = selectCC(runtime);
+  const args = linkArguments(cPath, out, opt, externFlags, std, runtime);
   const first = runClangCaptured(cc, args);
   const startError = clangStartError(cc, first);
   if (startError !== undefined) {
     throw startError;
   }
   if (first.status === 0) {
+    requireProduced(cc, out);
     return;
   }
 
@@ -604,7 +791,7 @@ function link(
   const retry = staleLdRetryArgs(args, first.stderr, {
     darwin: process.platform === 'darwin',
     defaultCc: process.env['CC'] === undefined,
-    sanitized: SANITIZED,
+    sanitized: runtime.sanitized,
   });
   if (retry !== undefined) {
     const second = runClangCaptured(cc, retry.args);
@@ -613,6 +800,7 @@ function link(
       throw secondStartError;
     }
     if (second.status === 0) {
+      requireProduced(cc, out);
       return;
     }
     process.stderr.write(second.stdout);

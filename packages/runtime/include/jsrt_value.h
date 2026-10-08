@@ -100,10 +100,30 @@ static inline bool jsrt_fits_int32(double d) {
 
 /* --------------------------------------------------------------- strings */
 
+/* A string is a header and a view of its code units (docs/VALUE.md §2). `data` points either just
+ * past the header, where a flat string keeps its own units, or into an append buffer that several
+ * strings share: each of those is a prefix of the buffer, so appending past every prefix's end
+ * changes none of them, and `s += x` in a loop extends the buffer instead of copying the whole
+ * string again (plan.md §9 Task 6.23, F12). Contents never change once a string is visible.
+ * Construction goes through jsrt_string_alloc and jsrt_string_concat (jsrt_string_mem.zig). */
 typedef struct JSString {
-  uint32_t length;  /* UTF-16 code units -- not bytes, not code points */
-  uint16_t data[];  /* flexible array member; NOT NUL-terminated */
+  uint32_t length;   /* UTF-16 code units -- not bytes, not code points */
+  uint32_t flags;    /* JSRT_STRING_* */
+  uint16_t *data;    /* NOT NUL-terminated */
+  void *buffer;      /* the append buffer `data` points into, or NULL for a flat string */
 } JSString;
+
+/* The string came out of a concatenation: the next concatenation onto it reserves room to grow. */
+#define JSRT_STRING_GROWN 1u
+
+/* Maximum string length in code units: 2^29 - 24 = 536870888, matching V8's `String::kMaxLength`
+ * on 64-bit (the pinned Node's limit; plan-notes 251 A12). An earlier cap of 2^31-1 (plan-notes
+ * 203) disagreed with Node: lengths between the two caps must throw
+ * `RangeError: Invalid string length`. */
+#define JSRT_MAX_STRING_LENGTH 536870888u
+
+/* A flat string of `len` code units for the caller to fill before it is visible anywhere. */
+JSString *jsrt_string_alloc(uint32_t len);
 
 /* Generated C touches string contents only through these two, never ->data[i] directly, so that
  * rope/small-string representations stay a runtime-only change (docs/VALUE.md §2). */
@@ -188,16 +208,23 @@ int32_t jsrt_to_int32(double d);
 /* ToUint32: convert a double to uint32_t using the spec algorithm. */
 uint32_t jsrt_to_uint32(double d);
 
+/* ToPrimitive's preferred type (ECMA-262 §7.1.1): `string` tries `toString` first, the other two
+ * `valueOf` first. `default` is what `+` and `==` pass; only a Date tells it from `number`. */
+typedef enum { JSRT_HINT_DEFAULT, JSRT_HINT_NUMBER, JSRT_HINT_STRING } jsrt_hint;
+
 /* ToPrimitive (ECMA-262 §7.1.1, docs/NUMERIC.md §7): the conversion every other abstract
  * operation runs FIRST when handed an object. A primitive passes through untouched.
  *
- * There is no `hint` parameter, and that is a fact about the subset rather than a shortcut: the
- * hint only selects whether `valueOf` or `toString` is tried first, and this subset has neither a
- * user-written `valueOf` nor a `Symbol.toPrimitive` (STA1212, Phase 5). The inherited
- * `Object.prototype.valueOf` returns the object itself -- not a primitive -- so BOTH hints fall
- * through to `toString` for every object that exists here, and the two hints cannot be told apart.
- * Adding user methods is what makes the hint observable; add the parameter then, not before. */
-jsrt_value jsrt_to_primitive(jsrt_value v);
+ * An object runs OrdinaryToPrimitive (§7.1.1.1): the two methods in the hint's order, the one the
+ * object actually has -- its own, its class's, a prototype's (jsrt_user_get) -- or else the builtin
+ * prototype's. The first call that answers a primitive wins; a method that is not callable is
+ * skipped; when neither answers a primitive the result is Node's `TypeError: Cannot convert
+ * object to primitive value`. A Date's default hint is `string` (§21.4.4.45). There is no
+ * `Symbol.toPrimitive`: symbols are STA1212 (Phase 5), so no object can carry one.
+ *
+ * User code runs here, so the answer may be an exception: it is left pending and the value is
+ * `undefined`, which the caller must not use before checking jsrt_pending(). */
+jsrt_value jsrt_to_primitive(jsrt_value v, jsrt_hint hint);
 
 /* ToNumber: convert a jsrt_value to a double. An object is run through ToPrimitive first.
  * Handles double, boolean, null, undefined, string, and Int32. */
@@ -350,16 +377,31 @@ static inline uint32_t jsrt_class_key_slot(const JSRTClass *cls, uint32_t i) {
 
 struct JSRTClosure;
 
+struct JSRTDynObject;
+
 /* Unlike JSRTArray, the elements ARE a flexible member here, and that is safe for the reason it is
- * unsafe there: an object's slot count is fixed by its class at construction and the subset has no
- * way to add a property, so this allocation never grows and therefore never moves. If dynamic
- * property addition ever lands, it does NOT get to grow this -- it gets an overflow table, or the
- * header's address stops being stable and every boxed reference to it becomes wrong. */
+ * unsafe there: an object's slot count is fixed by its class at construction, so this allocation
+ * never grows and therefore never moves. A property the class never declared does NOT grow it: it
+ * lands in `extras`, a dynamic object created on the first such write (docs/VALUE.md §4.24), the
+ * way a function's own properties land in JSRTClosure::props. Growing `fields` instead would move
+ * the header and make every boxed reference to it wrong. */
 typedef struct JSRTObject {
   const JSRTClass *cls;
   bool frozen; /* Object.freeze: writes throw TypeError (Phase 5 step 11) */
+  /* The undeclared properties, in insertion order after every declared one; NULL until the first
+   * write of a name the class does not declare. */
+  struct JSRTDynObject *extras;
   jsrt_value fields[];
 } JSRTObject;
+
+/* True exactly for a value laid out as a JSRTObject: a JSRT_TAG_OBJECT that is neither a dynamic
+ * object nor one of the runtime's own layouts (Map, Date, RegExp, ...) that only share its `cls`
+ * prefix. Only such a value has `frozen`, `extras` and `fields`. */
+bool jsrt_is_fixed_object(jsrt_value v);
+
+/* A fixed object's undeclared properties as a dynamic object, or NULL when it has none -- and for
+ * any value that is not a fixed object, so a caller need not ask jsrt_is_fixed_object first. */
+struct JSRTDynObject *jsrt_fixed_extras(jsrt_value v);
 
 /* Every slot starts as `undefined`, which is what a declared-but-unassigned field reads as in
  * JavaScript. The constructor body then assigns the ones it assigns. */
@@ -496,12 +538,27 @@ bool jsrt_key_is_array_index(const char *key, uint32_t *value);
  * `*count_out` is the visible key count. The returned slot array is malloc-owned by the caller. */
 uint32_t *jsrt_fixed_key_order(const JSRTClass *cls, uint32_t *count_out);
 
-/* A shape key from a JS string: an immortal NUL-terminated UTF-8 copy, the lifetime the shape
- * table already gives every key. A key containing U+0000 aborts -- a C string cannot hold one. */
+/* A shape key from a JS string: an interned immortal NUL-terminated UTF-8 copy, the lifetime the
+ * shape table already gives every key. A second intern of the same bytes returns the first
+ * pointer. A key containing U+0000 aborts -- a C string cannot hold one. */
 const char *jsrt_shape_key(jsrt_value name);
 /* Reading a property the object does not have is `undefined` -- that IS the semantics of an
  * optional property. A miss is never cached: the same object can gain the key later. */
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic);
+/* [[Get]] of `key` restricted to what the PROGRAM put there: the object's own properties, its
+ * class's methods, and a dynamic object's prototype chain. False on a miss, which means the key
+ * resolves on a builtin prototype (%Object.prototype%, %Array.prototype%, ...) whose methods the
+ * caller models itself -- ToPrimitive's fallback, util.format's `hasBuiltInToString`. A getter
+ * found runs, and may leave an exception pending.
+ *
+ * `holder` (may be NULL) answers where the hit lives: NULL for an own property, otherwise the
+ * `constructor.name` of the prototype that holds it ("" when that prototype has none). A class
+ * method whose capturing closure has no table entry cannot be traced to one class; `*exact` (may
+ * be NULL) is then false and `*holder` names the most-derived candidate, or a builtin-named one
+ * when any candidate is (jsrt_is_builtin_constructor_name), so a caller refuses rather than
+ * guesses. */
+bool jsrt_user_get(jsrt_value obj, const char *key, jsrt_value *out, const char **holder,
+                   bool *exact);
 /* Overwrites in place when the key exists; transitions the shape (growing slots) when it does
  * not. Transitions are not IC-cached -- each object performs a given addition once. `key` must
  * outlive the program (generated C passes string literals); the shape table stores the pointer. */
@@ -1549,6 +1606,11 @@ jsrt_value jsrt_call_at(jsrt_value callee, uint32_t argc, const jsrt_value *argv
  * method call's receiver, passed to a closure that declares one, or NULL for a plain call. */
 jsrt_value jsrt_call_spread_at(jsrt_value callee, const jsrt_value *receiver, jsrt_value args,
                                const char *loc);
+/* A call the RUNTIME makes with a known `this` (ToPrimitive calling `toString`): a closure that
+ * declares a receiver gets `receiver` in slot zero whatever its arity, anything else is
+ * jsrt_call's call -- a class object's TypeError included. */
+jsrt_value jsrt_call_with_this(jsrt_value callee, jsrt_value receiver, uint32_t argc,
+                               const jsrt_value *argv);
 
 /* `new v(...)`: the one caller of a class object's constructor (docs/VALUE.md §4.17).
  *
@@ -1829,7 +1891,20 @@ jsrt_value jsrt_console_time(jsrt_value label);
 jsrt_value jsrt_console_time_end(jsrt_value label);
 void jsrt_console_trace(jsrt_value message);
 void jsrt_console_trace_bare(void);
-jsrt_value jsrt_to_string(jsrt_value v); /* ECMA-262 ToString: -0 becomes "0" */
+/* ECMA-262 ToString: -0 becomes "0". An object goes through ToPrimitive with hint `string`, so a
+ * `toString` (or `valueOf`) the program wrote RUNS here and may throw: the exception is left
+ * pending and the answer is the empty string, which no caller may use before it checks
+ * jsrt_pending() (plan.md §9 Task 6.27). */
+jsrt_value jsrt_to_string(jsrt_value v);
+/* What the builtin prototypes' own `toString` answers for an object -- `[object Object]`, an
+ * array's join, a Date's or an Error's text -- never a method the program wrote. ToPrimitive's
+ * fallback when the program wrote none, and the rendering a runtime error MESSAGE uses, which must
+ * not call into the program (Node names such an operand without converting it). */
+jsrt_value jsrt_builtin_to_string(jsrt_value v);
+/* util.format's `builtInObjects` (lib/internal/util/inspect.js, Node v26.7.0): the globals whose
+ * name, as a holder's `constructor.name`, makes `%s` inspect an object instead of calling its
+ * `toString`. The list is the pinned Node's, measured, and a unit test re-measures it. */
+bool jsrt_is_builtin_constructor_name(const char *name);
 
 /* ----------------------------------------------------------- exceptions */
 
@@ -1891,6 +1966,22 @@ typedef struct JSRTFrame {
 extern _Thread_local JSRTFrame *jsrt_frame_top;
 
 void jsrt_frame_init(JSRTFrame *frame);
+
+/* The native stack guard (plan.md §9 Task 6.23, docs/VALUE.md §4.25). Every generated function opens
+ * with JSRT_STACK_CHECK() BEFORE its JSRT_FRAME, so the early return has no frame to pop: it leaves
+ * Node's catchable `RangeError: Maximum call stack size exceeded` pending and returns undefined,
+ * and the caller's pending check unwinds as for any throw. `jsrt_stack_limit` is the lowest frame
+ * address a generated function may open at on this thread; jsrt_init sets it from the thread's real
+ * stack bounds, leaving headroom for the runtime code the deepest frame still calls. It is 0 on a
+ * thread jsrt_init never ran on, which disables the check rather than failing every call. */
+extern _Thread_local uintptr_t jsrt_stack_limit;
+jsrt_value jsrt_stack_overflow(void);
+#define JSRT_STACK_CHECK()                                                               \
+  do {                                                                                   \
+    if (__builtin_expect((uintptr_t)__builtin_frame_address(0) < jsrt_stack_limit, 0)) { \
+      return jsrt_stack_overflow();                                                      \
+    }                                                                                    \
+  } while (0)
 
 /* Slots are filled with JSRT_UNDEFINED and only THEN is the frame published to jsrt_frame_top,
  * so a collection triggered mid-prologue can never scan an uninitialized slot. */
