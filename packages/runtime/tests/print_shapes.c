@@ -8,17 +8,32 @@
  * `undefined`; an overwrite changes the value without changing the order; a non-identifier key
  * prints quoted; and reads through one shared inline cache stay correct across a shape-sharing
  * hit, a transition (the cached shape goes stale), and an unrelated shape.
+ * Intern identity is an assert, not a print: two `jsrt_shape_key` conversions of the same
+ * bytes must share one immortal pointer (plan-notes 353).
  */
 
 #include "corpus.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static JSRTIC ic_a; /* static, exactly as generated C would emit a property site's cache */
 
 int main(void) {
   jsrt_init();
   JSRT_FRAME(6);
+
+  /* Intern identity: a lookup that only compared used to leak a malloc per call.
+   * Not a print: the corpus still diffs stdout against Node byte-for-byte. */
+  {
+    const char *once = jsrt_shape_key(str("intern-me"));
+    const char *twice = jsrt_shape_key(str("intern-me"));
+    if (once != twice || strcmp(once, "intern-me") != 0) {
+      fprintf(stderr, "jsrt_shape_key intern identity failed\n");
+      JSRT_FRAME_POP();
+      return 1;
+    }
+  }
 
   /* Empty prints as {}. */
   jsrt_value empty = jsrt_dynobj_new();

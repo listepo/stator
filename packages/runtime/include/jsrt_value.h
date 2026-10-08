@@ -538,8 +538,9 @@ bool jsrt_key_is_array_index(const char *key, uint32_t *value);
  * `*count_out` is the visible key count. The returned slot array is malloc-owned by the caller. */
 uint32_t *jsrt_fixed_key_order(const JSRTClass *cls, uint32_t *count_out);
 
-/* A shape key from a JS string: an immortal NUL-terminated UTF-8 copy, the lifetime the shape
- * table already gives every key. A key containing U+0000 aborts -- a C string cannot hold one. */
+/* A shape key from a JS string: an interned immortal NUL-terminated UTF-8 copy, the lifetime the
+ * shape table already gives every key. A second intern of the same bytes returns the first
+ * pointer. A key containing U+0000 aborts -- a C string cannot hold one. */
 const char *jsrt_shape_key(jsrt_value name);
 /* Reading a property the object does not have is `undefined` -- that IS the semantics of an
  * optional property. A miss is never cached: the same object can gain the key later. */

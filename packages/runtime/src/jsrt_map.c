@@ -412,9 +412,12 @@ static bool next_key(jsrt_value s, uint32_t *at, jsrt_value *key) {
 }
 
 jsrt_value jsrt_set_union(jsrt_value a, jsrt_value b) {
-  jsrt_value out = jsrt_set_new();
-  copy_keys(out, a);
-  copy_keys(out, b);
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
+  copy_keys(JSRT_LOCAL(0), a);
+  copy_keys(JSRT_LOCAL(0), b);
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 
@@ -424,43 +427,52 @@ jsrt_value jsrt_set_intersection(jsrt_value a, jsrt_value b) {
   const bool walk_a = set_count(a) <= set_count(b);
   const jsrt_value walk = walk_a ? a : b;
   const jsrt_value test = walk_a ? b : a;
-  jsrt_value out = jsrt_set_new();
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
   uint32_t at = 0;
   jsrt_value key;
   while (next_key(walk, &at, &key)) {
     if (jsrt_map_has(test, key)) {
-      jsrt_set_add(out, key);
+      jsrt_set_add(JSRT_LOCAL(0), key);
     }
   }
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 
 jsrt_value jsrt_set_difference(jsrt_value a, jsrt_value b) {
-  jsrt_value out = jsrt_set_new();
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
   uint32_t at = 0;
   jsrt_value key;
   while (next_key(a, &at, &key)) {
     if (!jsrt_map_has(b, key)) {
-      jsrt_set_add(out, key);
+      jsrt_set_add(JSRT_LOCAL(0), key);
     }
   }
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 
 jsrt_value jsrt_set_symmetric_difference(jsrt_value a, jsrt_value b) {
-  jsrt_value out = jsrt_set_new();
-  copy_keys(out, a);
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_set_new();
+  copy_keys(JSRT_LOCAL(0), a);
   /* Membership is tested against A, not against the result: the result is losing keys as this
    * runs, and the spec asks whether the RECEIVER had the key. */
   uint32_t at = 0;
   jsrt_value key;
   while (next_key(b, &at, &key)) {
     if (jsrt_map_has(a, key)) {
-      (void)jsrt_map_delete(out, key);
+      (void)jsrt_map_delete(JSRT_LOCAL(0), key);
     } else {
-      jsrt_set_add(out, key);
+      jsrt_set_add(JSRT_LOCAL(0), key);
     }
   }
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 

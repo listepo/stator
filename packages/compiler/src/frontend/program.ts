@@ -529,7 +529,7 @@ export function sha256(data: string | Buffer): string {
  * can repeat for different contents on a coarse-tick filesystem and serve a stale program under
  * the wrong test's name (plan-notes 245). A dep edit without an entry touch still does not bust
  * the cache — no runner does that mid-run; a watch daemon with a full dependency set is the
- * follow-up. Custom `host` (memfs tests) always bypasses the cache.
+ * follow-up. Custom `host` (in-memory CompilerHost tests) always bypasses the cache.
  *
  * Two slots: a graph that imports a package loads twice per build — once to find the imports,
  * once over the bundle — and one slot would evict each with the other. */
@@ -589,9 +589,10 @@ export function clearProgramCache(): void {
  * Stator owns strict family + noEmit; user's tsconfig.json is ignored for these.
  * Returns the program and any diagnostics emitted during program construction.
  *
- * `host` is the seam for tests (plan-notes 187): unit suites back programs with a memfs volume
- * through it. Omitted means ts.sys against the real disk — the ONLY mode the shipped compiler
- * runs in, since every production call passes no host. `overlay` lays virtual text over either.
+ * `host` is the seam for tests (plan-notes 187): unit suites can back programs with an
+ * in-memory CompilerHost through it. Omitted means ts.sys against the real disk — the ONLY
+ * mode the shipped compiler runs in, since every production call passes no host. `overlay`
+ * lays virtual text over either.
  *
  * `node` is the `--node` platform (plan.md §11c T11.5): Node built-ins resolve to `packages/node`
  * (`./node.ts`). Like the mode, it is a frontend policy nothing below the gate reads.
@@ -605,7 +606,7 @@ export function createProgram(
   overlay?: ProgramOverlay,
   node = false,
 ): LoadedProgram {
-  // Custom hosts (memfs) have no meaningful disk mtime; never cache those.
+  // Custom hosts (in-memory) have no meaningful disk mtime; never cache those.
   if (host === undefined) {
     const absEntry = resolve(entryFile).replace(/\\/g, '/');
     const overlayKey = overlay?.key ?? '';

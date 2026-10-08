@@ -213,7 +213,6 @@ jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv
     const char *shown = jsrt_shape_key(jsrt_builtin_to_string(ctor));
     char message[256];
     (void)snprintf(message, sizeof message, "%s is not a constructor", shown);
-    free((void *)shown);
     jsrt_throw_error(&jsrt_class_type_error, message);
     return JSRT_UNDEFINED;
   }
@@ -255,7 +254,6 @@ bool jsrt_instanceof_ctor(jsrt_value obj, jsrt_value ctor) {
       char message[256];
       (void)snprintf(message, sizeof message,
                      "Function has non-object prototype '%s' in instanceof check", shown);
-      free((void *)shown);
       jsrt_throw_error(&jsrt_class_type_error, message);
       return false;
     }
@@ -391,9 +389,7 @@ static bool index_of(jsrt_value index, uint32_t *out) {
     return true;
   }
   const char *key = jsrt_shape_key(jsrt_to_string(index));
-  const bool ok = jsrt_key_is_array_index(key, out);
-  free((void *)key);
-  return ok;
+  return jsrt_key_is_array_index(key, out);
 }
 
 jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {

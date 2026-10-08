@@ -268,7 +268,9 @@ const char *jsrt_shape_key(jsrt_value name) {
     }
   }
   key[k] = '\0';
-  return key;
+  /* Dedup: a lookup that only compared used to leak this buffer on every call. Interning is
+   * what makes the "immortal copy" comment above true for reads as well as writes. */
+  return jsrt_shape_intern(key);
 }
 
 /* A loaded slot, resolved. An accessor cell becomes a call with the receiver as argument zero --
@@ -749,8 +751,6 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
     snprintf(message, sizeof message, "Cannot use 'in' operator to search for '%s' in %s", k,
              receiver);
     jsrt_throw_error(&jsrt_class_type_error, message);
-    free((void *)receiver);
-    free((void *)k);
     return false;
   }
   bool answer = false;
@@ -772,9 +772,6 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   if (!answer && jsrt_is_dynobj(obj)) {
     answer = inherited_get(obj, k, obj, &inherited);
   }
-  /* Compared only -- nothing here keeps the key, unlike a write that installs it in a shape -- so
-   * this copy dies with the call instead of joining the immortal shape table. */
-  free((void *)k);
   return answer;
 }
 
@@ -966,9 +963,8 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
     jsrt_throw_error(&jsrt_class_type_error, "Cannot convert undefined or null to object");
     return false;
   }
-  /* Owned here, unlike every other shape key: a delete only COMPARES the key -- the chain it
-   * replays carries the immortal keys the old shapes already held -- so this copy dies with the
-   * call instead of joining the table. */
+  /* Interned: a delete only COMPARES the key -- the chain it replays carries the same immortal
+   * pointers the intern table already holds. */
   const char *k = jsrt_shape_key(jsrt_to_string(key));
   bool answer = true;
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
@@ -992,7 +988,6 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
      * reach a representation the layout does not have (plan.md §8 step 2a(c), bucket 2704). */
     const JSRTDynObject *extras = jsrt_fixed_extras(obj);
     if (extras != NULL && jsrt_shape_find(extras->shape, k) != NULL) {
-      free((void *)k);
       return jsrt_delete(extras_value(extras), key);
     }
     if (jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_has(obj, k)) {
@@ -1000,13 +995,11 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
         char msg[256];
         snprintf(msg, sizeof msg, "Cannot delete property '%s' of #<Object>", k);
         jsrt_throw_error(&jsrt_class_type_error, msg);
-        free((void *)k);
         return false;
       }
       jsrt_panic(
           "STA2007: a statically-shaped object cannot lose a property; planned for Phase 8");
     }
-    free((void *)k);
     return true;
   }
   const PropTable o = as_prop_table(obj, "delete");
@@ -1014,7 +1007,6 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
   if (hit == NULL) {
     /* Absent is `true` even on a frozen object: §13.5.1.2 asks [[Delete]], and deleting what is
      * not there succeeds. Only an existing non-configurable property raises. */
-    free((void *)k);
     return true;
   }
   if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
@@ -1025,7 +1017,6 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
   } else {
     jsrt_shape_remove(o.shape, *o.slots, hit);
   }
-  free((void *)k);
   return answer;
 }
 

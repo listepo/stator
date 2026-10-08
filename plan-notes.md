@@ -12776,3 +12776,53 @@ ls-files --eol` shows `i/lf` for every text file), and `--update` writes LF. A `
 of `* text=auto eol=lf` makes every checkout LF. `git add --renormalize .` changed no file. This
 also removes the reason `ci.yml` gave for keeping `lint` off the desktop legs ("arguing with
 git's line-ending translation"), so the comment now says why one run in `static` is enough.
+
+## 353. Shape-key intern, named-site frames, and the CI files that never ran on main (2026-10-08)
+
+**Plan:** §2 (pipeline), docs/VALUE.md §4.10 (shape keys), §4.12 (rooting). `plan.md` NOT edited
+— this is a bug-fix change, not a roadmap move. T17 (`String.prototype.repeat` hang) already
+landed on `main` as `ccf9818`; T19's NULL-capture path already uses `NO_GROUP`.
+
+**pipeline.yml called a private reusable workflow.** GitHub run 37694735601 failed in 0s with
+"workflow file issue": `uses: listepo/infra/.github/workflows/pipeline.yml@…` is not visible to
+this public repo. PR #61 already had the public pin (`pyrlyn/ci` at
+`c875cd763ad0c4abbd936e480be5752330d3b66b`) plus `permissions.actions: write` for that
+workflow's cancel-run step. Copied that pin and the `actions: write` grant into the tree's
+`pipeline.yml`.
+
+**ci.yml had no `push` trigger.** The revert-on-failure job is `github.event_name == 'push'`
+only, so a merge to `main` ran no tests of its own and could never revert. Added
+`push: branches: [main]`.
+
+**nightly.yml had no top-level `permissions`.** GITHUB_TOKEN then inherits the repo default,
+which on a public repo with "restrictive" defaults is too wide for a scheduled job that only
+needs to read. Set `permissions: contents: read`.
+
+**T16 — `jsrt_shape_key` leaked a malloc on every lookup.** The conversion buffer was immortal
+only for keys that `jsrt_shape_transition` stored on a *new* child. `jsrt_get_prop` /
+`jsrt_has_prop` / `jsrt_in` / `jsrt_delete` / `jsrt_object_assign` / `fromEntries` / index /
+print all convert and compare. Zig intern table (`jsrt_shape_intern` in `jsrt_shape.zig`):
+FNV-1a, chained buckets, rehash; a second intern of the same bytes returns the first pointer
+and frees the duplicate. Callers must not `free` an interned key. Pinned by an assert in
+`runtime/tests/print_shapes.c` (identity, not stdout — the corpus still diffs against Node).
+
+**T18 — unrooted C locals across allocating calls.** Boehm is conservative and `jsrt_value` is
+NaN-boxed, so a C local is not a root. Frames at the named sites: `jsrt_object_from_entries`
+FRAME(1); `jsrt_object_assign` FRAME(2) for keys+value; `iterator_result` FRAME(1); the four
+Set algebra ops FRAME(1); `jsrt_promise_settle` self-cycle FRAME(2). Not a whole-runtime
+`GC_STRESS` toggle.
+
+**windows/arm64 builtin-names (note 352).** Still unverified why that Node build's
+`builtInObjects` is larger. The test is skipped on `win32`/`arm64` rather than growing a
+per-platform list in `jsrt_print.c`. Reopen with a measured reason that Node's set on that
+arch is the one we should match.
+
+**Docs / dead dep.** AGENTS.md and CLAUDE.md listed Ryū under `runtime/vendor/`; it is not
+vendored (`docs/TOOLCHAIN.md`, notes 28 / 188). `memfs` was in the root and
+`packages/tests` `package.json` and never imported; removed, lockfile updated. Comments on
+`createProgram`'s custom-host seam said "memfs" because that was the intended test backing;
+they now say "in-memory CompilerHost".
+
+**Not in this change.** GitHub Pages (E9) is `has_pages: false` on the repo — a setting, not a
+workflow fix. Dependabot PRs are not merged here. CHANGELOG.md / SECURITY.md remain the
+existing P2 docs gap. The string `replace` triple-scan leftover is still P2.
