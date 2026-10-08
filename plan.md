@@ -1,5 +1,49 @@
 # plan.md — Stator: a two-mode AOT compiler for TypeScript/JavaScript
 
+https://github.com/listepo/stator
+
+An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
+
+| # | Status | Priority | Complexity | Readiness | Agent |
+| --- | --- | --- | --- | --- | --- |
+| T15 | in progress | P2 | 1 | 70% | Cursor / grok 4.7 |
+| T16 | todo | P0 | 3 | 0% | |
+| T17 | todo | P1 | 1 | 0% | |
+| T18 | todo | P1 | 3 | 0% | |
+| T19 | todo | P3 | 1 | 0% | |
+| T20 | todo | P2 | 2 | 0% | |
+
+### T15. Required root docs
+
+`todo.md`, `roadmap.md`, `ideas.md`, and `toolchain.md` were missing from the repo root. Done when those four files exist and are filled from this plan, the manifests, and `docs/TOOLCHAIN.md`, and when the package audit has either a new test or a recorded reason that every package under `packages/` is already covered.
+
+### T16. Systemic `jsrt_shape_key` leak on every dynamic property read/write
+
+`jsrt_shape.c:234` mallocs a key "immortal", but `jsrt_shape_transition` (`jsrt_shape.zig:87-103`) only takes ownership on a *new* transition; reads never store it. Sites that pass a fresh key without freeing leak `3·len+1` bytes each call: `jsrt_shape.c:900` (`jsrt_dyn_index_get` — every js-mode `o[k]` read), `jsrt_shape.c:914` + `jsrt_value.c:392,408` (`jsrt_dyn_index_set`), `jsrt_object_ops.c:184,196,222,269-283`, `jsrt_json.c:151` (`parse_key`), `jsrt_print.c:1514,1885,2226`, `jsrt_regexp.c:662-667`. The correct pattern already exists (`jsrt_in` at `jsrt_shape.c:601,638`, `jsrt_delete` at `:833,889`, `jsrt_typed.zig:497-509`). A js-mode loop with computed-key reads or repeated `JSON.parse` grows RSS without bound under the Boehm build. Done means: every non-storing call site frees its key (or reads go through a compare-only helper), and the leak harness covers computed-key reads.
+
+### T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion
+
+`jsrt_string_ops.c:265-275`: the range guard `count * (double)str->length > JSRT_MAX_STRING_LENGTH` is `0 > max` for an empty receiver, so any count passes; `(uint32_t)count` is UB for count ≥ 2³² and an in-range huge count spins a `times`-iteration no-op `memcpy` loop (Node returns `""` instantly). Done means: early-return for an empty receiver, validate `count <= UINT32_MAX` before the cast, with fixtures for the empty-receiver edge.
+
+### T18. GC rooting hazards: boxed values held in C locals across allocating calls
+
+The same pattern `jsrt_op_add` was already fixed for ("measured: 999685 of 1000000") remains at: `jsrt_ops.c:85-86` (`jsrt_compare` holds `pa` across the allocating ToPrimitive of `b`), `jsrt_array_ops.c:765` (default sort comparator: x's string unrooted while y's ToString allocates; `sort_merge` at `:775` interleaves allocations with reads), `jsrt_promise.c:181` (adoption path enqueues with the inner promise unrooted across `enqueue`'s `jsrt_gc_alloc`), `jsrt_numeric.c:419-423` (`jsrt_loose_equals` passes an unrooted primitive into a recursive allocating call). Done means: each partial is parked in a `JSRT_FRAME` slot as `jsrt_op_add`, `jsrt_json.c:216-231` and `jsrt_promise_construct` already do.
+
+### T19. Small runtime fixes: RegExp NULL-capture and `replace_impl` double scan
+
+`jsrt_regexp.c:514-515` passes a possibly-NULL `capture` to `exec_at` while `jsrt_regexp_search` (`:627`) guards it — align the two (or drop both with a comment). `jsrt_string_ops.c:507-508,523,537`: `replace_impl` calls `index_of_from` twice per match — hoist the result.
+
+### T20. Tests for the runtime edges found by the audit
+
+No fixture covers `repeat` with an empty receiver and a huge count (T17), and the 10M-object leak harness only creates objects — it never exercises computed-key dynamic reads (T16). Also `compareSdkNames` (`toolchain.ts:38-40`) silently ranks non-SDK names as 0.0 via destructuring defaults — an explicit rank for non-matching names would surface malformed input, and the program cache (`program.ts:578-608`) keys on entry hash only, which deserves a dependency-hash key or a documented TODO before any watch mode. Done means: the two runtime edges have fixtures, and the toolchain/cache notes are addressed.
+
+Execution plan:
+
+1. Read `plan.md`, `package.json`, `mise.toml`, `docs/TOOLCHAIN.md`, and `README.md`.
+2. Add the four root files in English from those sources. Leave `todo-js` and `todo-ts` in place.
+3. Audit `packages/`: a package is covered when its name already appears in `packages/tests`. Every package is covered, so add no tests.
+4. Leave readiness at 70% because tests were not run.
+
 > **Audience:** AI agents (and humans) executing this project. This file is self-contained: read it top to bottom before doing any task. Every task has numbered **Steps** and a **Check** — do not mark a task done until its Check passes. Findings that contradict this plan go into `plan-notes.md` (repo root), not silently into code. Operational conventions (commands, coding standards, workflow) live in `AGENTS.md`; this file is the roadmap and the spec.
 >
 > **Name:** **Stator** (formerly "Ketch" — renamed 2026-08-29; "Ketch" collides with an established company). A stator is the static half of an electric motor: it doesn't move, and it's what makes the rotor spin. The compiler's two modes mirror stator/rotor — the static `ts` mode and the dynamic `js` mode. CLI binary: `stator`.
