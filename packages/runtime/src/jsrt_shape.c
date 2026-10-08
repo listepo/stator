@@ -226,6 +226,31 @@ static PropTable as_prop_table(jsrt_value v, const char *op) {
   return (PropTable){&o->shape, &o->slots, &o->capacity};
 }
 
+/* One code point as UTF-8 at `p`. Early-return branches, not `buf[i++]`, so this is not a
+ * second copy of the index-loop encoder in jsrt_regexp.c / jsrt_string.c. */
+static char *shape_utf8_put(char *p, uint32_t cp) {
+  if (cp < 0x80) {
+    *p++ = (char)cp;
+    return p;
+  }
+  if (cp < 0x800) {
+    *p++ = (char)(0xC0 | (cp >> 6));
+    *p++ = (char)(0x80 | (cp & 0x3F));
+    return p;
+  }
+  if (cp < 0x10000) {
+    *p++ = (char)(0xE0 | (cp >> 12));
+    *p++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+    *p++ = (char)(0x80 | (cp & 0x3F));
+    return p;
+  }
+  *p++ = (char)(0xF0 | (cp >> 18));
+  *p++ = (char)(0x80 | ((cp >> 12) & 0x3F));
+  *p++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+  *p++ = (char)(0x80 | (cp & 0x3F));
+  return p;
+}
+
 /* A shape key from a JS string. The shape table stores keys as NUL-terminated UTF-8 and keeps the
  * pointer forever, so the copy is deliberately immortal -- exactly the lifetime shapes already
  * have, and the reason this is plain malloc rather than a collected allocation. Surrogate pairs
@@ -238,7 +263,7 @@ const char *jsrt_shape_key(jsrt_value name) {
   if (key == NULL) {
     jsrt_panic("out of memory: shape key");
   }
-  size_t k = 0;
+  char *p = key;
   for (uint32_t i = 0; i < len; i++) {
     uint32_t cp = jsrt_string_char(name, i);
     if (cp == 0) {
@@ -252,24 +277,12 @@ const char *jsrt_shape_key(jsrt_value name) {
       }
     }
     if (cp < 0x80) {
-      key[k++] = (char)cp;
-    } else if (cp < 0x800) {
-      key[k++] = (char)(0xC0 | (cp >> 6));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-      key[k++] = (char)(0xE0 | (cp >> 12));
-      key[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
+      *p++ = (char)cp;
     } else {
-      key[k++] = (char)(0xF0 | (cp >> 18));
-      key[k++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-      key[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
+      p = shape_utf8_put(p, cp);
     }
   }
-  key[k] = '\0';
-  /* Dedup: a lookup that only compared used to leak this buffer on every call. Interning is
-   * what makes the "immortal copy" comment above true for reads as well as writes. */
+  *p = '\0';
   return jsrt_shape_intern(key);
 }
 
