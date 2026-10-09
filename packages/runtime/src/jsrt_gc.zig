@@ -147,6 +147,32 @@ const impl = if (boehm) struct {
         @memset(@as([*]u8, @ptrCast(p))[0..bytes], 0);
         return p;
     }
+
+    fn collect() void {
+        gc.GC_gcollect();
+    }
+
+    /// `jsrt_gc_watch`: the test's proof that a boxed value was not a root. The finalizer runs
+    /// from inside the collection that finds `obj` unreachable.
+    var watched_flag: c_int = 0;
+
+    fn watchedFinalizer(obj: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+        _ = obj;
+        _ = data;
+        watched_flag = 1;
+    }
+
+    fn watch(obj: *anyopaque) void {
+        gc.GC_register_finalizer(obj, watchedFinalizer, null, null, null);
+    }
+
+    fn watched() c_int {
+        return watched_flag;
+    }
+
+    fn watchedReset() void {
+        watched_flag = 0;
+    }
 } else struct {
     fn init() void {}
 
@@ -154,14 +180,46 @@ const impl = if (boehm) struct {
         return std.c.malloc(bytes);
     }
 
+    fn collect() void {}
+
     fn allocAtomic(bytes: usize) ?*anyopaque {
         return std.c.calloc(bytes, 1);
     }
+
+    fn watch(_: *anyopaque) void {}
+
+    fn watched() c_int {
+        return 0;
+    }
+
+    fn watchedReset() void {}
 };
 
 /// Whether this runtime copy has installed its kind and roots hook. Single-threaded, like every
 /// runtime entry in v0 (docs/FFI.md §8).
 var gc_initialized = false;
+
+/// `jsrt_gc_stress`: a test collects before every allocation so an unrooted boxed value cannot
+/// survive by accident of heap size. Re-entry is skipped: a collection must not collect again
+/// from inside itself.
+var gc_stress = false;
+var gc_stress_collecting = false;
+
+export fn jsrt_gc_stress(on: c_int) void {
+    gc_stress = on != 0;
+}
+
+export fn jsrt_gc_watch(obj: *anyopaque) void {
+    impl.watch(obj);
+}
+
+export fn jsrt_gc_watched_reset() void {
+    impl.watchedReset();
+}
+
+export fn jsrt_gc_watched() c_int {
+    return impl.watched();
+}
 
 /// Called by jsrt_init once the pointer-width assumption holds. Idempotent: two `--emit-header`
 /// units linked against one libjsrt.a each call it from their own init, and a second install would
@@ -176,7 +234,16 @@ export fn jsrt_gc_init() void {
 /// The runtime's ONE collected allocation (jsrt.h). A zero-byte request is a real one -- an empty
 /// array literal still wants an element buffer -- and malloc may answer NULL for it, which is
 /// indistinguishable from failure, so it asks for one granule instead. Never returns NULL.
+fn stressCollect() void {
+    if (gc_stress and !gc_stress_collecting) {
+        gc_stress_collecting = true;
+        impl.collect();
+        gc_stress_collecting = false;
+    }
+}
+
 pub fn alloc(bytes: usize, what: [*:0]const u8) *anyopaque {
+    stressCollect();
     return impl.alloc(if (bytes == 0) 1 else bytes) orelse oom(what);
 }
 
@@ -185,6 +252,7 @@ pub fn alloc(bytes: usize, what: [*:0]const u8) *anyopaque {
 /// Unlike `alloc` it answers NULL on failure, because a buffer's size is the program's choice and
 /// a refusal is a RangeError the program can catch, not an internal panic.
 pub fn allocAtomic(bytes: usize) ?*anyopaque {
+    stressCollect();
     return impl.allocAtomic(if (bytes == 0) 1 else bytes);
 }
 

@@ -28,3 +28,48 @@ for (let i = 0; i < 100000; i++) {
   joined += (pair[0] + pair[1]).length;
 }
 console.log(joined);
+
+// Relational compare, loose equality, sort and promise adoption each hold a boxed value across
+// an allocating call (plan.md T18). The loop count is the pressure, as above.
+class Label {
+  constructor(n) {
+    this.n = n;
+  }
+  valueOf() {
+    return this;
+  }
+  toString() {
+    return String(this.n);
+  }
+}
+
+let less = 0;
+for (let i = 0; i < 20000; i++) {
+  if (new Label(i) < new Label(i + 1)) less++;
+}
+console.log(less);
+
+const nums = [];
+for (let i = 0; i < 500; i++) nums.push((i * 17) % 500);
+nums.sort();
+console.log(nums[0], nums[nums.length - 1], nums.length);
+
+let eq = 0;
+for (let i = 0; i < 20000; i++) {
+  const text = String(i % 50);
+  if (new Label(i % 50) == text) eq++;
+}
+console.log(eq);
+
+async function adopted() {
+  let sum = 0;
+  for (let i = 0; i < 1000; i++) {
+    const inner = Promise.resolve(i);
+    const outer = new Promise((resolve) => {
+      resolve(inner);
+    });
+    if (i % 250 === 249) sum += await outer;
+  }
+  console.log(sum);
+}
+adopted();

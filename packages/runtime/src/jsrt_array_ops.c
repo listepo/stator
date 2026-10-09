@@ -757,17 +757,33 @@ static int sort_compare(jsrt_value x, jsrt_value y, jsrt_value cmp) {
   if (xu || yu) {
     return xu ? (yu ? 0 : 1) : -1;
   }
-  if (!jsrt_is(cmp, JSRT_TAG_UNDEFINED)) {
-    jsrt_value args[2] = {x, y};
-    const double d = jsrt_to_number(jsrt_call(cmp, 2, args));
-    return (d < 0) ? -1 : (d > 0) ? 1 : 0;
+  /* x and y are NaN-boxed copies. The user comparator and the default ToString both allocate,
+   * so each operand stays in a slot until the comparison has read it. A throw answers 0; the
+   * merge stops on the pending exception and does not write the incomplete run back. */
+  JSRT_FRAME(3);
+  JSRT_LOCAL(0) = x;
+  JSRT_LOCAL(1) = y;
+  JSRT_LOCAL(2) = cmp;
+  int order = 0;
+  if (!jsrt_is(JSRT_LOCAL(2), JSRT_TAG_UNDEFINED)) {
+    jsrt_value args[2] = {JSRT_LOCAL(0), JSRT_LOCAL(1)};
+    const double d = jsrt_to_number(jsrt_call(JSRT_LOCAL(2), 2, args));
+    if (!jsrt_pending()) {
+      if (d < 0.0) {
+        order = -1;
+      } else if (d > 0.0) {
+        order = 1;
+      }
+    }
+  } else {
+    JSRT_LOCAL(0) = jsrt_to_string(JSRT_LOCAL(0));
+    if (!jsrt_pending()) {
+      JSRT_LOCAL(1) = jsrt_to_string(JSRT_LOCAL(1));
+    }
+    if (!jsrt_pending()) {
+      order = jsrt_string_compare(JSRT_LOCAL(0), JSRT_LOCAL(1));
+    }
   }
-  /* Either ToString may run the program's `toString`, so the left text stays rooted while the
-   * right one converts, and a throw ends the comparison (the merge stops on it). */
-  JSRT_FRAME(1);
-  JSRT_LOCAL(0) = jsrt_to_string(x);
-  const jsrt_value right = jsrt_pending() ? JSRT_LOCAL(0) : jsrt_to_string(y);
-  const int order = jsrt_pending() ? 0 : jsrt_string_compare(JSRT_LOCAL(0), right);
   JSRT_FRAME_POP();
   return order;
 }
@@ -778,9 +794,21 @@ static void sort_merge(jsrt_value *elems, jsrt_value *scratch, uint32_t lo, uint
   uint32_t a = lo;
   uint32_t b = mid;
   for (uint32_t k = lo; k < hi && !jsrt_pending(); k++) {
-    /* `<= 0` keeps the left run's element on ties: that inequality IS the stability. */
-    const bool take_a = a < mid && (b >= hi || sort_compare(elems[a], elems[b], cmp) <= 0);
-    scratch[k] = take_a ? elems[a++] : elems[b++];
+    /* The two elements are read into slots BEFORE sort_compare allocates (ToString, or the
+     * program's comparator). `<= 0` keeps the left run's element on ties: that inequality IS
+     * the stability. */
+    JSRT_FRAME(2);
+    JSRT_LOCAL(0) = a < mid ? elems[a] : JSRT_UNDEFINED;
+    JSRT_LOCAL(1) = b < hi ? elems[b] : JSRT_UNDEFINED;
+    const bool take_a =
+        a < mid && (b >= hi || sort_compare(JSRT_LOCAL(0), JSRT_LOCAL(1), cmp) <= 0);
+    scratch[k] = take_a ? JSRT_LOCAL(0) : JSRT_LOCAL(1);
+    if (take_a) {
+      a++;
+    } else {
+      b++;
+    }
+    JSRT_FRAME_POP();
   }
   if (jsrt_pending()) {
     return; /* the merge is incomplete, so writing it back would duplicate elements */
@@ -802,10 +830,16 @@ static void sort_range(jsrt_value *elems, jsrt_value *scratch, uint32_t lo, uint
 }
 
 jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp) {
-  JSRTArray *a = jsrt_require_array(array, "sort");
-  if (a == NULL) {
+  if (jsrt_require_array(array, "sort") == NULL) {
     return JSRT_UNDEFINED;
   }
+  /* The scratch array is born here. During a merge an element's only copy may be that scratch,
+   * and every comparison allocates, so the receiver, the comparator and the scratch stay in
+   * slots. A NaN-boxed local would not. */
+  JSRT_FRAME(3);
+  JSRT_LOCAL(0) = array;
+  JSRT_LOCAL(1) = cmp;
+  JSRTArray *a = jsrt_as_array(JSRT_LOCAL(0));
   /* §23.1.3.30 SortIndexedProperties collects only the indices the array HAS: the present
    * elements sort (undefined among them sinking, by sort_compare), and the holes follow them. */
   uint32_t present = 0;
@@ -818,10 +852,13 @@ jsrt_value jsrt_array_sort(jsrt_value array, jsrt_value cmp) {
     a->elements[i] = JSRT_HOLE;
   }
   if (present >= 2) {
-    jsrt_value scratch_owner = jsrt_array_new(present, a->elements);
-    sort_range(a->elements, arr(scratch_owner)->elements, 0, present, cmp);
+    JSRT_LOCAL(2) = jsrt_array_new(present, a->elements);
+    a = jsrt_as_array(JSRT_LOCAL(0));
+    sort_range(a->elements, jsrt_as_array(JSRT_LOCAL(2))->elements, 0, present, JSRT_LOCAL(1));
   }
-  return array;
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
+  return out;
 }
 
 /* The downward mirrors of find/findIndex, same entry-length + existence discipline. */
