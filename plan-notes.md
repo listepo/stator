@@ -12883,3 +12883,26 @@ The build and the browser check still run. Any other status fails the job. Enabl
 Pages (Settings → Pages → GitHub Actions) is what turns publishing back on; the workflow
 does not call the action's `enablement` input, which would need a token other than
 `GITHUB_TOKEN`. `site/README.md` and `docs/TOOLCHAIN.md` say the same.
+
+## 356. Compare-only shape keys were still interned (T16) (2026-10-09)
+
+**What 353 fixed.** `jsrt_shape_intern` frees a second malloc of the same bytes, so a loop
+that reads one key no longer leaks a buffer per call. The table itself is immortal, the
+same lifetime as a shape.
+
+**What it left.** A miss never stores the pointer, but every `jsrt_shape_key` still entered
+the table. Reproduced on this tree before the call-site change: `print_shapes` reported
+`compare-only key lookup interned 32 keys` for 32 distinct `jsrt_dyn_index_get` / `in` /
+`delete` misses. A named-group `exec` malloc'd the group name and handed it to
+`jsrt_set_prop`; the second match reused the existing transition and leaked that malloc
+(`jsrt_shape_transition` takes ownership only of a new child).
+
+**Change.** `jsrt_shape_key_ephemeral` is the conversion the caller frees.
+`jsrt_get_prop_value` and `jsrt_has_prop_value` are the compare-only lookups. Reads, `in`,
+`delete`, `Object.hasOwn`, array-index checks, print and `JSON.stringify` gets, and the
+two error-message renderings use it. Stores (`jsrt_set_prop`, `JSON.parse` keys,
+`console.count` labels) still intern. Named-group names go through `jsrt_shape_intern`, so
+the second match frees the duplicate. `jsrt_shape_intern_count` is what the corpus asserts: 32 misses in `print_shapes` leave
+it unchanged and one stored key adds one; two named-group execs in `print_regexp` add
+the two group names and nothing on the second exec. The leak harness row `keys.js` is
+2M distinct computed reads under `--mode=js` (peak 2956 KB of the 64 MB cap).

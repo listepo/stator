@@ -1922,7 +1922,7 @@ void jsrt_console_table(jsrt_value v) {
       value = jsrt_unhole(row_list->elements[i]);
     } else {
       const jsrt_value key = row_list->elements[i];
-      value = jsrt_get_prop(v, jsrt_shape_key(key), NULL);
+      value = jsrt_get_prop_value(v, key, NULL);
       if (jsrt_pending()) {
         goto cleanup;
       }
@@ -2270,7 +2270,7 @@ static void json_value(JSRTBuf *out, jsrt_value v, const JSONAncestor *chain, bo
     bool first = true;
     for (uint32_t i = 0; i < keys->length; i++) {
       const jsrt_value key = keys->elements[i];
-      const jsrt_value value = jsrt_get_prop(v, jsrt_shape_key(key), NULL);
+      const jsrt_value value = jsrt_get_prop_value(v, key, NULL);
       if (jsrt_pending()) {
         return;
       }

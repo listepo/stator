@@ -210,9 +210,10 @@ jsrt_value jsrt_construct(jsrt_value ctor, uint32_t argc, const jsrt_value *argv
   if (!jsrt_is(ctor, JSRT_TAG_CLOSURE)) {
     /* Node's wording names the operand's rendered value (`5 is not a constructor`). Rendering a
      * message must not call the program's own `toString`, which V8 never does here. */
-    const char *shown = jsrt_shape_key(jsrt_builtin_to_string(ctor));
+    char *shown = jsrt_shape_key_ephemeral(jsrt_builtin_to_string(ctor));
     char message[256];
     (void)snprintf(message, sizeof message, "%s is not a constructor", shown);
+    free(shown);
     jsrt_throw_error(&jsrt_class_type_error, message);
     return JSRT_UNDEFINED;
   }
@@ -250,10 +251,11 @@ bool jsrt_instanceof_ctor(jsrt_value obj, jsrt_value ctor) {
     }
     const jsrt_value proto = jsrt_function_prototype(ctor);
     if (!jsrt_is_object(proto)) {
-      const char *shown = jsrt_shape_key(jsrt_to_string(proto));
+      char *shown = jsrt_shape_key_ephemeral(jsrt_to_string(proto));
       char message[256];
       (void)snprintf(message, sizeof message,
                      "Function has non-object prototype '%s' in instanceof check", shown);
+      free(shown);
       jsrt_throw_error(&jsrt_class_type_error, message);
       return false;
     }
@@ -388,8 +390,10 @@ static bool index_of(jsrt_value index, uint32_t *out) {
     *out = (uint32_t)d;
     return true;
   }
-  const char *key = jsrt_shape_key(jsrt_to_string(index));
-  return jsrt_key_is_array_index(key, out);
+  char *key = jsrt_shape_key_ephemeral(jsrt_to_string(index));
+  const bool answer = jsrt_key_is_array_index(key, out);
+  free(key);
+  return answer;
 }
 
 jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {
@@ -398,7 +402,7 @@ jsrt_value jsrt_array_get(jsrt_value array, jsrt_value index) {
      * agree by construction: nullish throws Node's reading-message, a primitive misses to
      * `undefined`, a fixed shape walks its descriptor. (A string answers `undefined` here where
      * Node answers the code unit -- the dynamic path's own gap, shared rather than doubled.) */
-    return jsrt_get_prop(array, jsrt_shape_key(jsrt_to_string(index)), NULL);
+    return jsrt_get_prop_value(array, index, NULL);
   }
   const JSRTArray *a = jsrt_as_array(array);
   uint32_t i = 0;

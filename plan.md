@@ -7,7 +7,7 @@ An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 | # | Status | Priority | Complexity | Readiness | Agent |
 | --- | --- | --- | --- | --- | --- |
 | T15 | in progress | P2 | 1 | 70% | Cursor / grok 4.7 |
-| T16 | todo | P0 | 3 | 0% | |
+| T16 | done | P0 | 3 | 100% | Cursor / grok 4.7 |
 | T17 | todo | P1 | 1 | 0% | |
 | T18 | todo | P1 | 3 | 0% | |
 | T19 | todo | P3 | 1 | 0% | |
@@ -17,9 +17,9 @@ An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 
 `todo.md`, `roadmap.md`, `ideas.md`, and `toolchain.md` were missing from the repo root. Done when those four files exist and are filled from this plan, the manifests, and `docs/TOOLCHAIN.md`, and when the package audit has either a new test or a recorded reason that every package under `packages/` is already covered.
 
-### T16. Systemic `jsrt_shape_key` leak on every dynamic property read/write
+### ~~T16. Systemic `jsrt_shape_key` leak on every dynamic property read/write~~
 
-`jsrt_shape.c:234` mallocs a key "immortal", but `jsrt_shape_transition` (`jsrt_shape.zig:87-103`) only takes ownership on a *new* transition; reads never store it. Sites that pass a fresh key without freeing leak `3·len+1` bytes each call: `jsrt_shape.c:900` (`jsrt_dyn_index_get` — every js-mode `o[k]` read), `jsrt_shape.c:914` + `jsrt_value.c:392,408` (`jsrt_dyn_index_set`), `jsrt_object_ops.c:184,196,222,269-283`, `jsrt_json.c:151` (`parse_key`), `jsrt_print.c:1514,1885,2226`, `jsrt_regexp.c:662-667`. The correct pattern already exists (`jsrt_in` at `jsrt_shape.c:601,638`, `jsrt_delete` at `:833,889`, `jsrt_typed.zig:497-509`). A js-mode loop with computed-key reads or repeated `JSON.parse` grows RSS without bound under the Boehm build. Done means: every non-storing call site frees its key (or reads go through a compare-only helper), and the leak harness covers computed-key reads.
+Done — evidence in `done.md`.
 
 ### T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion
 

@@ -1,6 +1,7 @@
 /* The GC hygiene test (plan.md §7 Task 4.5): compile a loop that allocates ten million objects and
  * watch the process's RSS while it runs, then do the same for the FFI string-conversion loop
- * (strings.ts) — one watcher, one cap, one plateau rule, a row per loop in FIXTURES below.
+ * (strings.ts) and the computed-key read loop (keys.js, T16) — one watcher, one cap, one plateau
+ * rule, a row per loop in FIXTURES below.
  *
  * This is the one test that can tell whether the rooting discipline is doing its job END TO END.
  * The frame audit (tests/unit/frames.test.ts) proves the emitted C declares the slots it writes;
@@ -44,6 +45,8 @@ interface LeakFixture {
    * preloaded — the golden runner's `--import node_shim.mjs` pattern, pointed at the landed shim
    * whose bindings the fixture's declarations already match. */
   readonly nodeArgs: readonly string[];
+  /** Extra `stator build` arguments after `-o`. A `.js` entry needs `--mode=js`. */
+  readonly buildArgs?: readonly string[];
 }
 
 const FIXTURES: readonly LeakFixture[] = [
@@ -53,6 +56,7 @@ const FIXTURES: readonly LeakFixture[] = [
     label: '10M FFI strings',
     nodeArgs: ['--import', join(HERE, '..', 'golden', 'ts', 'extern_strstr', 'node_shim.mjs')],
   },
+  { file: 'keys.js', label: '2M computed-key reads', nodeArgs: [], buildArgs: ['--mode=js'] },
 ];
 
 /** A runtime that never collects needs ~320 MB for this fixture; one that does needs a few. */
@@ -67,9 +71,11 @@ function collecting(): boolean {
 }
 
 function compile(fixture: LeakFixture, out: string): void {
-  const build = spawnSync(process.execPath, [CLI, 'build', join(HERE, fixture.file), '-o', out], {
-    encoding: 'utf8',
-  });
+  const build = spawnSync(
+    process.execPath,
+    [CLI, 'build', join(HERE, fixture.file), '-o', out, ...(fixture.buildArgs ?? [])],
+    { encoding: 'utf8' },
+  );
   if (build.status !== 0) {
     throw new Error(`stator build failed: ${build.stderr.trim()}`);
   }
