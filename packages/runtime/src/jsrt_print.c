@@ -1296,10 +1296,14 @@ void jsrt_eprint(jsrt_value v) { print_to(v, stderr, true); }
 
 static void json_format(JSRTBuf *out, jsrt_value v);
 
-/* `builtInObjects` as the pinned Node builds it: the capitalized own properties of `globalThis`
- * at the moment inspect.js loads, during bootstrap -- so the web globals installed later
- * (`Event`, `URL`, `Buffer`, ...) are NOT in it. Measured on v26.7.0 by asking util.format('%s')
- * of a class named after each global (plan-notes 345); `to-primitive.test.ts` re-measures it. */
+/* `builtInObjects` as the pinned Node records it when inspect.js is evaluated into the startup
+ * snapshot: the capitalized own properties of `globalThis` at that moment, so the web globals
+ * installed later (`Event`, `URL`, `Buffer`, ...) are NOT in it. Measured on v26.7.0 by asking
+ * util.format('%s') of a class named after each global (plan-notes 345); `to-primitive.test.ts`
+ * re-measures it. A binary built without the snapshot (the official win-arm64 package is
+ * cross-compiled, so `node_use_node_snapshot` is false) evaluates inspect.js later and treats
+ * seven more names as builtins. Those are not this list: the oracle is the snapshot set
+ * (plan-notes 354). */
 static const char *const BUILTIN_CONSTRUCTOR_NAMES[] = {
     "AggregateError", "Array",          "ArrayBuffer",    "Atomics",
     "BigInt",         "BigInt64Array",  "BigUint64Array", "Boolean",

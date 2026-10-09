@@ -12826,3 +12826,60 @@ they now say "in-memory CompilerHost".
 **Not in this change.** GitHub Pages (E9) is `has_pages: false` on the repo — a setting, not a
 workflow fix. Dependabot PRs are not merged here. CHANGELOG.md / SECURITY.md remain the
 existing P2 docs gap. The string `replace` triple-scan leftover is still P2.
+
+## 354. The windows/arm64 builtin-constructor mismatch is the startup snapshot (2026-10-09)
+
+**Does it fail on main?** No. `frontend (windows/arm64)` on main run 37861129653 is green
+because plan-notes 353 skips the test on `win32`/`arm64`. The assertion still fails on any
+commit without that skip: PR #61 job 113025497253 and PR #114 job 113033051244, both Node
+v26.7.0. `frontend (windows/x64)` on the same runs passes. The seven names the win-arm64
+binary adds, and the runtime list does not, are `AsyncDisposableStack`, `DisposableStack`,
+`Float16Array`, `SharedArrayBuffer`, `SuppressedError`, `Temporal` and `WebAssembly`.
+
+**Why only that runner.** Node records `builtInObjects` when `lib/internal/util/inspect.js`
+is evaluated (v26.7.0, the set `hasBuiltInToString` consults). A binary built with the
+startup snapshot evaluates that file while the snapshot is generated, before the late globals
+exist; that is the 47-name set in `BUILTIN_CONSTRUCTOR_NAMES` and the set every other CI
+platform measures. The official win-arm64 package is not built on ARM64. Node's
+`BUILDING.md` (v26.7.0) lists it as "Windows Server 2022 (x64) with Visual Studio 2022", a
+cross-compile. `configure.py` then sets `node_use_node_snapshot` false
+(`b(not cross_compiling and not options.shared)`). Without the snapshot, `inspect.js` runs
+at the first `util.format`, after those seven globals exist, so `%s` treats a class of one
+of those names as a builtin. Linux arm64, macOS arm64 and win-x64 official packages are
+native builds, so they keep the snapshot. There is no official win-arm64 binary of v26.7.0
+that has the snapshot; compiling Node on the runner would not be pinning the release.
+
+Reproduced on the official linux-x64 binary of the same version: with the snapshot,
+`util.format` and `BUILTIN_CONSTRUCTOR_NAMES` are the same 47 names. `node --no-node-snapshot`
+(the binary still reports `node_use_node_snapshot: true`; the flag only skips using the
+embedded snapshot) measures exactly the same seven extras and nothing else. The win-arm64
+difference is the missing snapshot, not an arm64-only global. The official
+`win-arm64/node.exe` of v26.7.0 embeds `"node_use_node_snapshot": false` in its
+`config.gypi` (and `node_use_node_code_cache` false beside it).
+
+**What the runtime should match.** The oracle for goldens is the pinned Node's snapshot set.
+Adding the seven names would make `%s` of a `Temporal` (and the other six) inspect on every
+platform, which the snapshot Node does not do. A per-platform list in `jsrt_print.c` would
+describe the cross-compiled binary, not the pinned Node.
+
+**The comparison.** `unit/to-primitive.test.ts` no longer skips on architecture. When
+`process.config.variables.node_use_node_snapshot` is true, the measured set must equal the
+runtime list. When it is false, the measured set must equal that list plus exactly the seven
+late names above. A missing runtime name, or any extra other than those seven, still fails.
+The platform skip hid both.
+
+## 355. The site workflow skips deploy when GitHub Pages is not enabled (2026-10-09)
+
+**Evidence.** `site` on main run 37840183839 failed in `actions/configure-pages@v6` with
+"Get Pages site failed … Error: Not Found". The repository has no Pages site
+(`has_pages: false`, plan-notes 353). Pull requests that only build the site stay green,
+because `configure-pages` is already skipped on `pull_request`. A push to `main` that
+touches `site/**` or `docs/**` is not.
+
+**Change.** The workflow GETs `/repos/{owner}/{repo}/pages`, including on pull requests.
+HTTP 200 publishes as before (never from a pull request). HTTP 404 prints that Pages is
+not enabled and skips `configure-pages`, the pages artifact upload, and the deploy job.
+The build and the browser check still run. Any other status fails the job. Enabling
+Pages (Settings → Pages → GitHub Actions) is what turns publishing back on; the workflow
+does not call the action's `enablement` input, which would need a token other than
+`GITHUB_TOKEN`. `site/README.md` and `docs/TOOLCHAIN.md` say the same.
