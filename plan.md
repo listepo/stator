@@ -7,7 +7,7 @@ An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 | # | Status | Priority | Complexity | Readiness | Agent |
 | --- | --- | --- | --- | --- | --- |
 | T15 | in progress | P2 | 1 | 70% | Cursor / grok 4.7 |
-| T16 | todo | P0 | 3 | 0% | |
+| T16 | in progress | P0 | 3 | 10% | Cursor / grok 4.7 |
 | T17 | todo | P1 | 1 | 0% | |
 | T18 | todo | P1 | 3 | 0% | |
 | T19 | todo | P3 | 1 | 0% | |
