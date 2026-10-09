@@ -12849,6 +12849,12 @@ of those names as a builtin. Linux arm64, macOS arm64 and win-x64 official packa
 native builds, so they keep the snapshot. There is no official win-arm64 binary of v26.7.0
 that has the snapshot; compiling Node on the runner would not be pinning the release.
 
+Reproduced on the official linux-x64 binary of the same version: with the snapshot,
+`util.format` and `BUILTIN_CONSTRUCTOR_NAMES` are the same 47 names. `node --no-node-snapshot`
+(the binary still reports `node_use_node_snapshot: true`; the flag only skips using the
+embedded snapshot) measures exactly the same seven extras and nothing else. The win-arm64
+difference is the missing snapshot, not an arm64-only global.
+
 **What the runtime should match.** The oracle for goldens is the pinned Node's snapshot set.
 Adding the seven names would make `%s` of a `Temporal` (and the other six) inspect on every
 platform, which the snapshot Node does not do. A per-platform list in `jsrt_print.c` would
