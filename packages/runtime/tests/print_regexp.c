@@ -103,10 +103,19 @@ int main(void) {
   jsrt_print(jsrt_regexp_exec(pair, str("nope")));
   jsrt_value optional = re("a(x)?(b)", "");
   jsrt_print(jsrt_regexp_exec(optional, str("ab")));
-  /* Named groups: `groups` is a NULL-PROTOTYPE object, and Node says so when it prints one. */
+  /* Named groups: `groups` is a NULL-PROTOTYPE object, and Node says so when it prints one.
+   * Two execs of one pattern: the group names are stored on the first groups object and
+   * only compared on the second. Interning them once is the regression for the malloc the
+   * second transition used to drop (T16). Not a print. */
   jsrt_value named = re("(?<year>\\d{4})-(?<month>\\d{2})", "");
+  const size_t groups_before = jsrt_shape_intern_count();
   jsrt_print(jsrt_regexp_exec(named, str("2026-09")));
   jsrt_print(jsrt_get_prop(jsrt_regexp_exec(named, str("2026-09")), "index", NULL));
+  if (jsrt_shape_intern_count() != groups_before + 2) {
+    fprintf(stderr, "named-group keys interned %zu, want 2\n",
+            jsrt_shape_intern_count() - groups_before);
+    return 1;
+  }
   /* exec on a /g pattern walks the subject through lastIndex, exactly as test does. */
   jsrt_value walker = re("a", "g");
   jsrt_print(jsrt_regexp_exec(walker, str("aab")));

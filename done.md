@@ -4531,6 +4531,14 @@ Left to other cards: `esmExternalRequirePlugin` in `vite-stator` (T12.2) and the
 through the default adapter (T12.3). The CJS cycle and `module.exports` replacement goldens moved
 to T12.3 earlier.
 
+### T16. Compare-only shape keys are freed; stores still intern
+
+`jsrt_shape_key` interned every UTF-8 conversion. A second lookup of the same bytes was freed (plan-notes 353), but a miss never stores the pointer, so each distinct computed read, `in`, `delete`, `Object.hasOwn`, array-index check, print/`JSON.stringify` get, and error-message rendering kept `3·len+1` bytes plus an intern node for the life of the process. A named-group `exec` malloc'd the group name and passed it to `jsrt_set_prop`; the second match reused the existing transition and leaked that malloc. Reproduced before the call-site change: `print_shapes` reported `compare-only key lookup interned 32 keys`.
+
+Compare-only sites now go through `jsrt_shape_key_ephemeral` (`jsrt_get_prop_value` / `jsrt_has_prop_value` free it). Stores (`jsrt_set_prop`, `JSON.parse` keys, `console.count` labels) still intern. Named-group names go through `jsrt_shape_intern`. The leak harness covers 2M distinct computed-key reads (`packages/tests/leak/keys.js`, `--mode=js`).
+
+Check: `just -f packages/runtime/justfile -d packages/runtime runtime-test` — `runtime: print corpus matches Node` (32 misses leave `jsrt_shape_intern_count` unchanged; one stored key adds one; two named-group execs in `print_regexp` add the two names and nothing on the second exec). `pnpm run test:leak` — `leak: 2M computed-key reads — peak RSS 2956 KB of a 65536 KB cap, 114 samples, plateau` (the 10M object and FFI rows still plateau).
+
 ### T17. `"".repeat` with a huge count no longer hangs or runs an undefined cast
 
 `packages/runtime/src/jsrt_string_ops.c` `jsrt_string_repeat` checked only `count * str->length > JSRT_MAX_STRING_LENGTH`: an empty receiver makes that product zero for any count, so `"".repeat(4294967295)` fell into a 4294967295-iteration loop over zero bytes (Node answers `""` instantly) and a count past UINT32_MAX reached `(uint32_t)count`, undefined by C11 §6.3.1.4. Found by the 2026-10-07 audit (task T17 of the audit set; the plan-table rows ride the in-flight plan restructure). Fix: an empty receiver returns itself before anything else, and a count past UINT32_MAX throws the spec's `Invalid string length` before the cast — keeping the length cap's coverage of the cast true by construction.
