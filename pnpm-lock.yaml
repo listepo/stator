@@ -134,8 +134,8 @@ importers:
         specifier: 5.4.0
         version: 5.4.0
       dotenv:
-        specifier: 18.0.1
-        version: 18.0.1
+        specifier: 18.0.5
+        version: 18.0.5
       execa:
         specifier: 10.0.1
         version: 10.0.1
@@ -198,8 +198,8 @@ importers:
         specifier: 2.11.0
         version: 2.11.0(@opentelemetry/api@1.9.1)
       dotenv:
-        specifier: 18.0.1
-        version: 18.0.1
+        specifier: 18.0.5
+        version: 18.0.5
       ink:
         specifier: 7.1.1
         version: 7.1.1(@types/react@19.3.0)(react@19.3.0)
@@ -859,8 +859,8 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  dotenv@18.0.1:
-    resolution: {integrity: sha512-0eR4m4D/jH5eaI3evo2ZqqMii5mrTCR12v12VChdie6O1gPHs7XAjzTep0CWc1Bd+oNx3vVfbi734dK4zghigw==}
+  dotenv@18.0.5:
+    resolution: {integrity: sha512-aBrGvt6KhjxbEnatqMWOMidftwsrCiCvqh1yNIGB9QyF0J+VcWkKDMsvYOEm7ZS82oiV+BT1sTOtIlAmUlTpwQ==}
     engines: {node: '>=12'}
     hasBin: true
 
@@ -1921,7 +1921,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  dotenv@18.0.1: {}
+  dotenv@18.0.5: {}
 
   emoji-regex@10.6.0: {}
 
