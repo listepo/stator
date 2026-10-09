@@ -12868,10 +12868,10 @@ The platform skip hid both.
 because `configure-pages` is already skipped on `pull_request`. A push to `main` that
 touches `site/**` or `docs/**` is not.
 
-**Change.** Before `configure-pages`, the workflow GETs
-`/repos/{owner}/{repo}/pages`. HTTP 200 publishes as before. HTTP 404 prints that Pages
-is not enabled and skips `configure-pages`, the pages artifact upload, and the deploy
-job. The build and the browser check still run. Any other status fails the job. Enabling
+**Change.** The workflow GETs `/repos/{owner}/{repo}/pages`, including on pull requests.
+HTTP 200 publishes as before (never from a pull request). HTTP 404 prints that Pages is
+not enabled and skips `configure-pages`, the pages artifact upload, and the deploy job.
+The build and the browser check still run. Any other status fails the job. Enabling
 Pages (Settings → Pages → GitHub Actions) is what turns publishing back on; the workflow
 does not call the action's `enablement` input, which would need a token other than
 `GITHUB_TOKEN`. `site/README.md` and `docs/TOOLCHAIN.md` say the same.
