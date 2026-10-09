@@ -6,6 +6,9 @@ on:
     - cron: '0 3 * * 0'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   evidence:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 2 * * *' || github.event.schedule == '0 3 * * 0'

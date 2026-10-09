@@ -89,8 +89,14 @@ import {
   isExternDeclaration,
   linkPragmasOf,
 } from './extern.ts';
-import { isFreeCommonJsName, isPackageSpecifier } from './vendor.ts';
-import { type CommonJsBinding, commonJsVerdict, isNodeSourceFile, nodeBuiltinId } from './node.ts';
+import { isFreeCommonJsName, isPackageSpecifier, isSyntaxFreeEsModule } from './vendor.ts';
+import {
+  type CommonJsBinding,
+  commonJsVerdict,
+  isNodeSourceFile,
+  nodeBuiltinId,
+  nodeLocationModule,
+} from './node.ts';
 import { classifyStdSpecifier } from './std.ts';
 
 type Mode = 'ts' | 'js';
@@ -726,9 +732,13 @@ function gateSpecifier(
   }
   const target = typeChecker.getSymbolAtLocation(moduleSpecifier)?.valueDeclaration;
   const name = (spec.propertyName ?? spec.name).text;
-  return target !== undefined &&
-    ts.isSourceFile(target) &&
-    ambiguousStarExports(target, typeChecker).has(name)
+  if (target === undefined || !ts.isSourceFile(target)) {
+    return { kind: 'accept' };
+  }
+  if (name === 'default') {
+    return missingDefault(target) ?? { kind: 'accept' };
+  }
+  return ambiguousStarExports(target, typeChecker).has(name)
     ? {
         kind: 'never',
         code: 'STA3003',
@@ -737,6 +747,22 @@ function gateSpecifier(
           'differently, so it cannot be imported by name',
       }
     : { kind: 'accept' };
+}
+
+/** A default import of a module with no default export is the SyntaxError ES raises at link time
+ * (ResolveExport answers null, §16.2.1.6.3). TypeScript reports it (TS1192) for every module it
+ * knows to be one; the gap is a syntax-free `.js` ES module, which it takes for CommonJS and gives a
+ * synthesized default (plan.md §9 Task 6.29). */
+function missingDefault(target: ts.SourceFile): GateResult | undefined {
+  return isSyntaxFreeEsModule(target)
+    ? {
+        kind: 'never',
+        code: 'STA3004',
+        message:
+          `${target.fileName} has no default export: it is an ES module ("type": "module") ` +
+          'with no export statement',
+      }
+    : undefined;
 }
 
 /** `ns.x` where `ns` is a module namespace: a member the lowering resolves to the export's own
@@ -759,11 +785,15 @@ function gateImport(node: ts.ImportDeclaration, typeChecker: ts.TypeChecker): Ga
   if (specifier.kind !== 'accept') {
     return specifier;
   }
+  const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
+  if (node.importClause?.name !== undefined && target !== undefined && ts.isSourceFile(target)) {
+    const missing = missingDefault(target);
+    if (missing !== undefined) return missing;
+  }
   // A namespace of a declaration file has no module behind it: its bindings are extern C
   // functions (docs/FFI.md §1), called by name, with no slot a namespace object could read.
   const bindings = node.importClause?.namedBindings;
   if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
-    const target = typeChecker.getSymbolAtLocation(node.moduleSpecifier)?.valueDeclaration;
     if (target !== undefined && ts.isSourceFile(target) && target.isDeclarationFile) {
       return notYet('a namespace import of a declaration file is not yet supported', 5);
     }
@@ -800,6 +830,12 @@ function gateModuleSpecifier(spec: ts.Expression, typeChecker: ts.TypeChecker): 
       if (target === undefined || (ts.isSourceFile(target) && isNodeSourceFile(target.fileName))) {
         return { kind: 'accept' };
       }
+    }
+    // The `--node` location rewrite's own import of its helpers, spelled absolute where no
+    // relative path reaches them (`nodeLocationModule`). Not a package, and the same file a
+    // relative import of it already reaches.
+    if (spec.text === nodeLocationModule()) {
+      return { kind: 'accept' };
     }
     // Bare specifier: a package. In js mode the bundler takes it (plan.md §11d T12.1), and the
     // vendor rewrite turns every import declaration and re-export of one into an import of the

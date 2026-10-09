@@ -493,11 +493,7 @@ fn slot(view: *const View, d: f64) ?usize {
 
 export fn jsrt_uint8array_get(array: Value, index: Value) Value {
     const view = asView(array) orelse return c.jsrt_dyn_index_get(array, index, null);
-    const d = numericKey(index) orelse {
-        const key = c.jsrt_shape_key(c.jsrt_to_string(index));
-        defer std.c.free(@constCast(key));
-        return c.jsrt_get_prop(array, key, null);
-    };
+    const d = numericKey(index) orelse return c.jsrt_get_prop_value(array, index, null);
     const i = slot(view, d) orelse return undefined_value;
     return c.jsrt_number(@floatFromInt(bytesOf(view)[i]));
 }
@@ -506,7 +502,6 @@ export fn jsrt_uint8array_put(array: Value, index: Value, value: Value) void {
     const view = asView(array) orelse return c.jsrt_dyn_index_set(array, index, value, null);
     const d = numericKey(index) orelse {
         const key = c.jsrt_shape_key(c.jsrt_to_string(index));
-        defer std.c.free(@constCast(key));
         return c.jsrt_set_prop(array, key, value, null);
     };
     // TypedArraySetElement (§10.4.5.16): the value converts BEFORE the index is checked, so a

@@ -179,3 +179,31 @@ export function ambiguousStarExports(
   visiting.delete(file);
   return ambiguous;
 }
+
+/** The bindings an import declaration of `file` names `eval` or `arguments`. A module is strict
+ * code, where either name as a binding identifier is an early SyntaxError (§13.1.1); TypeScript's
+ * binder checks every other declaration for it but not an ImportedBinding, so Stator does. A
+ * type-only import binds no value and is erased. */
+export function strictReservedImports(file: ts.SourceFile): readonly ts.Identifier[] {
+  const found: ts.Identifier[] = [];
+  const check = (name: ts.Identifier | undefined): void => {
+    if (name !== undefined && (name.text === 'eval' || name.text === 'arguments')) {
+      found.push(name);
+    }
+  };
+  for (const statement of file.statements) {
+    const clause = ts.isImportDeclaration(statement) ? statement.importClause : undefined;
+    if (clause === undefined || clause.isTypeOnly) continue;
+    check(clause.name);
+    const bindings = clause.namedBindings;
+    if (bindings === undefined) continue;
+    if (ts.isNamespaceImport(bindings)) {
+      check(bindings.name);
+      continue;
+    }
+    for (const element of bindings.elements) {
+      if (!element.isTypeOnly) check(element.name);
+    }
+  }
+  return found;
+}

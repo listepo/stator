@@ -226,19 +226,43 @@ static PropTable as_prop_table(jsrt_value v, const char *op) {
   return (PropTable){&o->shape, &o->slots, &o->capacity};
 }
 
-/* A shape key from a JS string. The shape table stores keys as NUL-terminated UTF-8 and keeps the
- * pointer forever, so the copy is deliberately immortal -- exactly the lifetime shapes already
- * have, and the reason this is plain malloc rather than a collected allocation. Surrogate pairs
- * combine into one code point; a lone surrogate is encoded as itself. U+0000 has no
- * representation in a C string and aborts loudly rather than truncating the key silently. */
-const char *jsrt_shape_key(jsrt_value name) {
+/* One code point as UTF-8 at `p`. Early-return branches, not `buf[i++]`, so this is not a
+ * second copy of the index-loop encoder in jsrt_regexp.c / jsrt_string.c. */
+static char *shape_utf8_put(char *p, uint32_t cp) {
+  if (cp < 0x80) {
+    *p++ = (char)cp;
+    return p;
+  }
+  if (cp < 0x800) {
+    *p++ = (char)(0xC0 | (cp >> 6));
+    *p++ = (char)(0x80 | (cp & 0x3F));
+    return p;
+  }
+  if (cp < 0x10000) {
+    *p++ = (char)(0xE0 | (cp >> 12));
+    *p++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+    *p++ = (char)(0x80 | (cp & 0x3F));
+    return p;
+  }
+  *p++ = (char)(0xF0 | (cp >> 18));
+  *p++ = (char)(0x80 | ((cp >> 12) & 0x3F));
+  *p++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+  *p++ = (char)(0x80 | (cp & 0x3F));
+  return p;
+}
+
+/* UTF-8 for a JS string. The caller owns the buffer. Surrogate pairs combine into one code point;
+ * a lone surrogate is encoded as itself. U+0000 has no representation in a C string and aborts
+ * loudly rather than truncating the key silently. Plain malloc: the buffer is bytes, not a
+ * jsrt_value, and a compare-only caller frees it before anything else can collect. */
+static char *shape_key_bytes(jsrt_value name) {
   const uint32_t len = jsrt_string_length(name);
   /* Worst case is three bytes per code unit: an astral PAIR takes four bytes for two units. */
   char *key = (char *)malloc((size_t)len * 3 + 1);
   if (key == NULL) {
     jsrt_panic("out of memory: shape key");
   }
-  size_t k = 0;
+  char *p = key;
   for (uint32_t i = 0; i < len; i++) {
     uint32_t cp = jsrt_string_char(name, i);
     if (cp == 0) {
@@ -252,23 +276,34 @@ const char *jsrt_shape_key(jsrt_value name) {
       }
     }
     if (cp < 0x80) {
-      key[k++] = (char)cp;
-    } else if (cp < 0x800) {
-      key[k++] = (char)(0xC0 | (cp >> 6));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-      key[k++] = (char)(0xE0 | (cp >> 12));
-      key[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
+      *p++ = (char)cp;
     } else {
-      key[k++] = (char)(0xF0 | (cp >> 18));
-      key[k++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-      key[k++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      key[k++] = (char)(0x80 | (cp & 0x3F));
+      p = shape_utf8_put(p, cp);
     }
   }
-  key[k] = '\0';
+  *p = '\0';
   return key;
+}
+
+/* A shape key from a JS string. The shape table stores keys as NUL-terminated UTF-8 and keeps the
+ * pointer forever, so a key a transition stores is deliberately immortal -- exactly the lifetime
+ * shapes already have. A second conversion of the same bytes returns the first pointer. */
+const char *jsrt_shape_key(jsrt_value name) { return jsrt_shape_intern(shape_key_bytes(name)); }
+
+char *jsrt_shape_key_ephemeral(jsrt_value name) { return shape_key_bytes(name); }
+
+jsrt_value jsrt_get_prop_value(jsrt_value obj, jsrt_value name, JSRTIC *ic) {
+  char *key = shape_key_bytes(jsrt_to_string(name));
+  const jsrt_value value = jsrt_get_prop(obj, key, ic);
+  free(key);
+  return value;
+}
+
+bool jsrt_has_prop_value(jsrt_value obj, jsrt_value name) {
+  char *key = shape_key_bytes(name);
+  const bool answer = jsrt_has_prop(obj, key);
+  free(key);
+  return answer;
 }
 
 /* A loaded slot, resolved. An accessor cell becomes a call with the receiver as argument zero --
@@ -737,20 +772,21 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
                      "Cannot use 'in' operator to search for a value in null or undefined");
     return false;
   }
-  const char *k = jsrt_shape_key(jsrt_to_string(key));
+  /* Compared, never stored: a miss must not enter the intern table (T16). */
+  char *k = jsrt_shape_key_ephemeral(jsrt_to_string(key));
   if (!jsrt_is_object(obj)) {
     /* §13.10.1 step 6: the RIGHT operand must be an Object, and a primitive is not one -- so the
      * answer is a TypeError, never a boolean. Two wrong answers lived here: `"length" in "abc"`
      * reported `true` through the string branch of `jsrt_has_prop`, and any other primitive
      * reported `false`, so a thrown error was hidden behind an ordinary value (plan-notes 220).
      * Node's wording names both operands, so the receiver goes through ToString like the key. */
-    const char *receiver = jsrt_shape_key(jsrt_to_string(obj));
+    char *receiver = jsrt_shape_key_ephemeral(jsrt_to_string(obj));
     char message[256];
     snprintf(message, sizeof message, "Cannot use 'in' operator to search for '%s' in %s", k,
              receiver);
+    free(receiver);
+    free(k);
     jsrt_throw_error(&jsrt_class_type_error, message);
-    free((void *)receiver);
-    free((void *)k);
     return false;
   }
   bool answer = false;
@@ -772,9 +808,7 @@ bool jsrt_in(jsrt_value key, jsrt_value obj) {
   if (!answer && jsrt_is_dynobj(obj)) {
     answer = inherited_get(obj, k, obj, &inherited);
   }
-  /* Compared only -- nothing here keeps the key, unlike a write that installs it in a shape -- so
-   * this copy dies with the call instead of joining the immortal shape table. */
-  free((void *)k);
+  free(k);
   return answer;
 }
 
@@ -966,10 +1000,9 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
     jsrt_throw_error(&jsrt_class_type_error, "Cannot convert undefined or null to object");
     return false;
   }
-  /* Owned here, unlike every other shape key: a delete only COMPARES the key -- the chain it
-   * replays carries the immortal keys the old shapes already held -- so this copy dies with the
-   * call instead of joining the table. */
-  const char *k = jsrt_shape_key(jsrt_to_string(key));
+  /* Compared, never stored on this call: the chain a removal replays already holds the
+   * interned pointers. A miss must not enter the intern table (T16). */
+  char *k = jsrt_shape_key_ephemeral(jsrt_to_string(key));
   bool answer = true;
   if (jsrt_is(obj, JSRT_TAG_ARRAY)) {
     uint32_t index = 0;
@@ -992,21 +1025,22 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
      * reach a representation the layout does not have (plan.md §8 step 2a(c), bucket 2704). */
     const JSRTDynObject *extras = jsrt_fixed_extras(obj);
     if (extras != NULL && jsrt_shape_find(extras->shape, k) != NULL) {
-      free((void *)k);
+      free(k);
       return jsrt_delete(extras_value(extras), key);
     }
     if (jsrt_is(obj, JSRT_TAG_OBJECT) && fixed_has(obj, k)) {
       if (jsrt_as_object(obj)->frozen) {
         char msg[256];
         snprintf(msg, sizeof msg, "Cannot delete property '%s' of #<Object>", k);
+        free(k);
         jsrt_throw_error(&jsrt_class_type_error, msg);
-        free((void *)k);
         return false;
       }
+      free(k);
       jsrt_panic(
           "STA2007: a statically-shaped object cannot lose a property; planned for Phase 8");
     }
-    free((void *)k);
+    free(k);
     return true;
   }
   const PropTable o = as_prop_table(obj, "delete");
@@ -1014,7 +1048,7 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
   if (hit == NULL) {
     /* Absent is `true` even on a frozen object: §13.5.1.2 asks [[Delete]], and deleting what is
      * not there succeeds. Only an existing non-configurable property raises. */
-    free((void *)k);
+    free(k);
     return true;
   }
   if (jsrt_is_dynobj(obj) && ((JSRTDynObject *)jsrt_ptr(obj))->frozen) {
@@ -1025,7 +1059,7 @@ bool jsrt_delete(jsrt_value obj, jsrt_value key) {
   } else {
     jsrt_shape_remove(o.shape, *o.slots, hit);
   }
-  free((void *)k);
+  free(k);
   return answer;
 }
 
@@ -1036,7 +1070,7 @@ jsrt_value jsrt_dyn_index_get(jsrt_value obj, jsrt_value index, JSRTIC *ic) {
   if (jsrt_is_uint8array(obj)) {
     return jsrt_uint8array_get(obj, index);
   }
-  return jsrt_get_prop(obj, jsrt_shape_key(jsrt_to_string(index)), ic);
+  return jsrt_get_prop_value(obj, index, ic);
 }
 
 void jsrt_dyn_index_set(jsrt_value obj, jsrt_value index, jsrt_value value, JSRTIC *ic) {

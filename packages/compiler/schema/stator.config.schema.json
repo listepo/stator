@@ -35,8 +35,8 @@
       "description": "build: extra clang link flags; each entry splits on spaces like one --link value. Command-line --link flags are appended after these."
     },
     "emit": {
-      "enum": ["binary", "c"],
-      "description": "build: \"c\" stops after writing C to out (--emit=c). Default \"binary\"."
+      "enum": ["binary", "c", "lib"],
+      "description": "build: \"c\" stops after writing C to out (--emit=c); \"lib\" writes out as a static library lib<name>.a plus lib<name>.pc, and needs emitHeader (--emit=lib). Default \"binary\"."
     },
     "keepC": {
       "type": "boolean",

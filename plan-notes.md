@@ -12289,6 +12289,148 @@ design point is whether each library carries a private runtime (prelink and loca
 one external runtime. Step 3 of the card leaves it to measurement, because the deciding factor
 (two collectors in one process) cannot be settled on paper.
 
+## 341. Two units sharing one runtime crashed at the first collection (2026-10-04)
+
+**Found while measuring Task 7.4 step 3.** Two `--emit-header` objects (Task 7.2) linked with
+one `libjsrt.a` into one C program segfaulted (exit 139) at the first collection. Each unit's
+`stator_<unit>_init` calls `jsrt_init()`, and `jsrt_init` called `jsrt_gc_init` every time.
+The second call saved the current push-other-roots hook, which was already the runtime's own
+`pushRoots`, as its predecessor. `pushRoots` then called itself until the stack ran out. lldb
+stopped in `pushRoots` at `jsrt_gc.zig:102` with `EXC_BAD_ACCESS` (macOS 27.0.1 arm64,
+Boehm 8.2.12 from Homebrew).
+
+The unit-level guard in the generated init (Task 7.2 step 3) only stopped one unit from
+initializing twice. It could not see the other unit. The Task 7.2 comment said "a second
+`jsrt_init()` would chain the Boehm roots hook into itself". That described the failure,
+but nothing prevented it across units.
+
+**Fix:** `jsrt_gc_init` is now idempotent through a module-level flag in `jsrt_gc.zig`. The
+flag is single-threaded, like every v0 runtime entry. `GC_init` itself was already safe to
+call twice. bdwgc v8.2.12 `misc.c` starts `GC_init` with
+`if (EXPECT(GC_is_initialized, TRUE)) return;`
+(https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04). The bug was ours:
+we registered a second kind and installed the hook a second time.
+
+**Regression test:** `packages/tests/unit/export-stubs.test.ts`, "two --emit-header units share
+one libjsrt.a across forced collections". Two units each keep 5,000 strings, and the C `main`
+calls `GC_gcollect()` after every call when the archive links Boehm. Before the fix the test
+fails with `SIGSEGV`. After it, the test prints `a=5000 b=5000`.
+
+## 342. Task 7.4 step 3: each library carries a private runtime (2026-10-04)
+
+**Question.** Two Stator libraries in one C program each need the runtime. Either (a) every
+library prelinks a private copy and hides it, or (b) `--runtime=external` leaves the runtime out
+and the consumer links one shared `libjsrt.a`. Both were measured before choosing.
+
+**Host.** macOS 27.0.1 arm64; `clang version 21.1.8` (conda, the `mise.toml` pin) and Apple
+clang 21.0.0 (clang-2100.3.34.2); `ld-27037.1` (Xcode 27.0); Apple `ar` (cctools); bdw-gc 8.2.12
+(Homebrew); pkg-config 3.0.7.
+
+**(b), one shared runtime.** Two `--emit-header` objects linked against one `libjsrt.a` crashed
+at the first forced collection. That was a Task 7.2 bug, not a property of (b), and it is fixed
+separately (plan-notes 341). With the fix, (b) works, but it leaves the consumer to find and
+link a `libjsrt.a` built from the same commit, and the runtime's ~900 global symbols land in the
+consumer's namespace. Neither is visible in the library's own files.
+
+**(a), a private runtime per library.** `cc -r unit.o libjsrt.a` with
+`-Wl,-exported_symbols_list` on Mach-O: the list marks every other global private extern, and
+`ld -r` makes private externs static unless `-keep_private_externs` is given (local `man ld`,
+ld-27037.1). On ELF, `objcopy --keep-global-symbols=<file>` makes every other global local
+(https://sourceware.org/binutils/docs/binutils/objcopy.html, checked 2026-10-04). Measured:
+
+| What | Result |
+|---|---|
+| globals left in `libconsumer.a` | 7: the unit's 6 `stator_consumer_*` symbols and `jsrt_gc_shared_kind_p48` |
+| runtime symbols made non-external | 894 at first measurement (1,313 local symbols in the stripped member) |
+| two libraries in one program, forced Boehm collections | works, default and ASan runtime |
+| app through the library vs object + `libjsrt.a` (`-dead_strip`) | 240 KB vs 245 KB |
+| cost of each extra library in one program | about 200 KB (its own runtime) |
+| member before the final link | about 390 KB |
+
+**Decision: (a).** The coordinator approved it on this evidence. (b) is not offered: there is no
+`--runtime=external` flag, and docs/FFI.md §8 says why.
+
+**Three things (a) needed:**
+
+1. *A shared Boehm object kind.* Each runtime copy registered its own kind, and bdw-gc allows
+   `MAXOBJKINDS` = 16 (https://github.com/ivmai/bdwgc/blob/v8.2.12/include/private/gc_priv.h).
+   `GC_new_kind` aborts with "Too many kinds" past it
+   (https://github.com/ivmai/bdwgc/blob/v8.2.12/misc.c, checked 2026-10-04), so the 13th
+   library's init killed the process. A clean `last_error` before the abort was considered and
+   not needed: the copies now share one kind through a weak global, `jsrt_gc_shared_kind_p48`
+   (`packages/runtime/src/jsrt_mem.h`), which the library keeps exported so the copies coalesce.
+   The first copy to initialize registers the kind, and the rest reuse it. Measured: 15 units in
+   one process initialize and collect. Sharing is sound because every copy's mark procedure
+   masks the same 48-bit payload; a runtime that marks differently must rename the symbol.
+   The weak definition is in C (`jsrt_value.c`): Zig 0.16.0 emits a weak data `@export` as a
+   non-external symbol on Mach-O, which does not coalesce.
+2. *`--no-default-config` on the prelink.* The pinned conda clang's configuration file adds
+   `-Wl,-rpath`, and `ld -r` refuses it ("-rpath can only be used when creating a dynamic final
+   linked image"). Without the config file, conda clang's output is byte-identical to Apple
+   clang's.
+3. *No debug information.* The runtime's Zig object carries debug stabs even in a release build,
+   naming `packages/runtime/src/` and the archive path on the build machine. The prelink passes
+   `-Wl,-S` (ld(1): do not put debug information in the output; GNU ld documents the same
+   flag). The sanitized flavor keeps it for line numbers in reports, and so its archive is not
+   byte-reproducible (the debug map also names the scratch directory).
+
+**The stack guard (Task 6.23, rebased onto `2efaabb`).** Each copy's `jsrt_stack_init` sets
+its own thread-local `jsrt_stack_limit` from the same thread bounds, and installs its own
+SIGSEGV/SIGBUS handler, saving the previous one; a fault outside its guard region restores the
+previous handler and returns, so the copies chain. Proof: `keeper.ts` exports `deep()`, which
+recurses without bound; in `two.c` it answers the sentinel with "Maximum call stack size
+exceeded" in `stator_keeper_last_error()`, and the consumer library answers correctly right
+after. Default and ASan runtime, macOS.
+
+**Source paths.** The archive holds the unit's own source path where a call site records its
+`file:line` for error stacks, as a binary does. That is program data, not a build input, and the
+static-lib check exempts exactly those strings; every other path into the repository is refused.
+
+**Determinism.** Two builds into different directories give byte-identical `.a`, `.h` and
+`.pc`. Apple's `ar` refuses the `D` modifier; it zeroes the member date, uid and gid when
+`ZERO_AR_DATE` is set
+(https://raw.githubusercontent.com/apple-oss-distributions/cctools/main/misc/libtool.c, checked
+2026-10-04). GNU `ar` takes `D` (https://sourceware.org/binutils/docs/binutils/ar-cmdline.html,
+checked 2026-10-04). Plain Apple `ar rcs` gave different bytes on every build.
+
+**The `.pc`.** `prefix=${pcfiledir}` makes it relocatable. `Libs` is the binary link's own list
+(`build.ts` `systemLinkFlags`, shared with `linkArguments`), so the two cannot drift.
+
+**Proof.** `packages/tests/ffi/example-c-consumer/static-lib.ts`, run by the ffi CI jobs (Linux
+and macOS) and by the ASan gate.
+
+**Linux evidence (PR #105, CI run 37148352874 on `3d87e50`, 2026-10-03).** ubuntu-24.04 x64 and
+arm64; Ubuntu clang 18.1.3 (1ubuntu1); GNU ld, objcopy and ar from GNU Binutils for Ubuntu 2.42.
+`ffi (linux/x64)` and `ffi (linux/arm64)` print `ffi static-lib: ok (two libraries, forced Boehm
+collections)`, and `asan (linux/x64)` and `asan (linux/arm64)` print `ffi static-lib: ok (asan,
+two libraries, forced Boehm collections)`. So the ELF path (`cc -r`, then
+`objcopy --keep-global-symbols`, then `ar rcsD`) holds two private runtimes in one program. Both
+runtimes' collections and both stack guards are confirmed, and the archive is byte-identical
+across two builds.
+
+**The sanitized runtime on ELF.** The first asan run (linux/x64, on `fdeb612`) failed at the
+consumer link of `two.c` with "`jsrt_class_range_error` ... defined in discarded section
+`.data.rel.ro.jsrt_class_range_error[jsrt_class_range_error]`". Clang's ASan dead-strips globals
+by default (`-fsanitize-address-globals-dead-stripping`, on by default in
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/clang/lib/Driver/SanitizerArgs.cpp).
+On ELF it puts each instrumented global in a COMDAT group named after the symbol
+(`instrumentGlobalsELF`,
+https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp,
+checked 2026-10-03). Two prelinked copies carry same-named groups. The final link keeps one copy
+and discards the other, whose code still refers to it. The sanitized flavor now builds with
+`-fno-sanitize-address-globals-dead-stripping` (`packages/runtime/justfile`), so ASan registers
+globals through a metadata array instead. The release flavor is not instrumented and has no such
+groups.
+
+## 343. Task 7.4 lands (2026-10-03)
+
+The Check passes. The step 3 evidence and the decision are in 342, and the GC-init fix is in 341.
+The Linux proof is CI run 37148352874: both `ffi (linux/*)` and both `asan (linux/*)` jobs print
+`ffi static-lib: ok`. The macOS proof is a local run (default and ASan), and the macOS ffi and
+asan CI jobs passed the same step in CI run 37153833737 (Apple clang 15.0.0, ld-1053.12). The card moves to done.md, and plan.md keeps the stub.
+Changelog: v4.79. Left out of this task and not planned: a Windows library (STA1219) and a
+`jsrt_value` surface under `--emit=lib` (STA1220). Both are refusals, so neither fails at run time.
+
 ## 344. Two bugs found while landing 6.24 become Tasks 6.27–6.28 (2026-10-04)
 
 **Source.** The agent landing Task 6.24 reported two pre-existing bugs outside its scope
@@ -12484,3 +12626,283 @@ lowered. Task 6.29 restores the six tests.
 - **Task 6.30: eleven other Windows failures.** Ten are `bundler.test.ts` path-form mismatches:
   the code answers `C:/Users/…` and the tests expect `C:\Users\…`. The other is
   `selfhost.test.ts` "the committed baseline is in --update form".
+
+## 350. Task 6.29: the six lost Test262 module tests were never real passes; three refusals land (2026-10-03)
+
+**Bisect.** No commit in `76a69ed..b95a0dc` dropped a refusal, because Stator never had one.
+At `76a69ed` the runner compiled a module test as `.tmp/test-<pid>-<slot>.js`. The test's
+self-import (`'./early-import-eval.js'`) and its `_FIXTURE` import then resolved to nothing. The
+build failed with `STA0012` "Cannot find module", which the runner maps to SyntaxError, so the
+negative test counted as a pass. Commit `68c8d57` (T11.5a, plan-notes 302) changed that: it
+compiles a module test under its own name, with its siblings copied next to it. From then on, the
+five tests reached the gate. The gate only raised `STA1214` at harness lines, and the runner
+recorded a skip. Reproduced on `76a69ed` by compiling a renamed copy of `early-import-eval.js`,
+which gives `STA0012` "Cannot find module".
+
+`dup-bound-names.js` lost for a different reason. At `76a69ed` the build raised `STA0012`
+(TS2300 "Duplicate identifier"). The bundle step (T12.1) came later and now runs before the
+program's diagnostics are reported. It hands the bare `'z'` to Vite, which fails with `STA0015`.
+
+**What TypeScript 6.0.3 does** (probed with `ts.getPreEmitDiagnostics`, the frontend's options):
+
+- `import { eval } from`, `import { y as arguments } from`: no diagnostic, in `.js` or `.ts`.
+  The binder checks strict-mode `eval`/`arguments` on every other binding (TS1100) but not on an
+  ImportedBinding.
+- `import { x, y as x } from 'z'`: TS2300 twice. These are **binder** diagnostics
+  (`SourceFile.bindDiagnostics`), not parser ones.
+- A default import of a `.js` file with no import or export statement: no diagnostic. TypeScript
+  cannot tell such a file from CommonJS, so it gives the file a synthesized default. Using the
+  binding then fails in the lowering with `STA4035`. For a `.ts` file, an `.mjs` file, a file with
+  `import.meta`, or a module with exports but no default, it reports TS1192, which becomes
+  `STA0012`.
+- Node 26.7.0 on the same file: under `"type": "module"`, `import x from './empty.js'` throws
+  SyntaxError "does not provide an export named 'default'". With no `"type"`, Node loads the file
+  as CommonJS and `x` is `{}`.
+
+**What landed.**
+
+1. **`STA3005`** (both modes): an imported binding named `eval` or `arguments`. The frontend
+   raises it after the checker (`strictReservedImports` in `frontend/modules.ts`). It is a
+   parse-phase error, so it is reported before the gate.
+2. **Parse errors come before the bundle step.** `LoadedProgram.parseDiagnostics` holds the
+   parse-phase subset: the parser's, the binder's and `STA3005`. When it is non-empty,
+   `bundledFrontend` reports only those and loads no adapter. The unresolved package imports
+   are not reported beside them, because those are the bundle's to resolve. The binder's list
+   is read through `Reflect.get(file, 'bindDiagnostics')`, an internal field. A unit test pins
+   that the pinned `typescript` still fills it, and a release without it degrades to the parser's
+   list without failing. A public alternative was considered and refused: treating every
+   base-program diagnostic as blocking would also block on the `STA0012` "Cannot find module"
+   of every package import, which is exactly what the bundle step resolves.
+3. **`STA3004`** (js mode): a default import, an `import { default as x }`, or an
+   `export { default } from` of a `.js` file that Node loads as an ES module (`"type": "module"`)
+   and that has no ES-module syntax. The gate raises it, next to `STA3003`. It is deliberately
+   narrower than Stator's own CommonJS rule (docs/MODES.md). With no `"type"`, Node gives the file
+   a CommonJS default, so refusing it would put a SyntaxError where Node prints `{}`.
+
+The runner maps `STA3004` and `STA3005` to SyntaxError, the same way it already maps `STA3003`.
+The classification is unchanged otherwise.
+
+**Not changed, found on the way.** Two shapes still hit `STA4035`:
+- a default import of a syntax-free `.js` with no `"type"`, which Node runs as CommonJS (`{}`);
+- `ns.default` through `import * as ns` of a syntax-free ES module, which Node answers with
+  `undefined`.
+
+Both are internal errors, not wrong output. They are left for a card if the creator wants one.
+
+**Measured** on macOS arm64, Node 26.7.0, corpus pin `771005236e88`. A full `pnpm run test262`
+reports `2377 passed, 49384 skipped, 1819 failed`. Before this change, CI on `b95a0dc` reported
+2371. The six tests pass under `--filter`, and so do the five tests gained since `76a69ed`.
+`ratchet.json` `passed` goes from 2372 to 2377. `failed` and `skipped` keep CI's values: the
+gate fails only when `failed` rises, and this change moves tests from failed or skipped to passed.
+
+The selfhost baseline for `packages/compiler` rises from 1833 to 1845 `STA1214`. The new frontend
+code (the binder-list read, the import walks and the gate check) uses constructs Stator does not
+compile yet. `--update` records that rise.
+
+## 352. Task 6.30: which path form the bundler seam promises, and LF everywhere (2026-10-03)
+
+**Evidence.** CI run 37150879614, job 111286117947 (`frontend (windows/x64)`), on `0cad209`:
+eleven unit failures besides the FFI quote test plan-notes 349 already skipped.
+
+| Test | Code answered | Test expected | Cause |
+|---|---|---|---|
+| `resolveDir` (3 tests) | `C:/Users/RUNNER~1/…/stator-bundler-X` | `C:\Users\RUNNER~1\…\stator-bundler-X` | `resolveDir` was `dirname(entryFile.fileName)`, the checker's spelling; the test's root comes from `mkdtemp` |
+| `modulePath`, `#line`, diagnostic `file` (4 tests) | `C:/…/node_modules/leftpad/index.js` | `C:\…\stator-bundler-X/node_modules/leftpad/index.js` | the checker's spelling against a test that glued `${root}/…`, a mixed form no code answers |
+| `rewrites(bundle).get(join(root, 'more.js'))` (2 tests) | `''` | the rewritten line | the map is keyed by checker file names; `join` gives `\` |
+| `--node` location read (1 test) | `STA0012 Cannot find module './D:/a/stator/stator/packages/node/src/internal/location.ts'` | `ok` | **a real bug**: the runner's temp dir is on `C:` and the checkout on `D:`. `path.relative` across drives answers the absolute path, and `relativeSpecifier` put `./` in front of it |
+| selfhost "the committed baseline is in --update form" | LF | `\r\n` on every line | the repo has no `.gitattributes`, and git on the Windows runner checks out with `core.autocrlf=true` |
+
+Two more assertions passed on Windows by accident: `rewrites(undefined).get(join(root, 'more.js'))`
+and `rewrites(…).get(join(root, 'main.js'))` expected `undefined`, which a wrongly spelled key
+always answers.
+
+**Decision (the card asked for one).** A file name has two spellings, and docs/BUNDLER.md §5
+"Paths" now says which one is used where:
+
+- **Out of the compiler, the platform's form** (`path.join`'s): `VendorEntry.resolveDir`, and
+  the `file` of every diagnostic (`CompileResult.diagnostics`, `stderr`, `stator explain` text and
+  `--json`). The card's requirement: a diagnostic shown to a Windows user uses `\`. One function,
+  `platformPath` in `frontend/vendor.ts` (the seam's module), does the conversion. A module of
+  its own would cost the selfhost ratchet one STA1214 for its `node:path` import. It is applied
+  in the one step both `build` and `explain` already took on the way out:
+  `mapVendorDiagnostics` becomes `reportedDiagnostics`, which maps vendor diagnostics and then
+  converts every `file`.
+- **Inside the compiler and in the generated C, the checker's form** (absolute, `/`): TypeScript
+  names every `SourceFile` that way, so `modulePath`, the `rewrites` keys (the overlay the program
+  is re-created with), `#line` and the run-time locations the binary prints keep it. Converting
+  them would mean converting back at every lookup. clang and debuggers take `/` on Windows.
+- **Written specifiers** are relative with `/`, or, when no relative path exists (another drive),
+  the absolute target with `/`. `relativeSpecifier` checks `isAbsolute` on what `relative`
+  answers.
+
+**The cross-drive fix needed a second step**, found by the first CI run of this change: the
+location rewrite's absolute `D:/…/internal/location.ts` was then answered by the checker with
+TS2877 ("uses a '.ts' extension … not a relative path"), because `rewriteRelativeImportExtensions`
+is on. With the extension dropped, the gate refused it as a package (STA1214), since every
+non-relative specifier is a package to it. So the helper's absolute specifier is the checker's
+path without `.ts` (`nodeLocationModule`), which Bundler resolution finds, and the gate accepts
+exactly that string. It names the compiler's own file, the one a relative import of the helper
+already reaches. Forcing that branch on macOS passes both `--node` bundler tests, including the
+run of the binary.
+
+The tests now say which form they expect: `join(root, …)` for what comes out, and a
+`checkerName` helper (`/` for `\`) for `modulePath`, the `rewrites` keys and `#line`. No
+assertion became looser: the `#line` regexes, which matched any character at each `.` of the
+root, are now exact `includes` checks, and the stderr check names the whole path instead of its
+tail. The `--node` test is split. The compile, which is where the cross-drive bug failed, runs on
+every platform. Running the binary is `NATIVE_ONLY`, like every other test that runs one.
+
+**After merging main (#105, Task 7.4).** CI on `685e025` failed one more Windows test, which no
+Windows leg had run before: `unit/static-lib.test.ts` "an export that crosses as jsrt_value is
+STA1220 under --emit=lib only" got `STA1219 --emit=lib is not yet supported on Windows`. That is
+the designed order (`libraryOutputs` refuses the platform before anything compiles), so STA1220
+cannot arise on Windows. The test is skipped on `win32`, and "--emit=lib on Windows is STA1219,
+before compiling" covers that platform.
+
+**Still red after that: `frontend (windows/arm64)`, one test from Task 6.27.** CI on `54ba88f`
+(job 111328467740): `frontend (windows/x64)` passes, and `windows/arm64` fails only
+`unit/to-primitive.test.ts` "the runtime names the same builtin constructors as the pinned Node".
+On that runner Node v26.7.0's `util.format('%s')` treats seven more names as builtin
+constructors than on linux, macOS and windows/x64: `AsyncDisposableStack`, `DisposableStack`,
+`Float16Array`, `SharedArrayBuffer`, `SuppressedError`, `Temporal`, `WebAssembly`. So Node's
+`builtInObjects` differs by platform, and `BUILTIN_CONSTRUCTOR_NAMES` (`jsrt_print.c`) matches
+every platform except windows/arm64. Why that Node build differs (for example, whether it
+starts without the startup snapshot, so `inspect.js` loads after those globals exist) is
+**unverified**. Not fixed here: it is outside this card, and whether the runtime should carry a
+per-platform list is open.
+
+**CRLF.** The root cause is the checkout, not the comparison: the committed bytes are LF (`git
+ls-files --eol` shows `i/lf` for every text file), and `--update` writes LF. A `.gitattributes`
+of `* text=auto eol=lf` makes every checkout LF. `git add --renormalize .` changed no file. This
+also removes the reason `ci.yml` gave for keeping `lint` off the desktop legs ("arguing with
+git's line-ending translation"), so the comment now says why one run in `static` is enough.
+
+## 353. Shape-key intern, named-site frames, and the CI files that never ran on main (2026-10-08)
+
+**Plan:** §2 (pipeline), docs/VALUE.md §4.10 (shape keys), §4.12 (rooting). `plan.md` NOT edited
+— this is a bug-fix change, not a roadmap move. T17 (`String.prototype.repeat` hang) already
+landed on `main` as `ccf9818`; T19's NULL-capture path already uses `NO_GROUP`.
+
+**pipeline.yml called a private reusable workflow.** GitHub run 37694735601 failed in 0s with
+"workflow file issue": `uses: listepo/infra/.github/workflows/pipeline.yml@…` is not visible to
+this public repo. PR #61 already had the public pin (`pyrlyn/ci` at
+`c875cd763ad0c4abbd936e480be5752330d3b66b`) plus `permissions.actions: write` for that
+workflow's cancel-run step. Copied that pin and the `actions: write` grant into the tree's
+`pipeline.yml`.
+
+**ci.yml had no `push` trigger.** The revert-on-failure job is `github.event_name == 'push'`
+only, so a merge to `main` ran no tests of its own and could never revert. Added
+`push: branches: [main]`.
+
+**nightly.yml had no top-level `permissions`.** GITHUB_TOKEN then inherits the repo default,
+which on a public repo with "restrictive" defaults is too wide for a scheduled job that only
+needs to read. Set `permissions: contents: read`.
+
+**T16 — `jsrt_shape_key` leaked a malloc on every lookup.** The conversion buffer was immortal
+only for keys that `jsrt_shape_transition` stored on a *new* child. `jsrt_get_prop` /
+`jsrt_has_prop` / `jsrt_in` / `jsrt_delete` / `jsrt_object_assign` / `fromEntries` / index /
+print all convert and compare. Zig intern table (`jsrt_shape_intern` in `jsrt_shape.zig`):
+FNV-1a, chained buckets, rehash; a second intern of the same bytes returns the first pointer
+and frees the duplicate. Callers must not `free` an interned key. Pinned by an assert in
+`runtime/tests/print_shapes.c` (identity, not stdout — the corpus still diffs against Node).
+
+**T18 — unrooted C locals across allocating calls.** Boehm is conservative and `jsrt_value` is
+NaN-boxed, so a C local is not a root. Frames at the named sites: `jsrt_object_from_entries`
+FRAME(1); `jsrt_object_assign` FRAME(2) for keys+value; `iterator_result` FRAME(1); the four
+Set algebra ops FRAME(1); `jsrt_promise_settle` self-cycle FRAME(2). Not a whole-runtime
+`GC_STRESS` toggle.
+
+**windows/arm64 builtin-names (note 352).** Still unverified why that Node build's
+`builtInObjects` is larger. The test is skipped on `win32`/`arm64` rather than growing a
+per-platform list in `jsrt_print.c`. Reopen with a measured reason that Node's set on that
+arch is the one we should match.
+
+**Docs / dead dep.** AGENTS.md and CLAUDE.md listed Ryū under `runtime/vendor/`; it is not
+vendored (`docs/TOOLCHAIN.md`, notes 28 / 188). `memfs` was in the root and
+`packages/tests` `package.json` and never imported; removed, lockfile updated. Comments on
+`createProgram`'s custom-host seam said "memfs" because that was the intended test backing;
+they now say "in-memory CompilerHost".
+
+**Not in this change.** GitHub Pages (E9) is `has_pages: false` on the repo — a setting, not a
+workflow fix. Dependabot PRs are not merged here. CHANGELOG.md / SECURITY.md remain the
+existing P2 docs gap. The string `replace` triple-scan leftover is still P2.
+
+## 354. The windows/arm64 builtin-constructor mismatch is the startup snapshot (2026-10-09)
+
+**Does it fail on main?** No. `frontend (windows/arm64)` on main run 37861129653 is green
+because plan-notes 353 skips the test on `win32`/`arm64`. The assertion still fails on any
+commit without that skip: PR #61 job 113025497253 and PR #114 job 113033051244, both Node
+v26.7.0. `frontend (windows/x64)` on the same runs passes. The seven names the win-arm64
+binary adds, and the runtime list does not, are `AsyncDisposableStack`, `DisposableStack`,
+`Float16Array`, `SharedArrayBuffer`, `SuppressedError`, `Temporal` and `WebAssembly`.
+
+**Why only that runner.** Node records `builtInObjects` when `lib/internal/util/inspect.js`
+is evaluated (v26.7.0, the set `hasBuiltInToString` consults). A binary built with the
+startup snapshot evaluates that file while the snapshot is generated, before the late globals
+exist; that is the 47-name set in `BUILTIN_CONSTRUCTOR_NAMES` and the set every other CI
+platform measures. The official win-arm64 package is not built on ARM64. Node's
+`BUILDING.md` (v26.7.0) lists it as "Windows Server 2022 (x64) with Visual Studio 2022", a
+cross-compile. `configure.py` then sets `node_use_node_snapshot` false
+(`b(not cross_compiling and not options.shared)`). Without the snapshot, `inspect.js` runs
+at the first `util.format`, after those seven globals exist, so `%s` treats a class of one
+of those names as a builtin. Linux arm64, macOS arm64 and win-x64 official packages are
+native builds, so they keep the snapshot. There is no official win-arm64 binary of v26.7.0
+that has the snapshot; compiling Node on the runner would not be pinning the release.
+
+Reproduced on the official linux-x64 binary of the same version: with the snapshot,
+`util.format` and `BUILTIN_CONSTRUCTOR_NAMES` are the same 47 names. `node --no-node-snapshot`
+(the binary still reports `node_use_node_snapshot: true`; the flag only skips using the
+embedded snapshot) measures exactly the same seven extras and nothing else. The win-arm64
+difference is the missing snapshot, not an arm64-only global. The official
+`win-arm64/node.exe` of v26.7.0 embeds `"node_use_node_snapshot": false` in its
+`config.gypi` (and `node_use_node_code_cache` false beside it).
+
+**What the runtime should match.** The oracle for goldens is the pinned Node's snapshot set.
+Adding the seven names would make `%s` of a `Temporal` (and the other six) inspect on every
+platform, which the snapshot Node does not do. A per-platform list in `jsrt_print.c` would
+describe the cross-compiled binary, not the pinned Node.
+
+**The comparison.** `unit/to-primitive.test.ts` no longer skips on architecture. When
+`process.config.variables.node_use_node_snapshot` is true, the measured set must equal the
+runtime list. When it is false, the measured set must equal that list plus exactly the seven
+late names above. A missing runtime name, or any extra other than those seven, still fails.
+The platform skip hid both.
+
+## 355. The site workflow skips deploy when GitHub Pages is not enabled (2026-10-09)
+
+**Evidence.** `site` on main run 37840183839 failed in `actions/configure-pages@v6` with
+"Get Pages site failed … Error: Not Found". The repository has no Pages site
+(`has_pages: false`, plan-notes 353). Pull requests that only build the site stay green,
+because `configure-pages` is already skipped on `pull_request`. A push to `main` that
+touches `site/**` or `docs/**` is not.
+
+**Change.** The workflow GETs `/repos/{owner}/{repo}/pages`, including on pull requests.
+HTTP 200 publishes as before (never from a pull request). HTTP 404 prints that Pages is
+not enabled and skips `configure-pages`, the pages artifact upload, and the deploy job.
+The build and the browser check still run. Any other status fails the job. Enabling
+Pages (Settings → Pages → GitHub Actions) is what turns publishing back on; the workflow
+does not call the action's `enablement` input, which would need a token other than
+`GITHUB_TOKEN`. `site/README.md` and `docs/TOOLCHAIN.md` say the same.
+
+## 356. Compare-only shape keys were still interned (T16) (2026-10-09)
+
+**What 353 fixed.** `jsrt_shape_intern` frees a second malloc of the same bytes, so a loop
+that reads one key no longer leaks a buffer per call. The table itself is immortal, the
+same lifetime as a shape.
+
+**What it left.** A miss never stores the pointer, but every `jsrt_shape_key` still entered
+the table. Reproduced on this tree before the call-site change: `print_shapes` reported
+`compare-only key lookup interned 32 keys` for 32 distinct `jsrt_dyn_index_get` / `in` /
+`delete` misses. A named-group `exec` malloc'd the group name and handed it to
+`jsrt_set_prop`; the second match reused the existing transition and leaked that malloc
+(`jsrt_shape_transition` takes ownership only of a new child).
+
+**Change.** `jsrt_shape_key_ephemeral` is the conversion the caller frees.
+`jsrt_get_prop_value` and `jsrt_has_prop_value` are the compare-only lookups. Reads, `in`,
+`delete`, `Object.hasOwn`, array-index checks, print and `JSON.stringify` gets, and the
+two error-message renderings use it. Stores (`jsrt_set_prop`, `JSON.parse` keys,
+`console.count` labels) still intern. Named-group names go through `jsrt_shape_intern`, so
+the second match frees the duplicate. `jsrt_shape_intern_count` is what the corpus asserts: 32 misses in `print_shapes` leave
+it unchanged and one stored key adds one; two named-group execs in `print_regexp` add
+the two group names and nothing on the second exec. The leak harness row `keys.js` is
+2M distinct computed reads under `--mode=js` (peak 2956 KB of the 64 MB cap).

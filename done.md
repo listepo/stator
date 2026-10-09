@@ -3171,6 +3171,138 @@ verifier problem fails the build.
 > prove it runs (`g(10000)`), matching Node byte-for-byte; a decision test per mode; the
 > HIR verifier is clean on all of them; `pnpm run ci` is green.
 
+### Task 6.29 — Test262 gets back the six module tests it lost ✅ (landed 2026-10-03)
+
+The six tests were lost for two reasons (plan-notes 349, 350). The four `early-import-*` tests
+and `instn-named-err-not-found-dflt` had never really passed. Until `68c8d57`, the runner compiled
+a module test under a temporary name, so its imports failed to resolve with `STA0012`, which
+counts as a SyntaxError. Stator had no refusal for either shape. `dup-bound-names` lost because
+the bundle step (T12.1) ran before the duplicate binding was reported.
+
+What landed (plan-notes 350):
+
+- `STA3005`, both modes: an imported binding named `eval` or `arguments` (`strictReservedImports`
+  in `src/frontend/modules.ts`, raised by `createProgram`).
+- `LoadedProgram.parseDiagnostics`: the parser's and the binder's diagnostics plus `STA3005`.
+  When there are any, `bundledFrontend` (`src/cli/bundler.ts`) reports only them and loads no
+  adapter.
+- `STA3004`, js mode: the default of a `.js` file that Node loads as an ES module and that has no
+  module syntax, in an import, an `import { default as x }`, or an `export { default } from`
+  (`missingDefault` in `src/frontend/gate.ts`, `isSyntaxFreeEsModule` in `src/frontend/vendor.ts`).
+- The Test262 runner maps both codes to SyntaxError, the way it maps `STA3003`.
+- Tests:
+  - decision tests `subset_import_binding_eval_{ts,js}` and `subset_import_default_missing_{ts,js}`;
+  - three unit tests in `unit/bundler.test.ts`: parse errors come before the adapter, the
+    binder's list is still where `parsePhaseKeys` reads it, and STA3004 in its three shapes but
+    not for a CommonJS file.
+- Docs: `docs/DIAGNOSTICS.md` (two rows), `docs/SUBSET.md` (the imports row), `docs/BUNDLER.md` §5.
+
+The Check, on linux CI: run 37154148433 on `eb44366`, job "test262 conformance" (Aggregate and
+gate), reports `test262: merged 8 shard(s), 53580 results` and `test262: 2377 passed, 49384
+skipped, … 1819 failed`. The ratchet gate is green.
+
+Local evidence (macOS arm64, Node 26.7.0, corpus pin `771005236e88`):
+
+- `pnpm run test262` → `2377 passed, 49384 skipped, … 1819 failed`, exit 0.
+- `ratchet.json` `passed`: 2372 → 2377.
+- `run.ts --filter`:
+  - `module-code/early-import` → `4 passed`;
+  - `import/dup-bound-names` → `1 passed`;
+  - `instn-named-err-not-found-dflt` → `1 passed`;
+  - the five tests gained since `76a69ed` → `1 passed` each.
+- `pnpm run ci` → exit 0:
+  - typecheck and lint clean, dupes at 183 clones;
+  - unit `764 passed (764)`;
+  - `subset: 933 fixtures — 902 passed, 31 expected-fail, 0 failed`;
+  - `golden: 459 fixtures — 459 passed, 0 failed`;
+  - `selfhost: 14 targets match the baseline`, after `--update` raised compiler `STA1214` from
+    1833 to 1845 for the new frontend code;
+  - builtins, node-coverage, leak and ASan green.
+
+> **Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
+> `b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
+> (`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
+> 1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
+>    phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
+>    supported", from harness lines), so the runner records a skip. The SyntaxError for an
+>    imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
+>    is skipped the same way. Find the commit that dropped it (bisect with
+>    `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
+>    is a SyntaxError in every module.
+> 2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
+>    specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
+>    30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
+>    before any bundle step runs.
+>
+> **Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
+> five gained tests stay), and `ratchet.json` is raised to the new total.
+
+### Task 6.30 — The Windows frontend legs are green again ✅ (landed 2026-10-04)
+
+`frontend (windows/x64)` failed eleven unit tests once stage 2 ran again (CI run 37150879614, job
+111286117947). Ten were in `unit/bundler.test.ts` and one was the selfhost baseline test. Four
+root causes (plan-notes 352):
+
+- **No stated path form at the bundler seam.** The code answered the checker's spelling
+  (`C:/…`), and the tests glued `${root}/…` onto a `C:\…` root.
+- **A cross-drive bug.** The runner's temp dir is on `C:` and the checkout on `D:`.
+  `path.relative` answers an absolute path there, and `relativeSpecifier` put `./` in front of
+  it, so a `--node` location read failed with `Cannot find module './D:/…/location.ts'`.
+- **The helper's absolute import**, once spelled correctly, still met TS2877 (a non-relative
+  `.ts` import) and then the gate's package rule.
+- **CRLF.** The repo had no `.gitattributes`, and git on the Windows runner checks out with
+  `core.autocrlf=true`.
+
+What landed:
+
+- docs/BUNDLER.md §5 "Paths": what leaves the compiler is in the platform's form, namely
+  `VendorEntry.resolveDir` and every diagnostic's `file` (the API, `stderr`, `stator explain`).
+  `modulePath`, the `rewrites` keys, `#line` and run-time locations keep the checker's form.
+  docs/DIAGNOSTICS.md says the same for the `file` field.
+- `platformPath` in `frontend/vendor.ts`. `mapVendorDiagnostics` becomes `reportedDiagnostics`,
+  the one outbound step `build` and `explain` share, and it converts every `file`.
+- `relativeSpecifier` answers the absolute target when no relative path exists. The location
+  rewrite then imports `nodeLocationModule()` (the helper's checker path without `.ts`), and the
+  gate accepts exactly that string.
+- `.gitattributes`: `* text=auto eol=lf`. `git add --renormalize .` changed no file. The
+  `ci.yml` comment that blamed line-ending translation for keeping `lint` off the desktop legs
+  now gives the real reason.
+- Tests state which form they expect: `join(root, …)` for what comes out, `checkerName` for
+  internal names. No assertion got looser. The `#line` regexes became exact `includes`, and two
+  `rewrites(…).get(…) === undefined` checks that passed vacuously on Windows now test something.
+  The `--node` bundler test is split: the compile runs on every platform (on the Windows x64
+  runner it crosses drives), and the run of the binary is `NATIVE_ONLY`.
+- Merging main brought Task 7.4's `unit/static-lib.test.ts`, whose Windows leg had never run:
+  "an export that crosses as jsrt_value is STA1220" met STA1219, because Windows refuses
+  `--emit=lib` before compiling (docs/FFI.md §8). It is skipped on `win32`; the next test pins
+  STA1219 there.
+- After that merge, `frontend (windows/arm64)` (CI on `54ba88f`, job 111328467740) still fails one
+  Task 6.27 test, `unit/to-primitive.test.ts`: Node's own builtin-constructor set is seven names
+  larger on that runner (plan-notes 352). `frontend (windows/x64)` passes.
+
+Check evidence (PR #110, head `f9a5e72`, CI run 37155782218):
+
+- `frontend (windows/x64)` (job 111299744263) and `frontend (windows/arm64)` (job 111299744145):
+  pass, `Tests  702 passed | 63 skipped (765)` each.
+- Every other job passes except `test262 conformance` (`FAIL ratchet: passed dropped from 2372
+  to 2371`), which is Task 6.29's known drop and is on main too.
+- Local `pnpm run ci` → exit 0 (`Tests  762 passed (762)`, subset 898 passed + 31 expected-fail,
+  golden 459/459, selfhost 14 targets match the baseline).
+
+> **Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
+> and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
+> since `76a69ed`, because stage 2 waits on the linux jobs, which were red.
+> 1. Ten `unit/bundler.test.ts` tests (T12.1–T12.3) compare a bundler path such as `resolveDir`, a
+>    `#line` file or a diagnostic file against `join(...)`. The code answers `C:/Users/…` and the test
+>    expects `C:\Users\…`. Decide which form the bundler seam promises, document it in
+>    `docs/BUNDLER.md`, and make the code and the tests agree. A diagnostic shown to a Windows user
+>    should use the platform's separators.
+> 2. `unit/selfhost.test.ts` "the committed baseline is in --update form" fails on Windows (most
+>    likely CRLF from checkout, compared against the `--update` text). Fix it with a
+>    `.gitattributes` rule or by normalizing the comparison, whichever is the root cause.
+>
+> **Check:** `frontend (windows/x64)` and `frontend (windows/arm64)` green on a PR.
+
 ## Phase 7 — FFI ✅ COMPLETE (2026-09-16)
 
 **Check — PASSED.** *An example that statically links SQLite, queries it from TS, and is
@@ -3304,6 +3436,77 @@ Check evidence: 12/12 `subset_out_*` decision fixtures (ts/js twins with the
 checker-owns-ts splits), 5/5 `extern-out` classifier unit tests, 17/17 generator unit
 tests, golden 386/386 (serial, sharded, ASan), `test:ffi` 5/5, differential smoke 10/10
 with 0 divergences. Net `cpd` unchanged at 0.9%.
+
+### Task 7.4 — A self-contained static library for C consumers ✅ (landed 2026-10-03)
+
+Asked by the creator (plan-notes 340). Step 3 chose (a), a private runtime per library, on measured
+evidence (plan-notes 342); two runtime bugs found on the way are plan-notes 341 and 342.
+
+> **[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
+> Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
+> The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
+> libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
+> This task makes `stator build` produce one static library plus its header, which a C build can
+> use with no Stator checkout.
+>
+> Steps:
+>
+> 1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
+>    `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
+>    member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
+>    written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
+>    same input are byte-identical, as the header already is (Task 7.2 step 8).
+> 2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
+>    it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
+>    writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
+>    the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
+> 3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
+>    program would each carry `jsrt_*` and collide. Measure both options and record the result in
+>    plan-notes before choosing:
+>    (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
+>    `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
+>    on ELF), so each library carries a private runtime; this must prove two such libraries work
+>    in one process, including two collectors' init and roots;
+>    (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
+>    shared `libjsrt.a` installed once.
+>    Whichever is chosen, the other combination is refused or documented. It never fails at run
+>    time.
+> 4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
+>    (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
+>    Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
+> 5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
+>    refused with a not-yet diagnostic until then.
+>
+> **Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
+> `<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
+> runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
+> linked into one C program and both called, under the option step 3 chose. The ffi CI job and
+> the ASan job run it. `pnpm run ci` is green.
+
+**What landed.** `src/cli/library.ts` (prelink, localization, deterministic `ar`, the `.pc`),
+the `--emit=lib` branch and `systemLinkFlags` in `src/cli/build.ts`, the config key and schema,
+STA0020/STA1219/STA1220 and two STA0004 forms in `docs/DIAGNOSTICS.md`, the shared Boehm kind
+(`jsrt_gc_shared_kind_p48`) and idempotent `jsrt_gc_init` in the runtime, and
+`-fno-sanitize-address-globals-dead-stripping` for the sanitized runtime (ELF COMDAT groups broke
+two sanitized libraries in one link). Docs: `docs/FFI.md` §8 "Static library", TOOLCHAIN, CONFIG,
+HOW-IT-WORKS. Option (b), `--runtime=external`, is documented as not offered.
+
+**Check — PASSED:**
+
+- `packages/tests/ffi/example-c-consumer/static-lib.ts`: builds `libconsumer.a` twice and compares
+  the `.a`, `.h` and `.pc` bytes; copies them with `main.c` to a fresh temp dir, refuses any repo
+  path (the unit's own error-stack `file:line` strings excepted), links through `pkg-config` alone
+  and matches `expected.txt`; links `libconsumer` and `libkeeper` into `two.c` with forced Boehm
+  collections (`GC_get_gc_no() >= 10`) and a stack overflow in one library.
+- Linux CI (run 37148352874, ubuntu-24.04, clang 18.1.3, GNU binutils 2.42): `ffi (linux/x64)`,
+  `ffi (linux/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (linux/x64)`, `asan (linux/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm
+  collections)`.
+- macOS 27.0.1 arm64 locally: default and ASan both ok. CI run 37153833737 (Apple clang 15.0.0,
+  ld-1053.12): `ffi (macos/arm64)` → `ffi static-lib: ok (two libraries, forced Boehm collections)`;
+  `asan (macos/arm64)` → `ffi static-lib: ok (asan, two libraries, forced Boehm collections)`.
+- `pnpm run ci` exit 0 locally (unit 772 passed, subset 0 failed, golden 459/459, selfhost matches
+  baseline); `pnpm run test:ffi` exit 0; `unit/static-lib.test.ts` 10 passed.
 
 ### Test-infra track: Darwin link retry, `test:ffi` real checks, C-consumer example ✅ (landed 2026-09-15)
 
@@ -4327,3 +4530,21 @@ cycle and `module.exports` replacement goldens moved to T12.3.
 Left to other cards: `esmExternalRequirePlugin` in `vite-stator` (T12.2) and the CommonJS goldens
 through the default adapter (T12.3). The CJS cycle and `module.exports` replacement goldens moved
 to T12.3 earlier.
+
+### T16. Compare-only shape keys are freed; stores still intern
+
+`jsrt_shape_key` interned every UTF-8 conversion. A second lookup of the same bytes was freed (plan-notes 353), but a miss never stores the pointer, so each distinct computed read, `in`, `delete`, `Object.hasOwn`, array-index check, print/`JSON.stringify` get, and error-message rendering kept `3·len+1` bytes plus an intern node for the life of the process. A named-group `exec` malloc'd the group name and passed it to `jsrt_set_prop`; the second match reused the existing transition and leaked that malloc. Reproduced before the call-site change: `print_shapes` reported `compare-only key lookup interned 32 keys`.
+
+Compare-only sites now go through `jsrt_shape_key_ephemeral` (`jsrt_get_prop_value` / `jsrt_has_prop_value` free it). Stores (`jsrt_set_prop`, `JSON.parse` keys, `console.count` labels) still intern. Named-group names go through `jsrt_shape_intern`. The leak harness covers 2M distinct computed-key reads (`packages/tests/leak/keys.js`, `--mode=js`).
+
+Check: `just -f packages/runtime/justfile -d packages/runtime runtime-test` — `runtime: print corpus matches Node` (32 misses leave `jsrt_shape_intern_count` unchanged; one stored key adds one; two named-group execs in `print_regexp` add the two names and nothing on the second exec). `pnpm run test:leak` — `leak: 2M computed-key reads — peak RSS 2956 KB of a 65536 KB cap, 114 samples, plateau` (the 10M object and FFI rows still plateau).
+
+### T17. `"".repeat` with a huge count no longer hangs or runs an undefined cast
+
+`packages/runtime/src/jsrt_string_ops.c` `jsrt_string_repeat` checked only `count * str->length > JSRT_MAX_STRING_LENGTH`: an empty receiver makes that product zero for any count, so `"".repeat(4294967295)` fell into a 4294967295-iteration loop over zero bytes (Node answers `""` instantly) and a count past UINT32_MAX reached `(uint32_t)count`, undefined by C11 §6.3.1.4. Found by the 2026-10-07 audit (task T17 of the audit set; the plan-table rows ride the in-flight plan restructure). Fix: an empty receiver returns itself before anything else, and a count past UINT32_MAX throws the spec's `Invalid string length` before the cast — keeping the length cap's coverage of the cast true by construction.
+Model: ZCode / GLM-5.3 · Status: done 2026-10-07 · Priority: P1 · Complexity: 1 · Files: `packages/runtime/src/jsrt_string_ops.c`, `packages/tests/golden/{js,ts}/string_range_error.ts`
+Check: `moon run tests:golden -- --filter string_range_error` — both fixtures' full outputs match Node, including the new `"".repeat(4294967295)` and `"".repeat(2**53)` cases (the full golden pass: 463/463).
+
+### T23. Builtin-constructor comparison follows the startup snapshot
+
+`unit/to-primitive.test.ts` compared `BUILTIN_CONSTRUCTOR_NAMES` with the host `util.format` set and skipped `win32`/`arm64`, so main's `frontend (windows/arm64)` was green while any branch without the skip failed (PR #61, PR #114). The official win-arm64 Node 26.7.0 is cross-compiled from win-x64, so `node_use_node_snapshot` is false and `inspect.js` records seven later globals. The runtime list stays the snapshot set. The test now branches on that flag and fails unless a no-snapshot build differs by exactly those seven names (plan-notes 354).

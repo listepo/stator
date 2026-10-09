@@ -1,5 +1,49 @@
 # plan.md — Stator: a two-mode AOT compiler for TypeScript/JavaScript
 
+https://github.com/listepo/stator
+
+An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
+
+| # | Status | Priority | Complexity | Readiness | Agent |
+| --- | --- | --- | --- | --- | --- |
+| T15 | in progress | P2 | 1 | 70% | Cursor / grok 4.7 |
+| T16 | done | P0 | 3 | 100% | Cursor / grok 4.7 |
+| T17 | todo | P1 | 1 | 0% | |
+| T18 | todo | P1 | 3 | 0% | |
+| T19 | todo | P3 | 1 | 0% | |
+| T20 | todo | P2 | 2 | 0% | |
+
+### T15. Required root docs
+
+`todo.md`, `roadmap.md`, `ideas.md`, and `toolchain.md` were missing from the repo root. Done when those four files exist and are filled from this plan, the manifests, and `docs/TOOLCHAIN.md`, and when the package audit has either a new test or a recorded reason that every package under `packages/` is already covered.
+
+### ~~T16. Systemic `jsrt_shape_key` leak on every dynamic property read/write~~
+
+Done — evidence in `done.md`.
+
+### T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion
+
+`jsrt_string_ops.c:265-275`: the range guard `count * (double)str->length > JSRT_MAX_STRING_LENGTH` is `0 > max` for an empty receiver, so any count passes; `(uint32_t)count` is UB for count ≥ 2³² and an in-range huge count spins a `times`-iteration no-op `memcpy` loop (Node returns `""` instantly). Done means: early-return for an empty receiver, validate `count <= UINT32_MAX` before the cast, with fixtures for the empty-receiver edge.
+
+### T18. GC rooting hazards: boxed values held in C locals across allocating calls
+
+The same pattern `jsrt_op_add` was already fixed for ("measured: 999685 of 1000000") remains at: `jsrt_ops.c:85-86` (`jsrt_compare` holds `pa` across the allocating ToPrimitive of `b`), `jsrt_array_ops.c:765` (default sort comparator: x's string unrooted while y's ToString allocates; `sort_merge` at `:775` interleaves allocations with reads), `jsrt_promise.c:181` (adoption path enqueues with the inner promise unrooted across `enqueue`'s `jsrt_gc_alloc`), `jsrt_numeric.c:419-423` (`jsrt_loose_equals` passes an unrooted primitive into a recursive allocating call). Done means: each partial is parked in a `JSRT_FRAME` slot as `jsrt_op_add`, `jsrt_json.c:216-231` and `jsrt_promise_construct` already do.
+
+### T19. Small runtime fixes: RegExp NULL-capture and `replace_impl` double scan
+
+`jsrt_regexp.c:514-515` passes a possibly-NULL `capture` to `exec_at` while `jsrt_regexp_search` (`:627`) guards it — align the two (or drop both with a comment). `jsrt_string_ops.c:507-508,523,537`: `replace_impl` calls `index_of_from` twice per match — hoist the result.
+
+### T20. Tests for the runtime edges found by the audit
+
+No fixture covers `repeat` with an empty receiver and a huge count (T17), and the 10M-object leak harness only creates objects — it never exercises computed-key dynamic reads (T16). Also `compareSdkNames` (`toolchain.ts:38-40`) silently ranks non-SDK names as 0.0 via destructuring defaults — an explicit rank for non-matching names would surface malformed input, and the program cache (`program.ts:578-608`) keys on entry hash only, which deserves a dependency-hash key or a documented TODO before any watch mode. Done means: the two runtime edges have fixtures, and the toolchain/cache notes are addressed.
+
+Execution plan:
+
+1. Read `plan.md`, `package.json`, `mise.toml`, `docs/TOOLCHAIN.md`, and `README.md`.
+2. Add the four root files in English from those sources. Leave `todo-js` and `todo-ts` in place.
+3. Audit `packages/`: a package is covered when its name already appears in `packages/tests`. Every package is covered, so add no tests.
+4. Leave readiness at 70% because tests were not run.
+
 > **Audience:** AI agents (and humans) executing this project. This file is self-contained: read it top to bottom before doing any task. Every task has numbered **Steps** and a **Check** — do not mark a task done until its Check passes. Findings that contradict this plan go into `plan-notes.md` (repo root), not silently into code. Operational conventions (commands, coding standards, workflow) live in `AGENTS.md`; this file is the roadmap and the spec.
 >
 > **Name:** **Stator** (formerly "Ketch" — renamed 2026-08-29; "Ketch" collides with an established company). A stator is the static half of an electric motor: it doesn't move, and it's what makes the rotor spin. The compiler's two modes mirror stator/rotor — the static `ts` mode and the dynamic `js` mode. CLI binary: `stator`.
@@ -7,6 +51,26 @@
 > **Source research:** "The JS AOT Field Guide" (five multi-agent research fan-outs, 2026-08-28/29, ~700 web lookups): prior art (30+ projects incl. graveyard), Static Hermes vs Perry vs Porffor vs scriptc head-to-head, FFI survey, JS→Rust-target rejection, engine-embedding costs, Boa internals deep-dive. Competitor performance figures below are self-published — treat as directional, re-benchmark locally.
 >
 > **Verification:** v1.1 was adversarially reviewed by three independent checker agents; all 24 findings folded in. v2.0 is a directed pivot (implementation language, modes, rename) — see §16.
+
+---
+
+## Cloud review findings (2026-10-08)
+
+New bugs, dead code and moves from a read-only Cursor cloud review of `main` at `ccf9818` (agent `bc-00769179-8c19-518a-869c-66b0c6473943`; full report: `cloud/stator.md` in the private `listepo/roadmap` repo). They take ids T20–T26, after T17 (`done.md`); T15, T16, T18 and T19 are left free because the review's source list uses those labels for other stator items. Ordered P0, P1, P2. **confirmed** means seen in the tree or in GitHub Actions logs; **suspected** means plausible but not proven. Line numbers are as of the review. Nothing here is scheduled into a phase yet: to take one, give it Steps and a Check per §15.
+
+| ID | Priority | Kind | Status | Where | Fix |
+| --- | --- | --- | --- | --- | --- |
+| T20 | P0 | bug | confirmed | `.github/workflows/ci.yml:3-10`; comment `:1-2`; `revert-on-failure` at `:406-410` | `ci.yml` runs only on `pull_request`, `workflow_dispatch` and `workflow_call`, not on `push` to `main`, so `main` has no test workflow and `revert-on-failure` never runs. Add `push: branches: [main]`, or make those checks required on `main`. |
+| T21 | P0 | bug | confirmed | PR CI run 37692965170 vs `ccf9818` on `main` | T17 was merged with red CI (`pipeline` failed in 0 s, `frontend (windows/arm64)` failed), so required checks are missing or bypassable. Require `static`, `frontend-coverage` and the Windows/macOS jobs (or a smaller set you actually enforce); do not merge on SonarCloud green alone. |
+| T22 | P0 | move | confirmed | `.github/workflows/pipeline.yml:26` (`uses: listepo/infra/…`) → the `pyrlyn/ci` reusable workflow | A public repo cannot call a private `listepo/infra` workflow; every pipeline run fails in 0 s (main run 37694735601). Merge PR #61, which repoints it. |
+| ~~T23~~ | P1 | bug | fixed | plan-notes 354 | The official win-arm64 Node is cross-compiled without a startup snapshot, so `util.format` sees seven later globals. The test follows `node_use_node_snapshot` and still fails on any other difference. |
+| T24 | P1 | move | confirmed | `packages/compiler/src/codegen/index.ts` (6,276 lines, the only file in `codegen/`) → files under `packages/compiler/src/codegen/` | Split the C emitter by HIR family (expressions, statements, classes, closures, runtime calls); it is the merge bottleneck. |
+| T25 | P2 | bug | confirmed | `AGENTS.md` repo map; `packages/runtime/src/jsrt_print.c:42-46`, `:50-80`; `packages/runtime/vendor/` | The repo map says Ryū is vendored, but `vendor/` holds only `quickjs-ng/` and `fdlibm/`, and `shortest_digits` is a hand-written float printer. Fix the repo map now; vendoring Ryū stays with §12, where it is already scheduled. |
+| T26 | P2 | dead code | confirmed | root `package.json:53`; `packages/tests/package.json:10`; comments only in `packages/compiler/src/frontend/program.ts:532`, `:592`, `:608` | `memfs` is never imported. Remove it from both `package.json` files, or add the memfs host the comments describe. |
+
+Already tracked here, not added again: moving number printing to the vendored Ryū C code (the review's move M3) is in §12, "Ryū rides here too".
+
+Not added: exposing `ffi-gen` as a `stator ffi-gen` subcommand is optional, and the review says to keep it in-tree as it is; the identity string methods (`jsrt_string_to_string`, `jsrt_string_value_of`) are used through the method table.
 
 ---
 
@@ -824,37 +888,9 @@ prints different bytes while `explain` says `static`, so 6.27 comes first.
 
 ~~**Task 6.28 — A function initializer may refer to its own binding.**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.28 (plan-notes 347).
 
-**Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).** CI on
-`b95a0dc` passes 2371 tests, but `ratchet.json` holds 2372. Compared with the last green run
-(`76a69ed`, 2026-09-25), six tests were lost and five gained. The six fall into two groups:
-1. `module-code/early-import-{eval,arguments}` and `early-import-as-{eval,arguments}` (negative,
-   phase parse, SyntaxError). The build now raises only `STA1214` ("method calls are not yet
-   supported", from harness lines), so the runner records a skip. The SyntaxError for an
-   imported binding named `eval`/`arguments` is no longer reported. `instn-named-err-not-found-dflt`
-   is skipped the same way. Find the commit that dropped it (bisect with
-   `run.ts --filter module-code/early-import`), and restore the refusal. A strict-mode binding error
-   is a SyntaxError in every module.
-2. `import/dup-bound-names.js` (`import { x, y as x } from 'z'`, negative parse SyntaxError). The bare
-   specifier now goes to the bundler first, which fails with `STA0015` (on CI it also exceeds the
-   30 s build ceiling). The duplicate binding is a parse-phase error, so it has to be reported
-   before any bundle step runs.
+~~**Task 6.29 — Test262 gets back the six module tests it lost (plan-notes 349).**~~ ✅ **landed 2026-10-03** — evidence in [done.md](done.md) → Phase 6 Task 6.29 (plan-notes 350).
 
-**Check:** `pnpm run test262` on linux CI gets back all six tests with `passed` ≥ 2372 (the
-five gained tests stay), and `ratchet.json` is raised to the new total.
-
-**Task 6.30 — The Windows frontend legs are green again (plan-notes 349).** `frontend (windows/x64)`
-and `frontend (windows/arm64)` fail 11 unit tests on `ci-linux-fix-main`. They have not run green
-since `76a69ed`, because stage 2 waits on the linux jobs, which were red.
-1. Ten `unit/bundler.test.ts` tests (T12.1–T12.3) compare a bundler path such as `resolveDir`, a
-   `#line` file or a diagnostic file against `join(...)`. The code answers `C:/Users/…` and the test
-   expects `C:\Users\…`. Decide which form the bundler seam promises, document it in
-   `docs/BUNDLER.md`, and make the code and the tests agree. A diagnostic shown to a Windows user
-   should use the platform's separators.
-2. `unit/selfhost.test.ts` "the committed baseline is in --update form" fails on Windows (most
-   likely CRLF from checkout, compared against the `--update` text). Fix it with a
-   `.gitattributes` rule or by normalizing the comparison, whichever is the root cause.
-
-**Check:** `frontend (windows/x64)` and `frontend (windows/arm64)` green on a PR.
+~~**Task 6.30 — The Windows frontend legs are green again (plan-notes 349).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.30 (plan-notes 352).
 
 **Standing decision — Bun is not a test runner (2026-09-14, plan-notes 241).** Measured on this host (Bun 1.3.14 vs pinned Node 26.x): subset −5%, spawn-heavy unit −37%, in-process parity — while adopting it silently redefines the oracle (`process.execPath`), breaks the lcov pipeline (Node-only flags), and weakens the `erasableSyntaxOnly` runtime guard (Bun transpiles what Node type-stripping refuses). Reopen only with new measured evidence per §15.4. Task 6.5 is the prerequisite that keeps the question askable.
 
@@ -1079,46 +1115,7 @@ Steps (detailed 2026-09-01; plan-notes 131):
 
 **Check:** ✅ **met 2026-09-15** — `examples/ffi/sqlite/` (generated binding + demo + C `main()`), proven locally byte-for-byte with the pinned Node; the CI proof is the ffi job's own run (plan-notes 271): an example that statically links SQLite, queries it from TS, and is itself callable from a C `main()` — built and run in CI.
 
-**[D3] Task 7.4 — A self-contained static library for C consumers (creator, 2026-10-04, plan-notes 340).**
-Task 7.2 gives a C program a header and one relocatable object (`--emit-header`, `-o unit.o`).
-The consumer must then find and link `libjsrt.a`, `libjsrt_std.a` and the runtime's system
-libraries itself, as `packages/tests/ffi/example-c-consumer/` does with paths into this repo.
-This task makes `stator build` produce one static library plus its header, which a C build can
-use with no Stator checkout.
-
-Steps:
-
-1. **`--emit=lib`** (config key `emit: "lib"`, schema regenerated, `docs/CONFIG.md` row) with
-   `--emit-header=<h>`: `-o lib<unit>.a` holds the unit's object and every runtime and `std`
-   member it references. `--emit=lib` without `--emit-header` is a usage error. The archive is
-   written in deterministic mode (`llvm-ar`/`ar` `D`, no timestamps or uids), so two builds of the
-   same input are byte-identical, as the header already is (Task 7.2 step 8).
-2. **System libraries travel with the archive.** Boehm (`-lgc`, when the runtime was built with
-   it), ICU (intl flavor), `-lm` and `-lpthread` cannot go inside a static archive. The build
-   writes them next to it as `lib<unit>.pc` (pkg-config: `Libs:`, `Libs.private:`, `Cflags:`),
-   the same list `build.ts`'s runtime link line uses today, so the two cannot drift.
-3. **One runtime per process; decide by measurement.** Two Stator libraries linked into one C
-   program would each carry `jsrt_*` and collide. Measure both options and record the result in
-   plan-notes before choosing:
-   (a) prelink: `ld -r` the unit with the runtime into one object, then keep only
-   `stator_<unit>_*` global (`-exported_symbols_list` on Mach-O, `objcopy --keep-global-symbols`
-   on ELF), so each library carries a private runtime; this must prove two such libraries work
-   in one process, including two collectors' init and roots;
-   (b) `--runtime=external`: the archive omits the runtime members, and the `.pc` file names a
-   shared `libjsrt.a` installed once.
-   Whichever is chosen, the other combination is refused or documented. It never fails at run
-   time.
-4. **Docs.** `docs/FFI.md §8` gains a "static library" section with the consumer's build line
-   (`cc main.c $(pkg-config --cflags --libs lib<unit>)`). `docs/TOOLCHAIN.md` names the archiver.
-   Any new refusal is allocated in `docs/DIAGNOSTICS.md`.
-5. **Platforms.** macOS and Linux first. Windows (`.lib` through `llvm-lib`) is a later step,
-   refused with a not-yet diagnostic until then.
-
-**Check:** a copy of `example-c-consumer` builds against only the emitted `lib<unit>.a`,
-`<unit>.h` and `lib<unit>.pc`, copied to a temporary directory with no path into the repo. It
-runs and prints `expected.txt`. Two builds give byte-identical archives (`cmp`). Two units are
-linked into one C program and both called, under the option step 3 chose. The ffi CI job and
-the ASan job run it. `pnpm run ci` is green.
+~~**Task 7.4 — A self-contained static library for C consumers.**~~ ✅ **landed 2026-10-03** — evidence in [done.md](done.md) → Phase 7 Task 7.4 (plan-notes 341, 342, 343).
 
 ---
 
@@ -1523,11 +1520,28 @@ both modes and goldens, a full `pnpm run ci`, and the self-compilation baseline 
    go through the builtins' member gate (the `Map` pair rides step 6; the array writes stay here),
    and 6 index accesses whose receiver is a string or a union. Both residues stay with this step,
    queued after step 11.
-8. **`Object.*` (21)** and destructuring (31, for-of, declarations, parameters).
-9. **Class expressions (~10)** and the remaining singletons (`encodeURI`, `Error.captureStackTrace`,
-   `Function.prototype.call`/`apply`, a spread into `String.fromCharCode`). Also a `[Symbol.iterator]`
-   method in an object literal, which is an internal `STA4068` in both modes today instead of a
-   refusal or a user iterable (plan-notes 310, step 5).
+8. **`Object.*` (21)** and destructuring (31, for-of, declarations, parameters), split in two:
+   8a. **`Object.*` reflection — in progress, Claude Code / sonnet-5-5** (handed over by the card's
+   owner; it unblocks T12.3's `__toESM`/`__copyProps`). Execution plan: property attributes on a
+   dynamic object (the accessor cell of docs/VALUE.md §4.15 grows a data form and
+   `enumerable`/`writable`/`configurable` flags, and every own-key walk skips a non-enumerable
+   key); `Object.create`, `Object.defineProperty`, `Object.getOwnPropertyDescriptor`,
+   `Object.getOwnPropertyNames` and `Object.getPrototypeOf` in `js` mode, as callees and as
+   values (`var __create = Object.create`); `Object.prototype` and
+   `Object.prototype.hasOwnProperty` as values. The runtime half is one new file,
+   `runtime/src/jsrt_reflect.c`; `ts` mode keeps its verdicts (prototype machinery, plan-notes
+   125). Decision tests in both modes, goldens `js/object_reflection` and T12.3's
+   `pkg_cjs_exports`/`pkg_cjs_replace`.
+   8b. Destructuring (31) — not claimed; stays with the card's owner.
+9. **Class expressions (~10)** and the remaining singletons, split in two:
+   9a. **`Function.prototype.call`/`apply`/`bind` — in progress, Claude Code / sonnet-5-5.**
+   Execution plan: `jsrt_get_prop` answers `call`/`apply`/`bind` on any closure through the
+   `jsrt_bound_method` mechanism the primitives use; `bind` builds the two-slot env docs/VALUE.md
+   §4.16 prescribes; the gate admits the three members on a function-typed receiver in `js` mode
+   and lowers them as the dynamic method call. Golden `js/function_call_apply_bind`.
+   9b. Class expressions, `encodeURI`, `Error.captureStackTrace`, a spread into
+   `String.fromCharCode`, and a `[Symbol.iterator]` method in an object literal (an internal
+   `STA4068` in both modes today, plan-notes 310 step 5) — not claimed.
 10. ~~**A `RegExp` method called straight off a union narrowing** (`unknown` or a union narrowed by `instanceof RegExp`, then `.test()` / `.toString()`) panics at run time with `STA2006` "calling a non-function"; binding it to a `RegExp`-typed local first works (plan-notes 314). Primitive and built-in method dispatch, `jsrt_get_prop` included.~~ Fixed by step 4b (v4.35): `jsrt_get_prop` answers a RegExp's methods and data properties on an Unknown receiver.
 11. **A `Date` method called off a union narrowing** (plan-notes 317). On `t: number | Date`
    narrowed by `typeof`, `instanceof Date` or `valueOf`, `t.getTime()` compiles but panics at run
@@ -2450,3 +2464,6 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.74** (2026-10-04): **Task 6.27 landed: a user `toString`/`valueOf` is honored by ToPrimitive** (plan-notes 345). A template hole, `String(x)`, `concat`, `join`, `'' + x`, `Number(x)`, the comparisons, `==` and util.format's `%s`/`%d`/`%i`/`%f` call the method the object has, in ECMA-262's hint order. A throwing method is catchable, and an object answer is Node's `TypeError`. The three 6.24 refusals that shared this path are lifted. The card moved to done.md.
 - **v4.75** (2026-10-04): **Task 6.28 lands: a function initializer may refer to its own binding** (plan-notes 347). The HIR verifier registers a `let`/`const` binding before its own initializer and lets only a function body read it, matching the lowering, so `const g = (n) => … g(n - 1)` and the other four shapes of plan-notes 344 compile in both modes instead of stopping with `STA4002`. A closure the initializer may call before it finishes (passed to a call, coerced, spread) is not-yet `STA1214`: Node's TDZ `ReferenceError` needs a run-time check the compiler does not have.
 - **v4.76** (2026-10-03): **CI on linux is green again except test262; Intel macOS leaves CI; Tasks 6.29–6.30 added** (plan-notes 349). PRs #98–#104 were merged with no CI run. `static analysis` now installs `site/` deps before lint, a line-wrap-sensitive FFI assertion is fixed, and the `std/io` MiB test gets a `maxBuffer` (it was SIGTERMed with ENOBUFS). The macOS x64 matrix entries are dropped (Intel macOS is unsupported). Task 6.29 tracks the six Test262 module tests that were lost, and Task 6.30 the Windows unit-test failures that surfaced once stage 2 ran again.
+- **v4.77** (2026-10-03): **Task 6.29 lands: Test262 gets back its six module tests** (plan-notes 350). The five `module-code` tests had only ever passed by accident: the runner compiled them under a temporary name, so their imports failed to resolve. A build now reports parse-phase errors (the parser's, the binder's, and the new `STA3005` for an imported binding named `eval`/`arguments`) before any bundle step runs. A default import of a syntax-free `.js` ES module is the new `STA3004`. `ratchet.json` `passed` goes from 2372 to 2377.
+- **v4.78** (2026-10-04): **Task 6.30 lands: the Windows frontend legs are green again** (plan-notes 352). Diagnostics and `VendorEntry.resolveDir` leave the compiler in the platform's form (`\` on Windows). Internal names and the generated C keep the checker's forward slashes. docs/BUNDLER.md §5 "Paths" states which form is used where. A `--node` program whose project sits on another Windows drive than the compiler now compiles, because the location helper is imported by its absolute path where no relative one exists. `.gitattributes` keeps every checkout LF, so the selfhost baseline matches its `--update` form on Windows.
+- **v4.79** (2026-10-03): **Task 7.4 lands: a self-contained static library for C consumers** (plan-notes 341–343). `stator build --emit=lib -o lib<name>.a --emit-header=<h>` prelinks the unit with a private runtime (`cc -r`; Mach-O `-exported_symbols_list`, ELF `objcopy --keep-global-symbols`), archives it deterministically and writes a relocatable `lib<name>.pc` from the binary link's own flag list, so `cc main.c $(pkg-config --cflags --libs lib<name>)` builds with no Stator checkout. Two libraries share one Boehm through a weak shared object kind and chained roots hooks; `jsrt_gc_init` is idempotent, which also fixes two `--emit-header` objects sharing one `libjsrt.a`. New codes STA0020, STA1219 (Windows) and STA1220 (`jsrt_value` surface). About 200 KB of runtime per extra library.

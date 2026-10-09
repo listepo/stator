@@ -1,8 +1,11 @@
 name: ci
 
 on:
-  # PRs get the same gate as main pushes (plan-notes: ci.yml ran only on main, so PRs
-  # #7-#11 showed no remote CI). The revert job stays push-only by its event guard below.
+  # Main pushes run the same jobs as pull requests. The revert job is push-only
+  # (`github.event_name == 'push'` below); without this trigger it never fires,
+  # and a merge to main would have no test gate of its own.
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
   # Dependabot pull requests: dependabot.yml calls this workflow so they get the
@@ -176,9 +179,9 @@ jobs:
           if-no-files-found: ignore
 
   # The compiler itself, which is portable TypeScript -- so this is the half of the suite Windows
-  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: a formatter check
-  # would be arguing with git's line-ending translation, not with the code. No coverage on any of
-  # these (plain `pnpm run test`); linux/x64 (above) is the only coverage owner.
+  # can reach, and the reason Windows is in the matrix at all. `lint` is NOT here: `.gitattributes`
+  # checks out the same LF bytes everywhere, so the one run in `static` covers them. No coverage on
+  # any of these (plain `pnpm run test`); linux/x64 (above) is the only coverage owner.
   # This job is the ungated Linux arm64 leg; the same steps run for macOS/Windows in stage 2 below.
   frontend:
     name: frontend (${{ matrix.platform }}/${{ matrix.arch }})
@@ -361,6 +364,20 @@ jobs:
       # `--emit-header`/`--unit-name` exist (cli/main.ts), so this builds, links, runs, and
       # byte-compares like the unit-level stub proof, as a CI step.
       - run: node packages/tests/ffi/example-c-consumer/c-consumer.ts
+      # Task 7.4 Check: `--emit=lib` archives used through pkg-config alone from a directory
+      # with no repo paths, byte-identical across two builds, and two libraries (two private
+      # runtimes) in one C program over forced Boehm collections. The versions are the
+      # evidence plan-notes 342 cites for each object format's localization.
+      - name: Static library (--emit=lib)
+        shell: bash
+        run: |
+          clang --version | head -n 1
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            ld --version | head -n 1; objcopy --version | head -n 1; ar --version | head -n 1
+          else
+            ld -v 2>&1 | head -n 1
+          fi
+          node packages/tests/ffi/example-c-consumer/static-lib.ts
       # Task 7.3 Check: the SQLite demo's C main() against the emitted sqlitedemo header
       # (row-count success + nonzero-convention error paths, header double-build cmp).
       - run: node examples/ffi/sqlite/sqlite-c-main.ts

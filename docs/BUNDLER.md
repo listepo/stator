@@ -291,7 +291,7 @@ name only when the graph imports a package or, under `--node`, holds a CommonJS 
 ```ts
 export type VendorEntry = {
   code: string; // generated ESM: `export { pad } from 'leftpad-esm';` …
-  resolveDir: string; // where package resolution starts (the entry's directory)
+  resolveDir: string; // where package resolution starts (the entry's directory), platform form
 };
 export type BundleOptions = {
   external: readonly (string | RegExp)[]; // node:*, built-ins, std/* (§3)
@@ -307,6 +307,28 @@ export type BundlerAdapter = {
 };
 export function compile(request: CompileRequest): Promise<CompileResult>; // vendor bundle optional
 ```
+
+**Paths.** A file name has two spellings, and the seam says which one it uses where (T6.30,
+plan-notes 352):
+
+- **Out of the compiler, the platform's form**: absolute, with the separator `path.join` gives
+  (`\` on Windows). That is `VendorEntry.resolveDir` and the `file` of every diagnostic, in
+  `CompileResult.diagnostics`, in `stderr` and in `stator explain` (text and `--json`), mapped
+  vendor diagnostics included (§6). A Windows user reads `C:\app\main.js:2:1`, and a caller
+  compares with `join(root, 'main.js')`. On Linux and macOS both forms are the same string.
+- **Inside the compiler and in what it generates, the checker's form**: absolute, forward
+  slashes, on every platform, because TypeScript names every `SourceFile` that way. That is
+  `VendorPlan.modulePath`, the keys of `VendorPlan.rewrites` (the overlay the program is
+  re-created with), and the file names in the C: `#line` and the locations the binary prints at
+  run time. clang and debuggers accept forward slashes on Windows.
+- **Specifiers the compiler writes** (the vendor entry's `from` for a CommonJS project file, the
+  rewritten imports, the `--node` location helper's import) are relative with forward slashes.
+  When no relative path exists (a file on another Windows drive) they are the absolute target
+  with forward slashes, and the location helper's import also drops `.ts`, since the checker
+  flags a non-relative `.ts` import as one emit cannot rewrite (TS2877). The gate accepts that
+  one absolute spelling, which names the compiler's own file.
+- **In**, either form: `entry` and a map's `sources` are resolved before use, and
+  `BundleResult.inputs` may list absolute paths in either spelling.
 
 **The vendor entry** comes from the project's import declarations. The spike's `depsOnly`
 generates it in about 60 lines:
@@ -366,6 +388,13 @@ what the bundler would be asked to bundle, or `undefined`.
   install it (`pnpm add -D vite-stator vite`).
 - `STA0015`: the adapter's bundle step failed, with the bundler's message passed through, the
   same model as `STA0012`.
+
+**Parse errors come first** (plan.md §9 Task 6.29). The bundle step runs only on a graph that
+parses. When a project file has a parse-phase error, the build reports that error and stops
+before any adapter loads. Parse-phase errors are the parser's, the binder's (such as
+`import { x, y as x } from 'pkg'`) and `STA3005`. The package imports the graph leaves
+unresolved are not reported next to it. Without this, an unbuildable bare specifier would turn a
+SyntaxError into `STA0015`.
 
 ## 6. Diagnostics through the source map
 
