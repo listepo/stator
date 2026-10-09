@@ -422,12 +422,28 @@ bool jsrt_loose_equals(jsrt_value a, jsrt_value b) {
    * and ask again. The recursion terminates because ToPrimitive answers a primitive, which no
    * branch here sends back to an object -- or throws, which ends the comparison. */
   if (jsrt_is_object(a) || jsrt_is_object(b)) {
+    /* ToPrimitive allocates the primitive (an object's toString builds a string). That string
+     * is not the caller's operand, so it has to sit in a slot across the recursive call, which
+     * converts the other side and can allocate again. The other operand is parked beside it:
+     * it is a parameter, and a parameter is not a root. */
     const bool left = jsrt_is_object(a);
-    const jsrt_value primitive = jsrt_to_primitive(left ? a : b, JSRT_HINT_DEFAULT);
+    JSRT_FRAME(2);
+    JSRT_LOCAL(0) = a;
+    JSRT_LOCAL(1) = b;
+    const jsrt_value primitive =
+        jsrt_to_primitive(left ? JSRT_LOCAL(0) : JSRT_LOCAL(1), JSRT_HINT_DEFAULT);
     if (jsrt_pending()) {
+      JSRT_FRAME_POP();
       return false;
     }
-    return left ? jsrt_loose_equals(primitive, b) : jsrt_loose_equals(a, primitive);
+    if (left) {
+      JSRT_LOCAL(0) = primitive;
+    } else {
+      JSRT_LOCAL(1) = primitive;
+    }
+    const bool eq = jsrt_loose_equals(JSRT_LOCAL(0), JSRT_LOCAL(1));
+    JSRT_FRAME_POP();
+    return eq;
   }
 
   /* Unreachable: the eight tags are exhausted above. Here so the function has one exit for a

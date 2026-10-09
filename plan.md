@@ -8,8 +8,8 @@ An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 | --- | --- | --- | --- | --- | --- |
 | T15 | in progress | P2 | 1 | 70% | Cursor / grok 4.7 |
 | T16 | done | P0 | 3 | 100% | Cursor / grok 4.7 |
-| T17 | todo | P1 | 1 | 0% | |
-| T18 | todo | P1 | 3 | 0% | |
+| T17 | done | P1 | 1 | 100% | Cursor / grok 4.7 |
+| T18 | done | P1 | 3 | 100% | Cursor / grok 4.7 |
 | T19 | todo | P3 | 1 | 0% | |
 | T20 | todo | P2 | 2 | 0% | |
 
@@ -21,13 +21,13 @@ An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 
 Done — evidence in `done.md`.
 
-### T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion
+### ~~T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion~~
 
-`jsrt_string_ops.c:265-275`: the range guard `count * (double)str->length > JSRT_MAX_STRING_LENGTH` is `0 > max` for an empty receiver, so any count passes; `(uint32_t)count` is UB for count ≥ 2³² and an in-range huge count spins a `times`-iteration no-op `memcpy` loop (Node returns `""` instantly). Done means: early-return for an empty receiver, validate `count <= UINT32_MAX` before the cast, with fixtures for the empty-receiver edge.
+Done — evidence in `done.md`.
 
-### T18. GC rooting hazards: boxed values held in C locals across allocating calls
+### ~~T18. GC rooting hazards: boxed values held in C locals across allocating calls~~
 
-The same pattern `jsrt_op_add` was already fixed for ("measured: 999685 of 1000000") remains at: `jsrt_ops.c:85-86` (`jsrt_compare` holds `pa` across the allocating ToPrimitive of `b`), `jsrt_array_ops.c:765` (default sort comparator: x's string unrooted while y's ToString allocates; `sort_merge` at `:775` interleaves allocations with reads), `jsrt_promise.c:181` (adoption path enqueues with the inner promise unrooted across `enqueue`'s `jsrt_gc_alloc`), `jsrt_numeric.c:419-423` (`jsrt_loose_equals` passes an unrooted primitive into a recursive allocating call). Done means: each partial is parked in a `JSRT_FRAME` slot as `jsrt_op_add`, `jsrt_json.c:216-231` and `jsrt_promise_construct` already do.
+Done — evidence in `done.md`.
 
 ### T19. Small runtime fixes: RegExp NULL-capture and `replace_impl` double scan
 
@@ -35,7 +35,7 @@ The same pattern `jsrt_op_add` was already fixed for ("measured: 999685 of 10000
 
 ### T20. Tests for the runtime edges found by the audit
 
-No fixture covers `repeat` with an empty receiver and a huge count (T17), and the 10M-object leak harness only creates objects — it never exercises computed-key dynamic reads (T16). Also `compareSdkNames` (`toolchain.ts:38-40`) silently ranks non-SDK names as 0.0 via destructuring defaults — an explicit rank for non-matching names would surface malformed input, and the program cache (`program.ts:578-608`) keys on entry hash only, which deserves a dependency-hash key or a documented TODO before any watch mode. Done means: the two runtime edges have fixtures, and the toolchain/cache notes are addressed.
+The empty-receiver `repeat` fixtures landed with T17 (`string_range_error`) and the computed-key leak row with T16 (`keys.js`). Still open: `compareSdkNames` (`toolchain.ts:38-40`) silently ranks non-SDK names as 0.0 via destructuring defaults — an explicit rank for non-matching names would surface malformed input — and the program cache (`program.ts:578-608`) keys on entry hash only, which deserves a dependency-hash key or a documented TODO before any watch mode. Done means: those two notes are addressed.
 
 Execution plan:
 
@@ -892,7 +892,7 @@ prints different bytes while `explain` says `static`, so 6.27 comes first.
 
 ~~**Task 6.30 — The Windows frontend legs are green again (plan-notes 349).**~~ ✅ **landed 2026-10-04** — evidence in [done.md](done.md) → Phase 6 Task 6.30 (plan-notes 352).
 
-**Task 6.31 — SonarCloud through the shared pyrlyn/ci workflow (plan-notes 357).**
+**Task 6.31 — SonarCloud through the shared pyrlyn/ci workflow (plan-notes 358).**
 `.github/workflows/sonarcloud.yml` is an 89-line copy of what pyrlyn/ci's reusable
 `sonarcloud.yml` does (that workflow names stator among the copies it replaces). Turn it into a
 thin caller, pinned by full SHA: `uses:
@@ -912,7 +912,7 @@ pyrlyn/ci/.github/workflows/sonarcloud.yml@c875cd763ad0c4abbd936e480be5752330d3b
 3. Toolchain through mise instead of the four setup actions: `mise: true`, `mise-install-args:
    node npm:pnpm just zig` (mise.toml pins Node 26.7.0, pnpm 12.3.4, just 1.58.0, Zig 0.16.0;
    conda clang/llvm are not needed for the scan). If the runtime build needs clang, add
-   `conda:clang conda:llvm` and record the time it costs in plan-notes 357.
+   `conda:clang conda:llvm` and record the time it costs in plan-notes 358.
 4. `setup-command: pnpm install --frozen-lockfile && pnpm run runtime` and `coverage-command:
    pnpm run test:coverage` (writes `coverage/lcov.info`, the path `sonar-project.properties`
    reads). `soft-fail` stays at its default `true`: the old workflow's `continue-on-error` on the
@@ -2501,4 +2501,4 @@ column and is not re-tagged: those rows are not tasks until they are scheduled.
 - **v4.77** (2026-10-03): **Task 6.29 lands: Test262 gets back its six module tests** (plan-notes 350). The five `module-code` tests had only ever passed by accident: the runner compiled them under a temporary name, so their imports failed to resolve. A build now reports parse-phase errors (the parser's, the binder's, and the new `STA3005` for an imported binding named `eval`/`arguments`) before any bundle step runs. A default import of a syntax-free `.js` ES module is the new `STA3004`. `ratchet.json` `passed` goes from 2372 to 2377.
 - **v4.78** (2026-10-04): **Task 6.30 lands: the Windows frontend legs are green again** (plan-notes 352). Diagnostics and `VendorEntry.resolveDir` leave the compiler in the platform's form (`\` on Windows). Internal names and the generated C keep the checker's forward slashes. docs/BUNDLER.md §5 "Paths" states which form is used where. A `--node` program whose project sits on another Windows drive than the compiler now compiles, because the location helper is imported by its absolute path where no relative one exists. `.gitattributes` keeps every checkout LF, so the selfhost baseline matches its `--update` form on Windows.
 - **v4.79** (2026-10-03): **Task 7.4 lands: a self-contained static library for C consumers** (plan-notes 341–343). `stator build --emit=lib -o lib<name>.a --emit-header=<h>` prelinks the unit with a private runtime (`cc -r`; Mach-O `-exported_symbols_list`, ELF `objcopy --keep-global-symbols`), archives it deterministically and writes a relocatable `lib<name>.pc` from the binary link's own flag list, so `cc main.c $(pkg-config --cflags --libs lib<name>)` builds with no Stator checkout. Two libraries share one Boehm through a weak shared object kind and chained roots hooks; `jsrt_gc_init` is idempotent, which also fixes two `--emit-header` objects sharing one `libjsrt.a`. New codes STA0020, STA1219 (Windows) and STA1220 (`jsrt_value` surface). About 200 KB of runtime per extra library.
-- **v4.80** (2026-10-08): **Task 6.31 added: SonarCloud through the shared pyrlyn/ci workflow** (plan-notes 357). `sonarcloud.yml` is a copy of pyrlyn/ci's reusable `sonarcloud.yml`; the card moves it to a thin caller pinned by SHA, with the toolchain from mise.toml and the same soft-fail behavior.
+- **v4.80** (2026-10-08): **Task 6.31 added: SonarCloud through the shared pyrlyn/ci workflow** (plan-notes 358). `sonarcloud.yml` is a copy of pyrlyn/ci's reusable `sonarcloud.yml`; the card moves it to a thin caller pinned by SHA, with the toolchain from mise.toml and the same soft-fail behavior.
