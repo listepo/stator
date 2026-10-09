@@ -304,4 +304,7 @@ _runtime-test flavor:
       "./${DIR}/${corpus}" > "${DIR}/${corpus}.actual.txt"
       diff -u "${DIR}/${corpus}.expected.txt" "${DIR}/${corpus}.actual.txt"
     done
+    # Not a Node diff: forces a collection on every allocation and checks the rooted answers.
+    link_one "tests/roots.c" "${DIR}/roots"
+    "./${DIR}/roots"
     echo "${TAG}"

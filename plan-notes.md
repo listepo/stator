@@ -12906,3 +12906,37 @@ the second match frees the duplicate. `jsrt_shape_intern_count` is what the corp
 it unchanged and one stored key adds one; two named-group execs in `print_regexp` add
 the two group names and nothing on the second exec. The leak harness row `keys.js` is
 2M distinct computed reads under `--mode=js` (peak 2956 KB of the 64 MB cap).
+
+## 357. T17 was already on main; T18 parks the remaining unrooted values (2026-10-09)
+
+**T17.** `jsrt_string_repeat` already returns an empty receiver before the loop and rejects a count
+past `UINT32_MAX` before the cast (`ccf9818`, `done.md`). `packages/tests/golden/{js,ts}/string_range_error.*`
+covers `"".repeat(4294967295)` and `"".repeat(2**53)`. The plan table and `todo.md` still listed it
+open; both now point at `done.md`. No further code change.
+
+**T18.** A `jsrt_value` is NaN-boxed, so a C local or parameter is not a Boehm root (plan-notes 108).
+The four sites in the task still dropped a boxed value on the floor across an allocation:
+
+- `jsrt_compare` popped its frame before `jsrt_string_compare` and `jsrt_to_number`, so the
+  primitives survived `ToPrimitive` and then stopped being roots.
+- `sort_compare` rooted the left `ToString` only. The right string, and both operands of a user
+  comparator, were locals across `jsrt_call` / `ToString`. `sort_merge` read the elements around
+  that call. `jsrt_array_sort` left the scratch array in a local; the comment above the merge says
+  an element's only reference can be that scratch.
+- `jsrt_promise_settle` called `enqueue` with the inner promise unrooted. `enqueue` allocates the
+  microtask, then stores the value.
+- `jsrt_loose_equals` passed the `ToPrimitive` result into the recursive call from a local.
+
+Each of those values is a `JSRT_FRAME` slot until the allocating call has finished with it.
+`jsrt_gc_stress` (off unless a test sets it; a no-op without Boehm) collects before every
+collected allocation, scanned or pointer-free, so `packages/runtime/tests/roots.c` hits the
+window instead of hoping the heap is full. A freed promise still holds its old bytes, so
+adoption also arms `jsrt_gc_watch` on the inner promise: the finalizer runs inside that
+collection when the value is not a root. Without Boehm the watch is a no-op.
+
+The audit task T20 still said no fixture covers an empty `repeat` or a computed-key read. Those
+fixtures are T17's `string_range_error` and T16's `keys.js`. What T20 still asks for is
+`compareSdkNames` and the program-cache key.
+
+`docs/ru` and `docs/uk` are not in the tree. The one English sentence added to `docs/TOOLCHAIN.md`
+(the `runtime-test` recipe also runs `tests/roots.c`) has no translation file to update.

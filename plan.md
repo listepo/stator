@@ -8,8 +8,8 @@ An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 | --- | --- | --- | --- | --- | --- |
 | T15 | in progress | P2 | 1 | 70% | Cursor / grok 4.7 |
 | T16 | done | P0 | 3 | 100% | Cursor / grok 4.7 |
-| T17 | todo | P1 | 1 | 0% | |
-| T18 | todo | P1 | 3 | 0% | |
+| T17 | done | P1 | 1 | 100% | Cursor / grok 4.7 |
+| T18 | done | P1 | 3 | 100% | Cursor / grok 4.7 |
 | T19 | todo | P3 | 1 | 0% | |
 | T20 | todo | P2 | 2 | 0% | |
 
@@ -21,13 +21,13 @@ An ahead-of-time compiler from TypeScript and JavaScript to native binaries.
 
 Done — evidence in `done.md`.
 
-### T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion
+### ~~T17. `"".repeat(hugeCount)` hangs and performs an out-of-range double→uint32 conversion~~
 
-`jsrt_string_ops.c:265-275`: the range guard `count * (double)str->length > JSRT_MAX_STRING_LENGTH` is `0 > max` for an empty receiver, so any count passes; `(uint32_t)count` is UB for count ≥ 2³² and an in-range huge count spins a `times`-iteration no-op `memcpy` loop (Node returns `""` instantly). Done means: early-return for an empty receiver, validate `count <= UINT32_MAX` before the cast, with fixtures for the empty-receiver edge.
+Done — evidence in `done.md`.
 
-### T18. GC rooting hazards: boxed values held in C locals across allocating calls
+### ~~T18. GC rooting hazards: boxed values held in C locals across allocating calls~~
 
-The same pattern `jsrt_op_add` was already fixed for ("measured: 999685 of 1000000") remains at: `jsrt_ops.c:85-86` (`jsrt_compare` holds `pa` across the allocating ToPrimitive of `b`), `jsrt_array_ops.c:765` (default sort comparator: x's string unrooted while y's ToString allocates; `sort_merge` at `:775` interleaves allocations with reads), `jsrt_promise.c:181` (adoption path enqueues with the inner promise unrooted across `enqueue`'s `jsrt_gc_alloc`), `jsrt_numeric.c:419-423` (`jsrt_loose_equals` passes an unrooted primitive into a recursive allocating call). Done means: each partial is parked in a `JSRT_FRAME` slot as `jsrt_op_add`, `jsrt_json.c:216-231` and `jsrt_promise_construct` already do.
+Done — evidence in `done.md`.
 
 ### T19. Small runtime fixes: RegExp NULL-capture and `replace_impl` double scan
 
@@ -35,7 +35,7 @@ The same pattern `jsrt_op_add` was already fixed for ("measured: 999685 of 10000
 
 ### T20. Tests for the runtime edges found by the audit
 
-No fixture covers `repeat` with an empty receiver and a huge count (T17), and the 10M-object leak harness only creates objects — it never exercises computed-key dynamic reads (T16). Also `compareSdkNames` (`toolchain.ts:38-40`) silently ranks non-SDK names as 0.0 via destructuring defaults — an explicit rank for non-matching names would surface malformed input, and the program cache (`program.ts:578-608`) keys on entry hash only, which deserves a dependency-hash key or a documented TODO before any watch mode. Done means: the two runtime edges have fixtures, and the toolchain/cache notes are addressed.
+The empty-receiver `repeat` fixtures landed with T17 (`string_range_error`) and the computed-key leak row with T16 (`keys.js`). Still open: `compareSdkNames` (`toolchain.ts:38-40`) silently ranks non-SDK names as 0.0 via destructuring defaults — an explicit rank for non-matching names would surface malformed input — and the program cache (`program.ts:578-608`) keys on entry hash only, which deserves a dependency-hash key or a documented TODO before any watch mode. Done means: those two notes are addressed.
 
 Execution plan:
 
