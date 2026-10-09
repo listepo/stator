@@ -12853,7 +12853,9 @@ Reproduced on the official linux-x64 binary of the same version: with the snapsh
 `util.format` and `BUILTIN_CONSTRUCTOR_NAMES` are the same 47 names. `node --no-node-snapshot`
 (the binary still reports `node_use_node_snapshot: true`; the flag only skips using the
 embedded snapshot) measures exactly the same seven extras and nothing else. The win-arm64
-difference is the missing snapshot, not an arm64-only global.
+difference is the missing snapshot, not an arm64-only global. The official
+`win-arm64/node.exe` of v26.7.0 embeds `"node_use_node_snapshot": false` in its
+`config.gypi` (and `node_use_node_code_cache` false beside it).
 
 **What the runtime should match.** The oracle for goldens is the pinned Node's snapshot set.
 Adding the seven names would make `%s` of a `Temporal` (and the other six) inspect on every
