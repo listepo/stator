@@ -140,40 +140,42 @@ typedef enum {
 static jsrt_order jsrt_compare(jsrt_value a, jsrt_value b) {
   /* ToPrimitive first, for the same reason as `+`: the both-strings test has to see what the
    * operands BECOME, so `["10"] < ["9"]` compares text and answers true.
-   * Hint `number` (§7.2.13 IsLessThan steps 1-2), and the left operand's string stays rooted
-   * while the right one's `valueOf` runs. A throw stops the comparison; the caller checks. */
+   * Hint `number` (§7.2.13 IsLessThan steps 1-2). Each primitive stays in a slot until the
+   * comparison has read it: the right operand's `valueOf` allocates, and ToNumber of a string
+   * allocates too, and a NaN-boxed local is not a root. A throw stops the comparison. */
   JSRT_FRAME(2);
   JSRT_LOCAL(0) = jsrt_to_primitive(a, JSRT_HINT_NUMBER);
   if (!jsrt_pending()) {
     JSRT_LOCAL(1) = jsrt_to_primitive(b, JSRT_HINT_NUMBER);
   }
-  const jsrt_value pa = JSRT_LOCAL(0);
-  const jsrt_value pb = JSRT_LOCAL(1);
-  JSRT_FRAME_POP();
   if (jsrt_pending()) {
+    JSRT_FRAME_POP();
     return JSRT_ORDER_UNORDERED;
   }
 
   /* Text order applies only when BOTH operands are strings. One non-string operand sends both
    * through ToNumber -- which is why `"10" < "9"` is true but `"10" < 9` is false. */
-  if (jsrt_is(pa, JSRT_TAG_STRING) && jsrt_is(pb, JSRT_TAG_STRING)) {
-    int c = jsrt_string_compare(pa, pb);
+  jsrt_order order;
+  if (jsrt_is(JSRT_LOCAL(0), JSRT_TAG_STRING) && jsrt_is(JSRT_LOCAL(1), JSRT_TAG_STRING)) {
+    int c = jsrt_string_compare(JSRT_LOCAL(0), JSRT_LOCAL(1));
     if (c < 0) {
-      return JSRT_ORDER_LT;
+      order = JSRT_ORDER_LT;
+    } else {
+      order = c > 0 ? JSRT_ORDER_GT : JSRT_ORDER_EQ;
     }
-    return c > 0 ? JSRT_ORDER_GT : JSRT_ORDER_EQ;
+  } else {
+    double da = jsrt_to_number(JSRT_LOCAL(0));
+    double db = jsrt_to_number(JSRT_LOCAL(1));
+    if (isnan(da) || isnan(db)) {
+      order = JSRT_ORDER_UNORDERED;
+    } else if (da < db) {
+      order = JSRT_ORDER_LT;
+    } else {
+      order = da > db ? JSRT_ORDER_GT : JSRT_ORDER_EQ;
+    }
   }
-
-  /* Both are primitives now, so neither ToNumber can run user code or allocate. */
-  double da = jsrt_to_number(pa);
-  double db = jsrt_to_number(pb);
-  if (isnan(da) || isnan(db)) {
-    return JSRT_ORDER_UNORDERED;
-  }
-  if (da < db) {
-    return JSRT_ORDER_LT;
-  }
-  return da > db ? JSRT_ORDER_GT : JSRT_ORDER_EQ;
+  JSRT_FRAME_POP();
+  return order;
 }
 
 bool jsrt_op_lt(jsrt_value a, jsrt_value b) { return jsrt_compare(a, b) == JSRT_ORDER_LT; }
