@@ -181,7 +181,7 @@ jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key) {
   }
   const JSRTObject *fixed = (const JSRTObject *)jsrt_ptr(v);
   if (jsrt_is_dynobj(v)) {
-    return jsrt_bool(jsrt_has_prop(v, jsrt_shape_key(key)));
+    return jsrt_bool(jsrt_has_prop_value(v, key));
   }
   for (uint32_t i = 0; i < fixed->cls->field_count; i++) {
     if (is_private_field(fixed->cls->fields[i])) {
@@ -192,8 +192,8 @@ jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key) {
     }
   }
   const JSRTDynObject *extras = jsrt_fixed_extras(v);
-  return extras != NULL ? jsrt_bool(jsrt_has_prop(JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)extras),
-                                                  jsrt_shape_key(key)))
+  return extras != NULL ? jsrt_bool(jsrt_has_prop_value(
+                             JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)extras), key))
                         : JSRT_FALSE;
 }
 

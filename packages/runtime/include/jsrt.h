@@ -27,6 +27,20 @@ _Noreturn void jsrt_panic(const char *msg);
  * the out-of-memory panic; the call never returns NULL. */
 void *jsrt_gc_alloc(size_t bytes, const char *what);
 
+/* Test hook. When `on` is non-zero, every collected allocation (scanned or pointer-free) runs a
+ * full collection first, so a NaN-boxed value that is not in a `JSRT_FRAME` slot dies at the next
+ * allocation. Off unless a test turns it on. Without Boehm it is a no-op. Generated code does not
+ * call it. */
+void jsrt_gc_stress(int on);
+
+/* Test hook beside `jsrt_gc_stress`. `jsrt_gc_watch` registers a finalizer on one object.
+ * A later collection that finds it unreachable makes `jsrt_gc_watched` return non-zero until
+ * `jsrt_gc_watched_reset`. Without Boehm the watch is a no-op and the flag stays zero.
+ * Generated code does not call these. */
+void jsrt_gc_watch(void *obj);
+void jsrt_gc_watched_reset(void);
+int jsrt_gc_watched(void);
+
 /* Called by jsrt_init once the pointer-width assumption holds. */
 void jsrt_gc_init(void);
 

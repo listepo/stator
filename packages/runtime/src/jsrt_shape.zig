@@ -44,6 +44,11 @@ const Intern = struct {
 var intern_buckets: []?*Intern = &.{};
 var intern_count: usize = 0;
 
+/// How many distinct keys the table holds. Compare-only lookups must not move it.
+export fn jsrt_shape_intern_count() usize {
+    return intern_count;
+}
+
 fn internHash(bytes: []const u8) u64 {
     var h: u64 = 14695981039346656037;
     for (bytes) |b| {

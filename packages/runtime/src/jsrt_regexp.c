@@ -10,6 +10,7 @@
  * capture array, and turning those into indices, strings or arrays is this file's job. */
 
 #include "jsrt.h"
+#include "jsrt_mem.h"
 #include "jsrt_value.h"
 
 #include "libregexp.h"
@@ -656,15 +657,16 @@ static jsrt_value match_groups(const JSRTRegExp *re, const JSString *s, const ui
   JSRT_LOCAL(0) = jsrt_null_proto_new();
   for (uint32_t g = 1; g < ncap; g++) {
     if (names[0] != '\0') {
-      /* The key must outlive the program the way every shape key does, and these names live in the
-       * bytecode -- which is never freed for a live regexp, but IS owned by the engine. Copy. */
+      /* The name is stored on the groups object's shape. Intern it: a second match of the
+       * same pattern builds a fresh object whose transition REUSES the existing child, and
+       * a raw malloc there would leak (T16). The bytecode's copy stays the engine's. */
       const size_t n = strlen(names);
       char *key = (char *)malloc(n + 1);
       if (key == NULL) {
         jsrt_panic("out of memory: group name");
       }
       memcpy(key, names, n + 1);
-      jsrt_set_prop(JSRT_LOCAL(0), key, group_value(s, m, g), NULL);
+      jsrt_set_prop(JSRT_LOCAL(0), jsrt_shape_intern(key), group_value(s, m, g), NULL);
     }
     names += strlen(names) + LRE_GROUP_NAME_TRAILER_LEN;
   }

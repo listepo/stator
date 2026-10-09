@@ -3,8 +3,14 @@
  * The goldens (`golden/ts/to_primitive.ts`, `golden/js/to_primitive.js`) hold every conversion
  * site to the pinned Node byte-for-byte. What they cannot hold is the runtime's copy of Node's
  * `builtInObjects`, the set util.format's `%s` consults to decide whether an INHERITED toString
- * is a builtin's (inspect) or the program's (call it): it is a fact about the pinned Node, so this
- * re-measures it on the Node running the tests and compares it with `jsrt_print.c`. */
+ * is a builtin's (inspect) or the program's (call it). Node records that set when `inspect.js`
+ * is evaluated. A binary built with the startup snapshot (the pinned Node on every platform
+ * whose official package is compiled natively) evaluates it during snapshot generation, before
+ * the late globals exist. The official win-arm64 package is cross-compiled from win-x64, so
+ * `configure.py` sets `node_use_node_snapshot` false and `inspect.js` runs at first use, after
+ * those globals exist (plan-notes 354). The runtime copies the snapshot set. This re-measures
+ * the running Node and compares it with `jsrt_print.c`, using the snapshot flag so a
+ * cross-compiled binary is not asked to equal a set it never recorded. */
 
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -42,18 +48,41 @@ function runtimeBuiltinNames(): string[] {
   return [...body.matchAll(/"([^"]+)"/g)].map((match) => match[1] ?? '').sort();
 }
 
-test(
-  'the runtime names the same builtin constructors as the pinned Node',
-  {
-    // Node v26.7.0 on windows/arm64 treats seven extra constructor names as builtins
-    // (plan-notes 352). The runtime list matches every other platform; a per-platform
-    // list is still open (plan-notes 353).
-    skip: process.platform === 'win32' && process.arch === 'arm64',
-  },
-  () => {
-    assert.deepEqual(runtimeBuiltinNames(), measuredBuiltinNames());
-  },
-);
+/** `process.config.variables` does not declare this key (`@types/node` 26.6.2). Node writes
+ * it as the string `'true'`/`'false'` from `configure.py` and exposes a boolean at run time. */
+function nodeBuiltWithStartupSnapshot(): boolean {
+  const variables = process.config.variables as { node_use_node_snapshot?: boolean | string };
+  const flag = variables.node_use_node_snapshot;
+  return flag === true || flag === 'true';
+}
+
+/** Globals that exist by the time a no-snapshot Node evaluates `inspect.js`, and that the
+ * snapshot build of v26.7.0 does not put in `builtInObjects`. Measured on the official
+ * win-arm64 binary (CI job 113033051244, plan-notes 352 and 354). Any other extra, or any
+ * name missing from the runtime list, is a real mismatch and fails the test. */
+const LATE_BUILTINS_WITHOUT_STARTUP_SNAPSHOT: readonly string[] = [
+  'AsyncDisposableStack',
+  'DisposableStack',
+  'Float16Array',
+  'SharedArrayBuffer',
+  'SuppressedError',
+  'Temporal',
+  'WebAssembly',
+];
+
+/** The set `util.format` must report for this process: the snapshot set when the binary was
+ * built with one, and that set plus the late globals when it was not. */
+function expectedBuiltinNames(runtime: readonly string[]): string[] {
+  if (nodeBuiltWithStartupSnapshot()) {
+    return [...runtime];
+  }
+  return [...runtime, ...LATE_BUILTINS_WITHOUT_STARTUP_SNAPSHOT].sort();
+}
+
+test('the runtime names the same builtin constructors as the pinned Node', () => {
+  const runtime = runtimeBuiltinNames();
+  assert.deepEqual(measuredBuiltinNames(), expectedBuiltinNames(runtime));
+});
 
 test(
   '%s of an inherited toString calls it unless a builtin-named class wrote it',

@@ -4531,8 +4531,26 @@ Left to other cards: `esmExternalRequirePlugin` in `vite-stator` (T12.2) and the
 through the default adapter (T12.3). The CJS cycle and `module.exports` replacement goldens moved
 to T12.3 earlier.
 
+### T16. Compare-only shape keys are freed; stores still intern
+
+`jsrt_shape_key` interned every UTF-8 conversion. A second lookup of the same bytes was freed (plan-notes 353), but a miss never stores the pointer, so each distinct computed read, `in`, `delete`, `Object.hasOwn`, array-index check, print/`JSON.stringify` get, and error-message rendering kept `3·len+1` bytes plus an intern node for the life of the process. A named-group `exec` malloc'd the group name and passed it to `jsrt_set_prop`; the second match reused the existing transition and leaked that malloc. Reproduced before the call-site change: `print_shapes` reported `compare-only key lookup interned 32 keys`.
+
+Compare-only sites now go through `jsrt_shape_key_ephemeral` (`jsrt_get_prop_value` / `jsrt_has_prop_value` free it). Stores (`jsrt_set_prop`, `JSON.parse` keys, `console.count` labels) still intern. Named-group names go through `jsrt_shape_intern`. The leak harness covers 2M distinct computed-key reads (`packages/tests/leak/keys.js`, `--mode=js`).
+
+Check: `just -f packages/runtime/justfile -d packages/runtime runtime-test` — `runtime: print corpus matches Node` (32 misses leave `jsrt_shape_intern_count` unchanged; one stored key adds one; two named-group execs in `print_regexp` add the two names and nothing on the second exec). `pnpm run test:leak` — `leak: 2M computed-key reads — peak RSS 2956 KB of a 65536 KB cap, 114 samples, plateau` (the 10M object and FFI rows still plateau).
+
 ### T17. `"".repeat` with a huge count no longer hangs or runs an undefined cast
 
 `packages/runtime/src/jsrt_string_ops.c` `jsrt_string_repeat` checked only `count * str->length > JSRT_MAX_STRING_LENGTH`: an empty receiver makes that product zero for any count, so `"".repeat(4294967295)` fell into a 4294967295-iteration loop over zero bytes (Node answers `""` instantly) and a count past UINT32_MAX reached `(uint32_t)count`, undefined by C11 §6.3.1.4. Found by the 2026-10-07 audit (task T17 of the audit set; the plan-table rows ride the in-flight plan restructure). Fix: an empty receiver returns itself before anything else, and a count past UINT32_MAX throws the spec's `Invalid string length` before the cast — keeping the length cap's coverage of the cast true by construction.
 Model: ZCode / GLM-5.3 · Status: done 2026-10-07 · Priority: P1 · Complexity: 1 · Files: `packages/runtime/src/jsrt_string_ops.c`, `packages/tests/golden/{js,ts}/string_range_error.ts`
 Check: `moon run tests:golden -- --filter string_range_error` — both fixtures' full outputs match Node, including the new `"".repeat(4294967295)` and `"".repeat(2**53)` cases (the full golden pass: 463/463).
+
+### T18. GC rooting hazards: boxed values stay in frame slots across allocating calls
+
+`jsrt_compare` copied both primitives out of its frame and popped before `jsrt_string_compare` / `jsrt_to_number`. `sort_compare` left the right-hand `ToString` (and both operands of a user comparator) in C locals, and `sort_merge` read array elements around that allocating call. `jsrt_array_sort` kept the scratch array — the block a merge writes into — in an unrooted local. `jsrt_promise_settle` passed the outer and inner promises into `enqueue`, which `jsrt_gc_alloc`s the microtask before storing them. `jsrt_loose_equals` passed the `ToPrimitive` result into the recursive call from a C local. A NaN-boxed word is not a Boehm root (plan-notes 108). Each of those values is now a `JSRT_FRAME` slot for the whole allocating call, the same way `jsrt_op_add` already parks its primitives. `jsrt_gc_stress` collects before every `jsrt_gc_alloc` so a test can hit the window without waiting on heap size.
+
+Check: `just -f packages/runtime/justfile -d packages/runtime runtime-test` — print corpus matches Node, then `packages/runtime/tests/roots.c` prints `roots ok` (compare, loose equality, default sort, user sort, promise adoption whose inner-promise finalizer stays quiet), under `jsrt_gc_stress`. Observed 2026-10-09: that command printed `roots ok` then `runtime: print corpus matches Node`.
+
+### T23. Builtin-constructor comparison follows the startup snapshot
+
+`unit/to-primitive.test.ts` compared `BUILTIN_CONSTRUCTOR_NAMES` with the host `util.format` set and skipped `win32`/`arm64`, so main's `frontend (windows/arm64)` was green while any branch without the skip failed (PR #61, PR #114). The official win-arm64 Node 26.7.0 is cross-compiled from win-x64, so `node_use_node_snapshot` is false and `inspect.js` records seven later globals. The runtime list stays the snapshot set. The test now branches on that flag and fails unless a no-snapshot build differs by exactly those seven names (plan-notes 354).

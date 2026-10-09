@@ -168,23 +168,28 @@ void jsrt_promise_settle(jsrt_value promise, jsrt_value value, bool rejected) {
   if (p->resolved) {
     return; /* already resolved: the resolving functions are idempotent, adoption included */
   }
+  /* Both arguments are NaN-boxed. enqueue allocates the microtask before it stores them, and the
+   * self-cycle path allocates a TypeError, so neither promise may live only in a parameter. */
+  JSRT_FRAME(4);
+  JSRT_LOCAL(0) = promise;
+  JSRT_LOCAL(1) = value;
+  p = jsrt_as_promise(JSRT_LOCAL(0));
   p->resolved = true;
-  if (!rejected && jsrt_is_promise(value)) {
-    if (promise == value) {
-      /* Self-resolution would subscribe a reaction to a promise that only that reaction
-       * could settle -- a silent hang. The spec rejects with a TypeError instead. */
+  if (!rejected && jsrt_is_promise(JSRT_LOCAL(1))) {
+    if (JSRT_LOCAL(0) == JSRT_LOCAL(1)) {
       const char *text = "Chaining cycle detected for promise";
-      JSRT_FRAME(2);
-      JSRT_LOCAL(0) = jsrt_string_from_utf8(text, strlen(text));
-      JSRT_LOCAL(1) = jsrt_error_new(&jsrt_class_type_error, JSRT_LOCAL(0));
-      promise_settle_now(promise, JSRT_LOCAL(1), true);
+      JSRT_LOCAL(2) = jsrt_string_from_utf8(text, strlen(text));
+      JSRT_LOCAL(3) = jsrt_error_new(&jsrt_class_type_error, JSRT_LOCAL(2));
+      promise_settle_now(JSRT_LOCAL(0), JSRT_LOCAL(3), true);
       JSRT_FRAME_POP();
       return;
     }
-    enqueue(adopt_subscribe, (void *)(uintptr_t)promise, value, false);
+    enqueue(adopt_subscribe, (void *)(uintptr_t)JSRT_LOCAL(0), JSRT_LOCAL(1), false);
+    JSRT_FRAME_POP();
     return;
   }
-  promise_settle_now(promise, value, rejected);
+  promise_settle_now(JSRT_LOCAL(0), JSRT_LOCAL(1), rejected);
+  JSRT_FRAME_POP();
 }
 
 jsrt_value jsrt_promise_resolve(jsrt_value v) {

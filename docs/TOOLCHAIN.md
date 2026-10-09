@@ -41,7 +41,8 @@ proposes a TypeScript or `@types/node` major. Node, pnpm, LLVM, just and Zig sta
 ## Site (`site/`)
 
 The landing page is its own Astro project with its own lockfile (`site/pnpm-lock.yaml`), built and
-checked by `.github/workflows/pages.yml`, never by `pnpm run ci`.
+checked by `.github/workflows/pages.yml`, never by `pnpm run ci`. That workflow publishes only when
+the repository has a GitHub Pages site; otherwise it still builds and checks, and skips the deploy.
 
 | Package                     | Pin                | Where pinned                                                                                                                                         |
 | --------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -83,7 +84,7 @@ pnpm run bench:record            # refresh packages/tests/bench/baseline.json (t
 just -f packages/runtime/justfile -d packages/runtime runtime          # packages/runtime/build/libjsrt.a          (clang -O2, -Werror; thin LTO where the linker allows)
 just -f packages/runtime/justfile -d packages/runtime runtime-asan     # packages/runtime/build-asan/libjsrt.a     (-fsanitize=address,undefined -O1 -g)
 just -f packages/runtime/justfile -d packages/runtime runtime-intl     # packages/runtime/build-intl/libjsrt.a     (ICU feature build)
-just -f packages/runtime/justfile -d packages/runtime runtime-test     # print corpus vs Node
+just -f packages/runtime/justfile -d packages/runtime runtime-test     # print corpus vs Node, then tests/roots.c
 just -f packages/runtime/justfile -d packages/runtime runtime-clean
 just -f packages/std/justfile -d packages/std std                    # packages/std/build/libjsrt_std.a        (zig -O ReleaseSafe; `pnpm run runtime` builds it too)
 node packages/compiler/src/cli/main.ts build file.ts -o app [--mode=ts|js]

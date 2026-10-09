@@ -12826,3 +12826,133 @@ they now say "in-memory CompilerHost".
 **Not in this change.** GitHub Pages (E9) is `has_pages: false` on the repo — a setting, not a
 workflow fix. Dependabot PRs are not merged here. CHANGELOG.md / SECURITY.md remain the
 existing P2 docs gap. The string `replace` triple-scan leftover is still P2.
+
+## 354. The windows/arm64 builtin-constructor mismatch is the startup snapshot (2026-10-09)
+
+**Does it fail on main?** No. `frontend (windows/arm64)` on main run 37861129653 is green
+because plan-notes 353 skips the test on `win32`/`arm64`. The assertion still fails on any
+commit without that skip: PR #61 job 113025497253 and PR #114 job 113033051244, both Node
+v26.7.0. `frontend (windows/x64)` on the same runs passes. The seven names the win-arm64
+binary adds, and the runtime list does not, are `AsyncDisposableStack`, `DisposableStack`,
+`Float16Array`, `SharedArrayBuffer`, `SuppressedError`, `Temporal` and `WebAssembly`.
+
+**Why only that runner.** Node records `builtInObjects` when `lib/internal/util/inspect.js`
+is evaluated (v26.7.0, the set `hasBuiltInToString` consults). A binary built with the
+startup snapshot evaluates that file while the snapshot is generated, before the late globals
+exist; that is the 47-name set in `BUILTIN_CONSTRUCTOR_NAMES` and the set every other CI
+platform measures. The official win-arm64 package is not built on ARM64. Node's
+`BUILDING.md` (v26.7.0) lists it as "Windows Server 2022 (x64) with Visual Studio 2022", a
+cross-compile. `configure.py` then sets `node_use_node_snapshot` false
+(`b(not cross_compiling and not options.shared)`). Without the snapshot, `inspect.js` runs
+at the first `util.format`, after those seven globals exist, so `%s` treats a class of one
+of those names as a builtin. Linux arm64, macOS arm64 and win-x64 official packages are
+native builds, so they keep the snapshot. There is no official win-arm64 binary of v26.7.0
+that has the snapshot; compiling Node on the runner would not be pinning the release.
+
+Reproduced on the official linux-x64 binary of the same version: with the snapshot,
+`util.format` and `BUILTIN_CONSTRUCTOR_NAMES` are the same 47 names. `node --no-node-snapshot`
+(the binary still reports `node_use_node_snapshot: true`; the flag only skips using the
+embedded snapshot) measures exactly the same seven extras and nothing else. The win-arm64
+difference is the missing snapshot, not an arm64-only global. The official
+`win-arm64/node.exe` of v26.7.0 embeds `"node_use_node_snapshot": false` in its
+`config.gypi` (and `node_use_node_code_cache` false beside it).
+
+**What the runtime should match.** The oracle for goldens is the pinned Node's snapshot set.
+Adding the seven names would make `%s` of a `Temporal` (and the other six) inspect on every
+platform, which the snapshot Node does not do. A per-platform list in `jsrt_print.c` would
+describe the cross-compiled binary, not the pinned Node.
+
+**The comparison.** `unit/to-primitive.test.ts` no longer skips on architecture. When
+`process.config.variables.node_use_node_snapshot` is true, the measured set must equal the
+runtime list. When it is false, the measured set must equal that list plus exactly the seven
+late names above. A missing runtime name, or any extra other than those seven, still fails.
+The platform skip hid both.
+
+## 355. The site workflow skips deploy when GitHub Pages is not enabled (2026-10-09)
+
+**Evidence.** `site` on main run 37840183839 failed in `actions/configure-pages@v6` with
+"Get Pages site failed … Error: Not Found". The repository has no Pages site
+(`has_pages: false`, plan-notes 353). Pull requests that only build the site stay green,
+because `configure-pages` is already skipped on `pull_request`. A push to `main` that
+touches `site/**` or `docs/**` is not.
+
+**Change.** The workflow GETs `/repos/{owner}/{repo}/pages`, including on pull requests.
+HTTP 200 publishes as before (never from a pull request). HTTP 404 prints that Pages is
+not enabled and skips `configure-pages`, the pages artifact upload, and the deploy job.
+The build and the browser check still run. Any other status fails the job. Enabling
+Pages (Settings → Pages → GitHub Actions) is what turns publishing back on; the workflow
+does not call the action's `enablement` input, which would need a token other than
+`GITHUB_TOKEN`. `site/README.md` and `docs/TOOLCHAIN.md` say the same.
+
+## 356. Compare-only shape keys were still interned (T16) (2026-10-09)
+
+**What 353 fixed.** `jsrt_shape_intern` frees a second malloc of the same bytes, so a loop
+that reads one key no longer leaks a buffer per call. The table itself is immortal, the
+same lifetime as a shape.
+
+**What it left.** A miss never stores the pointer, but every `jsrt_shape_key` still entered
+the table. Reproduced on this tree before the call-site change: `print_shapes` reported
+`compare-only key lookup interned 32 keys` for 32 distinct `jsrt_dyn_index_get` / `in` /
+`delete` misses. A named-group `exec` malloc'd the group name and handed it to
+`jsrt_set_prop`; the second match reused the existing transition and leaked that malloc
+(`jsrt_shape_transition` takes ownership only of a new child).
+
+**Change.** `jsrt_shape_key_ephemeral` is the conversion the caller frees.
+`jsrt_get_prop_value` and `jsrt_has_prop_value` are the compare-only lookups. Reads, `in`,
+`delete`, `Object.hasOwn`, array-index checks, print and `JSON.stringify` gets, and the
+two error-message renderings use it. Stores (`jsrt_set_prop`, `JSON.parse` keys,
+`console.count` labels) still intern. Named-group names go through `jsrt_shape_intern`, so
+the second match frees the duplicate. `jsrt_shape_intern_count` is what the corpus asserts: 32 misses in `print_shapes` leave
+it unchanged and one stored key adds one; two named-group execs in `print_regexp` add
+the two group names and nothing on the second exec. The leak harness row `keys.js` is
+2M distinct computed reads under `--mode=js` (peak 2956 KB of the 64 MB cap).
+
+## 357. T17 was already on main; T18 parks the remaining unrooted values (2026-10-09)
+
+**T17.** `jsrt_string_repeat` already returns an empty receiver before the loop and rejects a count
+past `UINT32_MAX` before the cast (`ccf9818`, `done.md`). `packages/tests/golden/{js,ts}/string_range_error.*`
+covers `"".repeat(4294967295)` and `"".repeat(2**53)`. The plan table and `todo.md` still listed it
+open; both now point at `done.md`. No further code change.
+
+**T18.** A `jsrt_value` is NaN-boxed, so a C local or parameter is not a Boehm root (plan-notes 108).
+The four sites in the task still dropped a boxed value on the floor across an allocation:
+
+- `jsrt_compare` popped its frame before `jsrt_string_compare` and `jsrt_to_number`, so the
+  primitives survived `ToPrimitive` and then stopped being roots.
+- `sort_compare` rooted the left `ToString` only. The right string, and both operands of a user
+  comparator, were locals across `jsrt_call` / `ToString`. `sort_merge` read the elements around
+  that call. `jsrt_array_sort` left the scratch array in a local; the comment above the merge says
+  an element's only reference can be that scratch.
+- `jsrt_promise_settle` called `enqueue` with the inner promise unrooted. `enqueue` allocates the
+  microtask, then stores the value.
+- `jsrt_loose_equals` passed the `ToPrimitive` result into the recursive call from a local.
+
+Each of those values is a `JSRT_FRAME` slot until the allocating call has finished with it.
+`jsrt_gc_stress` (off unless a test sets it; a no-op without Boehm) collects before every
+collected allocation, scanned or pointer-free, so `packages/runtime/tests/roots.c` hits the
+window instead of hoping the heap is full. A freed promise still holds its old bytes, so
+adoption also arms `jsrt_gc_watch` on the inner promise: the finalizer runs inside that
+collection when the value is not a root. Without Boehm the watch is a no-op.
+
+The audit task T20 still said no fixture covers an empty `repeat` or a computed-key read. Those
+fixtures are T17's `string_range_error` and T16's `keys.js`. What T20 still asks for is
+`compareSdkNames` and the program-cache key.
+
+`docs/ru` and `docs/uk` are not in the tree. The one English sentence added to `docs/TOOLCHAIN.md`
+(the `runtime-test` recipe also runs `tests/roots.c`) has no translation file to update.
+
+## 358. Task 6.31: sonarcloud.yml is a copy of the shared pyrlyn/ci workflow (2026-10-08)
+
+**Evidence.** pyrlyn/ci `.github/workflows/sonarcloud.yml` at
+`c875cd763ad0c4abbd936e480be5752330d3b66b` describes itself as "unifying the sonarcloud.yml of
+rtok, ketch, cox, runa, crates-packages, slint_dart and stator". Its steps are the ones stator's
+`sonarcloud.yml` carries by hand: skip with a notice without `SONAR_TOKEN`, full-history
+checkout, tool setup, a setup and a coverage command, the scan with soft-fail. What differs: the
+shared workflow sets tools up with mise (`mise-install-args`), not with `pnpm/action-setup`,
+`actions/setup-node`, `mlugg/setup-zig` and `extractions/setup-just`, and it runs a failing
+`setup-command` as a hard failure, where stator's `Build runtime archive` step is
+`continue-on-error`. The caller inputs, secret and permissions are in Task 6.31.
+
+GitHub Actions is enabled on this repository (2026-10-08), so the change can be checked on its
+own pull request.
+
