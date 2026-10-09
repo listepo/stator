@@ -181,7 +181,7 @@ jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key) {
   }
   const JSRTObject *fixed = (const JSRTObject *)jsrt_ptr(v);
   if (jsrt_is_dynobj(v)) {
-    return jsrt_bool(jsrt_has_prop(v, jsrt_shape_key(key)));
+    return jsrt_bool(jsrt_has_prop_value(v, key));
   }
   for (uint32_t i = 0; i < fixed->cls->field_count; i++) {
     if (is_private_field(fixed->cls->fields[i])) {
@@ -192,8 +192,8 @@ jsrt_value jsrt_object_has_own(jsrt_value v, jsrt_value key) {
     }
   }
   const JSRTDynObject *extras = jsrt_fixed_extras(v);
-  return extras != NULL ? jsrt_bool(jsrt_has_prop(JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)extras),
-                                                  jsrt_shape_key(key)))
+  return extras != NULL ? jsrt_bool(jsrt_has_prop_value(
+                             JSRT_BOX(JSRT_TAG_OBJECT, (uintptr_t)extras), key))
                         : JSRT_FALSE;
 }
 
@@ -205,7 +205,8 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
   if (!jsrt_is(pairs, JSRT_TAG_ARRAY)) {
     jsrt_panic("STA4084: Object.fromEntries on a value that is not an array");
   }
-  jsrt_value out = jsrt_dynobj_new();
+  JSRT_FRAME(1);
+  JSRT_LOCAL(0) = jsrt_dynobj_new();
   const JSRTArray *list = jsrt_as_array(pairs);
   for (uint32_t i = 0; i < list->length; i++) {
     const jsrt_value pair = jsrt_unhole(list->elements[i]);
@@ -219,8 +220,10 @@ jsrt_value jsrt_object_from_entries(jsrt_value pairs) {
     if (!jsrt_is(key, JSRT_TAG_STRING)) {
       jsrt_panic("STA2005: Object.fromEntries with a non-string key is not yet supported");
     }
-    jsrt_set_prop(out, jsrt_shape_key(key), value, NULL);
+    jsrt_set_prop(JSRT_LOCAL(0), jsrt_shape_key(key), value, NULL);
   }
+  const jsrt_value out = JSRT_LOCAL(0);
+  JSRT_FRAME_POP();
   return out;
 }
 
@@ -257,32 +260,37 @@ jsrt_value jsrt_object_assign(jsrt_value target, jsrt_value source) {
   ) {
     return target;
   }
-  const jsrt_value keys = collect(source, OBJ_KEYS);
+  JSRT_FRAME(2);
+  JSRT_LOCAL(0) = collect(source, OBJ_KEYS);
   if (jsrt_pending()) {
+    JSRT_FRAME_POP();
     return JSRT_UNDEFINED;
   }
   const bool sourceIsArray = jsrt_is(source, JSRT_TAG_ARRAY);
   const JSRTArray *srcArray = sourceIsArray ? jsrt_as_array(source) : NULL;
   const bool sourceIsString = jsrt_is(source, JSRT_TAG_STRING);
-  const JSRTArray *list = jsrt_as_array(keys);
+  const JSRTArray *list = jsrt_as_array(JSRT_LOCAL(0));
   for (uint32_t i = 0; i < list->length; i++) {
     const char *key = jsrt_shape_key(list->elements[i]);
     uint32_t index = 0;
     const bool indexed = jsrt_key_is_array_index(key, &index);
     uint16_t unit = 0;
-    const jsrt_value value =
+    JSRT_LOCAL(1) =
         srcArray != NULL && indexed && index < srcArray->length ? srcArray->elements[index]
         : sourceIsString && indexed
             ? (unit = jsrt_string_char(source, index), jsrt_string_from_units(&unit, 1))
             : jsrt_get_prop(source, key, NULL);
     if (jsrt_pending()) {
+      JSRT_FRAME_POP();
       return JSRT_UNDEFINED;
     }
-    jsrt_set_prop(target, key, value, NULL);
+    jsrt_set_prop(target, key, JSRT_LOCAL(1), NULL);
     if (jsrt_pending()) {
+      JSRT_FRAME_POP();
       return JSRT_UNDEFINED;
     }
   }
+  JSRT_FRAME_POP();
   return target;
 }
 

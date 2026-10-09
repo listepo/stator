@@ -1,3 +1,6 @@
+> [!NOTE]
+> This project is under active development. We need "testing volunteers": try it and report what breaks.
+
 # Stator
 
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=listepo_stator&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=listepo_stator) [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=listepo_stator&metric=coverage)](https://sonarcloud.io/component_measures?id=listepo_stator&metric=coverage) [![Tests](https://img.shields.io/sonar/tests/listepo_stator?server=https%3A%2F%2Fsonarcloud.io&compact_message)](https://sonarcloud.io/component_measures?id=listepo_stator&metric=tests)

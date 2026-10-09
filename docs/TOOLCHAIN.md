@@ -41,7 +41,8 @@ proposes a TypeScript or `@types/node` major. Node, pnpm, LLVM, just and Zig sta
 ## Site (`site/`)
 
 The landing page is its own Astro project with its own lockfile (`site/pnpm-lock.yaml`), built and
-checked by `.github/workflows/pages.yml`, never by `pnpm run ci`.
+checked by `.github/workflows/pages.yml`, never by `pnpm run ci`. That workflow publishes only when
+the repository has a GitHub Pages site; otherwise it still builds and checks, and skips the deploy.
 
 | Package                     | Pin                | Where pinned                                                                                                                                         |
 | --------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |

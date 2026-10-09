@@ -538,9 +538,20 @@ bool jsrt_key_is_array_index(const char *key, uint32_t *value);
  * `*count_out` is the visible key count. The returned slot array is malloc-owned by the caller. */
 uint32_t *jsrt_fixed_key_order(const JSRTClass *cls, uint32_t *count_out);
 
-/* A shape key from a JS string: an immortal NUL-terminated UTF-8 copy, the lifetime the shape
- * table already gives every key. A key containing U+0000 aborts -- a C string cannot hold one. */
+/* A shape key from a JS string: an interned immortal NUL-terminated UTF-8 copy, the lifetime the
+ * shape table already gives every key it STORES. A second intern of the same bytes returns the
+ * first pointer. A key containing U+0000 aborts -- a C string cannot hold one. A lookup that only
+ * compares uses `jsrt_shape_key_ephemeral` and frees it; interning a miss keeps the bytes forever. */
 const char *jsrt_shape_key(jsrt_value name);
+/* The same UTF-8 conversion, owned by the caller (`free`). Not interned. */
+char *jsrt_shape_key_ephemeral(jsrt_value name);
+/* Distinct keys currently in the intern table. A compare-only lookup must not change it. */
+size_t jsrt_shape_intern_count(void);
+/* [[Get]] / [[HasProperty]] of a JS key. The conversion is freed before return, so a miss does
+ * not enter the intern table. `jsrt_get_prop_value` runs ToString; `jsrt_has_prop_value` requires
+ * a string (the caller already did ToPropertyKey). */
+jsrt_value jsrt_get_prop_value(jsrt_value obj, jsrt_value name, JSRTIC *ic);
+bool jsrt_has_prop_value(jsrt_value obj, jsrt_value name);
 /* Reading a property the object does not have is `undefined` -- that IS the semantics of an
  * optional property. A miss is never cached: the same object can gain the key later. */
 jsrt_value jsrt_get_prop(jsrt_value obj, const char *key, JSRTIC *ic);

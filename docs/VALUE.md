@@ -806,8 +806,13 @@ where that is decided: a FROZEN property is non-configurable, so it raises Node'
 element abort with `STA2007`, the mirror of `STA2004` below — a `JSRTClass` has no way to spell a
 missing slot, and a hole has no representation at all. Where the receiver's type is known the
 frontend refuses before any of that: `STA1108` in ts mode, `STA1205` in js. Keys are `const char *` with program lifetime
-(generated C passes string literals; the shape table stores the pointer and compares by pointer
-first, `strcmp` as the backstop for one key spelled at two sites). Each receiver has a deliberate path: a dynamic object or array walks the shape table; a
+(generated C passes string literals; `jsrt_shape_key` interns a UTF-8 conversion of a JS string
+into the same immortal table when a transition or another immortal table stores the pointer).
+A lookup that only compares (`jsrt_get_prop_value`, `in`, `delete`, `Object.hasOwn`, an
+array-index check, a print or `JSON.stringify` get) uses `jsrt_shape_key_ephemeral` and frees
+it, so a miss does not grow the intern table.
+The shape table stores the pointer and compares by pointer first, `strcmp` as the backstop for
+one key spelled at two sites. Each receiver has a deliberate path: a dynamic object or array walks the shape table; a
 fixed-layout object reads and writes existing fields through its `JSRTClass` descriptor and
 raises `STA2004` if asked to grow a new key (Phase 8); a string answers `"length"` and
 everything else `undefined`; nullish is a TypeError; a primitive write is a TypeError.
@@ -815,8 +820,11 @@ everything else `undefined`; nullish is a TypeError; a primitive write is a Type
 
 Pinned by `runtime/tests/print_shapes.{c,mjs}`: insertion-order printing through the chain,
 overwrite-in-place, undefined-on-miss, shared-IC reads across shape-sharing objects, the
-stale-cache miss after a transition, divergent histories landing on different shapes, and
-non-identifier keys printing quoted (`{ 'a-b': 1 }`). `delete` is pinned against Node instead, by
+stale-cache miss after a transition, divergent histories landing on different shapes,
+non-identifier keys printing quoted (`{ 'a-b': 1 }`), and intern identity (two conversions of
+the same bytes share one pointer; a compare-only miss does not change the intern count; a
+stored key interns once; abort on mismatch, not a print). A second named-group exec interning
+nothing new is pinned in `runtime/tests/print_regexp.c`. `delete` is pinned against Node instead, by
 `tests/golden/{ts,js}/delete_prop.*`: the boolean answer, the `undefined` read and the `in` result
 after removal, the print order after a re-add, one read site shared by two objects that rebuilt to
 the same shape, and the frozen `TypeError`.

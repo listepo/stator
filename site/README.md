@@ -64,4 +64,7 @@ CI always builds with the default `/stator/` base.
 
 ## Deploy
 
-`.github/workflows/pages.yml` builds this package on `main` (and checks PRs that touch `site/**`) and uploads `site/dist` to GitHub Pages.
+`.github/workflows/pages.yml` builds this package on `main` (and checks PRs that touch `site/**`).
+It publishes `site/dist` only when GitHub Pages is enabled for the repository (Settings → Pages →
+Source: GitHub Actions). If Pages is not enabled, the workflow still builds and browser-checks the
+site, and skips the upload and the deploy.

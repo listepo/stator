@@ -27,9 +27,82 @@ fn slotCount(shape: *const Shape) u32 {
 
 /// Pointer compare first -- generated C passes string literals, and the transition that created a
 /// shape stored that same literal -- with a byte compare as the backstop for a key spelled at two
-/// sites.
+/// sites. Interned keys from `jsrt_shape_intern` compare equal by pointer.
 fn sameKey(a: [*c]const u8, b: [*c]const u8) bool {
     return a == b or std.mem.orderZ(u8, @ptrCast(a), @ptrCast(b)) == .eq;
+}
+
+/// Immortal intern table for UTF-8 shape keys. `jsrt_shape_key` mallocs a conversion buffer and
+/// hands it here; a second intern of the same bytes returns the first pointer and frees the
+/// duplicate. Keys outlive the program the way shapes do, and are plain malloc.
+const Intern = struct {
+    key: [*:0]u8,
+    hash: u64,
+    next: ?*Intern,
+};
+
+var intern_buckets: []?*Intern = &.{};
+var intern_count: usize = 0;
+
+/// How many distinct keys the table holds. Compare-only lookups must not move it.
+export fn jsrt_shape_intern_count() usize {
+    return intern_count;
+}
+
+fn internHash(bytes: []const u8) u64 {
+    var h: u64 = 14695981039346656037;
+    for (bytes) |b| {
+        h ^= b;
+        h *%= 1099511628211;
+    }
+    return h;
+}
+
+fn internBuckets(n: usize) []?*Intern {
+    const bytes = n * @sizeOf(?*Intern);
+    const raw = std.c.malloc(bytes) orelse c.jsrt_panic("out of memory: shape intern");
+    const ptr: [*]?*Intern = @ptrCast(@alignCast(raw));
+    const slice = ptr[0..n];
+    @memset(slice, null);
+    return slice;
+}
+
+fn internRehash(next_len: usize) void {
+    const fresh = internBuckets(next_len);
+    for (intern_buckets) |head| {
+        var node = head;
+        while (node) |n| {
+            const nxt = n.next;
+            const slot = &fresh[n.hash % next_len];
+            n.next = slot.*;
+            slot.* = n;
+            node = nxt;
+        }
+    }
+    if (intern_buckets.len != 0) std.c.free(@ptrCast(intern_buckets.ptr));
+    intern_buckets = fresh;
+}
+
+export fn jsrt_shape_intern(key: [*:0]u8) [*:0]const u8 {
+    const bytes = std.mem.span(key);
+    const h = internHash(bytes);
+    if (intern_buckets.len == 0) internRehash(8);
+    const slot = &intern_buckets[h % intern_buckets.len];
+    var node = slot.*;
+    while (node) |n| {
+        if (n.hash == h and std.mem.eql(u8, std.mem.span(n.key), bytes)) {
+            std.c.free(key);
+            return n.key;
+        }
+        node = n.next;
+    }
+    const raw = std.c.malloc(@sizeOf(Intern)) orelse c.jsrt_panic("out of memory: shape intern");
+    const fresh: *Intern = @ptrCast(@alignCast(raw));
+    fresh.* = .{ .key = key, .hash = h, .next = slot.* };
+    slot.* = fresh;
+    intern_count += 1;
+    if (intern_count > intern_buckets.len) internRehash(intern_buckets.len * 2);
+    return key;
 }
 
 /// Enumeration order (§10.1.11.1 OrdinaryOwnPropertyKeys): array-index keys first, ascending, then

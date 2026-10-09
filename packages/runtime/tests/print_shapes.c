@@ -8,17 +8,60 @@
  * `undefined`; an overwrite changes the value without changing the order; a non-identifier key
  * prints quoted; and reads through one shared inline cache stay correct across a shape-sharing
  * hit, a transition (the cached shape goes stale), and an unrelated shape.
+ * Intern identity is an assert, not a print: two `jsrt_shape_key` conversions of the same
+ * bytes must share one immortal pointer (plan-notes 353).
  */
 
 #include "corpus.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static JSRTIC ic_a; /* static, exactly as generated C would emit a property site's cache */
 
 int main(void) {
   jsrt_init();
   JSRT_FRAME(6);
+
+  /* Intern identity: a stored key is immortal and shared. A compare-only lookup of a
+   * fresh key must not enter that table (T16) — the miss used to keep 3·len+1 bytes
+   * per call. Not a print: the corpus still diffs stdout against Node byte-for-byte. */
+  {
+    const char *once = jsrt_shape_key(str("intern-me"));
+    const char *twice = jsrt_shape_key(str("intern-me"));
+    if (once != twice || strcmp(once, "intern-me") != 0) {
+      fprintf(stderr, "jsrt_shape_key intern identity failed\n");
+      JSRT_FRAME_POP();
+      return 1;
+    }
+    const size_t before = jsrt_shape_intern_count();
+    jsrt_value obj = jsrt_dynobj_new();
+    JSRT_LOCAL(0) = obj;
+    for (int i = 0; i < 32; i++) {
+      char buf[32];
+      snprintf(buf, sizeof buf, "miss-%d", i);
+      const jsrt_value key = str(buf);
+      if (jsrt_dyn_index_get(obj, key, NULL) != JSRT_UNDEFINED || jsrt_in(key, obj) ||
+          !jsrt_delete(obj, key)) {
+        fprintf(stderr, "compare-only miss did not answer the spec\n");
+        JSRT_FRAME_POP();
+        return 1;
+      }
+    }
+    if (jsrt_shape_intern_count() != before) {
+      fprintf(stderr, "compare-only key lookup interned %zu keys\n",
+              jsrt_shape_intern_count() - before);
+      JSRT_FRAME_POP();
+      return 1;
+    }
+    jsrt_dyn_index_set(obj, str("stored-once"), num(1), NULL);
+    jsrt_dyn_index_set(obj, str("stored-once"), num(2), NULL);
+    if (jsrt_shape_intern_count() != before + 1) {
+      fprintf(stderr, "a stored key was not interned exactly once\n");
+      JSRT_FRAME_POP();
+      return 1;
+    }
+  }
 
   /* Empty prints as {}. */
   jsrt_value empty = jsrt_dynobj_new();

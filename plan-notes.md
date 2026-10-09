@@ -12777,7 +12777,137 @@ of `* text=auto eol=lf` makes every checkout LF. `git add --renormalize .` chang
 also removes the reason `ci.yml` gave for keeping `lint` off the desktop legs ("arguing with
 git's line-ending translation"), so the comment now says why one run in `static` is enough.
 
-## 353. Task 6.31: sonarcloud.yml is a copy of the shared pyrlyn/ci workflow (2026-10-08)
+## 353. Shape-key intern, named-site frames, and the CI files that never ran on main (2026-10-08)
+
+**Plan:** §2 (pipeline), docs/VALUE.md §4.10 (shape keys), §4.12 (rooting). `plan.md` NOT edited
+— this is a bug-fix change, not a roadmap move. T17 (`String.prototype.repeat` hang) already
+landed on `main` as `ccf9818`; T19's NULL-capture path already uses `NO_GROUP`.
+
+**pipeline.yml called a private reusable workflow.** GitHub run 37694735601 failed in 0s with
+"workflow file issue": `uses: listepo/infra/.github/workflows/pipeline.yml@…` is not visible to
+this public repo. PR #61 already had the public pin (`pyrlyn/ci` at
+`c875cd763ad0c4abbd936e480be5752330d3b66b`) plus `permissions.actions: write` for that
+workflow's cancel-run step. Copied that pin and the `actions: write` grant into the tree's
+`pipeline.yml`.
+
+**ci.yml had no `push` trigger.** The revert-on-failure job is `github.event_name == 'push'`
+only, so a merge to `main` ran no tests of its own and could never revert. Added
+`push: branches: [main]`.
+
+**nightly.yml had no top-level `permissions`.** GITHUB_TOKEN then inherits the repo default,
+which on a public repo with "restrictive" defaults is too wide for a scheduled job that only
+needs to read. Set `permissions: contents: read`.
+
+**T16 — `jsrt_shape_key` leaked a malloc on every lookup.** The conversion buffer was immortal
+only for keys that `jsrt_shape_transition` stored on a *new* child. `jsrt_get_prop` /
+`jsrt_has_prop` / `jsrt_in` / `jsrt_delete` / `jsrt_object_assign` / `fromEntries` / index /
+print all convert and compare. Zig intern table (`jsrt_shape_intern` in `jsrt_shape.zig`):
+FNV-1a, chained buckets, rehash; a second intern of the same bytes returns the first pointer
+and frees the duplicate. Callers must not `free` an interned key. Pinned by an assert in
+`runtime/tests/print_shapes.c` (identity, not stdout — the corpus still diffs against Node).
+
+**T18 — unrooted C locals across allocating calls.** Boehm is conservative and `jsrt_value` is
+NaN-boxed, so a C local is not a root. Frames at the named sites: `jsrt_object_from_entries`
+FRAME(1); `jsrt_object_assign` FRAME(2) for keys+value; `iterator_result` FRAME(1); the four
+Set algebra ops FRAME(1); `jsrt_promise_settle` self-cycle FRAME(2). Not a whole-runtime
+`GC_STRESS` toggle.
+
+**windows/arm64 builtin-names (note 352).** Still unverified why that Node build's
+`builtInObjects` is larger. The test is skipped on `win32`/`arm64` rather than growing a
+per-platform list in `jsrt_print.c`. Reopen with a measured reason that Node's set on that
+arch is the one we should match.
+
+**Docs / dead dep.** AGENTS.md and CLAUDE.md listed Ryū under `runtime/vendor/`; it is not
+vendored (`docs/TOOLCHAIN.md`, notes 28 / 188). `memfs` was in the root and
+`packages/tests` `package.json` and never imported; removed, lockfile updated. Comments on
+`createProgram`'s custom-host seam said "memfs" because that was the intended test backing;
+they now say "in-memory CompilerHost".
+
+**Not in this change.** GitHub Pages (E9) is `has_pages: false` on the repo — a setting, not a
+workflow fix. Dependabot PRs are not merged here. CHANGELOG.md / SECURITY.md remain the
+existing P2 docs gap. The string `replace` triple-scan leftover is still P2.
+
+## 354. The windows/arm64 builtin-constructor mismatch is the startup snapshot (2026-10-09)
+
+**Does it fail on main?** No. `frontend (windows/arm64)` on main run 37861129653 is green
+because plan-notes 353 skips the test on `win32`/`arm64`. The assertion still fails on any
+commit without that skip: PR #61 job 113025497253 and PR #114 job 113033051244, both Node
+v26.7.0. `frontend (windows/x64)` on the same runs passes. The seven names the win-arm64
+binary adds, and the runtime list does not, are `AsyncDisposableStack`, `DisposableStack`,
+`Float16Array`, `SharedArrayBuffer`, `SuppressedError`, `Temporal` and `WebAssembly`.
+
+**Why only that runner.** Node records `builtInObjects` when `lib/internal/util/inspect.js`
+is evaluated (v26.7.0, the set `hasBuiltInToString` consults). A binary built with the
+startup snapshot evaluates that file while the snapshot is generated, before the late globals
+exist; that is the 47-name set in `BUILTIN_CONSTRUCTOR_NAMES` and the set every other CI
+platform measures. The official win-arm64 package is not built on ARM64. Node's
+`BUILDING.md` (v26.7.0) lists it as "Windows Server 2022 (x64) with Visual Studio 2022", a
+cross-compile. `configure.py` then sets `node_use_node_snapshot` false
+(`b(not cross_compiling and not options.shared)`). Without the snapshot, `inspect.js` runs
+at the first `util.format`, after those seven globals exist, so `%s` treats a class of one
+of those names as a builtin. Linux arm64, macOS arm64 and win-x64 official packages are
+native builds, so they keep the snapshot. There is no official win-arm64 binary of v26.7.0
+that has the snapshot; compiling Node on the runner would not be pinning the release.
+
+Reproduced on the official linux-x64 binary of the same version: with the snapshot,
+`util.format` and `BUILTIN_CONSTRUCTOR_NAMES` are the same 47 names. `node --no-node-snapshot`
+(the binary still reports `node_use_node_snapshot: true`; the flag only skips using the
+embedded snapshot) measures exactly the same seven extras and nothing else. The win-arm64
+difference is the missing snapshot, not an arm64-only global. The official
+`win-arm64/node.exe` of v26.7.0 embeds `"node_use_node_snapshot": false` in its
+`config.gypi` (and `node_use_node_code_cache` false beside it).
+
+**What the runtime should match.** The oracle for goldens is the pinned Node's snapshot set.
+Adding the seven names would make `%s` of a `Temporal` (and the other six) inspect on every
+platform, which the snapshot Node does not do. A per-platform list in `jsrt_print.c` would
+describe the cross-compiled binary, not the pinned Node.
+
+**The comparison.** `unit/to-primitive.test.ts` no longer skips on architecture. When
+`process.config.variables.node_use_node_snapshot` is true, the measured set must equal the
+runtime list. When it is false, the measured set must equal that list plus exactly the seven
+late names above. A missing runtime name, or any extra other than those seven, still fails.
+The platform skip hid both.
+
+## 355. The site workflow skips deploy when GitHub Pages is not enabled (2026-10-09)
+
+**Evidence.** `site` on main run 37840183839 failed in `actions/configure-pages@v6` with
+"Get Pages site failed … Error: Not Found". The repository has no Pages site
+(`has_pages: false`, plan-notes 353). Pull requests that only build the site stay green,
+because `configure-pages` is already skipped on `pull_request`. A push to `main` that
+touches `site/**` or `docs/**` is not.
+
+**Change.** The workflow GETs `/repos/{owner}/{repo}/pages`, including on pull requests.
+HTTP 200 publishes as before (never from a pull request). HTTP 404 prints that Pages is
+not enabled and skips `configure-pages`, the pages artifact upload, and the deploy job.
+The build and the browser check still run. Any other status fails the job. Enabling
+Pages (Settings → Pages → GitHub Actions) is what turns publishing back on; the workflow
+does not call the action's `enablement` input, which would need a token other than
+`GITHUB_TOKEN`. `site/README.md` and `docs/TOOLCHAIN.md` say the same.
+
+## 356. Compare-only shape keys were still interned (T16) (2026-10-09)
+
+**What 353 fixed.** `jsrt_shape_intern` frees a second malloc of the same bytes, so a loop
+that reads one key no longer leaks a buffer per call. The table itself is immortal, the
+same lifetime as a shape.
+
+**What it left.** A miss never stores the pointer, but every `jsrt_shape_key` still entered
+the table. Reproduced on this tree before the call-site change: `print_shapes` reported
+`compare-only key lookup interned 32 keys` for 32 distinct `jsrt_dyn_index_get` / `in` /
+`delete` misses. A named-group `exec` malloc'd the group name and handed it to
+`jsrt_set_prop`; the second match reused the existing transition and leaked that malloc
+(`jsrt_shape_transition` takes ownership only of a new child).
+
+**Change.** `jsrt_shape_key_ephemeral` is the conversion the caller frees.
+`jsrt_get_prop_value` and `jsrt_has_prop_value` are the compare-only lookups. Reads, `in`,
+`delete`, `Object.hasOwn`, array-index checks, print and `JSON.stringify` gets, and the
+two error-message renderings use it. Stores (`jsrt_set_prop`, `JSON.parse` keys,
+`console.count` labels) still intern. Named-group names go through `jsrt_shape_intern`, so
+the second match frees the duplicate. `jsrt_shape_intern_count` is what the corpus asserts: 32 misses in `print_shapes` leave
+it unchanged and one stored key adds one; two named-group execs in `print_regexp` add
+the two group names and nothing on the second exec. The leak harness row `keys.js` is
+2M distinct computed reads under `--mode=js` (peak 2956 KB of the 64 MB cap).
+
+## 357. Task 6.31: sonarcloud.yml is a copy of the shared pyrlyn/ci workflow (2026-10-08)
 
 **Evidence.** pyrlyn/ci `.github/workflows/sonarcloud.yml` at
 `c875cd763ad0c4abbd936e480be5752330d3b66b` describes itself as "unifying the sonarcloud.yml of
